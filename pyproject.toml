@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "geoparquet-tools"
+version = "0.1.0"
+description = "A collection of tools for working with GeoParquet files"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+dependencies = [
+    "click>=8.0.0",
+    "pyarrow>=12.0.0",
+    "duckdb>=0.8.0",
+    "pandas>=1.0.0",
+]
+
+[project.scripts]
+gt = "geoparquet_tools:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["geoparquet_tools"] 

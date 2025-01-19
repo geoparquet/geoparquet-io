@@ -119,11 +119,6 @@ def check_bbox_structure(parquet_file, verbose=False):
 
     return bbox_column_name
 
-@click.command()
-@click.argument("input_parquet")
-@click.argument("countries_parquet")
-@click.argument("output_parquet")
-@click.option("--verbose", is_flag=True, help="Print additional information.")
 def add_country_codes(input_parquet, countries_parquet, output_parquet, verbose):
     """
     Add country ISO codes to a GeoParquet file based on spatial intersection.

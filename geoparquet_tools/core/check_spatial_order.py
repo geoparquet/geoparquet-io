@@ -8,13 +8,6 @@ import fsspec
 import urllib.parse
 import os
 
-@click.command()
-@click.argument("parquet_file")
-@click.option("--random-sample-size", default=100, show_default=True,
-              help="Number of rows in each sample for random-pairs cross-join.")
-@click.option("--limit-rows", default=500000, show_default=True,
-              help="Max number of rows to read from the file (avoid huge memory usage).")
-@click.option("--verbose", is_flag=True, help="Print detailed metadata information.")
 def check_spatial_order(parquet_file, random_sample_size, limit_rows, verbose):
     """
     Check approximate spatial ordering of a GeoParquet file by comparing

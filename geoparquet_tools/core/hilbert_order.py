@@ -6,12 +6,6 @@ import pyarrow.parquet as pq
 import os
 import urllib.parse
 
-@click.command()
-@click.argument("input_parquet")
-@click.argument("output_parquet")
-@click.option("--geometry-column", default="geometry", show_default=True,
-              help="Name of the geometry column to use for ordering.")
-@click.option("--verbose", is_flag=True, help="Print additional information.")
 def hilbert_order(input_parquet, output_parquet, geometry_column, verbose):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.

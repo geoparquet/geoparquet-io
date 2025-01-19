@@ -104,12 +104,6 @@ def _is_wgs84(crs):
         )
     return False
 
-@click.command()
-@click.argument("input_parquet")
-@click.argument("output_folder")
-@click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure.")
-@click.option("--verbose", is_flag=True, help="Print additional information.")
-@click.option("--overwrite", is_flag=True, help="Overwrite existing country files.")
 def split_by_country(input_parquet, output_folder, hive, verbose, overwrite):
     """
     Split a GeoParquet file into separate files by country code.

@@ -38,9 +38,6 @@ def get_row_count_assessment(avg_rows):
     else:
         return "yellow", "⚠️  Row count per group is outside recommended range (50,000-200,000)"
 
-@click.command()
-@click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print full GeoParquet metadata")
 def check_parquet_structure(parquet_file, verbose):
     """
     Analyze key GeoParquet file characteristics and provide recommendations.
