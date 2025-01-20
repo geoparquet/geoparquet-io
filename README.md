@@ -16,7 +16,7 @@ This ideally includes spatial partitioning, though there's more unknowns there. 
 
 ## TODO's
  - try to drop pyarrow, just use duckdb
- - better handling of country file - download it automatically, test other country files, make a bit more generic.
+ - better handling of country file - download it automatically, test other country files, make a bit more generic. Param to set the country iso column (get rid of the table that guesses it)
  - spatial partitioning by kd-tree and s2
  - add tests
  - add docs
@@ -25,4 +25,7 @@ This ideally includes spatial partitioning, though there's more unknowns there. 
  - option for further partitioning within admin boundaries
  - admin level 2 splitting
  - ticket to admin extension in fiboa about putting source boundary file.
- 
+ - tool to print country code stats - number of records in each country
+ - better decompisition of checks - core call on its own, layer on the warning info
+
+

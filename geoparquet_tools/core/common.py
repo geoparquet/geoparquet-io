@@ -95,25 +95,47 @@ def format_size(size_bytes):
 
 def check_bbox_structure(parquet_file, verbose=False):
     """
-    Check if the parquet file has bbox covering metadata and proper bbox column structure.
+    Check bbox structure and metadata coverage in a GeoParquet file.
     
-    Args:
-        parquet_file (str): Path to parquet file
-        verbose (bool): Whether to print debug information
-        
     Returns:
-        str: Name of bbox column to use
-        
-    Raises:
-        click.BadParameter: If bbox column structure is invalid
+        dict: Results including:
+            - has_bbox_column (bool): Whether a valid bbox struct column exists
+            - bbox_column_name (str): Name of the bbox column if found
+            - has_bbox_metadata (bool): Whether bbox covering is specified in metadata
+            - status (str): "optimal", "suboptimal", or "poor"
+            - message (str): Human readable description
     """
-    with fsspec.open(parquet_file, 'rb') as f:
+    with fsspec.open(safe_file_url(parquet_file), 'rb') as f:
         pf = pq.ParquetFile(f)
         metadata = pf.schema_arrow.metadata
         schema = pf.schema_arrow
 
-    bbox_column_name = 'bbox'  # default name
-    if metadata and b'geo' in metadata:
+    if verbose:
+        click.echo("\nSchema fields:")
+        for field in schema:
+            click.echo(f"  {field.name}: {field.type}")
+
+    # First find the bbox column in the schema
+    bbox_column_name = None
+    has_bbox_column = False
+    
+    # Look for conventional names first
+    conventional_names = ['bbox', 'bounds', 'extent']
+    for field in schema:
+        if field.name in conventional_names or (
+            isinstance(field.type, type(schema[0].type)) and 
+            str(field.type).startswith('struct<') and 
+            all(f in str(field.type) for f in ['xmin', 'ymin', 'xmax', 'ymax'])
+        ):
+            bbox_column_name = field.name
+            has_bbox_column = True
+            if verbose:
+                click.echo(f"Found bbox column: {field.name} with type {field.type}")
+            break
+
+    # Then check metadata for bbox covering that specifically references the bbox column
+    has_bbox_metadata = False
+    if metadata and b'geo' in metadata and has_bbox_column:
         try:
             geo_meta = json.loads(metadata[b'geo'].decode('utf-8'))
             if verbose:
@@ -122,47 +144,47 @@ def check_bbox_structure(parquet_file, verbose=False):
             
             if isinstance(geo_meta, dict) and 'columns' in geo_meta:
                 columns = geo_meta['columns']
-                if isinstance(columns, dict):
-                    for col_name, col_info in columns.items():
-                        if isinstance(col_info, dict) and 'covering' in col_info:
-                            covering = col_info['covering']
-                            if isinstance(covering, dict) and 'bbox' in covering:
-                                bbox_info = covering['bbox']
-                                if isinstance(bbox_info, dict) and all(k in bbox_info for k in ['xmin', 'ymin', 'xmax', 'ymax']):
-                                    bbox_ref = bbox_info['xmin']
-                                    if isinstance(bbox_ref, list) and len(bbox_ref) > 0:
-                                        bbox_column_name = bbox_ref[0]
-                                        break
-                elif isinstance(columns, list):
-                    for col in columns:
-                        if isinstance(col, dict) and col.get('bbox_covering', False):
-                            bbox_column_name = col.get('name', 'bbox')
+                for col_name, col_info in columns.items():
+                    if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
+                        bbox_refs = col_info["covering"]["bbox"]
+                        # Check if the bbox covering references our bbox column
+                        if isinstance(bbox_refs, dict) and all(
+                            isinstance(ref, list) and 
+                            len(ref) == 2 and 
+                            ref[0] == bbox_column_name
+                            for ref in bbox_refs.values()
+                        ):
+                            has_bbox_metadata = True
+                            if verbose:
+                                click.echo(f"Found bbox covering in metadata referencing column: {bbox_column_name}")
                             break
-            elif isinstance(geo_meta, list):
-                for col in geo_meta:
-                    if isinstance(col, dict) and col.get('bbox_covering', False):
-                        bbox_column_name = col.get('name', 'bbox')
-                        break
         except json.JSONDecodeError:
             if verbose:
                 click.echo("Failed to parse geo metadata as JSON")
 
-    if bbox_column_name == 'bbox' and verbose:
-        click.echo("Warning: No bbox covering metadata found in the file. Attempting to find a 'bbox' column name.")
+    # Determine status and message
+    if has_bbox_column and has_bbox_metadata:
+        status = "optimal"
+        message = f"✓ Found bbox column '{bbox_column_name}' with proper metadata covering"
+    elif has_bbox_column:
+        status = "suboptimal"
+        message = f"⚠️  Found bbox column '{bbox_column_name}' but no bbox covering metadata (recommended for better performance)"
+    else:
+        status = "poor"
+        message = "❌ No valid bbox column found"
 
-    # Check for bbox column structure
-    bbox_field = None
-    for field in schema:
-        if field.name == bbox_column_name:
-            bbox_field = field
-            break
+    if verbose:
+        click.echo(f"\nFinal results:")
+        click.echo(f"  has_bbox_column: {has_bbox_column}")
+        click.echo(f"  bbox_column_name: {bbox_column_name}")
+        click.echo(f"  has_bbox_metadata: {has_bbox_metadata}")
+        click.echo(f"  status: {status}")
+        click.echo(f"  message: {message}")
 
-    if not bbox_field:
-        raise click.BadParameter(f"No '{bbox_column_name}' column found in the file: {parquet_file}")
-
-    required_fields = {'xmin', 'ymin', 'xmax', 'ymax'}
-    if bbox_field.type.num_fields < 4 or not all(f.name in required_fields for f in bbox_field.type):
-        raise click.BadParameter(f"Invalid bbox column structure in file: {parquet_file}. "
-                               f"Must be a struct with xmin, ymin, xmax, ymax fields.")
-
-    return bbox_column_name 
+    return {
+        "has_bbox_column": has_bbox_column,
+        "bbox_column_name": bbox_column_name if has_bbox_column else None,
+        "has_bbox_metadata": has_bbox_metadata,
+        "status": status,
+        "message": message
+    }

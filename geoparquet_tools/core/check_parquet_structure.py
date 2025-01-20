@@ -6,7 +6,7 @@ import fsspec
 import json
 from geoparquet_tools.core.common import (
     safe_file_url, format_size, get_parquet_metadata, parse_geo_metadata,
-    find_primary_geometry_column
+    find_primary_geometry_column, check_bbox_structure
 )
 
 def get_row_group_stats(parquet_file):
@@ -80,9 +80,9 @@ def assess_row_count(avg_rows):
     else:
         return "suboptimal", "Row count per group is outside recommended range (50,000-200,000)", "yellow"
 
-def get_compression_info(parquet_file, geometry_column=None):
+def get_compression_info(parquet_file, column_name=None):
     """
-    Get compression information for a specific column or all columns.
+    Get compression information for specified column(s).
     
     Returns:
         dict: Mapping of column names to their compression algorithms
@@ -93,46 +93,11 @@ def get_compression_info(parquet_file, geometry_column=None):
         compression_info = {}
         for i in range(metadata.num_columns):
             col = metadata.schema.column(i)
-            if geometry_column is None or col.name == geometry_column:
+            if column_name is None or col.name == column_name:
                 compression = metadata.row_group(0).column(i).compression
                 compression_info[col.name] = compression
                 
         return compression_info
-
-def get_geoparquet_version_info(parquet_file):
-    """
-    Get GeoParquet version and bbox covering information.
-    
-    Returns:
-        dict: Information including:
-            - version: GeoParquet version
-            - has_bbox_covering: Whether file has bbox covering
-            - bbox_columns: List of columns with bbox covering
-    """
-    metadata, _ = get_parquet_metadata(parquet_file)
-    geo_meta = parse_geo_metadata(metadata, False)
-    
-    if not geo_meta:
-        return {
-            "version": None,
-            "has_bbox_covering": False,
-            "bbox_columns": []
-        }
-    
-    version = geo_meta.get("version", "0.0.0")
-    bbox_columns = []
-    
-    if isinstance(geo_meta, dict):
-        columns = geo_meta.get("columns", {})
-        for col_name, col_meta in columns.items():
-            if col_meta.get("covering", {}).get("bbox"):
-                bbox_columns.append(col_name)
-                
-    return {
-        "version": version,
-        "has_bbox_covering": bool(bbox_columns),
-        "bbox_columns": bbox_columns
-    }
 
 def check_parquet_structure(parquet_file, verbose):
     """
@@ -164,18 +129,38 @@ def check_parquet_structure(parquet_file, verbose):
         click.echo("- Optimal rows: 50,000-200,000 rows per group")
         click.echo("- Small files (<128 MB): single row group is fine")
 
-    # GeoParquet version info
-    geo_info = get_geoparquet_version_info(parquet_file)
-    if geo_info["version"]:
+    # Get GeoParquet metadata
+    metadata, _ = get_parquet_metadata(parquet_file)
+    geo_meta = parse_geo_metadata(metadata, False)
+    
+    if geo_meta:
+        version = geo_meta.get("version", "0.0.0")
         click.echo("\nGeoParquet Metadata:")
-        if geo_info["version"] >= "1.1.0":
-            click.echo(click.style(f"✓ Version {geo_info['version']}", fg="green"), nl=False)
-            if geo_info["has_bbox_covering"]:
-                click.echo(click.style(" | ✓ bbox covering", fg="green"))
+        version_color = "green" if version >= "1.1.0" else "yellow"
+        version_prefix = "✓" if version >= "1.1.0" else "⚠️"
+        version_suffix = "" if version >= "1.1.0" else " (upgrade to 1.1.0+ recommended)"
+        
+        click.echo(
+            click.style(
+                f"{version_prefix} Version {version}{version_suffix}",
+                fg=version_color
+            ),
+            nl=False
+        )
+        
+        # Check bbox structure
+        bbox_info = check_bbox_structure(parquet_file, verbose)
+        if bbox_info["has_bbox_column"]:
+            if bbox_info["has_bbox_metadata"]:
+                click.echo(click.style(f" | ✓ Found bbox column '{bbox_info['bbox_column_name']}' with proper metadata covering", fg="green"))
             else:
-                click.echo(click.style(" | ⚠️  No bbox covering (recommended for better performance)", fg="yellow"))
+                click.echo(click.style(
+                    f" | ⚠️  Found bbox column '{bbox_info['bbox_column_name']}' but missing bbox covering metadata "
+                    "(add to metadata for better performance)", 
+                    fg="yellow"
+                ))
         else:
-            click.echo(click.style(f"⚠️  Version {geo_info['version']} (upgrade to 1.1.0+ recommended)", fg="yellow"))
+            click.echo(click.style(" | ❌ No bbox column found (recommended for better performance)", fg="red"))
         
         # Compression info
         primary_col = find_primary_geometry_column(parquet_file, verbose)
