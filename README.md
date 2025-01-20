@@ -13,3 +13,16 @@ Currently just a collection of python files, each with their own click cli. Goal
 The aim is to try to make it so it's easy to run each check in the recommendations, and also test the whole set of things in one, and then to also provide the functionality to convert parquet files to be in line with the recommendations.
 
 This ideally includes spatial partitioning, though there's more unknowns there. But hopefully can provide tools to break up large files with DuckDB, with both admin-partitioned strategies and at least a couple index-based ones (kd-tree, s2, etc). So a goal for these tools is to make it easy for anyone with a large dataset to break it up with a cli call or two.
+
+## TODO's
+ - try to drop pyarrow, just use duckdb
+ - better handling of country file - download it automatically, test other country files, make a bit more generic.
+ - spatial partitioning by kd-tree and s2
+ - add tests
+ - add docs
+ - decompose checks so they can each be called individually, and added
+ - call for country splitting to be all in one.
+ - option for further partitioning within admin boundaries
+ - admin level 2 splitting
+ - ticket to admin extension in fiboa about putting source boundary file.
+ 

@@ -7,6 +7,9 @@ import json
 import fsspec
 import urllib.parse
 import os
+from geoparquet_tools.core.common import (
+    safe_file_url
+)
 
 def safe_file_url(file_path, verbose=False):
     """Handle both local and remote files, returning safe URL."""
@@ -24,15 +27,14 @@ def safe_file_url(file_path, verbose=False):
 
 def check_country_code_column(parquet_file):
     """Check if admin:country_code column exists and is populated."""
-    with fsspec.open(parquet_file, 'rb') as f:
-        parquet = pq.ParquetFile(f)
+    with pq.ParquetFile(parquet_file) as parquet:
         schema = parquet.schema
         
         # Check if column exists
         if 'admin:country_code' not in schema.names:
             raise click.UsageError(
                 "Column 'admin:country_code' not found in the Parquet file. "
-                "Please add country codes first using the add_country_codes.py script."
+                "Please add country codes first using the add_country_codes command."
             )
         
         # Check if column has values
@@ -40,7 +42,7 @@ def check_country_code_column(parquet_file):
         if table.column('admin:country_code').null_count == table.num_rows:
             raise click.UsageError(
                 "Column 'admin:country_code' exists but contains only NULL values. "
-                "Please populate country codes using the add_country_codes.py script."
+                "Please populate country codes using the add_country_codes command."
             )
 
 def check_crs(parquet_file, verbose=False):

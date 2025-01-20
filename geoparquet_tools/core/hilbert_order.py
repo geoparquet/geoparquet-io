@@ -3,8 +3,10 @@
 import click
 import duckdb
 import pyarrow.parquet as pq
-import os
-import urllib.parse
+from geoparquet_tools.core.common import (
+    safe_file_url, find_primary_geometry_column, get_parquet_metadata,
+    update_metadata
+)
 
 def hilbert_order(input_parquet, output_parquet, geometry_column, verbose):
     """
@@ -13,31 +15,22 @@ def hilbert_order(input_parquet, output_parquet, geometry_column, verbose):
     Takes an input GeoParquet file and creates a new file with rows ordered
     by their position along a Hilbert space-filling curve.
     """
-    # Read the original GeoParquet metadata to get CRS
-    pq_file = pq.ParquetFile(input_parquet)
-    metadata = pq_file.schema_arrow.metadata
-    if metadata:
-        geo_metadata = {k.decode('utf-8'): v.decode('utf-8') 
-                       for k, v in metadata.items() 
-                       if k.decode('utf-8').startswith('geo')}
-        if verbose:
-            click.echo(f"Original GeoParquet metadata: {geo_metadata}")
+    safe_url = safe_file_url(input_parquet, verbose)
     
+    # Get metadata before reordering
+    metadata, _ = get_parquet_metadata(input_parquet, verbose)
+    
+    # Use specified geometry column or find primary one
+    if geometry_column == "geometry":
+        geometry_column = find_primary_geometry_column(input_parquet, verbose)
+    
+    if verbose:
+        click.echo(f"Using geometry column: {geometry_column}")
+    
+    # Create DuckDB connection and load spatial extension
     con = duckdb.connect()
     con.execute("LOAD spatial;")
     
-    # Handle both local and remote files
-    if input_parquet.startswith(('http://', 'https://')):
-        parsed = urllib.parse.urlparse(input_parquet)
-        encoded_path = urllib.parse.quote(parsed.path)
-        safe_url = parsed._replace(path=encoded_path).geturl()
-        if verbose:
-            click.echo(f"Reading remote file: {safe_url}")
-    else:
-        if not os.path.exists(input_parquet):
-            raise click.BadParameter(f"Local file not found: {input_parquet}")
-        safe_url = input_parquet
-
     # First get the extent of all geometries
     extent_query = f"""
     SELECT ST_Extent(ST_Extent_Agg({geometry_column}))::BOX_2D AS bounds
@@ -72,27 +65,12 @@ def hilbert_order(input_parquet, output_parquet, geometry_column, verbose):
     
     if verbose:
         click.echo(f"Successfully wrote ordered data to: {output_parquet}")
-
-    # Now update the output file with the original CRS information
+    
+    # Update the output file with the original metadata
     if metadata:
-        # Read the output file
-        table = pq.read_table(output_parquet)
-        
-        # Combine existing metadata with geo metadata
-        existing_metadata = table.schema.metadata or {}
-        new_metadata = {
-            k.encode('utf-8'): v.encode('utf-8')
-            for k, v in {**{k.decode('utf-8'): v.decode('utf-8') 
-                           for k, v in existing_metadata.items()},
-                        **geo_metadata}.items()
-        }
-        
-        # Write back with updated metadata
-        new_table = table.replace_schema_metadata(new_metadata)
-        pq.write_table(new_table, output_parquet)
-        
+        update_metadata(output_parquet, metadata)
         if verbose:
-            click.echo(f"Updated output file with original CRS metadata")
+            click.echo("Updated output file with original metadata")
 
 if __name__ == "__main__":
     hilbert_order() 
