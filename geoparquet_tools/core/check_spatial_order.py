@@ -89,15 +89,18 @@ def check_spatial_order(parquet_file, random_sample_size, limit_rows, verbose):
     # Calculate ratio
     ratio = consecutive_avg / random_avg if consecutive_avg and random_avg else None
     
-    click.echo(f"\nResults:")
-    click.echo(f"Average distance between consecutive features: {consecutive_avg}")
-    click.echo(f"Average distance between random features: {random_avg}")
-    click.echo(f"Ratio (consecutive / random): {ratio}")
+    if not verbose:  # Only print results if not being called from check_all
+        click.echo(f"\nResults:")
+        click.echo(f"Average distance between consecutive features: {consecutive_avg}")
+        click.echo(f"Average distance between random features: {random_avg}")
+        click.echo(f"Ratio (consecutive / random): {ratio}")
 
-    if ratio is not None and ratio < 0.5:
-        click.echo("=> Data seems strongly spatially clustered.")
-    elif ratio is not None:
-        click.echo("=> Data might not be strongly clustered (or is partially clustered).")
+        if ratio is not None and ratio < 0.5:
+            click.echo("=> Data seems strongly spatially clustered.")
+        elif ratio is not None:
+            click.echo("=> Data might not be strongly clustered (or is partially clustered).")
+    
+    return ratio
 
 if __name__ == "__main__":
     check_spatial_order()

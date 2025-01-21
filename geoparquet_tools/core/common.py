@@ -4,6 +4,7 @@ import fsspec
 import pyarrow.parquet as pq
 import urllib.parse
 import os
+import duckdb
 
 def safe_file_url(file_path, verbose=False):
     """Handle both local and remote files, returning safe URL."""
@@ -81,9 +82,41 @@ def update_metadata(output_file, original_metadata):
     for k, v in original_metadata.items():
         if k.decode('utf-8').startswith('geo'):
             new_metadata[k] = v
-    
+
     new_table = table.replace_schema_metadata(new_metadata)
-    pq.write_table(new_table, output_file)
+    
+    # Get file size for row group calculation
+    file_size = os.path.getsize(output_file)
+    
+    # Calculate optimal row groups using actual file size
+    num_row_groups = calculate_row_group_count(new_table.num_rows, file_size)
+    rows_per_group = new_table.num_rows // num_row_groups
+
+    pq.write_table(
+        new_table,
+        output_file,
+        row_group_size=rows_per_group,
+        compression='ZSTD',
+        write_statistics=True,
+        use_dictionary=True,
+        version='2.6'
+    )
+
+def calculate_row_group_count(total_rows, file_size_bytes, target_row_group_size_mb=130):
+    """Calculate optimal number of row groups based on target size in MB."""
+    # Convert target size to bytes
+    target_bytes = target_row_group_size_mb * 1024 * 1024
+    
+    # Calculate average bytes per row
+    bytes_per_row = file_size_bytes / total_rows if total_rows > 0 else 0
+    
+    # Calculate number of rows that would fit in target size
+    rows_per_group = int(target_bytes / bytes_per_row) if bytes_per_row > 0 else total_rows
+    
+    # Calculate number of groups needed
+    num_groups = max(1, total_rows // rows_per_group)
+        
+    return num_groups
 
 def format_size(size_bytes):
     """Convert bytes to human readable string."""
@@ -188,3 +221,69 @@ def check_bbox_structure(parquet_file, verbose=False):
         "status": status,
         "message": message
     }
+
+def add_bbox(parquet_file, verbose=False):
+    """
+    Add a bbox struct column to a GeoParquet file if it doesn't exist.
+    
+    Args:
+        parquet_file: Path to the parquet file
+        verbose: Whether to print verbose output
+        
+    Returns:
+        bool: True if bbox was added, False if it already existed
+    """
+    # Check if bbox already exists
+    bbox_info = check_bbox_structure(parquet_file, verbose)
+    if bbox_info["has_bbox_column"]:
+        if verbose:
+            click.echo(f"Bbox column '{bbox_info['bbox_column_name']}' already exists, no action needed")
+        return False
+        
+    safe_url = safe_file_url(parquet_file, verbose)
+    
+    # Get geometry column
+    geom_col = find_primary_geometry_column(parquet_file, verbose)
+    
+    if verbose:
+        click.echo(f"Adding bbox column for geometry column: {geom_col}")
+    
+    # Create temporary file path
+    temp_file = parquet_file + ".tmp"
+    
+    try:
+        # Create DuckDB connection
+        con = duckdb.connect()
+        con.execute("LOAD spatial;")
+        
+        # Add bbox column
+        query = f"""
+        COPY (
+            SELECT 
+                *,
+                STRUCT_PACK(
+                    xmin := ST_XMin({geom_col}),
+                    ymin := ST_YMin({geom_col}),
+                    xmax := ST_XMax({geom_col}),
+                    ymax := ST_YMax({geom_col})
+                ) as bbox
+            FROM '{safe_url}'
+        )
+        TO '{temp_file}'
+        (FORMAT PARQUET);
+        """
+        
+        con.execute(query)
+        
+        # move temp file to original file
+        os.replace(temp_file, parquet_file)
+        
+        if verbose:
+            click.echo("Successfully added bbox column")
+        
+        return True
+        
+    except Exception as e:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        raise click.ClickException(f"Failed to add bbox: {str(e)}")
