@@ -156,7 +156,7 @@ def check_parquet_structure(parquet_file, verbose):
             else:
                 click.echo(click.style(
                     f" | ⚠️  Found bbox column '{bbox_info['bbox_column_name']}' but missing bbox covering metadata "
-                    "(add to metadata to help inform clients", 
+                    "(add to metadata to help inform clients)", 
                     fg="yellow"
                 ))
         else:
