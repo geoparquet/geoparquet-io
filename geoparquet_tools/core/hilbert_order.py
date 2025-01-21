@@ -84,7 +84,6 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", ver
     
     con.execute(order_query)
     # Read the ordered data
-    table = pq.read_table(temp_file)
     if metadata:
         update_metadata(temp_file, metadata)
         if verbose:

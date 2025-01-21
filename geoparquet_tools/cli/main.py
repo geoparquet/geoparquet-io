@@ -14,7 +14,7 @@ def cli():
 # Check commands group
 @cli.group()
 def check():
-    """Commands for checking GeoParquet files."""
+    """Commands for checking GeoParquet files for best practices."""
     pass
 
 @check.command(name='all')
@@ -117,7 +117,7 @@ def hilbert_order(input_parquet, output_parquet, geometry_column, verbose):
     by their position along a Hilbert space-filling curve.
     
     By default, applies optimal formatting (ZSTD compression, optimized row groups, bbox metadata)
-    while preserving the CRS. Use --no-format to preserve all original formatting.
+    while preserving the CRS. 
     """
     try:
         hilbert_impl(input_parquet, output_parquet, geometry_column, verbose)
@@ -127,10 +127,10 @@ def hilbert_order(input_parquet, output_parquet, geometry_column, verbose):
 # Add commands group
 @cli.group()
 def add():
-    """Commands for adding data to GeoParquet files."""
+    """Commands for enhancing GeoParquet files in various ways."""
     pass
 
-@add.command(name='country-codes')
+@add.command(name='admin-divisions')
 @click.argument("input_parquet")
 @click.argument("countries_parquet")
 @click.argument("output_parquet")
