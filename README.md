@@ -10,7 +10,7 @@ For now, just clone the repo and run `pip install -e .` from the root directory.
 
 The `geoparquet-tools` package provides a command-line interface through the `gt` command. Here are the available commands:
 
-```bash
+```
 $ gt --help
 Usage: gt [OPTIONS] COMMAND [ARGS]...
 
@@ -35,7 +35,7 @@ preserves CRS information, so if you're working with projected data then it can 
 than using DuckDB directly. It outputs data according to recommended [GeoParquet
 best practices](https://github.com/opengeospatial/geoparquet/pull/254/files) (except it doesn't yet right the bbox covering metadata).
 
-```bash
+```
 $ gt sort hilbert --help
 Usage: gt sort hilbert [OPTIONS] INPUT_PARQUET OUTPUT_PARQUET
 
