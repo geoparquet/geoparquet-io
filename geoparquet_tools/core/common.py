@@ -68,7 +68,7 @@ def find_primary_geometry_column(parquet_file, verbose=False):
     return "geometry"
 
 def update_metadata(output_file, original_metadata):
-    """Update a parquet file with original metadata."""
+    """Update a parquet file with original metadata and add bbox covering if present."""
     if not original_metadata:
         return
         
@@ -76,13 +76,53 @@ def update_metadata(output_file, original_metadata):
     existing_metadata = table.schema.metadata or {}
     new_metadata = {
         k: v for k, v in existing_metadata.items()
+        if not k.decode('utf-8').startswith('geo')  # Remove existing geo metadata
     }
     
-    # Add original geo metadata
-    for k, v in original_metadata.items():
-        if k.decode('utf-8').startswith('geo'):
-            new_metadata[k] = v
-
+    # Check for bbox column
+    bbox_info = check_bbox_structure(output_file, verbose=False)
+    
+    # Get geometry column
+    geom_col = find_primary_geometry_column(output_file, verbose=False)
+    
+    # Start with original geo metadata if it exists
+    try:
+        if b'geo' in original_metadata:
+            geo_meta = json.loads(original_metadata[b'geo'].decode('utf-8'))
+        else:
+            geo_meta = {
+                "version": "1.1.0",
+                "primary_column": geom_col,
+                "columns": {}
+            }
+    except json.JSONDecodeError:
+        geo_meta = {
+            "version": "1.1.0",
+            "primary_column": geom_col,
+            "columns": {}
+        }
+    
+    # Ensure proper structure
+    if "columns" not in geo_meta:
+        geo_meta["columns"] = {}
+    if geom_col not in geo_meta["columns"]:
+        geo_meta["columns"][geom_col] = {}
+    
+    # Add bbox covering if bbox column exists
+    if bbox_info["has_bbox_column"]:
+        geo_meta["columns"][geom_col]["covering"] = {
+            "bbox": {
+                "xmin": [bbox_info["bbox_column_name"], "xmin"],
+                "ymin": [bbox_info["bbox_column_name"], "ymin"],
+                "xmax": [bbox_info["bbox_column_name"], "xmax"],
+                "ymax": [bbox_info["bbox_column_name"], "ymax"]
+            }
+        }
+    
+    # Add updated geo metadata
+    new_metadata[b'geo'] = json.dumps(geo_meta).encode('utf-8')
+    
+    # Update table schema with new metadata
     new_table = table.replace_schema_metadata(new_metadata)
     
     # Get file size for row group calculation
@@ -180,16 +220,17 @@ def check_bbox_structure(parquet_file, verbose=False):
                 for col_name, col_info in columns.items():
                     if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
                         bbox_refs = col_info["covering"]["bbox"]
-                        # Check if the bbox covering references our bbox column
+                        # Check if the bbox covering has the required structure
                         if isinstance(bbox_refs, dict) and all(
-                            isinstance(ref, list) and 
-                            len(ref) == 2 and 
-                            ref[0] == bbox_column_name
+                            key in bbox_refs for key in ['xmin', 'ymin', 'xmax', 'ymax']
+                        ) and all(
+                            isinstance(ref, list) and len(ref) == 2
                             for ref in bbox_refs.values()
                         ):
+                            referenced_bbox_column = bbox_refs['xmin'][0]  # Get column name from any coordinate
                             has_bbox_metadata = True
                             if verbose:
-                                click.echo(f"Found bbox covering in metadata referencing column: {bbox_column_name}")
+                                click.echo(f"Found bbox covering in metadata referencing column: {referenced_bbox_column}")
                             break
         except json.JSONDecodeError:
             if verbose:
