@@ -138,4 +138,5 @@ First todo is to convert all of these into proper github issues ;)
  - ticket to admin extension in fiboa about putting source boundary file.
  - tool to print country code stats - number of records in each country
  - better decompisition of checks - core call on its own, layer on the warning info
+ - better handling of really small files - if only one row group don't print red on the size, and don't fail on spatial order analysis.
 
