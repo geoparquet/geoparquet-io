@@ -8,7 +8,9 @@ import fsspec
 import urllib.parse
 import os
 from geoparquet_tools.core.common import (
-    safe_file_url
+    safe_file_url,
+    get_parquet_metadata,
+    update_metadata
 )
 
 def safe_file_url(file_path, verbose=False):
@@ -116,6 +118,9 @@ def split_by_country(input_parquet, output_folder, hive, verbose, overwrite):
     """
     input_url = safe_file_url(input_parquet, verbose)
     
+    # Get metadata before processing
+    metadata, _ = get_parquet_metadata(input_parquet, verbose)
+    
     # Verify admin:country_code column exists and is populated
     if verbose:
         click.echo("Checking country code column...")
@@ -183,6 +188,10 @@ def split_by_country(input_parquet, output_folder, hive, verbose, overwrite):
         """
         
         con.execute(query)
+        
+        # Update metadata for this country's file
+        if metadata:
+            update_metadata(output_filename, metadata)
         
         if verbose:
             click.echo(f"Wrote {output_filename}")
