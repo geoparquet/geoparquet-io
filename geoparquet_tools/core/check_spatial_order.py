@@ -17,6 +17,7 @@ def check_spatial_order(parquet_file, random_sample_size, limit_rows, verbose):
     
     # Create DuckDB connection and load spatial extension
     con = duckdb.connect()
+    con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
     
     # First get total rows

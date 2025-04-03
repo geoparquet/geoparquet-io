@@ -136,6 +136,7 @@ def split_by_country(input_parquet, output_folder, hive, verbose, overwrite):
     
     # Create DuckDB connection
     con = duckdb.connect()
+    con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
     
     # Get unique country codes

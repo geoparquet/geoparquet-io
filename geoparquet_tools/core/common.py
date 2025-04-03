@@ -295,6 +295,7 @@ def add_bbox(parquet_file, verbose=False):
     try:
         # Create DuckDB connection
         con = duckdb.connect()
+        con.execute("INSTALL spatial;")
         con.execute("LOAD spatial;")
         
         # Add bbox column

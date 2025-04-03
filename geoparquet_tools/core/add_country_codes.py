@@ -44,6 +44,7 @@ def add_country_codes(input_parquet, countries_parquet, output_parquet, verbose)
     
     # Create DuckDB connection and load spatial extension
     con = duckdb.connect()
+    con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
     
     # Get total input count

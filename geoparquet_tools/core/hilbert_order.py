@@ -46,6 +46,7 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", ver
     
     # Create DuckDB connection and load spatial extension
     con = duckdb.connect()
+    con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
     
     # First get the extent of all geometries
