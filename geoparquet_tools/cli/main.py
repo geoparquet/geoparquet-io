@@ -6,6 +6,7 @@ from geoparquet_tools.core.add_country_codes import add_country_codes as add_cou
 from geoparquet_tools.core.split_by_country import split_by_country as split_country_impl
 from geoparquet_tools.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
 from geoparquet_tools.core.add_bbox_column import add_bbox_column as add_bbox_column_impl
+from geoparquet_tools.core.partition_by_string import partition_by_string as partition_by_string_impl
 
 @click.group()
 def cli():
@@ -162,13 +163,64 @@ def partition():
 
 @partition.command(name='admin')
 @click.argument("input_parquet")
-@click.argument("output_folder")
+@click.argument("output_folder", required=False)
+@click.option("--column", default="admin:country_code", help="Column name to partition by (default: admin:country_code)")
 @click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure.")
 @click.option("--verbose", is_flag=True, help="Print additional information.")
 @click.option("--overwrite", is_flag=True, help="Overwrite existing country files.")
-def partition_admin(input_parquet, output_folder, hive, verbose, overwrite):
-    """Split a GeoParquet file into separate files by country code."""
-    split_country_impl(input_parquet, output_folder, hive, verbose, overwrite)
+@click.option("--preview", is_flag=True, help="Preview partitions without creating files.")
+@click.option("--preview-limit", default=15, type=int, help="Number of partitions to show in preview (default: 15)")
+def partition_admin(input_parquet, output_folder, column, hive, verbose, overwrite, preview, preview_limit):
+    """Split a GeoParquet file into separate files by country code.
+
+    By default, partitions by the 'admin:country_code' column, but you can specify
+    a different column using the --column option.
+
+    Use --preview to see what partitions would be created without actually creating files.
+    """
+    # If preview mode, output_folder is not required
+    if not preview and not output_folder:
+        raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
+
+    split_country_impl(input_parquet, output_folder, column, hive, verbose, overwrite, preview, preview_limit)
+
+@partition.command(name='string')
+@click.argument("input_parquet")
+@click.argument("output_folder", required=False)
+@click.option("--column", required=True, help="Column name to partition by (required)")
+@click.option("--chars", type=int, help="Number of characters to use as prefix for partitioning")
+@click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure")
+@click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")
+@click.option("--preview", is_flag=True, help="Preview partitions without creating files")
+@click.option("--preview-limit", default=15, type=int, help="Number of partitions to show in preview (default: 15)")
+@click.option("--verbose", is_flag=True, help="Print additional information")
+def partition_string(input_parquet, output_folder, column, chars, hive, overwrite, preview, preview_limit, verbose):
+    """Partition a GeoParquet file by string column values.
+
+    Creates separate GeoParquet files based on distinct values in the specified column.
+    When --chars is provided, partitions by the first N characters of the column values.
+
+    Use --preview to see what partitions would be created without actually creating files.
+
+    Examples:
+
+        # Preview partitions by first character of MGRS codes
+        gt partition string input.parquet --column MGRS --chars 1 --preview
+
+        # Partition by full column values
+        gt partition string input.parquet output/ --column category
+
+        # Partition by first character of MGRS codes
+        gt partition string input.parquet output/ --column mgrs --chars 1
+
+        # Use Hive-style partitioning
+        gt partition string input.parquet output/ --column region --hive
+    """
+    # If preview mode, output_folder is not required
+    if not preview and not output_folder:
+        raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
+
+    partition_by_string_impl(input_parquet, output_folder, column, chars, hive, overwrite, preview, preview_limit, verbose)
 
 if __name__ == "__main__":
     cli() 

@@ -1,49 +1,30 @@
 #!/usr/bin/env python3
 
 import click
-import duckdb
 import pyarrow.parquet as pq
 import json
 import fsspec
-import urllib.parse
-import os
-from geoparquet_tools.core.common import (
-    safe_file_url,
-    get_parquet_metadata,
-    update_metadata
-)
+from geoparquet_tools.core.common import safe_file_url
+from geoparquet_tools.core.partition_common import partition_by_column, preview_partition
 
-def safe_file_url(file_path, verbose=False):
-    """Handle both local and remote files, returning safe URL."""
-    if file_path.startswith(('http://', 'https://')):
-        parsed = urllib.parse.urlparse(file_path)
-        encoded_path = urllib.parse.quote(parsed.path)
-        safe_url = parsed._replace(path=encoded_path).geturl()
-        if verbose:
-            click.echo(f"Reading remote file: {safe_url}")
-    else:
-        if not os.path.exists(file_path):
-            raise click.BadParameter(f"Local file not found: {file_path}")
-        safe_url = file_path
-    return safe_url
 
-def check_country_code_column(parquet_file):
-    """Check if admin:country_code column exists and is populated."""
+def check_country_code_column(parquet_file, column_name="admin:country_code"):
+    """Check if the specified column exists and is populated."""
     with pq.ParquetFile(parquet_file) as parquet:
         schema = parquet.schema
-        
+
         # Check if column exists
-        if 'admin:country_code' not in schema.names:
+        if column_name not in schema.names:
             raise click.UsageError(
-                "Column 'admin:country_code' not found in the Parquet file. "
+                f"Column '{column_name}' not found in the Parquet file. "
                 "Please add country codes first using the add_country_codes command."
             )
-        
+
         # Check if column has values
-        table = parquet.read(['admin:country_code'])
-        if table.column('admin:country_code').null_count == table.num_rows:
+        table = parquet.read([column_name])
+        if table.column(column_name).null_count == table.num_rows:
             raise click.UsageError(
-                "Column 'admin:country_code' exists but contains only NULL values. "
+                f"Column '{column_name}' exists but contains only NULL values. "
                 "Please populate country codes using the add_country_codes command."
             )
 
@@ -108,96 +89,58 @@ def _is_wgs84(crs):
         )
     return False
 
-def split_by_country(input_parquet, output_folder, hive, verbose, overwrite):
+def split_by_country(input_parquet, output_folder, column="admin:country_code", hive=False, verbose=False, overwrite=False, preview=False, preview_limit=15):
     """
     Split a GeoParquet file into separate files by country code.
-    
-    Requires an input GeoParquet file with 'admin:country_code' column
+
+    Requires an input GeoParquet file with a country code column
     and an output folder path. Creates one file per country,
     optionally using Hive-style partitioning.
+
+    Args:
+        input_parquet: Input GeoParquet file
+        output_folder: Output directory
+        column: Column name to partition by (default: "admin:country_code")
+        hive: Use Hive-style partitioning
+        verbose: Print detailed information
+        overwrite: Overwrite existing files
+        preview: Show preview of partitions without creating files
+        preview_limit: Maximum number of partitions to show in preview (default: 15)
     """
     input_url = safe_file_url(input_parquet, verbose)
-    
-    # Get metadata before processing
-    metadata, _ = get_parquet_metadata(input_parquet, verbose)
-    
-    # Verify admin:country_code column exists and is populated
+
+    # Verify column exists and is populated
     if verbose:
-        click.echo("Checking country code column...")
-    check_country_code_column(input_url)
-    
-    # Check CRS
-    check_crs(input_url, verbose)
-    
-    # Create output directory
-    os.makedirs(output_folder, exist_ok=True)
-    if verbose:
-        click.echo(f"Created output directory: {output_folder}")
-    
-    # Create DuckDB connection
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
-    
-    # Get unique country codes
-    if verbose:
-        click.echo("Finding unique country codes...")
-    
-    result = con.execute("""
-        SELECT DISTINCT "admin:country_code"
-        FROM '{input_url}'
-        WHERE "admin:country_code" IS NOT NULL
-        ORDER BY "admin:country_code" DESC
-    """.format(input_url=input_url))
-    
-    countries = result.fetchall()
-    
-    if verbose:
-        click.echo(f"Found {len(countries)} unique countries")
-    
-    # Process each country
-    for country in countries:
-        country_code = country[0]
-        
-        # Determine output path
-        if hive:
-            write_folder = os.path.join(output_folder, f'country_code={country_code}')
-            os.makedirs(write_folder, exist_ok=True)
-        else:
-            write_folder = output_folder
-            
-        output_filename = os.path.join(write_folder, f'{country_code}.parquet')
-        
-        # Skip if file exists and not overwriting
-        if os.path.exists(output_filename) and not overwrite:
-            if verbose:
-                click.echo(f"Output file for country {country_code} already exists, skipping...")
-            continue
-        
-        if verbose:
-            click.echo(f"Processing country {country_code}...")
-        
-        # Extract and write country data
-        query = f"""
-        COPY (
-            SELECT *
-            FROM '{input_url}'
-            WHERE "admin:country_code" = '{country_code}'
+        click.echo(f"Checking column '{column}'...")
+    check_country_code_column(input_url, column)
+
+    # Check CRS (only if not in preview mode)
+    if not preview:
+        check_crs(input_url, verbose)
+
+    # If preview mode, show preview and exit
+    if preview:
+        preview_partition(
+            input_parquet=input_parquet,
+            column_name=column,
+            column_prefix_length=None,
+            limit=preview_limit,
+            verbose=verbose
         )
-        TO '{output_filename}'
-        (FORMAT PARQUET);
-        """
-        
-        con.execute(query)
-        
-        # Update metadata for this country's file
-        if metadata:
-            update_metadata(output_filename, metadata)
-        
-        if verbose:
-            click.echo(f"Wrote {output_filename}")
-    
-    click.echo(f"Successfully split file into {len(countries)} country files")
+        return
+
+    # Use common partition function
+    num_partitions = partition_by_column(
+        input_parquet=input_parquet,
+        output_folder=output_folder,
+        column_name=column,
+        column_prefix_length=None,
+        hive=hive,
+        overwrite=overwrite,
+        verbose=verbose
+    )
+
+    click.echo(f"Successfully split file into {num_partitions} country file(s)")
 
 if __name__ == "__main__":
     split_by_country() 
