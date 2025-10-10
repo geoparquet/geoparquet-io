@@ -5,6 +5,7 @@ from geoparquet_tools.core.hilbert_order import hilbert_order as hilbert_impl
 from geoparquet_tools.core.add_country_codes import add_country_codes as add_country_codes_impl
 from geoparquet_tools.core.split_by_country import split_by_country as split_country_impl
 from geoparquet_tools.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
+from geoparquet_tools.core.add_bbox_column import add_bbox_column as add_bbox_column_impl
 
 @click.group()
 def cli():
@@ -138,6 +139,20 @@ def add():
 def add_country_codes(input_parquet, countries_parquet, output_parquet, verbose):
     """Add country ISO codes to a GeoParquet file based on spatial intersection."""
     add_country_codes_impl(input_parquet, countries_parquet, output_parquet, verbose)
+
+@add.command(name='bbox')
+@click.argument("input_parquet")
+@click.argument("output_parquet")
+@click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
+@click.option("--verbose", is_flag=True, help="Print additional information.")
+def add_bbox(input_parquet, output_parquet, bbox_name, verbose):
+    """Add a bbox struct column to a GeoParquet file.
+
+    Creates a new column with bounding box coordinates (xmin, ymin, xmax, ymax)
+    for each geometry feature. The bbox column improves spatial query performance
+    and adds proper bbox covering metadata to the GeoParquet file.
+    """
+    add_bbox_column_impl(input_parquet, output_parquet, bbox_name, verbose)
 
 # Partition commands group
 @cli.group()

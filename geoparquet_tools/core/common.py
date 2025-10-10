@@ -137,6 +137,7 @@ def update_metadata(output_file, original_metadata):
         output_file,
         row_group_size=rows_per_group,
         compression='ZSTD',
+        compression_level='15',
         write_statistics=True,
         use_dictionary=True,
         version='2.6'
@@ -263,23 +264,27 @@ def check_bbox_structure(parquet_file, verbose=False):
         "message": message
     }
 
-def add_bbox(parquet_file, verbose=False):
+def add_bbox(parquet_file, bbox_column_name='bbox', verbose=False):
     """
     Add a bbox struct column to a GeoParquet file if it doesn't exist.
-    
+
     Args:
         parquet_file: Path to the parquet file
+        bbox_column_name: Name for the bbox column (default: 'bbox')
         verbose: Whether to print verbose output
-        
+
     Returns:
         bool: True if bbox was added, False if it already existed
     """
-    # Check if bbox already exists
-    bbox_info = check_bbox_structure(parquet_file, verbose)
-    if bbox_info["has_bbox_column"]:
-        if verbose:
-            click.echo(f"Bbox column '{bbox_info['bbox_column_name']}' already exists, no action needed")
-        return False
+    # Get schema to check if column already exists
+    with fsspec.open(safe_file_url(parquet_file), 'rb') as f:
+        pf = pq.ParquetFile(f)
+        schema = pf.schema_arrow
+
+    # Check if the requested column name already exists
+    for field in schema:
+        if field.name == bbox_column_name:
+            raise click.ClickException(f"Column '{bbox_column_name}' already exists in the file. Please choose a different name.")
         
     safe_url = safe_file_url(parquet_file, verbose)
     
@@ -301,14 +306,14 @@ def add_bbox(parquet_file, verbose=False):
         # Add bbox column
         query = f"""
         COPY (
-            SELECT 
+            SELECT
                 *,
                 STRUCT_PACK(
                     xmin := ST_XMin({geom_col}),
                     ymin := ST_YMin({geom_col}),
                     xmax := ST_XMax({geom_col}),
                     ymax := ST_YMax({geom_col})
-                ) as bbox
+                ) as {bbox_column_name}
             FROM '{safe_url}'
         )
         TO '{temp_file}'
@@ -321,7 +326,7 @@ def add_bbox(parquet_file, verbose=False):
         os.replace(temp_file, parquet_file)
         
         if verbose:
-            click.echo("Successfully added bbox column")
+            click.echo(f"Successfully added bbox column '{bbox_column_name}'")
         
         return True
         

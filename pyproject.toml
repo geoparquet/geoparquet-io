@@ -7,7 +7,7 @@ name = "geoparquet-tools"
 version = "0.1.0"
 description = "A collection of tools for working with GeoParquet files"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.8,<3.14"
 license = "Apache-2.0"
 authors = [
     { name = "Chris Holmes", email = "cholmes@9eo.org" }

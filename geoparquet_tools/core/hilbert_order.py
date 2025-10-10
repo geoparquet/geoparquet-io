@@ -2,6 +2,7 @@
 
 import click
 import duckdb
+import json
 import pyarrow.parquet as pq
 import pyarrow as pa
 from geoparquet_tools.core.common import (
@@ -27,15 +28,15 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", ver
     if metadata and b'geo' in metadata:
         try:
             geo_meta = pa.py_buffer(metadata[b'geo']).to_pybytes().decode('utf-8')
-            geo_dict = eval(geo_meta)
+            geo_dict = json.loads(geo_meta)
             if isinstance(geo_dict, dict) and 'columns' in geo_dict:
                 for col in geo_dict['columns'].values():
                     if 'crs' in col:
                         original_crs = col['crs']
                         break
-        except:
+        except (json.JSONDecodeError, KeyError) as e:
             if verbose:
-                click.echo("Could not parse original CRS")
+                click.echo(f"Could not parse original CRS: {e}")
     
     # Use specified geometry column or find primary one
     if geometry_column == "geometry":
@@ -51,30 +52,34 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", ver
     
     # First get the extent of all geometries
     extent_query = f"""
-    SELECT ST_Extent(ST_Extent_Agg({geometry_column}))::BOX_2D AS bounds
+    SELECT
+        ST_XMin(ST_Extent_Agg({geometry_column})) as min_x,
+        ST_YMin(ST_Extent_Agg({geometry_column})) as min_y,
+        ST_XMax(ST_Extent_Agg({geometry_column})) as max_x,
+        ST_YMax(ST_Extent_Agg({geometry_column})) as max_y
     FROM '{safe_url}';
     """
-    
+
     if verbose:
         click.echo("Calculating spatial extent...")
-    
-    bounds = con.execute(extent_query).fetchone()[0]
-    
+
+    result = con.execute(extent_query).fetchone()
+    min_x, min_y, max_x, max_y = result
+
     if verbose:
-        click.echo(f"Spatial bounds: {bounds}")
-    
+        click.echo(f"Spatial bounds: min_x={min_x}, min_y={min_y}, max_x={max_x}, max_y={max_y}")
+
     # Create temporary file for initial Hilbert ordering
     temp_file = output_parquet + ".tmp"
-    
+
     # Order by Hilbert value and add bbox
     order_query = f"""
     COPY (
-        SELECT 
+        SELECT
             *
         FROM '{safe_url}'
-        ORDER BY ST_Hilbert({geometry_column}, 
-            ST_Extent(ST_MakeEnvelope({bounds['min_x']}, {bounds['min_y']}, 
-                                    {bounds['max_x']}, {bounds['max_y']})))
+        ORDER BY ST_Hilbert({geometry_column},
+            ST_MakeEnvelope({min_x}, {min_y}, {max_x}, {max_y}))
     )
     TO '{temp_file}'
     (FORMAT PARQUET);
