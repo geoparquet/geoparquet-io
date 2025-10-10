@@ -109,20 +109,21 @@ def sort():
 @click.argument('output_parquet', type=click.Path())
 @click.option('--geometry-column', '-g', default='geometry',
               help='Name of the geometry column (default: geometry)')
+@click.option('--add-bbox', is_flag=True, help='Automatically add bbox column and metadata if missing.')
 @click.option('--verbose', '-v', is_flag=True,
               help='Print verbose output')
-def hilbert_order(input_parquet, output_parquet, geometry_column, verbose):
+def hilbert_order(input_parquet, output_parquet, geometry_column, add_bbox, verbose):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
-    
+
     Takes an input GeoParquet file and creates a new file with rows ordered
     by their position along a Hilbert space-filling curve.
-    
+
     By default, applies optimal formatting (ZSTD compression, optimized row groups, bbox metadata)
-    while preserving the CRS. 
+    while preserving the CRS.
     """
     try:
-        hilbert_impl(input_parquet, output_parquet, geometry_column, verbose)
+        hilbert_impl(input_parquet, output_parquet, geometry_column, add_bbox, verbose)
     except Exception as e:
         raise click.ClickException(str(e))
 
@@ -134,12 +135,18 @@ def add():
 
 @add.command(name='admin-divisions')
 @click.argument("input_parquet")
-@click.argument("countries_parquet")
 @click.argument("output_parquet")
+@click.option("--countries-file", default=None, help="Path or URL to countries parquet file. If not provided, uses default from source.coop")
+@click.option("--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing.")
 @click.option("--verbose", is_flag=True, help="Print additional information.")
-def add_country_codes(input_parquet, countries_parquet, output_parquet, verbose):
-    """Add country ISO codes to a GeoParquet file based on spatial intersection."""
-    add_country_codes_impl(input_parquet, countries_parquet, output_parquet, verbose)
+def add_country_codes(input_parquet, output_parquet, countries_file, add_bbox, verbose):
+    """Add country ISO codes to a GeoParquet file based on spatial intersection.
+
+    If --countries-file is not provided, will use the default countries file from
+    https://data.source.coop/cholmes/admin-boundaries/countries.parquet and filter
+    to only the subset that overlaps with the input data (may take longer).
+    """
+    add_country_codes_impl(input_parquet, countries_file, output_parquet, add_bbox, verbose)
 
 @add.command(name='bbox')
 @click.argument("input_parquet")

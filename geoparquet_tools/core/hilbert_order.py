@@ -7,13 +7,13 @@ import pyarrow.parquet as pq
 import pyarrow as pa
 from geoparquet_tools.core.common import (
     safe_file_url, find_primary_geometry_column, get_parquet_metadata,
-    update_metadata
+    update_metadata, check_bbox_structure, add_bbox
 )
 
-def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", verbose=False):
+def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", add_bbox_flag=False, verbose=False):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
-    
+
     Takes an input GeoParquet file and creates a new file with rows ordered
     by their position along a Hilbert space-filling curve. Applies best practices:
     - ZSTD compression
@@ -21,6 +21,20 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", ver
     - bbox covering metadata
     - Preserves CRS from original file
     """
+    # Check input file bbox structure for informational purposes
+    input_bbox_info = check_bbox_structure(input_parquet, verbose)
+    if input_bbox_info["status"] != "optimal":
+        click.echo(click.style(
+            "\nWarning: Input file could benefit from bbox optimization:\n" +
+            input_bbox_info["message"],
+            fg="yellow"
+        ))
+        if not add_bbox_flag:
+            click.echo(click.style(
+                "💡 Tip: Run this command with --add-bbox to ensure the output file has bbox optimization",
+                fg="cyan"
+            ))
+
     safe_url = safe_file_url(input_parquet, verbose)
     
     # Get metadata and CRS from original file
@@ -93,12 +107,23 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", ver
     # move temp file to output file
     import os
     os.rename(temp_file, output_parquet)
-    
-    # Clean up temporary file
 
+    # Clean up temporary file
     if os.path.exists(temp_file):
         os.remove(temp_file)
-    
+
+    # Check if output needs bbox and add if requested
+    output_bbox_info = check_bbox_structure(output_parquet, verbose)
+    if output_bbox_info["status"] != "optimal" and add_bbox_flag:
+        if not output_bbox_info["has_bbox_column"]:
+            click.echo("\nAdding bbox column to output file...")
+            add_bbox(output_parquet, 'bbox', verbose)
+            click.echo(click.style("✓ Added bbox column and metadata to output file", fg="green"))
+        elif not output_bbox_info["has_bbox_metadata"]:
+            click.echo("\nAdding bbox metadata to output file...")
+            from geoparquet_tools.core.add_bbox_metadata import add_bbox_metadata
+            add_bbox_metadata(output_parquet, verbose)
+
     if verbose:
         click.echo(f"Successfully wrote ordered data to: {output_parquet}")
 
