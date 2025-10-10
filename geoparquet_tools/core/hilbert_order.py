@@ -50,50 +50,43 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", ver
     con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
     
-    # First get the extent of all geometries
-    extent_query = f"""
-    SELECT
-        ST_XMin(ST_Extent_Agg({geometry_column})) as min_x,
-        ST_YMin(ST_Extent_Agg({geometry_column})) as min_y,
-        ST_XMax(ST_Extent_Agg({geometry_column})) as max_x,
-        ST_YMax(ST_Extent_Agg({geometry_column})) as max_y
-    FROM '{safe_url}';
-    """
-
-    if verbose:
-        click.echo("Calculating spatial extent...")
-
-    result = con.execute(extent_query).fetchone()
-    min_x, min_y, max_x, max_y = result
-
-    if verbose:
-        click.echo(f"Spatial bounds: min_x={min_x}, min_y={min_y}, max_x={max_x}, max_y={max_y}")
-
     # Create temporary file for initial Hilbert ordering
     temp_file = output_parquet + ".tmp"
 
-    # Order by Hilbert value and add bbox
+    if verbose:
+        click.echo("Reordering data using Hilbert curve...")
+
+    # Order by Hilbert value using proper extent calculation
+    # ST_Extent_Agg returns GEOMETRY, but ST_Extent converts it to BOX_2D
     order_query = f"""
     COPY (
-        SELECT
-            *
-        FROM '{safe_url}'
-        ORDER BY ST_Hilbert({geometry_column},
-            ST_MakeEnvelope({min_x}, {min_y}, {max_x}, {max_y}))
+        WITH extent AS (
+            SELECT ST_Extent(ST_Extent_Agg({geometry_column})) as box
+            FROM '{safe_url}'
+        )
+        SELECT t.*
+        FROM '{safe_url}' t, extent e
+        ORDER BY ST_Hilbert(t.{geometry_column}, e.box)
     )
     TO '{temp_file}'
     (FORMAT PARQUET);
     """
-    
-    if verbose:
-        click.echo("Reordering data using Hilbert curve...")
-    
+
     con.execute(order_query)
+
+    if verbose:
+        click.echo("Query executed successfully")
+
     # Read the ordered data
     if metadata:
-        update_metadata(temp_file, metadata)
-        if verbose:
-            click.echo("Updated output file with optimal metadata")
+        try:
+            update_metadata(temp_file, metadata)
+            if verbose:
+                click.echo("Updated output file with optimal metadata")
+        except Exception as e:
+            if verbose:
+                click.echo(f"Error updating metadata: {e}")
+            # Still continue - the file is sorted correctly even without metadata update
     
     
     # Write final file with optimal settings

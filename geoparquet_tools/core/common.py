@@ -137,7 +137,7 @@ def update_metadata(output_file, original_metadata):
         output_file,
         row_group_size=rows_per_group,
         compression='ZSTD',
-        compression_level='15',
+        compression_level=15,
         write_statistics=True,
         use_dictionary=True,
         version='2.6'
