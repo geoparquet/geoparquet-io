@@ -4,6 +4,7 @@ import fsspec
 import pyarrow.parquet as pq
 import urllib.parse
 import os
+import re
 import duckdb
 
 def safe_file_url(file_path, verbose=False):
@@ -26,19 +27,19 @@ def get_parquet_metadata(parquet_file, verbose=False):
         pf = pq.ParquetFile(f)
         metadata = pf.schema_arrow.metadata
         schema = pf.schema_arrow
-        
+
     if verbose and metadata:
         click.echo("\nParquet metadata key-value pairs:")
         for key in metadata:
             click.echo(f"{key}: {metadata[key]}")
-            
+
     return metadata, schema
 
 def parse_geo_metadata(metadata, verbose=False):
     """Parse GeoParquet metadata from Parquet metadata."""
     if not metadata or b'geo' not in metadata:
         return None
-        
+
     try:
         geo_meta = json.loads(metadata[b'geo'].decode('utf-8'))
         if verbose:
@@ -54,62 +55,59 @@ def find_primary_geometry_column(parquet_file, verbose=False):
     """Find primary geometry column from GeoParquet metadata."""
     metadata, _ = get_parquet_metadata(parquet_file, verbose)
     geo_meta = parse_geo_metadata(metadata, verbose)
-    
+
     if not geo_meta:
         return "geometry"
-        
+
     if isinstance(geo_meta, dict):
         return geo_meta.get("primary_column", "geometry")
     elif isinstance(geo_meta, list):
         for col in geo_meta:
             if isinstance(col, dict) and col.get("primary", False):
                 return col.get("name", "geometry")
-    
+
     return "geometry"
 
-def update_metadata(output_file, original_metadata):
-    """Update a parquet file with original metadata and add bbox covering if present."""
-    if not original_metadata:
-        return
-        
-    table = pq.read_table(output_file)
-    existing_metadata = table.schema.metadata or {}
-    new_metadata = {
-        k: v for k, v in existing_metadata.items()
-        if not k.decode('utf-8').startswith('geo')  # Remove existing geo metadata
-    }
-    
-    # Check for bbox column
-    bbox_info = check_bbox_structure(output_file, verbose=False)
-    
-    # Get geometry column
-    geom_col = find_primary_geometry_column(output_file, verbose=False)
-    
-    # Start with original geo metadata if it exists
-    try:
-        if b'geo' in original_metadata:
+def create_geo_metadata(original_metadata, geom_col, bbox_info, verbose=False):
+    """
+    Create or update GeoParquet metadata with bbox covering if applicable.
+
+    Args:
+        original_metadata: Original parquet metadata dict
+        geom_col: Name of the geometry column
+        bbox_info: Result from check_bbox_structure
+        verbose: Whether to print verbose output
+
+    Returns:
+        dict: Updated geo metadata
+    """
+    # Process existing geo metadata if present
+    geo_meta = None
+    if original_metadata and b'geo' in original_metadata:
+        try:
             geo_meta = json.loads(original_metadata[b'geo'].decode('utf-8'))
-        else:
-            geo_meta = {
-                "version": "1.1.0",
-                "primary_column": geom_col,
-                "columns": {}
-            }
-    except json.JSONDecodeError:
+        except json.JSONDecodeError:
+            geo_meta = None
+
+    # Create or update geo metadata - always use 1.1.0 for proper covering support
+    if not geo_meta:
         geo_meta = {
             "version": "1.1.0",
             "primary_column": geom_col,
             "columns": {}
         }
-    
+    else:
+        # Upgrade to 1.1.0 if it's an older version
+        geo_meta["version"] = "1.1.0"
+
     # Ensure proper structure
     if "columns" not in geo_meta:
         geo_meta["columns"] = {}
     if geom_col not in geo_meta["columns"]:
         geo_meta["columns"][geom_col] = {}
-    
+
     # Add bbox covering if bbox column exists
-    if bbox_info["has_bbox_column"]:
+    if bbox_info and bbox_info.get("has_bbox_column"):
         geo_meta["columns"][geom_col]["covering"] = {
             "bbox": {
                 "xmin": [bbox_info["bbox_column_name"], "xmin"],
@@ -118,46 +116,337 @@ def update_metadata(output_file, original_metadata):
                 "ymax": [bbox_info["bbox_column_name"], "ymax"]
             }
         }
-    
-    # Add updated geo metadata
+        if verbose:
+            click.echo(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
+
+    return geo_meta
+
+def parse_size_string(size_str):
+    """
+    Parse a human-readable size string into bytes.
+
+    Args:
+        size_str: String like '256MB', '1GB', '128' (assumed MB if no unit)
+
+    Returns:
+        int: Size in bytes
+    """
+    if not size_str:
+        return None
+
+    # Handle plain numbers (assume MB)
+    try:
+        return int(size_str) * 1024 * 1024
+    except ValueError:
+        pass
+
+    # Parse with units
+    size_str = size_str.strip().upper()
+    match = re.match(r'^(\d+(?:\.\d+)?)\s*([KMGT]?B?)$', size_str)
+    if not match:
+        raise ValueError(f"Invalid size format: {size_str}")
+
+    value = float(match.group(1))
+    unit = match.group(2)
+
+    # Convert to bytes
+    multipliers = {
+        'B': 1,
+        'KB': 1024,
+        'MB': 1024 * 1024,
+        'GB': 1024 * 1024 * 1024,
+        'TB': 1024 * 1024 * 1024 * 1024,
+        'K': 1024,
+        'M': 1024 * 1024,
+        'G': 1024 * 1024 * 1024,
+        'T': 1024 * 1024 * 1024 * 1024,
+    }
+
+    multiplier = multipliers.get(unit, 1024 * 1024)  # Default to MB
+    return int(value * multiplier)
+
+def calculate_row_group_size(total_rows, file_size_bytes, target_row_group_size_mb=None,
+                           target_row_group_rows=None):
+    """
+    Calculate optimal row group size for parquet file.
+
+    Args:
+        total_rows: Total number of rows in the file
+        file_size_bytes: Current file size in bytes
+        target_row_group_size_mb: Target size per row group in MB
+        target_row_group_rows: Exact number of rows per row group
+
+    Returns:
+        int: Number of rows per row group
+    """
+    if target_row_group_rows:
+        # Use exact row count if specified
+        return min(target_row_group_rows, total_rows)
+
+    if not target_row_group_size_mb:
+        target_row_group_size_mb = 130  # Default 130MB
+
+    # Convert target size to bytes
+    target_bytes = target_row_group_size_mb * 1024 * 1024
+
+    # Calculate average bytes per row
+    if total_rows > 0 and file_size_bytes > 0:
+        bytes_per_row = file_size_bytes / total_rows
+        # Calculate number of rows that would fit in target size
+        rows_per_group = int(target_bytes / bytes_per_row)
+        # Ensure at least 1 row per group but not more than total rows
+        return max(1, min(rows_per_group, total_rows))
+    else:
+        # Default to all rows in one group if we can't calculate
+        return max(1, total_rows)
+
+def validate_compression_settings(compression, compression_level, verbose=False):
+    """
+    Validate and normalize compression settings.
+
+    Args:
+        compression: Compression type string
+        compression_level: Compression level (can be None for defaults)
+        verbose: Whether to print verbose output
+
+    Returns:
+        tuple: (normalized_compression, validated_level, compression_desc)
+    """
+    compression = compression.upper()
+    valid_compressions = ['ZSTD', 'GZIP', 'BROTLI', 'LZ4', 'SNAPPY', 'UNCOMPRESSED']
+
+    if compression not in valid_compressions:
+        raise click.BadParameter(
+            f"Invalid compression '{compression}'. Must be one of: {', '.join(valid_compressions)}"
+        )
+
+    # Handle compression level based on format
+    compression_ranges = {
+        'GZIP': (1, 9, 6),    # min, max, default
+        'ZSTD': (1, 22, 15),  # min, max, default
+        'BROTLI': (1, 11, 6)  # min, max, default
+    }
+
+    if compression in compression_ranges:
+        min_level, max_level, default_level = compression_ranges[compression]
+
+        # Use default if not specified
+        if compression_level is None:
+            compression_level = default_level
+
+        if compression_level < min_level or compression_level > max_level:
+            raise click.BadParameter(
+                f"{compression} compression level must be between {min_level} and {max_level}, got {compression_level}"
+            )
+        compression_desc = f"{compression}:{compression_level}"
+    elif compression in ['LZ4', 'SNAPPY']:
+        if compression_level and compression_level != 15 and verbose:  # Not default
+            click.echo(click.style(
+                f"Note: {compression} does not support compression levels. Ignoring level {compression_level}.",
+                fg="yellow"
+            ))
+        compression_level = None  # These formats don't use compression levels
+        compression_desc = compression
+    else:
+        compression_level = None  # UNCOMPRESSED doesn't use levels
+        compression_desc = compression
+
+    return compression, compression_level, compression_desc
+
+def build_copy_query(query, output_file, compression):
+    """
+    Build a DuckDB COPY query with proper compression settings.
+
+    Args:
+        query: SELECT query or existing COPY query
+        output_file: Output file path
+        compression: Compression type (already validated)
+
+    Returns:
+        str: Complete COPY query
+    """
+    # Map to DuckDB compression names
+    duckdb_compression_map = {
+        'ZSTD': 'zstd',
+        'GZIP': 'gzip',
+        'BROTLI': 'brotli',
+        'LZ4': 'lz4',
+        'SNAPPY': 'snappy',
+        'UNCOMPRESSED': 'uncompressed'
+    }
+    duckdb_compression = duckdb_compression_map[compression]
+
+    # Modify query to use the specified compression
+    if "COPY (" in query and "TO '" in query:
+        # Extract the query parts
+        query_parts = query.split("TO '")
+        if len(query_parts) == 2:
+            output_path_and_rest = query_parts[1]
+            # Find the end of the output path
+            path_end = output_path_and_rest.find("'")
+            if path_end > 0:
+                # Rebuild query with compression
+                base_query = query_parts[0] + f"TO '{output_file}'"
+                query = base_query + f"\n(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"
+    else:
+        # Assume it's a SELECT query that needs COPY wrapper
+        query = f"""COPY ({query})
+TO '{output_file}'
+(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
+
+    return query
+
+def rewrite_with_metadata(output_file, original_metadata, compression, compression_level,
+                         row_group_size_mb=None, row_group_rows=None, verbose=False):
+    """
+    Rewrite a parquet file with updated metadata and compression settings.
+
+    Args:
+        output_file: Path to the parquet file to rewrite
+        original_metadata: Original metadata to preserve
+        compression: Compression type
+        compression_level: Compression level
+        row_group_size_mb: Target row group size in MB
+        row_group_rows: Exact number of rows per row group
+        verbose: Whether to print verbose output
+    """
+    if verbose:
+        click.echo("Updating metadata and optimizing file structure...")
+
+    # Check if this is a Hive-partitioned file by examining the parent directory
+    parent_dir = os.path.basename(os.path.dirname(output_file))
+    is_hive_partition = '=' in parent_dir
+
+    if is_hive_partition:
+        # For Hive-partitioned files, read directly as a single file
+        # to avoid PyArrow trying to interpret it as a dataset
+        with open(output_file, 'rb') as f:
+            table = pq.read_table(f)
+    else:
+        # Read the written file normally
+        table = pq.read_table(output_file)
+
+    # Prepare metadata
+    existing_metadata = table.schema.metadata or {}
+    new_metadata = {}
+
+    # Copy non-geo metadata from existing
+    for k, v in existing_metadata.items():
+        if not k.decode('utf-8').startswith('geo'):
+            new_metadata[k] = v
+
+    # Get geometry column and bbox info
+    geom_col = find_primary_geometry_column(output_file, verbose=False)
+    bbox_info = check_bbox_structure(output_file, verbose=False)
+
+    # Create geo metadata
+    geo_meta = create_geo_metadata(original_metadata, geom_col, bbox_info, verbose)
     new_metadata[b'geo'] = json.dumps(geo_meta).encode('utf-8')
-    
+
     # Update table schema with new metadata
     new_table = table.replace_schema_metadata(new_metadata)
-    
-    # Get file size for row group calculation
-    file_size = os.path.getsize(output_file)
-    
-    # Calculate optimal row groups using actual file size
-    num_row_groups = calculate_row_group_count(new_table.num_rows, file_size)
-    rows_per_group = new_table.num_rows // num_row_groups
 
+    # Calculate optimal row groups
+    file_size = os.path.getsize(output_file)
+    rows_per_group = calculate_row_group_size(
+        new_table.num_rows,
+        file_size,
+        target_row_group_size_mb=row_group_size_mb,
+        target_row_group_rows=row_group_rows
+    )
+
+    # Set PyArrow compression parameters
+    pa_compression = compression if compression != 'UNCOMPRESSED' else None
+    # PyArrow supports compression levels for GZIP, ZSTD, and BROTLI
+    if compression in ['GZIP', 'ZSTD', 'BROTLI']:
+        pa_compression_level = compression_level
+    else:
+        pa_compression_level = None
+
+    # Build write kwargs
+    write_kwargs = {
+        'row_group_size': rows_per_group,
+        'compression': pa_compression,
+        'write_statistics': True,
+        'use_dictionary': True,
+        'version': '2.6'
+    }
+
+    # Add compression level for supported formats
+    if pa_compression_level is not None:
+        write_kwargs['compression_level'] = pa_compression_level
+
+    # Rewrite the file
     pq.write_table(
         new_table,
         output_file,
-        row_group_size=rows_per_group,
-        compression='ZSTD',
-        compression_level=15,
-        write_statistics=True,
-        use_dictionary=True,
-        version='2.6'
+        **write_kwargs
     )
 
-def calculate_row_group_count(total_rows, file_size_bytes, target_row_group_size_mb=130):
-    """Calculate optimal number of row groups based on target size in MB."""
-    # Convert target size to bytes
-    target_bytes = target_row_group_size_mb * 1024 * 1024
-    
-    # Calculate average bytes per row
-    bytes_per_row = file_size_bytes / total_rows if total_rows > 0 else 0
-    
-    # Calculate number of rows that would fit in target size
-    rows_per_group = int(target_bytes / bytes_per_row) if bytes_per_row > 0 else total_rows
-    
-    # Calculate number of groups needed
-    num_groups = max(1, total_rows // rows_per_group)
-        
-    return num_groups
+    if verbose:
+        if compression in ['GZIP', 'ZSTD', 'BROTLI']:
+            compression_desc = f"{compression}:{compression_level}"
+        else:
+            compression_desc = compression
+        click.echo(f"✓ File written with {compression_desc} compression and updated metadata")
+        if row_group_rows:
+            click.echo(f"  Row group size: {rows_per_group:,} rows")
+        elif row_group_size_mb:
+            click.echo(f"  Row group size: ~{row_group_size_mb}MB ({rows_per_group:,} rows)")
+
+def write_parquet_with_metadata(con, query, output_file, original_metadata=None,
+                                compression='ZSTD', compression_level=15,
+                                row_group_size_mb=None, row_group_rows=None,
+                                verbose=False):
+    """
+    Write a parquet file with proper compression and metadata handling.
+
+    Args:
+        con: DuckDB connection
+        query: SQL query to execute
+        output_file: Path to output file
+        original_metadata: Original metadata from source file
+        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+        compression_level: Compression level (varies by format)
+        row_group_size_mb: Target row group size in MB
+        row_group_rows: Exact number of rows per row group
+        verbose: Whether to print verbose output
+
+    Returns:
+        None
+    """
+    # Validate compression settings
+    compression, compression_level, compression_desc = validate_compression_settings(
+        compression, compression_level, verbose
+    )
+
+    if verbose:
+        click.echo(f"Writing output with {compression_desc} compression...")
+
+    # Build and execute query
+    final_query = build_copy_query(query, output_file, compression)
+    con.execute(final_query)
+
+    # Rewrite with metadata and optimal settings
+    if original_metadata or verbose or row_group_size_mb or row_group_rows:
+        rewrite_with_metadata(
+            output_file, original_metadata, compression, compression_level,
+            row_group_size_mb, row_group_rows, verbose
+        )
+
+def update_metadata(output_file, original_metadata):
+    """Update a parquet file with original metadata and add bbox covering if present."""
+    if not original_metadata:
+        return
+
+    # Use the rewrite function with default compression settings
+    rewrite_with_metadata(
+        output_file,
+        original_metadata,
+        compression='ZSTD',
+        compression_level=15,
+        verbose=False
+    )
 
 def format_size(size_bytes):
     """Convert bytes to human readable string."""
@@ -170,7 +459,7 @@ def format_size(size_bytes):
 def check_bbox_structure(parquet_file, verbose=False):
     """
     Check bbox structure and metadata coverage in a GeoParquet file.
-    
+
     Returns:
         dict: Results including:
             - has_bbox_column (bool): Whether a valid bbox struct column exists
@@ -192,13 +481,13 @@ def check_bbox_structure(parquet_file, verbose=False):
     # First find the bbox column in the schema
     bbox_column_name = None
     has_bbox_column = False
-    
+
     # Look for conventional names first
     conventional_names = ['bbox', 'bounds', 'extent']
     for field in schema:
         if field.name in conventional_names or (
-            isinstance(field.type, type(schema[0].type)) and 
-            str(field.type).startswith('struct<') and 
+            isinstance(field.type, type(schema[0].type)) and
+            str(field.type).startswith('struct<') and
             all(f in str(field.type) for f in ['xmin', 'ymin', 'xmax', 'ymax'])
         ):
             bbox_column_name = field.name
@@ -215,7 +504,7 @@ def check_bbox_structure(parquet_file, verbose=False):
             if verbose:
                 click.echo("\nParsed geo metadata:")
                 click.echo(json.dumps(geo_meta, indent=2))
-            
+
             if isinstance(geo_meta, dict) and 'columns' in geo_meta:
                 columns = geo_meta['columns']
                 for col_name, col_info in columns.items():
@@ -368,27 +657,29 @@ def add_bbox(parquet_file, bbox_column_name='bbox', verbose=False):
     for field in schema:
         if field.name == bbox_column_name:
             raise click.ClickException(f"Column '{bbox_column_name}' already exists in the file. Please choose a different name.")
-        
+
     safe_url = safe_file_url(parquet_file, verbose)
-    
+
     # Get geometry column
     geom_col = find_primary_geometry_column(parquet_file, verbose)
-    
+
     if verbose:
         click.echo(f"Adding bbox column for geometry column: {geom_col}")
-    
+
+    # Get metadata before processing
+    metadata, _ = get_parquet_metadata(parquet_file, verbose)
+
     # Create temporary file path
     temp_file = parquet_file + ".tmp"
-    
+
     try:
         # Create DuckDB connection
         con = duckdb.connect()
         con.execute("INSTALL spatial;")
         con.execute("LOAD spatial;")
-        
-        # Add bbox column
+
+        # Build query to add bbox column (without COPY wrapper)
         query = f"""
-        COPY (
             SELECT
                 *,
                 STRUCT_PACK(
@@ -398,21 +689,25 @@ def add_bbox(parquet_file, bbox_column_name='bbox', verbose=False):
                     ymax := ST_YMax({geom_col})
                 ) as {bbox_column_name}
             FROM '{safe_url}'
-        )
-        TO '{temp_file}'
-        (FORMAT PARQUET);
         """
-        
-        con.execute(query)
-        
+
+        # Use common write function to preserve metadata
+        write_parquet_with_metadata(
+            con, query, temp_file,
+            original_metadata=metadata,
+            compression='ZSTD',
+            compression_level=15,
+            verbose=verbose
+        )
+
         # move temp file to original file
         os.replace(temp_file, parquet_file)
-        
+
         if verbose:
             click.echo(f"Successfully added bbox column '{bbox_column_name}'")
-        
+
         return True
-        
+
     except Exception as e:
         if os.path.exists(temp_file):
             os.remove(temp_file)

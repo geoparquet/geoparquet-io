@@ -3,27 +3,62 @@
 import click
 import duckdb
 import json
+import os
 import pyarrow.parquet as pq
 import pyarrow as pa
 from geoparquet_tools.core.common import (
     safe_file_url, find_primary_geometry_column, get_parquet_metadata,
-    update_metadata, check_bbox_structure, add_bbox, get_dataset_bounds
+    write_parquet_with_metadata, check_bbox_structure, add_bbox, get_dataset_bounds
 )
 
-def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", add_bbox_flag=False, verbose=False):
+def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", add_bbox_flag=False,
+                 verbose=False, compression='ZSTD', compression_level=None,
+                 row_group_size_mb=None, row_group_rows=None):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
 
     Takes an input GeoParquet file and creates a new file with rows ordered
     by their position along a Hilbert space-filling curve. Applies best practices:
-    - ZSTD compression
-    - Optimal row group sizes
+    - Configurable compression (default ZSTD)
+    - Configurable row group sizes
     - bbox covering metadata
     - Preserves CRS from original file
+    - Writes GeoParquet 1.1 format
     """
-    # Check input file bbox structure for informational purposes
+    # Check input file bbox structure
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
-    if input_bbox_info["status"] != "optimal":
+
+    # Track if we're using a temporary file with bbox added
+    temp_file_created = False
+    working_parquet = input_parquet
+
+    # If add_bbox is requested and input doesn't have bbox, add it first
+    if add_bbox_flag and not input_bbox_info["has_bbox_column"]:
+        click.echo(click.style(
+            "\nAdding bbox column to enable fast bounds calculation...",
+            fg="cyan"
+        ))
+        # Create a temporary file with bbox column
+        import tempfile
+        temp_fd, temp_file = tempfile.mkstemp(suffix='.parquet')
+        os.close(temp_fd)  # Close the file descriptor
+
+        # Copy input to temp file and add bbox
+        import shutil
+        shutil.copy2(input_parquet, temp_file)
+
+        # Add bbox to the temp file
+        add_bbox(temp_file, 'bbox', verbose)
+        click.echo(click.style("✓ Added bbox column for optimized processing", fg="green"))
+
+        working_parquet = temp_file
+        temp_file_created = True
+
+        # Update bbox info for the working file
+        input_bbox_info = check_bbox_structure(working_parquet, verbose)
+
+    elif input_bbox_info["status"] != "optimal":
+        # Show warning if not optimal and not adding bbox
         click.echo(click.style(
             "\nWarning: Input file could benefit from bbox optimization:\n" +
             input_bbox_info["message"],
@@ -31,47 +66,32 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", add
         ))
         if not add_bbox_flag:
             click.echo(click.style(
-                "💡 Tip: Run this command with --add-bbox to ensure the output file has bbox optimization",
+                "💡 Tip: Run this command with --add-bbox to enable fast bounds calculation",
                 fg="cyan"
             ))
 
-    safe_url = safe_file_url(input_parquet, verbose)
-    
-    # Get metadata and CRS from original file
+    safe_url = safe_file_url(working_parquet, verbose)
+
+    # Get metadata from original file (use original, not temp)
     metadata, schema = get_parquet_metadata(input_parquet, verbose)
-    if metadata and b'geo' in metadata:
-        try:
-            geo_meta = pa.py_buffer(metadata[b'geo']).to_pybytes().decode('utf-8')
-            geo_dict = json.loads(geo_meta)
-            if isinstance(geo_dict, dict) and 'columns' in geo_dict:
-                for col in geo_dict['columns'].values():
-                    if 'crs' in col:
-                        original_crs = col['crs']
-                        break
-        except (json.JSONDecodeError, KeyError) as e:
-            if verbose:
-                click.echo(f"Could not parse original CRS: {e}")
-    
+
     # Use specified geometry column or find primary one
     if geometry_column == "geometry":
-        geometry_column = find_primary_geometry_column(input_parquet, verbose)
-    
+        geometry_column = find_primary_geometry_column(working_parquet, verbose)
+
     if verbose:
         click.echo(f"Using geometry column: {geometry_column}")
-    
+
     # Create DuckDB connection and load spatial extension
     con = duckdb.connect()
     con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
-    
-    # Create temporary file for initial Hilbert ordering
-    temp_file = output_parquet + ".tmp"
 
     if verbose:
         click.echo("Calculating dataset bounds for Hilbert ordering...")
 
-    # Get dataset bounds using common function (warns if no bbox column)
-    bounds = get_dataset_bounds(input_parquet, geometry_column, verbose=verbose)
+    # Get dataset bounds using common function (will be fast if bbox column exists)
+    bounds = get_dataset_bounds(working_parquet, geometry_column, verbose=verbose)
 
     if not bounds:
         raise click.ClickException("Could not calculate dataset bounds")
@@ -82,62 +102,49 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", add
         click.echo(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
         click.echo("Reordering data using Hilbert curve...")
 
-    # Order by Hilbert value using the calculated bounds
-    # Create a BOX_2D from the bounds for ST_Hilbert
-    # ST_Extent converts a geometry to BOX_2D
+    # Build SELECT query for Hilbert ordering (without COPY wrapper)
+    # The write_parquet_with_metadata function will add the COPY wrapper
     order_query = f"""
-    COPY (
         SELECT *
         FROM '{safe_url}'
         ORDER BY ST_Hilbert(
             {geometry_column},
             ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))
         )
-    )
-    TO '{temp_file}'
-    (FORMAT PARQUET);
     """
 
-    con.execute(order_query)
+    try:
+        # Use the common write function with metadata preservation
+        write_parquet_with_metadata(
+            con, order_query, output_parquet,
+            original_metadata=metadata,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            verbose=verbose
+        )
 
-    if verbose:
-        click.echo("Query executed successfully")
+        if verbose:
+            click.echo("Hilbert ordering completed successfully")
 
-    # Read the ordered data
-    if metadata:
-        try:
-            update_metadata(temp_file, metadata)
-            if verbose:
-                click.echo("Updated output file with optimal metadata")
-        except Exception as e:
-            if verbose:
-                click.echo(f"Error updating metadata: {e}")
-            # Still continue - the file is sorted correctly even without metadata update
-    
-    
-    # Write final file with optimal settings
-    # move temp file to output file
-    import os
-    os.rename(temp_file, output_parquet)
+        # If we added bbox temporarily and it's now in the output, note it
+        if add_bbox_flag and temp_file_created:
+            click.echo(click.style("✓ Output includes bbox column and metadata for optimal performance", fg="green"))
 
-    # Clean up temporary file
-    if os.path.exists(temp_file):
-        os.remove(temp_file)
+        if verbose:
+            click.echo(f"Successfully wrote ordered data to: {output_parquet}")
 
-    # Check if output needs bbox and add if requested
-    output_bbox_info = check_bbox_structure(output_parquet, verbose)
-    if output_bbox_info["status"] != "optimal" and add_bbox_flag:
-        if not output_bbox_info["has_bbox_column"]:
-            click.echo("\nAdding bbox column to output file...")
-            add_bbox(output_parquet, 'bbox', verbose)
-            click.echo(click.style("✓ Added bbox column and metadata to output file", fg="green"))
-        elif not output_bbox_info["has_bbox_metadata"]:
-            click.echo("\nAdding bbox metadata to output file...")
-            from geoparquet_tools.core.add_bbox_metadata import add_bbox_metadata
-            add_bbox_metadata(output_parquet, verbose)
-
-    if verbose:
-        click.echo(f"Successfully wrote ordered data to: {output_parquet}")
+    finally:
+        # Clean up temporary file if created
+        if temp_file_created and os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+                if verbose:
+                    click.echo("Cleaned up temporary file")
+            except Exception as e:
+                if verbose:
+                    click.echo(f"Warning: Could not remove temporary file: {e}")
 
 if __name__ == "__main__":
     hilbert_order() 

@@ -110,20 +110,42 @@ def sort():
 @click.option('--geometry-column', '-g', default='geometry',
               help='Name of the geometry column (default: geometry)')
 @click.option('--add-bbox', is_flag=True, help='Automatically add bbox column and metadata if missing.')
+@click.option("--compression", default="ZSTD", type=click.Choice(["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False),
+              help="Compression type for output file (default: ZSTD)")
+@click.option("--compression-level", type=click.IntRange(1, 22),
+              help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.")
+@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
+@click.option("--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)")
 @click.option('--verbose', '-v', is_flag=True,
               help='Print verbose output')
-def hilbert_order(input_parquet, output_parquet, geometry_column, add_bbox, verbose):
+def hilbert_order(input_parquet, output_parquet, geometry_column, add_bbox, compression, compression_level,
+                 row_group_size, row_group_size_mb, verbose):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
 
     Takes an input GeoParquet file and creates a new file with rows ordered
     by their position along a Hilbert space-filling curve.
 
-    By default, applies optimal formatting (ZSTD compression, optimized row groups, bbox metadata)
-    while preserving the CRS.
+    Applies optimal formatting (configurable compression, optimized row groups,
+    bbox metadata) while preserving the CRS. Output is written as GeoParquet 1.1.
     """
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_tools.core.common import parse_size_string
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}")
+
     try:
-        hilbert_impl(input_parquet, output_parquet, geometry_column, add_bbox, verbose)
+        hilbert_impl(input_parquet, output_parquet, geometry_column, add_bbox, verbose,
+                     compression.upper(), compression_level, row_group_mb, row_group_size)
     except Exception as e:
         raise click.ClickException(str(e))
 
@@ -138,31 +160,77 @@ def add():
 @click.argument("output_parquet")
 @click.option("--countries-file", default=None, help="Path or URL to countries parquet file. If not provided, uses default from source.coop")
 @click.option("--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing.")
+@click.option("--compression", default="ZSTD", type=click.Choice(["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False),
+              help="Compression type for output file (default: ZSTD)")
+@click.option("--compression-level", type=click.IntRange(1, 22),
+              help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.")
+@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
+@click.option("--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)")
 @click.option("--dry-run", is_flag=True, help="Print SQL commands that would be executed without actually running them.")
 @click.option("--verbose", is_flag=True, help="Print additional information.")
-def add_country_codes(input_parquet, output_parquet, countries_file, add_bbox, dry_run, verbose):
+def add_country_codes(input_parquet, output_parquet, countries_file, add_bbox, compression, compression_level,
+                      row_group_size, row_group_size_mb, dry_run, verbose):
     """Add country ISO codes to a GeoParquet file based on spatial intersection.
 
     If --countries-file is not provided, will use the default countries file from
     https://data.source.coop/cholmes/admin-boundaries/countries.parquet and filter
     to only the subset that overlaps with the input data (may take longer).
+
+    Output is written as GeoParquet 1.1 with proper bbox covering metadata.
     """
-    add_country_codes_impl(input_parquet, countries_file, output_parquet, add_bbox, dry_run, verbose)
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_tools.core.common import parse_size_string
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}")
+
+    add_country_codes_impl(input_parquet, countries_file, output_parquet, add_bbox, dry_run, verbose,
+                          compression.upper(), compression_level, row_group_mb, row_group_size)
 
 @add.command(name='bbox')
 @click.argument("input_parquet")
 @click.argument("output_parquet")
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
+@click.option("--compression", default="ZSTD", type=click.Choice(["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False),
+              help="Compression type for output file (default: ZSTD)")
+@click.option("--compression-level", type=click.IntRange(1, 22),
+              help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.")
+@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
+@click.option("--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)")
 @click.option("--dry-run", is_flag=True, help="Print SQL commands that would be executed without actually running them.")
 @click.option("--verbose", is_flag=True, help="Print additional information.")
-def add_bbox(input_parquet, output_parquet, bbox_name, dry_run, verbose):
+def add_bbox(input_parquet, output_parquet, bbox_name, compression, compression_level,
+            row_group_size, row_group_size_mb, dry_run, verbose):
     """Add a bbox struct column to a GeoParquet file.
 
     Creates a new column with bounding box coordinates (xmin, ymin, xmax, ymax)
     for each geometry feature. The bbox column improves spatial query performance
-    and adds proper bbox covering metadata to the GeoParquet file.
+    and adds proper bbox covering metadata to the GeoParquet file (GeoParquet 1.1).
     """
-    add_bbox_column_impl(input_parquet, output_parquet, bbox_name, dry_run, verbose)
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_tools.core.common import parse_size_string
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}")
+
+    add_bbox_column_impl(input_parquet, output_parquet, bbox_name, dry_run, verbose,
+                        compression.upper(), compression_level, row_group_mb, row_group_size)
 
 # Partition commands group
 @cli.group()

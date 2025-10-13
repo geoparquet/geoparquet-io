@@ -5,12 +5,14 @@ import os
 import duckdb
 from geoparquet_tools.core.common import (
     safe_file_url, find_primary_geometry_column, get_parquet_metadata,
-    update_metadata, check_bbox_structure
+    update_metadata, check_bbox_structure, write_parquet_with_metadata
 )
 import pyarrow.parquet as pq
 import fsspec
 
-def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox', dry_run=False, verbose=False):
+def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox',
+                   dry_run=False, verbose=False, compression='ZSTD', compression_level=None,
+                   row_group_size_mb=None, row_group_rows=None):
     """
     Add a bbox struct column to a GeoParquet file.
 
@@ -20,6 +22,10 @@ def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox', dry_
         bbox_column_name: Name for the bbox column (default: 'bbox')
         dry_run: Whether to print SQL commands without executing them
         verbose: Whether to print verbose output
+        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+        compression_level: Compression level (varies by format)
+        row_group_size_mb: Target row group size in MB
+        row_group_rows: Exact number of rows per row group
     """
     # Get safe URL for input file
     input_url = safe_file_url(input_parquet, verbose)
@@ -61,9 +67,8 @@ def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox', dry_
         total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
         click.echo(f"Processing {total_count:,} features...")
 
-    # Build the query to add bbox column
+    # Build the query to add bbox column (without COPY wrapper for new method)
     query = f"""
-    COPY (
         SELECT
             *,
             STRUCT_PACK(
@@ -73,100 +78,48 @@ def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox', dry_
                 ymax := ST_YMax({geom_col})
             ) AS {bbox_column_name}
         FROM '{input_url}'
-    )
-    TO '{output_parquet}'
-    (FORMAT PARQUET, COMPRESSION 'ZSTD', COMPRESSION_LEVEL 15);
     """
 
     if dry_run:
-        # In dry-run mode, just show the query
+        # In dry-run mode, show the query with COPY wrapper
+        if compression in ['GZIP', 'ZSTD', 'BROTLI']:
+            compression_str = f"{compression}:{compression_level}"
+        else:
+            compression_str = compression
+
+        # Use lowercase for DuckDB format
+        duckdb_compression = compression.lower() if compression != 'UNCOMPRESSED' else 'uncompressed'
+        display_query = f"""COPY ({query.strip()})
+TO '{output_parquet}'
+(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
+
         click.echo(click.style("-- Main query to add bbox column:", fg="cyan"))
-        display_query = query.strip()
         click.echo(display_query)
 
-        click.echo(click.style("\n-- Note: This query creates a new parquet file with a bbox struct column added", fg="cyan"))
+        click.echo(click.style(f"\n-- Note: Using {compression_str} compression", fg="cyan"))
+        click.echo(click.style("-- This query creates a new parquet file with a bbox struct column added", fg="cyan"))
         click.echo(click.style("-- The bbox column contains (xmin, ymin, xmax, ymax) for each geometry", fg="cyan"))
-        click.echo(click.style("-- Metadata would also be updated with bbox covering information", fg="cyan"))
+        click.echo(click.style("-- Metadata would also be updated with bbox covering information (GeoParquet 1.1)", fg="cyan"))
         return
 
-    # Execute the query
+    # Execute the query using the common write method
     if verbose:
         click.echo(f"Creating bbox column '{bbox_column_name}'...")
 
-    con.execute(query)
+    # Get metadata before processing
+    metadata = None
+    if not dry_run:
+        metadata, _ = get_parquet_metadata(input_parquet, verbose)
 
-    # Update the output file with the original metadata and bbox covering
-    if metadata:
-        # Read the output file to update metadata
-        table = pq.read_table(output_parquet)
-        existing_metadata = table.schema.metadata or {}
-        new_metadata = {
-            k: v for k, v in existing_metadata.items()
-            if not k.decode('utf-8').startswith('geo')  # Remove existing geo metadata
-        }
-
-        # Get or create geo metadata
-        try:
-            if b'geo' in metadata:
-                import json
-                geo_meta = json.loads(metadata[b'geo'].decode('utf-8'))
-            else:
-                geo_meta = {
-                    "version": "1.1.0",
-                    "primary_column": geom_col,
-                    "columns": {}
-                }
-        except json.JSONDecodeError:
-            import json
-            geo_meta = {
-                "version": "1.1.0",
-                "primary_column": geom_col,
-                "columns": {}
-            }
-
-        # Ensure proper structure
-        if "columns" not in geo_meta:
-            geo_meta["columns"] = {}
-        if geom_col not in geo_meta["columns"]:
-            geo_meta["columns"][geom_col] = {}
-
-        # Add bbox covering metadata
-        geo_meta["columns"][geom_col]["covering"] = {
-            "bbox": {
-                "xmin": [bbox_column_name, "xmin"],
-                "ymin": [bbox_column_name, "ymin"],
-                "xmax": [bbox_column_name, "xmax"],
-                "ymax": [bbox_column_name, "ymax"]
-            }
-        }
-
-        # Add updated geo metadata
-        import json
-        new_metadata[b'geo'] = json.dumps(geo_meta).encode('utf-8')
-
-        # Update table schema with new metadata
-        new_table = table.replace_schema_metadata(new_metadata)
-
-        # Calculate optimal row groups
-        file_size = os.path.getsize(output_parquet)
-        from geoparquet_tools.core.common import calculate_row_group_count
-        num_row_groups = calculate_row_group_count(new_table.num_rows, file_size)
-        rows_per_group = new_table.num_rows // num_row_groups
-
-        # Rewrite with updated metadata and optimized settings
-        pq.write_table(
-            new_table,
-            output_parquet,
-            row_group_size=rows_per_group,
-            compression='ZSTD',
-            compression_level=15,
-            write_statistics=True,
-            use_dictionary=True,
-            version='2.6'
-        )
-
-        if verbose:
-            click.echo("Updated output file with bbox covering metadata")
+    write_parquet_with_metadata(
+        con, query, output_parquet,
+        original_metadata=metadata,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
+        verbose=verbose
+    )
 
     click.echo(f"Successfully added bbox column '{bbox_column_name}' to: {output_parquet}")
 

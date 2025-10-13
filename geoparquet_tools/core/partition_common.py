@@ -8,7 +8,7 @@ from typing import Optional
 from geoparquet_tools.core.common import (
     safe_file_url,
     get_parquet_metadata,
-    update_metadata
+    write_parquet_with_metadata
 )
 
 
@@ -229,22 +229,21 @@ def partition_by_column(
             # Match rows where the full value matches
             where_clause = f'"{column_name}" = \'{partition_value}\''
 
-        # Extract and write partition data
+        # Build SELECT query for partition (without COPY wrapper)
         partition_query = f"""
-        COPY (
             SELECT *
             FROM '{input_url}'
             WHERE {where_clause}
-        )
-        TO '{output_filename}'
-        (FORMAT PARQUET, COMPRESSION 'ZSTD', COMPRESSION_LEVEL 15);
         """
 
-        con.execute(partition_query)
-
-        # Update metadata for this partition file
-        if metadata:
-            update_metadata(output_filename, metadata)
+        # Use common write function with metadata preservation
+        write_parquet_with_metadata(
+            con, partition_query, output_filename,
+            original_metadata=metadata,
+            compression='ZSTD',
+            compression_level=15,
+            verbose=False
+        )
 
         if verbose:
             click.echo(f"Wrote {output_filename}")

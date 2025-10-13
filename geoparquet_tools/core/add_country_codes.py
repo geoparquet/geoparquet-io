@@ -4,7 +4,8 @@ import click
 import duckdb
 from geoparquet_tools.core.common import (
     safe_file_url, find_primary_geometry_column, get_parquet_metadata,
-    update_metadata, check_bbox_structure, get_dataset_bounds
+    update_metadata, check_bbox_structure, get_dataset_bounds,
+    write_parquet_with_metadata
 )
 
 
@@ -54,7 +55,9 @@ def find_country_code_column(con, countries_source, is_subquery=False):
     )
 
 
-def add_country_codes(input_parquet, countries_parquet, output_parquet, add_bbox_flag, dry_run, verbose):
+def add_country_codes(input_parquet, countries_parquet, output_parquet, add_bbox_flag,
+                     dry_run, verbose, compression='ZSTD', compression_level=None,
+                     row_group_size_mb=None, row_group_rows=None):
     """Add country ISO codes to a GeoParquet file based on spatial intersection."""
     # Get safe URLs for both input files
     input_url = safe_file_url(input_parquet, verbose)
@@ -306,7 +309,8 @@ WHERE {countries_bbox_col}.xmin <= {xmax:.6f}
         if verbose and not dry_run:
             click.echo("Using bbox columns for initial filtering...")
 
-        query = f"""COPY (
+        # Build SELECT query (without COPY wrapper for new method)
+        query = f"""
     SELECT
         a.*,
         {select_clause}
@@ -320,23 +324,20 @@ WHERE {countries_bbox_col}.xmin <= {xmax:.6f}
             b.{countries_geom_col},
             a.{input_geom_col}
         )
-)
-TO '{output_parquet}'
-(FORMAT PARQUET);"""
+"""
     else:
         if not dry_run:
             click.echo("No bbox columns available, using full geometry intersection...")
 
-        query = f"""COPY (
+        # Build SELECT query (without COPY wrapper for new method)
+        query = f"""
     SELECT
         a.*,
         {select_clause}
     FROM '{input_url}' a
     LEFT JOIN {countries_source} b
     ON ST_Intersects(b.{countries_geom_col}, a.{input_geom_col})
-)
-TO '{output_parquet}'
-(FORMAT PARQUET);"""
+"""
 
     if dry_run:
         # In dry-run mode, just show the query
@@ -347,18 +348,36 @@ TO '{output_parquet}'
         else:
             click.echo(click.style("-- Using full geometry intersection (no bbox optimization)", fg="cyan"))
 
-        # Clean up the query formatting for display
-        display_query = query.strip()
+        # Show the query with COPY wrapper for display
+        if compression in ['GZIP', 'ZSTD', 'BROTLI']:
+            compression_str = f"{compression}:{compression_level}"
+        else:
+            compression_str = compression
+
+        # Use lowercase for DuckDB format
+        duckdb_compression = compression.lower() if compression != 'UNCOMPRESSED' else 'uncompressed'
+        display_query = f"""COPY ({query.strip()})
+TO '{output_parquet}'
+(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
         click.echo(display_query)
 
-        click.echo(click.style("\n-- Note: Original metadata would also be preserved in the output file", fg="cyan"))
+        click.echo(click.style(f"\n-- Note: Using {compression_str} compression", fg="cyan"))
+        click.echo(click.style("-- Original metadata would also be preserved in the output file", fg="cyan"))
         return
 
-    # Execute the query
+    # Execute the query using the common write method
     if verbose:
         click.echo("Performing spatial join with country boundaries...")
 
-    con.execute(query)
+    write_parquet_with_metadata(
+        con, query, output_parquet,
+        original_metadata=metadata,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
+        verbose=verbose
+    )
 
     # Get statistics about the results
     stats_query = f"""
@@ -378,12 +397,6 @@ TO '{output_parquet}'
     click.echo(f"\nResults:")
     click.echo(f"- Added country codes to {features_with_country:,} of {total_features:,} features")
     click.echo(f"- Found {unique_countries:,} unique countries")
-
-    # Update the output file with the original metadata
-    if metadata:
-        update_metadata(output_parquet, metadata)
-        if verbose:
-            click.echo("Updated output file with original metadata")
 
     click.echo(f"\nSuccessfully wrote output to: {output_parquet}")
 
