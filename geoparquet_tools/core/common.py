@@ -264,6 +264,89 @@ def check_bbox_structure(parquet_file, verbose=False):
         "message": message
     }
 
+def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
+    """
+    Calculate the bounding box of the entire dataset.
+
+    Uses bbox column if available for fast calculation, otherwise calculates
+    from geometry column (slower).
+
+    Args:
+        parquet_file: Path to the parquet file
+        geometry_column: Geometry column name (if None, will auto-detect)
+        verbose: Whether to print verbose output
+
+    Returns:
+        tuple: (xmin, ymin, xmax, ymax) or None if error
+    """
+    safe_url = safe_file_url(parquet_file, verbose)
+
+    # Get geometry column if not specified
+    if not geometry_column:
+        geometry_column = find_primary_geometry_column(parquet_file, verbose)
+
+    # Check for bbox column
+    bbox_info = check_bbox_structure(parquet_file, verbose)
+
+    # Create DuckDB connection
+    con = duckdb.connect()
+    con.execute("INSTALL spatial;")
+    con.execute("LOAD spatial;")
+
+    try:
+        if bbox_info["has_bbox_column"]:
+            # Use bbox column for fast bounds calculation
+            bbox_col = bbox_info["bbox_column_name"]
+            if verbose:
+                click.echo(f"Using bbox column '{bbox_col}' for fast bounds calculation")
+
+            query = f"""
+            SELECT
+                MIN({bbox_col}.xmin) as xmin,
+                MIN({bbox_col}.ymin) as ymin,
+                MAX({bbox_col}.xmax) as xmax,
+                MAX({bbox_col}.ymax) as ymax
+            FROM '{safe_url}'
+            """
+        else:
+            # Calculate from geometry column (slower)
+            click.echo(click.style(
+                f"⚠️  No bbox column found - calculating bounds from geometry column '{geometry_column}' (this may be slow)",
+                fg="yellow"
+            ))
+            click.echo(click.style(
+                "💡 Tip: Add a bbox column for faster operations with 'gt add bbox'",
+                fg="cyan"
+            ))
+
+            query = f"""
+            SELECT
+                MIN(ST_XMin({geometry_column})) as xmin,
+                MIN(ST_YMin({geometry_column})) as ymin,
+                MAX(ST_XMax({geometry_column})) as xmax,
+                MAX(ST_YMax({geometry_column})) as ymax
+            FROM '{safe_url}'
+            """
+
+        result = con.execute(query).fetchone()
+
+        if result and all(v is not None for v in result):
+            xmin, ymin, xmax, ymax = result
+            if verbose:
+                click.echo(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
+            return (xmin, ymin, xmax, ymax)
+        else:
+            if verbose:
+                click.echo("Warning: Could not calculate bounds (empty dataset or null geometries)")
+            return None
+
+    except Exception as e:
+        if verbose:
+            click.echo(f"Error calculating bounds: {e}")
+        return None
+    finally:
+        con.close()
+
 def add_bbox(parquet_file, bbox_column_name='bbox', verbose=False):
     """
     Add a bbox struct column to a GeoParquet file if it doesn't exist.

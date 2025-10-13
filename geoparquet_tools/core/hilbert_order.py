@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 import pyarrow as pa
 from geoparquet_tools.core.common import (
     safe_file_url, find_primary_geometry_column, get_parquet_metadata,
-    update_metadata, check_bbox_structure, add_bbox
+    update_metadata, check_bbox_structure, add_bbox, get_dataset_bounds
 )
 
 def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", add_bbox_flag=False, verbose=False):
@@ -68,19 +68,31 @@ def hilbert_order(input_parquet, output_parquet, geometry_column="geometry", add
     temp_file = output_parquet + ".tmp"
 
     if verbose:
+        click.echo("Calculating dataset bounds for Hilbert ordering...")
+
+    # Get dataset bounds using common function (warns if no bbox column)
+    bounds = get_dataset_bounds(input_parquet, geometry_column, verbose=verbose)
+
+    if not bounds:
+        raise click.ClickException("Could not calculate dataset bounds")
+
+    xmin, ymin, xmax, ymax = bounds
+
+    if verbose:
+        click.echo(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
         click.echo("Reordering data using Hilbert curve...")
 
-    # Order by Hilbert value using proper extent calculation
-    # ST_Extent_Agg returns GEOMETRY, but ST_Extent converts it to BOX_2D
+    # Order by Hilbert value using the calculated bounds
+    # Create a BOX_2D from the bounds for ST_Hilbert
+    # ST_Extent converts a geometry to BOX_2D
     order_query = f"""
     COPY (
-        WITH extent AS (
-            SELECT ST_Extent(ST_Extent_Agg({geometry_column})) as box
-            FROM '{safe_url}'
+        SELECT *
+        FROM '{safe_url}'
+        ORDER BY ST_Hilbert(
+            {geometry_column},
+            ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))
         )
-        SELECT t.*
-        FROM '{safe_url}' t, extent e
-        ORDER BY ST_Hilbert(t.{geometry_column}, e.box)
     )
     TO '{temp_file}'
     (FORMAT PARQUET);

@@ -138,29 +138,31 @@ def add():
 @click.argument("output_parquet")
 @click.option("--countries-file", default=None, help="Path or URL to countries parquet file. If not provided, uses default from source.coop")
 @click.option("--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing.")
+@click.option("--dry-run", is_flag=True, help="Print SQL commands that would be executed without actually running them.")
 @click.option("--verbose", is_flag=True, help="Print additional information.")
-def add_country_codes(input_parquet, output_parquet, countries_file, add_bbox, verbose):
+def add_country_codes(input_parquet, output_parquet, countries_file, add_bbox, dry_run, verbose):
     """Add country ISO codes to a GeoParquet file based on spatial intersection.
 
     If --countries-file is not provided, will use the default countries file from
     https://data.source.coop/cholmes/admin-boundaries/countries.parquet and filter
     to only the subset that overlaps with the input data (may take longer).
     """
-    add_country_codes_impl(input_parquet, countries_file, output_parquet, add_bbox, verbose)
+    add_country_codes_impl(input_parquet, countries_file, output_parquet, add_bbox, dry_run, verbose)
 
 @add.command(name='bbox')
 @click.argument("input_parquet")
 @click.argument("output_parquet")
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
+@click.option("--dry-run", is_flag=True, help="Print SQL commands that would be executed without actually running them.")
 @click.option("--verbose", is_flag=True, help="Print additional information.")
-def add_bbox(input_parquet, output_parquet, bbox_name, verbose):
+def add_bbox(input_parquet, output_parquet, bbox_name, dry_run, verbose):
     """Add a bbox struct column to a GeoParquet file.
 
     Creates a new column with bounding box coordinates (xmin, ymin, xmax, ymax)
     for each geometry feature. The bbox column improves spatial query performance
     and adds proper bbox covering metadata to the GeoParquet file.
     """
-    add_bbox_column_impl(input_parquet, output_parquet, bbox_name, verbose)
+    add_bbox_column_impl(input_parquet, output_parquet, bbox_name, dry_run, verbose)
 
 # Partition commands group
 @cli.group()

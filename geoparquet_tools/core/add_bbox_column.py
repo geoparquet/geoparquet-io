@@ -10,7 +10,7 @@ from geoparquet_tools.core.common import (
 import pyarrow.parquet as pq
 import fsspec
 
-def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox', verbose=False):
+def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox', dry_run=False, verbose=False):
     """
     Add a bbox struct column to a GeoParquet file.
 
@@ -18,39 +18,50 @@ def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox', verb
         input_parquet: Path to the input parquet file
         output_parquet: Path to the output parquet file
         bbox_column_name: Name for the bbox column (default: 'bbox')
+        dry_run: Whether to print SQL commands without executing them
         verbose: Whether to print verbose output
     """
     # Get safe URL for input file
     input_url = safe_file_url(input_parquet, verbose)
 
-    # Get metadata before processing
-    metadata, _ = get_parquet_metadata(input_parquet, verbose)
-
-    # Check if the requested column name already exists
-    with fsspec.open(input_url, 'rb') as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-
-    for field in schema:
-        if field.name == bbox_column_name:
-            raise click.ClickException(f"Column '{bbox_column_name}' already exists in the file. Please choose a different name.")
-
     # Get geometry column
     geom_col = find_primary_geometry_column(input_parquet, verbose)
 
-    if verbose:
-        click.echo(f"Adding bbox column '{bbox_column_name}' for geometry column: {geom_col}")
+    # Start dry-run mode output if needed
+    if dry_run:
+        click.echo(click.style("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n", fg="yellow", bold=True))
+        click.echo(click.style(f"-- Input file: {input_url}", fg="cyan"))
+        click.echo(click.style(f"-- Output file: {output_parquet}", fg="cyan"))
+        click.echo(click.style(f"-- Geometry column: {geom_col}", fg="cyan"))
+        click.echo(click.style(f"-- Bbox column name: {bbox_column_name}\n", fg="cyan"))
+
+    # Check if the requested column name already exists (skip in dry-run)
+    if not dry_run:
+        with fsspec.open(input_url, 'rb') as f:
+            pf = pq.ParquetFile(f)
+            schema = pf.schema_arrow
+
+        for field in schema:
+            if field.name == bbox_column_name:
+                raise click.ClickException(f"Column '{bbox_column_name}' already exists in the file. Please choose a different name.")
+
+        # Get metadata before processing
+        metadata, _ = get_parquet_metadata(input_parquet, verbose)
+
+        if verbose:
+            click.echo(f"Adding bbox column '{bbox_column_name}' for geometry column: {geom_col}")
 
     # Create DuckDB connection and load spatial extension
     con = duckdb.connect()
     con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
 
-    # Get total count
-    total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
-    click.echo(f"Processing {total_count:,} features...")
+    # Get total count (skip in dry-run)
+    if not dry_run:
+        total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
+        click.echo(f"Processing {total_count:,} features...")
 
-    # Add bbox column using the provided query pattern
+    # Build the query to add bbox column
     query = f"""
     COPY (
         SELECT
@@ -67,6 +78,18 @@ def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox', verb
     (FORMAT PARQUET, COMPRESSION 'ZSTD', COMPRESSION_LEVEL 15);
     """
 
+    if dry_run:
+        # In dry-run mode, just show the query
+        click.echo(click.style("-- Main query to add bbox column:", fg="cyan"))
+        display_query = query.strip()
+        click.echo(display_query)
+
+        click.echo(click.style("\n-- Note: This query creates a new parquet file with a bbox struct column added", fg="cyan"))
+        click.echo(click.style("-- The bbox column contains (xmin, ymin, xmax, ymax) for each geometry", fg="cyan"))
+        click.echo(click.style("-- Metadata would also be updated with bbox covering information", fg="cyan"))
+        return
+
+    # Execute the query
     if verbose:
         click.echo(f"Creating bbox column '{bbox_column_name}'...")
 
