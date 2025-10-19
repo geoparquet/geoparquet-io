@@ -6,8 +6,8 @@ import click
 import fsspec
 import pyarrow.parquet as pq
 
-from geoparquet_tools.core.common import safe_file_url
-from geoparquet_tools.core.partition_common import partition_by_column, preview_partition
+from geoparquet_io.core.common import safe_file_url
+from geoparquet_io.core.partition_common import partition_by_column, preview_partition
 
 
 def check_country_code_column(parquet_file, column_name="admin:country_code"):

@@ -7,7 +7,7 @@ import shutil
 
 from click.testing import CliRunner
 
-from geoparquet_tools.cli.main import format
+from geoparquet_io.cli.main import format
 
 
 class TestFormatCommands:

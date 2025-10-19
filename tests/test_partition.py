@@ -7,7 +7,7 @@ import os
 import pytest
 from click.testing import CliRunner
 
-from geoparquet_tools.cli.main import partition
+from geoparquet_io.cli.main import partition
 
 
 class TestPartitionCommands:

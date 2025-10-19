@@ -1,20 +1,20 @@
 import click
 
-from geoparquet_tools.core.add_bbox_column import add_bbox_column as add_bbox_column_impl
-from geoparquet_tools.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
-from geoparquet_tools.core.add_country_codes import add_country_codes as add_country_codes_impl
-from geoparquet_tools.core.check_parquet_structure import check_all as check_structure_impl
-from geoparquet_tools.core.check_spatial_order import check_spatial_order as check_spatial_impl
-from geoparquet_tools.core.hilbert_order import hilbert_order as hilbert_impl
-from geoparquet_tools.core.partition_by_string import (
+from geoparquet_io.core.add_bbox_column import add_bbox_column as add_bbox_column_impl
+from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
+from geoparquet_io.core.add_country_codes import add_country_codes as add_country_codes_impl
+from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
+from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
+from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
+from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
-from geoparquet_tools.core.split_by_country import split_by_country as split_country_impl
+from geoparquet_io.core.split_by_country import split_by_country as split_country_impl
 
 
 @click.group()
 def cli():
-    """GeoParquet Tools CLI for working with GeoParquet files."""
+    """Fast I/O and transformation tools for GeoParquet files."""
     pass
 
 
@@ -94,7 +94,7 @@ def check_spatial(parquet_file, random_sample_size, limit_rows, verbose):
 @click.option("--verbose", is_flag=True, help="Print additional information.")
 def check_compression_cmd(parquet_file, verbose):
     """Check compression settings for geometry column."""
-    from geoparquet_tools.core.check_parquet_structure import check_compression
+    from geoparquet_io.core.check_parquet_structure import check_compression
 
     check_compression(parquet_file, verbose)
 
@@ -104,7 +104,7 @@ def check_compression_cmd(parquet_file, verbose):
 @click.option("--verbose", is_flag=True, help="Print additional information.")
 def check_bbox_cmd(parquet_file, verbose):
     """Check GeoParquet metadata version and bbox structure."""
-    from geoparquet_tools.core.check_parquet_structure import check_metadata_and_bbox
+    from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
 
     check_metadata_and_bbox(parquet_file, verbose)
 
@@ -114,7 +114,7 @@ def check_bbox_cmd(parquet_file, verbose):
 @click.option("--verbose", is_flag=True, help="Print additional information.")
 def check_row_group_cmd(parquet_file, verbose):
     """Check row group optimization."""
-    from geoparquet_tools.core.check_parquet_structure import check_row_groups
+    from geoparquet_io.core.check_parquet_structure import check_row_groups
 
     check_row_groups(parquet_file, verbose)
 
@@ -196,7 +196,7 @@ def hilbert_order(
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
 
     # Parse size string if provided
-    from geoparquet_tools.core.common import parse_size_string
+    from geoparquet_io.core.common import parse_size_string
 
     row_group_mb = None
     if row_group_size_mb:
@@ -288,7 +288,7 @@ def add_country_codes(
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
 
     # Parse size string if provided
-    from geoparquet_tools.core.common import parse_size_string
+    from geoparquet_io.core.common import parse_size_string
 
     row_group_mb = None
     if row_group_size_mb:
@@ -361,7 +361,7 @@ def add_bbox(
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
 
     # Parse size string if provided
-    from geoparquet_tools.core.common import parse_size_string
+    from geoparquet_io.core.common import parse_size_string
 
     row_group_mb = None
     if row_group_size_mb:

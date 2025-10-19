@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "geoparquet-tools"
+name = "geoparquet-io"
 version = "0.1.0"
-description = "A collection of tools for working with GeoParquet files"
+description = "Fast I/O and transformation tools for GeoParquet files"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
 authors = [
     { name = "Chris Holmes", email = "cholmes@9eo.org" }
 ]
-keywords = ["geoparquet", "geospatial", "parquet", "gis"]
+keywords = ["geoparquet", "geospatial", "parquet", "gis", "io"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -35,11 +35,14 @@ dependencies = [
 ]
 
 [project.scripts]
-gt = "geoparquet_tools:cli"
+gpio = "geoparquet_io:cli"
+gt = "geoparquet_io:cli"  # Legacy alias for backwards compatibility
 
 [project.urls]
-"Homepage" = "https://github.com/cholmes/geoparquet-tools"
-"Bug Tracker" = "https://github.com/cholmes/geoparquet-tools/issues"
+"Homepage" = "https://github.com/cholmes/geoparquet-io"
+"Bug Tracker" = "https://github.com/cholmes/geoparquet-io/issues"
+"Documentation" = "https://github.com/cholmes/geoparquet-io#readme"
+"Source" = "https://github.com/cholmes/geoparquet-io"
 
 [project.optional-dependencies]
 dev = [
@@ -51,7 +54,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["geoparquet_tools"]
+packages = ["geoparquet_io"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -84,7 +87,7 @@ ignore = [
 "__init__.py" = ["F401"]  # unused imports in __init__.py
 
 [tool.ruff.lint.isort]
-known-first-party = ["geoparquet_tools"]
+known-first-party = ["geoparquet_io"]
 
 [tool.mypy]
 python_version = "3.9"

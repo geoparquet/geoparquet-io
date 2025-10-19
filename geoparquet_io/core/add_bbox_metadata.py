@@ -6,8 +6,8 @@ import os
 import click
 import pyarrow.parquet as pq
 
-from geoparquet_tools.core.check_parquet_structure import get_compression_info, get_row_group_stats
-from geoparquet_tools.core.common import (
+from geoparquet_io.core.check_parquet_structure import get_compression_info, get_row_group_stats
+from geoparquet_io.core.common import (
     check_bbox_structure,
     find_primary_geometry_column,
     get_parquet_metadata,

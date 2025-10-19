@@ -5,7 +5,7 @@ import os
 import click
 import duckdb
 
-from geoparquet_tools.core.common import (
+from geoparquet_io.core.common import (
     add_bbox,
     check_bbox_structure,
     find_primary_geometry_column,

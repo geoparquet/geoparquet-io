@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_tools.core.add_country_codes import find_country_code_column
+from geoparquet_io.core.add_country_codes import find_country_code_column
 
 
 class TestFindCountryCodeColumn:

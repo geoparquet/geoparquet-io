@@ -59,7 +59,7 @@ jobs:
 
     - name: Run tests with pytest
       run: |
-        uv run pytest -v --tb=short --cov=geoparquet_tools --cov-report=term-missing --cov-report=xml
+        uv run pytest -v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-report=xml
 
     - name: Upload coverage to Codecov
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'

@@ -1,5 +1,5 @@
 """
-Pytest configuration and shared fixtures for geoparquet-tools tests.
+Pytest configuration and shared fixtures for geoparquet-io tests.
 """
 
 import os

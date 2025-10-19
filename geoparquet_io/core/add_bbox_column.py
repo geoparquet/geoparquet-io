@@ -6,7 +6,7 @@ import duckdb
 import fsspec
 import pyarrow.parquet as pq
 
-from geoparquet_tools.core.common import (
+from geoparquet_io.core.common import (
     find_primary_geometry_column,
     get_parquet_metadata,
     safe_file_url,

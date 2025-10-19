@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
-from geoparquet_tools.cli.main import cli
+from geoparquet_io.cli.main import cli
 
 
 @pytest.fixture

@@ -4,7 +4,7 @@ Tests for dry-run functionality in add commands.
 
 from click.testing import CliRunner
 
-from geoparquet_tools.cli.main import add
+from geoparquet_io.cli.main import add
 
 
 class TestDryRunCommands:

@@ -5,7 +5,7 @@ import click
 import fsspec
 import pyarrow.parquet as pq
 
-from geoparquet_tools.core.common import (
+from geoparquet_io.core.common import (
     check_bbox_structure,
     find_primary_geometry_column,
     format_size,

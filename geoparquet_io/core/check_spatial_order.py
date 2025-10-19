@@ -3,7 +3,7 @@
 import click
 import duckdb
 
-from geoparquet_tools.core.common import find_primary_geometry_column, safe_file_url
+from geoparquet_io.core.common import find_primary_geometry_column, safe_file_url
 
 
 def check_spatial_order(parquet_file, random_sample_size, limit_rows, verbose):

@@ -12,8 +12,8 @@ import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
-from geoparquet_tools.cli.main import cli
-from geoparquet_tools.core.common import (
+from geoparquet_io.cli.main import cli
+from geoparquet_io.core.common import (
     check_bbox_structure,
     get_parquet_metadata,
     parse_geo_metadata,

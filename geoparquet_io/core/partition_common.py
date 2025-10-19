@@ -7,7 +7,7 @@ from typing import Optional
 import click
 import duckdb
 
-from geoparquet_tools.core.common import (
+from geoparquet_io.core.common import (
     get_parquet_metadata,
     safe_file_url,
     write_parquet_with_metadata,

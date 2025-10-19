@@ -7,7 +7,7 @@ import os
 import duckdb
 from click.testing import CliRunner
 
-from geoparquet_tools.cli.main import sort
+from geoparquet_io.cli.main import sort
 
 
 class TestSortCommands:

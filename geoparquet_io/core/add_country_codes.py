@@ -3,7 +3,7 @@
 import click
 import duckdb
 
-from geoparquet_tools.core.common import (
+from geoparquet_io.core.common import (
     check_bbox_structure,
     find_primary_geometry_column,
     get_dataset_bounds,
@@ -158,7 +158,7 @@ def add_country_codes(
                 # Fix the bbox issue based on what's missing
                 if not input_bbox_info["has_bbox_column"]:
                     click.echo("Adding bbox column to input file...")
-                    from geoparquet_tools.core.common import add_bbox
+                    from geoparquet_io.core.common import add_bbox
 
                     add_bbox(input_parquet, "bbox", verbose)
                     click.echo(
@@ -169,7 +169,7 @@ def add_country_codes(
                     input_bbox_col = input_bbox_info["bbox_column_name"]
                 elif not input_bbox_info["has_bbox_metadata"]:
                     click.echo("Adding bbox metadata to input file...")
-                    from geoparquet_tools.core.add_bbox_metadata import add_bbox_metadata
+                    from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata
 
                     add_bbox_metadata(input_parquet, verbose)
                     # Re-check after adding metadata
@@ -198,7 +198,7 @@ def add_country_codes(
                     # Fix the bbox issue based on what's missing
                     if not countries_bbox_info["has_bbox_column"]:
                         click.echo("Adding bbox column to countries file...")
-                        from geoparquet_tools.core.common import add_bbox
+                        from geoparquet_io.core.common import add_bbox
 
                         add_bbox(countries_parquet, "bbox", verbose)
                         click.echo(
@@ -211,7 +211,7 @@ def add_country_codes(
                         countries_bbox_col = countries_bbox_info["bbox_column_name"]
                     elif not countries_bbox_info["has_bbox_metadata"]:
                         click.echo("Adding bbox metadata to countries file...")
-                        from geoparquet_tools.core.add_bbox_metadata import add_bbox_metadata
+                        from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata
 
                         add_bbox_metadata(countries_parquet, verbose)
                         # Re-check after adding metadata

@@ -4,7 +4,7 @@ Tests for check commands.
 
 from click.testing import CliRunner
 
-from geoparquet_tools.cli.main import check
+from geoparquet_io.cli.main import check
 
 
 class TestCheckCommands:
