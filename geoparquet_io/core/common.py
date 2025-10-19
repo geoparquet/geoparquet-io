@@ -74,14 +74,17 @@ def find_primary_geometry_column(parquet_file, verbose=False):
     return "geometry"
 
 
-def create_geo_metadata(original_metadata, geom_col, bbox_info, verbose=False):
+def create_geo_metadata(
+    original_metadata, geom_col, bbox_info, custom_metadata=None, verbose=False
+):
     """
-    Create or update GeoParquet metadata with bbox covering if applicable.
+    Create or update GeoParquet metadata with spatial index covering information.
 
     Args:
         original_metadata: Original parquet metadata dict
         geom_col: Name of the geometry column
         bbox_info: Result from check_bbox_structure
+        custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
 
     Returns:
@@ -108,18 +111,37 @@ def create_geo_metadata(original_metadata, geom_col, bbox_info, verbose=False):
     if geom_col not in geo_meta["columns"]:
         geo_meta["columns"][geom_col] = {}
 
+    # Initialize covering dict if bbox or custom metadata exists
+    if (bbox_info and bbox_info.get("has_bbox_column")) or (
+        custom_metadata and "covering" in custom_metadata
+    ):
+        if "covering" not in geo_meta["columns"][geom_col]:
+            geo_meta["columns"][geom_col]["covering"] = {}
+
     # Add bbox covering if bbox column exists
     if bbox_info and bbox_info.get("has_bbox_column"):
-        geo_meta["columns"][geom_col]["covering"] = {
-            "bbox": {
-                "xmin": [bbox_info["bbox_column_name"], "xmin"],
-                "ymin": [bbox_info["bbox_column_name"], "ymin"],
-                "xmax": [bbox_info["bbox_column_name"], "xmax"],
-                "ymax": [bbox_info["bbox_column_name"], "ymax"],
-            }
+        geo_meta["columns"][geom_col]["covering"]["bbox"] = {
+            "xmin": [bbox_info["bbox_column_name"], "xmin"],
+            "ymin": [bbox_info["bbox_column_name"], "ymin"],
+            "xmax": [bbox_info["bbox_column_name"], "xmax"],
+            "ymax": [bbox_info["bbox_column_name"], "ymax"],
         }
         if verbose:
             click.echo(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
+
+    # Add custom metadata (e.g., H3, S2)
+    if custom_metadata:
+        if "covering" in custom_metadata:
+            # Merge covering information
+            geo_meta["columns"][geom_col]["covering"].update(custom_metadata["covering"])
+            if verbose:
+                for key in custom_metadata["covering"]:
+                    click.echo(f"Added {key} covering metadata")
+
+        # Add any top-level custom metadata
+        for key, value in custom_metadata.items():
+            if key != "covering":
+                geo_meta[key] = value
 
     return geo_meta
 
@@ -313,6 +335,7 @@ def rewrite_with_metadata(
     compression_level,
     row_group_size_mb=None,
     row_group_rows=None,
+    custom_metadata=None,
     verbose=False,
 ):
     """
@@ -325,6 +348,7 @@ def rewrite_with_metadata(
         compression_level: Compression level
         row_group_size_mb: Target row group size in MB
         row_group_rows: Exact number of rows per row group
+        custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
     """
     if verbose:
@@ -357,7 +381,7 @@ def rewrite_with_metadata(
     bbox_info = check_bbox_structure(output_file, verbose=False)
 
     # Create geo metadata
-    geo_meta = create_geo_metadata(original_metadata, geom_col, bbox_info, verbose)
+    geo_meta = create_geo_metadata(original_metadata, geom_col, bbox_info, custom_metadata, verbose)
     new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
     # Update table schema with new metadata
@@ -417,6 +441,7 @@ def write_parquet_with_metadata(
     compression_level=15,
     row_group_size_mb=None,
     row_group_rows=None,
+    custom_metadata=None,
     verbose=False,
 ):
     """
@@ -431,6 +456,7 @@ def write_parquet_with_metadata(
         compression_level: Compression level (varies by format)
         row_group_size_mb: Target row group size in MB
         row_group_rows: Exact number of rows per row group
+        custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
 
     Returns:
@@ -457,6 +483,7 @@ def write_parquet_with_metadata(
             compression_level,
             row_group_size_mb,
             row_group_rows,
+            custom_metadata,
             verbose,
         )
 
@@ -673,75 +700,241 @@ def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
         con.close()
 
 
-def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
+def add_computed_column(
+    input_parquet,
+    output_parquet,
+    column_name,
+    sql_expression,
+    extensions=None,
+    dry_run=False,
+    verbose=False,
+    compression="ZSTD",
+    compression_level=None,
+    row_group_size_mb=None,
+    row_group_rows=None,
+    dry_run_description=None,
+    custom_metadata=None,
+):
     """
-    Add a bbox struct column to a GeoParquet file if it doesn't exist.
+    Add a computed column to a GeoParquet file using SQL expression.
+
+    Handles all boilerplate for adding columns derived from existing data:
+    - Input validation
+    - Schema checking
+    - DuckDB connection and extension loading
+    - Query execution
+    - Metadata preservation
+    - Dry-run support
 
     Args:
-        parquet_file: Path to the parquet file
+        input_parquet: Path to input file
+        output_parquet: Path to output file
+        column_name: Name for the new column
+        sql_expression: SQL expression to compute column value
+        extensions: DuckDB extensions to load beyond 'spatial' (e.g., ['h3'])
+        dry_run: Whether to print SQL without executing
+        verbose: Whether to print verbose output
+        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+        compression_level: Compression level (varies by format)
+        row_group_size_mb: Target row group size in MB
+        row_group_rows: Exact number of rows per row group
+        dry_run_description: Optional description for dry-run output
+        custom_metadata: Optional dict with custom metadata (e.g., H3 info)
+
+    Example:
+        add_computed_column(
+            'input.parquet', 'output.parquet',
+            column_name='h3_cell',
+            sql_expression="h3_latlng_to_cell(ST_Y(ST_Centroid(geometry)), "
+                          "ST_X(ST_Centroid(geometry)), 9)",
+            extensions=['h3'],
+            custom_metadata={'covering': {'h3': {'column': 'h3_cell', 'resolution': 9}}}
+        )
+    """
+    # Get safe URL for input file
+    input_url = safe_file_url(input_parquet, verbose)
+
+    # Get geometry column (for reference)
+    geom_col = find_primary_geometry_column(input_parquet, verbose)
+
+    # Dry-run mode header
+    if dry_run:
+        click.echo(
+            click.style(
+                "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
+                fg="yellow",
+                bold=True,
+            )
+        )
+        click.echo(click.style(f"-- Input file: {input_url}", fg="cyan"))
+        click.echo(click.style(f"-- Output file: {output_parquet}", fg="cyan"))
+        click.echo(click.style(f"-- Geometry column: {geom_col}", fg="cyan"))
+        click.echo(click.style(f"-- New column: {column_name}", fg="cyan"))
+        if dry_run_description:
+            click.echo(click.style(f"-- Description: {dry_run_description}", fg="cyan"))
+        click.echo()
+
+    # Check if column already exists (skip in dry-run)
+    if not dry_run:
+        with fsspec.open(input_url, "rb") as f:
+            pf = pq.ParquetFile(f)
+            schema = pf.schema_arrow
+
+        for field in schema:
+            if field.name == column_name:
+                raise click.ClickException(
+                    f"Column '{column_name}' already exists in the file. "
+                    f"Please choose a different name."
+                )
+
+        # Get metadata before processing
+        metadata, _ = get_parquet_metadata(input_parquet, verbose)
+
+        if verbose:
+            click.echo(f"Adding column '{column_name}'...")
+
+    # Create DuckDB connection and load extensions
+    con = duckdb.connect()
+    con.execute("INSTALL spatial;")
+    con.execute("LOAD spatial;")
+
+    # Load additional extensions if specified
+    if extensions:
+        for ext in extensions:
+            if verbose and not dry_run:
+                click.echo(f"Loading DuckDB extension: {ext}")
+            con.execute(f"INSTALL {ext} FROM community;")
+            con.execute(f"LOAD {ext};")
+
+    # Get total count (skip in dry-run)
+    if not dry_run:
+        total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
+        click.echo(f"Processing {total_count:,} features...")
+
+    # Build the query
+    query = f"""
+        SELECT
+            *,
+            {sql_expression} AS {column_name}
+        FROM '{input_url}'
+    """
+
+    # Handle dry-run display
+    if dry_run:
+        # Show formatted query with COPY wrapper
+        compression_desc = compression
+        if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
+            compression_desc = f"{compression}:{compression_level}"
+
+        duckdb_compression = (
+            compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
+        )
+        display_query = f"""COPY ({query.strip()})
+TO '{output_parquet}'
+(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
+
+        click.echo(click.style("-- Main query:", fg="cyan"))
+        click.echo(display_query)
+        click.echo(click.style(f"\n-- Note: Using {compression_desc} compression", fg="cyan"))
+        click.echo(
+            click.style(
+                "-- This query creates a new parquet file with the computed column added", fg="cyan"
+            )
+        )
+        click.echo(
+            click.style(
+                "-- Metadata would also be updated with proper GeoParquet covering information",
+                fg="cyan",
+            )
+        )
+        return
+
+    # Execute the query using existing write helper
+    if verbose:
+        click.echo(f"Creating column '{column_name}'...")
+
+    write_parquet_with_metadata(
+        con,
+        query,
+        output_parquet,
+        original_metadata=metadata,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
+        custom_metadata=custom_metadata,
+        verbose=verbose,
+    )
+
+
+def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
+    """
+    Add a bbox struct column to a GeoParquet file in-place.
+
+    Internal helper function used by --add-bbox flags in other commands
+    (hilbert_order, add_country_codes). Modifies the file in-place by
+    writing to a temporary file and replacing the original.
+
+    Raises an error if the bbox column already exists.
+
+    Args:
+        parquet_file: Path to the parquet file (will be modified in-place)
         bbox_column_name: Name for the bbox column (default: 'bbox')
         verbose: Whether to print verbose output
 
     Returns:
-        bool: True if bbox was added, False if it already existed
+        bool: True if bbox was added successfully
+
+    Raises:
+        click.ClickException: If column already exists or operation fails
     """
-    # Get schema to check if column already exists
+    # Check if column already exists
     with fsspec.open(safe_file_url(parquet_file), "rb") as f:
         pf = pq.ParquetFile(f)
         schema = pf.schema_arrow
 
-    # Check if the requested column name already exists
     for field in schema:
         if field.name == bbox_column_name:
             raise click.ClickException(
-                f"Column '{bbox_column_name}' already exists in the file. Please choose a different name."
+                f"Column '{bbox_column_name}' already exists in the file. "
+                f"Please choose a different name."
             )
 
-    safe_url = safe_file_url(parquet_file, verbose)
-
-    # Get geometry column
+    # Get geometry column for SQL expression
     geom_col = find_primary_geometry_column(parquet_file, verbose)
 
     if verbose:
         click.echo(f"Adding bbox column for geometry column: {geom_col}")
 
-    # Get metadata before processing
-    metadata, _ = get_parquet_metadata(parquet_file, verbose)
+    # Define SQL expression
+    sql_expression = f"""STRUCT_PACK(
+        xmin := ST_XMin({geom_col}),
+        ymin := ST_YMin({geom_col}),
+        xmax := ST_XMax({geom_col}),
+        ymax := ST_YMax({geom_col})
+    )"""
 
     # Create temporary file path
     temp_file = parquet_file + ".tmp"
 
     try:
-        # Create DuckDB connection
-        con = duckdb.connect()
-        con.execute("INSTALL spatial;")
-        con.execute("LOAD spatial;")
-
-        # Build query to add bbox column (without COPY wrapper)
-        query = f"""
-            SELECT
-                *,
-                STRUCT_PACK(
-                    xmin := ST_XMin({geom_col}),
-                    ymin := ST_YMin({geom_col}),
-                    xmax := ST_XMax({geom_col}),
-                    ymax := ST_YMax({geom_col})
-                ) as {bbox_column_name}
-            FROM '{safe_url}'
-        """
-
-        # Use common write function to preserve metadata
-        write_parquet_with_metadata(
-            con,
-            query,
-            temp_file,
-            original_metadata=metadata,
+        # Use add_computed_column to write to temp file
+        add_computed_column(
+            input_parquet=parquet_file,
+            output_parquet=temp_file,
+            column_name=bbox_column_name,
+            sql_expression=sql_expression,
+            extensions=None,
+            dry_run=False,
+            verbose=verbose,
             compression="ZSTD",
             compression_level=15,
-            verbose=verbose,
+            row_group_size_mb=None,
+            row_group_rows=None,
+            dry_run_description=None,
         )
 
-        # move temp file to original file
+        # Replace original file with updated file
         os.replace(temp_file, parquet_file)
 
         if verbose:
@@ -750,6 +943,7 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
         return True
 
     except Exception as e:
+        # Clean up temporary file if something goes wrong
         if os.path.exists(temp_file):
             os.remove(temp_file)
         raise click.ClickException(f"Failed to add bbox: {str(e)}") from e

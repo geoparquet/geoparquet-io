@@ -3,6 +3,7 @@ import click
 from geoparquet_io.core.add_bbox_column import add_bbox_column as add_bbox_column_impl
 from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
 from geoparquet_io.core.add_country_codes import add_country_codes as add_country_codes_impl
+from geoparquet_io.core.add_h3_column import add_h3_column as add_h3_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
@@ -379,6 +380,89 @@ def add_bbox(
         input_parquet,
         output_parquet,
         bbox_name,
+        dry_run,
+        verbose,
+        compression.upper(),
+        compression_level,
+        row_group_mb,
+        row_group_size,
+    )
+
+
+@add.command(name="h3")
+@click.argument("input_parquet")
+@click.argument("output_parquet")
+@click.option("--h3-name", default="h3_cell", help="Name for the H3 column (default: h3_cell)")
+@click.option(
+    "--resolution",
+    default=9,
+    type=click.IntRange(0, 15),
+    help="H3 resolution level (0-15). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9",
+)
+@click.option(
+    "--compression",
+    default="ZSTD",
+    type=click.Choice(
+        ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
+    ),
+    help="Compression type for output file (default: ZSTD)",
+)
+@click.option(
+    "--compression-level",
+    type=click.IntRange(1, 22),
+    help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
+)
+@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
+@click.option(
+    "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print SQL commands that would be executed without actually running them.",
+)
+@click.option("--verbose", is_flag=True, help="Print additional information.")
+def add_h3(
+    input_parquet,
+    output_parquet,
+    h3_name,
+    resolution,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    dry_run,
+    verbose,
+):
+    """Add an H3 cell ID column to a GeoParquet file.
+
+    Computes H3 hexagonal cell IDs based on geometry centroids. H3 is a hierarchical
+    hexagonal geospatial indexing system that provides consistent cell sizes and shapes
+    across the globe.
+
+    The cell ID is stored as a VARCHAR (string) for maximum portability across tools.
+    Resolution determines cell size - higher values mean smaller cells with more precision.
+    """
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_io.core.common import parse_size_string
+
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}") from e
+
+    add_h3_column_impl(
+        input_parquet,
+        output_parquet,
+        h3_name,
+        resolution,
         dry_run,
         verbose,
         compression.upper(),
