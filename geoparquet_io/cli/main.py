@@ -7,6 +7,7 @@ from geoparquet_io.core.add_h3_column import add_h3_column as add_h3_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
+from geoparquet_io.core.partition_by_h3 import partition_by_h3 as partition_by_h3_impl
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
@@ -566,6 +567,79 @@ def partition_string(
         output_folder,
         column,
         chars,
+        hive,
+        overwrite,
+        preview,
+        preview_limit,
+        verbose,
+    )
+
+
+@partition.command(name="h3")
+@click.argument("input_parquet")
+@click.argument("output_folder", required=False)
+@click.option(
+    "--h3-name",
+    default="h3_cell",
+    help="Name of H3 column to partition by (default: h3_cell)",
+)
+@click.option(
+    "--resolution",
+    type=click.IntRange(0, 15),
+    default=9,
+    help="H3 resolution for partitioning (0-15, default: 9)",
+)
+@click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure")
+@click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")
+@click.option("--preview", is_flag=True, help="Preview partitions without creating files")
+@click.option(
+    "--preview-limit",
+    default=15,
+    type=int,
+    help="Number of partitions to show in preview (default: 15)",
+)
+@click.option("--verbose", is_flag=True, help="Print additional information")
+def partition_h3(
+    input_parquet,
+    output_folder,
+    h3_name,
+    resolution,
+    hive,
+    overwrite,
+    preview,
+    preview_limit,
+    verbose,
+):
+    """Partition a GeoParquet file by H3 cells at specified resolution.
+
+    Creates separate GeoParquet files based on H3 cell prefixes at the specified resolution.
+    If the H3 column doesn't exist, it will be automatically added before partitioning.
+
+    Use --preview to see what partitions would be created without actually creating files.
+
+    Examples:
+
+        # Preview partitions at resolution 7 (~5km² cells)
+        gpio partition h3 input.parquet --resolution 7 --preview
+
+        # Partition by H3 cells at default resolution 9
+        gpio partition h3 input.parquet output/
+
+        # Partition with custom H3 column name
+        gpio partition h3 input.parquet output/ --h3-name my_h3
+
+        # Use Hive-style partitioning at resolution 8
+        gpio partition h3 input.parquet output/ --resolution 8 --hive
+    """
+    # If preview mode, output_folder is not required
+    if not preview and not output_folder:
+        raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
+
+    partition_by_h3_impl(
+        input_parquet,
+        output_folder,
+        h3_name,
+        resolution,
         hive,
         overwrite,
         preview,

@@ -6,8 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-- Created a generic `add_computed_column` in `common.py` to minimize boilerplate; refactored `add_bbox_column` and `add_bbox` to use it ([#23](https://github.com/cholmes/geoparquet-io/pull/23))
-- Added H3 support via duckdb ([#23](https://github.com/cholmes/geoparquet-io/pull/23))
+- Created a generic `add_computed_column` in `common.py` to minimize boilerplate; refactored `add_bbox_column` and `add_bbox` to use it
+- Added H3 hexagonal cell ID support via DuckDB H3 extension
+  - New `gpio add h3` command to add H3 cell IDs at any resolution (0-15, default: 9)
+  - New `gpio partition h3` command to partition by H3 cells with auto-column creation
+  - Support for multiple spatial index metadata (bbox + H3) in GeoParquet 1.1 spec
+  - Hive-style partitioning support for H3
+- Enhanced metadata system to support custom covering metadata for spatial indices
 
 ## [0.1.0] - 2025-10-19
 

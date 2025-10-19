@@ -282,6 +282,52 @@ gpio partition string input.parquet output/ --column mgrs_code --chars 2
 gpio partition string input.parquet output/ --column region --chars 1 --hive
 ```
 
+#### partition h3
+
+Partition a GeoParquet file by H3 hexagonal cells at a specified resolution. Automatically adds H3 column if it doesn't exist.
+
+```
+$ gpio partition h3 --help
+Usage: gpio partition h3 [OPTIONS] INPUT_PARQUET [OUTPUT_FOLDER]
+
+  Partition a GeoParquet file by H3 cells at specified resolution.
+
+  Creates separate GeoParquet files based on H3 cell prefixes at the
+  specified resolution. If the H3 column doesn't exist, it will be
+  automatically added before partitioning.
+
+  Use --preview to see what partitions would be created without actually
+  creating files.
+
+Options:
+  --h3-name TEXT           Name of H3 column to partition by (default:
+                           h3_cell)
+  --resolution INTEGER     H3 resolution for partitioning (0-15, default: 9)
+  --hive                   Use Hive-style partitioning in output folder
+                           structure
+  --overwrite              Overwrite existing partition files
+  --preview                Preview partitions without creating files
+  --preview-limit INTEGER  Number of partitions to show in preview (default:
+                           15)
+  --verbose                Print additional information
+  --help                   Show this message and exit.
+```
+
+Example usage:
+```bash
+# Preview partitions at resolution 7 (~5km² cells)
+gpio partition h3 input.parquet --resolution 7 --preview
+
+# Partition by H3 cells at default resolution 9
+gpio partition h3 input.parquet output/
+
+# Partition with custom resolution and Hive-style
+gpio partition h3 input.parquet output/ --resolution 8 --hive
+
+# Use custom H3 column name
+gpio partition h3 input.parquet output/ --h3-name my_h3
+```
+
 #### partition admin
 
 Split a GeoParquet file into separate files by country code (or any administrative column). By default, partitions by the `admin:country_code` column, but you can specify a different column.
