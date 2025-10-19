@@ -29,123 +29,159 @@ class TestFindCountryCodeColumn:
     def test_find_admin_country_code_column(self):
         """Test finding admin:country_code column."""
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            try:
-                # Create test file with admin:country_code column
-                self.create_test_parquet(
-                    ["id", "admin:country_code", "name"],
-                    [[1, 2], ["US", "CA"], ["Place1", "Place2"]],
-                    tmp.name,
-                )
+            tmp_name = tmp.name
 
-                con = duckdb.connect()
+        try:
+            # Create test file with admin:country_code column
+            self.create_test_parquet(
+                ["id", "admin:country_code", "name"],
+                [[1, 2], ["US", "CA"], ["Place1", "Place2"]],
+                tmp_name,
+            )
+
+            con = duckdb.connect()
+            try:
                 con.execute("INSTALL spatial;")
                 con.execute("LOAD spatial;")
 
-                result = find_country_code_column(con, tmp.name, is_subquery=False)
+                result = find_country_code_column(con, tmp_name, is_subquery=False)
                 assert result == "admin:country_code"
             finally:
-                os.unlink(tmp.name)
+                con.close()
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def test_find_country_column(self):
         """Test finding country column."""
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            try:
-                # Create test file with country column
-                self.create_test_parquet(
-                    ["id", "country", "name"],
-                    [[1, 2], ["US", "CA"], ["Place1", "Place2"]],
-                    tmp.name,
-                )
+            tmp_name = tmp.name
 
-                con = duckdb.connect()
+        try:
+            # Create test file with country column
+            self.create_test_parquet(
+                ["id", "country", "name"],
+                [[1, 2], ["US", "CA"], ["Place1", "Place2"]],
+                tmp_name,
+            )
+
+            con = duckdb.connect()
+            try:
                 con.execute("INSTALL spatial;")
                 con.execute("LOAD spatial;")
 
-                result = find_country_code_column(con, tmp.name, is_subquery=False)
+                result = find_country_code_column(con, tmp_name, is_subquery=False)
                 assert result == "country"
             finally:
-                os.unlink(tmp.name)
+                con.close()
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def test_find_iso_a2_column(self):
         """Test finding ISO_A2 column."""
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            try:
-                # Create test file with ISO_A2 column
-                self.create_test_parquet(
-                    ["id", "ISO_A2", "name"], [[1, 2], ["US", "CA"], ["Place1", "Place2"]], tmp.name
-                )
+            tmp_name = tmp.name
 
-                con = duckdb.connect()
+        try:
+            # Create test file with ISO_A2 column
+            self.create_test_parquet(
+                ["id", "ISO_A2", "name"], [[1, 2], ["US", "CA"], ["Place1", "Place2"]], tmp_name
+            )
+
+            con = duckdb.connect()
+            try:
                 con.execute("INSTALL spatial;")
                 con.execute("LOAD spatial;")
 
-                result = find_country_code_column(con, tmp.name, is_subquery=False)
+                result = find_country_code_column(con, tmp_name, is_subquery=False)
                 assert result == "ISO_A2"
             finally:
-                os.unlink(tmp.name)
+                con.close()
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def test_priority_order(self):
         """Test that columns are found in priority order."""
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            try:
-                # Create test file with multiple matching columns
-                self.create_test_parquet(
-                    ["id", "ISO_A2", "country", "admin:country_code"],
-                    [[1, 2], ["US", "CA"], ["USA", "CAN"], ["US", "CA"]],
-                    tmp.name,
-                )
+            tmp_name = tmp.name
 
-                con = duckdb.connect()
+        try:
+            # Create test file with multiple matching columns
+            self.create_test_parquet(
+                ["id", "ISO_A2", "country", "admin:country_code"],
+                [[1, 2], ["US", "CA"], ["USA", "CAN"], ["US", "CA"]],
+                tmp_name,
+            )
+
+            con = duckdb.connect()
+            try:
                 con.execute("INSTALL spatial;")
                 con.execute("LOAD spatial;")
 
-                result = find_country_code_column(con, tmp.name, is_subquery=False)
+                result = find_country_code_column(con, tmp_name, is_subquery=False)
                 # Should find admin:country_code first due to priority
                 assert result == "admin:country_code"
             finally:
-                os.unlink(tmp.name)
+                con.close()
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def test_no_country_column_raises_error(self):
         """Test that error is raised when no country column is found."""
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            try:
-                # Create test file without any country column
-                self.create_test_parquet(
-                    ["id", "name", "value"], [[1, 2], ["Place1", "Place2"], [100, 200]], tmp.name
-                )
+            tmp_name = tmp.name
 
-                con = duckdb.connect()
+        try:
+            # Create test file without any country column
+            self.create_test_parquet(
+                ["id", "name", "value"], [[1, 2], ["Place1", "Place2"], [100, 200]], tmp_name
+            )
+
+            con = duckdb.connect()
+            try:
                 con.execute("INSTALL spatial;")
                 con.execute("LOAD spatial;")
 
                 import click
 
                 with pytest.raises(click.UsageError) as exc_info:
-                    find_country_code_column(con, tmp.name, is_subquery=False)
+                    find_country_code_column(con, tmp_name, is_subquery=False)
 
                 assert "Could not find country code column" in str(exc_info.value)
             finally:
-                os.unlink(tmp.name)
+                con.close()
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def test_with_subquery(self):
         """Test finding column with a subquery source."""
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            try:
-                # Create test file
-                self.create_test_parquet(
-                    ["id", "country", "name"],
-                    [[1, 2], ["US", "CA"], ["Place1", "Place2"]],
-                    tmp.name,
-                )
+            tmp_name = tmp.name
 
-                con = duckdb.connect()
+        try:
+            # Create test file
+            self.create_test_parquet(
+                ["id", "country", "name"],
+                [[1, 2], ["US", "CA"], ["Place1", "Place2"]],
+                tmp_name,
+            )
+
+            con = duckdb.connect()
+            try:
                 con.execute("INSTALL spatial;")
                 con.execute("LOAD spatial;")
 
                 # Create a subquery
-                subquery = f"(SELECT * FROM '{tmp.name}')"
+                subquery = f"(SELECT * FROM '{tmp_name}')"
 
                 result = find_country_code_column(con, subquery, is_subquery=True)
                 assert result == "country"
             finally:
-                os.unlink(tmp.name)
+                con.close()
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)

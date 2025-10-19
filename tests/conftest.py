@@ -5,8 +5,10 @@ Pytest configuration and shared fixtures for geoparquet-io tests.
 import os
 import shutil
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
+import duckdb
 import pytest
 
 # Test data directory
@@ -46,3 +48,19 @@ def temp_output_dir():
 def temp_output_file(temp_output_dir):
     """Create a temporary output file path."""
     return os.path.join(temp_output_dir, "output.parquet")
+
+
+@contextmanager
+def duckdb_connection():
+    """
+    Context manager for DuckDB connections that ensures proper cleanup.
+
+    Useful for tests to avoid Windows file locking issues.
+    """
+    con = duckdb.connect()
+    try:
+        con.execute("INSTALL spatial;")
+        con.execute("LOAD spatial;")
+        yield con
+    finally:
+        con.close()
