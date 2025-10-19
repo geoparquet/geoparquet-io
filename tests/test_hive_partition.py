@@ -5,6 +5,7 @@ These tests verify that Hive partitioning works correctly and produces valid out
 
 import json
 import os
+import sys
 import tempfile
 
 import pyarrow as pa
@@ -20,38 +21,50 @@ from geoparquet_io.cli.main import cli
 def sample_parquet():
     """Create a sample GeoParquet file for testing."""
     with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-        # Create valid WKB for POINT(0 0)
-        wkb_point = bytes.fromhex("0101000000000000000000000000000000000000000000000000000000")
+        tmp_name = tmp.name
 
-        # Create test data with multiple categories
-        table = pa.table(
-            {
-                "id": ["1", "2", "3", "4", "5", "6"],
-                "category": ["A", "A", "B", "B", "C", "C"],
-                "region": ["north", "north", "south", "south", "east", "east"],
-                "geometry": [wkb_point] * 6,
-            }
-        )
+    # Create valid WKB for POINT(0 0)
+    wkb_point = bytes.fromhex("0101000000000000000000000000000000000000000000000000000000")
 
-        # Add GeoParquet metadata
-        metadata = {
-            b"geo": json.dumps(
-                {
-                    "version": "1.1.0",
-                    "primary_column": "geometry",
-                    "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
-                }
-            ).encode("utf-8")
+    # Create test data with multiple categories
+    table = pa.table(
+        {
+            "id": ["1", "2", "3", "4", "5", "6"],
+            "category": ["A", "A", "B", "B", "C", "C"],
+            "region": ["north", "north", "south", "south", "east", "east"],
+            "geometry": [wkb_point] * 6,
         }
+    )
 
-        table = table.replace_schema_metadata(metadata)
-        pq.write_table(table, tmp.name)
+    # Add GeoParquet metadata
+    metadata = {
+        b"geo": json.dumps(
+            {
+                "version": "1.1.0",
+                "primary_column": "geometry",
+                "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+            }
+        ).encode("utf-8")
+    }
 
-        yield tmp.name
+    table = table.replace_schema_metadata(metadata)
+    pq.write_table(table, tmp_name)
 
-        # Cleanup
-        if os.path.exists(tmp.name):
-            os.unlink(tmp.name)
+    yield tmp_name
+
+    # Cleanup
+    try:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+    except PermissionError:
+        # On Windows, file might still be locked - try again after a short delay
+        import gc
+        import time
+
+        gc.collect()  # Force garbage collection to close file handles
+        time.sleep(0.1)
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
 
 @pytest.fixture
@@ -112,6 +125,10 @@ class TestHivePartitioning:
         except Exception as e:
             pytest.fail(f"Failed to read Hive-partitioned dataset: {e}")
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows doesn't allow colons in directory names",
+    )
     def test_hive_partition_with_special_column(self, temp_dir):
         """Test Hive partitioning with special column names like 'admin:country_code'."""
         # Create test data with special column name
@@ -317,6 +334,10 @@ class TestPartitionFormatCompliance:
                         file_path = os.path.join(temp_dir, dir_name, file_name)
                         self._verify_geoparquet_format(file_path)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows doesn't allow colons in directory names",
+    )
     def test_admin_partition_format_compliance(self, temp_dir):
         """Test that admin partition produces GeoParquet 1.1.0 with ZSTD compression."""
         # Create test data with admin:country_code column
