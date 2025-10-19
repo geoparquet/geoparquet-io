@@ -228,19 +228,3 @@ The `format` command is still in development. It aims to enable formatting of Ge
 according to best practices, either all at once or by individual command, in sync with 
 the 'check'. So you could easily run check and then format. Right now it just has the
 ability to add bbox metadata.
-
-
-## TODO's
-
-First todo is to convert all of these into proper github issues ;)
-
- - better handling of country file - download it automatically, test other country files, make a bit more generic
- - spatial partitioning by kd-tree and s2
- - add tests
- - add better docs
- - option for further partitioning within admin boundaries (like s2 / kd-tree when the files are above a threshold)
- - admin level 2 splitting
- - ticket to admin extension in fiboa about putting source boundary file
- - better decomposition of checks - core call on its own, layer on the warning info
- - better handling of really small files - if only one row group don't print red on the size, and don't fail on spatial order analysis
-
