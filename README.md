@@ -1,12 +1,71 @@
 # geoparquet-io
 
+[![Tests](https://github.com/cholmes/geoparquet-io/actions/workflows/tests.yml/badge.svg)](https://github.com/cholmes/geoparquet-io/actions/workflows/tests.yml)
+[![Python Version](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/cholmes/geoparquet-io)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/cholmes/geoparquet-io/blob/main/LICENSE)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+
 Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
+
+## Features
+
+- 🚀 **Fast**: Built on PyArrow and DuckDB for high-performance operations
+- 📦 **Comprehensive**: Sort, partition, enhance, and validate GeoParquet files
+- 🎯 **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
+- 🔧 **Flexible**: CLI and Python API for any workflow
+- ✅ **Tested**: Extensive test suite across Python 3.9-3.13 and all platforms
 
 ## Installation
 
-For now, just clone the repo and run `pip install -e .` from the root directory.
+### From PyPI (Coming Soon)
 
-Coming soon: `pip install geoparquet-io`
+```bash
+pip install geoparquet-io
+```
+
+### From Source
+
+```bash
+git clone https://github.com/cholmes/geoparquet-io.git
+cd geoparquet-io
+pip install -e .
+```
+
+### With uv (Recommended for Development)
+
+```bash
+git clone https://github.com/cholmes/geoparquet-io.git
+cd geoparquet-io
+uv sync --all-extras
+```
+
+### Requirements
+
+- Python 3.9 or higher
+- PyArrow 12.0.0+
+- DuckDB 1.1.3+
+
+## Quick Start
+
+```bash
+# Install
+pip install geoparquet-io
+
+# Sort a file using Hilbert curve
+gpio sort hilbert input.parquet output.parquet
+
+# Add bounding box column for faster queries
+gpio add bbox input.parquet output.parquet
+
+# Partition by country
+gpio partition admin buildings.parquet output/ --column country_code
+
+# Check file quality
+gpio check all myfile.parquet
+
+# Get help
+gpio --help
+```
 
 ## Usage
 
