@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from click.testing import CliRunner
 
-from geoparquet_tools.cli.main import cli
+from geoparquet_io.cli.main import cli
 
 
 def create_test_file_with_bbox():
