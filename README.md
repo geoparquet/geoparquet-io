@@ -51,17 +51,20 @@ uv sync --all-extras
 # Install
 pip install geoparquet-io
 
-# Sort a file using Hilbert curve
-gpio sort hilbert input.parquet output.parquet
+# Check file quality and best practices
+gpio check all myfile.parquet
 
 # Add bounding box column for faster queries
 gpio add bbox input.parquet output.parquet
 
-# Partition by country
-gpio partition admin buildings.parquet output/ --column country_code
+# Add country codes via spatial join
+gpio add admin-divisions input.parquet output.parquet
 
-# Check file quality
-gpio check all myfile.parquet
+# Sort using Hilbert curve for spatial locality
+gpio sort hilbert input.parquet output_sorted.parquet
+
+# Partition into separate files by country
+gpio partition admin buildings.parquet output_dir/
 
 # Get help
 gpio --help
@@ -92,11 +95,7 @@ Commands:
 
 ### sort
 
-The `sort` commands aims to provide different options to do spatial sorting of GeoParquet
-files. Right now it just does Hilbert sorting, using DuckDB's `ST_Hilbert` function. It
-preserves CRS information, so if you're working with projected data then it can be nicer
-than using DuckDB directly. It outputs data according to recommended [GeoParquet
-best practices](https://github.com/opengeospatial/geoparquet/pull/254/files) (except it doesn't yet right the bbox covering metadata).
+The `sort` commands provide spatial sorting options for GeoParquet files. Currently supports Hilbert curve ordering using DuckDB's `ST_Hilbert` function. Preserves CRS information and outputs files following [GeoParquet 1.1 best practices](https://github.com/opengeospatial/geoparquet/pull/254/files) with proper bbox covering metadata.
 
 ```
 $ gpio sort hilbert --help
@@ -153,21 +152,43 @@ gpio add bbox input.parquet output.parquet --bbox-name bounds
 
 Add ISO codes for countries based on spatial intersection, following the [administrative division extension](https://github.com/fiboa/administrative-division-extension) in [fiboa](https://github.com/fiboa).
 
+By default, uses a curated countries dataset from [source.coop](https://data.source.coop/cholmes/admin-boundaries/countries.parquet), automatically filtered to your data's extent. You can also provide a custom countries file.
+
 ```
 $ gpio add admin-divisions --help
-Usage: gpio add admin-divisions [OPTIONS] INPUT_PARQUET COUNTRIES_PARQUET
-                              OUTPUT_PARQUET
+Usage: gpio add admin-divisions [OPTIONS] INPUT_PARQUET OUTPUT_PARQUET
 
   Add country ISO codes to a GeoParquet file based on spatial intersection.
 
+  If --countries-file is not provided, will use the default countries file
+  from https://data.source.coop/cholmes/admin-boundaries/countries.parquet
+  and filter to only the subset that overlaps with the input data (may take
+  longer).
+
+  Output is written as GeoParquet 1.1 with proper bbox covering metadata.
+
 Options:
-  --verbose  Print additional information.
-  --help     Show this message and exit.
+  --countries-file TEXT  Path or URL to countries parquet file. If not
+                         provided, uses default from source.coop
+  --add-bbox            Automatically add bbox column and metadata if missing.
+  --compression [...]   Compression type for output file (default: ZSTD)
+  --dry-run             Print SQL commands without executing
+  --verbose             Print additional information.
+  --help                Show this message and exit.
 ```
 
-The `COUNTRIES_PARQUET` file that works will be available soon on [source cooperative](https://source.coop/cholmes/admin-boundaries). (Or you can easily make your own - it's just the Overture division, filtered by country, written out in GeoParquet). Future
-versions will aim to make this more automatic, and also enable different country file
-definnitions.
+Example usage:
+```bash
+# Use default countries file (automatic)
+gpio add admin-divisions buildings.parquet buildings_with_countries.parquet
+
+# Use a custom countries file
+gpio add admin-divisions buildings.parquet buildings_with_countries.parquet \
+  --countries-file my_countries.parquet
+
+# Preview the SQL without executing
+gpio add admin-divisions buildings.parquet output.parquet --dry-run
+```
 
 ### partition
 
