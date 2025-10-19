@@ -404,52 +404,51 @@ class TestPartition:
         """Test that partition produces proper format."""
         # Create test input
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp_input:
-            try:
-                # Create simple test data with valid WKB
-                # WKB for POINT(0 0): 0101000000 00000000 00000000 00000000 00000000
-                wkb_point = bytes.fromhex(
-                    "0101000000000000000000000000000000000000000000000000000000"
-                )
-                table = pa.table(
-                    {
-                        "id": ["1", "2", "3", "4"],
-                        "category": ["A", "A", "B", "B"],
-                        "geometry": [wkb_point] * 4,
-                    }
-                )
+            tmp_input_name = tmp_input.name
 
-                # Add minimal geo metadata
-                metadata = {
-                    b"geo": json.dumps(
-                        {
-                            "version": "1.0.0",
-                            "primary_column": "geometry",
-                            "columns": {
-                                "geometry": {"encoding": "WKB", "geometry_types": ["Point"]}
-                            },
-                        }
-                    ).encode("utf-8")
+        try:
+            # Create simple test data with valid WKB
+            # WKB for POINT(0 0): 0101000000 00000000 00000000 00000000 00000000
+            wkb_point = bytes.fromhex("0101000000000000000000000000000000000000000000000000000000")
+            table = pa.table(
+                {
+                    "id": ["1", "2", "3", "4"],
+                    "category": ["A", "A", "B", "B"],
+                    "geometry": [wkb_point] * 4,
                 }
+            )
 
-                table = table.replace_schema_metadata(metadata)
-                pq.write_table(table, tmp_input.name)
+            # Add minimal geo metadata
+            metadata = {
+                b"geo": json.dumps(
+                    {
+                        "version": "1.0.0",
+                        "primary_column": "geometry",
+                        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+                    }
+                ).encode("utf-8")
+            }
 
-                # Run partition command
-                runner = CliRunner()
-                result = runner.invoke(
-                    cli, ["partition", "string", tmp_input.name, temp_dir, "--column", "category"]
-                )
+            table = table.replace_schema_metadata(metadata)
+            pq.write_table(table, tmp_input_name)
 
-                assert result.exit_code == 0, f"Partition failed: {result.output}"
+            # Run partition command
+            runner = CliRunner()
+            result = runner.invoke(
+                cli, ["partition", "string", tmp_input_name, temp_dir, "--column", "category"]
+            )
 
-                # Validate each partition file
-                for partition_file in ["A.parquet", "B.parquet"]:
-                    partition_path = os.path.join(temp_dir, partition_file)
-                    if os.path.exists(partition_path):
-                        validate_output_format(partition_path, expect_bbox=False)
+            assert result.exit_code == 0, f"Partition failed: {result.output}"
 
-            finally:
-                os.unlink(tmp_input.name)
+            # Validate each partition file
+            for partition_file in ["A.parquet", "B.parquet"]:
+                partition_path = os.path.join(temp_dir, partition_file)
+                if os.path.exists(partition_path):
+                    validate_output_format(partition_path, expect_bbox=False)
+
+        finally:
+            if os.path.exists(tmp_input_name):
+                os.unlink(tmp_input_name)
 
 
 class TestAllCommandsConsistency:
@@ -464,14 +463,16 @@ class TestAllCommandsConsistency:
 
         for cmd_base in test_commands:
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-                try:
-                    run_command_and_validate(
-                        cmd_base + [sample_parquet, tmp.name],
-                        expect_bbox=None,  # Don't check bbox, just version/compression
-                    )
-                finally:
-                    if os.path.exists(tmp.name):
-                        os.unlink(tmp.name)
+                tmp_name = tmp.name
+
+            try:
+                run_command_and_validate(
+                    cmd_base + [sample_parquet, tmp_name],
+                    expect_bbox=None,  # Don't check bbox, just version/compression
+                )
+            finally:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
 
     def test_compression_options_work(self, sample_parquet):
         """Test that all compression options work correctly."""
@@ -485,21 +486,23 @@ class TestAllCommandsConsistency:
 
         for compression_arg, expected_compression in compressions:
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-                try:
-                    run_command_and_validate(
-                        [
-                            "sort",
-                            "hilbert",
-                            sample_parquet,
-                            tmp.name,
-                            "--compression",
-                            compression_arg,
-                        ],
-                        expected_compression=expected_compression,
-                    )
-                finally:
-                    if os.path.exists(tmp.name):
-                        os.unlink(tmp.name)
+                tmp_name = tmp.name
+
+            try:
+                run_command_and_validate(
+                    [
+                        "sort",
+                        "hilbert",
+                        sample_parquet,
+                        tmp_name,
+                        "--compression",
+                        compression_arg,
+                    ],
+                    expected_compression=expected_compression,
+                )
+            finally:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
 
 
 # ============================================================================

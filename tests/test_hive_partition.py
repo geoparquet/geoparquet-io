@@ -116,51 +116,49 @@ class TestHivePartitioning:
         """Test Hive partitioning with special column names like 'admin:country_code'."""
         # Create test data with special column name
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            try:
-                wkb_point = bytes.fromhex(
-                    "0101000000000000000000000000000000000000000000000000000000"
-                )
+            tmp_name = tmp.name
 
-                table = pa.table(
-                    {
-                        "id": ["1", "2", "3", "4"],
-                        "admin:country_code": ["US", "US", "CA", "CA"],
-                        "geometry": [wkb_point] * 4,
-                    }
-                )
+        try:
+            wkb_point = bytes.fromhex("0101000000000000000000000000000000000000000000000000000000")
 
-                # Add GeoParquet metadata
-                metadata = {
-                    b"geo": json.dumps(
-                        {
-                            "version": "1.1.0",
-                            "primary_column": "geometry",
-                            "columns": {
-                                "geometry": {"encoding": "WKB", "geometry_types": ["Point"]}
-                            },
-                        }
-                    ).encode("utf-8")
+            table = pa.table(
+                {
+                    "id": ["1", "2", "3", "4"],
+                    "admin:country_code": ["US", "US", "CA", "CA"],
+                    "geometry": [wkb_point] * 4,
                 }
+            )
 
-                table = table.replace_schema_metadata(metadata)
-                pq.write_table(table, tmp.name)
+            # Add GeoParquet metadata
+            metadata = {
+                b"geo": json.dumps(
+                    {
+                        "version": "1.1.0",
+                        "primary_column": "geometry",
+                        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+                    }
+                ).encode("utf-8")
+            }
 
-                runner = CliRunner()
+            table = table.replace_schema_metadata(metadata)
+            pq.write_table(table, tmp_name)
 
-                # Run partition command with Hive style
-                result = runner.invoke(cli, ["partition", "admin", tmp.name, temp_dir, "--hive"])
+            runner = CliRunner()
 
-                assert result.exit_code == 0, f"Command failed: {result.output}"
+            # Run partition command with Hive style
+            result = runner.invoke(cli, ["partition", "admin", tmp_name, temp_dir, "--hive"])
 
-                # Check that Hive-style directories were created
-                expected_dirs = ["admin:country_code=US", "admin:country_code=CA"]
-                for dir_name in expected_dirs:
-                    dir_path = os.path.join(temp_dir, dir_name)
-                    assert os.path.isdir(dir_path), f"Expected directory {dir_path} not found"
+            assert result.exit_code == 0, f"Command failed: {result.output}"
 
-            finally:
-                if os.path.exists(tmp.name):
-                    os.unlink(tmp.name)
+            # Check that Hive-style directories were created
+            expected_dirs = ["admin:country_code=US", "admin:country_code=CA"]
+            for dir_name in expected_dirs:
+                dir_path = os.path.join(temp_dir, dir_name)
+                assert os.path.isdir(dir_path), f"Expected directory {dir_path} not found"
+
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def test_non_hive_partition_still_works(self, sample_parquet, temp_dir):
         """Test that non-Hive partitioning still works correctly."""
@@ -232,71 +230,69 @@ class TestPartitionStringWithChars:
         """Test partitioning by character prefix with Hive style."""
         # Create test data with longer strings
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            try:
-                wkb_point = bytes.fromhex(
-                    "0101000000000000000000000000000000000000000000000000000000"
-                )
+            tmp_name = tmp.name
 
-                table = pa.table(
-                    {
-                        "id": ["1", "2", "3", "4", "5", "6"],
-                        "code": ["ABC123", "ABC456", "DEF789", "DEF012", "GHI345", "GHI678"],
-                        "geometry": [wkb_point] * 6,
-                    }
-                )
+        try:
+            wkb_point = bytes.fromhex("0101000000000000000000000000000000000000000000000000000000")
 
-                # Add GeoParquet metadata
-                metadata = {
-                    b"geo": json.dumps(
-                        {
-                            "version": "1.1.0",
-                            "primary_column": "geometry",
-                            "columns": {
-                                "geometry": {"encoding": "WKB", "geometry_types": ["Point"]}
-                            },
-                        }
-                    ).encode("utf-8")
+            table = pa.table(
+                {
+                    "id": ["1", "2", "3", "4", "5", "6"],
+                    "code": ["ABC123", "ABC456", "DEF789", "DEF012", "GHI345", "GHI678"],
+                    "geometry": [wkb_point] * 6,
                 }
+            )
 
-                table = table.replace_schema_metadata(metadata)
-                pq.write_table(table, tmp.name)
+            # Add GeoParquet metadata
+            metadata = {
+                b"geo": json.dumps(
+                    {
+                        "version": "1.1.0",
+                        "primary_column": "geometry",
+                        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+                    }
+                ).encode("utf-8")
+            }
 
-                runner = CliRunner()
+            table = table.replace_schema_metadata(metadata)
+            pq.write_table(table, tmp_name)
 
-                # Partition by first 3 characters
-                result = runner.invoke(
-                    cli,
-                    [
-                        "partition",
-                        "string",
-                        tmp.name,
-                        temp_dir,
-                        "--column",
-                        "code",
-                        "--chars",
-                        "3",
-                        "--hive",
-                    ],
-                )
+            runner = CliRunner()
 
-                assert result.exit_code == 0, f"Command failed: {result.output}"
+            # Partition by first 3 characters
+            result = runner.invoke(
+                cli,
+                [
+                    "partition",
+                    "string",
+                    tmp_name,
+                    temp_dir,
+                    "--column",
+                    "code",
+                    "--chars",
+                    "3",
+                    "--hive",
+                ],
+            )
 
-                # Check that correct directories were created
-                expected_dirs = ["code_prefix=ABC", "code_prefix=DEF", "code_prefix=GHI"]
-                for dir_name in expected_dirs:
-                    dir_path = os.path.join(temp_dir, dir_name)
-                    assert os.path.isdir(dir_path), f"Expected directory {dir_path} not found"
+            assert result.exit_code == 0, f"Command failed: {result.output}"
 
-                    # Each partition should have 2 records
-                    files = [f for f in os.listdir(dir_path) if f.endswith(".parquet")]
-                    assert len(files) > 0, f"No parquet files in {dir_path}"
+            # Check that correct directories were created
+            expected_dirs = ["code_prefix=ABC", "code_prefix=DEF", "code_prefix=GHI"]
+            for dir_name in expected_dirs:
+                dir_path = os.path.join(temp_dir, dir_name)
+                assert os.path.isdir(dir_path), f"Expected directory {dir_path} not found"
 
-                    table = pq.read_table(os.path.join(dir_path, files[0]))
-                    assert len(table) == 2, f"Expected 2 rows in partition, got {len(table)}"
+                # Each partition should have 2 records
+                files = [f for f in os.listdir(dir_path) if f.endswith(".parquet")]
+                assert len(files) > 0, f"No parquet files in {dir_path}"
 
-            finally:
-                if os.path.exists(tmp.name):
-                    os.unlink(tmp.name)
+                table = pq.read_table(os.path.join(dir_path, files[0]))
+                assert len(table) == 2, f"Expected 2 rows in partition, got {len(table)}"
+
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
 
 class TestPartitionFormatCompliance:
@@ -325,53 +321,51 @@ class TestPartitionFormatCompliance:
         """Test that admin partition produces GeoParquet 1.1.0 with ZSTD compression."""
         # Create test data with admin:country_code column
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            try:
-                wkb_point = bytes.fromhex(
-                    "0101000000000000000000000000000000000000000000000000000000"
-                )
+            tmp_name = tmp.name
 
-                table = pa.table(
-                    {
-                        "id": ["1", "2", "3", "4"],
-                        "admin:country_code": ["US", "US", "CA", "CA"],
-                        "geometry": [wkb_point] * 4,
-                    }
-                )
+        try:
+            wkb_point = bytes.fromhex("0101000000000000000000000000000000000000000000000000000000")
 
-                # Add GeoParquet metadata
-                metadata = {
-                    b"geo": json.dumps(
-                        {
-                            "version": "1.1.0",
-                            "primary_column": "geometry",
-                            "columns": {
-                                "geometry": {"encoding": "WKB", "geometry_types": ["Point"]}
-                            },
-                        }
-                    ).encode("utf-8")
+            table = pa.table(
+                {
+                    "id": ["1", "2", "3", "4"],
+                    "admin:country_code": ["US", "US", "CA", "CA"],
+                    "geometry": [wkb_point] * 4,
                 }
+            )
 
-                table = table.replace_schema_metadata(metadata)
-                pq.write_table(table, tmp.name)
+            # Add GeoParquet metadata
+            metadata = {
+                b"geo": json.dumps(
+                    {
+                        "version": "1.1.0",
+                        "primary_column": "geometry",
+                        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+                    }
+                ).encode("utf-8")
+            }
 
-                runner = CliRunner()
+            table = table.replace_schema_metadata(metadata)
+            pq.write_table(table, tmp_name)
 
-                # Run admin partition command
-                result = runner.invoke(cli, ["partition", "admin", tmp.name, temp_dir, "--hive"])
+            runner = CliRunner()
 
-                assert result.exit_code == 0, f"Command failed: {result.output}"
+            # Run admin partition command
+            result = runner.invoke(cli, ["partition", "admin", tmp_name, temp_dir, "--hive"])
 
-                # Check each partition file
-                for dir_name in os.listdir(temp_dir):
-                    if os.path.isdir(os.path.join(temp_dir, dir_name)):
-                        for file_name in os.listdir(os.path.join(temp_dir, dir_name)):
-                            if file_name.endswith(".parquet"):
-                                file_path = os.path.join(temp_dir, dir_name, file_name)
-                                self._verify_geoparquet_format(file_path)
+            assert result.exit_code == 0, f"Command failed: {result.output}"
 
-            finally:
-                if os.path.exists(tmp.name):
-                    os.unlink(tmp.name)
+            # Check each partition file
+            for dir_name in os.listdir(temp_dir):
+                if os.path.isdir(os.path.join(temp_dir, dir_name)):
+                    for file_name in os.listdir(os.path.join(temp_dir, dir_name)):
+                        if file_name.endswith(".parquet"):
+                            file_path = os.path.join(temp_dir, dir_name, file_name)
+                            self._verify_geoparquet_format(file_path)
+
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def test_non_hive_partition_format_compliance(self, sample_parquet, temp_dir):
         """Test that non-Hive partition also produces GeoParquet 1.1.0 with ZSTD compression."""
