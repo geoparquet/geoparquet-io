@@ -11,6 +11,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
 - 🚀 **Fast**: Built on PyArrow and DuckDB for high-performance operations
 - 📦 **Comprehensive**: Sort, partition, enhance, and validate GeoParquet files
+- 🗺️ **Spatial Indexing**: Add bbox, H3 hexagonal cells, and admin divisions
 - 🎯 **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
 - 🔧 **Flexible**: CLI and Python API for any workflow
 - ✅ **Tested**: Extensive test suite across Python 3.9-3.13 and all platforms
@@ -56,6 +57,9 @@ gpio check all myfile.parquet
 
 # Add bounding box column for faster queries
 gpio add bbox input.parquet output.parquet
+
+# Add H3 hexagonal cell IDs for spatial indexing
+gpio add h3 input.parquet output.parquet --resolution 9
 
 # Add country codes via spatial join
 gpio add admin-divisions input.parquet output.parquet
@@ -146,6 +150,44 @@ gpio add bbox input.parquet output.parquet
 
 # Add bbox column with custom name
 gpio add bbox input.parquet output.parquet --bbox-name bounds
+```
+
+#### add h3
+
+Add H3 hexagonal cell IDs to a GeoParquet file based on geometry centroids. This provides hierarchical spatial indexing for aggregation and analysis, and automatically adds proper H3 covering metadata.
+
+```
+$ gpio add h3 --help
+Usage: gpio add h3 [OPTIONS] INPUT_PARQUET OUTPUT_PARQUET
+
+  Add an H3 cell ID column to a GeoParquet file.
+
+  Computes H3 hexagonal cell IDs based on geometry centroids. H3 is a
+  hierarchical hexagonal geospatial indexing system that provides consistent
+  cell sizes and shapes across the globe.
+
+  The cell ID is stored as a VARCHAR (string) for maximum portability across
+  tools. Resolution determines cell size - higher values mean smaller cells
+  with more precision.
+
+Options:
+  --h3-name TEXT        Name for the H3 column (default: h3_cell)
+  --resolution INTEGER  H3 resolution level (0-15). Res 7: ~5km², Res 9:
+                        ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9
+  --verbose             Print additional information.
+  --help                Show this message and exit.
+```
+
+Example usage:
+```bash
+# Add H3 column with default resolution 9
+gpio add h3 input.parquet output.parquet
+
+# Add H3 column with custom resolution
+gpio add h3 input.parquet output.parquet --resolution 13
+
+# Add H3 column with custom name
+gpio add h3 input.parquet output.parquet --h3-name h3_index
 ```
 
 #### add admin-divisions
