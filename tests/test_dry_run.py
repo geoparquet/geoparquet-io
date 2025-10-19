@@ -1,9 +1,10 @@
 """
 Tests for dry-run functionality in add commands.
 """
-import pytest
+
 from click.testing import CliRunner
-from geoparquet_tools.cli.main import add
+
+from geoparquet_io.cli.main import add
 
 
 class TestDryRunCommands:
@@ -12,12 +13,7 @@ class TestDryRunCommands:
     def test_add_bbox_dry_run(self, buildings_test_file):
         """Test dry-run mode for add bbox command."""
         runner = CliRunner()
-        result = runner.invoke(add, [
-            'bbox',
-            buildings_test_file,
-            'output.parquet',
-            '--dry-run'
-        ])
+        result = runner.invoke(add, ["bbox", buildings_test_file, "output.parquet", "--dry-run"])
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -36,13 +32,10 @@ class TestDryRunCommands:
     def test_add_bbox_dry_run_with_custom_name(self, buildings_test_file):
         """Test dry-run mode with custom bbox column name."""
         runner = CliRunner()
-        result = runner.invoke(add, [
-            'bbox',
-            buildings_test_file,
-            'output.parquet',
-            '--bbox-name', 'bounds',
-            '--dry-run'
-        ])
+        result = runner.invoke(
+            add,
+            ["bbox", buildings_test_file, "output.parquet", "--bbox-name", "bounds", "--dry-run"],
+        )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -52,12 +45,9 @@ class TestDryRunCommands:
     def test_add_admin_divisions_dry_run(self, buildings_test_file):
         """Test dry-run mode for add admin-divisions command."""
         runner = CliRunner()
-        result = runner.invoke(add, [
-            'admin-divisions',
-            buildings_test_file,
-            'output.parquet',
-            '--dry-run'
-        ])
+        result = runner.invoke(
+            add, ["admin-divisions", buildings_test_file, "output.parquet", "--dry-run"]
+        )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -65,25 +55,31 @@ class TestDryRunCommands:
         assert "-- Step 1: Calculate bounding box" in result.output
         assert "MIN(ST_XMin" in result.output or "MIN(bbox.xmin" in result.output
         # Should show the filtered countries query
-        assert "-- Step 2: Create filtered view" in result.output
+        assert "-- Step 2: Create temporary table" in result.output
         assert "ST_Intersects" in result.output
-        assert "ST_GeomFromText('POLYGON" in result.output
+        assert "CREATE TEMP TABLE filtered_countries" in result.output
         # Should show main spatial join
         assert "-- Step 3: Main spatial join query" in result.output
         assert 'b."country" as "admin:country_code"' in result.output
         # Should calculate actual bounds
         assert "-- Bounds calculated:" in result.output
 
-    def test_add_admin_divisions_dry_run_with_countries_file(self, buildings_test_file, places_test_file):
+    def test_add_admin_divisions_dry_run_with_countries_file(
+        self, buildings_test_file, places_test_file
+    ):
         """Test dry-run mode with custom countries file."""
         runner = CliRunner()
-        result = runner.invoke(add, [
-            'admin-divisions',
-            buildings_test_file,
-            'output.parquet',
-            '--countries-file', places_test_file,
-            '--dry-run'
-        ])
+        result = runner.invoke(
+            add,
+            [
+                "admin-divisions",
+                buildings_test_file,
+                "output.parquet",
+                "--countries-file",
+                places_test_file,
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -96,13 +92,9 @@ class TestDryRunCommands:
     def test_add_bbox_dry_run_verbose(self, buildings_test_file):
         """Test dry-run mode with verbose flag."""
         runner = CliRunner()
-        result = runner.invoke(add, [
-            'bbox',
-            buildings_test_file,
-            'output.parquet',
-            '--dry-run',
-            '--verbose'
-        ])
+        result = runner.invoke(
+            add, ["bbox", buildings_test_file, "output.parquet", "--dry-run", "--verbose"]
+        )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -120,34 +112,23 @@ class TestDryRunCommands:
         runner = CliRunner()
 
         # Test bbox dry-run
-        result = runner.invoke(add, [
-            'bbox',
-            buildings_test_file,
-            temp_output_file,
-            '--dry-run'
-        ])
+        result = runner.invoke(add, ["bbox", buildings_test_file, temp_output_file, "--dry-run"])
         assert result.exit_code == 0
         assert not os.path.exists(temp_output_file)
 
         # Test admin-divisions dry-run
-        result = runner.invoke(add, [
-            'admin-divisions',
-            buildings_test_file,
-            temp_output_file,
-            '--dry-run'
-        ])
+        result = runner.invoke(
+            add, ["admin-divisions", buildings_test_file, temp_output_file, "--dry-run"]
+        )
         assert result.exit_code == 0
         assert not os.path.exists(temp_output_file)
 
     def test_dry_run_with_bbox_column_present(self, places_test_file):
         """Test dry-run when input has bbox column (for admin-divisions)."""
         runner = CliRunner()
-        result = runner.invoke(add, [
-            'admin-divisions',
-            places_test_file,
-            'output.parquet',
-            '--dry-run'
-        ])
+        result = runner.invoke(
+            add, ["admin-divisions", places_test_file, "output.parquet", "--dry-run"]
+        )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output

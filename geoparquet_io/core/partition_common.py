@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 
-import click
-import duckdb
 import os
 import re
 from typing import Optional
-from geoparquet_tools.core.common import (
-    safe_file_url,
+
+import click
+import duckdb
+
+from geoparquet_io.core.common import (
     get_parquet_metadata,
-    write_parquet_with_metadata
+    safe_file_url,
+    write_parquet_with_metadata,
 )
 
 
@@ -26,11 +28,11 @@ def sanitize_filename(value: str) -> str:
     """
     # Replace problematic characters with underscores
     # Keep alphanumeric, dash, underscore, and period
-    sanitized = re.sub(r'[^a-zA-Z0-9._-]', '_', value)
+    sanitized = re.sub(r"[^a-zA-Z0-9._-]", "_", value)
     # Remove leading/trailing underscores and dots
-    sanitized = sanitized.strip('_.')
+    sanitized = sanitized.strip("_.")
     # Collapse multiple underscores
-    sanitized = re.sub(r'_+', '_', sanitized)
+    sanitized = re.sub(r"_+", "_", sanitized)
     return sanitized
 
 
@@ -39,7 +41,7 @@ def preview_partition(
     column_name: str,
     column_prefix_length: Optional[int] = None,
     limit: int = 15,
-    verbose: bool = False
+    verbose: bool = False,
 ) -> dict:
     """
     Preview the partitions that would be created without actually creating them.
@@ -112,13 +114,15 @@ def preview_partition(
         remaining_records = sum(row[1] for row in all_partitions[limit:])
         remaining_pct = (remaining_records / total_records) * 100
         click.echo("-" * 60)
-        click.echo(f"... and {remaining_count} more partition(s) with {remaining_records:,} records ({remaining_pct:.2f}%)")
-        click.echo(f"\nUse --preview-limit to show more partitions")
+        click.echo(
+            f"... and {remaining_count} more partition(s) with {remaining_records:,} records ({remaining_pct:.2f}%)"
+        )
+        click.echo("\nUse --preview-limit to show more partitions")
 
     return {
         "total_partitions": len(all_partitions),
         "total_records": total_records,
-        "partitions": all_partitions
+        "partitions": all_partitions,
     }
 
 
@@ -129,7 +133,7 @@ def partition_by_column(
     column_prefix_length: Optional[int] = None,
     hive: bool = False,
     overwrite: bool = False,
-    verbose: bool = False
+    verbose: bool = False,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.
@@ -202,15 +206,15 @@ def partition_by_column(
             # Hive-style: folder named "column=value"
             if column_prefix_length is not None:
                 # For prefix partitioning, use a more descriptive folder name
-                folder_name = f'{column_name}_prefix={safe_value}'
+                folder_name = f"{column_name}_prefix={safe_value}"
             else:
-                folder_name = f'{column_name}={safe_value}'
+                folder_name = f"{column_name}={safe_value}"
             write_folder = os.path.join(output_folder, folder_name)
             os.makedirs(write_folder, exist_ok=True)
-            output_filename = os.path.join(write_folder, f'{safe_value}.parquet')
+            output_filename = os.path.join(write_folder, f"{safe_value}.parquet")
         else:
             write_folder = output_folder
-            output_filename = os.path.join(write_folder, f'{safe_value}.parquet')
+            output_filename = os.path.join(write_folder, f"{safe_value}.parquet")
 
         # Skip if file exists and not overwriting
         if os.path.exists(output_filename) and not overwrite:
@@ -224,10 +228,10 @@ def partition_by_column(
         # Build WHERE clause based on whether we're using prefix or full value
         if column_prefix_length is not None:
             # Match rows where the prefix matches
-            where_clause = f'LEFT("{column_name}", {column_prefix_length}) = \'{partition_value}\''
+            where_clause = f"LEFT(\"{column_name}\", {column_prefix_length}) = '{partition_value}'"
         else:
             # Match rows where the full value matches
-            where_clause = f'"{column_name}" = \'{partition_value}\''
+            where_clause = f"\"{column_name}\" = '{partition_value}'"
 
         # Build SELECT query for partition (without COPY wrapper)
         partition_query = f"""
@@ -238,11 +242,13 @@ def partition_by_column(
 
         # Use common write function with metadata preservation
         write_parquet_with_metadata(
-            con, partition_query, output_filename,
+            con,
+            partition_query,
+            output_filename,
             original_metadata=metadata,
-            compression='ZSTD',
+            compression="ZSTD",
             compression_level=15,
-            verbose=False
+            verbose=False,
         )
 
         if verbose:
