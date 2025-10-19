@@ -62,6 +62,10 @@ python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "network: marks tests requiring network access (deselect with '-m \"not network\"')",
+]
 
 [tool.ruff]
 line-length = 100

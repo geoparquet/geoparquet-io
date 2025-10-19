@@ -639,7 +639,8 @@ def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
             )
             click.echo(
                 click.style(
-                    "💡 Tip: Add a bbox column for faster operations with 'gt add bbox'", fg="cyan"
+                    "💡 Tip: Add a bbox column for faster operations with 'gpio add bbox'",
+                    fg="cyan",
                 )
             )
 

@@ -11,8 +11,12 @@ from geoparquet_io.core.partition_by_string import (
 )
 from geoparquet_io.core.split_by_country import split_by_country as split_country_impl
 
+# Version info
+__version__ = "0.1.0"
+
 
 @click.group()
+@click.version_option(version=__version__, prog_name="geoparquet-io")
 def cli():
     """Fast I/O and transformation tools for GeoParquet files."""
     pass
@@ -52,7 +56,7 @@ def check_all(parquet_file, verbose, random_sample_size, limit_rows):
             click.echo(
                 click.style(
                     "⚠️  Data may not be optimally spatially ordered\n"
-                    "Consider running 'gt sort hilbert' to improve spatial locality",
+                    "Consider running 'gpio sort hilbert' to improve spatial locality",
                     fg="yellow",
                 )
             )
@@ -83,7 +87,7 @@ def check_spatial(parquet_file, random_sample_size, limit_rows, verbose):
             click.echo(
                 click.style(
                     "⚠️  Data may not be optimally spatially ordered\n"
-                    "Consider running 'gt sort hilbert' to improve spatial locality",
+                    "Consider running 'gpio sort hilbert' to improve spatial locality",
                     fg="yellow",
                 )
             )
@@ -458,16 +462,16 @@ def partition_string(
     Examples:
 
         # Preview partitions by first character of MGRS codes
-        gt partition string input.parquet --column MGRS --chars 1 --preview
+        gpio partition string input.parquet --column MGRS --chars 1 --preview
 
         # Partition by full column values
-        gt partition string input.parquet output/ --column category
+        gpio partition string input.parquet output/ --column category
 
         # Partition by first character of MGRS codes
-        gt partition string input.parquet output/ --column mgrs --chars 1
+        gpio partition string input.parquet output/ --column mgrs --chars 1
 
         # Use Hive-style partitioning
-        gt partition string input.parquet output/ --column region --hive
+        gpio partition string input.parquet output/ --column region --hive
     """
     # If preview mode, output_folder is not required
     if not preview and not output_folder:

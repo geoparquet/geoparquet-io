@@ -1,6 +1,6 @@
 """
 Tests to ensure all GeoParquet writing operations produce properly formatted output.
-These tests verify that all commands produce files that pass 'gt check all' standards.
+These tests verify that all commands produce files that pass 'gpio check all' standards.
 """
 
 import json

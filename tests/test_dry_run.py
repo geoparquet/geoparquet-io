@@ -55,9 +55,9 @@ class TestDryRunCommands:
         assert "-- Step 1: Calculate bounding box" in result.output
         assert "MIN(ST_XMin" in result.output or "MIN(bbox.xmin" in result.output
         # Should show the filtered countries query
-        assert "-- Step 2: Create filtered view" in result.output
+        assert "-- Step 2: Create temporary table" in result.output
         assert "ST_Intersects" in result.output
-        assert "ST_GeomFromText('POLYGON" in result.output
+        assert "CREATE TEMP TABLE filtered_countries" in result.output
         # Should show main spatial join
         assert "-- Step 3: Main spatial join query" in result.output
         assert 'b."country" as "admin:country_code"' in result.output

@@ -1,20 +1,22 @@
-# geoparquet-tools
+# geoparquet-io
 
-A collection of tools for GeoParquet, using PyArrow and DuckDB.
+Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
 ## Installation
 
 For now, just clone the repo and run `pip install -e .` from the root directory.
 
+Coming soon: `pip install geoparquet-io`
+
 ## Usage
 
-The `geoparquet-tools` package provides a command-line interface through the `gt` command. Here are the available commands:
+The `geoparquet-io` package provides a command-line interface through the `gpio` command. Here are the available commands:
 
 ```
-$ gt --help
-Usage: gt [OPTIONS] COMMAND [ARGS]...
+$ gpio --help
+Usage: gpio [OPTIONS] COMMAND [ARGS]...
 
-  GeoParquet Tools CLI for working with GeoParquet files.
+  Fast I/O and transformation tools for GeoParquet files.
 
 Options:
   --help  Show this message and exit.
@@ -27,6 +29,8 @@ Commands:
   sort       Commands for sorting GeoParquet files.
 ```
 
+> **Note:** The legacy `gt` command is still available as an alias for backwards compatibility.
+
 ### sort
 
 The `sort` commands aims to provide different options to do spatial sorting of GeoParquet
@@ -36,8 +40,8 @@ than using DuckDB directly. It outputs data according to recommended [GeoParquet
 best practices](https://github.com/opengeospatial/geoparquet/pull/254/files) (except it doesn't yet right the bbox covering metadata).
 
 ```
-$ gt sort hilbert --help
-Usage: gt sort hilbert [OPTIONS] INPUT_PARQUET OUTPUT_PARQUET
+$ gpio sort hilbert --help
+Usage: gpio sort hilbert [OPTIONS] INPUT_PARQUET OUTPUT_PARQUET
 
   Reorder a GeoParquet file using Hilbert curve ordering.
 
@@ -62,8 +66,8 @@ The `add` commands aim to enhance GeoParquet files in various ways, typically ad
 Add a bounding box struct column to a GeoParquet file. This improves spatial query performance by providing precomputed bounding boxes for each feature, and automatically adds proper bbox covering metadata.
 
 ```
-$ gt add bbox --help
-Usage: gt add bbox [OPTIONS] INPUT_PARQUET OUTPUT_PARQUET
+$ gpio add bbox --help
+Usage: gpio add bbox [OPTIONS] INPUT_PARQUET OUTPUT_PARQUET
 
   Add a bbox struct column to a GeoParquet file.
 
@@ -80,10 +84,10 @@ Options:
 Example usage:
 ```bash
 # Add bbox column with default name 'bbox'
-gt add bbox input.parquet output.parquet
+gpio add bbox input.parquet output.parquet
 
 # Add bbox column with custom name
-gt add bbox input.parquet output.parquet --bbox-name bounds
+gpio add bbox input.parquet output.parquet --bbox-name bounds
 ```
 
 #### add admin-divisions
@@ -91,8 +95,8 @@ gt add bbox input.parquet output.parquet --bbox-name bounds
 Add ISO codes for countries based on spatial intersection, following the [administrative division extension](https://github.com/fiboa/administrative-division-extension) in [fiboa](https://github.com/fiboa).
 
 ```
-$ gt add admin-divisions --help
-Usage: gt add admin-divisions [OPTIONS] INPUT_PARQUET COUNTRIES_PARQUET
+$ gpio add admin-divisions --help
+Usage: gpio add admin-divisions [OPTIONS] INPUT_PARQUET COUNTRIES_PARQUET
                               OUTPUT_PARQUET
 
   Add country ISO codes to a GeoParquet file based on spatial intersection.
@@ -115,8 +119,8 @@ The `partition` commands provide different options to partition GeoParquet files
 Partition a GeoParquet file by string column values. You can partition by full column values or by a prefix (first N characters). This is useful for splitting large datasets by categories, codes, regions, etc.
 
 ```
-$ gt partition string --help
-Usage: gt partition string [OPTIONS] INPUT_PARQUET [OUTPUT_FOLDER]
+$ gpio partition string --help
+Usage: gpio partition string [OPTIONS] INPUT_PARQUET [OUTPUT_FOLDER]
 
   Partition a GeoParquet file by string column values.
 
@@ -144,16 +148,16 @@ Options:
 Example usage:
 ```bash
 # Preview partitions by first character of MGRS codes
-gt partition string input.parquet --column MGRS --chars 1 --preview
+gpio partition string input.parquet --column MGRS --chars 1 --preview
 
 # Partition by full column values
-gt partition string input.parquet output/ --column category
+gpio partition string input.parquet output/ --column category
 
 # Partition by first 2 characters of MGRS codes
-gt partition string input.parquet output/ --column mgrs_code --chars 2
+gpio partition string input.parquet output/ --column mgrs_code --chars 2
 
 # Use Hive-style partitioning with prefix
-gt partition string input.parquet output/ --column region --chars 1 --hive
+gpio partition string input.parquet output/ --column region --chars 1 --hive
 ```
 
 #### partition admin
@@ -161,8 +165,8 @@ gt partition string input.parquet output/ --column region --chars 1 --hive
 Split a GeoParquet file into separate files by country code (or any administrative column). By default, partitions by the `admin:country_code` column, but you can specify a different column.
 
 ```
-$ gt partition admin --help
-Usage: gt partition admin [OPTIONS] INPUT_PARQUET [OUTPUT_FOLDER]
+$ gpio partition admin --help
+Usage: gpio partition admin [OPTIONS] INPUT_PARQUET [OUTPUT_FOLDER]
 
   Split a GeoParquet file into separate files by country code.
 
@@ -188,16 +192,16 @@ Options:
 Example usage:
 ```bash
 # Preview country partitions
-gt partition admin input.parquet --preview
+gpio partition admin input.parquet --preview
 
 # Partition by country code (default column)
-gt partition admin input.parquet output/
+gpio partition admin input.parquet output/
 
 # Partition by a custom admin column
-gt partition admin input.parquet output/ --column iso_code
+gpio partition admin input.parquet output/ --column iso_code
 
 # Use Hive-style partitioning
-gt partition admin input.parquet output/ --hive
+gpio partition admin input.parquet output/ --hive
 ```
 
 ### check
@@ -206,8 +210,8 @@ The `check` commands aim to provide different options to check GeoParquet files 
 adherence to [developing best practices](https://github.com/opengeospatial/geoparquet/pull/254/files).
 
 ```
-$ gt check --help
-Usage: gt check [OPTIONS] COMMAND [ARGS]...
+$ gpio check --help
+Usage: gpio check [OPTIONS] COMMAND [ARGS]...
 
   Commands for checking GeoParquet files for best practices.
 
