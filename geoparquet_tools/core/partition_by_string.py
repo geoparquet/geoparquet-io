@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
-import click
-import pyarrow.parquet as pq
-import fsspec
 from typing import Optional
+
+import click
+import fsspec
+import pyarrow.parquet as pq
+
 from geoparquet_tools.core.common import safe_file_url
 from geoparquet_tools.core.partition_common import partition_by_column, preview_partition
 
@@ -22,12 +24,12 @@ def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = 
     """
     safe_url = safe_file_url(parquet_file, verbose)
 
-    with fsspec.open(safe_url, 'rb') as f:
+    with fsspec.open(safe_url, "rb") as f:
         pf = pq.ParquetFile(f)
         schema = pf.schema_arrow
 
     if column_name not in schema.names:
-        available_columns = ', '.join(schema.names)
+        available_columns = ", ".join(schema.names)
         raise click.UsageError(
             f"Column '{column_name}' not found in the Parquet file.\n"
             f"Available columns: {available_columns}"
@@ -47,7 +49,7 @@ def partition_by_string(
     overwrite: bool = False,
     preview: bool = False,
     preview_limit: int = 15,
-    verbose: bool = False
+    verbose: bool = False,
 ):
     """
     Partition a GeoParquet file by string column values or prefixes.
@@ -79,7 +81,7 @@ def partition_by_string(
             column_name=column,
             column_prefix_length=chars,
             limit=preview_limit,
-            verbose=verbose
+            verbose=verbose,
         )
         return
 
@@ -99,7 +101,7 @@ def partition_by_string(
         column_prefix_length=chars,
         hive=hive,
         overwrite=overwrite,
-        verbose=verbose
+        verbose=verbose,
     )
 
     click.echo(f"Successfully created {num_partitions} partition file(s)")

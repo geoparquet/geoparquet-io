@@ -203,7 +203,7 @@ gt partition admin input.parquet output/ --hive
 ### check
 
 The `check` commands aim to provide different options to check GeoParquet files for
-adherence to [developing best practices](https://github.com/opengeospatial/geoparquet/pull/254/files). 
+adherence to [developing best practices](https://github.com/opengeospatial/geoparquet/pull/254/files).
 
 ```
 $ gt check --help
@@ -225,6 +225,6 @@ Commands:
 ### format
 
 The `format` command is still in development. It aims to enable formatting of GeoParquet
-according to best practices, either all at once or by individual command, in sync with 
+according to best practices, either all at once or by individual command, in sync with
 the 'check'. So you could easily run check and then format. Right now it just has the
 ability to add bbox metadata.

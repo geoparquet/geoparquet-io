@@ -2,10 +2,14 @@
 
 import click
 import duckdb
+
 from geoparquet_tools.core.common import (
-    safe_file_url, find_primary_geometry_column, get_parquet_metadata,
-    update_metadata, check_bbox_structure, get_dataset_bounds,
-    write_parquet_with_metadata
+    check_bbox_structure,
+    find_primary_geometry_column,
+    get_dataset_bounds,
+    get_parquet_metadata,
+    safe_file_url,
+    write_parquet_with_metadata,
 )
 
 
@@ -40,7 +44,7 @@ def find_country_code_column(con, countries_source, is_subquery=False):
         "ISO_A2",
         "ISO_A3",
         "ISO3",
-        "ISO2"
+        "ISO2",
     ]
 
     # Find the first matching column
@@ -55,9 +59,18 @@ def find_country_code_column(con, countries_source, is_subquery=False):
     )
 
 
-def add_country_codes(input_parquet, countries_parquet, output_parquet, add_bbox_flag,
-                     dry_run, verbose, compression='ZSTD', compression_level=None,
-                     row_group_size_mb=None, row_group_rows=None):
+def add_country_codes(
+    input_parquet,
+    countries_parquet,
+    output_parquet,
+    add_bbox_flag,
+    dry_run,
+    verbose,
+    compression="ZSTD",
+    compression_level=None,
+    row_group_size_mb=None,
+    row_group_rows=None,
+):
     """Add country ISO codes to a GeoParquet file based on spatial intersection."""
     # Get safe URLs for both input files
     input_url = safe_file_url(input_parquet, verbose)
@@ -68,14 +81,17 @@ def add_country_codes(input_parquet, countries_parquet, output_parquet, add_bbox
 
     if using_default:
         if not dry_run:
-            click.echo(click.style(
-                "\nNo countries file specified, using default from source.coop",
-                fg="cyan"
-            ))
-            click.echo(click.style(
-                "This will filter the remote file to only the area of your data, but may take longer than using a local file.",
-                fg="cyan"
-            ))
+            click.echo(
+                click.style(
+                    "\nNo countries file specified, using default from source.coop", fg="cyan"
+                )
+            )
+            click.echo(
+                click.style(
+                    "This will filter the remote file to only the area of your data, but may take longer than using a local file.",
+                    fg="cyan",
+                )
+            )
         countries_url = default_countries_url
     else:
         countries_url = safe_file_url(countries_parquet, verbose)
@@ -85,7 +101,7 @@ def add_country_codes(input_parquet, countries_parquet, output_parquet, add_bbox
 
     # For countries file geometry column
     if using_default:
-        countries_geom_col = 'geometry'
+        countries_geom_col = "geometry"
     else:
         countries_geom_col = find_primary_geometry_column(countries_parquet, verbose)
 
@@ -101,12 +117,28 @@ def add_country_codes(input_parquet, countries_parquet, output_parquet, add_bbox
 
     # Start dry-run mode output if needed
     if dry_run:
-        click.echo(click.style("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n", fg="yellow", bold=True))
+        click.echo(
+            click.style(
+                "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
+                fg="yellow",
+                bold=True,
+            )
+        )
         click.echo(click.style(f"-- Input file: {input_url}", fg="cyan"))
         click.echo(click.style(f"-- Countries file: {countries_url}", fg="cyan"))
         click.echo(click.style(f"-- Output file: {output_parquet}", fg="cyan"))
-        click.echo(click.style(f"-- Geometry columns: {input_geom_col} (input), {countries_geom_col} (countries)", fg="cyan"))
-        click.echo(click.style(f"-- Bbox columns: {input_bbox_col or 'none'} (input), {countries_bbox_col or 'none'} (countries)\n", fg="cyan"))
+        click.echo(
+            click.style(
+                f"-- Geometry columns: {input_geom_col} (input), {countries_geom_col} (countries)",
+                fg="cyan",
+            )
+        )
+        click.echo(
+            click.style(
+                f"-- Bbox columns: {input_bbox_col or 'none'} (input), {countries_bbox_col or 'none'} (countries)\n",
+                fg="cyan",
+            )
+        )
 
     # Get metadata before processing (skip in dry-run)
     metadata = None
@@ -115,67 +147,87 @@ def add_country_codes(input_parquet, countries_parquet, output_parquet, add_bbox
 
         # Check bbox structure and provide warnings
         if input_bbox_info["status"] != "optimal":
-            click.echo(click.style(
-                "\nWarning: Input file could benefit from bbox optimization:\n" +
-                input_bbox_info["message"],
-                fg="yellow"
-            ))
+            click.echo(
+                click.style(
+                    "\nWarning: Input file could benefit from bbox optimization:\n"
+                    + input_bbox_info["message"],
+                    fg="yellow",
+                )
+            )
             if add_bbox_flag:
                 # Fix the bbox issue based on what's missing
                 if not input_bbox_info["has_bbox_column"]:
                     click.echo("Adding bbox column to input file...")
                     from geoparquet_tools.core.common import add_bbox
-                    add_bbox(input_parquet, 'bbox', verbose)
-                    click.echo(click.style("✓ Added bbox column and metadata to input file", fg="green"))
+
+                    add_bbox(input_parquet, "bbox", verbose)
+                    click.echo(
+                        click.style("✓ Added bbox column and metadata to input file", fg="green")
+                    )
                     # Re-check after adding bbox
                     input_bbox_info = check_bbox_structure(input_parquet, verbose)
                     input_bbox_col = input_bbox_info["bbox_column_name"]
                 elif not input_bbox_info["has_bbox_metadata"]:
                     click.echo("Adding bbox metadata to input file...")
                     from geoparquet_tools.core.add_bbox_metadata import add_bbox_metadata
+
                     add_bbox_metadata(input_parquet, verbose)
                     # Re-check after adding metadata
                     input_bbox_info = check_bbox_structure(input_parquet, verbose)
             else:
-                click.echo(click.style(
-                    "💡 Tip: Run this command with --add-bbox to automatically add bbox optimization to the input file",
-                    fg="cyan"
-                ))
+                click.echo(
+                    click.style(
+                        "💡 Tip: Run this command with --add-bbox to automatically add bbox optimization to the input file",
+                        fg="cyan",
+                    )
+                )
 
         # Check bbox structure for countries file (only if not using default)
         if not using_default:
             countries_bbox_info = check_bbox_structure(countries_parquet, verbose)
             countries_bbox_col = countries_bbox_info["bbox_column_name"]
             if countries_bbox_info["status"] != "optimal":
-                click.echo(click.style(
-                    "\nWarning: Countries file could benefit from bbox optimization:\n" +
-                    countries_bbox_info["message"],
-                    fg="yellow"
-                ))
+                click.echo(
+                    click.style(
+                        "\nWarning: Countries file could benefit from bbox optimization:\n"
+                        + countries_bbox_info["message"],
+                        fg="yellow",
+                    )
+                )
                 if add_bbox_flag:
                     # Fix the bbox issue based on what's missing
                     if not countries_bbox_info["has_bbox_column"]:
                         click.echo("Adding bbox column to countries file...")
                         from geoparquet_tools.core.common import add_bbox
-                        add_bbox(countries_parquet, 'bbox', verbose)
-                        click.echo(click.style("✓ Added bbox column and metadata to countries file", fg="green"))
+
+                        add_bbox(countries_parquet, "bbox", verbose)
+                        click.echo(
+                            click.style(
+                                "✓ Added bbox column and metadata to countries file", fg="green"
+                            )
+                        )
                         # Re-check after adding bbox
                         countries_bbox_info = check_bbox_structure(countries_parquet, verbose)
                         countries_bbox_col = countries_bbox_info["bbox_column_name"]
                     elif not countries_bbox_info["has_bbox_metadata"]:
                         click.echo("Adding bbox metadata to countries file...")
                         from geoparquet_tools.core.add_bbox_metadata import add_bbox_metadata
+
                         add_bbox_metadata(countries_parquet, verbose)
                         # Re-check after adding metadata
                         countries_bbox_info = check_bbox_structure(countries_parquet, verbose)
                 else:
-                    click.echo(click.style(
-                        "💡 Tip: Run this command with --add-bbox to automatically add bbox optimization to the countries file",
-                        fg="cyan"
-                    ))
+                    click.echo(
+                        click.style(
+                            "💡 Tip: Run this command with --add-bbox to automatically add bbox optimization to the countries file",
+                            fg="cyan",
+                        )
+                    )
 
         if verbose:
-            click.echo(f"Using geometry columns: {input_geom_col} (input), {countries_geom_col} (countries)")
+            click.echo(
+                f"Using geometry columns: {input_geom_col} (input), {countries_geom_col} (countries)"
+            )
 
     # Create DuckDB connection and load spatial extension
     con = duckdb.connect()
@@ -193,7 +245,12 @@ def add_country_codes(input_parquet, countries_parquet, output_parquet, add_bbox
         # Need to calculate bounds and create filtered table
         if dry_run:
             # Show the SQL for calculating bounds
-            click.echo(click.style("-- Step 1: Calculate bounding box of input data to filter remote countries", fg="cyan"))
+            click.echo(
+                click.style(
+                    "-- Step 1: Calculate bounding box of input data to filter remote countries",
+                    fg="cyan",
+                )
+            )
 
             # Build the bounds SQL based on whether bbox column exists
             if input_bbox_col:
@@ -215,32 +272,58 @@ FROM '{input_url}';"""
             click.echo()
 
             # Calculate actual bounds for the dry-run display
-            click.echo(click.style("-- Calculating actual bounds for use in subsequent queries...", fg="yellow"))
+            click.echo(
+                click.style(
+                    "-- Calculating actual bounds for use in subsequent queries...", fg="yellow"
+                )
+            )
 
         # Calculate bounds (for both dry-run and actual execution)
         if verbose and not dry_run:
             click.echo("Calculating bounding box of input data to filter remote countries file...")
 
-        bounds = get_dataset_bounds(input_parquet, input_geom_col, verbose=(verbose and not dry_run))
+        bounds = get_dataset_bounds(
+            input_parquet, input_geom_col, verbose=(verbose and not dry_run)
+        )
 
         if not bounds:
             if dry_run:
                 # Use placeholder values for dry-run
                 xmin, ymin, xmax, ymax = "<xmin>", "<ymin>", "<xmax>", "<ymax>"
-                click.echo(click.style("-- Note: Could not calculate actual bounds, showing placeholder values", fg="yellow"))
+                click.echo(
+                    click.style(
+                        "-- Note: Could not calculate actual bounds, showing placeholder values",
+                        fg="yellow",
+                    )
+                )
             else:
                 raise click.ClickException("Could not calculate dataset bounds")
         else:
             xmin, ymin, xmax, ymax = bounds
             if dry_run:
-                click.echo(click.style(f"-- Bounds calculated: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})", fg="green"))
+                click.echo(
+                    click.style(
+                        f"-- Bounds calculated: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})",
+                        fg="green",
+                    )
+                )
             elif verbose:
                 click.echo(f"Input bbox: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
 
         if dry_run:
             click.echo()
-            click.echo(click.style("-- Step 2: Create temporary table with filtered countries using bbox filtering", fg="cyan"))
-            click.echo(click.style("-- Note: source.coop countries file has bbox column for fast filtering", fg="cyan"))
+            click.echo(
+                click.style(
+                    "-- Step 2: Create temporary table with filtered countries using bbox filtering",
+                    fg="cyan",
+                )
+            )
+            click.echo(
+                click.style(
+                    "-- Note: source.coop countries file has bbox column for fast filtering",
+                    fg="cyan",
+                )
+            )
 
         # Build the CREATE TABLE query using bbox filtering
         # We know the default countries file has a bbox column, so use it for filtering
@@ -346,23 +429,31 @@ WHERE {countries_bbox_col}.xmin <= {xmax:.6f}
         if input_bbox_col and countries_bbox_col:
             click.echo(click.style("-- Using bbox columns for optimized spatial join", fg="cyan"))
         else:
-            click.echo(click.style("-- Using full geometry intersection (no bbox optimization)", fg="cyan"))
+            click.echo(
+                click.style("-- Using full geometry intersection (no bbox optimization)", fg="cyan")
+            )
 
         # Show the query with COPY wrapper for display
-        if compression in ['GZIP', 'ZSTD', 'BROTLI']:
+        if compression in ["GZIP", "ZSTD", "BROTLI"]:
             compression_str = f"{compression}:{compression_level}"
         else:
             compression_str = compression
 
         # Use lowercase for DuckDB format
-        duckdb_compression = compression.lower() if compression != 'UNCOMPRESSED' else 'uncompressed'
+        duckdb_compression = (
+            compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
+        )
         display_query = f"""COPY ({query.strip()})
 TO '{output_parquet}'
 (FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
         click.echo(display_query)
 
         click.echo(click.style(f"\n-- Note: Using {compression_str} compression", fg="cyan"))
-        click.echo(click.style("-- Original metadata would also be preserved in the output file", fg="cyan"))
+        click.echo(
+            click.style(
+                "-- Original metadata would also be preserved in the output file", fg="cyan"
+            )
+        )
         return
 
     # Execute the query using the common write method
@@ -370,13 +461,15 @@ TO '{output_parquet}'
         click.echo("Performing spatial join with country boundaries...")
 
     write_parquet_with_metadata(
-        con, query, output_parquet,
+        con,
+        query,
+        output_parquet,
         original_metadata=metadata,
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,
         row_group_rows=row_group_rows,
-        verbose=verbose
+        verbose=verbose,
     )
 
     # Get statistics about the results
@@ -394,11 +487,12 @@ TO '{output_parquet}'
     features_with_country = stats[1]
     unique_countries = stats[2]
 
-    click.echo(f"\nResults:")
+    click.echo("\nResults:")
     click.echo(f"- Added country codes to {features_with_country:,} of {total_features:,} features")
     click.echo(f"- Found {unique_countries:,} unique countries")
 
     click.echo(f"\nSuccessfully wrote output to: {output_parquet}")
+
 
 if __name__ == "__main__":
     add_country_codes()

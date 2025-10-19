@@ -7,7 +7,7 @@ name = "geoparquet-tools"
 version = "0.1.0"
 description = "A collection of tools for working with GeoParquet files"
 readme = "README.md"
-requires-python = ">=3.8,<3.14"
+requires-python = ">=3.9"
 license = "Apache-2.0"
 authors = [
     { name = "Chris Holmes", email = "cholmes@9eo.org" }
@@ -19,10 +19,11 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: GIS",
 ]
 dependencies = [
@@ -44,6 +45,9 @@ gt = "geoparquet_tools:cli"
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "ruff>=0.8.0",
+    "pre-commit>=3.0.0",
+    "mypy>=1.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -54,4 +58,43 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short" 
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # unused imports in __init__.py
+
+[tool.ruff.lint.isort]
+known-first-party = ["geoparquet_tools"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true

@@ -1,7 +1,9 @@
 """
 Tests for get_dataset_bounds function.
 """
+
 import pytest
+
 from geoparquet_tools.core.common import get_dataset_bounds
 
 
@@ -48,14 +50,13 @@ class TestGetDatasetBounds:
 
     def test_get_bounds_with_specific_geometry_column(self, buildings_test_file):
         """Test getting bounds with specified geometry column."""
-        bounds = get_dataset_bounds(buildings_test_file, geometry_column='geometry', verbose=False)
+        bounds = get_dataset_bounds(buildings_test_file, geometry_column="geometry", verbose=False)
 
         assert bounds is not None
         assert len(bounds) == 4
 
     def test_get_bounds_verbose_output(self, buildings_test_file, capsys):
         """Test verbose output when calculating bounds."""
-        import click
 
         # Capture click output
         bounds = get_dataset_bounds(buildings_test_file, verbose=True)
@@ -96,7 +97,7 @@ class TestGetDatasetBounds:
 
         # Should raise an exception for nonexistent file
         with pytest.raises(click.BadParameter):
-            bounds = get_dataset_bounds('nonexistent.parquet', verbose=False)
+            get_dataset_bounds("nonexistent.parquet", verbose=False)
 
     def test_get_bounds_performance_difference(self, buildings_test_file, temp_output_file, capsys):
         """Test that bbox column actually helps performance (via warnings)."""

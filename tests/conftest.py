@@ -1,12 +1,13 @@
 """
 Pytest configuration and shared fixtures for geoparquet-tools tests.
 """
+
 import os
-import pytest
-import tempfile
 import shutil
+import tempfile
 from pathlib import Path
 
+import pytest
 
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent / "data"

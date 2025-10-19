@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
 
-import click
-import os
-import duckdb
-from geoparquet_tools.core.common import (
-    safe_file_url, find_primary_geometry_column, get_parquet_metadata,
-    update_metadata, check_bbox_structure, write_parquet_with_metadata
-)
-import pyarrow.parquet as pq
-import fsspec
 
-def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox',
-                   dry_run=False, verbose=False, compression='ZSTD', compression_level=None,
-                   row_group_size_mb=None, row_group_rows=None):
+import click
+import duckdb
+import fsspec
+import pyarrow.parquet as pq
+
+from geoparquet_tools.core.common import (
+    find_primary_geometry_column,
+    get_parquet_metadata,
+    safe_file_url,
+    write_parquet_with_metadata,
+)
+
+
+def add_bbox_column(
+    input_parquet,
+    output_parquet,
+    bbox_column_name="bbox",
+    dry_run=False,
+    verbose=False,
+    compression="ZSTD",
+    compression_level=None,
+    row_group_size_mb=None,
+    row_group_rows=None,
+):
     """
     Add a bbox struct column to a GeoParquet file.
 
@@ -35,7 +47,13 @@ def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox',
 
     # Start dry-run mode output if needed
     if dry_run:
-        click.echo(click.style("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n", fg="yellow", bold=True))
+        click.echo(
+            click.style(
+                "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
+                fg="yellow",
+                bold=True,
+            )
+        )
         click.echo(click.style(f"-- Input file: {input_url}", fg="cyan"))
         click.echo(click.style(f"-- Output file: {output_parquet}", fg="cyan"))
         click.echo(click.style(f"-- Geometry column: {geom_col}", fg="cyan"))
@@ -43,13 +61,15 @@ def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox',
 
     # Check if the requested column name already exists (skip in dry-run)
     if not dry_run:
-        with fsspec.open(input_url, 'rb') as f:
+        with fsspec.open(input_url, "rb") as f:
             pf = pq.ParquetFile(f)
             schema = pf.schema_arrow
 
         for field in schema:
             if field.name == bbox_column_name:
-                raise click.ClickException(f"Column '{bbox_column_name}' already exists in the file. Please choose a different name.")
+                raise click.ClickException(
+                    f"Column '{bbox_column_name}' already exists in the file. Please choose a different name."
+                )
 
         # Get metadata before processing
         metadata, _ = get_parquet_metadata(input_parquet, verbose)
@@ -82,13 +102,15 @@ def add_bbox_column(input_parquet, output_parquet, bbox_column_name='bbox',
 
     if dry_run:
         # In dry-run mode, show the query with COPY wrapper
-        if compression in ['GZIP', 'ZSTD', 'BROTLI']:
+        if compression in ["GZIP", "ZSTD", "BROTLI"]:
             compression_str = f"{compression}:{compression_level}"
         else:
             compression_str = compression
 
         # Use lowercase for DuckDB format
-        duckdb_compression = compression.lower() if compression != 'UNCOMPRESSED' else 'uncompressed'
+        duckdb_compression = (
+            compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
+        )
         display_query = f"""COPY ({query.strip()})
 TO '{output_parquet}'
 (FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
@@ -97,9 +119,23 @@ TO '{output_parquet}'
         click.echo(display_query)
 
         click.echo(click.style(f"\n-- Note: Using {compression_str} compression", fg="cyan"))
-        click.echo(click.style("-- This query creates a new parquet file with a bbox struct column added", fg="cyan"))
-        click.echo(click.style("-- The bbox column contains (xmin, ymin, xmax, ymax) for each geometry", fg="cyan"))
-        click.echo(click.style("-- Metadata would also be updated with bbox covering information (GeoParquet 1.1)", fg="cyan"))
+        click.echo(
+            click.style(
+                "-- This query creates a new parquet file with a bbox struct column added",
+                fg="cyan",
+            )
+        )
+        click.echo(
+            click.style(
+                "-- The bbox column contains (xmin, ymin, xmax, ymax) for each geometry", fg="cyan"
+            )
+        )
+        click.echo(
+            click.style(
+                "-- Metadata would also be updated with bbox covering information (GeoParquet 1.1)",
+                fg="cyan",
+            )
+        )
         return
 
     # Execute the query using the common write method
@@ -112,16 +148,19 @@ TO '{output_parquet}'
         metadata, _ = get_parquet_metadata(input_parquet, verbose)
 
     write_parquet_with_metadata(
-        con, query, output_parquet,
+        con,
+        query,
+        output_parquet,
         original_metadata=metadata,
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,
         row_group_rows=row_group_rows,
-        verbose=verbose
+        verbose=verbose,
     )
 
     click.echo(f"Successfully added bbox column '{bbox_column_name}' to: {output_parquet}")
+
 
 if __name__ == "__main__":
     add_bbox_column()

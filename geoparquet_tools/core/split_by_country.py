@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
-import click
-import pyarrow.parquet as pq
 import json
+
+import click
 import fsspec
+import pyarrow.parquet as pq
+
 from geoparquet_tools.core.common import safe_file_url
 from geoparquet_tools.core.partition_common import partition_by_column, preview_partition
 
@@ -28,47 +30,53 @@ def check_country_code_column(parquet_file, column_name="admin:country_code"):
                 "Please populate country codes using the add_country_codes command."
             )
 
+
 def check_crs(parquet_file, verbose=False):
     """Check if CRS is WGS84 or null, warn if not."""
-    with fsspec.open(parquet_file, 'rb') as f:
+    with fsspec.open(parquet_file, "rb") as f:
         metadata = pq.ParquetFile(f).schema_arrow.metadata
-        
-    if metadata and b'geo' in metadata:
+
+    if metadata and b"geo" in metadata:
         try:
-            geo_meta = json.loads(metadata[b'geo'].decode('utf-8'))
-            
+            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+
             # Check CRS in both metadata formats
             if isinstance(geo_meta, dict):
-                for col_name, col_meta in geo_meta.get("columns", {}).items():
+                for _col_name, col_meta in geo_meta.get("columns", {}).items():
                     crs = col_meta.get("crs")
                     if crs and not _is_wgs84(crs):
-                        click.echo(click.style(
-                            "Warning: Input file uses a CRS other than WGS84. "
-                            "Results may be incorrect.", 
-                            fg="yellow"
-                        ))
+                        click.echo(
+                            click.style(
+                                "Warning: Input file uses a CRS other than WGS84. "
+                                "Results may be incorrect.",
+                                fg="yellow",
+                            )
+                        )
                         return
             elif isinstance(geo_meta, list):
                 for col in geo_meta:
                     if isinstance(col, dict):
                         crs = col.get("crs")
                         if crs and not _is_wgs84(crs):
-                            click.echo(click.style(
-                                "Warning: Input file uses a CRS other than WGS84. "
-                                "Results may be incorrect.", 
-                                fg="yellow"
-                            ))
+                            click.echo(
+                                click.style(
+                                    "Warning: Input file uses a CRS other than WGS84. "
+                                    "Results may be incorrect.",
+                                    fg="yellow",
+                                )
+                            )
                             return
-            
+
         except json.JSONDecodeError:
             if verbose:
                 click.echo("Failed to parse geo metadata")
+
 
 def _is_wgs84(crs):
     """Check if CRS is WGS84 or equivalent."""
     if not crs:
         return True
-    
+
     # Common WGS84 identifiers
     wgs84_identifiers = [
         "4326",
@@ -76,20 +84,31 @@ def _is_wgs84(crs):
         "WGS84",
         "WGS 84",
         "urn:ogc:def:crs:EPSG::4326",
-        "urn:ogc:def:crs:OGC:1.3:CRS84"
+        "urn:ogc:def:crs:OGC:1.3:CRS84",
     ]
-    
+
     if isinstance(crs, str):
         return any(id.lower() in crs.lower() for id in wgs84_identifiers)
     elif isinstance(crs, dict):
         # Check PROJJSON format
         return (
-            crs.get("type", "").lower() == "geographiccrs" and
-            "wgs" in str(crs).lower() and "84" in str(crs)
+            crs.get("type", "").lower() == "geographiccrs"
+            and "wgs" in str(crs).lower()
+            and "84" in str(crs)
         )
     return False
 
-def split_by_country(input_parquet, output_folder, column="admin:country_code", hive=False, verbose=False, overwrite=False, preview=False, preview_limit=15):
+
+def split_by_country(
+    input_parquet,
+    output_folder,
+    column="admin:country_code",
+    hive=False,
+    verbose=False,
+    overwrite=False,
+    preview=False,
+    preview_limit=15,
+):
     """
     Split a GeoParquet file into separate files by country code.
 
@@ -125,7 +144,7 @@ def split_by_country(input_parquet, output_folder, column="admin:country_code", 
             column_name=column,
             column_prefix_length=None,
             limit=preview_limit,
-            verbose=verbose
+            verbose=verbose,
         )
         return
 
@@ -137,10 +156,11 @@ def split_by_country(input_parquet, output_folder, column="admin:country_code", 
         column_prefix_length=None,
         hive=hive,
         overwrite=overwrite,
-        verbose=verbose
+        verbose=verbose,
     )
 
     click.echo(f"Successfully split file into {num_partitions} country file(s)")
 
+
 if __name__ == "__main__":
-    split_by_country() 
+    split_by_country()

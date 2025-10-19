@@ -1,15 +1,17 @@
-import click
 import json
-import fsspec
-import pyarrow.parquet as pq
-import urllib.parse
 import os
 import re
+import urllib.parse
+
+import click
 import duckdb
+import fsspec
+import pyarrow.parquet as pq
+
 
 def safe_file_url(file_path, verbose=False):
     """Handle both local and remote files, returning safe URL."""
-    if file_path.startswith(('http://', 'https://')):
+    if file_path.startswith(("http://", "https://")):
         parsed = urllib.parse.urlparse(file_path)
         encoded_path = urllib.parse.quote(parsed.path)
         safe_url = parsed._replace(path=encoded_path).geturl()
@@ -21,9 +23,10 @@ def safe_file_url(file_path, verbose=False):
         safe_url = file_path
     return safe_url
 
+
 def get_parquet_metadata(parquet_file, verbose=False):
     """Get Parquet file metadata."""
-    with fsspec.open(parquet_file, 'rb') as f:
+    with fsspec.open(parquet_file, "rb") as f:
         pf = pq.ParquetFile(f)
         metadata = pf.schema_arrow.metadata
         schema = pf.schema_arrow
@@ -35,13 +38,14 @@ def get_parquet_metadata(parquet_file, verbose=False):
 
     return metadata, schema
 
+
 def parse_geo_metadata(metadata, verbose=False):
     """Parse GeoParquet metadata from Parquet metadata."""
-    if not metadata or b'geo' not in metadata:
+    if not metadata or b"geo" not in metadata:
         return None
 
     try:
-        geo_meta = json.loads(metadata[b'geo'].decode('utf-8'))
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
         if verbose:
             click.echo("\nParsed geo metadata:")
             click.echo(json.dumps(geo_meta, indent=2))
@@ -50,6 +54,7 @@ def parse_geo_metadata(metadata, verbose=False):
         if verbose:
             click.echo("Failed to parse geo metadata as JSON")
         return None
+
 
 def find_primary_geometry_column(parquet_file, verbose=False):
     """Find primary geometry column from GeoParquet metadata."""
@@ -68,6 +73,7 @@ def find_primary_geometry_column(parquet_file, verbose=False):
 
     return "geometry"
 
+
 def create_geo_metadata(original_metadata, geom_col, bbox_info, verbose=False):
     """
     Create or update GeoParquet metadata with bbox covering if applicable.
@@ -83,19 +89,15 @@ def create_geo_metadata(original_metadata, geom_col, bbox_info, verbose=False):
     """
     # Process existing geo metadata if present
     geo_meta = None
-    if original_metadata and b'geo' in original_metadata:
+    if original_metadata and b"geo" in original_metadata:
         try:
-            geo_meta = json.loads(original_metadata[b'geo'].decode('utf-8'))
+            geo_meta = json.loads(original_metadata[b"geo"].decode("utf-8"))
         except json.JSONDecodeError:
             geo_meta = None
 
     # Create or update geo metadata - always use 1.1.0 for proper covering support
     if not geo_meta:
-        geo_meta = {
-            "version": "1.1.0",
-            "primary_column": geom_col,
-            "columns": {}
-        }
+        geo_meta = {"version": "1.1.0", "primary_column": geom_col, "columns": {}}
     else:
         # Upgrade to 1.1.0 if it's an older version
         geo_meta["version"] = "1.1.0"
@@ -113,13 +115,14 @@ def create_geo_metadata(original_metadata, geom_col, bbox_info, verbose=False):
                 "xmin": [bbox_info["bbox_column_name"], "xmin"],
                 "ymin": [bbox_info["bbox_column_name"], "ymin"],
                 "xmax": [bbox_info["bbox_column_name"], "xmax"],
-                "ymax": [bbox_info["bbox_column_name"], "ymax"]
+                "ymax": [bbox_info["bbox_column_name"], "ymax"],
             }
         }
         if verbose:
             click.echo(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
 
     return geo_meta
+
 
 def parse_size_string(size_str):
     """
@@ -142,7 +145,7 @@ def parse_size_string(size_str):
 
     # Parse with units
     size_str = size_str.strip().upper()
-    match = re.match(r'^(\d+(?:\.\d+)?)\s*([KMGT]?B?)$', size_str)
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([KMGT]?B?)$", size_str)
     if not match:
         raise ValueError(f"Invalid size format: {size_str}")
 
@@ -151,22 +154,24 @@ def parse_size_string(size_str):
 
     # Convert to bytes
     multipliers = {
-        'B': 1,
-        'KB': 1024,
-        'MB': 1024 * 1024,
-        'GB': 1024 * 1024 * 1024,
-        'TB': 1024 * 1024 * 1024 * 1024,
-        'K': 1024,
-        'M': 1024 * 1024,
-        'G': 1024 * 1024 * 1024,
-        'T': 1024 * 1024 * 1024 * 1024,
+        "B": 1,
+        "KB": 1024,
+        "MB": 1024 * 1024,
+        "GB": 1024 * 1024 * 1024,
+        "TB": 1024 * 1024 * 1024 * 1024,
+        "K": 1024,
+        "M": 1024 * 1024,
+        "G": 1024 * 1024 * 1024,
+        "T": 1024 * 1024 * 1024 * 1024,
     }
 
     multiplier = multipliers.get(unit, 1024 * 1024)  # Default to MB
     return int(value * multiplier)
 
-def calculate_row_group_size(total_rows, file_size_bytes, target_row_group_size_mb=None,
-                           target_row_group_rows=None):
+
+def calculate_row_group_size(
+    total_rows, file_size_bytes, target_row_group_size_mb=None, target_row_group_rows=None
+):
     """
     Calculate optimal row group size for parquet file.
 
@@ -200,6 +205,7 @@ def calculate_row_group_size(total_rows, file_size_bytes, target_row_group_size_
         # Default to all rows in one group if we can't calculate
         return max(1, total_rows)
 
+
 def validate_compression_settings(compression, compression_level, verbose=False):
     """
     Validate and normalize compression settings.
@@ -213,7 +219,7 @@ def validate_compression_settings(compression, compression_level, verbose=False)
         tuple: (normalized_compression, validated_level, compression_desc)
     """
     compression = compression.upper()
-    valid_compressions = ['ZSTD', 'GZIP', 'BROTLI', 'LZ4', 'SNAPPY', 'UNCOMPRESSED']
+    valid_compressions = ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"]
 
     if compression not in valid_compressions:
         raise click.BadParameter(
@@ -222,9 +228,9 @@ def validate_compression_settings(compression, compression_level, verbose=False)
 
     # Handle compression level based on format
     compression_ranges = {
-        'GZIP': (1, 9, 6),    # min, max, default
-        'ZSTD': (1, 22, 15),  # min, max, default
-        'BROTLI': (1, 11, 6)  # min, max, default
+        "GZIP": (1, 9, 6),  # min, max, default
+        "ZSTD": (1, 22, 15),  # min, max, default
+        "BROTLI": (1, 11, 6),  # min, max, default
     }
 
     if compression in compression_ranges:
@@ -239,12 +245,14 @@ def validate_compression_settings(compression, compression_level, verbose=False)
                 f"{compression} compression level must be between {min_level} and {max_level}, got {compression_level}"
             )
         compression_desc = f"{compression}:{compression_level}"
-    elif compression in ['LZ4', 'SNAPPY']:
+    elif compression in ["LZ4", "SNAPPY"]:
         if compression_level and compression_level != 15 and verbose:  # Not default
-            click.echo(click.style(
-                f"Note: {compression} does not support compression levels. Ignoring level {compression_level}.",
-                fg="yellow"
-            ))
+            click.echo(
+                click.style(
+                    f"Note: {compression} does not support compression levels. Ignoring level {compression_level}.",
+                    fg="yellow",
+                )
+            )
         compression_level = None  # These formats don't use compression levels
         compression_desc = compression
     else:
@@ -252,6 +260,7 @@ def validate_compression_settings(compression, compression_level, verbose=False)
         compression_desc = compression
 
     return compression, compression_level, compression_desc
+
 
 def build_copy_query(query, output_file, compression):
     """
@@ -267,12 +276,12 @@ def build_copy_query(query, output_file, compression):
     """
     # Map to DuckDB compression names
     duckdb_compression_map = {
-        'ZSTD': 'zstd',
-        'GZIP': 'gzip',
-        'BROTLI': 'brotli',
-        'LZ4': 'lz4',
-        'SNAPPY': 'snappy',
-        'UNCOMPRESSED': 'uncompressed'
+        "ZSTD": "zstd",
+        "GZIP": "gzip",
+        "BROTLI": "brotli",
+        "LZ4": "lz4",
+        "SNAPPY": "snappy",
+        "UNCOMPRESSED": "uncompressed",
     }
     duckdb_compression = duckdb_compression_map[compression]
 
@@ -296,8 +305,16 @@ TO '{output_file}'
 
     return query
 
-def rewrite_with_metadata(output_file, original_metadata, compression, compression_level,
-                         row_group_size_mb=None, row_group_rows=None, verbose=False):
+
+def rewrite_with_metadata(
+    output_file,
+    original_metadata,
+    compression,
+    compression_level,
+    row_group_size_mb=None,
+    row_group_rows=None,
+    verbose=False,
+):
     """
     Rewrite a parquet file with updated metadata and compression settings.
 
@@ -315,12 +332,12 @@ def rewrite_with_metadata(output_file, original_metadata, compression, compressi
 
     # Check if this is a Hive-partitioned file by examining the parent directory
     parent_dir = os.path.basename(os.path.dirname(output_file))
-    is_hive_partition = '=' in parent_dir
+    is_hive_partition = "=" in parent_dir
 
     if is_hive_partition:
         # For Hive-partitioned files, read directly as a single file
         # to avoid PyArrow trying to interpret it as a dataset
-        with open(output_file, 'rb') as f:
+        with open(output_file, "rb") as f:
             table = pq.read_table(f)
     else:
         # Read the written file normally
@@ -332,7 +349,7 @@ def rewrite_with_metadata(output_file, original_metadata, compression, compressi
 
     # Copy non-geo metadata from existing
     for k, v in existing_metadata.items():
-        if not k.decode('utf-8').startswith('geo'):
+        if not k.decode("utf-8").startswith("geo"):
             new_metadata[k] = v
 
     # Get geometry column and bbox info
@@ -341,7 +358,7 @@ def rewrite_with_metadata(output_file, original_metadata, compression, compressi
 
     # Create geo metadata
     geo_meta = create_geo_metadata(original_metadata, geom_col, bbox_info, verbose)
-    new_metadata[b'geo'] = json.dumps(geo_meta).encode('utf-8')
+    new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
     # Update table schema with new metadata
     new_table = table.replace_schema_metadata(new_metadata)
@@ -352,39 +369,35 @@ def rewrite_with_metadata(output_file, original_metadata, compression, compressi
         new_table.num_rows,
         file_size,
         target_row_group_size_mb=row_group_size_mb,
-        target_row_group_rows=row_group_rows
+        target_row_group_rows=row_group_rows,
     )
 
     # Set PyArrow compression parameters
-    pa_compression = compression if compression != 'UNCOMPRESSED' else None
+    pa_compression = compression if compression != "UNCOMPRESSED" else None
     # PyArrow supports compression levels for GZIP, ZSTD, and BROTLI
-    if compression in ['GZIP', 'ZSTD', 'BROTLI']:
+    if compression in ["GZIP", "ZSTD", "BROTLI"]:
         pa_compression_level = compression_level
     else:
         pa_compression_level = None
 
     # Build write kwargs
     write_kwargs = {
-        'row_group_size': rows_per_group,
-        'compression': pa_compression,
-        'write_statistics': True,
-        'use_dictionary': True,
-        'version': '2.6'
+        "row_group_size": rows_per_group,
+        "compression": pa_compression,
+        "write_statistics": True,
+        "use_dictionary": True,
+        "version": "2.6",
     }
 
     # Add compression level for supported formats
     if pa_compression_level is not None:
-        write_kwargs['compression_level'] = pa_compression_level
+        write_kwargs["compression_level"] = pa_compression_level
 
     # Rewrite the file
-    pq.write_table(
-        new_table,
-        output_file,
-        **write_kwargs
-    )
+    pq.write_table(new_table, output_file, **write_kwargs)
 
     if verbose:
-        if compression in ['GZIP', 'ZSTD', 'BROTLI']:
+        if compression in ["GZIP", "ZSTD", "BROTLI"]:
             compression_desc = f"{compression}:{compression_level}"
         else:
             compression_desc = compression
@@ -394,10 +407,18 @@ def rewrite_with_metadata(output_file, original_metadata, compression, compressi
         elif row_group_size_mb:
             click.echo(f"  Row group size: ~{row_group_size_mb}MB ({rows_per_group:,} rows)")
 
-def write_parquet_with_metadata(con, query, output_file, original_metadata=None,
-                                compression='ZSTD', compression_level=15,
-                                row_group_size_mb=None, row_group_rows=None,
-                                verbose=False):
+
+def write_parquet_with_metadata(
+    con,
+    query,
+    output_file,
+    original_metadata=None,
+    compression="ZSTD",
+    compression_level=15,
+    row_group_size_mb=None,
+    row_group_rows=None,
+    verbose=False,
+):
     """
     Write a parquet file with proper compression and metadata handling.
 
@@ -430,9 +451,15 @@ def write_parquet_with_metadata(con, query, output_file, original_metadata=None,
     # Rewrite with metadata and optimal settings
     if original_metadata or verbose or row_group_size_mb or row_group_rows:
         rewrite_with_metadata(
-            output_file, original_metadata, compression, compression_level,
-            row_group_size_mb, row_group_rows, verbose
+            output_file,
+            original_metadata,
+            compression,
+            compression_level,
+            row_group_size_mb,
+            row_group_rows,
+            verbose,
         )
+
 
 def update_metadata(output_file, original_metadata):
     """Update a parquet file with original metadata and add bbox covering if present."""
@@ -441,20 +468,18 @@ def update_metadata(output_file, original_metadata):
 
     # Use the rewrite function with default compression settings
     rewrite_with_metadata(
-        output_file,
-        original_metadata,
-        compression='ZSTD',
-        compression_level=15,
-        verbose=False
+        output_file, original_metadata, compression="ZSTD", compression_level=15, verbose=False
     )
+
 
 def format_size(size_bytes):
     """Convert bytes to human readable string."""
-    for unit in ['B', 'KB', 'MB', 'GB']:
+    for unit in ["B", "KB", "MB", "GB"]:
         if size_bytes < 1024:
             return f"{size_bytes:.2f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.2f} TB"
+
 
 def check_bbox_structure(parquet_file, verbose=False):
     """
@@ -468,7 +493,7 @@ def check_bbox_structure(parquet_file, verbose=False):
             - status (str): "optimal", "suboptimal", or "poor"
             - message (str): Human readable description
     """
-    with fsspec.open(safe_file_url(parquet_file), 'rb') as f:
+    with fsspec.open(safe_file_url(parquet_file), "rb") as f:
         pf = pq.ParquetFile(f)
         metadata = pf.schema_arrow.metadata
         schema = pf.schema_arrow
@@ -483,12 +508,12 @@ def check_bbox_structure(parquet_file, verbose=False):
     has_bbox_column = False
 
     # Look for conventional names first
-    conventional_names = ['bbox', 'bounds', 'extent']
+    conventional_names = ["bbox", "bounds", "extent"]
     for field in schema:
         if field.name in conventional_names or (
-            isinstance(field.type, type(schema[0].type)) and
-            str(field.type).startswith('struct<') and
-            all(f in str(field.type) for f in ['xmin', 'ymin', 'xmax', 'ymax'])
+            isinstance(field.type, type(schema[0].type))
+            and str(field.type).startswith("struct<")
+            and all(f in str(field.type) for f in ["xmin", "ymin", "xmax", "ymax"])
         ):
             bbox_column_name = field.name
             has_bbox_column = True
@@ -498,29 +523,35 @@ def check_bbox_structure(parquet_file, verbose=False):
 
     # Then check metadata for bbox covering that specifically references the bbox column
     has_bbox_metadata = False
-    if metadata and b'geo' in metadata and has_bbox_column:
+    if metadata and b"geo" in metadata and has_bbox_column:
         try:
-            geo_meta = json.loads(metadata[b'geo'].decode('utf-8'))
+            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
             if verbose:
                 click.echo("\nParsed geo metadata:")
                 click.echo(json.dumps(geo_meta, indent=2))
 
-            if isinstance(geo_meta, dict) and 'columns' in geo_meta:
-                columns = geo_meta['columns']
-                for col_name, col_info in columns.items():
+            if isinstance(geo_meta, dict) and "columns" in geo_meta:
+                columns = geo_meta["columns"]
+                for _col_name, col_info in columns.items():
                     if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
                         bbox_refs = col_info["covering"]["bbox"]
                         # Check if the bbox covering has the required structure
-                        if isinstance(bbox_refs, dict) and all(
-                            key in bbox_refs for key in ['xmin', 'ymin', 'xmax', 'ymax']
-                        ) and all(
-                            isinstance(ref, list) and len(ref) == 2
-                            for ref in bbox_refs.values()
+                        if (
+                            isinstance(bbox_refs, dict)
+                            and all(key in bbox_refs for key in ["xmin", "ymin", "xmax", "ymax"])
+                            and all(
+                                isinstance(ref, list) and len(ref) == 2
+                                for ref in bbox_refs.values()
+                            )
                         ):
-                            referenced_bbox_column = bbox_refs['xmin'][0]  # Get column name from any coordinate
+                            referenced_bbox_column = bbox_refs["xmin"][
+                                0
+                            ]  # Get column name from any coordinate
                             has_bbox_metadata = True
                             if verbose:
-                                click.echo(f"Found bbox covering in metadata referencing column: {referenced_bbox_column}")
+                                click.echo(
+                                    f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
+                                )
                             break
         except json.JSONDecodeError:
             if verbose:
@@ -538,7 +569,7 @@ def check_bbox_structure(parquet_file, verbose=False):
         message = "❌ No valid bbox column found"
 
     if verbose:
-        click.echo(f"\nFinal results:")
+        click.echo("\nFinal results:")
         click.echo(f"  has_bbox_column: {has_bbox_column}")
         click.echo(f"  bbox_column_name: {bbox_column_name}")
         click.echo(f"  has_bbox_metadata: {has_bbox_metadata}")
@@ -550,8 +581,9 @@ def check_bbox_structure(parquet_file, verbose=False):
         "bbox_column_name": bbox_column_name if has_bbox_column else None,
         "has_bbox_metadata": has_bbox_metadata,
         "status": status,
-        "message": message
+        "message": message,
     }
+
 
 def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
     """
@@ -599,14 +631,17 @@ def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
             """
         else:
             # Calculate from geometry column (slower)
-            click.echo(click.style(
-                f"⚠️  No bbox column found - calculating bounds from geometry column '{geometry_column}' (this may be slow)",
-                fg="yellow"
-            ))
-            click.echo(click.style(
-                "💡 Tip: Add a bbox column for faster operations with 'gt add bbox'",
-                fg="cyan"
-            ))
+            click.echo(
+                click.style(
+                    f"⚠️  No bbox column found - calculating bounds from geometry column '{geometry_column}' (this may be slow)",
+                    fg="yellow",
+                )
+            )
+            click.echo(
+                click.style(
+                    "💡 Tip: Add a bbox column for faster operations with 'gt add bbox'", fg="cyan"
+                )
+            )
 
             query = f"""
             SELECT
@@ -636,7 +671,8 @@ def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
     finally:
         con.close()
 
-def add_bbox(parquet_file, bbox_column_name='bbox', verbose=False):
+
+def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
     """
     Add a bbox struct column to a GeoParquet file if it doesn't exist.
 
@@ -649,14 +685,16 @@ def add_bbox(parquet_file, bbox_column_name='bbox', verbose=False):
         bool: True if bbox was added, False if it already existed
     """
     # Get schema to check if column already exists
-    with fsspec.open(safe_file_url(parquet_file), 'rb') as f:
+    with fsspec.open(safe_file_url(parquet_file), "rb") as f:
         pf = pq.ParquetFile(f)
         schema = pf.schema_arrow
 
     # Check if the requested column name already exists
     for field in schema:
         if field.name == bbox_column_name:
-            raise click.ClickException(f"Column '{bbox_column_name}' already exists in the file. Please choose a different name.")
+            raise click.ClickException(
+                f"Column '{bbox_column_name}' already exists in the file. Please choose a different name."
+            )
 
     safe_url = safe_file_url(parquet_file, verbose)
 
@@ -693,11 +731,13 @@ def add_bbox(parquet_file, bbox_column_name='bbox', verbose=False):
 
         # Use common write function to preserve metadata
         write_parquet_with_metadata(
-            con, query, temp_file,
+            con,
+            query,
+            temp_file,
             original_metadata=metadata,
-            compression='ZSTD',
+            compression="ZSTD",
             compression_level=15,
-            verbose=verbose
+            verbose=verbose,
         )
 
         # move temp file to original file
@@ -711,4 +751,4 @@ def add_bbox(parquet_file, bbox_column_name='bbox', verbose=False):
     except Exception as e:
         if os.path.exists(temp_file):
             os.remove(temp_file)
-        raise click.ClickException(f"Failed to add bbox: {str(e)}")
+        raise click.ClickException(f"Failed to add bbox: {str(e)}") from e
