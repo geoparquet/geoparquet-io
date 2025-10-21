@@ -305,13 +305,12 @@ def _generate_recommendations(
             "Alternative: Use the data as a single file with spatial indexing (bbox column)."
         )
 
-    # Large partitions with H3 - suggest increasing resolution
+    # Large partitions - suggest more granular partitioning
     if column_prefix_length is not None and avg_rows > 1000000:
-        current_res = column_prefix_length
-        suggested_res = min(current_res + 2, 15)
         recommendations.append(
             f"Partitions are very large ({avg_rows:,} avg rows). "
-            f"Consider increasing H3 resolution to {suggested_res} for smaller, more manageable partitions."
+            f"Consider using more granular partitioning (e.g., higher resolution/iterations) "
+            f"for smaller, more manageable partitions."
         )
 
     # Very large max partition - suggest hierarchical partitioning
@@ -319,7 +318,7 @@ def _generate_recommendations(
         recommendations.append(
             "Largest partition is very large and imbalanced. "
             "Consider hierarchical partitioning: partition by a coarser key first (e.g., country/region), "
-            "then by H3 within each partition."
+            "then by spatial partitioning within each partition."
         )
 
     # Moderate number of reasonable-sized partitions - good strategy
@@ -333,16 +332,14 @@ def _generate_recommendations(
     if partition_count < 5 and total_rows > 1000000:
         recommendations.append(
             f"Only {partition_count} partitions for {total_rows:,} rows. "
-            "Consider using more granular partitioning (e.g., higher H3 resolution or prefix partitioning)."
+            "Consider using more granular partitioning (e.g., higher resolution/iterations or prefix partitioning)."
         )
 
     # Suggest hierarchical for specific cases
-    if partition_count > 5000 and column_prefix_length is not None:
-        current_res = column_prefix_length
-        suggested_res = max(current_res - 1, 0)
+    if partition_count > 5000:
         recommendations.append(
             f"Too many partitions ({partition_count:,}). Consider hierarchical approach: "
-            f"first partition by H3 at resolution {suggested_res}, then by resolution {current_res} within each."
+            f"first partition by a coarser key (e.g., region/country), then by finer spatial partitioning within each."
         )
 
     return recommendations

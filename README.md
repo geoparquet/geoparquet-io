@@ -11,7 +11,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
 - 🚀 **Fast**: Built on PyArrow and DuckDB for high-performance operations
 - 📦 **Comprehensive**: Sort, partition, enhance, and validate GeoParquet files
-- 🗺️ **Spatial Indexing**: Add bbox, H3 hexagonal cells, and admin divisions
+- 🗺️ **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and admin divisions
 - 🎯 **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
 - 🔧 **Flexible**: CLI and Python API for any workflow
 - ✅ **Tested**: Extensive test suite across Python 3.9-3.13 and all platforms
@@ -60,6 +60,9 @@ gpio add bbox input.parquet output.parquet
 
 # Add H3 hexagonal cell IDs for spatial indexing
 gpio add h3 input.parquet output.parquet --resolution 9
+
+# Add KD-tree partition IDs for balanced spatial partitioning
+gpio add kdtree input.parquet output.parquet --iterations 9
 
 # Add country codes via spatial join
 gpio add admin-divisions input.parquet output.parquet
@@ -189,6 +192,21 @@ gpio add h3 input.parquet output.parquet --resolution 13
 # Add H3 column with custom name
 gpio add h3 input.parquet output.parquet --h3-name h3_index
 ```
+
+#### add kdtree
+
+Add KD-tree partition IDs to a GeoParquet file. KD-tree creates balanced spatial partitions by recursively splitting on alternating X/Y dimensions at medians. The partition ID is stored as a binary string (e.g., "01011001").
+
+Example usage:
+```bash
+# Add KD-tree column with default 9 iterations (512 partitions)
+gpio add kdtree input.parquet output.parquet
+
+# Add KD-tree column with custom iterations
+gpio add kdtree input.parquet output.parquet --iterations 5
+```
+
+**Note**: Runtime scales with dataset size × iterations. For datasets > 50M rows, use hierarchical partitioning.
 
 #### add admin-divisions
 
@@ -343,6 +361,26 @@ gpio partition h3 input.parquet output/ --resolution 8 --hive
 # Use custom H3 column name
 gpio partition h3 input.parquet output/ --h3-name my_h3
 ```
+
+#### partition kdtree
+
+Partition a GeoParquet file by KD-tree cells. Automatically adds KD-tree column if it doesn't exist. Creates balanced spatial partitions by recursively splitting on alternating X/Y dimensions at medians.
+
+By default, the KD-tree column is **excluded** from output files (redundant with partition path), except when using Hive-style partitioning. Use `--keep-kdtree-column` to explicitly keep it.
+
+Example usage:
+```bash
+# Preview partition strategy (dry-run)
+gpio partition kdtree input.parquet --iterations 5 --preview
+
+# Partition by KD-tree at default 9 iterations (512 partitions)
+gpio partition kdtree input.parquet output/
+
+# Use Hive-style partitioning
+gpio partition kdtree input.parquet output/ --hive
+```
+
+**Note**: Runtime scales with dataset size × iterations. For datasets > 50M rows, use hierarchical partitioning.
 
 #### partition admin
 
