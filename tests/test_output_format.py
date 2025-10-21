@@ -435,7 +435,16 @@ class TestPartition:
             # Run partition command
             runner = CliRunner()
             result = runner.invoke(
-                cli, ["partition", "string", tmp_input_name, temp_dir, "--column", "category"]
+                cli,
+                [
+                    "partition",
+                    "string",
+                    tmp_input_name,
+                    temp_dir,
+                    "--column",
+                    "category",
+                    "--skip-analysis",
+                ],
             )
 
             assert result.exit_code == 0, f"Partition failed: {result.output}"

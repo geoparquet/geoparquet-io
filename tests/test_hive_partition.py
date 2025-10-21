@@ -83,7 +83,17 @@ class TestHivePartitioning:
 
         # Run partition command with Hive style
         result = runner.invoke(
-            cli, ["partition", "string", sample_parquet, temp_dir, "--column", "category", "--hive"]
+            cli,
+            [
+                "partition",
+                "string",
+                sample_parquet,
+                temp_dir,
+                "--column",
+                "category",
+                "--hive",
+                "--skip-analysis",
+            ],
         )
 
         assert result.exit_code == 0, f"Command failed: {result.output}"
@@ -105,7 +115,17 @@ class TestHivePartitioning:
 
         # Run partition command with Hive style
         result = runner.invoke(
-            cli, ["partition", "string", sample_parquet, temp_dir, "--column", "category", "--hive"]
+            cli,
+            [
+                "partition",
+                "string",
+                sample_parquet,
+                temp_dir,
+                "--column",
+                "category",
+                "--hive",
+                "--skip-analysis",
+            ],
         )
 
         assert result.exit_code == 0, f"Command failed: {result.output}"
@@ -163,7 +183,9 @@ class TestHivePartitioning:
             runner = CliRunner()
 
             # Run partition command with Hive style
-            result = runner.invoke(cli, ["partition", "admin", tmp_name, temp_dir, "--hive"])
+            result = runner.invoke(
+                cli, ["partition", "admin", tmp_name, temp_dir, "--hive", "--skip-analysis"]
+            )
 
             assert result.exit_code == 0, f"Command failed: {result.output}"
 
@@ -183,7 +205,16 @@ class TestHivePartitioning:
 
         # Run partition command WITHOUT Hive style
         result = runner.invoke(
-            cli, ["partition", "string", sample_parquet, temp_dir, "--column", "category"]
+            cli,
+            [
+                "partition",
+                "string",
+                sample_parquet,
+                temp_dir,
+                "--column",
+                "category",
+                "--skip-analysis",
+            ],
         )
 
         assert result.exit_code == 0, f"Command failed: {result.output}"
@@ -204,7 +235,17 @@ class TestHivePartitioning:
 
         # Run partition command with Hive style
         result = runner.invoke(
-            cli, ["partition", "string", sample_parquet, temp_dir, "--column", "category", "--hive"]
+            cli,
+            [
+                "partition",
+                "string",
+                sample_parquet,
+                temp_dir,
+                "--column",
+                "category",
+                "--hive",
+                "--skip-analysis",
+            ],
         )
 
         assert result.exit_code == 0, f"Command failed: {result.output}"
@@ -289,6 +330,7 @@ class TestPartitionStringWithChars:
                     "--chars",
                     "3",
                     "--hive",
+                    "--skip-analysis",
                 ],
             )
 
@@ -321,7 +363,17 @@ class TestPartitionFormatCompliance:
 
         # Run partition command
         result = runner.invoke(
-            cli, ["partition", "string", sample_parquet, temp_dir, "--column", "category", "--hive"]
+            cli,
+            [
+                "partition",
+                "string",
+                sample_parquet,
+                temp_dir,
+                "--column",
+                "category",
+                "--hive",
+                "--skip-analysis",
+            ],
         )
 
         assert result.exit_code == 0, f"Command failed: {result.output}"
@@ -372,7 +424,9 @@ class TestPartitionFormatCompliance:
             runner = CliRunner()
 
             # Run admin partition command
-            result = runner.invoke(cli, ["partition", "admin", tmp_name, temp_dir, "--hive"])
+            result = runner.invoke(
+                cli, ["partition", "admin", tmp_name, temp_dir, "--hive", "--skip-analysis"]
+            )
 
             assert result.exit_code == 0, f"Command failed: {result.output}"
 
@@ -394,7 +448,16 @@ class TestPartitionFormatCompliance:
 
         # Run partition command without Hive style
         result = runner.invoke(
-            cli, ["partition", "string", sample_parquet, temp_dir, "--column", "category"]
+            cli,
+            [
+                "partition",
+                "string",
+                sample_parquet,
+                temp_dir,
+                "--column",
+                "category",
+                "--skip-analysis",
+            ],
         )
 
         assert result.exit_code == 0, f"Command failed: {result.output}"

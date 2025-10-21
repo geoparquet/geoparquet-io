@@ -236,6 +236,8 @@ gpio add admin-divisions buildings.parquet output.parquet --dry-run
 
 The `partition` commands provide different options to partition GeoParquet files into separate files based on column values.
 
+**Smart Analysis**: All partition commands automatically analyze your partitioning strategy before execution, calculating statistics and providing recommendations. Use `--preview` for dry-run analysis without creating files. Use `--force` to override warnings, or `--skip-analysis` for performance.
+
 #### partition string
 
 Partition a GeoParquet file by string column values. You can partition by full column values or by a prefix (first N characters). This is useful for splitting large datasets by categories, codes, regions, etc.
@@ -269,7 +271,7 @@ Options:
 
 Example usage:
 ```bash
-# Preview partitions by first character of MGRS codes
+# Analyze and preview partition strategy (dry-run)
 gpio partition string input.parquet --column MGRS --chars 1 --preview
 
 # Partition by full column values
@@ -286,6 +288,8 @@ gpio partition string input.parquet output/ --column region --chars 1 --hive
 
 Partition a GeoParquet file by H3 hexagonal cells at a specified resolution. Automatically adds H3 column if it doesn't exist.
 
+By default, the H3 column is **excluded** from the output files (since it's redundant with the partition path), except when using Hive-style partitioning where it's included. Use `--keep-h3-column` to explicitly keep the column in all cases.
+
 ```
 $ gpio partition h3 --help
 Usage: gpio partition h3 [OPTIONS] INPUT_PARQUET [OUTPUT_FOLDER]
@@ -295,6 +299,10 @@ Usage: gpio partition h3 [OPTIONS] INPUT_PARQUET [OUTPUT_FOLDER]
   Creates separate GeoParquet files based on H3 cell prefixes at the
   specified resolution. If the H3 column doesn't exist, it will be
   automatically added before partitioning.
+
+  By default, the H3 column is excluded from output files (since it's
+  redundant with the partition path) unless using Hive-style partitioning.
+  Use --keep-h3-column to explicitly keep the column in all cases.
 
   Use --preview to see what partitions would be created without actually
   creating files.
@@ -309,19 +317,27 @@ Options:
   --preview                Preview partitions without creating files
   --preview-limit INTEGER  Number of partitions to show in preview (default:
                            15)
+  --keep-h3-column         Keep the H3 column in output files (default:
+                           excluded for non-Hive, included for Hive)
   --verbose                Print additional information
   --help                   Show this message and exit.
 ```
 
 Example usage:
 ```bash
-# Preview partitions at resolution 7 (~5km² cells)
+# Analyze and preview H3 partition strategy at resolution 7 (dry-run)
 gpio partition h3 input.parquet --resolution 7 --preview
 
-# Partition by H3 cells at default resolution 9
+# Partition by H3 cells at resolution 9 (analyzes first, H3 column excluded from output)
 gpio partition h3 input.parquet output/
 
-# Partition with custom resolution and Hive-style
+# Force partitioning despite analysis warnings
+gpio partition h3 input.parquet output/ --force
+
+# Partition with H3 column kept in output files
+gpio partition h3 input.parquet output/ --keep-h3-column
+
+# Partition with custom resolution and Hive-style (H3 column included by default)
 gpio partition h3 input.parquet output/ --resolution 8 --hive
 
 # Use custom H3 column name

@@ -108,6 +108,8 @@ def split_by_country(
     overwrite=False,
     preview=False,
     preview_limit=15,
+    force=False,
+    skip_analysis=False,
 ):
     """
     Split a GeoParquet file into separate files by country code.
@@ -125,6 +127,8 @@ def split_by_country(
         overwrite: Overwrite existing files
         preview: Show preview of partitions without creating files
         preview_limit: Maximum number of partitions to show in preview (default: 15)
+        force: Force partitioning even if analysis detects issues
+        skip_analysis: Skip partition strategy analysis (for performance)
     """
     input_url = safe_file_url(input_parquet, verbose)
 
@@ -137,8 +141,30 @@ def split_by_country(
     if not preview:
         check_crs(input_url, verbose)
 
-    # If preview mode, show preview and exit
+    # If preview mode, show analysis and preview, then exit
     if preview:
+        # Run analysis first to show recommendations
+        try:
+            from geoparquet_io.core.partition_common import (
+                PartitionAnalysisError,
+                analyze_partition_strategy,
+            )
+
+            analyze_partition_strategy(
+                input_parquet=input_parquet,
+                column_name=column,
+                column_prefix_length=None,
+                verbose=True,
+            )
+        except PartitionAnalysisError:
+            # Analysis already displayed the errors, just continue to preview
+            pass
+        except Exception as e:
+            # If analysis fails unexpectedly, show error but continue to preview
+            click.echo(click.style(f"\nAnalysis error: {e}", fg="yellow"))
+
+        # Then show partition preview
+        click.echo("\n" + "=" * 70)
         preview_partition(
             input_parquet=input_parquet,
             column_name=column,
@@ -157,6 +183,8 @@ def split_by_country(
         hive=hive,
         overwrite=overwrite,
         verbose=verbose,
+        force=force,
+        skip_analysis=skip_analysis,
     )
 
     click.echo(f"Successfully split file into {num_partitions} country file(s)")

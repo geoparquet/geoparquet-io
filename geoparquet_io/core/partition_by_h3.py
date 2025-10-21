@@ -22,6 +22,9 @@ def partition_by_h3(
     preview: bool = False,
     preview_limit: int = 15,
     verbose: bool = False,
+    keep_h3_column: bool = None,
+    force: bool = False,
+    skip_analysis: bool = False,
 ):
     """
     Partition a GeoParquet file by H3 cells at specified resolution.
@@ -39,10 +42,20 @@ def partition_by_h3(
         preview: Show preview of partitions without creating files
         preview_limit: Maximum number of partitions to show in preview (default: 15)
         verbose: Verbose output
+        keep_h3_column: Whether to keep H3 column in output files. If None (default),
+                       keeps the column for Hive partitioning but excludes it otherwise.
+        force: Force partitioning even if analysis detects issues
+        skip_analysis: Skip partition strategy analysis (for performance)
     """
     # Validate resolution
     if not 0 <= resolution <= 15:
         raise click.UsageError(f"H3 resolution must be between 0 and 15, got {resolution}")
+
+    # Determine default for keep_h3_column
+    # For Hive partitioning, keep the column by default (standard practice)
+    # Otherwise, exclude it by default (avoid redundancy since it's in the partition path)
+    if keep_h3_column is None:
+        keep_h3_column = hive
 
     safe_url = safe_file_url(input_parquet, verbose)
 
@@ -91,9 +104,31 @@ def partition_by_h3(
     elif verbose:
         click.echo(f"Using existing H3 column '{h3_column_name}'")
 
-    # If preview mode, show preview and exit
+    # If preview mode, show analysis and preview, then exit
     if preview:
         try:
+            # Run analysis first to show recommendations
+            try:
+                from geoparquet_io.core.partition_common import (
+                    PartitionAnalysisError,
+                    analyze_partition_strategy,
+                )
+
+                analyze_partition_strategy(
+                    input_parquet=input_parquet,
+                    column_name=h3_column_name,
+                    column_prefix_length=resolution,
+                    verbose=True,
+                )
+            except PartitionAnalysisError:
+                # Analysis already displayed the errors, just continue to preview
+                pass
+            except Exception as e:
+                # If analysis fails unexpectedly, show error but continue to preview
+                click.echo(click.style(f"\nAnalysis error: {e}", fg="yellow"))
+
+            # Then show partition preview
+            click.echo("\n" + "=" * 70)
             preview_partition(
                 input_parquet=input_parquet,
                 column_name=h3_column_name,
@@ -120,6 +155,9 @@ def partition_by_h3(
             hive=hive,
             overwrite=overwrite,
             verbose=verbose,
+            keep_partition_column=keep_h3_column,
+            force=force,
+            skip_analysis=skip_analysis,
         )
 
         if verbose:

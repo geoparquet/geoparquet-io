@@ -50,6 +50,8 @@ def partition_by_string(
     preview: bool = False,
     preview_limit: int = 15,
     verbose: bool = False,
+    force: bool = False,
+    skip_analysis: bool = False,
 ):
     """
     Partition a GeoParquet file by string column values or prefixes.
@@ -64,6 +66,8 @@ def partition_by_string(
         preview: Show preview of partitions without creating files
         preview_limit: Maximum number of partitions to show in preview (default: 15)
         verbose: Verbose output
+        force: Force partitioning even if analysis detects issues
+        skip_analysis: Skip partition strategy analysis (for performance)
     """
     # Validate column exists
     if verbose:
@@ -74,8 +78,30 @@ def partition_by_string(
     if chars is not None and chars < 1:
         raise click.UsageError("--chars must be a positive integer")
 
-    # If preview mode, show preview and exit
+    # If preview mode, show preview and analysis, then exit
     if preview:
+        # Run analysis first to show recommendations
+        try:
+            from geoparquet_io.core.partition_common import (
+                PartitionAnalysisError,
+                analyze_partition_strategy,
+            )
+
+            analyze_partition_strategy(
+                input_parquet=input_parquet,
+                column_name=column,
+                column_prefix_length=chars,
+                verbose=True,
+            )
+        except PartitionAnalysisError:
+            # Analysis already displayed the errors, just continue to preview
+            pass
+        except Exception as e:
+            # If analysis fails unexpectedly, show error but continue to preview
+            click.echo(click.style(f"\nAnalysis error: {e}", fg="yellow"))
+
+        # Then show partition preview
+        click.echo("\n" + "=" * 70)
         preview_partition(
             input_parquet=input_parquet,
             column_name=column,
@@ -102,6 +128,8 @@ def partition_by_string(
         hive=hive,
         overwrite=overwrite,
         verbose=verbose,
+        force=force,
+        skip_analysis=skip_analysis,
     )
 
     click.echo(f"Successfully created {num_partitions} partition file(s)")
