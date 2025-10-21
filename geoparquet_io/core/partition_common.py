@@ -14,6 +14,12 @@ from geoparquet_io.core.common import (
 )
 
 
+class PartitionAnalysisError(Exception):
+    """Raised when partition analysis detects a problematic strategy."""
+
+    pass
+
+
 def sanitize_filename(value: str) -> str:
     """
     Sanitize a string value for use in a filename.
@@ -34,6 +40,361 @@ def sanitize_filename(value: str) -> str:
     # Collapse multiple underscores
     sanitized = re.sub(r"_+", "_", sanitized)
     return sanitized
+
+
+def analyze_partition_strategy(
+    input_parquet: str,
+    column_name: str,
+    column_prefix_length: Optional[int] = None,
+    max_partitions: int = 10000,
+    min_rows_per_partition: int = 100,
+    min_partition_size_mb: float = 0.001,  # 1KB
+    max_imbalance_ratio: float = 1000.0,
+    warn_imbalance_ratio: float = 100.0,
+    warn_partition_count: int = 1000,
+    warn_min_rows: int = 10000,
+    verbose: bool = False,
+) -> dict:
+    """
+    Analyze a partition strategy before execution to detect potential issues.
+
+    Calculates comprehensive statistics about how data would be partitioned and
+    checks for pathological cases like too many partitions, tiny partitions,
+    extreme imbalance, etc.
+
+    Args:
+        input_parquet: Input file path
+        column_name: Column to partition by
+        column_prefix_length: If set, use first N characters of column value
+        max_partitions: Maximum allowed partitions (raises error if exceeded)
+        min_rows_per_partition: Minimum rows per partition (raises error if avg below this)
+        min_partition_size_mb: Minimum partition size in MB (raises error if avg below this)
+        max_imbalance_ratio: Maximum ratio of largest to median partition (raises error if exceeded)
+        warn_imbalance_ratio: Warn if imbalance ratio exceeds this
+        warn_partition_count: Warn if partition count exceeds this
+        warn_min_rows: Warn if average rows per partition below this
+        verbose: Print detailed analysis
+
+    Returns:
+        Dictionary with analysis results including:
+        - partition_count: Number of partitions
+        - total_rows: Total number of rows
+        - row_stats: Dict with min, max, avg, median, stddev
+        - size_stats: Dict with estimated sizes
+        - imbalance_ratio: Ratio of max to median partition size
+        - warnings: List of warning messages
+        - errors: List of error messages (blocking)
+        - largest_partition_pct: Percentage of data in largest partition
+
+    Raises:
+        PartitionAnalysisError: If blocking issues are detected
+    """
+    input_url = safe_file_url(input_parquet, verbose)
+
+    # Create DuckDB connection
+    con = duckdb.connect()
+    con.execute("INSTALL spatial;")
+    con.execute("LOAD spatial;")
+
+    # Build the column expression for partitioning
+    if column_prefix_length is not None:
+        column_expr = f'LEFT("{column_name}", {column_prefix_length})'
+    else:
+        column_expr = f'"{column_name}"'
+
+    if verbose:
+        click.echo("\n📊 Analyzing partition strategy...")
+
+    # Calculate comprehensive statistics in one query
+    stats_query = f"""
+        WITH partition_stats AS (
+            SELECT
+                {column_expr} as partition_value,
+                COUNT(*) as row_count
+            FROM '{input_url}'
+            WHERE "{column_name}" IS NOT NULL
+            GROUP BY partition_value
+        )
+        SELECT
+            COUNT(*) as partition_count,
+            SUM(row_count) as total_rows,
+            MIN(row_count) as min_rows,
+            MAX(row_count) as max_rows,
+            AVG(row_count)::BIGINT as avg_rows,
+            MEDIAN(row_count)::BIGINT as median_rows
+        FROM partition_stats
+    """
+
+    result = con.execute(stats_query).fetchone()
+
+    # Get approximate file size for estimation
+    # Use file size as a rough proxy for row size
+    try:
+        import os
+
+        file_size_bytes = os.path.getsize(input_parquet)
+    except Exception:
+        file_size_bytes = 0
+
+    con.close()
+
+    # Unpack results
+    (
+        partition_count,
+        total_rows,
+        min_rows,
+        max_rows,
+        avg_rows,
+        median_rows,
+    ) = result
+
+    # Estimate size based on file size and row distribution
+    if file_size_bytes > 0 and total_rows > 0:
+        bytes_per_row = file_size_bytes / total_rows
+        min_size_bytes = int(min_rows * bytes_per_row)
+        max_size_bytes = int(max_rows * bytes_per_row)
+        avg_size_bytes = int(avg_rows * bytes_per_row)
+    else:
+        # Fallback if we can't get file size
+        min_size_bytes = min_rows * 1000  # Assume 1KB per row as rough estimate
+        max_size_bytes = max_rows * 1000
+        avg_size_bytes = avg_rows * 1000
+
+    # Calculate derived metrics
+    imbalance_ratio = max_rows / median_rows if median_rows > 0 else 0
+    largest_partition_pct = (max_rows / total_rows * 100) if total_rows > 0 else 0
+    avg_size_mb = avg_size_bytes / (1024 * 1024)
+    max_size_mb = max_size_bytes / (1024 * 1024)
+
+    # Collect warnings and errors
+    warnings = []
+    errors = []
+
+    # Check for BREAKING conditions
+    if partition_count > max_partitions:
+        errors.append(
+            f"Pathological partitioning: {partition_count:,} partitions exceeds maximum of {max_partitions:,}. "
+            f"This will create too many small files with poor performance."
+        )
+
+    if avg_rows < min_rows_per_partition:
+        errors.append(
+            f"Tiny partitions: Average of {avg_rows:,} rows per partition is below minimum of {min_rows_per_partition:,}. "
+            f"This will result in poor I/O performance and excessive file overhead."
+        )
+
+    if avg_size_mb < min_partition_size_mb:
+        errors.append(
+            f"Tiny partition files: Average size of {avg_size_mb:.3f} MB is below minimum of {min_partition_size_mb:.3f} MB. "
+            f"These tiny files will have poor I/O performance."
+        )
+
+    if imbalance_ratio > max_imbalance_ratio:
+        errors.append(
+            f"Extreme imbalance: Largest partition ({max_rows:,} rows) is {imbalance_ratio:.1f}x the median ({median_rows:,} rows). "
+            f"This indicates a data quality issue or wrong partition key choice."
+        )
+
+    # Check for WARNING conditions
+    if warn_imbalance_ratio <= imbalance_ratio < max_imbalance_ratio:
+        warnings.append(
+            f"Moderate imbalance: Largest partition is {imbalance_ratio:.1f}x the median. "
+            f"This might be expected (e.g., some regions are larger) but worth noting."
+        )
+
+    if warn_partition_count <= partition_count < max_partitions:
+        warnings.append(
+            f"Many partitions: Creating {partition_count:,} partitions. Not broken but getting unwieldy."
+        )
+
+    if min_rows_per_partition <= avg_rows < warn_min_rows:
+        warnings.append(
+            f"Small partitions: Average of {avg_rows:,} rows per partition is below recommended {warn_min_rows:,}. "
+            f"Suboptimal but might be intentional for your use case."
+        )
+
+    if largest_partition_pct > 50:
+        warnings.append(
+            f"Single partition dominates: One partition contains {largest_partition_pct:.1f}% of all data. "
+            f"This might defeat the purpose of partitioning."
+        )
+
+    # Generate recommendations
+    recommendations = _generate_recommendations(
+        partition_count=partition_count,
+        total_rows=total_rows,
+        avg_rows=avg_rows,
+        max_rows=max_rows,
+        avg_size_mb=avg_size_mb,
+        imbalance_ratio=imbalance_ratio,
+        column_prefix_length=column_prefix_length,
+    )
+
+    # Build result dictionary
+    analysis = {
+        "partition_count": partition_count,
+        "total_rows": total_rows,
+        "row_stats": {
+            "min": min_rows,
+            "max": max_rows,
+            "avg": avg_rows,
+        },
+        "size_stats": {
+            "min_mb": min_size_bytes / (1024 * 1024),
+            "max_mb": max_size_mb,
+            "avg_mb": avg_size_mb,
+        },
+        "imbalance_ratio": imbalance_ratio,
+        "largest_partition_pct": largest_partition_pct,
+        "warnings": warnings,
+        "errors": errors,
+        "recommendations": recommendations,
+    }
+
+    # Display analysis if verbose
+    if verbose or warnings or errors or recommendations:
+        _display_partition_analysis(analysis, column_name, column_prefix_length)
+
+    # Raise error if blocking conditions found
+    if errors:
+        error_msg = "\n\n".join([f"❌ {err}" for err in errors])
+        error_msg += "\n\nUse --force to override this check if you're certain about this partitioning strategy."
+        raise PartitionAnalysisError(error_msg)
+
+    return analysis
+
+
+def _generate_recommendations(
+    partition_count: int,
+    total_rows: int,
+    avg_rows: int,
+    max_rows: int,
+    avg_size_mb: float,
+    imbalance_ratio: float,
+    column_prefix_length: Optional[int] = None,
+) -> list:
+    """
+    Generate actionable recommendations based on partition analysis.
+
+    Args:
+        partition_count: Number of partitions
+        total_rows: Total number of rows
+        avg_rows: Average rows per partition
+        max_rows: Maximum rows in a partition
+        avg_size_mb: Average partition size in MB
+        imbalance_ratio: Ratio of max to median partition
+        column_prefix_length: If partitioning by prefix (e.g., H3 resolution)
+
+    Returns:
+        List of recommendation strings
+    """
+    recommendations = []
+
+    # Very small dataset - not worth partitioning
+    if total_rows < 1000:
+        recommendations.append(
+            f"Dataset is very small ({total_rows:,} rows). "
+            "Partitioning is not recommended - use as a single file for better performance."
+        )
+        return recommendations
+
+    # Too many tiny files - suggest not partitioning or using fewer partitions
+    if partition_count > 1000 and avg_rows < 10000:
+        recommendations.append(
+            "Consider NOT partitioning this dataset - you'll create many small files with poor performance. "
+            "Alternative: Use the data as a single file with spatial indexing (bbox column)."
+        )
+
+    # Large partitions with H3 - suggest increasing resolution
+    if column_prefix_length is not None and avg_rows > 1000000:
+        current_res = column_prefix_length
+        suggested_res = min(current_res + 2, 15)
+        recommendations.append(
+            f"Partitions are very large ({avg_rows:,} avg rows). "
+            f"Consider increasing H3 resolution to {suggested_res} for smaller, more manageable partitions."
+        )
+
+    # Very large max partition - suggest hierarchical partitioning
+    if max_rows > 10000000 and imbalance_ratio > 5:
+        recommendations.append(
+            "Largest partition is very large and imbalanced. "
+            "Consider hierarchical partitioning: partition by a coarser key first (e.g., country/region), "
+            "then by H3 within each partition."
+        )
+
+    # Moderate number of reasonable-sized partitions - good strategy
+    if 10 <= partition_count <= 500 and 10000 <= avg_rows <= 5000000:
+        recommendations.append(
+            "This looks like a reasonable partitioning strategy. "
+            f"You'll create {partition_count} partitions with ~{avg_rows:,} rows each."
+        )
+
+    # Too few partitions - might not be worth it
+    if partition_count < 5 and total_rows > 1000000:
+        recommendations.append(
+            f"Only {partition_count} partitions for {total_rows:,} rows. "
+            "Consider using more granular partitioning (e.g., higher H3 resolution or prefix partitioning)."
+        )
+
+    # Suggest hierarchical for specific cases
+    if partition_count > 5000 and column_prefix_length is not None:
+        current_res = column_prefix_length
+        suggested_res = max(current_res - 1, 0)
+        recommendations.append(
+            f"Too many partitions ({partition_count:,}). Consider hierarchical approach: "
+            f"first partition by H3 at resolution {suggested_res}, then by resolution {current_res} within each."
+        )
+
+    return recommendations
+
+
+def _display_partition_analysis(
+    analysis: dict, column_name: str, column_prefix_length: Optional[int]
+) -> None:
+    """Display partition analysis results in a formatted way."""
+    partition_desc = f"'{column_name}'"
+    if column_prefix_length is not None:
+        partition_desc = f"first {column_prefix_length} character(s) of {partition_desc}"
+
+    click.echo(f"\nAnalyzing partition strategy for {partition_desc}...")
+    click.echo(f"  Partitions: {analysis['partition_count']:,}")
+    click.echo(f"  Total rows: {analysis['total_rows']:,}")
+
+    # Row distribution
+    stats = analysis["row_stats"]
+    click.echo(
+        f"  Rows per partition: min={stats['min']:,}, max={stats['max']:,}, avg={stats['avg']:,}"
+    )
+
+    # Size estimates
+    size = analysis["size_stats"]
+    if size["avg_mb"] >= 0.01:
+        click.echo(
+            f"  Estimated size per partition: min={size['min_mb']:.2f}MB, max={size['max_mb']:.2f}MB, avg={size['avg_mb']:.2f}MB"
+        )
+
+    # Balance metrics
+    click.echo(
+        f"  Imbalance: {analysis['imbalance_ratio']:.1f}x (largest/median), {analysis['largest_partition_pct']:.1f}% in largest"
+    )
+
+    # Recommendations
+    if analysis.get("recommendations"):
+        click.echo("\nRecommendations:")
+        for rec in analysis["recommendations"]:
+            click.echo(click.style(f"  💡 {rec}", fg="cyan"))
+
+    # Warnings
+    if analysis["warnings"]:
+        click.echo("\nWarnings:")
+        for warning in analysis["warnings"]:
+            click.echo(click.style(f"  {warning}", fg="yellow"))
+
+    # Errors
+    if analysis["errors"]:
+        click.echo("\nErrors:")
+        for error in analysis["errors"]:
+            click.echo(click.style(f"  {error}", fg="red"))
 
 
 def preview_partition(
@@ -134,6 +495,9 @@ def partition_by_column(
     hive: bool = False,
     overwrite: bool = False,
     verbose: bool = False,
+    keep_partition_column: bool = True,
+    force: bool = False,
+    skip_analysis: bool = False,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.
@@ -146,11 +510,37 @@ def partition_by_column(
         hive: Use Hive-style partitioning
         overwrite: Overwrite existing files
         verbose: Print detailed output
+        keep_partition_column: Whether to keep the partition column in output files (default: True)
+        force: Force partitioning even if analysis detects issues
+        skip_analysis: Skip partition strategy analysis (for performance)
 
     Returns:
         Number of partitions created
     """
     input_url = safe_file_url(input_parquet, verbose)
+
+    # Run partition analysis unless skipped
+    if not skip_analysis:
+        try:
+            analyze_partition_strategy(
+                input_parquet=input_parquet,
+                column_name=column_name,
+                column_prefix_length=column_prefix_length,
+                verbose=verbose,
+            )
+        except PartitionAnalysisError as e:
+            if not force:
+                raise click.ClickException(str(e)) from e
+            else:
+                # User forced execution despite warnings
+                if verbose:
+                    click.echo(
+                        click.style(
+                            "\n⚠️  Forcing partition creation despite analysis warnings/errors...",
+                            fg="yellow",
+                            bold=True,
+                        )
+                    )
 
     # Get metadata before processing
     metadata, _ = get_parquet_metadata(input_parquet, verbose)
@@ -233,9 +623,22 @@ def partition_by_column(
             # Match rows where the full value matches
             where_clause = f"\"{column_name}\" = '{partition_value}'"
 
+        # Build SELECT clause - exclude partition column if requested
+        if keep_partition_column:
+            select_clause = "*"
+        else:
+            # Get all column names from the input file
+            schema_query = f"SELECT * FROM '{input_url}' LIMIT 0"
+            schema_result = con.execute(schema_query)
+            all_columns = [desc[0] for desc in schema_result.description]
+
+            # Exclude the partition column
+            columns_to_select = [f'"{col}"' for col in all_columns if col != column_name]
+            select_clause = ", ".join(columns_to_select)
+
         # Build SELECT query for partition (without COPY wrapper)
         partition_query = f"""
-            SELECT *
+            SELECT {select_clause}
             FROM '{input_url}'
             WHERE {where_clause}
         """

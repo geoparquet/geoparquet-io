@@ -11,6 +11,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
 - 🚀 **Fast**: Built on PyArrow and DuckDB for high-performance operations
 - 📦 **Comprehensive**: Sort, partition, enhance, and validate GeoParquet files
+- 🗺️ **Spatial Indexing**: Add bbox, H3 hexagonal cells, and admin divisions
 - 🎯 **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
 - 🔧 **Flexible**: CLI and Python API for any workflow
 - ✅ **Tested**: Extensive test suite across Python 3.9-3.13 and all platforms
@@ -56,6 +57,9 @@ gpio check all myfile.parquet
 
 # Add bounding box column for faster queries
 gpio add bbox input.parquet output.parquet
+
+# Add H3 hexagonal cell IDs for spatial indexing
+gpio add h3 input.parquet output.parquet --resolution 9
 
 # Add country codes via spatial join
 gpio add admin-divisions input.parquet output.parquet
@@ -148,6 +152,44 @@ gpio add bbox input.parquet output.parquet
 gpio add bbox input.parquet output.parquet --bbox-name bounds
 ```
 
+#### add h3
+
+Add H3 hexagonal cell IDs to a GeoParquet file based on geometry centroids. This provides hierarchical spatial indexing for aggregation and analysis, and automatically adds proper H3 covering metadata.
+
+```
+$ gpio add h3 --help
+Usage: gpio add h3 [OPTIONS] INPUT_PARQUET OUTPUT_PARQUET
+
+  Add an H3 cell ID column to a GeoParquet file.
+
+  Computes H3 hexagonal cell IDs based on geometry centroids. H3 is a
+  hierarchical hexagonal geospatial indexing system that provides consistent
+  cell sizes and shapes across the globe.
+
+  The cell ID is stored as a VARCHAR (string) for maximum portability across
+  tools. Resolution determines cell size - higher values mean smaller cells
+  with more precision.
+
+Options:
+  --h3-name TEXT        Name for the H3 column (default: h3_cell)
+  --resolution INTEGER  H3 resolution level (0-15). Res 7: ~5km², Res 9:
+                        ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9
+  --verbose             Print additional information.
+  --help                Show this message and exit.
+```
+
+Example usage:
+```bash
+# Add H3 column with default resolution 9
+gpio add h3 input.parquet output.parquet
+
+# Add H3 column with custom resolution
+gpio add h3 input.parquet output.parquet --resolution 13
+
+# Add H3 column with custom name
+gpio add h3 input.parquet output.parquet --h3-name h3_index
+```
+
 #### add admin-divisions
 
 Add ISO codes for countries based on spatial intersection, following the [administrative division extension](https://github.com/fiboa/administrative-division-extension) in [fiboa](https://github.com/fiboa).
@@ -194,6 +236,8 @@ gpio add admin-divisions buildings.parquet output.parquet --dry-run
 
 The `partition` commands provide different options to partition GeoParquet files into separate files based on column values.
 
+**Smart Analysis**: All partition commands automatically analyze your partitioning strategy before execution, calculating statistics and providing recommendations. Use `--preview` for dry-run analysis without creating files. Use `--force` to override warnings, or `--skip-analysis` for performance.
+
 #### partition string
 
 Partition a GeoParquet file by string column values. You can partition by full column values or by a prefix (first N characters). This is useful for splitting large datasets by categories, codes, regions, etc.
@@ -227,7 +271,7 @@ Options:
 
 Example usage:
 ```bash
-# Preview partitions by first character of MGRS codes
+# Analyze and preview partition strategy (dry-run)
 gpio partition string input.parquet --column MGRS --chars 1 --preview
 
 # Partition by full column values
@@ -238,6 +282,66 @@ gpio partition string input.parquet output/ --column mgrs_code --chars 2
 
 # Use Hive-style partitioning with prefix
 gpio partition string input.parquet output/ --column region --chars 1 --hive
+```
+
+#### partition h3
+
+Partition a GeoParquet file by H3 hexagonal cells at a specified resolution. Automatically adds H3 column if it doesn't exist.
+
+By default, the H3 column is **excluded** from the output files (since it's redundant with the partition path), except when using Hive-style partitioning where it's included. Use `--keep-h3-column` to explicitly keep the column in all cases.
+
+```
+$ gpio partition h3 --help
+Usage: gpio partition h3 [OPTIONS] INPUT_PARQUET [OUTPUT_FOLDER]
+
+  Partition a GeoParquet file by H3 cells at specified resolution.
+
+  Creates separate GeoParquet files based on H3 cell prefixes at the
+  specified resolution. If the H3 column doesn't exist, it will be
+  automatically added before partitioning.
+
+  By default, the H3 column is excluded from output files (since it's
+  redundant with the partition path) unless using Hive-style partitioning.
+  Use --keep-h3-column to explicitly keep the column in all cases.
+
+  Use --preview to see what partitions would be created without actually
+  creating files.
+
+Options:
+  --h3-name TEXT           Name of H3 column to partition by (default:
+                           h3_cell)
+  --resolution INTEGER     H3 resolution for partitioning (0-15, default: 9)
+  --hive                   Use Hive-style partitioning in output folder
+                           structure
+  --overwrite              Overwrite existing partition files
+  --preview                Preview partitions without creating files
+  --preview-limit INTEGER  Number of partitions to show in preview (default:
+                           15)
+  --keep-h3-column         Keep the H3 column in output files (default:
+                           excluded for non-Hive, included for Hive)
+  --verbose                Print additional information
+  --help                   Show this message and exit.
+```
+
+Example usage:
+```bash
+# Analyze and preview H3 partition strategy at resolution 7 (dry-run)
+gpio partition h3 input.parquet --resolution 7 --preview
+
+# Partition by H3 cells at resolution 9 (analyzes first, H3 column excluded from output)
+gpio partition h3 input.parquet output/
+
+# Force partitioning despite analysis warnings
+gpio partition h3 input.parquet output/ --force
+
+# Partition with H3 column kept in output files
+gpio partition h3 input.parquet output/ --keep-h3-column
+
+# Partition with custom resolution and Hive-style (H3 column included by default)
+gpio partition h3 input.parquet output/ --resolution 8 --hive
+
+# Use custom H3 column name
+gpio partition h3 input.parquet output/ --h3-name my_h3
 ```
 
 #### partition admin

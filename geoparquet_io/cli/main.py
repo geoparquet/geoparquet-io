@@ -3,9 +3,11 @@ import click
 from geoparquet_io.core.add_bbox_column import add_bbox_column as add_bbox_column_impl
 from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
 from geoparquet_io.core.add_country_codes import add_country_codes as add_country_codes_impl
+from geoparquet_io.core.add_h3_column import add_h3_column as add_h3_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
+from geoparquet_io.core.partition_by_h3 import partition_by_h3 as partition_by_h3_impl
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
@@ -388,6 +390,89 @@ def add_bbox(
     )
 
 
+@add.command(name="h3")
+@click.argument("input_parquet")
+@click.argument("output_parquet")
+@click.option("--h3-name", default="h3_cell", help="Name for the H3 column (default: h3_cell)")
+@click.option(
+    "--resolution",
+    default=9,
+    type=click.IntRange(0, 15),
+    help="H3 resolution level (0-15). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9",
+)
+@click.option(
+    "--compression",
+    default="ZSTD",
+    type=click.Choice(
+        ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
+    ),
+    help="Compression type for output file (default: ZSTD)",
+)
+@click.option(
+    "--compression-level",
+    type=click.IntRange(1, 22),
+    help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
+)
+@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
+@click.option(
+    "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print SQL commands that would be executed without actually running them.",
+)
+@click.option("--verbose", is_flag=True, help="Print additional information.")
+def add_h3(
+    input_parquet,
+    output_parquet,
+    h3_name,
+    resolution,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    dry_run,
+    verbose,
+):
+    """Add an H3 cell ID column to a GeoParquet file.
+
+    Computes H3 hexagonal cell IDs based on geometry centroids. H3 is a hierarchical
+    hexagonal geospatial indexing system that provides consistent cell sizes and shapes
+    across the globe.
+
+    The cell ID is stored as a VARCHAR (string) for maximum portability across tools.
+    Resolution determines cell size - higher values mean smaller cells with more precision.
+    """
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_io.core.common import parse_size_string
+
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}") from e
+
+    add_h3_column_impl(
+        input_parquet,
+        output_parquet,
+        h3_name,
+        resolution,
+        dry_run,
+        verbose,
+        compression.upper(),
+        compression_level,
+        row_group_mb,
+        row_group_size,
+    )
+
+
 # Partition commands group
 @cli.group()
 def partition():
@@ -415,8 +500,27 @@ def partition():
     type=int,
     help="Number of partitions to show in preview (default: 15)",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force partitioning even if analysis detects potential issues",
+)
+@click.option(
+    "--skip-analysis",
+    is_flag=True,
+    help="Skip partition strategy analysis (for performance-sensitive cases)",
+)
 def partition_admin(
-    input_parquet, output_folder, column, hive, verbose, overwrite, preview, preview_limit
+    input_parquet,
+    output_folder,
+    column,
+    hive,
+    verbose,
+    overwrite,
+    preview,
+    preview_limit,
+    force,
+    skip_analysis,
 ):
     """Split a GeoParquet file into separate files by country code.
 
@@ -430,7 +534,16 @@ def partition_admin(
         raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
     split_country_impl(
-        input_parquet, output_folder, column, hive, verbose, overwrite, preview, preview_limit
+        input_parquet,
+        output_folder,
+        column,
+        hive,
+        verbose,
+        overwrite,
+        preview,
+        preview_limit,
+        force,
+        skip_analysis,
     )
 
 
@@ -441,16 +554,40 @@ def partition_admin(
 @click.option("--chars", type=int, help="Number of characters to use as prefix for partitioning")
 @click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure")
 @click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")
-@click.option("--preview", is_flag=True, help="Preview partitions without creating files")
+@click.option(
+    "--preview",
+    is_flag=True,
+    help="Analyze and preview partitions without creating files (dry-run)",
+)
 @click.option(
     "--preview-limit",
     default=15,
     type=int,
     help="Number of partitions to show in preview (default: 15)",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force partitioning even if analysis detects potential issues",
+)
+@click.option(
+    "--skip-analysis",
+    is_flag=True,
+    help="Skip partition strategy analysis (for performance-sensitive cases)",
+)
 @click.option("--verbose", is_flag=True, help="Print additional information")
 def partition_string(
-    input_parquet, output_folder, column, chars, hive, overwrite, preview, preview_limit, verbose
+    input_parquet,
+    output_folder,
+    column,
+    chars,
+    hive,
+    overwrite,
+    preview,
+    preview_limit,
+    force,
+    skip_analysis,
+    verbose,
 ):
     """Partition a GeoParquet file by string column values.
 
@@ -487,6 +624,116 @@ def partition_string(
         preview,
         preview_limit,
         verbose,
+        force,
+        skip_analysis,
+    )
+
+
+@partition.command(name="h3")
+@click.argument("input_parquet")
+@click.argument("output_folder", required=False)
+@click.option(
+    "--h3-name",
+    default="h3_cell",
+    help="Name of H3 column to partition by (default: h3_cell)",
+)
+@click.option(
+    "--resolution",
+    type=click.IntRange(0, 15),
+    default=9,
+    help="H3 resolution for partitioning (0-15, default: 9)",
+)
+@click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure")
+@click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")
+@click.option(
+    "--preview",
+    is_flag=True,
+    help="Analyze and preview partitions without creating files (dry-run)",
+)
+@click.option(
+    "--preview-limit",
+    default=15,
+    type=int,
+    help="Number of partitions to show in preview (default: 15)",
+)
+@click.option(
+    "--keep-h3-column",
+    is_flag=True,
+    help="Keep the H3 column in output files (default: excluded for non-Hive, included for Hive)",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force partitioning even if analysis detects potential issues",
+)
+@click.option(
+    "--skip-analysis",
+    is_flag=True,
+    help="Skip partition strategy analysis (for performance-sensitive cases)",
+)
+@click.option("--verbose", is_flag=True, help="Print additional information")
+def partition_h3(
+    input_parquet,
+    output_folder,
+    h3_name,
+    resolution,
+    hive,
+    overwrite,
+    preview,
+    preview_limit,
+    keep_h3_column,
+    force,
+    skip_analysis,
+    verbose,
+):
+    """Partition a GeoParquet file by H3 cells at specified resolution.
+
+    Creates separate GeoParquet files based on H3 cell prefixes at the specified resolution.
+    If the H3 column doesn't exist, it will be automatically added before partitioning.
+
+    By default, the H3 column is excluded from output files (since it's redundant with the
+    partition path) unless using Hive-style partitioning. Use --keep-h3-column to explicitly
+    keep the column in all cases.
+
+    Use --preview to see what partitions would be created without actually creating files.
+
+    Examples:
+
+        # Preview partitions at resolution 7 (~5km² cells)
+        gpio partition h3 input.parquet --resolution 7 --preview
+
+        # Partition by H3 cells at default resolution 9 (H3 column excluded from output)
+        gpio partition h3 input.parquet output/
+
+        # Partition with H3 column kept in output files
+        gpio partition h3 input.parquet output/ --keep-h3-column
+
+        # Partition with custom H3 column name
+        gpio partition h3 input.parquet output/ --h3-name my_h3
+
+        # Use Hive-style partitioning at resolution 8 (H3 column included by default)
+        gpio partition h3 input.parquet output/ --resolution 8 --hive
+    """
+    # If preview mode, output_folder is not required
+    if not preview and not output_folder:
+        raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
+
+    # Convert flag to None if not explicitly set, so implementation can determine default
+    keep_h3_col = True if keep_h3_column else None
+
+    partition_by_h3_impl(
+        input_parquet,
+        output_folder,
+        h3_name,
+        resolution,
+        hive,
+        overwrite,
+        preview,
+        preview_limit,
+        verbose,
+        keep_h3_col,
+        force,
+        skip_analysis,
     )
 
 

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Created generic `add_computed_column` helper in `common.py` to minimize boilerplate for adding computed columns
+- Added H3 hexagonal cell ID support via DuckDB H3 extension with `gpio add h3` and `gpio partition h3` commands. H3 columns are excluded from partition output by default (use `--keep-h3-column` to retain), except for Hive partitioning where they're kept by default.
+- Enhanced metadata system to support custom covering metadata for multiple spatial indices (bbox + H3) in GeoParquet 1.1 spec
+- Added intelligent partition strategy analysis that automatically validates partition plans before execution with configurable thresholds (errors for pathological cases like >10K partitions or <100 avg rows, warnings for moderate issues). New flags: `--force` to override errors, `--skip-analysis` for performance, and enhanced `--preview` for dry-run with actionable recommendations.
 
 ## [0.1.0] - 2025-10-19
 
