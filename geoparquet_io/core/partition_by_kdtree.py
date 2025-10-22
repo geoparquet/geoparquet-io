@@ -16,7 +16,7 @@ def partition_by_kdtree(
     input_parquet: str,
     output_folder: str,
     kdtree_column_name: str = "kdtree_cell",
-    iterations: int = 9,
+    iterations: int = None,
     hive: bool = False,
     overwrite: bool = False,
     preview: bool = False,
@@ -26,6 +26,7 @@ def partition_by_kdtree(
     force: bool = False,
     skip_analysis: bool = False,
     sample_size: int = 100000,
+    auto_target_rows: tuple = None,
 ):
     """
     Partition a GeoParquet file by KD-tree cells.
@@ -34,8 +35,6 @@ def partition_by_kdtree(
     partitioning.
 
     Performance Note: Approximate mode is O(n), exact mode is O(n × iterations).
-    For datasets > 50M rows, use hierarchical partitioning: partition by coarse
-    key (country/region) first, then apply KD-tree within each partition.
 
     Args:
         input_parquet: Input GeoParquet file
@@ -73,37 +72,8 @@ def partition_by_kdtree(
 
     column_exists = kdtree_column_name in schema.names
 
-    # Early check for large datasets - KD-tree computation is expensive
-    # Runtime scales with dataset_size × iterations, so warn/block for large datasets
-    # This applies to BOTH preview and actual partitioning since preview needs to compute values too
-    if not column_exists and not force and total_rows > 50_000_000:
-        partition_count = 2**iterations
-        preview_note = " (including preview)" if preview else ""
-        error_msg = click.style("\n⚠️  Large Dataset Warning\n", fg="yellow", bold=True)
-        error_msg += click.style(
-            f"\nDataset has {total_rows:,} rows. Computing {partition_count:,} KD-tree partitions{preview_note} "
-            f"will take considerable time.\n",
-            fg="yellow",
-        )
-        error_msg += click.style(
-            "\nRecommended approach for faster processing:", fg="cyan", bold=True
-        )
-        error_msg += click.style(
-            "\n  1. Partition by coarser key first (country/region/state)\n"
-            "  2. Apply KD-tree within each smaller partition\n",
-            fg="cyan",
-        )
-        error_msg += click.style(
-            "\nExample:\n"
-            "  gpio partition string <file> <output> --column state\n"
-            "  gpio partition kdtree <state_file> <output> --partitions 512\n",
-            fg="cyan",
-        )
-        error_msg += click.style(
-            "\nUse --force to proceed anyway.\n",
-            fg="yellow",
-        )
-        raise click.ClickException(error_msg)
+    # Note: With approximate mode (default), large datasets are handled efficiently in O(n)
+    # Only exact mode is expensive for very large datasets
 
     if not column_exists and verbose and total_rows > 10_000_000:
         click.echo(
@@ -140,6 +110,7 @@ def partition_by_kdtree(
                 row_group_rows=None,
                 force=force,
                 sample_size=sample_size,
+                auto_target_rows=auto_target_rows,
             )
 
             # Use the temp file as input for partitioning

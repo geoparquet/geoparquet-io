@@ -61,8 +61,8 @@ gpio add bbox input.parquet output.parquet
 # Add H3 hexagonal cell IDs for spatial indexing
 gpio add h3 input.parquet output.parquet --resolution 9
 
-# Add KD-tree partition IDs for balanced spatial partitioning
-gpio add kdtree input.parquet output.parquet --iterations 9
+# Add KD-tree partition IDs for balanced spatial partitioning (auto mode)
+gpio add kdtree input.parquet output.parquet
 
 # Add country codes via spatial join
 gpio add admin-divisions input.parquet output.parquet
@@ -197,16 +197,24 @@ gpio add h3 input.parquet output.parquet --h3-name h3_index
 
 Add KD-tree partition IDs to a GeoParquet file. KD-tree creates balanced spatial partitions by recursively splitting on alternating X/Y dimensions at medians. The partition ID is stored as a binary string (e.g., "01011001").
 
+By default, **auto-selects** partitions targeting ~120k rows each using **approximate mode** (O(n) with 100k sample) for fast computation. Use `--partitions N` for explicit control or `--exact` for deterministic results.
+
 Example usage:
 ```bash
-# Add KD-tree column with default 9 iterations (512 partitions)
+# Auto-select partitions targeting 120k rows each (default)
 gpio add kdtree input.parquet output.parquet
 
-# Add KD-tree column with custom iterations
-gpio add kdtree input.parquet output.parquet --iterations 5
+# Use explicit partition count
+gpio add kdtree input.parquet output.parquet --partitions 32
+
+# Use exact computation (slower but deterministic)
+gpio add kdtree input.parquet output.parquet --partitions 32 --exact
+
+# Track progress with verbose mode
+gpio add kdtree input.parquet output.parquet --verbose
 ```
 
-**Note**: Runtime scales with dataset size × iterations. For datasets > 50M rows, use hierarchical partitioning.
+**Note**: Partitions must be power of 2 (2, 4, 8, 16, ...).
 
 #### add admin-divisions
 
@@ -366,21 +374,27 @@ gpio partition h3 input.parquet output/ --h3-name my_h3
 
 Partition a GeoParquet file by KD-tree cells. Automatically adds KD-tree column if it doesn't exist. Creates balanced spatial partitions by recursively splitting on alternating X/Y dimensions at medians.
 
-By default, the KD-tree column is **excluded** from output files (redundant with partition path), except when using Hive-style partitioning. Use `--keep-kdtree-column` to explicitly keep it.
+By default, **auto-selects** partitions targeting ~120k rows each using **approximate mode** (O(n) with 100k sample). The KD-tree column is **excluded** from output files (redundant with partition path), except when using Hive-style partitioning.
 
 Example usage:
 ```bash
-# Preview partition strategy (dry-run)
-gpio partition kdtree input.parquet --iterations 5 --preview
-
-# Partition by KD-tree at default 9 iterations (512 partitions)
+# Auto-partition targeting 120k rows each (default)
 gpio partition kdtree input.parquet output/
 
-# Use Hive-style partitioning
-gpio partition kdtree input.parquet output/ --hive
+# Preview with auto-selected partitions
+gpio partition kdtree input.parquet --preview
+
+# Use explicit partition count
+gpio partition kdtree input.parquet output/ --partitions 32
+
+# Use exact computation for deterministic results
+gpio partition kdtree input.parquet output/ --partitions 32 --exact
+
+# Use Hive-style partitioning with progress tracking
+gpio partition kdtree input.parquet output/ --hive --verbose
 ```
 
-**Note**: Runtime scales with dataset size × iterations. For datasets > 50M rows, use hierarchical partitioning.
+**Note**: Partitions must be power of 2 (2, 4, 8, 16, ...).
 
 #### partition admin
 

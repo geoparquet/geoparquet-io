@@ -487,13 +487,13 @@ def add_h3(
     "--partitions",
     default=None,
     type=int,
-    help="Number of partitions (must be power of 2: 2, 4, 8, ...). Mutually exclusive with --auto.",
+    help="Explicit partition count (must be power of 2: 2, 4, 8, ...). Overrides default auto mode.",
 )
 @click.option(
     "--auto",
     default=None,
     type=int,
-    help="Auto-select partitions targeting N rows/partition (e.g., --auto 120000). Recommended: 120,000. Mutually exclusive with --partitions.",
+    help="Auto-select partitions targeting N rows/partition. Default when neither --partitions nor --auto specified: 120,000.",
 )
 @click.option(
     "--approx",
@@ -531,7 +531,7 @@ def add_h3(
 @click.option(
     "--force",
     is_flag=True,
-    help="Force operation on large datasets (>50M rows) - not recommended, use hierarchical partitioning instead",
+    help="Force operation on large datasets without confirmation",
 )
 @click.option("--verbose", is_flag=True, help="Print additional information.")
 def add_kdtree(
@@ -555,11 +555,11 @@ def add_kdtree(
     Creates balanced spatial partitions using recursive splits alternating between
     X and Y dimensions at medians. Partition count must be a power of 2.
 
-    Use --auto N to target N rows/partition (recommended: 120,000).
-    By default, uses approximate computation with 100k point sample.
+    By default, auto-selects partitions targeting ~120k rows each using approximate mode
+    (O(n) with 100k sample). Use --partitions N for explicit control or --exact for
+    deterministic computation.
 
     Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
-    For datasets > 50M rows, consider hierarchical partitioning (country/region + KD-tree).
 
     Use --verbose to track progress with iteration-by-iteration updates.
     """
@@ -571,7 +571,8 @@ def add_kdtree(
 
     # Set defaults
     if partitions is None and auto is None:
-        partitions = 512  # Default if none specified
+        auto = 120000  # Default: auto-select targeting 120k rows/partition
+        partitions = None
     elif auto is not None:
         # Auto mode: will compute partitions below
         partitions = None
@@ -904,9 +905,15 @@ def partition_h3(
 )
 @click.option(
     "--partitions",
+    default=None,
     type=int,
-    default=512,
-    help="Number of partitions (must be power of 2: 2, 4, 8, ...). Default: 512",
+    help="Explicit partition count (must be power of 2: 2, 4, 8, ...). Overrides default auto mode.",
+)
+@click.option(
+    "--auto",
+    default=None,
+    type=int,
+    help="Auto-select partitions targeting N rows/partition. Default: 120,000.",
 )
 @click.option(
     "--approx",
@@ -953,6 +960,7 @@ def partition_kdtree(
     output_folder,
     kdtree_name,
     partitions,
+    auto,
     approx,
     exact,
     hive,
@@ -969,40 +977,61 @@ def partition_kdtree(
     Creates separate files based on KD-tree partition IDs. If the KD-tree column doesn't
     exist, it will be automatically added. Partition count must be a power of 2.
 
-    By default, uses approximate computation with 100k point sample. Use --exact for
-    deterministic full-data computation.
+    By default, auto-selects partitions targeting ~120k rows each using approximate mode
+    (O(n) with 100k sample). Use --partitions N for explicit control or --exact for
+    deterministic computation.
 
     Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
-    For datasets > 50M rows, consider hierarchical partitioning (country/region first, then KD-tree).
 
     Use --verbose to track progress with iteration-by-iteration updates.
 
     Examples:
 
-        # Preview 32 partitions (using approximation)
-        gpio partition kdtree input.parquet --partitions 32 --preview
+        # Preview with auto-selected partitions
+        gpio partition kdtree input.parquet --preview
 
-        # Partition into 512 files with exact computation
-        gpio partition kdtree input.parquet output/ --exact
+        # Partition with explicit partition count
+        gpio partition kdtree input.parquet output/ --partitions 32
+
+        # Partition with exact computation
+        gpio partition kdtree input.parquet output/ --partitions 32 --exact
 
         # Partition with custom sample size
         gpio partition kdtree input.parquet output/ --approx 200000
     """
-    # Validate partitions is a power of 2
+    # Validate mutually exclusive options
     import math
 
-    if partitions < 2 or (partitions & (partitions - 1)) != 0:
-        raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
+    if sum([partitions is not None, auto is not None]) > 1:
+        raise click.UsageError("--partitions and --auto are mutually exclusive")
+
+    # Set defaults
+    if partitions is None and auto is None:
+        auto = 120000  # Default: auto-select targeting 120k rows/partition
+
+    # Validate partitions if specified
+    if partitions is not None:
+        if partitions < 2 or (partitions & (partitions - 1)) != 0:
+            raise click.UsageError(
+                f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}"
+            )
+        iterations = int(math.log2(partitions))
+    else:
+        iterations = None  # Will be computed in auto mode
 
     # Validate mutually exclusive options for approx/exact
     if exact and approx != 100000:
         raise click.UsageError("--approx and --exact are mutually exclusive")
 
-    # Convert partitions to iterations
-    iterations = int(math.log2(partitions))
-
     # Determine sample size
     sample_size = None if exact else approx
+
+    # Prepare auto_target if in auto mode
+    if auto is not None:
+        target_rows = auto if auto > 0 else 120000
+        auto_target = ("rows", target_rows)
+    else:
+        auto_target = None
 
     # If preview mode, output_folder is not required
     if not preview and not output_folder:
@@ -1025,6 +1054,7 @@ def partition_kdtree(
         force,
         skip_analysis,
         sample_size,
+        auto_target,
     )
 
 

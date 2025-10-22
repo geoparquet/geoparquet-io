@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 
 import click
-import fsspec
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
     find_primary_geometry_column,
@@ -209,8 +207,6 @@ def add_kdtree_column(
     on a sample, then applies to full dataset in a single pass.
 
     Performance Note: Approximate mode is O(n), exact mode is O(n × iterations).
-    For datasets > 50M rows, use hierarchical partitioning (country/region
-    first, then KD-tree within each partition).
 
     Args:
         input_parquet: Path to the input parquet file
@@ -282,48 +278,7 @@ def add_kdtree_column(
 
     con.close()
 
-    # Check dataset size - KD-tree computation is expensive on large datasets
-    if not dry_run and not force:
-        safe_url = safe_file_url(input_parquet, verbose)
-        with fsspec.open(safe_url, "rb") as f:
-            pf = pq.ParquetFile(f)
-            total_rows = pf.metadata.num_rows
-
-        if total_rows > 50_000_000:
-            partition_count = 2**iterations
-            error_msg = click.style("\n⚠️  Large Dataset Warning\n", fg="yellow", bold=True)
-            error_msg += click.style(
-                f"\nDataset has {total_rows:,} rows. Computing {partition_count:,} KD-tree partitions "
-                f"will take considerable time.\n",
-                fg="yellow",
-            )
-            error_msg += click.style(
-                "\nRecommended approach for faster processing:", fg="cyan", bold=True
-            )
-            error_msg += click.style(
-                "\n  1. Partition by coarser key first (country/region/state)\n"
-                "  2. Apply KD-tree within each smaller partition\n",
-                fg="cyan",
-            )
-            error_msg += click.style(
-                "\nExample:\n"
-                "  gpio partition string <file> <output> --column state\n"
-                "  gpio add kdtree <state_file> <output> --partitions 512\n",
-                fg="cyan",
-            )
-            error_msg += click.style(
-                "\nUse --force to proceed anyway.\n",
-                fg="yellow",
-            )
-            raise click.ClickException(error_msg)
-
-        if verbose and total_rows > 10_000_000:
-            click.echo(
-                click.style(
-                    f"Processing {total_rows:,} rows - this may take several minutes...",
-                    fg="cyan",
-                )
-            )
+    # Note: With approximate mode (default), large datasets are handled efficiently in O(n)
 
     # KD-tree requires a full table scan with recursive CTE - can't be done as a simple column expression
     # We need to use a different approach than add_computed_column
