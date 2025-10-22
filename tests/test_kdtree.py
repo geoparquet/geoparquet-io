@@ -14,7 +14,7 @@ class TestAddKDTreeColumn:
     """Test suite for add kdtree column command."""
 
     def test_add_kdtree_column_basic(self, buildings_test_file, temp_output_file):
-        """Test adding KD-tree column with default partitions (512)."""
+        """Test adding KD-tree column with auto-selection (default behavior)."""
         runner = CliRunner()
         result = runner.invoke(
             add,
@@ -22,16 +22,16 @@ class TestAddKDTreeColumn:
         )
         assert result.exit_code == 0
         assert os.path.exists(temp_output_file)
+        assert "Auto-selected" in result.output
 
         # Verify kdtree_cell column was added
         table = pq.read_table(temp_output_file)
         assert "kdtree_cell" in table.schema.names
 
-        # Verify binary strings are 10 characters (512 partitions = 9 iterations + starting '0')
+        # Verify binary strings are valid (length depends on auto-selection)
         kdtree_values = table.column("kdtree_cell").to_pylist()
         for value in kdtree_values:
             if value is not None:
-                assert len(value) == 10
                 assert all(c in "01" for c in value)
                 assert value.startswith("0")  # All start with '0'
 
@@ -116,7 +116,7 @@ class TestAddKDTreeColumn:
             ["kdtree", buildings_test_file, temp_output_file, "--verbose"],
         )
         assert result.exit_code == 0
-        assert "Adding column" in result.output or "Processing" in result.output
+        assert "Auto-selected" in result.output
 
 
 class TestPartitionKDTree:
