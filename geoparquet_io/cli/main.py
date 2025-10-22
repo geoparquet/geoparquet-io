@@ -484,10 +484,21 @@ def add_h3(
     help="Name for the KD-tree column (default: kdtree_cell)",
 )
 @click.option(
-    "--iterations",
-    default=9,
-    type=click.IntRange(1, 20),
-    help="Number of recursive splits (1-20). iterations=5: 32 partitions, iterations=9: 512 partitions. Default: 9",
+    "--partitions",
+    default=512,
+    type=int,
+    help="Number of partitions (must be power of 2: 2, 4, 8, ...). Default: 512",
+)
+@click.option(
+    "--approx",
+    default=100000,
+    type=int,
+    help="Use approximate computation by sampling N points (default: 100000). Mutually exclusive with --exact.",
+)
+@click.option(
+    "--exact",
+    is_flag=True,
+    help="Use exact median computation on full dataset (slower but deterministic). Mutually exclusive with --approx.",
 )
 @click.option(
     "--compression",
@@ -521,7 +532,9 @@ def add_kdtree(
     input_parquet,
     output_parquet,
     kdtree_name,
-    iterations,
+    partitions,
+    approx,
+    exact,
     compression,
     compression_level,
     row_group_size,
@@ -532,18 +545,31 @@ def add_kdtree(
 ):
     """Add a KD-tree cell ID column to a GeoParquet file.
 
-    Computes KD-tree partition IDs based on recursive spatial splits alternating
-    between X and Y dimensions at medians. This creates balanced spatial partitions
-    that adapt to data distribution.
+    Creates balanced spatial partitions using recursive splits alternating between
+    X and Y dimensions at medians. Partition count must be a power of 2.
 
-    The partition ID is stored as a binary string (e.g., "01011001") where each bit
-    represents a split decision (0=below median, 1=above/equal to median).
+    By default, uses approximate computation with 100k point sample. Use --exact for
+    deterministic full-data computation.
 
-    Iterations determine the number of partitions: 2^iterations total partitions.
-
-    Performance Note: Runtime scales with dataset size × iterations. For datasets
-    > 50M rows, consider hierarchical partitioning (country/region + KD-tree).
+    Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
+    For datasets > 50M rows, consider hierarchical partitioning (country/region + KD-tree).
     """
+    # Validate partitions is a power of 2
+    import math
+
+    if partitions < 2 or (partitions & (partitions - 1)) != 0:
+        raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
+
+    # Validate mutually exclusive options for approx/exact
+    if exact and approx != 100000:
+        raise click.UsageError("--approx and --exact are mutually exclusive")
+
+    # Convert partitions to iterations
+    iterations = int(math.log2(partitions))
+
+    # Determine sample size
+    sample_size = None if exact else approx
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -571,6 +597,7 @@ def add_kdtree(
         row_group_mb,
         row_group_size,
         force,
+        sample_size,
     )
 
 
@@ -847,10 +874,21 @@ def partition_h3(
     help="Name of KD-tree column to partition by (default: kdtree_cell)",
 )
 @click.option(
-    "--iterations",
-    type=click.IntRange(1, 20),
-    default=9,
-    help="Number of recursive splits for partitioning (1-20, default: 9)",
+    "--partitions",
+    type=int,
+    default=512,
+    help="Number of partitions (must be power of 2: 2, 4, 8, ...). Default: 512",
+)
+@click.option(
+    "--approx",
+    default=100000,
+    type=int,
+    help="Use approximate computation by sampling N points (default: 100000). Mutually exclusive with --exact.",
+)
+@click.option(
+    "--exact",
+    is_flag=True,
+    help="Use exact median computation on full dataset (slower but deterministic). Mutually exclusive with --approx.",
 )
 @click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure")
 @click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")
@@ -885,7 +923,9 @@ def partition_kdtree(
     input_parquet,
     output_folder,
     kdtree_name,
-    iterations,
+    partitions,
+    approx,
+    exact,
     hive,
     overwrite,
     preview,
@@ -895,41 +935,44 @@ def partition_kdtree(
     skip_analysis,
     verbose,
 ):
-    """Partition a GeoParquet file by KD-tree cells at specified iteration depth.
+    """Partition a GeoParquet file by KD-tree cells.
 
-    Creates separate GeoParquet files based on KD-tree partition IDs at the specified
-    iteration depth. If the KD-tree column doesn't exist, it will be automatically added
-    before partitioning.
+    Creates separate files based on KD-tree partition IDs. If the KD-tree column doesn't
+    exist, it will be automatically added. Partition count must be a power of 2.
 
-    KD-tree partitioning recursively splits data on alternating X/Y dimensions at medians,
-    creating balanced spatial partitions that adapt to data distribution.
+    By default, uses approximate computation with 100k point sample. Use --exact for
+    deterministic full-data computation.
 
-    By default, the KD-tree column is excluded from output files (since it's redundant with
-    the partition path) unless using Hive-style partitioning. Use --keep-kdtree-column to
-    explicitly keep the column in all cases.
-
-    Use --preview to see what partitions would be created without actually creating files.
-
-    Performance Note: Runtime scales with dataset size × iterations. For datasets > 50M rows,
-    consider hierarchical partitioning (country/region first, then KD-tree within each).
+    Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
+    For datasets > 50M rows, consider hierarchical partitioning (country/region first, then KD-tree).
 
     Examples:
 
-        # Preview partitions with 5 iterations (~32 partitions)
-        gpio partition kdtree input.parquet --iterations 5 --preview
+        # Preview 32 partitions (using approximation)
+        gpio partition kdtree input.parquet --partitions 32 --preview
 
-        # Partition by KD-tree at default 9 iterations (KD-tree column excluded from output)
-        gpio partition kdtree input.parquet output/
+        # Partition into 512 files with exact computation
+        gpio partition kdtree input.parquet output/ --exact
 
-        # Partition with KD-tree column kept in output files
-        gpio partition kdtree input.parquet output/ --keep-kdtree-column
-
-        # Partition with custom KD-tree column name
-        gpio partition kdtree input.parquet output/ --kdtree-name my_kdtree
-
-        # Use Hive-style partitioning at 12 iterations (KD-tree column included by default)
-        gpio partition kdtree input.parquet output/ --iterations 12 --hive
+        # Partition with custom sample size
+        gpio partition kdtree input.parquet output/ --approx 200000
     """
+    # Validate partitions is a power of 2
+    import math
+
+    if partitions < 2 or (partitions & (partitions - 1)) != 0:
+        raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
+
+    # Validate mutually exclusive options for approx/exact
+    if exact and approx != 100000:
+        raise click.UsageError("--approx and --exact are mutually exclusive")
+
+    # Convert partitions to iterations
+    iterations = int(math.log2(partitions))
+
+    # Determine sample size
+    sample_size = None if exact else approx
+
     # If preview mode, output_folder is not required
     if not preview and not output_folder:
         raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
@@ -950,6 +993,7 @@ def partition_kdtree(
         keep_kdtree_col,
         force,
         skip_analysis,
+        sample_size,
     )
 
 

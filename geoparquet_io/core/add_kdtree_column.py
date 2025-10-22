@@ -10,6 +10,147 @@ from geoparquet_io.core.common import (
 )
 
 
+def _build_sampling_query(input_url, geom_col, kdtree_column_name, iterations, sample_size, con):
+    """
+    Build a sampling-based KD-tree query that computes boundaries on a sample,
+    then applies them to the full dataset using iterative CTEs.
+
+    Strategy:
+    1. Sample the data and compute KD-tree to get split boundaries
+    2. Build a series of CTEs that iteratively compute partition IDs
+    3. Each CTE checks boundaries and appends '0' or '1' to partition ID
+    """
+    # Phase 1: Compute boundaries from sample
+    # We need to capture the actual boundary value used at each split
+    boundaries_query = f"""
+        WITH RECURSIVE kdtree_sample(iteration, x, y, partition_id, split_value) AS (
+            SELECT
+                0 AS iteration,
+                ST_X(ST_Centroid({geom_col})) AS x,
+                ST_Y(ST_Centroid({geom_col})) AS y,
+                '0' AS partition_id,
+                NULL::DOUBLE AS split_value
+            FROM '{input_url}' USING SAMPLE {sample_size} ROWS
+
+            UNION ALL
+
+            SELECT
+                iteration + 1 AS iteration,
+                x,
+                y,
+                IF(
+                    IF(MOD(iteration, 2) = 0, x, y) < APPROX_QUANTILE(
+                        IF(MOD(iteration, 2) = 0, x, y),
+                        0.5
+                    ) OVER (
+                        PARTITION BY partition_id
+                    ),
+                    partition_id || '0',
+                    partition_id || '1'
+                ) AS partition_id,
+                APPROX_QUANTILE(
+                    IF(MOD(iteration, 2) = 0, x, y),
+                    0.5
+                ) OVER (
+                    PARTITION BY partition_id
+                ) AS split_value
+            FROM kdtree_sample
+            WHERE
+                iteration < {iterations}
+        )
+        SELECT DISTINCT
+            iteration,
+            partition_id,
+            split_value
+        FROM kdtree_sample
+        WHERE iteration > 0 AND split_value IS NOT NULL
+        ORDER BY iteration, partition_id
+    """
+
+    # Execute to get boundaries
+    boundaries_result = con.execute(boundaries_query).fetchall()
+
+    # Build boundaries dictionary: {(iteration, partition_id): split_value}
+    # The partition_id here is the NEW partition after the split
+    # To get parent, we strip the last character
+    boundaries = {}
+    for iteration, partition_id, split_value in boundaries_result:
+        parent_partition = partition_id[:-1] if len(partition_id) > 0 else ""
+        # Only store one boundary per (iteration, parent) - they should all be the same
+        if (iteration, parent_partition) not in boundaries:
+            boundaries[(iteration, parent_partition)] = split_value
+
+    # Phase 2: Build iterative query that applies boundaries
+    # Build series of CTEs, one per iteration
+    cte_parts = []
+
+    # CTE 0: Load data with coordinates and initialize partition to '0'
+    cte_parts.append(f"""
+        data_with_coords AS (
+            SELECT *,
+                ST_X(ST_Centroid({geom_col})) AS _kdtree_x,
+                ST_Y(ST_Centroid({geom_col})) AS _kdtree_y,
+                '0' AS _kdtree_partition
+            FROM '{input_url}'
+        )
+    """)
+
+    # CTEs 1..iterations: For each iteration, append '0' or '1' based on boundary
+    for i in range(1, iterations + 1):
+        prev_cte = f"iter_{i - 1}" if i > 1 else "data_with_coords"
+        current_cte = f"iter_{i}"
+
+        # Dimension to check: x if (i-1) is even, y if odd
+        dim_col = "_kdtree_x" if (i - 1) % 2 == 0 else "_kdtree_y"
+
+        # Build CASE statement for all possible parent partitions at this iteration
+        # Get all unique parent partitions that could exist at iteration i-1
+        possible_parents = set()
+        for iter_num, parent in boundaries.keys():
+            if iter_num == i:
+                possible_parents.add(parent)
+
+        if not possible_parents:
+            # If no boundaries found (shouldn't happen), just append '0'
+            case_logic = "_kdtree_partition || '0'"
+        else:
+            # Build CASE statement
+            case_parts = []
+            for parent in sorted(possible_parents):
+                split_val = boundaries.get((i, parent))
+                if split_val is not None:
+                    case_parts.append(
+                        f"WHEN _kdtree_partition = '{parent}' AND {dim_col} < {split_val} THEN _kdtree_partition || '0'"
+                    )
+                    case_parts.append(
+                        f"WHEN _kdtree_partition = '{parent}' AND {dim_col} >= {split_val} THEN _kdtree_partition || '1'"
+                    )
+
+            # Default: append '0' (shouldn't reach here but safety)
+            case_logic = f"CASE {' '.join(case_parts)} ELSE _kdtree_partition || '0' END"
+
+        cte_parts.append(f"""
+        {current_cte} AS (
+            SELECT * EXCLUDE(_kdtree_partition),
+                {case_logic} AS _kdtree_partition
+            FROM {prev_cte}
+        )
+        """)
+
+    # Final SELECT
+    final_cte = f"iter_{iterations}"
+    cte_sql = ",\n".join(cte_parts)
+
+    full_query = f"""
+        WITH {cte_sql}
+        SELECT * EXCLUDE(_kdtree_x, _kdtree_y, _kdtree_partition),
+            _kdtree_partition AS {kdtree_column_name}
+        FROM {final_cte}
+    """
+
+    return full_query
+
+
 def add_kdtree_column(
     input_parquet,
     output_parquet,
@@ -22,27 +163,26 @@ def add_kdtree_column(
     row_group_size_mb=None,
     row_group_rows=None,
     force=False,
+    sample_size=100000,
 ):
     """
     Add a KD-tree cell ID column to a GeoParquet file.
 
-    Computes KD-tree partition IDs based on recursive spatial splits
-    alternating between X and Y dimensions at medians. The partition
-    ID is stored as a binary string (e.g., "01011001").
+    Creates balanced spatial partitions using recursive splits alternating
+    between X and Y dimensions at medians.
 
-    Performance Note: Runtime scales with dataset size × iterations.
-    For datasets > 50M rows, consider hierarchical partitioning
-    (partition by country/region first, then apply KD-tree within
-    each partition).
+    By default, uses approximate computation: computes partition boundaries
+    on a sample, then applies to full dataset in a single pass.
+
+    Performance Note: Approximate mode is O(n), exact mode is O(n × iterations).
+    For datasets > 50M rows, use hierarchical partitioning (country/region
+    first, then KD-tree within each partition).
 
     Args:
         input_parquet: Path to the input parquet file
         output_parquet: Path to the output parquet file
         kdtree_column_name: Name for the KD-tree column (default: 'kdtree_cell')
-        iterations: Number of recursive splits (1-20).
-                   iterations=5: 32 partitions, iterations=9: 512 partitions,
-                   iterations=12: 4,096 partitions.
-                   Default: 9 (512 partitions)
+        iterations: Number of recursive splits (1-20). Determines partition count: 2^iterations
         dry_run: Whether to print SQL commands without executing them
         verbose: Whether to print verbose output
         compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
@@ -50,6 +190,7 @@ def add_kdtree_column(
         row_group_size_mb: Target row group size in MB
         row_group_rows: Exact number of rows per row group
         force: Force operation even on large datasets (not recommended)
+        sample_size: Number of points to sample for computing boundaries. None for exact mode (default: 100000)
     """
     # Validate iterations
     if not 1 <= iterations <= 20:
@@ -66,26 +207,27 @@ def add_kdtree_column(
             total_rows = pf.metadata.num_rows
 
         if total_rows > 50_000_000:
+            partition_count = 2**iterations
             error_msg = click.style("\n⚠️  Large Dataset Warning\n", fg="yellow", bold=True)
             error_msg += click.style(
-                f"\nThis dataset has {total_rows:,} rows. KD-tree computation runtime scales with "
-                f"dataset size × iterations ({total_rows:,} × {iterations} = extremely slow).\n",
+                f"\nDataset has {total_rows:,} rows. Computing {partition_count:,} KD-tree partitions "
+                f"requires {iterations} full passes over the data (extremely slow).\n",
                 fg="yellow",
             )
             error_msg += click.style("\nRecommended approach:", fg="cyan", bold=True)
             error_msg += click.style(
-                "\n  1. Use hierarchical partitioning: partition by a coarser key first "
-                "(country/region/state),\n     then apply KD-tree within each smaller partition.\n",
+                "\n  1. Partition by coarser key first (country/region/state)\n"
+                "  2. Apply KD-tree within each smaller partition\n",
                 fg="cyan",
             )
             error_msg += click.style(
-                "  2. For example:\n"
-                "     - First: gpio partition string <file> <output> --column state\n"
-                "     - Then: For each state partition, gpio add kdtree <state_file> <output>\n",
+                "\nExample:\n"
+                "  gpio partition string <file> <output> --column state\n"
+                "  gpio add kdtree <state_file> <output> --partitions 512\n",
                 fg="cyan",
             )
             error_msg += click.style(
-                "\nIf you still want to proceed (not recommended), use --force to override this check.\n",
+                "\nUse --force to override (not recommended).\n",
                 fg="yellow",
             )
             raise click.ClickException(error_msg)
@@ -114,54 +256,62 @@ def add_kdtree_column(
     if not dry_run:
         # Get total count
         total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
-        click.echo(f"Processing {total_count:,} features...")
+        mode_str = "exact" if sample_size is None else f"approx (sample: {sample_size:,})"
+        click.echo(f"Processing {total_count:,} features ({mode_str})...")
 
-    # Build the full KD-tree query following the tutorial pattern
-    # https://duckdb.org/2024/09/09/spatial-extension.html
-    query = f"""
-        WITH RECURSIVE kdtree(iteration, x, y, partition_id, row_id) AS (
-            SELECT
-                0 AS iteration,
-                ST_X(ST_Centroid({geom_col})) AS x,
-                ST_Y(ST_Centroid({geom_col})) AS y,
-                '0' AS partition_id,
-                ROW_NUMBER() OVER () AS row_id
-            FROM '{input_url}'
+    # Choose algorithm based on sample_size
+    if sample_size is None:
+        # Exact mode: use full recursive CTE (slower but deterministic)
+        # https://duckdb.org/2024/09/09/spatial-extension.html
+        query = f"""
+            WITH RECURSIVE kdtree(iteration, x, y, partition_id, row_id) AS (
+                SELECT
+                    0 AS iteration,
+                    ST_X(ST_Centroid({geom_col})) AS x,
+                    ST_Y(ST_Centroid({geom_col})) AS y,
+                    '0' AS partition_id,
+                    ROW_NUMBER() OVER () AS row_id
+                FROM '{input_url}'
 
-            UNION ALL
+                UNION ALL
 
-            SELECT
-                iteration + 1 AS iteration,
-                x,
-                y,
-                IF(
-                    IF(MOD(iteration, 2) = 0, x, y) < APPROX_QUANTILE(
-                        IF(MOD(iteration, 2) = 0, x, y),
-                        0.5
-                    ) OVER (
-                        PARTITION BY partition_id
-                    ),
-                    partition_id || '0',
-                    partition_id || '1'
-                ) AS partition_id,
-                row_id
-            FROM kdtree
-            WHERE
-                iteration < {iterations}
-        ),
-        kdtree_final AS (
-            SELECT row_id, partition_id
-            FROM kdtree
-            WHERE iteration = {iterations}
-        ),
-        original_with_rownum AS (
-            SELECT *, ROW_NUMBER() OVER () AS row_id
-            FROM '{input_url}'
+                SELECT
+                    iteration + 1 AS iteration,
+                    x,
+                    y,
+                    IF(
+                        IF(MOD(iteration, 2) = 0, x, y) < APPROX_QUANTILE(
+                            IF(MOD(iteration, 2) = 0, x, y),
+                            0.5
+                        ) OVER (
+                            PARTITION BY partition_id
+                        ),
+                        partition_id || '0',
+                        partition_id || '1'
+                    ) AS partition_id,
+                    row_id
+                FROM kdtree
+                WHERE
+                    iteration < {iterations}
+            ),
+            kdtree_final AS (
+                SELECT row_id, partition_id
+                FROM kdtree
+                WHERE iteration = {iterations}
+            ),
+            original_with_rownum AS (
+                SELECT *, ROW_NUMBER() OVER () AS row_id
+                FROM '{input_url}'
+            )
+            SELECT original_with_rownum.* EXCLUDE (row_id), kdtree_final.partition_id AS {kdtree_column_name}
+            FROM original_with_rownum
+            JOIN kdtree_final ON original_with_rownum.row_id = kdtree_final.row_id
+        """
+    else:
+        # Approximate mode: compute boundaries on sample, apply to full dataset (faster)
+        query = _build_sampling_query(
+            input_url, geom_col, kdtree_column_name, iterations, sample_size, con
         )
-        SELECT original_with_rownum.* EXCLUDE (row_id), kdtree_final.partition_id AS {kdtree_column_name}
-        FROM original_with_rownum
-        JOIN kdtree_final ON original_with_rownum.row_id = kdtree_final.row_id
-    """
 
     # Prepare KD-tree metadata for GeoParquet spec
     partition_count = 2**iterations
@@ -183,12 +333,10 @@ def add_kdtree_column(
                 bold=True,
             )
         )
-        click.echo(click.style(f"-- Input file: {input_url}", fg="cyan"))
-        click.echo(click.style(f"-- Output file: {output_parquet}", fg="cyan"))
-        click.echo(click.style(f"-- New column: {kdtree_column_name}", fg="cyan"))
-        click.echo(
-            click.style(f"-- Iterations: {iterations} (~{partition_count} partitions)", fg="cyan")
-        )
+        click.echo(click.style(f"-- Input: {input_url}", fg="cyan"))
+        click.echo(click.style(f"-- Output: {output_parquet}", fg="cyan"))
+        click.echo(click.style(f"-- Column: {kdtree_column_name}", fg="cyan"))
+        click.echo(click.style(f"-- Partitions: {partition_count}", fg="cyan"))
         click.echo()
         click.echo(query)
         return
@@ -216,8 +364,7 @@ def add_kdtree_column(
 
     if not dry_run:
         click.echo(
-            f"Successfully added KD-tree column '{kdtree_column_name}' "
-            f"({iterations} iterations, ~{partition_count} partitions) to: {output_parquet}"
+            f"Added KD-tree column '{kdtree_column_name}' ({partition_count} partitions) to: {output_parquet}"
         )
 
 

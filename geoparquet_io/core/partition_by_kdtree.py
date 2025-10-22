@@ -25,23 +25,23 @@ def partition_by_kdtree(
     keep_kdtree_column: bool = None,
     force: bool = False,
     skip_analysis: bool = False,
+    sample_size: int = 100000,
 ):
     """
-    Partition a GeoParquet file by KD-tree cells at specified iteration depth.
+    Partition a GeoParquet file by KD-tree cells.
 
-    If the KD-tree column doesn't exist, it will be automatically added at the
-    specified iteration depth before partitioning.
+    If the KD-tree column doesn't exist, it will be automatically added before
+    partitioning.
 
-    Performance Note: Runtime scales with dataset size × iterations.
-    For datasets > 50M rows, consider hierarchical partitioning: partition by
-    a coarse key (country/region) first, then apply KD-tree within each partition.
+    Performance Note: Approximate mode is O(n), exact mode is O(n × iterations).
+    For datasets > 50M rows, use hierarchical partitioning: partition by coarse
+    key (country/region) first, then apply KD-tree within each partition.
 
     Args:
         input_parquet: Input GeoParquet file
         output_folder: Output directory
         kdtree_column_name: Name of KD-tree column (default: 'kdtree_cell')
-        iterations: Number of recursive splits (1-20, default: 9)
-                   iterations=5: 32 partitions, iterations=9: 512 partitions
+        iterations: Number of recursive splits (1-20, default: 9). Determines partition count: 2^iterations
         hive: Use Hive-style partitioning
         overwrite: Overwrite existing files
         preview: Show preview of partitions without creating files
@@ -51,6 +51,7 @@ def partition_by_kdtree(
                            keeps the column for Hive partitioning but excludes it otherwise.
         force: Force partitioning even if analysis detects issues
         skip_analysis: Skip partition strategy analysis (for performance)
+        sample_size: Number of points to sample for computing boundaries. None for exact mode (default: 100,000)
     """
     # Validate iterations
     if not 1 <= iterations <= 20:
@@ -76,29 +77,28 @@ def partition_by_kdtree(
     # Runtime scales with dataset_size × iterations, so warn/block for large datasets
     # This applies to BOTH preview and actual partitioning since preview needs to compute values too
     if not column_exists and not force and total_rows > 50_000_000:
+        partition_count = 2**iterations
         preview_note = " (including preview)" if preview else ""
         error_msg = click.style("\n⚠️  Large Dataset Warning\n", fg="yellow", bold=True)
         error_msg += click.style(
-            f"\nThis dataset has {total_rows:,} rows. Computing KD-tree partition IDs{preview_note} "
-            f"requires processing\nthe entire dataset {iterations} times (runtime scales with "
-            f"dataset size × iterations).\n\n"
-            f"This would take an extremely long time and may crash your system.\n",
+            f"\nDataset has {total_rows:,} rows. Computing {partition_count:,} KD-tree partitions{preview_note} "
+            f"requires {iterations} full passes over the data (extremely slow).\n",
             fg="yellow",
         )
         error_msg += click.style("\nRecommended approach:", fg="cyan", bold=True)
         error_msg += click.style(
-            "\n  1. Use hierarchical partitioning: partition by a coarser key first "
-            "(country/region/state),\n     then apply KD-tree within each partition.\n",
+            "\n  1. Partition by coarser key first (country/region/state)\n"
+            "  2. Apply KD-tree within each smaller partition\n",
             fg="cyan",
         )
         error_msg += click.style(
-            "  2. For example:\n"
-            "     - First: gpio partition string <file> <output> --column state\n"
-            "     - Then: For each state partition, gpio partition kdtree <state_file> <output>\n",
+            "\nExample:\n"
+            "  gpio partition string <file> <output> --column state\n"
+            "  gpio partition kdtree <state_file> <output> --partitions 512\n",
             fg="cyan",
         )
         error_msg += click.style(
-            "\nIf you still want to proceed (not recommended), use --force to override this check.\n",
+            "\nUse --force to override (not recommended).\n",
             fg="yellow",
         )
         raise click.ClickException(error_msg)
@@ -112,9 +112,12 @@ def partition_by_kdtree(
         )
 
     # If column doesn't exist, add it
+    partition_count = 2**iterations
     if not column_exists:
         if verbose:
-            click.echo(f"KD-tree column '{kdtree_column_name}' not found. Adding it now...")
+            click.echo(
+                f"Adding KD-tree column '{kdtree_column_name}' with {partition_count} partitions..."
+            )
 
         # Create temporary file for KD-tree-enriched data
         temp_dir = tempfile.gettempdir()
@@ -134,12 +137,11 @@ def partition_by_kdtree(
                 row_group_size_mb=None,
                 row_group_rows=None,
                 force=force,
+                sample_size=sample_size,
             )
 
             # Use the temp file as input for partitioning
             input_parquet = temp_file
-            if verbose:
-                click.echo(f"KD-tree column added successfully with {iterations} iterations")
 
         except Exception as e:
             # Clean up temp file on error
@@ -189,10 +191,8 @@ def partition_by_kdtree(
         return
 
     # Build description for user feedback
-    partition_count = 2**iterations
     click.echo(
-        f"Partitioning by KD-tree cells with {iterations} iterations "
-        f"(~{partition_count} partitions, column: '{kdtree_column_name}')"
+        f"Partitioning into {partition_count} KD-tree cells (column: '{kdtree_column_name}')"
     )
 
     try:
@@ -212,7 +212,7 @@ def partition_by_kdtree(
         )
 
         if verbose:
-            click.echo(f"\nSuccessfully created {num_partitions} partition(s) in {output_folder}")
+            click.echo(f"\nCreated {num_partitions} partition(s) in {output_folder}")
 
     finally:
         # Clean up temp file if we created one
