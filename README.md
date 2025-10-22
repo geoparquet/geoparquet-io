@@ -11,7 +11,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
 - 🚀 **Fast**: Built on PyArrow and DuckDB for high-performance operations
 - 📦 **Comprehensive**: Sort, partition, enhance, and validate GeoParquet files
-- 🗺️ **Spatial Indexing**: Add bbox, H3 hexagonal cells, and admin divisions
+- 🗺️ **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and admin divisions
 - 🎯 **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
 - 🔧 **Flexible**: CLI and Python API for any workflow
 - ✅ **Tested**: Extensive test suite across Python 3.9-3.13 and all platforms
@@ -63,6 +63,9 @@ gpio add bbox input.parquet output.parquet
 
 # Add H3 hexagonal cell IDs for spatial indexing
 gpio add h3 input.parquet output.parquet --resolution 9
+
+# Add KD-tree partition IDs for balanced spatial partitioning (auto mode)
+gpio add kdtree input.parquet output.parquet
 
 # Add country codes via spatial join
 gpio add admin-divisions input.parquet output.parquet
@@ -193,6 +196,29 @@ gpio add h3 input.parquet output.parquet --resolution 13
 # Add H3 column with custom name
 gpio add h3 input.parquet output.parquet --h3-name h3_index
 ```
+
+#### add kdtree
+
+Add KD-tree partition IDs to a GeoParquet file. KD-tree creates balanced spatial partitions by recursively splitting on alternating X/Y dimensions at medians. The partition ID is stored as a binary string (e.g., "01011001").
+
+By default, **auto-selects** partitions targeting ~120k rows each using **approximate mode** (O(n) with 100k sample) for fast computation. Use `--partitions N` for explicit control or `--exact` for deterministic results.
+
+Example usage:
+```bash
+# Auto-select partitions targeting 120k rows each (default)
+gpio add kdtree input.parquet output.parquet
+
+# Use explicit partition count
+gpio add kdtree input.parquet output.parquet --partitions 32
+
+# Use exact computation (slower but deterministic)
+gpio add kdtree input.parquet output.parquet --partitions 32 --exact
+
+# Track progress with verbose mode
+gpio add kdtree input.parquet output.parquet --verbose
+```
+
+**Note**: Partitions must be power of 2 (2, 4, 8, 16, ...).
 
 #### add admin-divisions
 
@@ -347,6 +373,32 @@ gpio partition h3 input.parquet output/ --resolution 8 --hive
 # Use custom H3 column name
 gpio partition h3 input.parquet output/ --h3-name my_h3
 ```
+
+#### partition kdtree
+
+Partition a GeoParquet file by KD-tree cells. Automatically adds KD-tree column if it doesn't exist. Creates balanced spatial partitions by recursively splitting on alternating X/Y dimensions at medians.
+
+By default, **auto-selects** partitions targeting ~120k rows each using **approximate mode** (O(n) with 100k sample). The KD-tree column is **excluded** from output files (redundant with partition path), except when using Hive-style partitioning.
+
+Example usage:
+```bash
+# Auto-partition targeting 120k rows each (default)
+gpio partition kdtree input.parquet output/
+
+# Preview with auto-selected partitions
+gpio partition kdtree input.parquet --preview
+
+# Use explicit partition count
+gpio partition kdtree input.parquet output/ --partitions 32
+
+# Use exact computation for deterministic results
+gpio partition kdtree input.parquet output/ --partitions 32 --exact
+
+# Use Hive-style partitioning with progress tracking
+gpio partition kdtree input.parquet output/ --hive --verbose
+```
+
+**Note**: Partitions must be power of 2 (2, 4, 8, 16, ...).
 
 #### partition admin
 

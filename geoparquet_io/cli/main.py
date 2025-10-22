@@ -4,6 +4,7 @@ from geoparquet_io.core.add_bbox_column import add_bbox_column as add_bbox_colum
 from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
 from geoparquet_io.core.add_country_codes import add_country_codes as add_country_codes_impl
 from geoparquet_io.core.add_h3_column import add_h3_column as add_h3_column_impl
+from geoparquet_io.core.add_kdtree_column import add_kdtree_column as add_kdtree_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
@@ -17,6 +18,7 @@ from geoparquet_io.core.inspect_utils import (
     get_preview_data,
 )
 from geoparquet_io.core.partition_by_h3 import partition_by_h3 as partition_by_h3_impl
+from geoparquet_io.core.partition_by_kdtree import partition_by_kdtree as partition_by_kdtree_impl
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
@@ -569,6 +571,162 @@ def add_h3(
     )
 
 
+@add.command(name="kdtree")
+@click.argument("input_parquet")
+@click.argument("output_parquet")
+@click.option(
+    "--kdtree-name",
+    default="kdtree_cell",
+    help="Name for the KD-tree column (default: kdtree_cell)",
+)
+@click.option(
+    "--partitions",
+    default=None,
+    type=int,
+    help="Explicit partition count (must be power of 2: 2, 4, 8, ...). Overrides default auto mode.",
+)
+@click.option(
+    "--auto",
+    default=None,
+    type=int,
+    help="Auto-select partitions targeting N rows/partition. Default when neither --partitions nor --auto specified: 120,000.",
+)
+@click.option(
+    "--approx",
+    default=100000,
+    type=int,
+    help="Use approximate computation by sampling N points (default: 100000). Mutually exclusive with --exact.",
+)
+@click.option(
+    "--exact",
+    is_flag=True,
+    help="Use exact median computation on full dataset (slower but deterministic). Mutually exclusive with --approx.",
+)
+@click.option(
+    "--compression",
+    default="ZSTD",
+    type=click.Choice(
+        ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
+    ),
+    help="Compression type for output file (default: ZSTD)",
+)
+@click.option(
+    "--compression-level",
+    type=click.IntRange(1, 22),
+    help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
+)
+@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
+@click.option(
+    "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print SQL commands that would be executed without actually running them.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force operation on large datasets without confirmation",
+)
+@click.option("--verbose", is_flag=True, help="Print additional information.")
+def add_kdtree(
+    input_parquet,
+    output_parquet,
+    kdtree_name,
+    partitions,
+    auto,
+    approx,
+    exact,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    dry_run,
+    force,
+    verbose,
+):
+    """Add a KD-tree cell ID column to a GeoParquet file.
+
+    Creates balanced spatial partitions using recursive splits alternating between
+    X and Y dimensions at medians. Partition count must be a power of 2.
+
+    By default, auto-selects partitions targeting ~120k rows each using approximate mode
+    (O(n) with 100k sample). Use --partitions N for explicit control or --exact for
+    deterministic computation.
+
+    Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
+
+    Use --verbose to track progress with iteration-by-iteration updates.
+    """
+    import math
+
+    # Validate mutually exclusive options
+    if sum([partitions is not None, auto is not None]) > 1:
+        raise click.UsageError("--partitions and --auto are mutually exclusive")
+
+    # Set defaults
+    if partitions is None and auto is None:
+        auto = 120000  # Default: auto-select targeting 120k rows/partition
+        partitions = None
+    elif auto is not None:
+        # Auto mode: will compute partitions below
+        partitions = None
+
+    # Validate partitions if specified
+    if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
+        raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
+
+    # Validate mutually exclusive options for approx/exact
+    if exact and approx != 100000:
+        raise click.UsageError("--approx and --exact are mutually exclusive")
+
+    # Determine sample size
+    sample_size = None if exact else approx
+
+    # If auto mode, compute optimal partitions
+    if auto is not None:
+        # Pass None for iterations, let implementation compute
+        iterations = None
+        target_rows = auto if auto > 0 else 120000
+        auto_target = ("rows", target_rows)
+    else:
+        # Convert partitions to iterations
+        iterations = int(math.log2(partitions))
+        auto_target = None
+
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_io.core.common import parse_size_string
+
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}") from e
+
+    add_kdtree_column_impl(
+        input_parquet,
+        output_parquet,
+        kdtree_name,
+        iterations,
+        dry_run,
+        verbose,
+        compression.upper(),
+        compression_level,
+        row_group_mb,
+        row_group_size,
+        force,
+        sample_size,
+        auto_target,
+    )
+
+
 # Partition commands group
 @cli.group()
 def partition():
@@ -830,6 +988,169 @@ def partition_h3(
         keep_h3_col,
         force,
         skip_analysis,
+    )
+
+
+@partition.command(name="kdtree")
+@click.argument("input_parquet")
+@click.argument("output_folder", required=False)
+@click.option(
+    "--kdtree-name",
+    default="kdtree_cell",
+    help="Name of KD-tree column to partition by (default: kdtree_cell)",
+)
+@click.option(
+    "--partitions",
+    default=None,
+    type=int,
+    help="Explicit partition count (must be power of 2: 2, 4, 8, ...). Overrides default auto mode.",
+)
+@click.option(
+    "--auto",
+    default=None,
+    type=int,
+    help="Auto-select partitions targeting N rows/partition. Default: 120,000.",
+)
+@click.option(
+    "--approx",
+    default=100000,
+    type=int,
+    help="Use approximate computation by sampling N points (default: 100000). Mutually exclusive with --exact.",
+)
+@click.option(
+    "--exact",
+    is_flag=True,
+    help="Use exact median computation on full dataset (slower but deterministic). Mutually exclusive with --approx.",
+)
+@click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure")
+@click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")
+@click.option(
+    "--preview",
+    is_flag=True,
+    help="Analyze and preview partitions without creating files (dry-run)",
+)
+@click.option(
+    "--preview-limit",
+    default=15,
+    type=int,
+    help="Number of partitions to show in preview (default: 15)",
+)
+@click.option(
+    "--keep-kdtree-column",
+    is_flag=True,
+    help="Keep the KD-tree column in output files (default: excluded for non-Hive, included for Hive)",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force partitioning even if analysis detects potential issues",
+)
+@click.option(
+    "--skip-analysis",
+    is_flag=True,
+    help="Skip partition strategy analysis (for performance-sensitive cases)",
+)
+@click.option("--verbose", is_flag=True, help="Print additional information")
+def partition_kdtree(
+    input_parquet,
+    output_folder,
+    kdtree_name,
+    partitions,
+    auto,
+    approx,
+    exact,
+    hive,
+    overwrite,
+    preview,
+    preview_limit,
+    keep_kdtree_column,
+    force,
+    skip_analysis,
+    verbose,
+):
+    """Partition a GeoParquet file by KD-tree cells.
+
+    Creates separate files based on KD-tree partition IDs. If the KD-tree column doesn't
+    exist, it will be automatically added. Partition count must be a power of 2.
+
+    By default, auto-selects partitions targeting ~120k rows each using approximate mode
+    (O(n) with 100k sample). Use --partitions N for explicit control or --exact for
+    deterministic computation.
+
+    Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
+
+    Use --verbose to track progress with iteration-by-iteration updates.
+
+    Examples:
+
+        # Preview with auto-selected partitions
+        gpio partition kdtree input.parquet --preview
+
+        # Partition with explicit partition count
+        gpio partition kdtree input.parquet output/ --partitions 32
+
+        # Partition with exact computation
+        gpio partition kdtree input.parquet output/ --partitions 32 --exact
+
+        # Partition with custom sample size
+        gpio partition kdtree input.parquet output/ --approx 200000
+    """
+    # Validate mutually exclusive options
+    import math
+
+    if sum([partitions is not None, auto is not None]) > 1:
+        raise click.UsageError("--partitions and --auto are mutually exclusive")
+
+    # Set defaults
+    if partitions is None and auto is None:
+        auto = 120000  # Default: auto-select targeting 120k rows/partition
+
+    # Validate partitions if specified
+    if partitions is not None:
+        if partitions < 2 or (partitions & (partitions - 1)) != 0:
+            raise click.UsageError(
+                f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}"
+            )
+        iterations = int(math.log2(partitions))
+    else:
+        iterations = None  # Will be computed in auto mode
+
+    # Validate mutually exclusive options for approx/exact
+    if exact and approx != 100000:
+        raise click.UsageError("--approx and --exact are mutually exclusive")
+
+    # Determine sample size
+    sample_size = None if exact else approx
+
+    # Prepare auto_target if in auto mode
+    if auto is not None:
+        target_rows = auto if auto > 0 else 120000
+        auto_target = ("rows", target_rows)
+    else:
+        auto_target = None
+
+    # If preview mode, output_folder is not required
+    if not preview and not output_folder:
+        raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
+
+    # Convert flag to None if not explicitly set, so implementation can determine default
+    keep_kdtree_col = True if keep_kdtree_column else None
+
+    partition_by_kdtree_impl(
+        input_parquet,
+        output_folder,
+        kdtree_name,
+        iterations,
+        hive,
+        overwrite,
+        preview,
+        preview_limit,
+        verbose,
+        keep_kdtree_col,
+        force,
+        skip_analysis,
+        sample_size,
+        auto_target,
     )
 
 
