@@ -34,7 +34,7 @@ def extract_file_info(parquet_file: str) -> dict[str, Any]:
         parquet_file: Path to the parquet file
 
     Returns:
-        dict: File info including size, rows, row_groups
+        dict: File info including size, rows, row_groups, compression
     """
     safe_url = safe_file_url(parquet_file, verbose=False)
 
@@ -42,6 +42,14 @@ def extract_file_info(parquet_file: str) -> dict[str, Any]:
         pf = pq.ParquetFile(f)
         num_rows = pf.metadata.num_rows
         num_row_groups = pf.metadata.num_row_groups
+
+        # Get compression from first row group, first column
+        compression = None
+        if num_row_groups > 0:
+            row_group = pf.metadata.row_group(0)
+            if row_group.num_columns > 0:
+                column = row_group.column(0)
+                compression = column.compression
 
     # Get file size - handle both local and remote files
     if parquet_file.startswith(("http://", "https://")):
@@ -58,6 +66,7 @@ def extract_file_info(parquet_file: str) -> dict[str, Any]:
         "size_human": size_human,
         "rows": num_rows,
         "row_groups": num_row_groups,
+        "compression": compression,
     }
 
 
@@ -69,7 +78,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
         parquet_file: Path to the parquet file
 
     Returns:
-        dict: Geo info including CRS, bbox, primary_column
+        dict: Geo info including CRS, bbox, primary_column, version
     """
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
     geo_meta = parse_geo_metadata(metadata, verbose=False)
@@ -77,10 +86,14 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
     if not geo_meta:
         return {
             "has_geo_metadata": False,
+            "version": None,
             "crs": None,
             "bbox": None,
             "primary_column": None,
         }
+
+    # Extract version
+    version = geo_meta.get("version")
 
     # Extract CRS and bbox from primary geometry column
     primary_column = geo_meta.get("primary_column", "geometry")
@@ -122,6 +135,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
 
     return {
         "has_geo_metadata": True,
+        "version": version,
         "crs": crs,
         "bbox": bbox,
         "primary_column": primary_column,
@@ -419,7 +433,15 @@ def format_terminal_output(
     console.print(f"Rows: [cyan]{file_info['rows']:,}[/cyan]")
     console.print(f"Row Groups: [cyan]{file_info['row_groups']}[/cyan]")
 
+    # Compression
+    if file_info.get("compression"):
+        console.print(f"Compression: [cyan]{file_info['compression']}[/cyan]")
+
     if geo_info["has_geo_metadata"]:
+        # GeoParquet version
+        if geo_info.get("version"):
+            console.print(f"GeoParquet Version: [cyan]{geo_info['version']}[/cyan]")
+
         crs_display = geo_info["crs"] if geo_info["crs"] else "Not specified"
         console.print(f"CRS: [cyan]{crs_display}[/cyan]")
 
@@ -555,6 +577,8 @@ def format_json_output(
         "size_human": file_info["size_human"],
         "rows": file_info["rows"],
         "row_groups": file_info["row_groups"],
+        "compression": file_info.get("compression"),
+        "geoparquet_version": geo_info.get("version"),
         "crs": geo_info.get("crs"),
         "bbox": geo_info.get("bbox"),
         "columns": [

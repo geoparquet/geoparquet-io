@@ -137,8 +137,8 @@ def check_row_group_cmd(parquet_file, verbose):
 # Inspect command
 @cli.command()
 @click.argument("parquet_file", type=click.Path(exists=True))
-@click.option("--head", type=int, help="Show first N rows (default: 10 if no tail specified)")
-@click.option("--tail", type=int, help="Show last N rows (default: 10 if no head specified)")
+@click.option("--head", type=int, default=None, help="Show first N rows")
+@click.option("--tail", type=int, default=None, help="Show last N rows")
 @click.option(
     "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
 )
@@ -160,6 +160,10 @@ def inspect(parquet_file, head, tail, stats, json_output):
         \b
         # Preview first 10 rows
         gpio inspect data.parquet --head 10
+
+        \b
+        # Preview last 5 rows
+        gpio inspect data.parquet --tail 5
 
         \b
         # Show statistics
