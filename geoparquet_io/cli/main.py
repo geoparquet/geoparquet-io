@@ -485,9 +485,15 @@ def add_h3(
 )
 @click.option(
     "--partitions",
-    default=512,
+    default=None,
     type=int,
-    help="Number of partitions (must be power of 2: 2, 4, 8, ...). Default: 512",
+    help="Number of partitions (must be power of 2: 2, 4, 8, ...). Mutually exclusive with --auto.",
+)
+@click.option(
+    "--auto",
+    default=None,
+    type=int,
+    help="Auto-select partitions targeting N rows/partition (e.g., --auto 120000). Recommended: 120,000. Mutually exclusive with --partitions.",
 )
 @click.option(
     "--approx",
@@ -533,6 +539,7 @@ def add_kdtree(
     output_parquet,
     kdtree_name,
     partitions,
+    auto,
     approx,
     exact,
     compression,
@@ -548,27 +555,46 @@ def add_kdtree(
     Creates balanced spatial partitions using recursive splits alternating between
     X and Y dimensions at medians. Partition count must be a power of 2.
 
-    By default, uses approximate computation with 100k point sample. Use --exact for
-    deterministic full-data computation.
+    Use --auto N to target N rows/partition (recommended: 120,000).
+    By default, uses approximate computation with 100k point sample.
 
     Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
     For datasets > 50M rows, consider hierarchical partitioning (country/region + KD-tree).
     """
-    # Validate partitions is a power of 2
     import math
 
-    if partitions < 2 or (partitions & (partitions - 1)) != 0:
+    # Validate mutually exclusive options
+    if sum([partitions is not None, auto is not None]) > 1:
+        raise click.UsageError("--partitions and --auto are mutually exclusive")
+
+    # Set defaults
+    if partitions is None and auto is None:
+        partitions = 512  # Default if none specified
+    elif auto is not None:
+        # Auto mode: will compute partitions below
+        partitions = None
+
+    # Validate partitions if specified
+    if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
         raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
 
     # Validate mutually exclusive options for approx/exact
     if exact and approx != 100000:
         raise click.UsageError("--approx and --exact are mutually exclusive")
 
-    # Convert partitions to iterations
-    iterations = int(math.log2(partitions))
-
     # Determine sample size
     sample_size = None if exact else approx
+
+    # If auto mode, compute optimal partitions
+    if auto is not None:
+        # Pass None for iterations, let implementation compute
+        iterations = None
+        target_rows = auto if auto > 0 else 120000
+        auto_target = ("rows", target_rows)
+    else:
+        # Convert partitions to iterations
+        iterations = int(math.log2(partitions))
+        auto_target = None
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -598,6 +624,7 @@ def add_kdtree(
         row_group_size,
         force,
         sample_size,
+        auto_target,
     )
 
 

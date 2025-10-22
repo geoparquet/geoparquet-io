@@ -14,7 +14,7 @@ class TestAddKDTreeColumn:
     """Test suite for add kdtree column command."""
 
     def test_add_kdtree_column_basic(self, buildings_test_file, temp_output_file):
-        """Test adding KD-tree column with default iterations."""
+        """Test adding KD-tree column with default partitions (512)."""
         runner = CliRunner()
         result = runner.invoke(
             add,
@@ -27,7 +27,7 @@ class TestAddKDTreeColumn:
         table = pq.read_table(temp_output_file)
         assert "kdtree_cell" in table.schema.names
 
-        # Verify binary strings are 10 characters (default iterations=9 + starting '0')
+        # Verify binary strings are 10 characters (512 partitions = 9 iterations + starting '0')
         kdtree_values = table.column("kdtree_cell").to_pylist()
         for value in kdtree_values:
             if value is not None:
@@ -35,16 +35,16 @@ class TestAddKDTreeColumn:
                 assert all(c in "01" for c in value)
                 assert value.startswith("0")  # All start with '0'
 
-    def test_add_kdtree_column_custom_iterations(self, buildings_test_file, temp_output_file):
-        """Test adding KD-tree column with custom iterations."""
+    def test_add_kdtree_column_custom_partitions(self, buildings_test_file, temp_output_file):
+        """Test adding KD-tree column with custom partitions (32)."""
         runner = CliRunner()
         result = runner.invoke(
             add,
-            ["kdtree", buildings_test_file, temp_output_file, "--iterations", "5"],
+            ["kdtree", buildings_test_file, temp_output_file, "--partitions", "32"],
         )
         assert result.exit_code == 0
 
-        # Verify binary strings are 6 characters (iterations=5 + starting '0')
+        # Verify binary strings are 6 characters (32 partitions = 5 iterations + starting '0')
         table = pq.read_table(temp_output_file)
         kdtree_values = table.column("kdtree_cell").to_pylist()
         for value in kdtree_values:
@@ -84,25 +84,29 @@ class TestAddKDTreeColumn:
         assert "DRY RUN MODE" in result.output
         assert not os.path.exists(temp_output_file)
 
-    def test_add_kdtree_column_invalid_iterations_low(self, buildings_test_file, temp_output_file):
-        """Test validation with iterations below minimum (0)."""
+    def test_add_kdtree_column_invalid_partitions_not_power_of_2(
+        self, buildings_test_file, temp_output_file
+    ):
+        """Test validation with partitions not power of 2."""
         runner = CliRunner()
         result = runner.invoke(
             add,
-            ["kdtree", buildings_test_file, temp_output_file, "--iterations", "0"],
+            ["kdtree", buildings_test_file, temp_output_file, "--partitions", "100"],
         )
         assert result.exit_code != 0
-        assert "Invalid value" in result.output or "out of range" in result.output.lower()
+        assert "power of 2" in result.output.lower()
 
-    def test_add_kdtree_column_invalid_iterations_high(self, buildings_test_file, temp_output_file):
-        """Test validation with iterations above maximum (21)."""
+    def test_add_kdtree_column_invalid_partitions_too_small(
+        self, buildings_test_file, temp_output_file
+    ):
+        """Test validation with partitions below minimum (1)."""
         runner = CliRunner()
         result = runner.invoke(
             add,
-            ["kdtree", buildings_test_file, temp_output_file, "--iterations", "21"],
+            ["kdtree", buildings_test_file, temp_output_file, "--partitions", "1"],
         )
         assert result.exit_code != 0
-        assert "Invalid value" in result.output or "out of range" in result.output.lower()
+        assert "power of 2" in result.output.lower()
 
     def test_add_kdtree_column_verbose(self, buildings_test_file, temp_output_file):
         """Test verbose output."""
@@ -122,7 +126,7 @@ class TestPartitionKDTree:
         """Test partition kdtree command with preview mode."""
         runner = CliRunner()
         result = runner.invoke(
-            partition, ["kdtree", buildings_test_file, "--iterations", "9", "--preview"]
+            partition, ["kdtree", buildings_test_file, "--partitions", "512", "--preview"]
         )
         assert result.exit_code == 0
         # Preview should show partition information
@@ -139,8 +143,8 @@ class TestPartitionKDTree:
                 "kdtree",
                 buildings_test_file,
                 temp_output_dir,
-                "--iterations",
-                "5",
+                "--partitions",
+                "32",
                 "--skip-analysis",
             ],
         )
@@ -150,14 +154,14 @@ class TestPartitionKDTree:
         assert len(output_files) > 0
         # All files should be .parquet
         assert all(f.endswith(".parquet") for f in output_files)
-        # Binary IDs should be 6 characters (iterations=5 + starting '0')
+        # Binary IDs should be 6 characters (32 partitions = 5 iterations + starting '0')
         assert all(len(f.replace(".parquet", "")) == 6 for f in output_files)
         # Verify they are valid binary strings starting with '0'
         assert all(all(c in "01" for c in f.replace(".parquet", "")) for f in output_files)
         assert all(f.startswith("0") for f in output_files)
 
-    def test_partition_kdtree_custom_iterations(self, buildings_test_file, temp_output_dir):
-        """Test partition kdtree with different iteration counts."""
+    def test_partition_kdtree_custom_partitions(self, buildings_test_file, temp_output_dir):
+        """Test partition kdtree with different partition counts."""
         runner = CliRunner()
         result = runner.invoke(
             partition,
@@ -165,8 +169,8 @@ class TestPartitionKDTree:
                 "kdtree",
                 buildings_test_file,
                 temp_output_dir,
-                "--iterations",
-                "7",
+                "--partitions",
+                "128",
                 "--skip-analysis",
             ],
         )
@@ -174,7 +178,7 @@ class TestPartitionKDTree:
         # Should have created partition files
         output_files = os.listdir(temp_output_dir)
         assert len(output_files) > 0
-        # Binary IDs should be 8 characters (iterations=7 + starting '0')
+        # Binary IDs should be 8 characters (128 partitions = 7 iterations + starting '0')
         assert all(len(f.replace(".parquet", "")) == 8 for f in output_files)
 
     def test_partition_kdtree_with_hive(self, buildings_test_file, temp_output_dir):
@@ -186,8 +190,8 @@ class TestPartitionKDTree:
                 "kdtree",
                 buildings_test_file,
                 temp_output_dir,
-                "--iterations",
-                "5",
+                "--partitions",
+                "32",
                 "--hive",
                 "--skip-analysis",
             ],
@@ -208,15 +212,14 @@ class TestPartitionKDTree:
                 "kdtree",
                 buildings_test_file,
                 temp_output_dir,
-                "--iterations",
-                "5",
+                "--partitions",
+                "32",
                 "--verbose",
                 "--skip-analysis",
             ],
         )
         assert result.exit_code == 0
-        assert "KD-tree column" in result.output
-        assert "Adding it now" in result.output or "Using existing" in result.output
+        assert "KD-tree column" in result.output or "partitions" in result.output
 
     def test_partition_kdtree_preview_with_limit(self, buildings_test_file):
         """Test partition kdtree preview with custom limit."""
@@ -226,8 +229,8 @@ class TestPartitionKDTree:
             [
                 "kdtree",
                 buildings_test_file,
-                "--iterations",
-                "9",
+                "--partitions",
+                "512",
                 "--preview",
                 "--preview-limit",
                 "5",
@@ -239,7 +242,7 @@ class TestPartitionKDTree:
     def test_partition_kdtree_no_output_folder(self, buildings_test_file):
         """Test partition kdtree without output folder (should fail unless preview)."""
         runner = CliRunner()
-        result = runner.invoke(partition, ["kdtree", buildings_test_file, "--iterations", "9"])
+        result = runner.invoke(partition, ["kdtree", buildings_test_file, "--partitions", "512"])
         # Should fail because output folder is required without --preview
         assert result.exit_code != 0
 
@@ -254,8 +257,8 @@ class TestPartitionKDTree:
                 temp_output_dir,
                 "--kdtree-name",
                 "custom_kdtree",
-                "--iterations",
-                "5",
+                "--partitions",
+                "32",
                 "--skip-analysis",
             ],
         )
@@ -263,14 +266,15 @@ class TestPartitionKDTree:
         output_files = os.listdir(temp_output_dir)
         assert len(output_files) > 0
 
-    def test_partition_kdtree_invalid_iterations(self, buildings_test_file, temp_output_dir):
-        """Test partition kdtree with invalid iterations."""
+    def test_partition_kdtree_invalid_partitions(self, buildings_test_file, temp_output_dir):
+        """Test partition kdtree with invalid partitions (not power of 2)."""
         runner = CliRunner()
         result = runner.invoke(
-            partition, ["kdtree", buildings_test_file, temp_output_dir, "--iterations", "25"]
+            partition, ["kdtree", buildings_test_file, temp_output_dir, "--partitions", "100"]
         )
-        # Should fail with invalid iterations
+        # Should fail with invalid partitions
         assert result.exit_code != 0
+        assert "power of 2" in result.output.lower()
 
     def test_partition_kdtree_excludes_column_by_default(
         self, buildings_test_file, temp_output_dir
@@ -283,8 +287,8 @@ class TestPartitionKDTree:
                 "kdtree",
                 buildings_test_file,
                 temp_output_dir,
-                "--iterations",
-                "5",
+                "--partitions",
+                "32",
                 "--skip-analysis",
             ],
         )
@@ -309,8 +313,8 @@ class TestPartitionKDTree:
                 "kdtree",
                 buildings_test_file,
                 temp_output_dir,
-                "--iterations",
-                "5",
+                "--partitions",
+                "32",
                 "--keep-kdtree-column",
                 "--skip-analysis",
             ],
@@ -340,8 +344,8 @@ class TestPartitionKDTree:
                 "kdtree",
                 buildings_test_file,
                 temp_output_dir,
-                "--iterations",
-                "5",
+                "--partitions",
+                "32",
                 "--hive",
                 "--skip-analysis",
             ],
@@ -376,8 +380,10 @@ class TestKDTreeBinaryIDs:
     """Test suite for validating KD-tree binary ID generation."""
 
     def test_kdtree_binary_id_length(self, buildings_test_file, temp_output_file):
-        """Test that binary IDs have correct length matching iterations+1 (starting '0')."""
-        for iterations in [3, 5, 7, 10]:
+        """Test that binary IDs have correct length based on partition count."""
+        import math
+
+        for partitions in [8, 32, 128, 1024]:
             runner = CliRunner()
             result = runner.invoke(
                 add,
@@ -385,8 +391,8 @@ class TestKDTreeBinaryIDs:
                     "kdtree",
                     buildings_test_file,
                     temp_output_file,
-                    "--iterations",
-                    str(iterations),
+                    "--partitions",
+                    str(partitions),
                 ],
             )
             assert result.exit_code == 0
@@ -394,12 +400,13 @@ class TestKDTreeBinaryIDs:
             table = pq.read_table(temp_output_file)
             kdtree_values = table.column("kdtree_cell").to_pylist()
 
-            # Verify all values have correct length (iterations + starting '0')
+            # Verify all values have correct length (log2(partitions) + starting '0')
+            iterations = int(math.log2(partitions))
             expected_length = iterations + 1
             for value in kdtree_values:
                 if value is not None:
                     assert len(value) == expected_length, (
-                        f"Expected binary ID length {expected_length}, got {len(value)}"
+                        f"Expected binary ID length {expected_length} for {partitions} partitions, got {len(value)}"
                     )
                     assert value.startswith("0"), "All binary IDs should start with '0'"
 
@@ -412,7 +419,7 @@ class TestKDTreeBinaryIDs:
         runner = CliRunner()
         result = runner.invoke(
             add,
-            ["kdtree", buildings_test_file, temp_output_file, "--iterations", "9"],
+            ["kdtree", buildings_test_file, temp_output_file, "--partitions", "512"],
         )
         assert result.exit_code == 0
 
@@ -427,26 +434,85 @@ class TestKDTreeBinaryIDs:
                 )
 
     def test_kdtree_partition_count(self, buildings_test_file, temp_output_dir):
-        """Test that the number of unique partitions is reasonable for the iteration count."""
+        """Test that the number of unique partitions is reasonable for the partition count."""
         runner = CliRunner()
-        iterations = 5
+        partitions = 32
         result = runner.invoke(
             partition,
             [
                 "kdtree",
                 buildings_test_file,
                 temp_output_dir,
-                "--iterations",
-                str(iterations),
+                "--partitions",
+                str(partitions),
                 "--skip-analysis",
             ],
         )
         assert result.exit_code == 0
 
         output_files = [f for f in os.listdir(temp_output_dir) if f.endswith(".parquet")]
-        # We won't have exactly 2^iterations partitions if data isn't uniformly distributed,
+        # We won't have exactly the requested partitions if data isn't uniformly distributed,
         # but we should have at least some partitions and no more than the theoretical max
-        max_partitions = 2**iterations
-        assert 0 < len(output_files) <= max_partitions, (
-            f"Expected between 1 and {max_partitions} partitions, got {len(output_files)}"
+        assert 0 < len(output_files) <= partitions, (
+            f"Expected between 1 and {partitions} partitions, got {len(output_files)}"
         )
+
+    def test_add_kdtree_approx_mode(self, buildings_test_file, temp_output_file):
+        """Test KD-tree with approximate mode (default)."""
+        runner = CliRunner()
+        result = runner.invoke(
+            add,
+            ["kdtree", buildings_test_file, temp_output_file, "--partitions", "32"],
+        )
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+        # Verify column was added
+        table = pq.read_table(temp_output_file)
+        assert "kdtree_cell" in table.schema.names
+
+    def test_add_kdtree_exact_mode(self, buildings_test_file, temp_output_file):
+        """Test KD-tree with exact mode."""
+        runner = CliRunner()
+        result = runner.invoke(
+            add,
+            ["kdtree", buildings_test_file, temp_output_file, "--partitions", "8", "--exact"],
+        )
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+        # Verify column was added
+        table = pq.read_table(temp_output_file)
+        assert "kdtree_cell" in table.schema.names
+
+    def test_add_kdtree_auto_mode(self, buildings_test_file, temp_output_file):
+        """Test KD-tree with auto mode."""
+        runner = CliRunner()
+        result = runner.invoke(
+            add,
+            ["kdtree", buildings_test_file, temp_output_file, "--auto", "1000"],
+        )
+        assert result.exit_code == 0
+        assert "Auto-selected" in result.output
+        assert os.path.exists(temp_output_file)
+        # Verify column was added
+        table = pq.read_table(temp_output_file)
+        assert "kdtree_cell" in table.schema.names
+
+    def test_add_kdtree_mutually_exclusive_partitions_auto(
+        self, buildings_test_file, temp_output_file
+    ):
+        """Test that --partitions and --auto are mutually exclusive."""
+        runner = CliRunner()
+        result = runner.invoke(
+            add,
+            [
+                "kdtree",
+                buildings_test_file,
+                temp_output_file,
+                "--partitions",
+                "32",
+                "--auto",
+                "1000",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output.lower()

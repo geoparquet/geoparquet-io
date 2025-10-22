@@ -10,6 +10,31 @@ from geoparquet_io.core.common import (
 )
 
 
+def _find_optimal_iterations(total_rows, target_rows, verbose=False):
+    """
+    Find optimal iteration count to get closest to target_rows per partition.
+
+    Uses adaptive search: tests iterations until we start moving away from target.
+    """
+    best_iterations = None
+    best_distance = float("inf")
+
+    # Test iterations from 1 to 20
+    for i in range(1, 21):
+        partitions = 2**i
+        avg_rows_per_partition = total_rows / partitions
+        distance = abs(avg_rows_per_partition - target_rows)
+
+        if distance < best_distance:
+            best_distance = distance
+            best_iterations = i
+        elif distance > best_distance * 1.5:
+            # We're moving away from target significantly, stop
+            break
+
+    return best_iterations
+
+
 def _build_sampling_query(input_url, geom_col, kdtree_column_name, iterations, sample_size, con):
     """
     Build a sampling-based KD-tree query that computes boundaries on a sample,
@@ -164,6 +189,7 @@ def add_kdtree_column(
     row_group_rows=None,
     force=False,
     sample_size=100000,
+    auto_target_rows=None,
 ):
     """
     Add a KD-tree cell ID column to a GeoParquet file.
@@ -182,7 +208,8 @@ def add_kdtree_column(
         input_parquet: Path to the input parquet file
         output_parquet: Path to the output parquet file
         kdtree_column_name: Name for the KD-tree column (default: 'kdtree_cell')
-        iterations: Number of recursive splits (1-20). Determines partition count: 2^iterations
+        iterations: Number of recursive splits (1-20). Determines partition count: 2^iterations.
+                   If None, will be auto-computed based on auto_target_rows.
         dry_run: Whether to print SQL commands without executing them
         verbose: Whether to print verbose output
         compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
@@ -191,13 +218,61 @@ def add_kdtree_column(
         row_group_rows: Exact number of rows per row group
         force: Force operation even on large datasets (not recommended)
         sample_size: Number of points to sample for computing boundaries. None for exact mode (default: 100000)
+        auto_target_rows: If set, auto-compute iterations to target this many rows per partition
     """
+    # Get total row count for auto mode or validation
+    input_url = safe_file_url(input_parquet, verbose)
+
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("INSTALL spatial;")
+    con.execute("LOAD spatial;")
+
+    total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
+
+    # Auto-compute iterations if requested
+    if iterations is None:
+        if auto_target_rows is None:
+            raise click.BadParameter("Either iterations or auto_target_rows must be specified")
+
+        # Get file size for MB calculations
+        import os
+
+        file_size_mb = os.path.getsize(input_parquet) / (1024 * 1024)
+
+        # Handle MB-based or row-based targets
+        if isinstance(auto_target_rows, tuple):
+            mode, value = auto_target_rows
+            if mode == "mb":
+                # Calculate target rows: (total_rows * target_mb) / file_size_mb
+                target_rows = int((total_count * value) / file_size_mb)
+                target_desc = f"{value:,.1f} MB"
+            else:
+                target_rows = value
+                target_desc = f"{value:,} rows"
+        else:
+            target_rows = auto_target_rows
+            target_desc = f"{auto_target_rows:,} rows"
+
+        iterations = _find_optimal_iterations(total_count, target_rows, verbose)
+        partition_count = 2**iterations
+
+        if verbose or not dry_run:
+            avg_rows = total_count / partition_count
+            avg_mb = file_size_mb / partition_count
+            click.echo(
+                f"Auto-selected {partition_count} partitions (avg ~{avg_rows:,.0f} rows, ~{avg_mb:,.1f} MB/partition, target: {target_desc})"
+            )
+
     # Validate iterations
     if not 1 <= iterations <= 20:
         raise click.BadParameter(f"Iterations must be between 1 and 20, got {iterations}")
 
     # Get geometry column for the SQL expression
     geom_col = find_primary_geometry_column(input_parquet, verbose)
+
+    con.close()
 
     # Check dataset size - KD-tree computation is expensive on large datasets
     if not dry_run and not force:
@@ -244,18 +319,17 @@ def add_kdtree_column(
     # We need to use a different approach than add_computed_column
     # Build a query that selects all original columns plus the KD-tree partition ID
 
+    # Reconnect for actual processing
     input_url = safe_file_url(input_parquet, verbose)
 
-    # Create DuckDB connection
     import duckdb
 
     con = duckdb.connect()
     con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
 
-    if not dry_run:
-        # Get total count
-        total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
+    if not dry_run and auto_target_rows is None:
+        # Only print if we haven't already printed in auto mode
         mode_str = "exact" if sample_size is None else f"approx (sample: {sample_size:,})"
         click.echo(f"Processing {total_count:,} features ({mode_str})...")
 
