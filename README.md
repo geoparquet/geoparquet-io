@@ -52,6 +52,9 @@ uv sync --all-extras
 # Install
 pip install geoparquet-io
 
+# Inspect file structure and metadata
+gpio inspect myfile.parquet
+
 # Check file quality and best practices
 gpio check all myfile.parquet
 
@@ -94,6 +97,7 @@ Commands:
   add        Commands for enhancing GeoParquet files in various ways.
   check      Commands for checking GeoParquet files for best practices.
   format     Commands for formatting GeoParquet files.
+  inspect    Inspect a GeoParquet file and show metadata summary.
   partition  Commands for partitioning GeoParquet files.
   sort       Commands for sorting GeoParquet files.
 ```
@@ -439,6 +443,44 @@ gpio partition admin input.parquet output/ --column iso_code
 # Use Hive-style partitioning
 gpio partition admin input.parquet output/ --hive
 ```
+
+### inspect
+
+The `inspect` command provides quick, human-readable summaries of GeoParquet files for development and data workflows. It's useful for "gut checks" without launching external tools like DuckDB, pandas, or QGIS.
+
+```bash
+# Quick metadata inspection (instant)
+gpio inspect data.parquet
+
+# Preview first 10 rows
+gpio inspect data.parquet --head 10
+
+# Preview last 5 rows
+gpio inspect data.parquet --tail 5
+
+# Show column statistics (nulls, min/max, unique estimates)
+gpio inspect data.parquet --stats
+
+# JSON output for scripting
+gpio inspect data.parquet --json
+
+# Combined: preview with statistics
+gpio inspect data.parquet --head 5 --stats
+```
+
+**Default output** (metadata only - instant):
+- Filename and file size
+- Row count and row group count
+- CRS and bounding box
+- Column schema with types (geometry column highlighted)
+
+**Optional flags:**
+- `--head N` - Show first N rows (default: 10 when used without number)
+- `--tail N` - Show last N rows (default: 10 when used without number)
+- `--stats` - Show column statistics (nulls, min/max, unique count estimates)
+- `--json` - Output as JSON for scripting/piping
+
+When using `--json`, the output includes preview data when `--head` or `--tail` is specified, and statistics when `--stats` is specified, making it ideal for automated validation pipelines.
 
 ### check
 
