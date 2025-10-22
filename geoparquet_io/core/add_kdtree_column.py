@@ -35,7 +35,9 @@ def _find_optimal_iterations(total_rows, target_rows, verbose=False):
     return best_iterations
 
 
-def _build_sampling_query(input_url, geom_col, kdtree_column_name, iterations, sample_size, con):
+def _build_sampling_query(
+    input_url, geom_col, kdtree_column_name, iterations, sample_size, con, verbose=False
+):
     """
     Build a sampling-based KD-tree query that computes boundaries on a sample,
     then applies them to the full dataset using iterative CTEs.
@@ -106,6 +108,8 @@ def _build_sampling_query(input_url, geom_col, kdtree_column_name, iterations, s
             boundaries[(iteration, parent_partition)] = split_value
 
     # Phase 2: Build iterative query that applies boundaries
+    if verbose:
+        click.echo("Step 2/2: Building query to apply boundaries to full dataset...")
     # Build series of CTEs, one per iteration
     cte_parts = []
 
@@ -122,6 +126,8 @@ def _build_sampling_query(input_url, geom_col, kdtree_column_name, iterations, s
 
     # CTEs 1..iterations: For each iteration, append '0' or '1' based on boundary
     for i in range(1, iterations + 1):
+        if verbose:
+            click.echo(f"  Iteration {i}/{iterations}...")
         prev_cte = f"iter_{i - 1}" if i > 1 else "data_with_coords"
         current_cte = f"iter_{i}"
 
@@ -163,6 +169,8 @@ def _build_sampling_query(input_url, geom_col, kdtree_column_name, iterations, s
         """)
 
     # Final SELECT
+    if verbose:
+        click.echo("  Query built, executing on full dataset...")
     final_cte = f"iter_{iterations}"
     cte_sql = ",\n".join(cte_parts)
 
@@ -286,10 +294,12 @@ def add_kdtree_column(
             error_msg = click.style("\n⚠️  Large Dataset Warning\n", fg="yellow", bold=True)
             error_msg += click.style(
                 f"\nDataset has {total_rows:,} rows. Computing {partition_count:,} KD-tree partitions "
-                f"requires {iterations} full passes over the data (extremely slow).\n",
+                f"will take considerable time.\n",
                 fg="yellow",
             )
-            error_msg += click.style("\nRecommended approach:", fg="cyan", bold=True)
+            error_msg += click.style(
+                "\nRecommended approach for faster processing:", fg="cyan", bold=True
+            )
             error_msg += click.style(
                 "\n  1. Partition by coarser key first (country/region/state)\n"
                 "  2. Apply KD-tree within each smaller partition\n",
@@ -302,7 +312,7 @@ def add_kdtree_column(
                 fg="cyan",
             )
             error_msg += click.style(
-                "\nUse --force to override (not recommended).\n",
+                "\nUse --force to proceed anyway.\n",
                 fg="yellow",
             )
             raise click.ClickException(error_msg)
@@ -310,8 +320,8 @@ def add_kdtree_column(
         if verbose and total_rows > 10_000_000:
             click.echo(
                 click.style(
-                    f"⚠️  Processing {total_rows:,} rows - this may take several minutes...",
-                    fg="yellow",
+                    f"Processing {total_rows:,} rows - this may take several minutes...",
+                    fg="cyan",
                 )
             )
 
@@ -330,12 +340,18 @@ def add_kdtree_column(
 
     if not dry_run and auto_target_rows is None:
         # Only print if we haven't already printed in auto mode
+        partition_count = 2**iterations
         mode_str = "exact" if sample_size is None else f"approx (sample: {sample_size:,})"
-        click.echo(f"Processing {total_count:,} features ({mode_str})...")
+        click.echo(
+            f"Processing {total_count:,} features with {partition_count} partitions ({mode_str})..."
+        )
 
     # Choose algorithm based on sample_size
     if sample_size is None:
         # Exact mode: use full recursive CTE (slower but deterministic)
+        if verbose:
+            click.echo(f"Computing KD-tree partitions (exact mode: {iterations} iterations)...")
+            click.echo("  This will process the full dataset recursively...")
         # https://duckdb.org/2024/09/09/spatial-extension.html
         query = f"""
             WITH RECURSIVE kdtree(iteration, x, y, partition_id, row_id) AS (
@@ -383,8 +399,12 @@ def add_kdtree_column(
         """
     else:
         # Approximate mode: compute boundaries on sample, apply to full dataset (faster)
+        if verbose:
+            click.echo(
+                f"Step 1/2: Computing split boundaries from {sample_size:,} sample points..."
+            )
         query = _build_sampling_query(
-            input_url, geom_col, kdtree_column_name, iterations, sample_size, con
+            input_url, geom_col, kdtree_column_name, iterations, sample_size, con, verbose
         )
 
     # Prepare KD-tree metadata for GeoParquet spec
@@ -421,6 +441,8 @@ def add_kdtree_column(
     metadata, _ = get_parquet_metadata(input_parquet, verbose)
 
     # Execute the query and write output
+    if verbose:
+        click.echo("Writing output file...")
     write_parquet_with_metadata(
         con,
         query,

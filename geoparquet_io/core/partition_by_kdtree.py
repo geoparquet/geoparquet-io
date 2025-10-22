@@ -82,10 +82,12 @@ def partition_by_kdtree(
         error_msg = click.style("\n⚠️  Large Dataset Warning\n", fg="yellow", bold=True)
         error_msg += click.style(
             f"\nDataset has {total_rows:,} rows. Computing {partition_count:,} KD-tree partitions{preview_note} "
-            f"requires {iterations} full passes over the data (extremely slow).\n",
+            f"will take considerable time.\n",
             fg="yellow",
         )
-        error_msg += click.style("\nRecommended approach:", fg="cyan", bold=True)
+        error_msg += click.style(
+            "\nRecommended approach for faster processing:", fg="cyan", bold=True
+        )
         error_msg += click.style(
             "\n  1. Partition by coarser key first (country/region/state)\n"
             "  2. Apply KD-tree within each smaller partition\n",
@@ -98,7 +100,7 @@ def partition_by_kdtree(
             fg="cyan",
         )
         error_msg += click.style(
-            "\nUse --force to override (not recommended).\n",
+            "\nUse --force to proceed anyway.\n",
             fg="yellow",
         )
         raise click.ClickException(error_msg)
@@ -106,8 +108,8 @@ def partition_by_kdtree(
     if not column_exists and verbose and total_rows > 10_000_000:
         click.echo(
             click.style(
-                f"⚠️  Processing {total_rows:,} rows - this may take several minutes...",
-                fg="yellow",
+                f"Processing {total_rows:,} rows - this may take several minutes...",
+                fg="cyan",
             )
         )
 

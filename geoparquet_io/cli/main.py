@@ -560,6 +560,8 @@ def add_kdtree(
 
     Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
     For datasets > 50M rows, consider hierarchical partitioning (country/region + KD-tree).
+
+    Use --verbose to track progress with iteration-by-iteration updates.
     """
     import math
 
@@ -972,6 +974,8 @@ def partition_kdtree(
 
     Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
     For datasets > 50M rows, consider hierarchical partitioning (country/region first, then KD-tree).
+
+    Use --verbose to track progress with iteration-by-iteration updates.
 
     Examples:
 
