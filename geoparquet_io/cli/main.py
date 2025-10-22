@@ -7,6 +7,15 @@ from geoparquet_io.core.add_h3_column import add_h3_column as add_h3_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
+from geoparquet_io.core.inspect_utils import (
+    extract_columns_info,
+    extract_file_info,
+    extract_geo_info,
+    format_json_output,
+    format_terminal_output,
+    get_column_statistics,
+    get_preview_data,
+)
 from geoparquet_io.core.partition_by_h3 import partition_by_h3 as partition_by_h3_impl
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
@@ -123,6 +132,93 @@ def check_row_group_cmd(parquet_file, verbose):
     from geoparquet_io.core.check_parquet_structure import check_row_groups
 
     check_row_groups(parquet_file, verbose)
+
+
+# Inspect command
+@cli.command()
+@click.argument("parquet_file", type=click.Path(exists=True))
+@click.option("--head", type=int, default=None, help="Show first N rows")
+@click.option("--tail", type=int, default=None, help="Show last N rows")
+@click.option(
+    "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
+)
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
+def inspect(parquet_file, head, tail, stats, json_output):
+    """
+    Inspect a GeoParquet file and show metadata summary.
+
+    Provides quick examination of GeoParquet files without launching external tools.
+    Default behavior shows metadata only (instant). Use --head/--tail to preview data,
+    or --stats to calculate column statistics.
+
+    Examples:
+
+        \b
+        # Quick metadata inspection
+        gpio inspect data.parquet
+
+        \b
+        # Preview first 10 rows
+        gpio inspect data.parquet --head 10
+
+        \b
+        # Preview last 5 rows
+        gpio inspect data.parquet --tail 5
+
+        \b
+        # Show statistics
+        gpio inspect data.parquet --stats
+
+        \b
+        # JSON output for scripting
+        gpio inspect data.parquet --json
+    """
+    import fsspec
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.common import safe_file_url
+
+    # Validate mutually exclusive options
+    if head and tail:
+        raise click.UsageError("--head and --tail are mutually exclusive")
+
+    try:
+        # Extract metadata
+        file_info = extract_file_info(parquet_file)
+        geo_info = extract_geo_info(parquet_file)
+
+        # Get schema for column info
+        safe_url = safe_file_url(parquet_file, verbose=False)
+        with fsspec.open(safe_url, "rb") as f:
+            pf = pq.ParquetFile(f)
+            schema = pf.schema_arrow
+
+        columns_info = extract_columns_info(schema, geo_info.get("primary_column"))
+
+        # Get preview data if requested
+        preview_table = None
+        preview_mode = None
+        if head or tail:
+            preview_table, preview_mode = get_preview_data(parquet_file, head=head, tail=tail)
+
+        # Get statistics if requested
+        statistics = None
+        if stats:
+            statistics = get_column_statistics(parquet_file, columns_info)
+
+        # Output
+        if json_output:
+            output = format_json_output(
+                file_info, geo_info, columns_info, preview_table, statistics
+            )
+            click.echo(output)
+        else:
+            format_terminal_output(
+                file_info, geo_info, columns_info, preview_table, preview_mode, statistics
+            )
+
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 # Format commands group
