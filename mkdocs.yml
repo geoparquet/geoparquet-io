@@ -1,0 +1,68 @@
+site_name: geoparquet-io
+site_description: Fast I/O and transformation tools for GeoParquet files
+site_author: Chris Holmes
+site_url: https://cholmes.github.io/geoparquet-io/
+repo_name: cholmes/geoparquet-io
+repo_url: https://github.com/cholmes/geoparquet-io
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to light mode
+  features:
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+  - User Guide:
+    - Inspecting Files: guide/inspect.md
+    - Checking Best Practices: guide/check.md
+    - Sorting Data: guide/sort.md
+    - Adding Spatial Indices: guide/add.md
+    - Partitioning Files: guide/partition.md
+    - Formatting Files: guide/format.md
+  - CLI Reference:
+    - Overview: cli/overview.md
+    - inspect: cli/inspect.md
+    - check: cli/check.md
+    - sort: cli/sort.md
+    - add: cli/add.md
+    - partition: cli/partition.md
+    - format: cli/format.md
+  - Python API:
+    - Overview: api/overview.md
+    - Core Functions: api/core.md
+  - Examples:
+    - Basic Usage: examples/basic.md
+    - Batch Processing: examples/batch.md
+  - Contributing: contributing.md
+  - Changelog: changelog.md
