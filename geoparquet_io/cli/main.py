@@ -1,5 +1,11 @@
 import click
 
+from geoparquet_io.cli.decorators import (
+    dry_run_option,
+    output_format_options,
+    partition_options,
+    verbose_option,
+)
 from geoparquet_io.core.add_bbox_column import add_bbox_column as add_bbox_column_impl
 from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
 from geoparquet_io.core.add_country_codes import add_country_codes as add_country_codes_impl
@@ -257,24 +263,8 @@ def sort():
 @click.option(
     "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
 )
-@click.option(
-    "--compression",
-    default="ZSTD",
-    type=click.Choice(
-        ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
-    ),
-    help="Compression type for output file (default: ZSTD)",
-)
-@click.option(
-    "--compression-level",
-    type=click.IntRange(1, 22),
-    help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
-)
-@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
-@click.option(
-    "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
-)
-@click.option("--verbose", "-v", is_flag=True, help="Print verbose output")
+@output_format_options
+@verbose_option
 def hilbert_order(
     input_parquet,
     output_parquet,
@@ -344,29 +334,9 @@ def add():
 @click.option(
     "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
 )
-@click.option(
-    "--compression",
-    default="ZSTD",
-    type=click.Choice(
-        ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
-    ),
-    help="Compression type for output file (default: ZSTD)",
-)
-@click.option(
-    "--compression-level",
-    type=click.IntRange(1, 22),
-    help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
-)
-@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
-@click.option(
-    "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Print SQL commands that would be executed without actually running them.",
-)
-@click.option("--verbose", is_flag=True, help="Print additional information.")
+@output_format_options
+@dry_run_option
+@verbose_option
 def add_country_codes(
     input_parquet,
     output_parquet,
@@ -420,29 +390,9 @@ def add_country_codes(
 @click.argument("input_parquet")
 @click.argument("output_parquet")
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
-@click.option(
-    "--compression",
-    default="ZSTD",
-    type=click.Choice(
-        ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
-    ),
-    help="Compression type for output file (default: ZSTD)",
-)
-@click.option(
-    "--compression-level",
-    type=click.IntRange(1, 22),
-    help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
-)
-@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
-@click.option(
-    "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Print SQL commands that would be executed without actually running them.",
-)
-@click.option("--verbose", is_flag=True, help="Print additional information.")
+@output_format_options
+@dry_run_option
+@verbose_option
 def add_bbox(
     input_parquet,
     output_parquet,
@@ -498,29 +448,9 @@ def add_bbox(
     type=click.IntRange(0, 15),
     help="H3 resolution level (0-15). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9",
 )
-@click.option(
-    "--compression",
-    default="ZSTD",
-    type=click.Choice(
-        ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
-    ),
-    help="Compression type for output file (default: ZSTD)",
-)
-@click.option(
-    "--compression-level",
-    type=click.IntRange(1, 22),
-    help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
-)
-@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
-@click.option(
-    "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Print SQL commands that would be executed without actually running them.",
-)
-@click.option("--verbose", is_flag=True, help="Print additional information.")
+@output_format_options
+@dry_run_option
+@verbose_option
 def add_h3(
     input_parquet,
     output_parquet,
@@ -602,34 +532,14 @@ def add_h3(
     is_flag=True,
     help="Use exact median computation on full dataset (slower but deterministic). Mutually exclusive with --approx.",
 )
-@click.option(
-    "--compression",
-    default="ZSTD",
-    type=click.Choice(
-        ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
-    ),
-    help="Compression type for output file (default: ZSTD)",
-)
-@click.option(
-    "--compression-level",
-    type=click.IntRange(1, 22),
-    help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
-)
-@click.option("--row-group-size", type=int, help="Exact number of rows per row group")
-@click.option(
-    "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Print SQL commands that would be executed without actually running them.",
-)
+@output_format_options
+@dry_run_option
 @click.option(
     "--force",
     is_flag=True,
     help="Force operation on large datasets without confirmation",
 )
-@click.option("--verbose", is_flag=True, help="Print additional information.")
+@verbose_option
 def add_kdtree(
     input_parquet,
     output_parquet,
@@ -742,39 +652,19 @@ def partition():
     default="admin:country_code",
     help="Column name to partition by (default: admin:country_code)",
 )
-@click.option(
-    "--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure."
-)
-@click.option("--verbose", is_flag=True, help="Print additional information.")
-@click.option("--overwrite", is_flag=True, help="Overwrite existing country files.")
-@click.option("--preview", is_flag=True, help="Preview partitions without creating files.")
-@click.option(
-    "--preview-limit",
-    default=15,
-    type=int,
-    help="Number of partitions to show in preview (default: 15)",
-)
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Force partitioning even if analysis detects potential issues",
-)
-@click.option(
-    "--skip-analysis",
-    is_flag=True,
-    help="Skip partition strategy analysis (for performance-sensitive cases)",
-)
+@partition_options
+@verbose_option
 def partition_admin(
     input_parquet,
     output_folder,
     column,
     hive,
-    verbose,
     overwrite,
     preview,
     preview_limit,
     force,
     skip_analysis,
+    verbose,
 ):
     """Split a GeoParquet file into separate files by country code.
 
@@ -806,30 +696,8 @@ def partition_admin(
 @click.argument("output_folder", required=False)
 @click.option("--column", required=True, help="Column name to partition by (required)")
 @click.option("--chars", type=int, help="Number of characters to use as prefix for partitioning")
-@click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure")
-@click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")
-@click.option(
-    "--preview",
-    is_flag=True,
-    help="Analyze and preview partitions without creating files (dry-run)",
-)
-@click.option(
-    "--preview-limit",
-    default=15,
-    type=int,
-    help="Number of partitions to show in preview (default: 15)",
-)
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Force partitioning even if analysis detects potential issues",
-)
-@click.option(
-    "--skip-analysis",
-    is_flag=True,
-    help="Skip partition strategy analysis (for performance-sensitive cases)",
-)
-@click.option("--verbose", is_flag=True, help="Print additional information")
+@partition_options
+@verbose_option
 def partition_string(
     input_parquet,
     output_folder,
@@ -897,45 +765,23 @@ def partition_string(
     default=9,
     help="H3 resolution for partitioning (0-15, default: 9)",
 )
-@click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure")
-@click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")
-@click.option(
-    "--preview",
-    is_flag=True,
-    help="Analyze and preview partitions without creating files (dry-run)",
-)
-@click.option(
-    "--preview-limit",
-    default=15,
-    type=int,
-    help="Number of partitions to show in preview (default: 15)",
-)
 @click.option(
     "--keep-h3-column",
     is_flag=True,
     help="Keep the H3 column in output files (default: excluded for non-Hive, included for Hive)",
 )
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Force partitioning even if analysis detects potential issues",
-)
-@click.option(
-    "--skip-analysis",
-    is_flag=True,
-    help="Skip partition strategy analysis (for performance-sensitive cases)",
-)
-@click.option("--verbose", is_flag=True, help="Print additional information")
+@partition_options
+@verbose_option
 def partition_h3(
     input_parquet,
     output_folder,
     h3_name,
     resolution,
+    keep_h3_column,
     hive,
     overwrite,
     preview,
     preview_limit,
-    keep_h3_column,
     force,
     skip_analysis,
     verbose,
@@ -1022,35 +868,13 @@ def partition_h3(
     is_flag=True,
     help="Use exact median computation on full dataset (slower but deterministic). Mutually exclusive with --approx.",
 )
-@click.option("--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure")
-@click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")
-@click.option(
-    "--preview",
-    is_flag=True,
-    help="Analyze and preview partitions without creating files (dry-run)",
-)
-@click.option(
-    "--preview-limit",
-    default=15,
-    type=int,
-    help="Number of partitions to show in preview (default: 15)",
-)
 @click.option(
     "--keep-kdtree-column",
     is_flag=True,
     help="Keep the KD-tree column in output files (default: excluded for non-Hive, included for Hive)",
 )
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Force partitioning even if analysis detects potential issues",
-)
-@click.option(
-    "--skip-analysis",
-    is_flag=True,
-    help="Skip partition strategy analysis (for performance-sensitive cases)",
-)
-@click.option("--verbose", is_flag=True, help="Print additional information")
+@partition_options
+@verbose_option
 def partition_kdtree(
     input_parquet,
     output_folder,
@@ -1059,11 +883,11 @@ def partition_kdtree(
     auto,
     approx,
     exact,
+    keep_kdtree_column,
     hive,
     overwrite,
     preview,
     preview_limit,
-    keep_kdtree_column,
     force,
     skip_analysis,
     verbose,
