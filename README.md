@@ -54,7 +54,7 @@ gpio add bbox input.parquet output.parquet
 # Sort using Hilbert curve for spatial locality
 gpio sort hilbert input.parquet output_sorted.parquet
 
-# Partition by admin boundaries (downloads and caches GAUL dataset)
+# Partition by admin boundaries
 gpio partition admin buildings.parquet output_dir/ --dataset gaul --levels continent,country
 ```
 
@@ -111,15 +111,11 @@ gpio sort hilbert input.parquet sorted.parquet
 # Partition by H3 cells
 gpio partition h3 large.parquet output_dir/ --resolution 7
 
-# Partition by admin boundaries (auto-caches remote datasets)
+# Partition by admin boundaries with spatial extent filtering
 gpio partition admin buildings.parquet by_admin/ --dataset gaul --levels continent,country
 
 # Multi-level Hive-style partitioning (continent=Africa/country=Kenya/...)
 gpio partition admin buildings.parquet by_admin/ --dataset gaul --levels continent,country,department --hive
-
-# Manage cache for remote datasets
-gpio cache list      # View cached datasets
-gpio cache clear     # Clear cache to free space
 ```
 
 ### Python API
