@@ -31,6 +31,14 @@ cd geoparquet-io
 uv sync --all-extras
 ```
 
+For full development set up see the [getting started](CONTRIBUTING.md#getting-started) instructions.
+
+### Requirements
+
+- Python 3.9 or higher
+- PyArrow 12.0.0+
+- DuckDB 1.1.3+
+
 ## Quick Start
 
 ```bash
