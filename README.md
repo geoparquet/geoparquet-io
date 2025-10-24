@@ -40,6 +40,8 @@ cd geoparquet-io
 uv sync --all-extras
 ```
 
+For full development set up see the [getting started](CONTRIBUTING.md#getting-started) instructions.
+
 ### Requirements
 
 - Python 3.9 or higher
