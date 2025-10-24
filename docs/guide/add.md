@@ -100,10 +100,7 @@ Add administrative division columns via spatial join with remote boundaries data
 
 ### How It Works
 
-Performs spatial intersection between your data and remote admin boundaries to add admin division columns.
-
-**First run**: Downloads and caches dataset (~2-3 minutes for GAUL)
-**Subsequent runs**: Uses cached dataset (~0.5 seconds)
+Performs spatial intersection between your data and remote admin boundaries to add admin division columns. Uses efficient spatial extent filtering to query only relevant boundaries from remote datasets.
 
 ### Quick Start
 
@@ -136,34 +133,18 @@ gpio add admin-divisions buildings.parquet output.parquet --dataset overture \
 
 Two remote admin boundary datasets are supported:
 
-| Dataset | Columns Added | Size | Description |
-|---------|--------------|------|-------------|
-| `gaul` (default) | `admin:continent`, `admin:country`, `admin:department` | 482 MB | GAUL L2 Admin Boundaries - worldwide |
-| `overture` | `admin:country`, `admin:region`, `admin:locality` | ~500 MB | Overture Maps Divisions (experimental) |
-
-### Caching
-
-Remote datasets are automatically cached for performance:
-
-```bash
-# View cached datasets
-gpio cache list
-
-# Clear cache to free disk space
-gpio cache clear
-```
-
-**Cache location**: `~/.cache/geoparquet-io/admin-datasets/`
-
-See the [Cache Management](cache.md) guide for details.
+| Dataset | Columns Added | Description |
+|---------|--------------|-------------|
+| `gaul` (default) | `admin:continent`, `admin:country`, `admin:department` | GAUL L2 Admin Boundaries - worldwide |
+| `overture` | `admin:country`, `admin:region` | Overture Maps Divisions (219 countries, 3,544 regions) - [docs](https://docs.overturemaps.org/guides/divisions/) |
 
 ### Notes
 
 - Uses the [administrative division extension](https://github.com/fiboa/administrative-division-extension) from [fiboa](https://github.com/fiboa)
 - GAUL dataset: [source.coop GAUL L2](https://data.source.coop/nlebovits/gaul-l2-admin/)
 - Performs spatial intersection to assign admin divisions based on geometry
-- Requires internet connection on first use (for downloading)
-- Uses bbox columns for optimization when available
+- Requires internet connection to access remote datasets
+- Uses spatial extent filtering and bbox columns for optimization
 
 ## Common Options
 

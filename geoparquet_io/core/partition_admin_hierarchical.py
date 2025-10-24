@@ -97,28 +97,93 @@ def partition_by_admin_hierarchical(
     con.execute("INSTALL httpfs;")
     con.execute("LOAD httpfs;")
 
-    # Configure for source.coop S3 access
-    con.execute("SET s3_endpoint='data.source.coop';")
-    con.execute("SET s3_url_style='path';")
-    con.execute("SET s3_use_ssl=true;")
+    # Configure S3 settings based on dataset requirements
+    dataset.configure_s3(con)
 
     # STEP 1: Spatial join to create enriched data with admin columns
     click.echo("\n📍 Step 1/2: Performing spatial join with admin boundaries...")
 
     enriched_table = "_enriched_with_admin"
 
-    # Prepare admin data source (downloads and caches if remote)
+    # Prepare admin data source
     admin_source = dataset.prepare_data_source(con)
 
     # Build SELECT clause for admin columns (only pull what we need)
     admin_select_parts = []
     output_column_names = []
-    for level, col in zip(levels, boundary_columns):
+    for i, (level, col) in enumerate(zip(levels, boundary_columns)):
         output_col = f"_admin_{level}"  # Temporary internal name
         output_column_names.append(output_col)
-        admin_select_parts.append(f'b."{col}" as "{output_col}"')
+        # Handle struct field access (e.g., names['primary']) vs simple column names
+        if "[" in col or "(" in col:
+            # SQL expression - reference the alias from subquery
+            admin_select_parts.append(f'b._col_{i} as "{output_col}"')
+        else:
+            # Simple column name - quote it
+            admin_select_parts.append(f'b."{col}" as "{output_col}"')
 
     admin_select_clause = ", ".join(admin_select_parts)
+
+    # Build admin data source with read_parquet options if needed
+    read_options = dataset.get_read_parquet_options()
+    if read_options:
+        options_str = ", ".join([f"{k}={v}" for k, v in read_options.items()])
+        admin_table_ref = f"read_parquet({admin_source}, {options_str})"
+    else:
+        admin_table_ref = admin_source
+
+    # Build WHERE clause for admin boundaries
+    admin_where_clauses = []
+
+    # Add subtype filter if applicable
+    subtype_filter = dataset.get_subtype_filter(levels)
+    if subtype_filter:
+        admin_where_clauses.append(subtype_filter)
+        if verbose:
+            click.echo(f"  → Filtering admin boundaries: {subtype_filter}")
+
+    # Add bbox extent filter to only load admin boundaries that overlap with input data
+    # This is crucial for performance with large global datasets like Overture
+    if admin_bbox_col:
+        # Get extent of input data - use bbox column if available, otherwise calculate from geometry
+        if input_bbox_col:
+            extent_query = f"""
+                SELECT
+                    MIN({input_bbox_col}.xmin) as xmin,
+                    MAX({input_bbox_col}.xmax) as xmax,
+                    MIN({input_bbox_col}.ymin) as ymin,
+                    MAX({input_bbox_col}.ymax) as ymax
+                FROM '{input_url}'
+            """
+        else:
+            # Calculate extent from geometry column
+            extent_query = f"""
+                SELECT
+                    MIN(ST_XMin("{input_geom_col}")) as xmin,
+                    MAX(ST_XMax("{input_geom_col}")) as xmax,
+                    MIN(ST_YMin("{input_geom_col}")) as ymin,
+                    MAX(ST_YMax("{input_geom_col}")) as ymax
+                FROM '{input_url}'
+            """
+
+        extent = con.execute(extent_query).fetchone()
+        if extent and all(v is not None for v in extent):
+            xmin, xmax, ymin, ymax = extent
+            extent_filter = f"""
+                ({admin_bbox_col}.xmin <= {xmax} AND
+                 {admin_bbox_col}.xmax >= {xmin} AND
+                 {admin_bbox_col}.ymin <= {ymax} AND
+                 {admin_bbox_col}.ymax >= {ymin})
+            """
+            admin_where_clauses.append(extent_filter)
+            if verbose:
+                click.echo(
+                    f"  → Filtering admin boundaries to input extent: ({xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f})"
+                )
+
+    admin_where_clause = ""
+    if admin_where_clauses:
+        admin_where_clause = "WHERE " + " AND ".join(admin_where_clauses)
 
     # Build efficient spatial join query
     if input_bbox_col and admin_bbox_col:
@@ -133,22 +198,17 @@ def partition_by_admin_hierarchical(
              a.{input_bbox_col}.ymax >= b.{admin_bbox_col}.ymin)
         """
 
-        enrichment_query = f"""
-            CREATE TEMP TABLE {enriched_table} AS
-            SELECT
-                a.*,
-                {admin_select_clause}
-            FROM '{input_url}' a
-            LEFT JOIN (
-                SELECT "{admin_geom_col}", {admin_bbox_col}, {", ".join([f'"{col}"' for col in boundary_columns])}
-                FROM '{admin_source}'
-            ) b
-            ON {bbox_filter}
-                AND ST_Intersects(b."{admin_geom_col}", a."{input_geom_col}")
-        """
-    else:
-        if verbose:
-            click.echo("  → Using full geometry intersection (no bbox optimization)")
+        # Build column list for subquery - handle struct access
+        # We need to give SQL expressions an alias so they can be referenced in the outer query
+        subquery_cols = []
+        for i, col in enumerate(boundary_columns):
+            if "[" in col or "(" in col:
+                # SQL expression - give it an alias
+                subquery_cols.append(f"{col} as _col_{i}")
+            else:
+                # Simple column, quote it
+                subquery_cols.append(f'"{col}"')
+        subquery_cols_str = ", ".join(subquery_cols)
 
         enrichment_query = f"""
             CREATE TEMP TABLE {enriched_table} AS
@@ -157,10 +217,41 @@ def partition_by_admin_hierarchical(
                 {admin_select_clause}
             FROM '{input_url}' a
             LEFT JOIN (
-                SELECT "{admin_geom_col}", {", ".join([f'"{col}"' for col in boundary_columns])}
-                FROM '{admin_source}'
+                SELECT {admin_geom_col}, {admin_bbox_col}, {subquery_cols_str}
+                FROM {admin_table_ref}
+                {admin_where_clause}
             ) b
-            ON ST_Intersects(b."{admin_geom_col}", a."{input_geom_col}")
+            ON {bbox_filter}
+                AND ST_Intersects(b.{admin_geom_col}, a."{input_geom_col}")
+        """
+    else:
+        if verbose:
+            click.echo("  → Using full geometry intersection (no bbox optimization)")
+
+        # Build column list for subquery - handle struct access
+        # We need to give SQL expressions an alias so they can be referenced in the outer query
+        subquery_cols = []
+        for i, col in enumerate(boundary_columns):
+            if "[" in col or "(" in col:
+                # SQL expression - give it an alias
+                subquery_cols.append(f"{col} as _col_{i}")
+            else:
+                # Simple column, quote it
+                subquery_cols.append(f'"{col}"')
+        subquery_cols_str = ", ".join(subquery_cols)
+
+        enrichment_query = f"""
+            CREATE TEMP TABLE {enriched_table} AS
+            SELECT
+                a.*,
+                {admin_select_clause}
+            FROM '{input_url}' a
+            LEFT JOIN (
+                SELECT {admin_geom_col}, {subquery_cols_str}
+                FROM {admin_table_ref}
+                {admin_where_clause}
+            ) b
+            ON ST_Intersects(b.{admin_geom_col}, a."{input_geom_col}")
         """
 
     con.execute(enrichment_query)

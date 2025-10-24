@@ -141,13 +141,11 @@ def add_admin_divisions_multi(
     con = duckdb.connect()
     con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
-
-    # Configure S3 access for source.coop
     con.execute("INSTALL httpfs;")
     con.execute("LOAD httpfs;")
-    con.execute("SET s3_endpoint='data.source.coop';")
-    con.execute("SET s3_url_style='path';")
-    con.execute("SET s3_use_ssl=true;")
+
+    # Configure S3 settings based on dataset requirements
+    dataset.configure_s3(con)
 
     # Get total input count (skip in dry-run)
     if not dry_run:
@@ -155,17 +153,103 @@ def add_admin_divisions_multi(
         click.echo(f"Processing {total_count:,} input features...")
 
     # Prepare admin data source
-    admin_table_ref = dataset.prepare_data_source(con)
+    admin_source = dataset.prepare_data_source(con)
+
+    # Build admin data source with read_parquet options if needed
+    read_options = dataset.get_read_parquet_options()
+    if read_options:
+        options_str = ", ".join([f"{k}={v}" for k, v in read_options.items()])
+        admin_table_ref = f"read_parquet({admin_source}, {options_str})"
+    else:
+        admin_table_ref = admin_source
+
+    # Build WHERE clause for admin boundaries
+    admin_where_clauses = []
+
+    # Add subtype filter if applicable
+    subtype_filter = dataset.get_subtype_filter(levels)
+    if subtype_filter:
+        admin_where_clauses.append(subtype_filter)
+        if verbose and not dry_run:
+            click.echo(f"Filtering admin boundaries: {subtype_filter}")
+
+    # Add bbox extent filter to only load admin boundaries that overlap with input data
+    # This is crucial for performance with large global datasets like Overture
+    if admin_bbox_col:
+        # Get extent of input data - use bbox column if available, otherwise calculate from geometry
+        if input_bbox_col:
+            extent_query = f"""
+                SELECT
+                    MIN({input_bbox_col}.xmin) as xmin,
+                    MAX({input_bbox_col}.xmax) as xmax,
+                    MIN({input_bbox_col}.ymin) as ymin,
+                    MAX({input_bbox_col}.ymax) as ymax
+                FROM '{input_url}'
+            """
+        else:
+            # Calculate extent from geometry column
+            extent_query = f"""
+                SELECT
+                    MIN(ST_XMin("{input_geom_col}")) as xmin,
+                    MAX(ST_XMax("{input_geom_col}")) as xmax,
+                    MIN(ST_YMin("{input_geom_col}")) as ymin,
+                    MAX(ST_YMax("{input_geom_col}")) as ymax
+                FROM '{input_url}'
+            """
+
+        extent = con.execute(extent_query).fetchone()
+        if extent and all(v is not None for v in extent):
+            xmin, xmax, ymin, ymax = extent
+            extent_filter = f"""
+                ({admin_bbox_col}.xmin <= {xmax} AND
+                 {admin_bbox_col}.xmax >= {xmin} AND
+                 {admin_bbox_col}.ymin <= {ymax} AND
+                 {admin_bbox_col}.ymax >= {ymin})
+            """
+            admin_where_clauses.append(extent_filter)
+            if verbose and not dry_run:
+                click.echo(
+                    f"Filtering admin boundaries to input extent: ({xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f})"
+                )
+
+    # Build admin subquery with filters
+    admin_where_clause = ""
+    if admin_where_clauses:
+        admin_where_clause = "WHERE " + " AND ".join(admin_where_clauses)
+
+    # Build column list for subquery - handle struct access
+    # We need to give SQL expressions an alias so they can be referenced in the outer query
+    subquery_cols = []
+    for i, col in enumerate(partition_columns):
+        if "[" in col or "(" in col:
+            # SQL expression - give it an alias
+            subquery_cols.append(f"{col} as _col_{i}")
+        else:
+            # Simple column, quote it
+            subquery_cols.append(f'"{col}"')
+    subquery_cols_str = ", ".join(subquery_cols)
 
     # Build SELECT clause for admin columns
     # Create column aliases based on level names
     admin_select_parts = []
-    for level, col in zip(levels, partition_columns):
+    for i, (level, col) in enumerate(zip(levels, partition_columns)):
         # Use level name as the output column name with admin: prefix
         output_col_name = f"admin:{level}"
-        admin_select_parts.append(f'b."{col}" as "{output_col_name}"')
+        # Handle struct field access (e.g., names['primary']) vs simple column names
+        if "[" in col or "(" in col:
+            # SQL expression - reference the alias from subquery
+            admin_select_parts.append(f'b._col_{i} as "{output_col_name}"')
+        else:
+            # Simple column name - quote it
+            admin_select_parts.append(f'b."{col}" as "{output_col_name}"')
 
     admin_select_clause = ", ".join(admin_select_parts)
+
+    admin_subquery = f"""(
+        SELECT {admin_geom_col}, {admin_bbox_col if admin_bbox_col else admin_geom_col}, {subquery_cols_str}
+        FROM {admin_table_ref}
+        {admin_where_clause}
+    )"""
 
     # Build spatial join query based on bbox availability
     if input_bbox_col and admin_bbox_col:
@@ -184,7 +268,7 @@ def add_admin_divisions_multi(
         a.*,
         {admin_select_clause}
     FROM '{input_url}' a
-    LEFT JOIN {admin_table_ref} b
+    LEFT JOIN {admin_subquery} b
     ON {bbox_condition}  -- Fast bbox intersection test
         AND ST_Intersects(  -- More expensive precise check only on bbox matches
             b.{admin_geom_col},
@@ -200,7 +284,7 @@ def add_admin_divisions_multi(
         a.*,
         {admin_select_clause}
     FROM '{input_url}' a
-    LEFT JOIN {admin_table_ref} b
+    LEFT JOIN {admin_subquery} b
     ON ST_Intersects(b.{admin_geom_col}, a.{input_geom_col})
 """
 

@@ -317,111 +317,6 @@ def hilbert_order(
         raise click.ClickException(str(e)) from e
 
 
-# Add commands group
-@cli.group()
-def cache():
-    """Manage cache for remote admin boundary datasets."""
-    pass
-
-
-@cache.command(name="list")
-@verbose_option
-def cache_list(verbose):
-    """List cached admin boundary datasets."""
-    import time
-
-    from geoparquet_io.core.admin_cache import list_cached_datasets
-
-    cached = list_cached_datasets(verbose)
-
-    if not cached:
-        click.echo("No cached datasets found.")
-        return
-
-    click.echo(f"\nCached Admin Boundary Datasets ({len(cached)} total):\n")
-
-    # Display table
-    for item in cached:
-        dataset_name = item.get("dataset_name", "unknown")
-        size_mb = item["size_bytes"] / (1024 * 1024)
-        cached_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item["cached_at"]))
-
-        click.echo(f"  {dataset_name}")
-        click.echo(f"    Size: {size_mb:.1f} MB")
-        click.echo(f"    Cached: {cached_at}")
-        if verbose:
-            click.echo(f"    Path: {item['file_path']}")
-            if "url" in item:
-                click.echo(f"    URL: {item['url']}")
-        click.echo()
-
-
-@cache.command(name="clear")
-@click.option(
-    "--dataset",
-    help="Clear cache for specific dataset (gaul, overture). If not specified, clears all.",
-)
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
-@verbose_option
-def cache_clear(dataset, yes, verbose):
-    """Clear cached admin boundary datasets."""
-    from geoparquet_io.core.admin_cache import clear_cache, list_cached_datasets
-
-    # Get list of what will be cleared
-    cached = list_cached_datasets()
-
-    if not cached:
-        click.echo("No cached datasets to clear.")
-        return
-
-    if dataset:
-        # Filter to specific dataset
-        cached = [c for c in cached if dataset.lower() in c.get("dataset_name", "").lower()]
-        if not cached:
-            click.echo(f"No cached datasets found for: {dataset}")
-            return
-
-    # Calculate total size
-    total_size_mb = sum(c["size_bytes"] for c in cached) / (1024 * 1024)
-
-    # Confirm
-    if not yes:
-        if dataset:
-            msg = f"Clear {len(cached)} cached file(s) for {dataset} ({total_size_mb:.1f} MB)?"
-        else:
-            msg = f"Clear all {len(cached)} cached file(s) ({total_size_mb:.1f} MB)?"
-
-        if not click.confirm(msg):
-            click.echo("Cancelled.")
-            return
-
-    # Clear cache
-    removed = clear_cache(dataset, verbose)
-
-    click.echo(f"✓ Removed {removed} file(s), freed {total_size_mb:.1f} MB")
-
-
-@cache.command(name="info")
-def cache_info():
-    """Show cache directory information."""
-    from geoparquet_io.core.admin_cache import get_cache_dir, list_cached_datasets
-
-    cache_dir = get_cache_dir()
-
-    click.echo(f"\nCache Directory: {cache_dir}")
-    click.echo(f"Exists: {cache_dir.exists()}")
-
-    cached = list_cached_datasets()
-    if cached:
-        total_size = sum(c["size_bytes"] for c in cached) / (1024 * 1024)
-        click.echo(f"Total cached: {len(cached)} dataset(s), {total_size:.1f} MB")
-    else:
-        click.echo("Total cached: 0 datasets")
-
-    click.echo("\nUse 'gpio cache list' to see cached datasets")
-    click.echo("Use 'gpio cache clear' to remove cached datasets")
-
-
 @cli.group()
 def add():
     """Commands for enhancing GeoParquet files in various ways."""
@@ -806,7 +701,7 @@ def partition():
     required=True,
     help="Comma-separated hierarchical levels to partition by. "
     "GAUL levels: continent,country,department. "
-    "Overture levels: country,region,locality.",
+    "Overture levels: country,region.",
 )
 @partition_options
 @verbose_option
@@ -832,7 +727,7 @@ def partition_admin(
     \b
     **Datasets:**
     - gaul: GAUL L2 Admin Boundaries (levels: continent, country, department)
-    - overture: Overture Maps Divisions (levels: country, region, locality)
+    - overture: Overture Maps Divisions (levels: country, region)
 
     \b
     **Examples:**

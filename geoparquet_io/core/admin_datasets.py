@@ -34,7 +34,6 @@ class AdminDataset(ABC):
         """
         self.source_path = source_path
         self.verbose = verbose
-        self._cached_path: Optional[str] = None
 
     @abstractmethod
     def get_dataset_name(self) -> str:
@@ -151,12 +150,47 @@ class AdminDataset(ABC):
         mapping = self.get_level_column_mapping()
         return [mapping[level] for level in levels]
 
+    def get_read_parquet_options(self) -> dict:
+        """
+        Get additional options to pass to read_parquet() for this dataset.
+
+        Returns:
+            Dictionary of option names to values
+        """
+        return {}
+
+    def get_subtype_filter(self, levels: list[str]) -> Optional[str]:
+        """
+        Get SQL WHERE clause to filter by subtype (for datasets that use subtype).
+
+        Args:
+            levels: List of level names to include
+
+        Returns:
+            SQL WHERE clause string or None if not applicable
+        """
+        return None
+
+    @abstractmethod
+    def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
+        """
+        Configure S3 settings for this dataset.
+
+        Default implementation does nothing (uses standard AWS S3).
+        Subclasses can override this method if they require custom S3 configuration
+        (e.g., custom endpoints like source.coop).
+
+        Args:
+            con: DuckDB connection to configure
+        """
+        pass  # Default: no custom S3 configuration needed (standard AWS S3)
+
     def prepare_data_source(self, con: duckdb.DuckDBPyConnection) -> str:
         """
         Prepare the data source for querying.
 
-        For remote sources, this downloads and caches the dataset locally.
-        For local sources, this just returns the path.
+        For remote sources, uses direct remote access with spatial extent filtering.
+        For local sources, verifies the file exists and returns the path.
 
         Args:
             con: DuckDB connection to use for queries
@@ -166,33 +200,10 @@ class AdminDataset(ABC):
         """
         source = self.get_source()
         if self.is_remote():
-            # For remote sources, use caching
-            from geoparquet_io.core.admin_cache import cache_dataset, get_cached_file
-
-            # Check if already cached
-            cached_path = get_cached_file(source, self.get_dataset_name())
-            if cached_path:
-                if self.verbose:
-                    click.echo(f"Using cached dataset: {cached_path}")
-                return f"'{cached_path}'"
-
-            # Download and cache
+            # For remote sources, use direct remote access
             if self.verbose:
-                click.echo(f"Downloading and caching {self.get_dataset_name()}...")
-
-            try:
-                cached_path = cache_dataset(source, self.get_dataset_name(), self.verbose)
-                return f"'{cached_path}'"
-            except Exception as e:
-                # Fall back to direct remote access if caching fails
-                if self.verbose:
-                    click.echo(
-                        click.style(
-                            f"Warning: Caching failed, using direct remote access: {e}",
-                            fg="yellow",
-                        )
-                    )
-                return f"'{source}'"
+                click.echo(f"Using remote dataset: {source}")
+            return f"'{source}'"
         else:
             # For local sources, verify the file exists
             if not os.path.exists(source):
@@ -226,6 +237,12 @@ class CurrentAdminDataset(AdminDataset):
 
     def get_bbox_column(self) -> Optional[str]:
         return "bbox"
+
+    def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Configure S3 for source.coop endpoint."""
+        con.execute("SET s3_endpoint='data.source.coop';")
+        con.execute("SET s3_url_style='path';")
+        con.execute("SET s3_use_ssl=true;")
 
 
 class GAULAdminDataset(AdminDataset):
@@ -262,41 +279,47 @@ class GAULAdminDataset(AdminDataset):
     def get_bbox_column(self) -> Optional[str]:
         return "geometry_bbox"
 
+    def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Configure S3 for source.coop endpoint."""
+        con.execute("SET s3_endpoint='data.source.coop';")
+        con.execute("SET s3_url_style='path';")
+        con.execute("SET s3_use_ssl=true;")
+
 
 class OvertureAdminDataset(AdminDataset):
     """
-    Overture Maps Divisions dataset.
+    Overture Maps Divisions dataset (release 2025-10-22.0).
 
-    Provides hierarchical administrative boundaries. The exact levels will be
-    determined by inspecting the data structure.
+    Provides hierarchical administrative boundaries at two levels:
+    - country: Country level (219 unique countries)
+    - region: First-level subdivisions (3,544 unique regions, equivalent to GAUL L2)
 
     Schema includes:
     - country: ISO 3166-1 alpha-2 code
     - subtype: Category (country, region, locality, etc.)
-    - names: Primary name and translations
-    - region: ISO 3166-2 principal subdivision code
-    - parent_division_id: Parent division ID for hierarchy
-    - hierarchies: Hierarchical relationships
+    - names.primary: Primary name for the division
+    - geometry: Polygon geometry (GEOMETRY type)
+    - bbox: Bounding box struct (xmin, xmax, ymin, ymax)
+
+    See: https://docs.overturemaps.org/guides/divisions/
     """
 
     def get_dataset_name(self) -> str:
         return "Overture Maps Divisions"
 
     def get_default_source(self) -> str:
-        return "s3://overturemaps-us-west-2/release/2025-10-22.0/theme=divisions/type=division/*"
+        # Latest release with divisions theme and division_area type (polygons)
+        return (
+            "s3://overturemaps-us-west-2/release/2025-10-22.0/theme=divisions/type=division_area/*"
+        )
 
     def get_available_levels(self) -> list[str]:
-        # TODO: These levels will be refined after inspecting actual data structure
-        # For now, using placeholder levels based on schema
-        return ["country", "region", "locality"]
+        return ["country", "region"]
 
     def get_level_column_mapping(self) -> dict[str, str]:
-        # TODO: This mapping will be refined after data inspection
-        # For now, using schema fields that seem most relevant
         return {
             "country": "country",
-            "region": "region",
-            "locality": "names.primary",  # May need special handling for STRUCT
+            "region": "names['primary']",  # Use primary name as region identifier
         }
 
     def get_geometry_column(self) -> str:
@@ -304,6 +327,27 @@ class OvertureAdminDataset(AdminDataset):
 
     def get_bbox_column(self) -> Optional[str]:
         return "bbox"
+
+    def get_read_parquet_options(self) -> dict:
+        """Overture uses Hive partitioning."""
+        return {"hive_partitioning": 1}
+
+    def get_subtype_filter(self, levels: list[str]) -> Optional[str]:
+        """Filter by subtype to only load relevant admin levels."""
+        # Map level names to Overture subtype values
+        level_to_subtype = {
+            "country": "country",
+            "region": "region",
+        }
+        subtypes = [level_to_subtype[level] for level in levels if level in level_to_subtype]
+        if subtypes:
+            subtype_list = ", ".join([f"'{s}'" for s in subtypes])
+            return f"subtype IN ({subtype_list})"
+        return None
+
+    def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Configure S3 for AWS us-west-2 region where Overture data is stored."""
+        con.execute("SET s3_region='us-west-2';")
 
 
 class CustomAdminDataset(AdminDataset):

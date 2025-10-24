@@ -82,11 +82,8 @@ Split by administrative boundaries via spatial join with remote datasets:
 
 This command performs **two operations**:
 
-1. **Spatial Join**: Downloads and caches remote admin boundaries, then spatially joins them with your data
+1. **Spatial Join**: Queries remote admin boundaries using spatial extent filtering, then spatially joins them with your data
 2. **Partition**: Splits the enriched data by administrative levels
-
-**First run**: Downloads dataset (~2-3 minutes for GAUL)
-**Subsequent runs**: Uses cached dataset (~0.5 seconds)
 
 ### Quick Start
 
@@ -94,7 +91,7 @@ This command performs **two operations**:
 # Preview GAUL partitions by continent
 gpio partition admin input.parquet --dataset gaul --levels continent --preview
 
-# Partition by continent (downloads and caches GAUL on first run)
+# Partition by continent
 gpio partition admin input.parquet output/ --dataset gaul --levels continent
 
 # Hive-style partitioning
@@ -124,29 +121,10 @@ gpio partition admin input.parquet output/ --dataset overture --levels country,r
 
 Two remote admin boundary datasets are supported:
 
-| Dataset | Levels | Size | Description |
-|---------|--------|------|-------------|
-| `gaul` (default) | continent, country, department | 482 MB | GAUL L2 Admin Boundaries - worldwide coverage |
-| `overture` | country, region, locality | ~500 MB | Overture Maps Divisions (experimental) |
-
-### Caching
-
-Remote datasets are automatically cached locally for performance:
-
-```bash
-# View cached datasets
-gpio cache list
-
-# Clear cache to free disk space
-gpio cache clear
-
-# Clear specific dataset
-gpio cache clear --dataset gaul
-```
-
-**Cache location**: `~/.cache/geoparquet-io/admin-datasets/`
-
-See the [Cache Management](cache.md) guide for details.
+| Dataset | Levels | Description |
+|---------|--------|-------------|
+| `gaul` (default) | continent, country, department | GAUL L2 Admin Boundaries - worldwide coverage |
+| `overture` | country, region | Overture Maps Divisions (219 countries, 3,544 regions) - [docs](https://docs.overturemaps.org/guides/divisions/) |
 
 ## Common Options
 

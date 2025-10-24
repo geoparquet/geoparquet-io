@@ -160,6 +160,24 @@ class TestOvertureAdminDataset:
         dataset = OvertureAdminDataset()
         assert dataset.get_bbox_column() == "bbox"
 
+    def test_get_read_parquet_options(self):
+        dataset = OvertureAdminDataset()
+        options = dataset.get_read_parquet_options()
+        assert "hive_partitioning" in options
+        assert options["hive_partitioning"] == 1
+
+    def test_get_subtype_filter(self):
+        dataset = OvertureAdminDataset()
+        # Test with country level
+        filter_country = dataset.get_subtype_filter(["country"])
+        assert filter_country == "subtype IN ('country')"
+
+        # Test with both levels
+        filter_both = dataset.get_subtype_filter(["country", "region"])
+        assert "country" in filter_both
+        assert "region" in filter_both
+        assert "subtype IN" in filter_both
+
 
 class TestAdminDatasetFactory:
     """Test AdminDatasetFactory."""
