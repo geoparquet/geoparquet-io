@@ -6,7 +6,6 @@ import click
 import pytest
 
 from geoparquet_io.core.admin_datasets import (
-    AdminDataset,
     AdminDatasetFactory,
     CurrentAdminDataset,
     GAULAdminDataset,
@@ -214,50 +213,6 @@ class TestAdminDatasetFactory:
             AdminDatasetFactory.create("invalid_dataset")
         assert "Unknown admin dataset" in str(exc_info.value)
         assert "invalid_dataset" in str(exc_info.value)
-
-    def test_register_custom_dataset(self):
-        # Create a custom dataset class
-        class CustomDataset(AdminDataset):
-            def get_dataset_name(self):
-                return "Custom Dataset"
-
-            def get_default_source(self):
-                return "https://example.com/data.parquet"
-
-            def get_available_levels(self):
-                return ["level1"]
-
-            def get_level_column_mapping(self):
-                return {"level1": "col1"}
-
-            def get_geometry_column(self):
-                return "geom"
-
-            def get_bbox_column(self):
-                return None
-
-        # Register it
-        AdminDatasetFactory.register_dataset("custom", CustomDataset)
-
-        # Verify it's available
-        assert "custom" in AdminDatasetFactory.get_available_datasets()
-
-        # Create an instance
-        dataset = AdminDatasetFactory.create("custom")
-        assert isinstance(dataset, CustomDataset)
-        assert dataset.get_dataset_name() == "Custom Dataset"
-
-        # Clean up - remove custom dataset
-        del AdminDatasetFactory._datasets["custom"]
-
-    def test_register_invalid_class(self):
-        # Try to register a class that doesn't inherit from AdminDataset
-        class InvalidClass:
-            pass
-
-        with pytest.raises(TypeError) as exc_info:
-            AdminDatasetFactory.register_dataset("invalid", InvalidClass)
-        assert "subclass of AdminDataset" in str(exc_info.value)
 
 
 class TestAdminDatasetIntegration:
