@@ -100,3 +100,45 @@ def bbox_option(func):
     return click.option(
         "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
     )(func)
+
+
+def partition_options(func):
+    """
+    Add standard partitioning options to a command.
+
+    Adds:
+    - --preview: Analyze and preview without creating files
+    - --preview-limit: Number of partitions to show in preview
+    - --force: Override analysis warnings
+    - --skip-analysis: Skip partition strategy analysis
+    - --hive: Use Hive-style partitioning
+    - --overwrite: Overwrite existing partition files
+    """
+    func = click.option(
+        "--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure"
+    )(func)
+    func = click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")(
+        func
+    )
+    func = click.option(
+        "--preview",
+        is_flag=True,
+        help="Analyze and preview partitions without creating files (dry-run)",
+    )(func)
+    func = click.option(
+        "--preview-limit",
+        default=15,
+        type=int,
+        help="Number of partitions to show in preview (default: 15)",
+    )(func)
+    func = click.option(
+        "--force",
+        is_flag=True,
+        help="Force partitioning even if analysis detects potential issues",
+    )(func)
+    func = click.option(
+        "--skip-analysis",
+        is_flag=True,
+        help="Skip partition strategy analysis (for performance-sensitive cases)",
+    )(func)
+    return func
