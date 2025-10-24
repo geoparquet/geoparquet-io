@@ -96,23 +96,74 @@ gpio add kdtree input.parquet output.parquet --verbose
 
 ## Administrative Divisions
 
-Add country ISO codes via spatial join:
+Add administrative division columns via spatial join with remote boundaries datasets:
+
+### How It Works
+
+Performs spatial intersection between your data and remote admin boundaries to add admin division columns.
+
+**First run**: Downloads and caches dataset (~2-3 minutes for GAUL)
+**Subsequent runs**: Uses cached dataset (~0.5 seconds)
+
+### Quick Start
 
 ```bash
-# Use default countries dataset
-gpio add admin-divisions buildings.parquet output.parquet
+# Add all GAUL levels (continent, country, department)
+gpio add admin-divisions input.parquet output.parquet --dataset gaul
 
-# Use custom countries file
-gpio add admin-divisions buildings.parquet output.parquet \
-  --countries-file my_countries.parquet
-
-# Preview SQL
-gpio add admin-divisions buildings.parquet output.parquet --dry-run
+# Preview SQL before execution
+gpio add admin-divisions input.parquet output.parquet --dataset gaul --dry-run
 ```
 
-Uses the [administrative division extension](https://github.com/fiboa/administrative-division-extension) from [fiboa](https://github.com/fiboa).
+### Multi-Level Admin Divisions
 
-Default countries source: [source.coop admin boundaries](https://data.source.coop/cholmes/admin-boundaries/countries.parquet)
+Add multiple hierarchical administrative levels:
+
+```bash
+# Add all GAUL levels (adds admin:continent, admin:country, admin:department)
+gpio add admin-divisions buildings.parquet output.parquet --dataset gaul
+
+# Add specific levels only
+gpio add admin-divisions buildings.parquet output.parquet --dataset gaul \
+  --levels continent,country
+
+# Use Overture Maps dataset
+gpio add admin-divisions buildings.parquet output.parquet --dataset overture \
+  --levels country,region
+```
+
+### Datasets
+
+Two remote admin boundary datasets are supported:
+
+| Dataset | Columns Added | Size | Description |
+|---------|--------------|------|-------------|
+| `gaul` (default) | `admin:continent`, `admin:country`, `admin:department` | 482 MB | GAUL L2 Admin Boundaries - worldwide |
+| `overture` | `admin:country`, `admin:region`, `admin:locality` | ~500 MB | Overture Maps Divisions (experimental) |
+
+### Caching
+
+Remote datasets are automatically cached for performance:
+
+```bash
+# View cached datasets
+gpio cache list
+
+# Clear cache to free disk space
+gpio cache clear
+```
+
+**Cache location**: `~/.cache/geoparquet-io/admin-datasets/`
+
+See the [Cache Management](cache.md) guide for details.
+
+### Notes
+
+- Uses the [administrative division extension](https://github.com/fiboa/administrative-division-extension) from [fiboa](https://github.com/fiboa)
+- GAUL dataset: [source.coop GAUL L2](https://data.source.coop/nlebovits/gaul-l2-admin/)
+- Performs spatial intersection to assign admin divisions based on geometry
+- Requires internet connection on first use (for downloading)
+- Uses bbox columns for optimization when available
 
 ## Common Options
 

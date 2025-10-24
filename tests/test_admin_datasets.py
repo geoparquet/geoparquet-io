@@ -1,0 +1,305 @@
+"""
+Tests for admin dataset abstraction layer.
+"""
+
+import click
+import pytest
+
+from geoparquet_io.core.admin_datasets import (
+    AdminDataset,
+    AdminDatasetFactory,
+    CurrentAdminDataset,
+    GAULAdminDataset,
+    OvertureAdminDataset,
+)
+
+
+class TestCurrentAdminDataset:
+    """Test CurrentAdminDataset implementation."""
+
+    def test_get_dataset_name(self):
+        dataset = CurrentAdminDataset()
+        assert dataset.get_dataset_name() == "Current (source.coop countries)"
+
+    def test_get_default_source(self):
+        dataset = CurrentAdminDataset()
+        source = dataset.get_default_source()
+        assert source.startswith("https://data.source.coop/")
+        assert "countries.parquet" in source
+
+    def test_get_available_levels(self):
+        dataset = CurrentAdminDataset()
+        levels = dataset.get_available_levels()
+        assert levels == ["country"]
+
+    def test_get_level_column_mapping(self):
+        dataset = CurrentAdminDataset()
+        mapping = dataset.get_level_column_mapping()
+        assert mapping == {"country": "country"}
+
+    def test_get_geometry_column(self):
+        dataset = CurrentAdminDataset()
+        assert dataset.get_geometry_column() == "geometry"
+
+    def test_get_bbox_column(self):
+        dataset = CurrentAdminDataset()
+        assert dataset.get_bbox_column() == "bbox"
+
+    def test_is_remote_with_default(self):
+        dataset = CurrentAdminDataset()
+        assert dataset.is_remote() is True
+
+    def test_is_remote_with_local_path(self):
+        dataset = CurrentAdminDataset(source_path="/local/path/data.parquet")
+        assert dataset.is_remote() is False
+
+    def test_get_partition_columns(self):
+        dataset = CurrentAdminDataset()
+        columns = dataset.get_partition_columns(["country"])
+        assert columns == ["country"]
+
+    def test_validate_levels_valid(self):
+        dataset = CurrentAdminDataset()
+        # Should not raise
+        dataset.validate_levels(["country"])
+
+    def test_validate_levels_invalid(self):
+        dataset = CurrentAdminDataset()
+        with pytest.raises(click.UsageError) as exc_info:
+            dataset.validate_levels(["continent"])
+        assert "Invalid levels" in str(exc_info.value)
+        assert "continent" in str(exc_info.value)
+
+
+class TestGAULAdminDataset:
+    """Test GAULAdminDataset implementation."""
+
+    def test_get_dataset_name(self):
+        dataset = GAULAdminDataset()
+        assert dataset.get_dataset_name() == "GAUL L2 Admin Boundaries"
+
+    def test_get_default_source(self):
+        dataset = GAULAdminDataset()
+        source = dataset.get_default_source()
+        assert "gaul-l2-admin" in source.lower()
+        assert source.endswith("*.parquet")
+
+    def test_get_available_levels(self):
+        dataset = GAULAdminDataset()
+        levels = dataset.get_available_levels()
+        assert levels == ["continent", "country", "department"]
+
+    def test_get_level_column_mapping(self):
+        dataset = GAULAdminDataset()
+        mapping = dataset.get_level_column_mapping()
+        assert mapping["continent"] == "continent"
+        assert mapping["country"] == "gaul0_name"
+        assert mapping["department"] == "gaul2_name"
+
+    def test_get_geometry_column(self):
+        dataset = GAULAdminDataset()
+        assert dataset.get_geometry_column() == "geometry"
+
+    def test_get_bbox_column(self):
+        dataset = GAULAdminDataset()
+        assert dataset.get_bbox_column() == "geometry_bbox"
+
+    def test_get_partition_columns_single_level(self):
+        dataset = GAULAdminDataset()
+        columns = dataset.get_partition_columns(["continent"])
+        assert columns == ["continent"]
+
+    def test_get_partition_columns_multi_level(self):
+        dataset = GAULAdminDataset()
+        columns = dataset.get_partition_columns(["continent", "country", "department"])
+        assert columns == ["continent", "gaul0_name", "gaul2_name"]
+
+    def test_validate_levels_all_valid(self):
+        dataset = GAULAdminDataset()
+        # Should not raise
+        dataset.validate_levels(["continent", "country", "department"])
+
+    def test_validate_levels_partial_valid(self):
+        dataset = GAULAdminDataset()
+        # Should not raise
+        dataset.validate_levels(["continent", "country"])
+
+    def test_validate_levels_invalid(self):
+        dataset = GAULAdminDataset()
+        with pytest.raises(click.UsageError) as exc_info:
+            dataset.validate_levels(["region"])
+        assert "Invalid levels" in str(exc_info.value)
+
+
+class TestOvertureAdminDataset:
+    """Test OvertureAdminDataset implementation."""
+
+    def test_get_dataset_name(self):
+        dataset = OvertureAdminDataset()
+        assert dataset.get_dataset_name() == "Overture Maps Divisions"
+
+    def test_get_default_source(self):
+        dataset = OvertureAdminDataset()
+        source = dataset.get_default_source()
+        assert source.startswith("s3://")
+        assert "overturemaps" in source.lower()
+        assert "divisions" in source.lower()
+
+    def test_get_available_levels(self):
+        dataset = OvertureAdminDataset()
+        levels = dataset.get_available_levels()
+        # At minimum should have some levels defined
+        assert len(levels) > 0
+        assert isinstance(levels, list)
+
+    def test_get_geometry_column(self):
+        dataset = OvertureAdminDataset()
+        assert dataset.get_geometry_column() == "geometry"
+
+    def test_get_bbox_column(self):
+        dataset = OvertureAdminDataset()
+        assert dataset.get_bbox_column() == "bbox"
+
+
+class TestAdminDatasetFactory:
+    """Test AdminDatasetFactory."""
+
+    def test_get_available_datasets(self):
+        datasets = AdminDatasetFactory.get_available_datasets()
+        assert "current" in datasets
+        assert "gaul" in datasets
+        assert "overture" in datasets
+
+    def test_create_current_dataset(self):
+        dataset = AdminDatasetFactory.create("current")
+        assert isinstance(dataset, CurrentAdminDataset)
+
+    def test_create_gaul_dataset(self):
+        dataset = AdminDatasetFactory.create("gaul")
+        assert isinstance(dataset, GAULAdminDataset)
+
+    def test_create_overture_dataset(self):
+        dataset = AdminDatasetFactory.create("overture")
+        assert isinstance(dataset, OvertureAdminDataset)
+
+    def test_create_with_custom_source(self):
+        dataset = AdminDatasetFactory.create("current", source_path="/custom/path.parquet")
+        assert dataset.source_path == "/custom/path.parquet"
+        assert dataset.get_source() == "/custom/path.parquet"
+
+    def test_create_with_verbose(self):
+        dataset = AdminDatasetFactory.create("current", verbose=True)
+        assert dataset.verbose is True
+
+    def test_create_invalid_dataset(self):
+        with pytest.raises(click.UsageError) as exc_info:
+            AdminDatasetFactory.create("invalid_dataset")
+        assert "Unknown admin dataset" in str(exc_info.value)
+        assert "invalid_dataset" in str(exc_info.value)
+
+    def test_register_custom_dataset(self):
+        # Create a custom dataset class
+        class CustomDataset(AdminDataset):
+            def get_dataset_name(self):
+                return "Custom Dataset"
+
+            def get_default_source(self):
+                return "https://example.com/data.parquet"
+
+            def get_available_levels(self):
+                return ["level1"]
+
+            def get_level_column_mapping(self):
+                return {"level1": "col1"}
+
+            def get_geometry_column(self):
+                return "geom"
+
+            def get_bbox_column(self):
+                return None
+
+        # Register it
+        AdminDatasetFactory.register_dataset("custom", CustomDataset)
+
+        # Verify it's available
+        assert "custom" in AdminDatasetFactory.get_available_datasets()
+
+        # Create an instance
+        dataset = AdminDatasetFactory.create("custom")
+        assert isinstance(dataset, CustomDataset)
+        assert dataset.get_dataset_name() == "Custom Dataset"
+
+        # Clean up - remove custom dataset
+        del AdminDatasetFactory._datasets["custom"]
+
+    def test_register_invalid_class(self):
+        # Try to register a class that doesn't inherit from AdminDataset
+        class InvalidClass:
+            pass
+
+        with pytest.raises(TypeError) as exc_info:
+            AdminDatasetFactory.register_dataset("invalid", InvalidClass)
+        assert "subclass of AdminDataset" in str(exc_info.value)
+
+
+class TestAdminDatasetIntegration:
+    """Integration tests for admin datasets."""
+
+    def test_current_dataset_full_workflow(self):
+        """Test typical workflow with current dataset."""
+        dataset = AdminDatasetFactory.create("current")
+
+        # Validate levels
+        dataset.validate_levels(["country"])
+
+        # Get partition columns
+        columns = dataset.get_partition_columns(["country"])
+        assert columns == ["country"]
+
+        # Check remote status
+        assert dataset.is_remote() is True
+
+    def test_gaul_dataset_hierarchical_workflow(self):
+        """Test hierarchical workflow with GAUL dataset."""
+        dataset = AdminDatasetFactory.create("gaul")
+
+        # Test single level
+        dataset.validate_levels(["continent"])
+        columns = dataset.get_partition_columns(["continent"])
+        assert columns == ["continent"]
+
+        # Test two levels
+        dataset.validate_levels(["continent", "country"])
+        columns = dataset.get_partition_columns(["continent", "country"])
+        assert columns == ["continent", "gaul0_name"]
+
+        # Test all three levels
+        dataset.validate_levels(["continent", "country", "department"])
+        columns = dataset.get_partition_columns(["continent", "country", "department"])
+        assert columns == ["continent", "gaul0_name", "gaul2_name"]
+
+    def test_custom_source_override(self):
+        """Test using custom source instead of default."""
+        custom_path = "/my/custom/gaul.parquet"
+        dataset = AdminDatasetFactory.create("gaul", source_path=custom_path)
+
+        assert dataset.get_source() == custom_path
+        assert dataset.is_remote() is False
+
+    def test_remote_url_detection(self):
+        """Test detection of remote vs local sources."""
+        # HTTP URL
+        dataset = AdminDatasetFactory.create("gaul", source_path="http://example.com/data.parquet")
+        assert dataset.is_remote() is True
+
+        # HTTPS URL
+        dataset = AdminDatasetFactory.create("gaul", source_path="https://example.com/data.parquet")
+        assert dataset.is_remote() is True
+
+        # S3 URL
+        dataset = AdminDatasetFactory.create("gaul", source_path="s3://bucket/data.parquet")
+        assert dataset.is_remote() is True
+
+        # Local path
+        dataset = AdminDatasetFactory.create("gaul", source_path="/local/path/data.parquet")
+        assert dataset.is_remote() is False
