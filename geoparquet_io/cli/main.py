@@ -31,7 +31,7 @@ from geoparquet_io.core.partition_by_string import (
 from geoparquet_io.core.split_by_country import split_by_country as split_country_impl
 
 # Version info
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 @click.group()
