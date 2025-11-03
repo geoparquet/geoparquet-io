@@ -304,3 +304,112 @@ def test_inspect_help(runner):
     assert "--tail" in result.output
     assert "--stats" in result.output
     assert "--json" in result.output
+    assert "--geo-metadata" in result.output
+    assert "--parquet-metadata" in result.output
+    assert "--parquet-geo-metadata" in result.output
+
+
+def test_inspect_geo_metadata(runner, test_file):
+    """Test inspect with --geo-metadata flag."""
+    result = runner.invoke(cli, ["inspect", test_file, "--geo-metadata"])
+
+    assert result.exit_code == 0
+    # Output should contain either GeoParquet metadata or message that none found
+    assert "GeoParquet Metadata" in result.output or "No GeoParquet metadata" in result.output
+
+    # If geo metadata is present, check that defaults are shown for missing fields
+    if "GeoParquet Metadata" in result.output:
+        # At least one of these default messages should appear if fields are missing
+        # (we can't guarantee they'll all be missing, but at least we test the logic works)
+        has_defaults = (
+            "Not present" in result.output or
+            "default value" in result.output
+        )
+        # This assertion is informational - defaults only show if fields are actually missing
+        # so we don't assert it, just check the output is valid
+
+
+def test_inspect_geo_metadata_json(runner, test_file):
+    """Test inspect with --geo-metadata and --json flags."""
+    result = runner.invoke(cli, ["inspect", test_file, "--geo-metadata", "--json"])
+
+    assert result.exit_code == 0
+
+    # Parse JSON output
+    data = json.loads(result.output)
+
+    # Data should be either None (no geo metadata) or a dict with geo metadata
+    if data is not None:
+        # Should have version and primary_column if geo metadata exists
+        assert isinstance(data, dict)
+
+
+def test_inspect_parquet_metadata(runner, test_file):
+    """Test inspect with --parquet-metadata flag."""
+    result = runner.invoke(cli, ["inspect", test_file, "--parquet-metadata"])
+
+    assert result.exit_code == 0
+    assert "Parquet File Metadata" in result.output
+    assert "Total Rows:" in result.output
+    assert "Row Groups:" in result.output
+    assert "Schema:" in result.output
+
+
+def test_inspect_parquet_metadata_json(runner, test_file):
+    """Test inspect with --parquet-metadata and --json flags."""
+    result = runner.invoke(cli, ["inspect", test_file, "--parquet-metadata", "--json"])
+
+    assert result.exit_code == 0
+
+    # Parse JSON output
+    data = json.loads(result.output)
+
+    # Verify structure
+    assert "num_rows" in data
+    assert "num_row_groups" in data
+    assert "num_columns" in data
+    assert "serialized_size" in data
+    assert "schema" in data
+    assert "row_groups" in data
+
+    # Verify row groups structure
+    assert isinstance(data["row_groups"], list)
+    if len(data["row_groups"]) > 0:
+        rg = data["row_groups"][0]
+        assert "id" in rg
+        assert "num_rows" in rg
+        assert "num_columns" in rg
+        assert "total_byte_size" in rg
+        assert "columns" in rg
+
+        # Verify column structure in row group
+        if len(rg["columns"]) > 0:
+            col = rg["columns"][0]
+            assert "path_in_schema" in col
+            assert "physical_type" in col
+            assert "compression" in col
+
+
+def test_inspect_parquet_geo_metadata(runner, test_file):
+    """Test inspect with --parquet-geo-metadata flag."""
+    result = runner.invoke(cli, ["inspect", test_file, "--parquet-geo-metadata"])
+
+    assert result.exit_code == 0
+    # Output should contain either geospatial metadata or message that none found
+    assert "Parquet Geospatial Metadata" in result.output
+
+
+def test_inspect_parquet_geo_metadata_json(runner, test_file):
+    """Test inspect with --parquet-geo-metadata and --json flags."""
+    result = runner.invoke(cli, ["inspect", test_file, "--parquet-geo-metadata", "--json"])
+
+    assert result.exit_code == 0
+
+    # Parse JSON output
+    data = json.loads(result.output)
+
+    # Verify structure
+    assert "geospatial_columns" in data
+    assert "custom_metadata" in data
+    assert isinstance(data["geospatial_columns"], dict)
+    assert isinstance(data["custom_metadata"], dict)

@@ -151,7 +151,10 @@ def check_row_group_cmd(parquet_file, verbose):
     "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
 )
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
-def inspect(parquet_file, head, tail, stats, json_output):
+@click.option("--geo-metadata", is_flag=True, help="Show GeoParquet metadata from 'geo' key")
+@click.option("--parquet-metadata", is_flag=True, help="Show Parquet file metadata")
+@click.option("--parquet-geo-metadata", is_flag=True, help="Show geospatial metadata from Parquet footer")
+def inspect(parquet_file, head, tail, stats, json_output, geo_metadata, parquet_metadata, parquet_geo_metadata):
     """
     Inspect a GeoParquet file and show metadata summary.
 
@@ -185,12 +188,32 @@ def inspect(parquet_file, head, tail, stats, json_output):
     import pyarrow.parquet as pq
 
     from geoparquet_io.core.common import safe_file_url
+    from geoparquet_io.core.inspect_utils import (
+        format_geo_metadata_output,
+        format_parquet_metadata_output,
+        format_parquet_geo_metadata_output,
+    )
 
     # Validate mutually exclusive options
     if head and tail:
         raise click.UsageError("--head and --tail are mutually exclusive")
 
     try:
+        # Handle --geo-metadata flag
+        if geo_metadata:
+            format_geo_metadata_output(parquet_file, json_output)
+            return
+
+        # Handle --parquet-metadata flag
+        if parquet_metadata:
+            format_parquet_metadata_output(parquet_file, json_output)
+            return
+
+        # Handle --parquet-geo-metadata flag
+        if parquet_geo_metadata:
+            format_parquet_geo_metadata_output(parquet_file, json_output)
+            return
+
         # Extract metadata
         file_info = extract_file_info(parquet_file)
         geo_info = extract_geo_info(parquet_file)
