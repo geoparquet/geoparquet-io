@@ -562,9 +562,13 @@ def format_parquet_geo_metadata(
             geo_columns_info[field.name] = col_info
 
     # Extract statistics from row groups
+    # Always read ALL row groups for overall bbox calculation
     num_rg_to_check = parquet_metadata.num_row_groups
+
+    # Determine how many row groups to show in output
+    num_rg_to_show = parquet_metadata.num_row_groups
     if row_groups_limit is not None:
-        num_rg_to_check = min(row_groups_limit, parquet_metadata.num_row_groups)
+        num_rg_to_show = min(row_groups_limit, parquet_metadata.num_row_groups)
 
     for col_name in geo_columns_info.keys():
         for rg_idx in range(num_rg_to_check):
@@ -641,9 +645,18 @@ def format_parquet_geo_metadata(
                 "[dim]For GeoParquet metadata, see the 'GeoParquet Metadata' section.[/dim]"
             )
         else:
-            console.print(
-                f"\n[dim]Reading from {num_rg_to_check} of {parquet_metadata.num_row_groups} row group(s)[/dim]"
-            )
+            # Show message about row groups being read
+            if row_groups_limit is not None and row_groups_limit < parquet_metadata.num_row_groups:
+                console.print(
+                    f"\n[dim]Showing statistics for {num_rg_to_show} of {parquet_metadata.num_row_groups} row group(s)[/dim]"
+                )
+                console.print(
+                    f"[dim](Overall bbox calculated from all {parquet_metadata.num_row_groups} row groups)[/dim]"
+                )
+            else:
+                console.print(
+                    f"\n[dim]Reading from {parquet_metadata.num_row_groups} row group(s)[/dim]"
+                )
 
             for col_name, col_info in geo_columns_info.items():
                 console.print(f"\n  [cyan bold]{col_name}[/cyan bold]:")
@@ -686,10 +699,39 @@ def format_parquet_geo_metadata(
                 else:
                     console.print("    Edges: [dim]N/A (only applies to Geography type)[/dim]")
 
-                # Row group statistics
+                # Calculate overall bbox from all row groups
+                overall_xmin = None
+                overall_ymin = None
+                overall_xmax = None
+                overall_ymax = None
+
+                for rg_stat in col_info["row_group_stats"]:
+                    if all(k in rg_stat for k in ["xmin", "ymin", "xmax", "ymax"]):
+                        if overall_xmin is None:
+                            overall_xmin = rg_stat["xmin"]
+                            overall_ymin = rg_stat["ymin"]
+                            overall_xmax = rg_stat["xmax"]
+                            overall_ymax = rg_stat["ymax"]
+                        else:
+                            overall_xmin = min(overall_xmin, rg_stat["xmin"])
+                            overall_ymin = min(overall_ymin, rg_stat["ymin"])
+                            overall_xmax = max(overall_xmax, rg_stat["xmax"])
+                            overall_ymax = max(overall_ymax, rg_stat["ymax"])
+
+                if overall_xmin is not None:
+                    console.print(
+                        f"    Overall Bbox: [{overall_xmin:.6f}, {overall_ymin:.6f}, "
+                        f"{overall_xmax:.6f}, {overall_ymax:.6f}]"
+                    )
+
+                # Row group statistics (only show first num_rg_to_show)
                 if col_info["row_group_stats"]:
                     console.print("    Row Group Statistics:")
-                    for rg_stat in col_info["row_group_stats"]:
+                    for idx, rg_stat in enumerate(col_info["row_group_stats"]):
+                        # Only show first num_rg_to_show row groups
+                        if idx >= num_rg_to_show:
+                            break
+
                         rg_id = rg_stat["row_group"]
                         console.print(f"      Row Group {rg_id}:")
                         if "null_count" in rg_stat:
@@ -705,6 +747,14 @@ def format_parquet_geo_metadata(
                             console.print(
                                 "        [dim]Bbox statistics available but format not parseable[/dim]"
                             )
+
+                    # Show info about remaining row groups if limited
+                    if len(col_info["row_group_stats"]) > num_rg_to_show:
+                        remaining = len(col_info["row_group_stats"]) - num_rg_to_show
+                        console.print(f"      [dim]... and {remaining} more row group(s)[/dim]")
+                        console.print(
+                            f"      [dim]Use --row-groups {parquet_metadata.num_row_groups} to see all row groups[/dim]"
+                        )
 
         console.print()
 
