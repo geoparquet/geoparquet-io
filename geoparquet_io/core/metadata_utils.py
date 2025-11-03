@@ -318,51 +318,12 @@ def format_parquet_metadata_enhanced(
                         "null_count": stats.null_count if hasattr(stats, "null_count") else None,
                     }
 
-                    # Add min/max if available
-                    if stats.has_min_max:
+                    # Add min/max if available (only for non-geo columns)
+                    # Geo columns get bbox from struct columns, not from their own statistics
+                    if stats.has_min_max and not is_geo:
                         try:
-                            # For geometry/geography columns, parse bbox
-                            if is_geo:
-                                min_bytes = stats.min
-                                max_bytes = stats.max
-
-                                if isinstance(min_bytes, bytes) and isinstance(max_bytes, bytes):
-                                    try:
-                                        import struct
-
-                                        # Parse WKB to extract bbox coordinates
-                                        if len(min_bytes) >= 21:
-                                            byte_order = min_bytes[0]
-                                            endian = "<" if byte_order == 1 else ">"
-                                            xmin, ymin = struct.unpack(
-                                                f"{endian}dd", min_bytes[5:21]
-                                            )
-                                            col_dict["statistics"]["min"] = {"x": xmin, "y": ymin}
-                                        else:
-                                            col_dict["statistics"]["min"] = (
-                                                f"<{len(min_bytes)} bytes>"
-                                            )
-
-                                        if len(max_bytes) >= 21:
-                                            byte_order = max_bytes[0]
-                                            endian = "<" if byte_order == 1 else ">"
-                                            xmax, ymax = struct.unpack(
-                                                f"{endian}dd", max_bytes[5:21]
-                                            )
-                                            col_dict["statistics"]["max"] = {"x": xmax, "y": ymax}
-                                        else:
-                                            col_dict["statistics"]["max"] = (
-                                                f"<{len(max_bytes)} bytes>"
-                                            )
-                                    except Exception:
-                                        col_dict["statistics"]["min"] = f"<{len(min_bytes)} bytes>"
-                                        col_dict["statistics"]["max"] = f"<{len(max_bytes)} bytes>"
-                                else:
-                                    col_dict["statistics"]["min"] = str(stats.min)
-                                    col_dict["statistics"]["max"] = str(stats.max)
-                            else:
-                                col_dict["statistics"]["min"] = str(stats.min)
-                                col_dict["statistics"]["max"] = str(stats.max)
+                            col_dict["statistics"]["min"] = str(stats.min)
+                            col_dict["statistics"]["max"] = str(stats.max)
                         except Exception:
                             pass
 
@@ -443,7 +404,7 @@ def format_parquet_metadata_enhanced(
                 min_val = "-"
                 max_val = "-"
 
-                # For geometry columns, try to get bbox from associated struct column first
+                # For geometry columns, ONLY get bbox from associated struct column
                 if is_geo and col_name in bbox_columns:
                     bbox_col_name = bbox_columns[col_name]
                     # Look for the bbox struct components in this row group
@@ -473,56 +434,18 @@ def format_parquet_metadata_enhanced(
                         min_val = f"({xmin_val:.6f}, {ymin_val:.6f})"
                         max_val = f"({xmax_val:.6f}, {ymax_val:.6f})"
 
-                # If we didn't get bbox from struct, try the geometry column's own statistics
-                if min_val == "-" and col.is_stats_set:
+                # For non-geo columns, get min/max from column statistics
+                if not is_geo and col.is_stats_set:
                     stats = col.statistics
                     if stats.has_min_max:
                         try:
-                            # For geometry/geography columns, format as bbox
-                            if is_geo:
-                                # Try to decode the WKB min/max as bbox coordinates
-                                # The statistics for geometry columns contain WKB-encoded bounding boxes
-                                min_bytes = stats.min
-                                max_bytes = stats.max
-
-                                if isinstance(min_bytes, bytes) and isinstance(max_bytes, bytes):
-                                    # Parse WKB to extract bbox coordinates
-                                    # Min contains (xmin, ymin), Max contains (xmax, ymax)
-                                    try:
-                                        import struct
-
-                                        # Skip WKB header (1 byte order + 4 bytes type) and read coordinates
-                                        if len(min_bytes) >= 21:  # 5 header + 16 for two doubles
-                                            byte_order = min_bytes[0]
-                                            endian = "<" if byte_order == 1 else ">"
-                                            xmin, ymin = struct.unpack(
-                                                f"{endian}dd", min_bytes[5:21]
-                                            )
-                                            min_val = f"({xmin:.6f}, {ymin:.6f})"
-
-                                        if len(max_bytes) >= 21:
-                                            byte_order = max_bytes[0]
-                                            endian = "<" if byte_order == 1 else ">"
-                                            xmax, ymax = struct.unpack(
-                                                f"{endian}dd", max_bytes[5:21]
-                                            )
-                                            max_val = f"({xmax:.6f}, {ymax:.6f})"
-                                    except Exception:
-                                        # If parsing fails, show raw representation
-                                        min_val = f"<{len(min_bytes)} bytes>"
-                                        max_val = f"<{len(max_bytes)} bytes>"
-                                else:
-                                    min_val = str(stats.min)
-                                    max_val = str(stats.max)
-                            else:
-                                # For non-geo columns, show as before
-                                min_val = str(stats.min)
-                                max_val = str(stats.max)
-                                # Truncate if too long
-                                if len(min_val) > 20:
-                                    min_val = min_val[:17] + "..."
-                                if len(max_val) > 20:
-                                    max_val = max_val[:17] + "..."
+                            min_val = str(stats.min)
+                            max_val = str(stats.max)
+                            # Truncate if too long
+                            if len(min_val) > 20:
+                                min_val = min_val[:17] + "..."
+                            if len(max_val) > 20:
+                                max_val = max_val[:17] + "..."
                         except Exception:
                             pass
 
@@ -579,9 +502,29 @@ def format_parquet_geo_metadata(
     # Do NOT make assumptions based on column names
     geo_columns_info = {}
 
+    # Find bbox struct columns associated with geometry columns
+    bbox_columns = {}  # Maps geometry column name to bbox struct column name
+    for field in schema:
+        if str(field.type).startswith("struct<") and "xmin" in str(field.type):
+            # This looks like a bbox struct - try to find associated geometry column
+            # Pattern 1: geometry -> geometry_bbox
+            if field.name.endswith("_bbox"):
+                base_name = field.name[:-5]  # Remove '_bbox'
+                if base_name in [f.name for f in schema]:
+                    bbox_columns[base_name] = field.name
+            # Pattern 2: Just named 'bbox' - associate with any geometry column found
+            elif field.name == "bbox":
+                # Will associate after we find geometry columns
+                pass
+
     for field in schema:
         geo_type = detect_geo_logical_type(field, parquet_schema_str)
         if geo_type:
+            # Check if there's a bbox struct named just 'bbox' to associate
+            for f in schema:
+                if f.name == "bbox" and str(f.type).startswith("struct<") and "xmin" in str(f.type):
+                    bbox_columns[field.name] = f.name
+
             col_info = {
                 "logical_type": geo_type,
                 "geometry_type": None,
@@ -626,30 +569,52 @@ def format_parquet_geo_metadata(
     for col_name in geo_columns_info.keys():
         for rg_idx in range(num_rg_to_check):
             rg = parquet_metadata.row_group(rg_idx)
+            rg_stats = {"row_group": rg_idx}
 
-            # Find column in this row group
+            # ONLY get bbox from associated struct column (not from geometry column's own WKB statistics)
+            if col_name in bbox_columns:
+                bbox_col_name = bbox_columns[col_name]
+                # Look for the bbox struct components in this row group
+                xmin_val = None
+                ymin_val = None
+                xmax_val = None
+                ymax_val = None
+
+                for col_idx in range(rg.num_columns):
+                    bbox_component = rg.column(col_idx)
+                    path = bbox_component.path_in_schema
+
+                    if path == f"{bbox_col_name}.xmin" and bbox_component.is_stats_set:
+                        if bbox_component.statistics.has_min_max:
+                            xmin_val = bbox_component.statistics.min
+                    elif path == f"{bbox_col_name}.ymin" and bbox_component.is_stats_set:
+                        if bbox_component.statistics.has_min_max:
+                            ymin_val = bbox_component.statistics.min
+                    elif path == f"{bbox_col_name}.xmax" and bbox_component.is_stats_set:
+                        if bbox_component.statistics.has_min_max:
+                            xmax_val = bbox_component.statistics.max
+                    elif path == f"{bbox_col_name}.ymax" and bbox_component.is_stats_set:
+                        if bbox_component.statistics.has_min_max:
+                            ymax_val = bbox_component.statistics.max
+
+                if all(v is not None for v in [xmin_val, ymin_val, xmax_val, ymax_val]):
+                    rg_stats["xmin"] = xmin_val
+                    rg_stats["ymin"] = ymin_val
+                    rg_stats["xmax"] = xmax_val
+                    rg_stats["ymax"] = ymax_val
+
+            # Get null count from geometry column
             for col_idx in range(rg.num_columns):
                 col = rg.column(col_idx)
                 if col.path_in_schema == col_name:
-                    rg_stats = {"row_group": rg_idx}
-
                     if col.is_stats_set:
                         stats = col.statistics
-
-                        # Check for bounding box in statistics
-                        # Note: PyArrow may not expose custom geospatial statistics directly
-                        # This would need deeper integration with Parquet C++ API
-                        if stats.has_min_max:
-                            try:
-                                rg_stats["has_min_max"] = True
-                            except Exception:
-                                pass
-
                         if stats.has_null_count:
                             rg_stats["null_count"] = stats.null_count
+                    break
 
-                    if rg_stats:
-                        geo_columns_info[col_name]["row_group_stats"].append(rg_stats)
+            if rg_stats:
+                geo_columns_info[col_name]["row_group_stats"].append(rg_stats)
 
     if json_output:
         # JSON output
@@ -729,9 +694,17 @@ def format_parquet_geo_metadata(
                         console.print(f"      Row Group {rg_id}:")
                         if "null_count" in rg_stat:
                             console.print(f"        Null Count: {rg_stat['null_count']}")
-                        console.print(
-                            "        [dim]Note: Bbox statistics require Parquet C++ API access[/dim]"
-                        )
+
+                        # Display bbox if we extracted it
+                        if all(k in rg_stat for k in ["xmin", "ymin", "xmax", "ymax"]):
+                            console.print(
+                                f"        Bbox: [{rg_stat['xmin']:.6f}, {rg_stat['ymin']:.6f}, "
+                                f"{rg_stat['xmax']:.6f}, {rg_stat['ymax']:.6f}]"
+                            )
+                        elif rg_stat.get("has_min_max"):
+                            console.print(
+                                "        [dim]Bbox statistics available but format not parseable[/dim]"
+                            )
 
         console.print()
 
