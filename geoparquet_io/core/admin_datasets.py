@@ -171,6 +171,39 @@ class AdminDataset(ABC):
         """
         return None
 
+    def get_column_transform(self, level_name: str) -> Optional[str]:
+        """
+        Get SQL expression to transform a column value for Vecorel compliance.
+
+        This method allows datasets to specify transformations needed to make
+        their native column values conform to the Vecorel administrative division
+        extension specification.
+
+        Args:
+            level_name: The level name (e.g., "country", "region")
+
+        Returns:
+            SQL transformation expression or None if no transform needed
+        """
+        return None
+
+    def get_output_column_name(self, level_name: str) -> str:
+        """
+        Get the output column name for a given administrative level.
+
+        This allows datasets to specify custom output column names that differ
+        from the simple "admin:{level}" pattern, enabling compliance with
+        specifications like Vecorel that use specific column names.
+
+        Args:
+            level_name: The level name (e.g., "country", "region")
+
+        Returns:
+            Output column name (e.g., "admin:country_code", "admin:subdivision_code")
+        """
+        # Default behavior: use "admin:{level}" pattern
+        return f"admin:{level_name}"
+
     @abstractmethod
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
         """
@@ -290,18 +323,26 @@ class OvertureAdminDataset(AdminDataset):
     """
     Overture Maps Divisions dataset (release 2025-10-22.0).
 
-    Provides hierarchical administrative boundaries at two levels:
-    - country: Country level (219 unique countries)
-    - region: First-level subdivisions (3,544 unique regions, equivalent to GAUL L2)
+    Provides hierarchical administrative boundaries at two levels, compliant with
+    the Vecorel administrative division extension specification:
+    - country: Country level (219 unique countries) → admin:country_code
+    - region: First-level subdivisions (3,544 unique regions) → admin:subdivision_code
+
+    Vecorel Compliance:
+    - Outputs ISO 3166-1 alpha-2 country codes (e.g., "US", "AR", "DE")
+    - Outputs ISO 3166-2 subdivision codes WITHOUT country prefix (e.g., "CA" not "US-CA")
+    - Automatically transforms Overture's region column to strip country prefix
 
     Schema includes:
-    - country: ISO 3166-1 alpha-2 code
+    - country: ISO 3166-1 alpha-2 code (maps to admin:country_code)
+    - region: ISO 3166-2 code with country prefix (e.g., "US-CA", transformed to "CA")
     - subtype: Category (country, region, locality, etc.)
     - names.primary: Primary name for the division
     - geometry: Polygon geometry (GEOMETRY type)
     - bbox: Bounding box struct (xmin, xmax, ymin, ymax)
 
     See: https://docs.overturemaps.org/guides/divisions/
+    See: https://vecorel.org/administrative-division-extension/v0.1.0/schema.yaml
     """
 
     def get_dataset_name(self) -> str:
@@ -318,8 +359,8 @@ class OvertureAdminDataset(AdminDataset):
 
     def get_level_column_mapping(self) -> dict[str, str]:
         return {
-            "country": "country",
-            "region": "names['primary']",  # Use primary name as region identifier
+            "country": "country",  # Maps to admin:country_code
+            "region": "region",  # Maps to admin:subdivision_code (needs transform)
         }
 
     def get_geometry_column(self) -> str:
@@ -344,6 +385,43 @@ class OvertureAdminDataset(AdminDataset):
             subtype_list = ", ".join([f"'{s}'" for s in subtypes])
             return f"subtype IN ({subtype_list})"
         return None
+
+    def get_column_transform(self, level_name: str) -> Optional[str]:
+        """
+        Get SQL expression to transform a column value for Vecorel compliance.
+
+        For region codes, strips the country prefix from ISO 3166-2 codes.
+        Example: 'US-CA' becomes 'CA', 'AR-U' becomes 'U'
+
+        Args:
+            level_name: The level name (e.g., "country", "region")
+
+        Returns:
+            SQL transformation expression or None if no transform needed
+        """
+        if level_name == "region":
+            # Strip country prefix for Vecorel compliance
+            return "CASE WHEN region LIKE '%-%' THEN split_part(region, '-', 2) ELSE region END"
+        return None
+
+    def get_output_column_name(self, level_name: str) -> str:
+        """
+        Get the output column name for Vecorel compliance.
+
+        Maps level names to Vecorel-compliant column names.
+
+        Args:
+            level_name: The level name (e.g., "country", "region")
+
+        Returns:
+            Vecorel-compliant column name
+        """
+        # Map to Vecorel column names
+        vecorel_mapping = {
+            "country": "admin:country_code",
+            "region": "admin:subdivision_code",
+        }
+        return vecorel_mapping.get(level_name, f"admin:{level_name}")
 
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
         """Configure S3 for AWS us-west-2 region where Overture data is stored."""

@@ -230,13 +230,19 @@ def add_admin_divisions_multi(
     subquery_cols_str = ", ".join(subquery_cols)
 
     # Build SELECT clause for admin columns
-    # Create column aliases based on level names
+    # Create column aliases based on level names with optional transformations
     admin_select_parts = []
     for i, (level, col) in enumerate(zip(levels, partition_columns)):
-        # Use level name as the output column name with admin: prefix
-        output_col_name = f"admin:{level}"
-        # Handle struct field access (e.g., names['primary']) vs simple column names
-        if "[" in col or "(" in col:
+        # Get the output column name (may be customized for Vecorel compliance)
+        output_col_name = dataset.get_output_column_name(level)
+
+        # Check if a column transformation is needed (e.g., stripping country prefix)
+        col_transform = dataset.get_column_transform(level)
+
+        if col_transform:
+            # Apply transformation - the transform is a full SQL expression
+            admin_select_parts.append(f'{col_transform} as "{output_col_name}"')
+        elif "[" in col or "(" in col:
             # SQL expression - reference the alias from subquery
             admin_select_parts.append(f'b._col_{i} as "{output_col_name}"')
         else:
@@ -339,7 +345,9 @@ TO '{output_parquet}'
 
     # Get statistics about the results
     # Build condition to check if ANY admin column is not null
-    admin_cols_check = " OR ".join([f'"admin:{level}" IS NOT NULL' for level in levels])
+    # Use the actual output column names from the dataset
+    output_col_names = [dataset.get_output_column_name(level) for level in levels]
+    admin_cols_check = " OR ".join([f'"{col}" IS NOT NULL' for col in output_col_names])
 
     stats_query = f"""
     SELECT
@@ -354,11 +362,11 @@ TO '{output_parquet}'
 
     # Get count of unique values for each admin level
     unique_counts = []
-    for level in levels:
+    for level, output_col in zip(levels, output_col_names):
         count_query = f"""
-        SELECT COUNT(DISTINCT "admin:{level}") as unique_count
+        SELECT COUNT(DISTINCT "{output_col}") as unique_count
         FROM '{output_parquet}'
-        WHERE "admin:{level}" IS NOT NULL;
+        WHERE "{output_col}" IS NOT NULL;
         """
         result = con.execute(count_query).fetchone()
         unique_counts.append((level, result[0]))
