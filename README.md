@@ -11,7 +11,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
 - **Fast**: Built on PyArrow and DuckDB for high-performance operations
 - **Comprehensive**: Sort, partition, enhance, and validate GeoParquet files
-- **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and admin divisions
+- **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and hierarchical admin divisions
 - **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
 - **Flexible**: CLI and Python API for any workflow
 - **Tested**: Extensive test suite across Python 3.9-3.13 and all platforms
@@ -54,8 +54,8 @@ gpio add bbox input.parquet output.parquet
 # Sort using Hilbert curve for spatial locality
 gpio sort hilbert input.parquet output_sorted.parquet
 
-# Partition into separate files by country
-gpio partition admin buildings.parquet output_dir/
+# Partition by admin boundaries
+gpio partition admin buildings.parquet output_dir/ --dataset gaul --levels continent,country
 ```
 
 ## Documentation
@@ -95,8 +95,11 @@ gpio add h3 input.parquet output.parquet --resolution 9
 # Add KD-tree partition IDs (auto-balanced)
 gpio add kdtree input.parquet output.parquet
 
-# Add country codes via spatial join
+# Add country codes via spatial join (default dataset)
 gpio add admin-divisions buildings.parquet output.parquet
+
+# Add GAUL hierarchical admin divisions (continent, country, department)
+gpio add admin-divisions buildings.parquet output.parquet --dataset gaul
 ```
 
 ### Optimize and Partition
@@ -108,8 +111,11 @@ gpio sort hilbert input.parquet sorted.parquet
 # Partition by H3 cells
 gpio partition h3 large.parquet output_dir/ --resolution 7
 
-# Partition by country
-gpio partition admin buildings.parquet by_country/
+# Partition by admin boundaries with spatial extent filtering
+gpio partition admin buildings.parquet by_admin/ --dataset gaul --levels continent,country
+
+# Multi-level Hive-style partitioning (continent=Africa/country=Kenya/...)
+gpio partition admin buildings.parquet by_admin/ --dataset gaul --levels continent,country,department --hive
 ```
 
 ### Python API

@@ -59,6 +59,44 @@ def find_country_code_column(con, countries_source, is_subquery=False):
     )
 
 
+def find_subdivision_code_column(con, countries_source, is_subquery=False):
+    """
+    Find the subdivision code column in a countries dataset.
+
+    Args:
+        con: DuckDB connection
+        countries_source: Either a file path or a subquery
+        is_subquery: Whether countries_source is a subquery (True) or file path (False)
+
+    Returns:
+        str or None: The name of the subdivision code column, or None if not found
+    """
+    # Build appropriate query based on source type
+    if is_subquery:
+        columns_query = f"SELECT * FROM {countries_source} LIMIT 0;"
+    else:
+        columns_query = f"SELECT * FROM '{countries_source}' LIMIT 0;"
+
+    countries_columns = [col[0] for col in con.execute(columns_query).description]
+
+    # Define possible subdivision code column names in priority order
+    subdivision_code_options = [
+        "admin:subdivision_code",
+        "subdivision_code",
+        "region",
+        "state",
+        "province",
+    ]
+
+    # Find the first matching column
+    for col in subdivision_code_options:
+        if col in countries_columns:
+            return col
+
+    # Subdivision is optional, return None if not found
+    return None
+
+
 def add_country_codes(
     input_parquet,
     countries_parquet,
@@ -76,14 +114,16 @@ def add_country_codes(
     input_url = safe_file_url(input_parquet, verbose)
 
     # Use default countries file if not provided
-    default_countries_url = "https://data.source.coop/cholmes/admin-boundaries/countries.parquet"
+    default_countries_url = (
+        "s3://overturemaps-us-west-2/release/2025-10-22.0/theme=divisions/type=division_area/*"
+    )
     using_default = countries_parquet is None
 
     if using_default:
         if not dry_run:
             click.echo(
                 click.style(
-                    "\nNo countries file specified, using default from source.coop", fg="cyan"
+                    "\nNo countries file specified, using default from Overture Maps", fg="cyan"
                 )
             )
             click.echo(
@@ -234,6 +274,10 @@ def add_country_codes(
     con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
 
+    # Configure S3 settings if using default Overture dataset
+    if using_default:
+        con.execute("SET s3_region='us-west-2';")
+
     # Get total input count (skip in dry-run)
     if not dry_run:
         total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
@@ -379,13 +423,48 @@ WHERE {countries_bbox_col}.xmin <= {xmax:.6f}
             if verbose:
                 click.echo(f"Using country code column: {country_code_col}")
 
-    # Build the SELECT clause based on whether we need to rename the column
+    # Build country code selection
     if country_code_col == "admin:country_code":
-        # No need to rename if it's already the right name
-        select_clause = f'b."{country_code_col}"'
+        country_select = f'b."{country_code_col}"'
     else:
-        # Rename to standard admin:country_code
-        select_clause = f'b."{country_code_col}" as "admin:country_code"'
+        country_select = f'b."{country_code_col}" as "admin:country_code"'
+
+    # Determine the subdivision code column
+    subdivision_code_col = None
+    if using_default:
+        # Default Overture dataset has 'region' column
+        subdivision_code_col = "region"
+        if verbose and not dry_run:
+            click.echo(
+                f"Using subdivision code column: {subdivision_code_col} (default countries file)"
+            )
+    else:
+        if not dry_run:
+            # For actual execution, find the appropriate column
+            subdivision_code_col = find_subdivision_code_column(
+                con, countries_source, is_subquery=(countries_source == countries_table)
+            )
+            if subdivision_code_col and verbose:
+                click.echo(f"Using subdivision code column: {subdivision_code_col}")
+
+    # Build subdivision code selection
+    if subdivision_code_col:
+        # Check if we need to transform (for Overture data with 'region' column)
+        if using_default and subdivision_code_col == "region":
+            # Apply Overture transformation to strip country prefix
+            subdivision_select = (
+                ", CASE WHEN b.region LIKE '%-%' THEN split_part(b.region, '-', 2) "
+                'ELSE b.region END as "admin:subdivision_code"'
+            )
+        elif subdivision_code_col == "admin:subdivision_code":
+            subdivision_select = f', b."{subdivision_code_col}"'
+        else:
+            subdivision_select = f', b."{subdivision_code_col}" as "admin:subdivision_code"'
+    else:
+        subdivision_select = ""
+
+    # Combine country and subdivision selections
+    select_clause = country_select + subdivision_select
 
     # Build spatial join query based on bbox availability
     if input_bbox_col and countries_bbox_col:
@@ -477,19 +556,28 @@ TO '{output_parquet}'
     SELECT
         COUNT(*) as total_features,
         COUNT(CASE WHEN "admin:country_code" IS NOT NULL THEN 1 END) as features_with_country,
-        COUNT(DISTINCT "admin:country_code") as unique_countries
-    FROM '{output_parquet}'
-    WHERE "admin:country_code" IS NOT NULL;
+        COUNT(CASE WHEN "admin:subdivision_code" IS NOT NULL THEN 1 END) as features_with_subdivision,
+        COUNT(DISTINCT "admin:country_code") as unique_countries,
+        COUNT(DISTINCT "admin:subdivision_code") as unique_subdivisions
+    FROM '{output_parquet}';
     """
 
     stats = con.execute(stats_query).fetchone()
     total_features = stats[0]
     features_with_country = stats[1]
-    unique_countries = stats[2]
+    features_with_subdivision = stats[2]
+    unique_countries = stats[3]
+    unique_subdivisions = stats[4]
 
     click.echo("\nResults:")
     click.echo(f"- Added country codes to {features_with_country:,} of {total_features:,} features")
+    if features_with_subdivision > 0:
+        click.echo(
+            f"- Added subdivision codes to {features_with_subdivision:,} of {total_features:,} features"
+        )
     click.echo(f"- Found {unique_countries:,} unique countries")
+    if unique_subdivisions > 0:
+        click.echo(f"- Found {unique_subdivisions:,} unique subdivisions")
 
     click.echo(f"\nSuccessfully wrote output to: {output_parquet}")
 

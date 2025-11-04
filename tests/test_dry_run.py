@@ -51,23 +51,18 @@ class TestDryRunCommands:
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
-        # Should show bounds calculation SQL
-        assert "-- Step 1: Calculate bounding box" in result.output
-        assert "MIN(ST_XMin" in result.output or "MIN(bbox.xmin" in result.output
-        # Should show the filtered countries query
-        assert "-- Step 2: Create temporary table" in result.output
+        # Should show admin dataset info
+        assert "Admin dataset:" in result.output
+        assert "s3://nlebovits/gaul-l2-admin" in result.output
+        # Should show spatial join query
         assert "ST_Intersects" in result.output
-        assert "CREATE TEMP TABLE filtered_countries" in result.output
-        # Should show main spatial join
-        assert "-- Step 3: Main spatial join query" in result.output
-        assert 'b."country" as "admin:country_code"' in result.output
-        # Should calculate actual bounds
-        assert "-- Bounds calculated:" in result.output
+        assert "admin:continent" in result.output or "admin:country" in result.output
+        # Should show COPY statement
+        assert "COPY (" in result.output
+        assert "TO 'output.parquet'" in result.output
 
-    def test_add_admin_divisions_dry_run_with_countries_file(
-        self, buildings_test_file, places_test_file
-    ):
-        """Test dry-run mode with custom countries file."""
+    def test_add_admin_divisions_dry_run_with_specific_levels(self, buildings_test_file):
+        """Test dry-run mode with specific levels."""
         runner = CliRunner()
         result = runner.invoke(
             add,
@@ -75,19 +70,21 @@ class TestDryRunCommands:
                 "admin-divisions",
                 buildings_test_file,
                 "output.parquet",
-                "--countries-file",
-                places_test_file,
+                "--dataset",
+                "gaul",
+                "--levels",
+                "continent,country",
                 "--dry-run",
             ],
         )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
-        # Should not have steps for filtering
-        assert "-- Step 1: Main spatial join query" in result.output
-        # Should not calculate bounds for non-default countries
-        assert "Calculate bounding box" not in result.output
-        assert 'b."admin:country_code"' in result.output
+        # Should only show requested levels
+        assert "admin:continent" in result.output
+        assert "admin:country" in result.output
+        # Should not include department
+        assert "admin:department" not in result.output
 
     def test_add_bbox_dry_run_verbose(self, buildings_test_file):
         """Test dry-run mode with verbose flag."""
@@ -132,7 +129,8 @@ class TestDryRunCommands:
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
-        # Should use bbox column for bounds calculation
-        assert "MIN(bbox.xmin)" in result.output
-        # Should still show bounds
-        assert "-- Bounds calculated:" in result.output
+        # Should use bbox column for spatial join optimization
+        assert "bbox.xmin" in result.output
+        assert "Using bbox columns for optimized spatial join" in result.output
+        # Should show spatial join query
+        assert "ST_Intersects" in result.output

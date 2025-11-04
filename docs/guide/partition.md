@@ -76,21 +76,55 @@ If KD-tree column doesn't exist, it's automatically added.
 
 ## By Admin Boundaries
 
-Split by country code or other administrative column:
+Split by administrative boundaries via spatial join with remote datasets:
+
+### How It Works
+
+This command performs **two operations**:
+
+1. **Spatial Join**: Queries remote admin boundaries using spatial extent filtering, then spatially joins them with your data
+2. **Partition**: Splits the enriched data by administrative levels
+
+### Quick Start
 
 ```bash
-# Preview partitions
-gpio partition admin input.parquet --preview
+# Preview GAUL partitions by continent
+gpio partition admin input.parquet --dataset gaul --levels continent --preview
 
-# Partition by default column (admin:country_code)
-gpio partition admin input.parquet output/
+# Partition by continent
+gpio partition admin input.parquet output/ --dataset gaul --levels continent
 
-# Custom admin column
-gpio partition admin input.parquet output/ --column iso_code
-
-# Hive-style
-gpio partition admin input.parquet output/ --hive
+# Hive-style partitioning
+gpio partition admin input.parquet output/ --dataset gaul --levels continent --hive
 ```
+
+### Multi-Level Hierarchical Partitioning
+
+Partition by multiple administrative levels:
+
+```bash
+# Hierarchical: continent → country
+gpio partition admin input.parquet output/ --dataset gaul --levels continent,country
+
+# All GAUL levels: continent → country → department
+gpio partition admin input.parquet output/ --dataset gaul --levels continent,country,department
+
+# Hive-style multi-level (creates continent=Africa/country=Kenya/department=Accra/)
+gpio partition admin input.parquet output/ --dataset gaul \
+    --levels continent,country,department --hive
+
+# Overture Maps by country and region
+gpio partition admin input.parquet output/ --dataset overture --levels country,region
+```
+
+### Datasets
+
+Two remote admin boundary datasets are supported:
+
+| Dataset | Levels | Description |
+|---------|--------|-------------|
+| `gaul` (default) | continent, country, department | GAUL L2 Admin Boundaries - worldwide coverage |
+| `overture` | country, region | Overture Maps Divisions (219 countries, 3,544 regions) - [docs](https://docs.overturemaps.org/guides/divisions/) |
 
 ## Common Options
 

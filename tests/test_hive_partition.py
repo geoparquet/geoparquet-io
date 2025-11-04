@@ -183,8 +183,19 @@ class TestHivePartitioning:
             runner = CliRunner()
 
             # Run partition command with Hive style
+            # Note: partition admin now does spatial join, so use partition string for existing columns
             result = runner.invoke(
-                cli, ["partition", "admin", tmp_name, temp_dir, "--hive", "--skip-analysis"]
+                cli,
+                [
+                    "partition",
+                    "string",
+                    tmp_name,
+                    temp_dir,
+                    "--column",
+                    "admin:country_code",
+                    "--hive",
+                    "--skip-analysis",
+                ],
             )
 
             assert result.exit_code == 0, f"Command failed: {result.output}"
@@ -423,9 +434,19 @@ class TestPartitionFormatCompliance:
 
             runner = CliRunner()
 
-            # Run admin partition command
+            # Run admin partition command (now use partition string for existing column)
             result = runner.invoke(
-                cli, ["partition", "admin", tmp_name, temp_dir, "--hive", "--skip-analysis"]
+                cli,
+                [
+                    "partition",
+                    "string",
+                    tmp_name,
+                    temp_dir,
+                    "--column",
+                    "admin:country_code",
+                    "--hive",
+                    "--skip-analysis",
+                ],
             )
 
             assert result.exit_code == 0, f"Command failed: {result.output}"
