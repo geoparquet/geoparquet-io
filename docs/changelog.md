@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added intelligent partition strategy analysis that automatically validates partition plans before execution with configurable thresholds (errors for pathological cases like >10K partitions or <100 avg rows, warnings for moderate issues). New flags: `--force` to override errors, `--skip-analysis` for performance, and enhanced `--preview` for dry-run with actionable recommendations.
 - Added KD-tree partitioning support ([#30](https://github.com/cholmes/geoparquet-io/pull/30))
 - Added `gpio inspect` command for fast metadata inspection with optional data preview (`--head`/`--tail`), statistics (`--stats`), and JSON output (`--json`) ([#31](https://github.com/cholmes/geoparquet-io/pull/31))
+- Added code quality checks to pre-commit hook and CI workflow ([#48](https://github.com/cholmes/geoparquet-io/pull/48))
 
 ## [0.1.0] - 2025-10-19
 
