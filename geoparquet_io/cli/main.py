@@ -8,7 +8,6 @@ from geoparquet_io.cli.decorators import (
 )
 from geoparquet_io.core.add_bbox_column import add_bbox_column as add_bbox_column_impl
 from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
-from geoparquet_io.core.add_country_codes import add_country_codes as add_country_codes_impl
 from geoparquet_io.core.add_h3_column import add_h3_column as add_h3_column_impl
 from geoparquet_io.core.add_kdtree_column import add_kdtree_column as add_kdtree_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
@@ -23,12 +22,14 @@ from geoparquet_io.core.inspect_utils import (
     get_column_statistics,
     get_preview_data,
 )
+from geoparquet_io.core.partition_admin_hierarchical import (
+    partition_by_admin_hierarchical as partition_admin_hierarchical_impl,
+)
 from geoparquet_io.core.partition_by_h3 import partition_by_h3 as partition_by_h3_impl
 from geoparquet_io.core.partition_by_kdtree import partition_by_kdtree as partition_by_kdtree_impl
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
-from geoparquet_io.core.split_by_country import split_by_country as split_country_impl
 
 # Version info
 __version__ = "0.2.0"
@@ -408,7 +409,6 @@ def hilbert_order(
         raise click.ClickException(str(e)) from e
 
 
-# Add commands group
 @cli.group()
 def add():
     """Commands for enhancing GeoParquet files in various ways."""
@@ -419,9 +419,15 @@ def add():
 @click.argument("input_parquet")
 @click.argument("output_parquet")
 @click.option(
-    "--countries-file",
-    default=None,
-    help="Path or URL to countries parquet file. If not provided, uses default from source.coop",
+    "--dataset",
+    type=click.Choice(["gaul", "overture"], case_sensitive=False),
+    default="gaul",
+    help="Admin boundaries dataset: 'gaul' (GAUL L2) or 'overture' (Overture Maps)",
+)
+@click.option(
+    "--levels",
+    help="Comma-separated hierarchical levels to add as columns (e.g., 'continent,country'). "
+    "If not specified, adds all available levels for the dataset.",
 )
 @click.option(
     "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
@@ -432,7 +438,8 @@ def add():
 def add_country_codes(
     input_parquet,
     output_parquet,
-    countries_file,
+    dataset,
+    levels,
     add_bbox,
     compression,
     compression_level,
@@ -441,13 +448,34 @@ def add_country_codes(
     dry_run,
     verbose,
 ):
-    """Add country ISO codes to a GeoParquet file based on spatial intersection.
+    """Add admin division columns via spatial join with remote boundaries datasets.
 
-    If --countries-file is not provided, will use the default countries file from
-    https://data.source.coop/cholmes/admin-boundaries/countries.parquet and filter
-    to only the subset that overlaps with the input data (may take longer).
+    Performs spatial intersection to add administrative division columns to your data.
 
-    Output is written as GeoParquet 1.1 with proper bbox covering metadata.
+    \b
+    **Datasets:**
+    - gaul: GAUL L2 (levels: continent, country, department)
+    - overture: Overture Maps (levels: country, region, locality)
+
+    \b
+    **Examples:**
+
+    \b
+    # Add all GAUL levels (continent, country, department)
+    gpio add admin-divisions input.parquet output.parquet --dataset gaul
+
+    \b
+    # Add specific GAUL levels only
+    gpio add admin-divisions input.parquet output.parquet --dataset gaul \\
+        --levels continent,country
+
+    \b
+    # Preview SQL before execution
+    gpio add admin-divisions input.parquet output.parquet --dataset gaul --dry-run
+
+    \b
+    **Note:** Requires internet connection to fetch remote boundaries datasets.
+    Input data must have valid geometries in WGS84 or compatible CRS.
     """
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -464,17 +492,32 @@ def add_country_codes(
         except ValueError as e:
             raise click.UsageError(f"Invalid row group size: {e}") from e
 
-    add_country_codes_impl(
+    # Use new multi-dataset implementation
+    from geoparquet_io.core.add_admin_divisions_multi import add_admin_divisions_multi
+
+    # Parse levels
+    if levels:
+        level_list = [level.strip() for level in levels.split(",")]
+    else:
+        # Use all available levels for the dataset
+        from geoparquet_io.core.admin_datasets import AdminDatasetFactory
+
+        temp_dataset = AdminDatasetFactory.create(dataset, None, verbose=False)
+        level_list = temp_dataset.get_available_levels()
+
+    add_admin_divisions_multi(
         input_parquet,
-        countries_file,
         output_parquet,
-        add_bbox,
-        dry_run,
-        verbose,
-        compression.upper(),
-        compression_level,
-        row_group_mb,
-        row_group_size,
+        dataset_name=dataset,
+        levels=level_list,
+        dataset_source=None,  # No custom sources for now
+        add_bbox_flag=add_bbox,
+        dry_run=dry_run,
+        verbose=verbose,
+        compression=compression.upper(),
+        compression_level=compression_level,
+        row_group_size_mb=row_group_mb,
+        row_group_rows=row_group_size,
     )
 
 
@@ -740,16 +783,25 @@ def partition():
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option(
-    "--column",
-    default="admin:country_code",
-    help="Column name to partition by (default: admin:country_code)",
+    "--dataset",
+    type=click.Choice(["gaul", "overture"], case_sensitive=False),
+    default="gaul",
+    help="Admin boundaries dataset: 'gaul' (GAUL L2) or 'overture' (Overture Maps)",
+)
+@click.option(
+    "--levels",
+    required=True,
+    help="Comma-separated hierarchical levels to partition by. "
+    "GAUL levels: continent,country,department. "
+    "Overture levels: country,region.",
 )
 @partition_options
 @verbose_option
 def partition_admin(
     input_parquet,
     output_folder,
-    column,
+    dataset,
+    levels,
     hive,
     overwrite,
     preview,
@@ -758,28 +810,62 @@ def partition_admin(
     skip_analysis,
     verbose,
 ):
-    """Split a GeoParquet file into separate files by country code.
+    """Partition by administrative boundaries via spatial join with remote datasets.
 
-    By default, partitions by the 'admin:country_code' column, but you can specify
-    a different column using the --column option.
+    This command performs a two-step operation:
+    1. Spatially joins input data with remote admin boundaries (GAUL or Overture)
+    2. Partitions the enriched data by specified admin levels
 
-    Use --preview to see what partitions would be created without actually creating files.
+    \b
+    **Datasets:**
+    - gaul: GAUL L2 Admin Boundaries (levels: continent, country, department)
+    - overture: Overture Maps Divisions (levels: country, region)
+
+    \b
+    **Examples:**
+
+    \b
+    # Preview GAUL partitions by continent
+    gpio partition admin input.parquet --dataset gaul --levels continent --preview
+
+    \b
+    # Partition by continent and country
+    gpio partition admin input.parquet output/ --dataset gaul --levels continent,country
+
+    \b
+    # All GAUL levels with Hive-style (continent=Africa/country=Kenya/...)
+    gpio partition admin input.parquet output/ --dataset gaul \\
+        --levels continent,country,department --hive
+
+    \b
+    # Overture Maps by country and region
+    gpio partition admin input.parquet output/ --dataset overture --levels country,region
+
+    \b
+    **Note:** This command fetches remote boundaries and performs spatial intersection.
+    Requires internet connection. Input data must have valid geometries in WGS84 or
+    compatible CRS.
     """
     # If preview mode, output_folder is not required
     if not preview and not output_folder:
         raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
-    split_country_impl(
+    # Parse levels
+    level_list = [level.strip() for level in levels.split(",")]
+
+    # Use hierarchical partitioning (spatial join + partition)
+    partition_admin_hierarchical_impl(
         input_parquet,
         output_folder,
-        column,
-        hive,
-        verbose,
-        overwrite,
-        preview,
-        preview_limit,
-        force,
-        skip_analysis,
+        dataset_name=dataset,
+        levels=level_list,
+        hive=hive,
+        overwrite=overwrite,
+        preview=preview,
+        preview_limit=preview_limit,
+        verbose=verbose,
+        force=force,
+        skip_analysis=skip_analysis,
     )
 
 
