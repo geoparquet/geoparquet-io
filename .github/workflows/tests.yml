@@ -1,5 +1,4 @@
 name: Tests
-
 on:
   push:
     branches: [ main, refactor ]
@@ -10,22 +9,30 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
 
-    - name: Set up Python
-      run: uv python install 3.11
+      - name: Set up Python
+        run: uv python install 3.11
 
-    - name: Install dependencies
-      run: uv sync --all-extras
+      - name: Install dependencies
+        run: uv sync --all-extras
 
-    - name: Check code formatting
-      run: uv run ruff format --check .
+      - name: Check code formatting
+        run: uv run ruff format --check .
 
-    - name: Run linter
-      run: uv run ruff check .
+      - name: Run linter
+        run: uv run ruff check .
+
+      - name: Check code complexity (informational)
+        run: uv run xenon --max-absolute=B --max-modules=B --max-average=A geoparquet_io tests
+        continue-on-error: true
+
+      - name: Check for dead code (informational)
+        run: uv run vulture geoparquet_io tests
+        continue-on-error: true
 
   test:
     runs-on: ${{ matrix.os }}
@@ -35,7 +42,6 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
         exclude:
-          # Exclude some combinations to speed up CI
           - os: macos-latest
             python-version: '3.9'
           - os: macos-latest
@@ -44,28 +50,27 @@ jobs:
             python-version: '3.9'
           - os: windows-latest
             python-version: '3.10'
-
     steps:
-    - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
 
-    - name: Set up Python ${{ matrix.python-version }}
-      run: uv python install ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
-    - name: Install dependencies
-      run: uv sync --all-extras
+      - name: Install dependencies
+        run: uv sync --all-extras
 
-    - name: Run tests with pytest
-      run: |
-        uv run pytest -v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-report=xml
+      - name: Run tests with pytest
+        run: |
+          uv run pytest -v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-report=xml
 
-    - name: Upload coverage to Codecov
-      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
-      uses: codecov/codecov-action@v5
-      with:
-        file: ./coverage.xml
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v5
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
