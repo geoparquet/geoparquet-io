@@ -18,3 +18,8 @@ repos:
         args: [--fix]
       # Run the formatter
       - id: ruff-format
+
+  - repo: https://github.com/jendrikseipp/vulture
+    rev: 'v2.3'
+    hooks:
+      - id: vulture

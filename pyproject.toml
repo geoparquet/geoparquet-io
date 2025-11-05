@@ -34,6 +34,9 @@ dependencies = [
     "fsspec>=2023.9.0",
     "rich>=13.0.0",
     "pre-commit>=4.3.0",
+    "vulture>=2.14",
+    "radon>=6.0.1",
+    "xenon>=0.9.3",
 ]
 
 [project.scripts]
@@ -112,3 +115,9 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
 strict_equality = true
+
+[tool.vulture]
+min_confidence = 80
+paths = ["geoparquet_io", "tests"]
+sort_by_size = true
+verbose = true
