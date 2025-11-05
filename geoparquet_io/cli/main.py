@@ -230,6 +230,98 @@ def inspect(parquet_file, head, tail, stats, json_output):
         raise click.ClickException(str(e)) from e
 
 
+# Meta command
+@cli.command()
+@click.argument("parquet_file", type=click.Path(exists=True))
+@click.option("--parquet", is_flag=True, help="Show only Parquet file metadata")
+@click.option("--geoparquet", is_flag=True, help="Show only GeoParquet metadata from 'geo' key")
+@click.option("--parquet-geo", is_flag=True, help="Show only Parquet geospatial metadata")
+@click.option(
+    "--row-groups", type=int, default=1, help="Number of row groups to display (default: 1)"
+)
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
+def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output):
+    """
+    Show comprehensive metadata for a GeoParquet file.
+
+    Displays three types of metadata:
+    1. Parquet File Metadata - File structure, schema, row groups, and column statistics
+    2. Parquet Geo Metadata - Geospatial metadata from Parquet format specification
+    3. GeoParquet Metadata - GeoParquet-specific metadata from 'geo' key
+
+    By default, shows all three sections. Use flags to show specific sections only.
+
+    Examples:
+
+        \b
+        # Show all metadata sections
+        gpio meta data.parquet
+
+        \b
+        # Show only Parquet file metadata
+        gpio meta data.parquet --parquet
+
+        \b
+        # Show only GeoParquet metadata
+        gpio meta data.parquet --geoparquet
+
+        \b
+        # Show all row groups instead of just the first
+        gpio meta data.parquet --row-groups 10
+
+        \b
+        # JSON output for scripting
+        gpio meta data.parquet --json
+    """
+    from geoparquet_io.core.metadata_utils import (
+        format_all_metadata,
+        format_geoparquet_metadata,
+        format_parquet_geo_metadata,
+        format_parquet_metadata_enhanced,
+    )
+
+    try:
+        # Count how many specific flags were set
+        specific_flags = sum([parquet, geoparquet, parquet_geo])
+
+        if specific_flags == 0:
+            # Show all sections
+            format_all_metadata(parquet_file, json_output, row_groups)
+        elif specific_flags > 1:
+            # Multiple specific flags - show each requested section
+            # Get primary geometry column for Parquet metadata highlighting
+            from geoparquet_io.core.common import get_parquet_metadata, parse_geo_metadata
+
+            metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
+            geo_meta = parse_geo_metadata(metadata, verbose=False)
+            primary_col = geo_meta.get("primary_column") if geo_meta else None
+
+            if parquet:
+                format_parquet_metadata_enhanced(parquet_file, json_output, row_groups, primary_col)
+            if parquet_geo:
+                format_parquet_geo_metadata(parquet_file, json_output, row_groups)
+            if geoparquet:
+                format_geoparquet_metadata(parquet_file, json_output)
+        else:
+            # Single specific flag
+            if parquet:
+                # Get primary geometry column for highlighting
+                from geoparquet_io.core.common import get_parquet_metadata, parse_geo_metadata
+
+                metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
+                geo_meta = parse_geo_metadata(metadata, verbose=False)
+                primary_col = geo_meta.get("primary_column") if geo_meta else None
+
+                format_parquet_metadata_enhanced(parquet_file, json_output, row_groups, primary_col)
+            elif geoparquet:
+                format_geoparquet_metadata(parquet_file, json_output)
+            elif parquet_geo:
+                format_parquet_geo_metadata(parquet_file, json_output, row_groups)
+
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
 # Format commands group
 @cli.group()
 def format():
