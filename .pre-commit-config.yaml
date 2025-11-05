@@ -19,7 +19,15 @@ repos:
       # Run the formatter
       - id: ruff-format
 
+    # find unused code
   - repo: https://github.com/jendrikseipp/vulture
     rev: 'v2.3'
     hooks:
       - id: vulture
+
+    # monitor code complexity
+  - repo: https://github.com/rubik/xenon
+    rev: v0.9.0
+    hooks:
+    - id: xenon
+      args: ['--max-absolute=B', '--max-modules=B', '--max-average=A']
