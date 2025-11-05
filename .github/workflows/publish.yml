@@ -1,5 +1,4 @@
 name: Publish to PyPI
-
 on:
   release:
     types: [published]
@@ -11,34 +10,40 @@ jobs:
     permissions:
       id-token: write  # Required for trusted publishing
       contents: read
-
     steps:
-    - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
 
-    - name: Set up Python
-      run: uv python install 3.11
+      - name: Set up Python
+        run: uv python install 3.11
 
-    - name: Install dependencies
-      run: uv sync --all-extras
+      - name: Install dependencies
+        run: uv sync --all-extras
 
-    - name: Run tests
-      run: uv run pytest -v --tb=short
+      - name: Run tests
+        run: uv run pytest -v --tb=short
 
-    - name: Check code formatting
-      run: uv run ruff format --check .
+      - name: Check code formatting
+        run: uv run ruff format --check .
 
-    - name: Run linter
-      run: uv run ruff check .
+      - name: Run linter
+        run: uv run ruff check .
 
-    - name: Build package
-      run: uv build
+      # Non-blocking complexity checks
+      - name: Check code complexity (informational)
+        run: uv run xenon --max-absolute=B --max-modules=B --max-average=A geoparquet_io tests
+        continue-on-error: true
 
-    - name: Publish to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        # Uses trusted publishing - no API token needed
-        # Must be configured at https://pypi.org/manage/account/publishing/
-        print-hash: true
+      - name: Check for dead code (informational)
+        run: uv run vulture geoparquet_io tests
+        continue-on-error: true
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
