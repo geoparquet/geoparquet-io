@@ -31,7 +31,7 @@ jobs:
         continue-on-error: true
 
       - name: Check for dead code (informational)
-        run: uv run vulture geoparquet_io tests
+        run: uv run vulture
         continue-on-error: true
 
   test:

@@ -120,4 +120,4 @@ strict_equality = true
 min_confidence = 80
 paths = ["geoparquet_io", "tests"]
 sort_by_size = true
-verbose = true
+verbose = false
