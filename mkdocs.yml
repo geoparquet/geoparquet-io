@@ -34,6 +34,9 @@ markdown_extensions:
   - admonition
   - pymdownx.superfences
   - pymdownx.highlight
+  - pymdownx.snippets:
+      base_path: docs
+      check_paths: true
   - tables
   - toc:
       permalink: true
@@ -65,4 +68,4 @@ nav:
     - Basic Usage: examples/basic.md
     - Batch Processing: examples/batch.md
   - Contributing: contributing.md
-  - Changelog: changelog.md
+  - Changelog: CHANGELOG.md

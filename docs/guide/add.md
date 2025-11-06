@@ -35,10 +35,7 @@ gpio add h3 input.parquet output.parquet --resolution 9
 
 **Resolution guide:**
 
-- Resolution 7: ~5 km² cells
-- Resolution 9: ~105 m² cells (default)
-- Resolution 11: ~2 m² cells
-- Resolution 13: ~0.04 m² cells
+--8<-- "_includes/h3-resolutions.md"
 
 **Options:**
 
@@ -131,51 +128,15 @@ gpio add admin-divisions buildings.parquet output.parquet --dataset overture \
 
 ### Datasets
 
-Two remote admin boundary datasets are supported:
-
-| Dataset | Standard | Columns Added | Description |
-|---------|----------|---------------|-------------|
-| `gaul` (default) | GAUL naming + ISO 3166-1 alpha-3 | `admin:continent`, `admin:country`, `admin:department` | FAO Global Administrative Unit Layers (GAUL) L2 - worldwide coverage with standardized naming |
-| `overture` | **Vecorel compliant** (ISO 3166-1/2) | `admin:country_code`, `admin:subdivision_code` | Overture Maps Divisions with ISO 3166 codes (219 countries, 3,544 regions) - [docs](https://docs.overturemaps.org/guides/divisions/) |
-
-### Vecorel Compliance (Overture Dataset Only)
-
-The `overture` dataset follows the [Vecorel administrative division extension](https://vecorel.org/administrative-division-extension/v0.1.0/schema.yaml) specification with standardized ISO codes:
-
-- **`admin:country_code`** (REQUIRED): ISO 3166-1 alpha-2 country code (e.g., "US", "AR", "DE")
-- **`admin:subdivision_code`**: ISO 3166-2 subdivision code WITHOUT country prefix (e.g., "CA" not "US-CA")
-
-The tool automatically transforms Overture's native region codes (e.g., "US-CA") to strip the country prefix for Vecorel compliance.
-
-**Note:** The GAUL dataset uses FAO's standardized naming system but is NOT Vecorel compliant:
-- Has ISO 3166-1 alpha-3 codes (e.g., "TZA"), but Vecorel requires alpha-2 (e.g., "TZ")
-- Uses GAUL's standardized naming for subnational units, not ISO 3166-2 codes
-- Columns: `admin:continent` (continent name), `admin:country` (GAUL country name), `admin:department` (GAUL L2 name)
-
-### Notes
-
-- **Overture dataset**: Vecorel compliant with ISO 3166-1 alpha-2 and ISO 3166-2 codes
-- **GAUL dataset**: FAO standardized naming system - [source.coop GAUL L2](https://data.source.coop/nlebovits/gaul-l2-admin/)
-- Performs spatial intersection to assign admin divisions based on geometry
-- Requires internet connection to access remote datasets
-- Uses spatial extent filtering and bbox columns for optimization
+--8<-- "_includes/admin-datasets.md"
 
 ## Common Options
 
 All `add` commands support:
 
+--8<-- "_includes/common-cli-options.md"
+
 ```bash
-# Compression settings
---compression [ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED]
---compression-level [1-22]
-
-# Row group sizing
---row-group-size [exact row count]
---row-group-size-mb [target size like '256MB' or '1GB']
-
-# Workflow options
---dry-run          # Preview SQL without executing
---verbose          # Detailed output
 --add-bbox         # Auto-add bbox if missing (some commands)
 ```
 

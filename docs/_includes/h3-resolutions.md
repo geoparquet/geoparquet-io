@@ -1,0 +1,4 @@
+- Resolution 7: ~5 km² cells
+- Resolution 9: ~105 m² cells (default)
+- Resolution 11: ~2 m² cells
+- Resolution 13: ~0.04 m² cells
