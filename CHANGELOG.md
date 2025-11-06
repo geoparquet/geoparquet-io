@@ -6,7 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-- Add support for partitioning by multiple admin levels from GAUL and Overture Maps ([#38](https://github.com/cholmes/geoparquet-io/pull/38))
+
+## [0.3.0] - 2025-11-06
+
+### Added
+- `gpio meta` command for deep inspection of Parquet and GeoParquet metadata ([#46](https://github.com/cholmes/geoparquet-io/pull/46))
+- Multi-level admin boundary partitioning with GAUL and Overture Maps datasets, using Vecorel extension with ISO 3166-1/2 codes ([#38](https://github.com/cholmes/geoparquet-io/pull/38))
+- Code quality checks with vulture and ruff to CI workflow ([#48](https://github.com/cholmes/geoparquet-io/pull/48), [#49](https://github.com/cholmes/geoparquet-io/pull/49), [#50](https://github.com/cholmes/geoparquet-io/pull/50))
+
+### Changed
+- GitHub Actions dependency updates ([#39](https://github.com/cholmes/geoparquet-io/pull/39), [#40](https://github.com/cholmes/geoparquet-io/pull/40), [#41](https://github.com/cholmes/geoparquet-io/pull/41), [#42](https://github.com/cholmes/geoparquet-io/pull/42))
 
 ## [0.2.0] - 2025-10-24
 
@@ -110,7 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release as `geoparquet-tools` with basic functionality.
 
-[Unreleased]: https://github.com/cholmes/geoparquet-io/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cholmes/geoparquet-io/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/cholmes/geoparquet-io/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cholmes/geoparquet-io/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cholmes/geoparquet-io/releases/tag/v0.1.0
 [0.0.1]: https://github.com/cholmes/geoparquet-tools/releases/tag/v0.0.1
