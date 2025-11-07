@@ -49,7 +49,7 @@ For more examples and detailed usage, see the [Quick Start Tutorial](https://cho
 
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and how to submit changes.
+Contributions are welcome! See [CONTRIBUTING.md](docs/contributing.md) for development setup, coding standards, and how to submit changes.
 
 ## Links
 
