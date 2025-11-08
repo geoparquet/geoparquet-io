@@ -1,6 +1,7 @@
 import click
 
 from geoparquet_io.cli.decorators import (
+    compression_options,
     dry_run_option,
     output_format_options,
     partition_options,
@@ -12,6 +13,7 @@ from geoparquet_io.core.add_h3_column import add_h3_column as add_h3_column_impl
 from geoparquet_io.core.add_kdtree_column import add_kdtree_column as add_kdtree_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
+from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
 from geoparquet_io.core.inspect_utils import (
     extract_columns_info,
@@ -141,6 +143,72 @@ def check_row_group_cmd(parquet_file, verbose):
     from geoparquet_io.core.check_parquet_structure import check_row_groups
 
     check_row_groups(parquet_file, verbose)
+
+
+# Convert command
+@cli.command()
+@click.argument("input_file", type=click.Path(exists=True))
+@click.argument("output_file", type=click.Path())
+@click.option(
+    "--skip-hilbert",
+    is_flag=True,
+    help="Skip Hilbert spatial ordering (faster but less optimal for spatial queries)",
+)
+@verbose_option
+@compression_options
+def convert(input_file, output_file, skip_hilbert, verbose, compression, compression_level):
+    """
+    Convert vector formats to optimized GeoParquet.
+
+    Automatically applies best practices:
+
+      • ZSTD compression (configurable)
+
+      • 100,000 row groups
+
+      • Bbox column with proper metadata
+
+      • Hilbert spatial ordering
+
+      • GeoParquet 1.1.0 metadata
+
+    Supported input formats (auto-detected):
+
+      • Shapefile (.shp)
+
+      • GeoJSON (.geojson, .json)
+
+      • GeoPackage (.gpkg)
+
+      • File Geodatabase (.gdb)
+
+    Examples:
+
+      \b
+      # Basic conversion
+      geoparquet-io convert input.shp output.parquet
+
+      \b
+      # With verbose output and validation
+      geoparquet-io convert input.geojson output.parquet --verbose
+
+      \b
+      # Skip Hilbert ordering for faster conversion
+      geoparquet-io convert large.gpkg output.parquet --skip-hilbert
+
+      \b
+      # Custom compression
+      geoparquet-io convert input.shp output.parquet --compression GZIP --compression-level 9
+    """
+    convert_to_geoparquet(
+        input_file,
+        output_file,
+        skip_hilbert=skip_hilbert,
+        verbose=verbose,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_rows=100000,  # Best practice default
+    )
 
 
 # Inspect command
