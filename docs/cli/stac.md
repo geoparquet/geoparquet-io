@@ -32,4 +32,9 @@ gpio stac partitions/ stac-output/ --bucket s3://my-bucket/roads/
 gpio stac data.parquet output.json \
   --bucket s3://my-bucket/roads/ \
   --public-url https://data.example.com/roads/
+
+# Overwrite existing STAC files
+gpio stac partitions/ stac-output/ \
+  --bucket s3://my-bucket/roads/ \
+  --overwrite
 ```

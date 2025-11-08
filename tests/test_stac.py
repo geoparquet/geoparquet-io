@@ -9,6 +9,7 @@ import pytest
 from geoparquet_io.core.stac import (
     construct_asset_href,
     detect_pmtiles,
+    detect_stac,
     generate_item_id,
     generate_stac_collection,
     generate_stac_geometry,
@@ -351,3 +352,308 @@ def test_generate_stac_collection_no_files(temp_output_dir):
         generate_stac_collection(str(empty_dir), bucket_prefix="s3://test-bucket/", verbose=False)
 
     assert "No parquet files found" in str(exc_info.value)
+
+
+def test_detect_stac_item_json(temp_output_dir):
+    """Test detect_stac for STAC Item JSON file."""
+    item_file = Path(temp_output_dir) / "item.json"
+    item_data = {
+        "type": "Feature",
+        "stac_version": "1.1.0",
+        "id": "test-item",
+        "bbox": [-180, -90, 180, 90],
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]],
+        },
+        "properties": {"datetime": "2024-01-01T00:00:00Z"},
+    }
+    with open(item_file, "w") as f:
+        json.dump(item_data, f)
+
+    assert detect_stac(str(item_file)) == "Item"
+
+
+def test_detect_stac_collection_json(temp_output_dir):
+    """Test detect_stac for STAC Collection JSON file."""
+    collection_file = Path(temp_output_dir) / "collection.json"
+    collection_data = {
+        "type": "Collection",
+        "stac_version": "1.1.0",
+        "id": "test-collection",
+        "description": "Test collection",
+        "extent": {
+            "spatial": {"bbox": [[-180, -90, 180, 90]]},
+            "temporal": {"interval": [[None, None]]},
+        },
+    }
+    with open(collection_file, "w") as f:
+        json.dump(collection_data, f)
+
+    assert detect_stac(str(collection_file)) == "Collection"
+
+
+def test_detect_stac_pure_collection_dir(temp_output_dir):
+    """Test detect_stac for directory with only collection.json (no parquet files)."""
+    collection_file = Path(temp_output_dir) / "collection.json"
+    collection_data = {
+        "type": "Collection",
+        "stac_version": "1.1.0",
+        "id": "test-collection",
+        "description": "Test collection",
+        "extent": {
+            "spatial": {"bbox": [[-180, -90, 180, 90]]},
+            "temporal": {"interval": [[None, None]]},
+        },
+    }
+    with open(collection_file, "w") as f:
+        json.dump(collection_data, f)
+
+    assert detect_stac(str(temp_output_dir)) == "Collection"
+
+
+def test_detect_stac_mixed_dir(places_test_file, temp_output_dir):
+    """Test detect_stac for directory with both collection.json and parquet files (mixed)."""
+    # Create collection.json
+    collection_file = Path(temp_output_dir) / "collection.json"
+    collection_data = {
+        "type": "Collection",
+        "stac_version": "1.1.0",
+        "id": "test-collection",
+        "description": "Test collection",
+        "extent": {
+            "spatial": {"bbox": [[-180, -90, 180, 90]]},
+            "temporal": {"interval": [[None, None]]},
+        },
+    }
+    with open(collection_file, "w") as f:
+        json.dump(collection_data, f)
+
+    # Copy parquet file to directory
+    import shutil
+
+    shutil.copy(places_test_file, Path(temp_output_dir) / "places.parquet")
+
+    # Mixed directory should return None (not detected as pure STAC)
+    assert detect_stac(str(temp_output_dir)) is None
+
+
+def test_detect_stac_non_json_file(temp_output_dir):
+    """Test detect_stac for non-JSON file."""
+    parquet_file = Path(temp_output_dir) / "data.parquet"
+    parquet_file.touch()
+    assert detect_stac(str(parquet_file)) is None
+
+
+def test_detect_stac_invalid_json(temp_output_dir):
+    """Test detect_stac for invalid JSON file."""
+    json_file = Path(temp_output_dir) / "invalid.json"
+    with open(json_file, "w") as f:
+        f.write("{ invalid json }")
+    assert detect_stac(str(json_file)) is None
+
+
+def test_detect_stac_non_stac_json(temp_output_dir):
+    """Test detect_stac for JSON file that's not STAC."""
+    json_file = Path(temp_output_dir) / "data.json"
+    with open(json_file, "w") as f:
+        json.dump({"type": "NotSTAC", "data": "test"}, f)
+    assert detect_stac(str(json_file)) is None
+
+
+def test_stac_cli_input_is_stac_item(places_test_file, temp_output_dir):
+    """Test CLI errors when input is already a STAC Item."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    # Create STAC Item JSON
+    item_file = Path(temp_output_dir) / "input.json"
+    item_data = {
+        "type": "Feature",
+        "stac_version": "1.1.0",
+        "id": "test-item",
+        "bbox": [-180, -90, 180, 90],
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]],
+        },
+        "properties": {"datetime": "2024-01-01T00:00:00Z"},
+    }
+    with open(item_file, "w") as f:
+        json.dump(item_data, f)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "stac",
+            str(item_file),
+            str(Path(temp_output_dir) / "output.json"),
+            "--bucket",
+            "s3://bucket/",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "already a STAC Item" in result.output
+
+
+def test_stac_cli_input_is_pure_stac_collection(temp_output_dir):
+    """Test CLI errors when input is a pure STAC Collection (no parquet files)."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    # Create collection.json
+    collection_file = Path(temp_output_dir) / "collection.json"
+    collection_data = {
+        "type": "Collection",
+        "stac_version": "1.1.0",
+        "id": "test-collection",
+        "description": "Test collection",
+        "extent": {
+            "spatial": {"bbox": [[-180, -90, 180, 90]]},
+            "temporal": {"interval": [[None, None]]},
+        },
+    }
+    with open(collection_file, "w") as f:
+        json.dump(collection_data, f)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "stac",
+            str(temp_output_dir),
+            str(Path(temp_output_dir) / "output"),
+            "--bucket",
+            "s3://bucket/",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "already a STAC Collection" in result.output
+
+
+def test_stac_cli_output_exists_no_overwrite(places_test_file, temp_output_dir):
+    """Test CLI errors when output exists and is STAC, without --overwrite."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    # Create output STAC Item
+    output_file = Path(temp_output_dir) / "output.json"
+    item_data = {
+        "type": "Feature",
+        "stac_version": "1.1.0",
+        "id": "existing-item",
+        "bbox": [-180, -90, 180, 90],
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]],
+        },
+        "properties": {"datetime": "2024-01-01T00:00:00Z"},
+    }
+    with open(output_file, "w") as f:
+        json.dump(item_data, f)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "stac",
+            places_test_file,
+            str(output_file),
+            "--bucket",
+            "s3://bucket/",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "already exists and is a STAC Item" in result.output
+    assert "--overwrite" in result.output
+
+
+def test_stac_cli_output_exists_with_overwrite(places_test_file, temp_output_dir):
+    """Test CLI overwrites when output exists and is STAC, with --overwrite."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    # Create output STAC Item
+    output_file = Path(temp_output_dir) / "output.json"
+    item_data = {
+        "type": "Feature",
+        "stac_version": "1.1.0",
+        "id": "existing-item",
+        "bbox": [-180, -90, 180, 90],
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]],
+        },
+        "properties": {"datetime": "2024-01-01T00:00:00Z"},
+    }
+    with open(output_file, "w") as f:
+        json.dump(item_data, f)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "stac",
+            places_test_file,
+            str(output_file),
+            "--bucket",
+            "s3://bucket/",
+            "--overwrite",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Overwriting existing STAC Item" in result.output
+    assert "Created STAC Item" in result.output
+
+    # Verify file was overwritten
+    with open(output_file) as f:
+        new_data = json.load(f)
+    assert new_data["id"] != "existing-item"  # Should have new ID from parquet file
+
+
+def test_stac_cli_mixed_dir_allowed(places_test_file, temp_output_dir):
+    """Test CLI allows input directory with both STAC and parquet files (mixed)."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    # Create collection.json
+    collection_file = Path(temp_output_dir) / "collection.json"
+    collection_data = {
+        "type": "Collection",
+        "stac_version": "1.1.0",
+        "id": "test-collection",
+        "description": "Test collection",
+        "extent": {
+            "spatial": {"bbox": [[-180, -90, 180, 90]]},
+            "temporal": {"interval": [[None, None]]},
+        },
+    }
+    with open(collection_file, "w") as f:
+        json.dump(collection_data, f)
+
+    # Copy parquet file to directory
+    import shutil
+
+    shutil.copy(places_test_file, Path(temp_output_dir) / "places.parquet")
+
+    # Should work (mixed directory allowed)
+    output_dir = Path(temp_output_dir) / "output"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "stac",
+            str(temp_output_dir),
+            str(output_dir),
+            "--bucket",
+            "s3://bucket/",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Created STAC Collection" in result.output

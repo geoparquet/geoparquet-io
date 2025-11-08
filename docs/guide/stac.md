@@ -66,6 +66,20 @@ tippecanoe -o partitioned/overview.pmtiles roads.parquet
 
 **Standard naming:** Use `overview.pmtiles` for consistency.
 
+## Overwriting Existing STAC Files
+
+If the output location already contains a valid STAC Collection or Item, the command will error to prevent accidental overwrites:
+
+```bash
+# Error if output already exists
+gpio stac data.parquet output.json --bucket s3://...
+
+# Use --overwrite to allow overwriting
+gpio stac data.parquet output.json --bucket s3://... --overwrite
+```
+
+**Note:** The command will error if the **input** is a pure STAC file (no parquet files). If the input directory contains both STAC files and parquet files, it will generate from the parquet files.
+
 ## Validation
 
 Check STAC compliance:

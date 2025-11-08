@@ -20,6 +20,74 @@ from geoparquet_io.core.common import (
 )
 
 
+def _detect_stac_file(file_path: Path) -> Optional[str]:
+    """Detect if a file is a STAC Item or Collection."""
+    if file_path.suffix.lower() != ".json":
+        return None
+
+    try:
+        with open(file_path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return None
+
+    stac_type = data.get("type")
+    if stac_type == "Feature":
+        return "Item"
+    elif stac_type == "Collection":
+        return "Collection"
+    return None
+
+
+def _detect_stac_directory(dir_path: Path) -> Optional[str]:
+    """Detect if a directory is a pure STAC Collection (no parquet files)."""
+    collection_file = dir_path / "collection.json"
+    if not collection_file.exists():
+        return None
+
+    try:
+        with open(collection_file) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return None
+
+    if data.get("type") != "Collection":
+        return None
+
+    # Check if directory also contains parquet files
+    # If it does, it's a mixed directory (STAC + parquet) - allow it
+    parquet_files = list(dir_path.glob("*.parquet")) + list(dir_path.glob("*/*.parquet"))
+    if parquet_files:
+        # Mixed directory - has both STAC and parquet, allow generation from parquet
+        return None
+
+    # Pure STAC directory - no parquet files
+    return "Collection"
+
+
+def detect_stac(input_path: str) -> Optional[str]:
+    """
+    Detect if input is already a STAC Item or Collection.
+
+    For directories, only returns STAC type if it contains STAC files
+    but NO parquet files (i.e., it's a pure STAC directory, not a mixed directory).
+
+    Args:
+        input_path: Path to file or directory
+
+    Returns:
+        "Item" if STAC Item, "Collection" if STAC Collection, None if not STAC or mixed
+    """
+    path = Path(input_path)
+
+    if path.is_file():
+        return _detect_stac_file(path)
+    elif path.is_dir():
+        return _detect_stac_directory(path)
+
+    return None
+
+
 def detect_pmtiles(base_path: str, verbose: bool = False) -> Optional[str]:
     """
     Detect PMTiles overview file in directory.
@@ -175,6 +243,7 @@ def _add_pmtiles_asset(
     bucket_prefix: str,
     public_url: Optional[str],
     verbose: bool,
+    show_warning: bool = True,
 ) -> None:
     """Add PMTiles asset to STAC Item if present."""
     pmtiles_path = detect_pmtiles(parquet_file, verbose=False)
@@ -191,7 +260,7 @@ def _add_pmtiles_asset(
         )
         if verbose:
             click.echo(f"Added PMTiles asset: {pmtiles_filename}")
-    elif verbose:
+    elif show_warning:
         click.echo(
             click.style(
                 "⚠️  No PMTiles overview found. Consider creating one for map visualization:\n"
@@ -260,6 +329,17 @@ def generate_stac_item(
     if verbose:
         click.echo(f"Generating STAC Item for {parquet_file}")
 
+    # Check for PMTiles immediately (before processing)
+    pmtiles_path = detect_pmtiles(parquet_file, verbose=False)
+    if not pmtiles_path:
+        click.echo(
+            click.style(
+                "⚠️  No PMTiles overview found. Consider creating one for map visualization:\n"
+                "   tippecanoe -o overview.pmtiles input.parquet",
+                fg="yellow",
+            )
+        )
+
     # Get metadata
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
     geo_meta = parse_geo_metadata(metadata, verbose=False)
@@ -301,10 +381,65 @@ def generate_stac_item(
     # Add projection info to properties if available
     _add_projection_properties(item, geo_meta, parquet_file)
 
-    # Add PMTiles asset if present
-    _add_pmtiles_asset(item, parquet_file, bucket_prefix, public_url, verbose)
+    # Add PMTiles asset if present (warning already shown above)
+    _add_pmtiles_asset(item, parquet_file, bucket_prefix, public_url, verbose, show_warning=False)
 
     # Add self link
+    _add_self_link(item, final_item_id, bucket_prefix, public_url)
+
+    return item.to_dict()
+
+
+def _generate_stac_item_no_warning(
+    parquet_file: str,
+    bucket_prefix: str,
+    public_url: Optional[str] = None,
+    item_id: Optional[str] = None,
+) -> dict:
+    """
+    Generate STAC Item without PMTiles warning (used for collection items).
+
+    Internal function to avoid duplicate warnings when generating collections.
+    """
+    # Get metadata
+    metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
+    geo_meta = parse_geo_metadata(metadata, verbose=False)
+
+    # Get bounds and geometry
+    bounds = get_dataset_bounds(parquet_file, verbose=False)
+    if not bounds:
+        raise click.ClickException(f"Could not calculate bounds for {parquet_file}")
+
+    geometry = generate_stac_geometry(parquet_file, verbose=False)
+    datetime_obj = get_file_datetime(parquet_file)
+    final_item_id = item_id or generate_item_id(parquet_file)
+
+    # Create pystac Item
+    item = pystac.Item(
+        id=final_item_id,
+        geometry=geometry,
+        bbox=list(bounds),
+        datetime=datetime_obj,
+        properties={},
+    )
+
+    # Add GeoParquet asset
+    parquet_filename = Path(parquet_file).name
+    item.add_asset(
+        key="data",
+        asset=pystac.Asset(
+            href=construct_asset_href(parquet_filename, bucket_prefix, public_url),
+            media_type="application/vnd.apache.parquet",
+            roles=["data"],
+            title="GeoParquet dataset",
+        ),
+    )
+
+    # Add projection info and PMTiles (without warning)
+    _add_projection_properties(item, geo_meta, parquet_file)
+    _add_pmtiles_asset(
+        item, parquet_file, bucket_prefix, public_url, verbose=False, show_warning=False
+    )
     _add_self_link(item, final_item_id, bucket_prefix, public_url)
 
     return item.to_dict()
@@ -332,6 +467,17 @@ def generate_stac_collection(
     """
     if verbose:
         click.echo(f"Generating STAC Collection for {partition_dir}")
+
+    # Check for PMTiles immediately (before processing)
+    pmtiles_path = detect_pmtiles(partition_dir, verbose=False)
+    if not pmtiles_path:
+        click.echo(
+            click.style(
+                "⚠️  No PMTiles overview found. Consider creating one for map visualization:\n"
+                "   tippecanoe -o overview.pmtiles <partition_files>",
+                fg="yellow",
+            )
+        )
 
     # Find all .parquet files in partition_dir
     all_files = _find_partition_files(partition_dir)
@@ -401,12 +547,12 @@ def _generate_collection_items(
 
     for parquet_file in all_files:
         partition_key = parquet_file.stem
-        item_dict = generate_stac_item(
+        # Generate item without PMTiles warning (will show once for collection)
+        item_dict = _generate_stac_item_no_warning(
             str(parquet_file),
             bucket_prefix,
             public_url,
             item_id=partition_key,
-            verbose=False,
         )
         items.append(item_dict)
 
@@ -447,14 +593,6 @@ def _add_collection_pmtiles(
         )
         if verbose:
             click.echo(f"Added PMTiles asset to collection: {pmtiles_filename}")
-    elif verbose:
-        click.echo(
-            click.style(
-                "⚠️  No PMTiles overview found. Consider creating one for map visualization:\n"
-                "   tippecanoe -o overview.pmtiles <partition_files>",
-                fg="yellow",
-            )
-        )
 
 
 def write_stac_json(stac_dict: dict, output_path: str, verbose: bool = False):
