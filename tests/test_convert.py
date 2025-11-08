@@ -11,6 +11,7 @@ Tests verify that convert applies all best practices:
 """
 
 import os
+import sys
 
 import duckdb
 import pytest
@@ -352,6 +353,9 @@ class TestConvertEdgeCases:
         assert input_count == output_count, "Row count mismatch after conversion"
         con.close()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="chmod permissions not supported on Windows"
+    )
     def test_convert_output_directory_not_writable(self, shapefile_input, tmp_path):
         """Test error handling when output directory is not writable."""
         # Create a read-only directory
