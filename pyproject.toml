@@ -37,6 +37,8 @@ dependencies = [
     "vulture>=2.14",
     "radon>=6.0.1",
     "xenon>=0.9.3",
+    "pystac>=1.9.0",
+    "jsonschema>=4.0.0",  # Required for pystac validation
 ]
 
 [project.scripts]

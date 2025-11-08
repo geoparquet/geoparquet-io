@@ -19,6 +19,7 @@ gpio [OPTIONS] COMMAND [ARGS]...
 - **[add](add.md)** - Enhance files with spatial indices
 - **[partition](partition.md)** - Split files into optimized partitions
 - **[format](format.md)** - Apply formatting best practices
+- **[stac](stac.md)** - Generate STAC metadata for datasets
 
 ## Global Options
 
@@ -44,6 +45,7 @@ gpio check --help
 gpio add bbox --help
 gpio partition h3 --help
 gpio check spatial --help
+gpio stac --help
 ```
 
 ## Legacy Alias

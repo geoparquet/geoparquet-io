@@ -1224,5 +1224,122 @@ def partition_kdtree(
     )
 
 
+# STAC commands
+@cli.command()
+@click.argument("input", type=click.Path(exists=True))
+@click.argument("output", type=click.Path())
+@click.option(
+    "--bucket",
+    required=True,
+    help="S3 bucket prefix for asset hrefs (e.g., s3://source.coop/org/dataset/)",
+)
+@click.option(
+    "--public-url",
+    help="Optional public HTTPS URL for assets (e.g., https://data.source.coop/org/dataset/)",
+)
+@click.option("--collection-id", help="Custom collection ID (for partitioned datasets)")
+@click.option("--item-id", help="Custom item ID (for single files)")
+@verbose_option
+def stac(input, output, bucket, public_url, collection_id, item_id, verbose):
+    """
+    Generate STAC Item or Collection from GeoParquet file(s).
+
+    Single file → STAC Item JSON
+
+    Partitioned directory → STAC Collection + Items
+
+    Automatically detects PMTiles overview files and includes them as assets.
+
+    Examples:
+
+      \b
+      # Single file
+      gpio stac input.parquet output.json --bucket s3://my-bucket/roads/
+
+      \b
+      # Partitioned dataset
+      gpio stac partitions/ stac-output/ --bucket s3://my-bucket/roads/
+
+      \b
+      # With public URL mapping
+      gpio stac data.parquet output.json \\
+        --bucket s3://my-bucket/roads/ \\
+        --public-url https://data.example.com/roads/
+    """
+    from pathlib import Path
+
+    from geoparquet_io.core.stac import (
+        generate_stac_collection,
+        generate_stac_item,
+        write_stac_json,
+    )
+
+    input_path = Path(input)
+
+    if input_path.is_file():
+        # Single file → Item
+        if verbose:
+            click.echo(f"Generating STAC Item for {input}")
+
+        item_dict = generate_stac_item(str(input_path), bucket, public_url, item_id, verbose)
+
+        write_stac_json(item_dict, output, verbose)
+        click.echo(f"✓ Created STAC Item: {output}")
+
+    elif input_path.is_dir():
+        # Directory → Collection + Items
+        if verbose:
+            click.echo(f"Generating STAC Collection for {input}")
+
+        collection_dict, item_dicts = generate_stac_collection(
+            str(input_path), bucket, public_url, collection_id, verbose
+        )
+
+        # Create output directory
+        output_path = Path(output)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Write collection
+        collection_file = output_path / "collection.json"
+        write_stac_json(collection_dict, str(collection_file), verbose)
+
+        # Write items
+        for item_dict in item_dicts:
+            item_file = output_path / f"{item_dict['id']}.json"
+            write_stac_json(item_dict, str(item_file), verbose)
+
+        click.echo(f"✓ Created STAC Collection: {collection_file}")
+        click.echo(f"✓ Created {len(item_dicts)} STAC Items in {output}")
+    else:
+        raise click.BadParameter(f"Input must be file or directory: {input}")
+
+
+@check.command(name="stac")
+@click.argument("stac_file", type=click.Path(exists=True))
+@verbose_option
+def check_stac_cmd(stac_file, verbose):
+    """
+    Validate STAC Item or Collection JSON.
+
+    Checks:
+
+      • STAC spec compliance
+
+      • Required fields
+
+      • Asset href resolution (local files)
+
+      • Best practices
+
+    Example:
+
+      \b
+      gpio check stac output.json
+    """
+    from geoparquet_io.core.stac_check import check_stac
+
+    check_stac(stac_file, verbose)
+
+
 if __name__ == "__main__":
     cli()
