@@ -22,6 +22,9 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 # Install
 pip install geoparquet-io
 
+# Convert Shapefile/GeoJSON/GeoPackage to optimized GeoParquet
+gpio convert input.shp output.parquet
+
 # Inspect file structure and metadata
 gpio inspect myfile.parquet
 
@@ -57,6 +60,7 @@ New to geoparquet-io? Start here:
 
 ## Command Reference
 
+- [convert](cli/convert.md) - Convert vector formats to optimized GeoParquet
 - [inspect](cli/inspect.md) - Examine file metadata and preview data
 - [check](cli/check.md) - Validate files against best practices
 - [sort](cli/sort.md) - Spatially sort using Hilbert curves

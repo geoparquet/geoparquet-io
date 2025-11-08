@@ -12,6 +12,7 @@ gpio [OPTIONS] COMMAND [ARGS]...
 
 ### Core Commands
 
+- **[convert](convert.md)** - Convert vector formats to optimized GeoParquet
 - **[inspect](inspect.md)** - Examine file metadata and preview data
 - **[check](check.md)** - Validate files against best practices
 - **[sort](sort.md)** - Spatially sort using Hilbert curves
