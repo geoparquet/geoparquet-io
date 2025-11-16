@@ -57,6 +57,12 @@ if bounds:
 
 ## Compression Options
 
+Available compression formats:
+
+--8<-- "_includes/compression-options.md"
+
+Example usage:
+
 ```python
 from geoparquet_io.core.add_bbox_column import add_bbox_column
 
@@ -65,15 +71,6 @@ add_bbox_column(..., compression="ZSTD", compression_level=15)
 
 # GZIP (widely compatible)
 add_bbox_column(..., compression="GZIP", compression_level=6)
-
-# BROTLI (high compression)
-add_bbox_column(..., compression="BROTLI", compression_level=6)
-
-# LZ4 (fast)
-add_bbox_column(..., compression="LZ4")
-
-# Snappy (balanced)
-add_bbox_column(..., compression="SNAPPY")
 ```
 
 ## Complete Example Script

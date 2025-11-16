@@ -119,25 +119,18 @@ gpio partition admin input.parquet output/ --dataset overture --levels country,r
 
 ### Datasets
 
-Two remote admin boundary datasets are supported:
-
-| Dataset | Levels | Description |
-|---------|--------|-------------|
-| `gaul` (default) | continent, country, department | GAUL L2 Admin Boundaries - worldwide coverage |
-| `overture` | country, region | Overture Maps Divisions (219 countries, 3,544 regions) - [docs](https://docs.overturemaps.org/guides/divisions/) |
+--8<-- "_includes/admin-datasets.md"
 
 ## Common Options
 
 All partition commands support:
 
+--8<-- "_includes/common-cli-options.md"
+
 ```bash
---preview              # Analyze and preview without creating files
 --preview-limit 15     # Number of partitions to show (default: 15)
---hive                 # Use Hive-style partitioning (column=value/)
---overwrite            # Overwrite existing partition files
 --force                # Override analysis warnings
 --skip-analysis        # Skip analysis (performance-sensitive cases)
---verbose              # Detailed output
 ```
 
 ## Output Structures

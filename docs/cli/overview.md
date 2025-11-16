@@ -99,26 +99,9 @@ gpio partition h3 input.parquet output_dir/
 
 Many commands share these options:
 
-### Compression
+--8<-- "_includes/common-cli-options.md"
 
 ```bash
---compression [ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED]
---compression-level [1-22]  # Varies by format
-```
-
-### Row Group Sizing
-
-```bash
---row-group-size [exact row count]
---row-group-size-mb [target size: '256MB', '1GB', etc.]
-```
-
-### Workflow Control
-
-```bash
---dry-run      # Preview without executing
---verbose      # Detailed output
---preview      # Preview results (partition commands)
 --force        # Override warnings
 ```
 

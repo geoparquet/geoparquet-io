@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `gpio meta` command for deep inspection of Parquet and GeoParquet metadata ([#46](https://github.com/cholmes/geoparquet-io/pull/46))
-- Multi-level admin boundary partitioning with GAUL and Overture Maps datasets, using Vecorel extension with ISO 3166-1/2 codes ([#38](https://github.com/cholmes/geoparquet-io/pull/38))
-- Code quality checks with vulture and ruff to CI workflow ([#48](https://github.com/cholmes/geoparquet-io/pull/48), [#49](https://github.com/cholmes/geoparquet-io/pull/49), [#50](https://github.com/cholmes/geoparquet-io/pull/50))
+- Multi-level admin boundary partitioning with GAUL and Overture Maps datasets ([#38](https://github.com/cholmes/geoparquet-io/pull/38))
+- Code quality checks with vulture and xenon to CI workflow ([#48](https://github.com/cholmes/geoparquet-io/pull/48), [#49](https://github.com/cholmes/geoparquet-io/pull/49), [#50](https://github.com/cholmes/geoparquet-io/pull/50))
 
 ### Changed
 - GitHub Actions dependency updates ([#39](https://github.com/cholmes/geoparquet-io/pull/39), [#40](https://github.com/cholmes/geoparquet-io/pull/40), [#41](https://github.com/cholmes/geoparquet-io/pull/41), [#42](https://github.com/cholmes/geoparquet-io/pull/42))

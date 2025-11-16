@@ -7,6 +7,8 @@
 
 Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
+**📚 [Full Documentation](https://cholmes.github.io/geoparquet-io/)** | **[Quick Start Tutorial](https://cholmes.github.io/geoparquet-io/getting-started/quickstart/)**
+
 ## Features
 
 - **Fast**: Built on PyArrow and DuckDB for high-performance operations
@@ -19,25 +21,10 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 ## Installation
 
 ```bash
-# With uv (recommended)
-uv pip install geoparquet-io
-
-# Or with pip
 pip install geoparquet-io
-
-# From source
-git clone https://github.com/cholmes/geoparquet-io.git
-cd geoparquet-io
-uv sync --all-extras
 ```
 
-For full development set up see the [getting started](CONTRIBUTING.md#getting-started) instructions.
-
-### Requirements
-
-- Python 3.9 or higher
-- PyArrow 12.0.0+
-- DuckDB 1.1.3+
+See the [Installation Guide](https://cholmes.github.io/geoparquet-io/getting-started/installation/) for other options (uv, from source) and requirements.
 
 ## Quick Start
 
@@ -58,110 +45,18 @@ gpio sort hilbert input.parquet output_sorted.parquet
 gpio partition admin buildings.parquet output_dir/ --dataset gaul --levels continent,country
 ```
 
-## Documentation
-
-Full documentation is available at: **[https://cholmes.github.io/geoparquet-io/](https://cholmes.github.io/geoparquet-io/)**
-
-- **[Getting Started](https://cholmes.github.io/geoparquet-io/getting-started/installation/)** - Installation and quick start guide
-- **[User Guide](https://cholmes.github.io/geoparquet-io/guide/inspect/)** - Detailed documentation for all features
-- **[CLI Reference](https://cholmes.github.io/geoparquet-io/cli/overview/)** - Complete command reference
-- **[Python API](https://cholmes.github.io/geoparquet-io/api/overview/)** - Python API documentation
-- **[Examples](https://cholmes.github.io/geoparquet-io/examples/basic/)** - Real-world usage patterns
-
-## Usage Examples
-
-### Inspect and Validate
-
-```bash
-# Quick metadata inspection
-gpio inspect data.parquet
-
-# Preview first 10 rows
-gpio inspect data.parquet --head 10
-
-# Check against best practices
-gpio check all data.parquet
-```
-
-### Enhance with Spatial Indices
-
-```bash
-# Add bounding boxes
-gpio add bbox input.parquet output.parquet
-
-# Add H3 hexagonal cell IDs
-gpio add h3 input.parquet output.parquet --resolution 9
-
-# Add KD-tree partition IDs (auto-balanced)
-gpio add kdtree input.parquet output.parquet
-
-# Add country codes via spatial join (default dataset)
-gpio add admin-divisions buildings.parquet output.parquet
-
-# Add GAUL hierarchical admin divisions (continent, country, department)
-gpio add admin-divisions buildings.parquet output.parquet --dataset gaul
-```
-
-### Optimize and Partition
-
-```bash
-# Sort by Hilbert curve
-gpio sort hilbert input.parquet sorted.parquet
-
-# Partition by H3 cells
-gpio partition h3 large.parquet output_dir/ --resolution 7
-
-# Partition by admin boundaries with spatial extent filtering
-gpio partition admin buildings.parquet by_admin/ --dataset gaul --levels continent,country
-
-# Multi-level Hive-style partitioning (continent=Africa/country=Kenya/...)
-gpio partition admin buildings.parquet by_admin/ --dataset gaul --levels continent,country,department --hive
-```
-
-### Python API
-
-```python
-from geoparquet_io.core.add_bbox_column import add_bbox_column
-from geoparquet_io.core.hilbert_order import hilbert_order
-
-# Add bounding box
-add_bbox_column("input.parquet", "output.parquet", verbose=True)
-
-# Sort by Hilbert curve
-hilbert_order("input.parquet", "sorted.parquet", add_bbox=True)
-```
+For more examples and detailed usage, see the [Quick Start Tutorial](https://cholmes.github.io/geoparquet-io/getting-started/quickstart/) and [User Guide](https://cholmes.github.io/geoparquet-io/guide/inspect/).
 
 ## Contributing
 
-Contributions are welcome! See our [Contributing Guide](https://cholmes.github.io/geoparquet-io/contributing/) for details.
-
-## Development
-
-```bash
-# Clone repository
-git clone https://github.com/cholmes/geoparquet-io.git
-cd geoparquet-io
-
-# Install with all development dependencies
-uv sync --all-extras
-
-# Run tests
-uv run pytest
-
-# Run linting
-uv run ruff check .
-
-# Build docs locally
-uv run mkdocs serve
-```
-
-## License
-
-Apache 2.0 - See [LICENSE](LICENSE) for details.
+Contributions are welcome! See [CONTRIBUTING.md](docs/contributing.md) for development setup, coding standards, and how to submit changes.
 
 ## Links
 
 - **Documentation**: [https://cholmes.github.io/geoparquet-io/](https://cholmes.github.io/geoparquet-io/)
 - **PyPI**: [https://pypi.org/project/geoparquet-io/](https://pypi.org/project/geoparquet-io/) (coming soon)
 - **Issues**: [https://github.com/cholmes/geoparquet-io/issues](https://github.com/cholmes/geoparquet-io/issues)
-- **Source**: [https://github.com/cholmes/geoparquet-io](https://github.com/cholmes/geoparquet-io)
+
+## License
+
+Apache 2.0 - See [LICENSE](LICENSE) for details.
