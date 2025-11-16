@@ -14,7 +14,7 @@ See the [Installation Guide](installation.md) for more options.
 
 ### 1. Convert to GeoParquet (Optional)
 
-If you're starting with Shapefile, GeoJSON, or GeoPackage, convert to optimized GeoParquet:
+If you're starting with Shapefile, GeoJSON, GeoPackage, or CSV/TSV, convert to optimized GeoParquet:
 
 ```bash
 gpio convert input.shp output.parquet
@@ -119,7 +119,7 @@ gpio partition kdtree large_file.parquet output_dir/
 ### Convert and Validate
 
 ```bash
-# 1. Convert from Shapefile/GeoJSON/GeoPackage
+# 1. Convert from Shapefile/GeoJSON/GeoPackage/CSV
 gpio convert input.shp output.parquet
 
 # 2. Verify it meets best practices
