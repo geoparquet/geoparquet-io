@@ -12,9 +12,30 @@ See the [Installation Guide](installation.md) for more options.
 
 ## Basic Workflow
 
-### 1. Inspect Your File
+### 1. Convert to GeoParquet (Optional)
 
-First, take a look at what's in your GeoParquet file:
+If you're starting with Shapefile, GeoJSON, GeoPackage, or CSV/TSV, convert to optimized GeoParquet:
+
+```bash
+gpio convert input.shp output.parquet
+```
+
+This automatically applies all best practices:
+- ZSTD compression
+- 100k row groups
+- Bbox column with metadata
+- Hilbert spatial ordering
+- GeoParquet 1.1.0 metadata
+
+Skip Hilbert ordering for faster conversion of large files:
+
+```bash
+gpio convert large.gpkg output.parquet --skip-hilbert
+```
+
+### 2. Inspect Your File
+
+Take a look at what's in your GeoParquet file:
 
 ```bash
 gpio inspect myfile.parquet
@@ -29,7 +50,7 @@ This shows you:
 
 Add `--head 10` to preview the first 10 rows, or `--stats` for column statistics.
 
-### 2. Check Quality
+### 3. Check Quality
 
 Validate your file against GeoParquet best practices:
 
@@ -44,7 +65,9 @@ This checks:
 - Bbox metadata structure
 - Row group optimization
 
-### 3. Optimize Your File
+### 4. Optimize Existing Files
+
+If you already have GeoParquet files, enhance them with spatial indices.
 
 Add a bounding box column for faster spatial queries:
 
@@ -58,9 +81,9 @@ Sort data using a Hilbert curve for better spatial locality:
 gpio sort hilbert input.parquet sorted.parquet
 ```
 
-### 4. Add Spatial Indices
+### 5. Add Spatial Indices
 
-Enhance your data with spatial indexing:
+Enhance your data with additional spatial indexing:
 
 ```bash
 # Add H3 hexagonal cell IDs (resolution 9 ≈ 105m² cells)
@@ -73,7 +96,7 @@ gpio add kdtree input.parquet output_kdtree.parquet
 gpio add admin-divisions buildings.parquet buildings_with_countries.parquet
 ```
 
-### 5. Partition Large Datasets
+### 6. Partition Large Datasets
 
 Split large files into manageable partitions:
 
@@ -93,7 +116,22 @@ gpio partition kdtree large_file.parquet output_dir/
 
 ## Common Patterns
 
+### Convert and Validate
+
+```bash
+# 1. Convert from Shapefile/GeoJSON/GeoPackage/CSV
+gpio convert input.shp output.parquet
+
+# 2. Verify it meets best practices
+gpio check all output.parquet
+
+# 3. Inspect the results
+gpio inspect output.parquet
+```
+
 ### Quality Check → Optimize → Validate
+
+For existing GeoParquet files:
 
 ```bash
 # 1. Check current state

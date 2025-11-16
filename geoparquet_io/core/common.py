@@ -74,6 +74,63 @@ def find_primary_geometry_column(parquet_file, verbose=False):
     return "geometry"
 
 
+def _parse_existing_geo_metadata(original_metadata):
+    """Parse existing geo metadata from original parquet metadata."""
+    if not original_metadata or b"geo" not in original_metadata:
+        return None
+    try:
+        return json.loads(original_metadata[b"geo"].decode("utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _initialize_geo_metadata(geo_meta, geom_col):
+    """Initialize or upgrade geo metadata structure."""
+    if not geo_meta:
+        return {"version": "1.1.0", "primary_column": geom_col, "columns": {}}
+
+    # Upgrade to 1.1.0 if it's an older version
+    geo_meta["version"] = "1.1.0"
+    if "columns" not in geo_meta:
+        geo_meta["columns"] = {}
+    if geom_col not in geo_meta["columns"]:
+        geo_meta["columns"][geom_col] = {}
+
+    return geo_meta
+
+
+def _add_bbox_covering(geo_meta, geom_col, bbox_info, verbose):
+    """Add bbox covering metadata to geometry column."""
+    if not bbox_info or not bbox_info.get("has_bbox_column"):
+        return
+
+    if "covering" not in geo_meta["columns"][geom_col]:
+        geo_meta["columns"][geom_col]["covering"] = {}
+
+    geo_meta["columns"][geom_col]["covering"]["bbox"] = {
+        "xmin": [bbox_info["bbox_column_name"], "xmin"],
+        "ymin": [bbox_info["bbox_column_name"], "ymin"],
+        "xmax": [bbox_info["bbox_column_name"], "xmax"],
+        "ymax": [bbox_info["bbox_column_name"], "ymax"],
+    }
+    if verbose:
+        click.echo(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
+
+
+def _add_custom_covering(geo_meta, geom_col, custom_metadata, verbose):
+    """Add custom covering metadata (e.g., H3, S2)."""
+    if not custom_metadata or "covering" not in custom_metadata:
+        return
+
+    if "covering" not in geo_meta["columns"][geom_col]:
+        geo_meta["columns"][geom_col]["covering"] = {}
+
+    geo_meta["columns"][geom_col]["covering"].update(custom_metadata["covering"])
+    if verbose:
+        for key in custom_metadata["covering"]:
+            click.echo(f"Added {key} covering metadata")
+
+
 def create_geo_metadata(
     original_metadata, geom_col, bbox_info, custom_metadata=None, verbose=False
 ):
@@ -90,55 +147,21 @@ def create_geo_metadata(
     Returns:
         dict: Updated geo metadata
     """
-    # Process existing geo metadata if present
-    geo_meta = None
-    if original_metadata and b"geo" in original_metadata:
-        try:
-            geo_meta = json.loads(original_metadata[b"geo"].decode("utf-8"))
-        except json.JSONDecodeError:
-            geo_meta = None
+    geo_meta = _parse_existing_geo_metadata(original_metadata)
+    geo_meta = _initialize_geo_metadata(geo_meta, geom_col)
 
-    # Create or update geo metadata - always use 1.1.0 for proper covering support
-    if not geo_meta:
-        geo_meta = {"version": "1.1.0", "primary_column": geom_col, "columns": {}}
-    else:
-        # Upgrade to 1.1.0 if it's an older version
-        geo_meta["version"] = "1.1.0"
+    # Add encoding if not present (required by GeoParquet spec)
+    if "encoding" not in geo_meta["columns"][geom_col]:
+        geo_meta["columns"][geom_col]["encoding"] = "WKB"
 
-    # Ensure proper structure
-    if "columns" not in geo_meta:
-        geo_meta["columns"] = {}
-    if geom_col not in geo_meta["columns"]:
-        geo_meta["columns"][geom_col] = {}
+    # Add bbox covering if needed
+    _add_bbox_covering(geo_meta, geom_col, bbox_info, verbose)
 
-    # Initialize covering dict if bbox or custom metadata exists
-    if (bbox_info and bbox_info.get("has_bbox_column")) or (
-        custom_metadata and "covering" in custom_metadata
-    ):
-        if "covering" not in geo_meta["columns"][geom_col]:
-            geo_meta["columns"][geom_col]["covering"] = {}
+    # Add custom covering if needed
+    _add_custom_covering(geo_meta, geom_col, custom_metadata, verbose)
 
-    # Add bbox covering if bbox column exists
-    if bbox_info and bbox_info.get("has_bbox_column"):
-        geo_meta["columns"][geom_col]["covering"]["bbox"] = {
-            "xmin": [bbox_info["bbox_column_name"], "xmin"],
-            "ymin": [bbox_info["bbox_column_name"], "ymin"],
-            "xmax": [bbox_info["bbox_column_name"], "xmax"],
-            "ymax": [bbox_info["bbox_column_name"], "ymax"],
-        }
-        if verbose:
-            click.echo(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
-
-    # Add custom metadata (e.g., H3, S2)
+    # Add any top-level custom metadata
     if custom_metadata:
-        if "covering" in custom_metadata:
-            # Merge covering information
-            geo_meta["columns"][geom_col]["covering"].update(custom_metadata["covering"])
-            if verbose:
-                for key in custom_metadata["covering"]:
-                    click.echo(f"Added {key} covering metadata")
-
-        # Add any top-level custom metadata
         for key, value in custom_metadata.items():
             if key != "covering":
                 geo_meta[key] = value
@@ -380,8 +403,10 @@ def rewrite_with_metadata(
     geom_col = find_primary_geometry_column(output_file, verbose=False)
     bbox_info = check_bbox_structure(output_file, verbose=False)
 
-    # Create geo metadata
-    geo_meta = create_geo_metadata(original_metadata, geom_col, bbox_info, custom_metadata, verbose)
+    # Create geo metadata - use existing metadata if no original provided
+    # This preserves DuckDB-generated metadata (encoding, geometry_types, etc.)
+    metadata_source = original_metadata if original_metadata else existing_metadata
+    geo_meta = create_geo_metadata(metadata_source, geom_col, bbox_info, custom_metadata, verbose)
     new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
     # Update table schema with new metadata
