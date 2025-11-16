@@ -25,6 +25,7 @@ def partition_by_h3(
     keep_h3_column: bool = None,
     force: bool = False,
     skip_analysis: bool = False,
+    filename_prefix: str = None,
 ):
     """
     Partition a GeoParquet file by H3 cells at specified resolution.
@@ -158,6 +159,7 @@ def partition_by_h3(
             keep_partition_column=keep_h3_column,
             force=force,
             skip_analysis=skip_analysis,
+            filename_prefix=filename_prefix,
         )
 
         if verbose:

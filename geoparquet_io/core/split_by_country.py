@@ -110,6 +110,7 @@ def split_by_country(
     preview_limit=15,
     force=False,
     skip_analysis=False,
+    filename_prefix=None,
 ):
     """
     Split a GeoParquet file into separate files by country code.
@@ -185,6 +186,7 @@ def split_by_country(
         verbose=verbose,
         force=force,
         skip_analysis=skip_analysis,
+        filename_prefix=filename_prefix,
     )
 
     click.echo(f"Successfully split file into {num_partitions} country file(s)")

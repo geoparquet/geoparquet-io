@@ -495,6 +495,7 @@ def partition_by_column(
     keep_partition_column: bool = True,
     force: bool = False,
     skip_analysis: bool = False,
+    filename_prefix: Optional[str] = None,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.
@@ -510,6 +511,7 @@ def partition_by_column(
         keep_partition_column: Whether to keep the partition column in output files (default: True)
         force: Force partitioning even if analysis detects issues
         skip_analysis: Skip partition strategy analysis (for performance)
+        filename_prefix: Optional prefix for partition filenames (e.g., 'fields' → fields_USA.parquet)
 
     Returns:
         Number of partitions created
@@ -589,6 +591,13 @@ def partition_by_column(
         safe_value = sanitize_filename(str(partition_value))
 
         # Determine output path
+        # Build filename with optional prefix
+        filename = (
+            f"{filename_prefix}_{safe_value}.parquet"
+            if filename_prefix
+            else f"{safe_value}.parquet"
+        )
+
         if hive:
             # Hive-style: folder named "column=value"
             if column_prefix_length is not None:
@@ -598,10 +607,10 @@ def partition_by_column(
                 folder_name = f"{column_name}={safe_value}"
             write_folder = os.path.join(output_folder, folder_name)
             os.makedirs(write_folder, exist_ok=True)
-            output_filename = os.path.join(write_folder, f"{safe_value}.parquet")
+            output_filename = os.path.join(write_folder, filename)
         else:
             write_folder = output_folder
-            output_filename = os.path.join(write_folder, f"{safe_value}.parquet")
+            output_filename = os.path.join(write_folder, filename)
 
         # Skip if file exists and not overwriting
         if os.path.exists(output_filename) and not overwrite:

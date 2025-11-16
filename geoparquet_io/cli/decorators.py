@@ -102,6 +102,19 @@ def bbox_option(func):
     )(func)
 
 
+def prefix_option(func):
+    """
+    Add --prefix option to a partitioning command.
+
+    Allows users to add a custom prefix to partition filenames.
+    Example: --prefix fields → fields_USA.parquet
+    """
+    return click.option(
+        "--prefix",
+        help="Custom prefix for partition filenames (e.g., 'fields' → fields_USA.parquet)",
+    )(func)
+
+
 def partition_options(func):
     """
     Add standard partitioning options to a command.
@@ -113,6 +126,7 @@ def partition_options(func):
     - --skip-analysis: Skip partition strategy analysis
     - --hive: Use Hive-style partitioning
     - --overwrite: Overwrite existing partition files
+    - --prefix: Custom filename prefix
     """
     func = click.option(
         "--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure"
@@ -141,4 +155,5 @@ def partition_options(func):
         is_flag=True,
         help="Skip partition strategy analysis (for performance-sensitive cases)",
     )(func)
+    func = prefix_option(func)
     return func

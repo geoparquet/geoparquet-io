@@ -39,6 +39,7 @@ def partition_by_admin_hierarchical(
     verbose: bool = False,
     force: bool = False,
     skip_analysis: bool = False,
+    filename_prefix: Optional[str] = None,
 ) -> int:
     """
     Partition a GeoParquet file by administrative boundaries.
@@ -329,7 +330,12 @@ def partition_by_admin_hierarchical(
         os.makedirs(partition_folder, exist_ok=True)
 
         # Generate output filename
-        filename = f"{sanitize_filename(str(combination[-1]))}.parquet"
+        safe_last_value = sanitize_filename(str(combination[-1]))
+        filename = (
+            f"{filename_prefix}_{safe_last_value}.parquet"
+            if filename_prefix
+            else f"{safe_last_value}.parquet"
+        )
         output_file = os.path.join(partition_folder, filename)
 
         # Skip if exists and not overwriting

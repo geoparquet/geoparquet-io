@@ -953,6 +953,7 @@ def partition_admin(
     preview_limit,
     force,
     skip_analysis,
+    prefix,
     verbose,
 ):
     """Partition by administrative boundaries via spatial join with remote datasets.
@@ -1011,6 +1012,7 @@ def partition_admin(
         verbose=verbose,
         force=force,
         skip_analysis=skip_analysis,
+        filename_prefix=prefix,
     )
 
 
@@ -1032,6 +1034,7 @@ def partition_string(
     preview_limit,
     force,
     skip_analysis,
+    prefix,
     verbose,
 ):
     """Partition a GeoParquet file by string column values.
@@ -1071,6 +1074,7 @@ def partition_string(
         verbose,
         force,
         skip_analysis,
+        prefix,
     )
 
 
@@ -1107,6 +1111,7 @@ def partition_h3(
     preview_limit,
     force,
     skip_analysis,
+    prefix,
     verbose,
 ):
     """Partition a GeoParquet file by H3 cells at specified resolution.
@@ -1157,6 +1162,7 @@ def partition_h3(
         keep_h3_col,
         force,
         skip_analysis,
+        prefix,
     )
 
 
@@ -1213,6 +1219,7 @@ def partition_kdtree(
     preview_limit,
     force,
     skip_analysis,
+    prefix,
     verbose,
 ):
     """Partition a GeoParquet file by KD-tree cells.
@@ -1298,6 +1305,7 @@ def partition_kdtree(
         skip_analysis,
         sample_size,
         auto_target,
+        prefix,
     )
 
 
