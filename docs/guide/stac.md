@@ -27,14 +27,16 @@ Creates `roads.json` with:
 Generate Collection + Items for partitioned datasets:
 
 ```bash
-gpio stac partitioned/ stac-output/ \
+gpio stac partitioned/ . \
   --bucket s3://source.coop/my-org/roads/
 ```
 
 Creates:
 
-- `stac-output/collection.json` - Overall dataset metadata
-- `stac-output/usa.json`, `can.json`, etc. - Per-partition Items
+- `collection.json` - Overall dataset metadata in output directory
+- `partitioned/usa.json`, `can.json`, etc. - Per-partition Items **co-located with data**
+
+**STAC Best Practice:** Items are written alongside their parquet files, not in a separate directory. This follows the STAC principle of co-locating metadata with data for better organization and discoverability.
 
 ## Public URL Mapping
 
@@ -58,11 +60,9 @@ STAC automatically detects PMTiles overview files for map visualization.
 - 0 files → warning, continue without overview
 - >1 files → error, clean up duplicates
 
-**Create PMTiles overview** (external tool):
+**Create PMTiles overview:**
 
-```bash
-tippecanoe -o partitioned/overview.pmtiles roads.parquet
-```
+Use [tippecanoe](https://github.com/felt/tippecanoe) to create PMTiles from your vector data.
 
 **Standard naming:** Use `overview.pmtiles` for consistency.
 
@@ -105,20 +105,32 @@ gpio convert roads.geojson roads.parquet
 gpio partition admin roads.parquet partitioned/ \
   --dataset gaul --levels country
 
-# 3. Create PMTiles overview (optional)
-tippecanoe -o partitioned/overview.pmtiles roads.parquet
+# 3. Create PMTiles overview (optional, see https://github.com/felt/tippecanoe)
 
 # 4. Generate STAC collection
-gpio stac partitioned/ stac-catalog/ \
+# Items written next to parquet files, collection.json in partitioned/
+gpio stac partitioned/ partitioned/ \
   --bucket s3://my-bucket/roads/ \
   --public-url https://data.example.com/roads/
 
 # 5. Validate
-gpio check stac stac-catalog/collection.json
+gpio check stac partitioned/collection.json
 
 # 6. Upload to S3 (external)
+# Single sync uploads both data and metadata together
 aws s3 sync partitioned/ s3://my-bucket/roads/
-aws s3 sync stac-catalog/ s3://my-bucket/roads/
+```
+
+**Directory structure after step 4:**
+```
+partitioned/
+├── collection.json          # Collection metadata
+├── overview.pmtiles         # Optional overview
+├── usa.parquet
+├── usa.json                 # STAC Item for USA
+├── can.parquet
+├── can.json                 # STAC Item for Canada
+└── ...
 ```
 
 ## Options
@@ -155,11 +167,14 @@ STAC Items automatically include:
 - **Geometry types** - From GeoParquet metadata
 - **Datetime** - From file modification time
 - **Assets** - GeoParquet file and PMTiles overview (if present)
+- **Links** - Self link, and collection link (for items in collections)
 
 ## Best Practices
 
-1. **Use consistent naming** - `overview.pmtiles` for PMTiles files
-2. **Validate before publishing** - Run `gpio check stac` before upload
-3. **Include PMTiles** - Enables interactive map visualization
-4. **Use public URLs** - Map S3 URIs to HTTPS with `--public-url` for web access
-5. **Custom IDs** - Use meaningful IDs for better discoverability
+1. **Co-locate metadata with data** - Items are automatically written alongside parquet files
+2. **Use consistent naming** - `overview.pmtiles` for PMTiles files
+3. **Validate before publishing** - Run `gpio check stac` before upload
+4. **Include PMTiles** - Enables interactive map visualization
+5. **Use public URLs** - Map S3 URIs to HTTPS with `--public-url` for web access
+6. **Custom IDs** - Use meaningful IDs for better discoverability
+7. **Single directory uploads** - With co-located metadata, upload data and STAC files together

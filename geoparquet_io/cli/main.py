@@ -1324,27 +1324,60 @@ def _handle_stac_collection(
     if verbose:
         click.echo(f"Generating STAC Collection for {input_path}")
 
-    output_path = Path(output)
-    collection_file = output_path / "collection.json"
+    # For collections, output can be:
+    # 1. A directory path (write collection.json there, items alongside parquet files)
+    # 2. None/same as input (write in-place alongside data)
+    input_path_obj = Path(input_path)
+
+    # Determine where to write collection.json
+    if output:
+        output_path = Path(output)
+        collection_file = output_path / "collection.json"
+    else:
+        # Write in-place
+        output_path = input_path_obj
+        collection_file = output_path / "collection.json"
+
     _check_output_stac_collection(output_path, collection_file, overwrite)
 
     collection_dict, item_dicts = generate_stac_collection(
         str(input_path), bucket, public_url, collection_id, verbose
     )
 
-    # Create output directory
+    # Create output directory if needed
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Write collection
     write_stac_json(collection_dict, str(collection_file), verbose)
 
-    # Write items
+    # Write items alongside their parquet files in the input directory
+    # This follows STAC best practice of co-locating metadata with data
     for item_dict in item_dicts:
-        item_file = output_path / f"{item_dict['id']}.json"
+        item_id = item_dict["id"]
+        # Find the parquet file in input directory
+        parquet_file = input_path_obj / f"{item_id}.parquet"
+        if not parquet_file.exists():
+            # Check for hive-style partitions
+            hive_partitions = list(input_path_obj.glob(f"*/{item_id}.parquet"))
+            if hive_partitions:
+                parquet_file = hive_partitions[0]
+
+        # Write item JSON next to parquet file
+        item_file = parquet_file.parent / f"{item_id}.json"
+
+        # Check if we need to overwrite
+        if item_file.exists() and not overwrite:
+            from geoparquet_io.core.stac import detect_stac
+
+            if detect_stac(str(item_file)):
+                raise click.ClickException(
+                    f"STAC Item already exists: {item_file}\nUse --overwrite to replace it."
+                )
+
         write_stac_json(item_dict, str(item_file), verbose)
 
     click.echo(f"✓ Created STAC Collection: {collection_file}")
-    click.echo(f"✓ Created {len(item_dicts)} STAC Items in {output}")
+    click.echo(f"✓ Created {len(item_dicts)} STAC Items alongside data files in {input_path}")
 
 
 @cli.command()
@@ -1373,7 +1406,10 @@ def stac(input, output, bucket, public_url, collection_id, item_id, overwrite, v
 
     Single file → STAC Item JSON
 
-    Partitioned directory → STAC Collection + Items
+    Partitioned directory → STAC Collection + Items (co-located with data)
+
+    For partitioned datasets, Items are written alongside their parquet files
+    following STAC best practices. collection.json is written to OUTPUT.
 
     Automatically detects PMTiles overview files and includes them as assets.
 
@@ -1384,8 +1420,8 @@ def stac(input, output, bucket, public_url, collection_id, item_id, overwrite, v
       gpio stac input.parquet output.json --bucket s3://my-bucket/roads/
 
       \b
-      # Partitioned dataset
-      gpio stac partitions/ stac-output/ --bucket s3://my-bucket/roads/
+      # Partitioned dataset - Items written next to parquet files
+      gpio stac partitions/ . --bucket s3://my-bucket/roads/
 
       \b
       # With public URL mapping

@@ -657,3 +657,71 @@ def test_stac_cli_mixed_dir_allowed(places_test_file, temp_output_dir):
     )
     assert result.exit_code == 0
     assert "Created STAC Collection" in result.output
+
+
+def test_stac_collection_items_colocated(places_test_file, temp_output_dir):
+    """Test STAC Collection generates Items alongside parquet files."""
+    import shutil
+
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    # Create partitioned directory
+    partition_dir = Path(temp_output_dir) / "partitions"
+    partition_dir.mkdir()
+    shutil.copy(places_test_file, partition_dir / "usa.parquet")
+    shutil.copy(places_test_file, partition_dir / "can.parquet")
+
+    # Generate STAC collection
+    output_dir = Path(temp_output_dir) / "output"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "stac",
+            str(partition_dir),
+            str(output_dir),
+            "--bucket",
+            "s3://bucket/partitions/",
+        ],
+    )
+    assert result.exit_code == 0
+
+    # Check collection.json in output directory
+    assert (output_dir / "collection.json").exists()
+
+    # Check items are next to parquet files in input directory
+    assert (partition_dir / "usa.json").exists()
+    assert (partition_dir / "can.json").exists()
+
+    # Verify item has collection link
+    with open(partition_dir / "usa.json") as f:
+        usa_item = json.load(f)
+    links = usa_item["links"]
+    collection_links = [link for link in links if link["rel"] == "collection"]
+    assert len(collection_links) == 1
+    assert "collection.json" in collection_links[0]["href"]
+
+
+def test_stac_item_has_collection_link(places_test_file, temp_output_dir):
+    """Test that STAC Items in collections have proper collection links."""
+    import shutil
+
+    # Create partitioned directory
+    partition_dir = Path(temp_output_dir) / "partitions"
+    partition_dir.mkdir()
+    shutil.copy(places_test_file, partition_dir / "usa.parquet")
+
+    # Generate collection
+    collection_dict, item_dicts = generate_stac_collection(
+        str(partition_dir), bucket_prefix="s3://test-bucket/partitions/", verbose=False
+    )
+
+    # Check item has collection link
+    assert len(item_dicts) == 1
+    usa_item = item_dicts[0]
+    links = usa_item["links"]
+    collection_links = [link for link in links if link["rel"] == "collection"]
+    assert len(collection_links) == 1
+    assert collection_links[0]["href"] == "s3://test-bucket/partitions/collection.json"

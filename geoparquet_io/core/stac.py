@@ -263,8 +263,8 @@ def _add_pmtiles_asset(
     elif show_warning:
         click.echo(
             click.style(
-                "⚠️  No PMTiles overview found. Consider creating one for map visualization:\n"
-                "   tippecanoe -o overview.pmtiles input.parquet",
+                "⚠️  No PMTiles overview found. Consider creating one for map visualization.\n"
+                "   See: https://github.com/felt/tippecanoe",
                 fg="yellow",
             )
         )
@@ -278,6 +278,17 @@ def _add_self_link(
         pystac.Link(
             rel=pystac.RelType.SELF,
             target=construct_asset_href(f"{item_id}.json", bucket_prefix, public_url),
+            media_type=pystac.MediaType.JSON,
+        )
+    )
+
+
+def _add_collection_link(item: pystac.Item, bucket_prefix: str, public_url: Optional[str]) -> None:
+    """Add collection/parent link to STAC Item."""
+    item.add_link(
+        pystac.Link(
+            rel=pystac.RelType.COLLECTION,
+            target=construct_asset_href("collection.json", bucket_prefix, public_url),
             media_type=pystac.MediaType.JSON,
         )
     )
@@ -334,8 +345,8 @@ def generate_stac_item(
     if not pmtiles_path:
         click.echo(
             click.style(
-                "⚠️  No PMTiles overview found. Consider creating one for map visualization:\n"
-                "   tippecanoe -o overview.pmtiles input.parquet",
+                "⚠️  No PMTiles overview found. Consider creating one for map visualization.\n"
+                "   See: https://github.com/felt/tippecanoe",
                 fg="yellow",
             )
         )
@@ -395,11 +406,22 @@ def _generate_stac_item_no_warning(
     bucket_prefix: str,
     public_url: Optional[str] = None,
     item_id: Optional[str] = None,
+    add_collection_link: bool = False,
 ) -> dict:
     """
     Generate STAC Item without PMTiles warning (used for collection items).
 
     Internal function to avoid duplicate warnings when generating collections.
+
+    Args:
+        parquet_file: Path to parquet file
+        bucket_prefix: S3 bucket prefix
+        public_url: Optional public URL mapping
+        item_id: Optional custom item ID
+        add_collection_link: Whether to add collection/parent link
+
+    Returns:
+        STAC Item as dict
     """
     # Get metadata
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
@@ -442,6 +464,10 @@ def _generate_stac_item_no_warning(
     )
     _add_self_link(item, final_item_id, bucket_prefix, public_url)
 
+    # Add collection link if part of collection
+    if add_collection_link:
+        _add_collection_link(item, bucket_prefix, public_url)
+
     return item.to_dict()
 
 
@@ -473,8 +499,8 @@ def generate_stac_collection(
     if not pmtiles_path:
         click.echo(
             click.style(
-                "⚠️  No PMTiles overview found. Consider creating one for map visualization:\n"
-                "   tippecanoe -o overview.pmtiles <partition_files>",
+                "⚠️  No PMTiles overview found. Consider creating one for map visualization.\n"
+                "   See: https://github.com/felt/tippecanoe",
                 fg="yellow",
             )
         )
@@ -548,11 +574,13 @@ def _generate_collection_items(
     for parquet_file in all_files:
         partition_key = parquet_file.stem
         # Generate item without PMTiles warning (will show once for collection)
+        # Add collection link since these are part of a collection
         item_dict = _generate_stac_item_no_warning(
             str(parquet_file),
             bucket_prefix,
             public_url,
             item_id=partition_key,
+            add_collection_link=True,
         )
         items.append(item_dict)
 
