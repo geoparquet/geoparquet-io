@@ -57,6 +57,19 @@ gpio check row-group myfile.parquet
 
 Checks row group size optimization for cloud-native access.
 
+### STAC Validation
+
+```bash
+gpio check stac output.json
+```
+
+Validates STAC Item or Collection JSON:
+
+- STAC spec compliance
+- Required fields
+- Asset href resolution (local files)
+- Best practices
+
 ## Options
 
 ```bash
@@ -72,3 +85,4 @@ gpio check spatial myfile.parquet --random-sample-size 200 --limit-rows 1000000
 - [CLI Reference: check](../cli/check.md)
 - [format command](format.md)
 - [sort command](sort.md)
+- [stac command](stac.md) - Generate STAC metadata
