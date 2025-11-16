@@ -4,6 +4,7 @@ import json
 import os
 
 import click
+import pystac
 import pytest
 
 from geoparquet_io.core.stac_check import check_stac, validate_stac_file
@@ -12,25 +13,27 @@ from geoparquet_io.core.stac_check import check_stac, validate_stac_file
 @pytest.fixture
 def valid_stac_item(temp_output_dir):
     """Create a valid STAC Item JSON file for testing."""
-    item_dict = {
-        "type": "Feature",
-        "stac_version": "1.1.0",
-        "id": "test-item",
-        "geometry": {
+    from datetime import datetime, timezone
+
+    # Use pystac to create item with correct version for installed pystac
+    item = pystac.Item(
+        id="test-item",
+        geometry={
             "type": "Polygon",
             "coordinates": [[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]],
         },
-        "bbox": [-180, -90, 180, 90],
-        "properties": {"datetime": "2024-11-08T00:00:00Z"},
-        "links": [{"rel": "self", "href": "./test-item.json", "type": "application/json"}],
-        "assets": {
-            "data": {
-                "href": "s3://bucket/test.parquet",
-                "type": "application/vnd.apache.parquet",
-                "roles": ["data"],
-            }
-        },
-    }
+        bbox=[-180, -90, 180, 90],
+        datetime=datetime(2024, 11, 8, 0, 0, 0, tzinfo=timezone.utc),
+        properties={},
+    )
+    item.add_link(pystac.Link("self", "./test-item.json", "application/json"))
+    item.add_asset(
+        "data",
+        pystac.Asset(
+            "s3://bucket/test.parquet", media_type="application/vnd.apache.parquet", roles=["data"]
+        ),
+    )
+    item_dict = item.to_dict()
 
     output_path = os.path.join(temp_output_dir, "valid_item.json")
     with open(output_path, "w") as f:
@@ -42,21 +45,19 @@ def valid_stac_item(temp_output_dir):
 @pytest.fixture
 def valid_stac_collection(temp_output_dir):
     """Create a valid STAC Collection JSON file for testing."""
-    collection_dict = {
-        "type": "Collection",
-        "stac_version": "1.1.0",
-        "id": "test-collection",
-        "description": "Test collection",
-        "license": "proprietary",
-        "extent": {
-            "spatial": {"bbox": [[-180, -90, 180, 90]]},
-            "temporal": {"interval": [[None, None]]},
-        },
-        "links": [
-            {"rel": "self", "href": "./collection.json", "type": "application/json"},
-            {"rel": "item", "href": "./item1.json", "type": "application/json"},
-        ],
-    }
+    # Use pystac to create collection with correct version for installed pystac
+    collection = pystac.Collection(
+        id="test-collection",
+        description="Test collection",
+        extent=pystac.Extent(
+            spatial=pystac.SpatialExtent([[-180, -90, 180, 90]]),
+            temporal=pystac.TemporalExtent([[None, None]]),
+        ),
+        license="proprietary",
+    )
+    collection.add_link(pystac.Link("self", "./collection.json", "application/json"))
+    collection.add_link(pystac.Link("item", "./item1.json", "application/json"))
+    collection_dict = collection.to_dict()
 
     output_path = os.path.join(temp_output_dir, "valid_collection.json")
     with open(output_path, "w") as f:
@@ -79,8 +80,9 @@ def test_validate_valid_item(valid_stac_item):
     """Test validation of a valid STAC Item."""
     results = validate_stac_file(valid_stac_item, verbose=False)
 
-    # Validation may have warnings if jsonschema not available, but should still be valid
-    assert results["valid"] is True or len(results["warnings"]) > 0
+    # Should be valid (no errors)
+    assert len(results["errors"]) == 0, f"Unexpected errors: {results['errors']}"
+    assert results["valid"] is True, f"Valid should be True. Results: {results}"
     assert results["info"]["stac_type"] == "Feature"
     assert results["info"]["stac_version"] in ["1.0.0", "1.1.0"]
 
@@ -89,8 +91,9 @@ def test_validate_valid_collection(valid_stac_collection):
     """Test validation of a valid STAC Collection."""
     results = validate_stac_file(valid_stac_collection, verbose=False)
 
-    # Validation may have warnings if jsonschema not available, but should still be valid
-    assert results["valid"] is True or len(results["warnings"]) > 0
+    # Should be valid (no errors)
+    assert len(results["errors"]) == 0, f"Unexpected errors: {results['errors']}"
+    assert results["valid"] is True, f"Valid should be True. Results: {results}"
     assert results["info"]["stac_type"] == "Collection"
     assert results["info"]["stac_version"] in ["1.0.0", "1.1.0"]
 
