@@ -22,12 +22,22 @@ def _assert_stac_item_structure(item_dict: dict) -> None:
     """Assert basic STAC Item structure."""
     assert item_dict["type"] == "Feature"
     assert "stac_version" in item_dict
-    assert item_dict["stac_version"] in ["1.0.0", "1.1.0"]  # pystac version-dependent
+    assert item_dict["stac_version"] in ["1.0.0", "1.1.0"]
     assert "id" in item_dict
+    _assert_item_geometry(item_dict)
+    _assert_item_properties(item_dict)
+
+
+def _assert_item_geometry(item_dict: dict) -> None:
+    """Assert STAC Item geometry structure."""
     assert "bbox" in item_dict
     assert len(item_dict["bbox"]) == 4
     assert "geometry" in item_dict
     assert item_dict["geometry"]["type"] == "Polygon"
+
+
+def _assert_item_properties(item_dict: dict) -> None:
+    """Assert STAC Item properties."""
     assert "properties" in item_dict
     assert "datetime" in item_dict["properties"]
 
@@ -52,9 +62,14 @@ def _assert_stac_collection_structure(collection_dict: dict) -> None:
     """Assert basic STAC Collection structure."""
     assert collection_dict["type"] == "Collection"
     assert "stac_version" in collection_dict
-    assert collection_dict["stac_version"] in ["1.0.0", "1.1.0"]  # pystac version-dependent
+    assert collection_dict["stac_version"] in ["1.0.0", "1.1.0"]
     assert "id" in collection_dict
     assert "description" in collection_dict
+    _assert_collection_extent(collection_dict)
+
+
+def _assert_collection_extent(collection_dict: dict) -> None:
+    """Assert STAC Collection extent structure."""
     assert "extent" in collection_dict
     assert "spatial" in collection_dict["extent"]
     assert "temporal" in collection_dict["extent"]
