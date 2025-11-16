@@ -362,3 +362,83 @@ class TestPartitionCommands:
         assert "h3_cell" in column_names, (
             "H3 column should be kept by default for Hive partitioning"
         )
+
+    # Prefix tests
+    def test_partition_string_with_prefix(self, places_test_file, temp_output_dir):
+        """Test partition string command with custom filename prefix."""
+        runner = CliRunner()
+        result = runner.invoke(
+            partition,
+            [
+                "string",
+                places_test_file,
+                temp_output_dir,
+                "--column",
+                "fsq_place_id",
+                "--chars",
+                "1",
+                "--prefix",
+                "places",
+            ],
+        )
+        assert result.exit_code == 0
+        # Should have created partition files with prefix
+        output_files = os.listdir(temp_output_dir)
+        assert len(output_files) > 0
+        # All files should start with "places_" and end with ".parquet"
+        assert all(f.startswith("places_") and f.endswith(".parquet") for f in output_files)
+
+    def test_partition_h3_with_prefix(self, buildings_test_file, temp_output_dir):
+        """Test partition h3 command with custom filename prefix."""
+        runner = CliRunner()
+        result = runner.invoke(
+            partition,
+            [
+                "h3",
+                buildings_test_file,
+                temp_output_dir,
+                "--resolution",
+                "9",
+                "--prefix",
+                "buildings",
+                "--skip-analysis",
+            ],
+        )
+        assert result.exit_code == 0
+        # Should have created partition files with prefix
+        output_files = os.listdir(temp_output_dir)
+        assert len(output_files) > 0
+        # All files should start with "buildings_" and end with ".parquet"
+        assert all(f.startswith("buildings_") and f.endswith(".parquet") for f in output_files)
+        # Pattern should be: buildings_<h3_cell>.parquet
+        for f in output_files:
+            # Remove prefix and .parquet extension to get H3 cell
+            h3_cell = f.replace("buildings_", "").replace(".parquet", "")
+            assert len(h3_cell) == 9, f"Expected 9-char H3 cell, got {h3_cell}"
+
+    def test_partition_string_with_prefix_and_hive(self, places_test_file, temp_output_dir):
+        """Test partition string with prefix and Hive-style partitioning."""
+        runner = CliRunner()
+        result = runner.invoke(
+            partition,
+            [
+                "string",
+                places_test_file,
+                temp_output_dir,
+                "--column",
+                "fsq_place_id",
+                "--chars",
+                "1",
+                "--prefix",
+                "places",
+                "--hive",
+            ],
+        )
+        assert result.exit_code == 0
+
+        # Find Hive partition directory and check files have prefix
+        items = os.listdir(temp_output_dir)
+        hive_dirs = [d for d in items if os.path.isdir(os.path.join(temp_output_dir, d))]
+        sample_dir = os.path.join(temp_output_dir, hive_dirs[0])
+        parquet_files = [f for f in os.listdir(sample_dir) if f.endswith(".parquet")]
+        assert all(f.startswith("places_") for f in parquet_files)

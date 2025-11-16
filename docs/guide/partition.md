@@ -131,6 +131,7 @@ All partition commands support:
 --preview-limit 15     # Number of partitions to show (default: 15)
 --force                # Override analysis warnings
 --skip-analysis        # Skip analysis (performance-sensitive cases)
+--prefix PREFIX        # Custom filename prefix (e.g., 'fields' → fields_USA.parquet)
 ```
 
 ## Output Structures
@@ -154,6 +155,18 @@ output/
 │   └── data.parquet
 └── column=value3/
     └── data.parquet
+```
+
+### Custom Filename Prefix
+
+Add `--prefix NAME` to prepend a custom prefix to partition filenames:
+
+```bash
+# Standard: fields_USA.parquet, fields_Kenya.parquet
+gpio partition admin input.parquet output/ --dataset gaul --levels country --prefix fields
+
+# Hive: country=USA/fields_USA.parquet, country=Kenya/fields_Kenya.parquet
+gpio partition admin input.parquet output/ --dataset gaul --levels country --prefix fields --hive
 ```
 
 ## Partition Analysis
