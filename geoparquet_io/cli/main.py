@@ -154,9 +154,49 @@ def check_row_group_cmd(parquet_file, verbose):
     is_flag=True,
     help="Skip Hilbert spatial ordering (faster but less optimal for spatial queries)",
 )
+@click.option(
+    "--wkt-column",
+    help="CSV/TSV: Column name containing WKT geometry (auto-detected if not specified)",
+)
+@click.option(
+    "--lat-column",
+    help="CSV/TSV: Column name containing latitude values (requires --lon-column)",
+)
+@click.option(
+    "--lon-column",
+    help="CSV/TSV: Column name containing longitude values (requires --lat-column)",
+)
+@click.option(
+    "--delimiter",
+    help="CSV/TSV: Delimiter character (auto-detected if not specified). Common: ',' (comma), '\\t' (tab), ';' (semicolon), '|' (pipe)",
+)
+@click.option(
+    "--crs",
+    default="EPSG:4326",
+    show_default=True,
+    help="CSV/TSV: CRS for geometry data (WGS84 assumed for lat/lon)",
+)
+@click.option(
+    "--skip-invalid",
+    is_flag=True,
+    help="CSV/TSV: Skip rows with invalid geometries instead of failing",
+)
 @verbose_option
 @compression_options
-def convert(input_file, output_file, skip_hilbert, verbose, compression, compression_level):
+def convert(
+    input_file,
+    output_file,
+    skip_hilbert,
+    wkt_column,
+    lat_column,
+    lon_column,
+    delimiter,
+    crs,
+    skip_invalid,
+    verbose,
+    compression,
+    compression_level,
+):
     """
     Convert vector formats to optimized GeoParquet.
 
@@ -182,11 +222,31 @@ def convert(input_file, output_file, skip_hilbert, verbose, compression, compres
 
       • File Geodatabase (.gdb)
 
+      • CSV/TSV (.csv, .tsv, .txt)
+
+    For CSV/TSV files, geometry is auto-detected from:
+
+      • WKT columns (named: wkt, geometry, geom, the_geom, shape)
+
+      • Lat/lon pairs (named: lat/lon, latitude/longitude, y/x)
+
     Examples:
 
       \b
       # Basic conversion
       geoparquet-io convert input.shp output.parquet
+
+      \b
+      # CSV with auto-detected WKT column
+      geoparquet-io convert points.csv output.parquet
+
+      \b
+      # CSV with explicit lat/lon columns
+      geoparquet-io convert data.csv output.parquet --lat-column lat --lon-column lng
+
+      \b
+      # TSV with custom delimiter and skip invalid geometries
+      geoparquet-io convert data.txt output.parquet --delimiter '|' --skip-invalid
 
       \b
       # With verbose output and validation
@@ -208,6 +268,12 @@ def convert(input_file, output_file, skip_hilbert, verbose, compression, compres
         compression=compression,
         compression_level=compression_level,
         row_group_rows=100000,  # Best practice default
+        wkt_column=wkt_column,
+        lat_column=lat_column,
+        lon_column=lon_column,
+        delimiter=delimiter,
+        crs=crs,
+        skip_invalid=skip_invalid,
     )
 
 

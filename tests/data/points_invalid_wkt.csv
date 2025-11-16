@@ -1,0 +1,5 @@
+id,name,wkt
+1,Valid,POINT(-74.006 40.7128)
+2,Invalid,NOT_A_WKT
+3,Valid,POINT(139.6917 35.6895)
+4,Null,

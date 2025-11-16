@@ -23,6 +23,7 @@ Auto-detected by file extension:
 - **GeoJSON** (.geojson, .json)
 - **GeoPackage** (.gpkg)
 - **File Geodatabase** (.gdb)
+- **CSV/TSV** (.csv, .tsv, .txt) - See [CSV/TSV Support](#csvtsv-support) below
 
 Any format supported by DuckDB's spatial extension can be read.
 
@@ -120,6 +121,51 @@ gpio inspect output.parquet
 # Validate
 gpio check all output.parquet
 ```
+
+## CSV/TSV Support
+
+Auto-detects geometry columns. WKT columns (wkt, geometry, geom) checked first, then lat/lon pairs (lat/lon, latitude/longitude).
+
+```bash
+# Auto-detect WKT or lat/lon
+gpio convert points.csv points.parquet
+
+# Explicit columns
+gpio convert data.csv out.parquet --wkt-column geom_wkt
+gpio convert data.csv out.parquet --lat-column lat --lon-column lng
+
+# Custom delimiter
+gpio convert data.txt out.parquet --delimiter "|"
+```
+
+### CRS and Validation
+
+Default: WGS84 (EPSG:4326). Override with `--crs` for WKT data:
+
+```bash
+gpio convert projected.csv out.parquet --crs EPSG:3857
+```
+
+Validates lat/lon ranges (-90 to 90, -180 to 180). Warns on large coordinates suggesting projected CRS.
+
+### Invalid Geometries
+
+Fails on invalid WKT by default. Skip with `--skip-invalid`:
+
+```bash
+gpio convert messy.csv out.parquet --skip-invalid
+```
+
+Skips invalid rows, disables Hilbert ordering. Mixed geometry types supported.
+
+### Delimiters
+
+Auto-detects comma and tab. Override with `--delimiter` for semicolon, pipe, or any single character.
+
+```bash
+gpio convert data.csv out.parquet --delimiter ";"
+```
+
 ## See Also
 
 - [CLI Reference: convert](../cli/convert.md)

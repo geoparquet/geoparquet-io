@@ -1,0 +1,4 @@
+id,name,lat,lon
+1,Valid,40.7128,-74.006
+2,Invalid lat,95.0,-74.006
+3,Invalid lon,40.7128,200.0

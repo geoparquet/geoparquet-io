@@ -45,6 +45,60 @@ def geopackage_input(test_data_dir):
     return str(test_data_dir / "buildings_test.gpkg")
 
 
+@pytest.fixture
+def csv_wkt_input(test_data_dir):
+    """Return path to test CSV file with WKT column."""
+    return str(test_data_dir / "points_wkt.csv")
+
+
+@pytest.fixture
+def csv_geometry_input(test_data_dir):
+    """Return path to test CSV file with geometry column."""
+    return str(test_data_dir / "points_geometry.csv")
+
+
+@pytest.fixture
+def csv_latlon_input(test_data_dir):
+    """Return path to test CSV file with lat/lon columns."""
+    return str(test_data_dir / "points_latlon.csv")
+
+
+@pytest.fixture
+def csv_latitude_longitude_input(test_data_dir):
+    """Return path to test CSV file with latitude/longitude columns."""
+    return str(test_data_dir / "points_latitude_longitude.csv")
+
+
+@pytest.fixture
+def tsv_wkt_input(test_data_dir):
+    """Return path to test TSV file with WKT column."""
+    return str(test_data_dir / "points_wkt.tsv")
+
+
+@pytest.fixture
+def csv_semicolon_input(test_data_dir):
+    """Return path to test file with semicolon delimiter."""
+    return str(test_data_dir / "points_semicolon.txt")
+
+
+@pytest.fixture
+def csv_invalid_wkt_input(test_data_dir):
+    """Return path to test CSV with invalid WKT."""
+    return str(test_data_dir / "points_invalid_wkt.csv")
+
+
+@pytest.fixture
+def csv_invalid_latlon_input(test_data_dir):
+    """Return path to test CSV with invalid lat/lon."""
+    return str(test_data_dir / "points_invalid_latlon.csv")
+
+
+@pytest.fixture
+def csv_mixed_geoms_input(test_data_dir):
+    """Return path to test CSV with mixed geometry types."""
+    return str(test_data_dir / "mixed_geometries.csv")
+
+
 class TestConvertCore:
     """Test core convert_to_geoparquet function."""
 
@@ -385,3 +439,265 @@ class TestConvertEdgeCases:
         assert (
             "not found" in str(exc_info.value).lower() or "directory" in str(exc_info.value).lower()
         )
+
+
+class TestConvertCSVCore:
+    """Test CSV/TSV conversion core functionality."""
+
+    def test_convert_csv_wkt_autodetect(self, csv_wkt_input, temp_output_file):
+        """Test CSV conversion with auto-detected WKT column."""
+        convert_to_geoparquet(csv_wkt_input, temp_output_file, verbose=False)
+
+        assert os.path.exists(temp_output_file)
+        assert os.path.getsize(temp_output_file) > 0
+
+        # Verify geometry column exists
+        con = duckdb.connect()
+        con.execute("INSTALL spatial;")
+        con.execute("LOAD spatial;")
+        result = con.execute(f"SELECT geometry FROM '{temp_output_file}' LIMIT 1").fetchone()
+        assert result is not None
+        con.close()
+
+    def test_convert_csv_geometry_column(self, csv_geometry_input, temp_output_file):
+        """Test CSV with 'geometry' column name is auto-detected."""
+        convert_to_geoparquet(csv_geometry_input, temp_output_file, verbose=False)
+
+        assert os.path.exists(temp_output_file)
+        # Verify row count
+        con = duckdb.connect()
+        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        assert count == 5
+        con.close()
+
+    def test_convert_csv_latlon_autodetect(self, csv_latlon_input, temp_output_file):
+        """Test CSV conversion with auto-detected lat/lon columns."""
+        convert_to_geoparquet(csv_latlon_input, temp_output_file, verbose=False)
+
+        assert os.path.exists(temp_output_file)
+
+        # Verify geometries are POINTs
+        con = duckdb.connect()
+        con.execute("INSTALL spatial;")
+        con.execute("LOAD spatial;")
+        result = con.execute(
+            f"SELECT ST_GeometryType(geometry) FROM '{temp_output_file}' LIMIT 1"
+        ).fetchone()
+        assert "POINT" in result[0]
+        con.close()
+
+    def test_convert_csv_latitude_longitude_columns(
+        self, csv_latitude_longitude_input, temp_output_file
+    ):
+        """Test CSV with latitude/longitude column names."""
+        convert_to_geoparquet(csv_latitude_longitude_input, temp_output_file, verbose=False)
+
+        assert os.path.exists(temp_output_file)
+        assert os.path.getsize(temp_output_file) > 0
+
+    def test_convert_tsv_autodetect(self, tsv_wkt_input, temp_output_file):
+        """Test TSV conversion with auto-detected tab delimiter."""
+        convert_to_geoparquet(tsv_wkt_input, temp_output_file, verbose=False)
+
+        assert os.path.exists(temp_output_file)
+        # Verify row count matches
+        con = duckdb.connect()
+        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        assert count == 5
+        con.close()
+
+    def test_convert_csv_explicit_wkt_column(self, csv_wkt_input, temp_output_file):
+        """Test CSV with explicit --wkt-column flag."""
+        convert_to_geoparquet(csv_wkt_input, temp_output_file, wkt_column="wkt", verbose=False)
+
+        assert os.path.exists(temp_output_file)
+
+    def test_convert_csv_explicit_latlon_columns(self, csv_latlon_input, temp_output_file):
+        """Test CSV with explicit --lat-column and --lon-column flags."""
+        convert_to_geoparquet(
+            csv_latlon_input, temp_output_file, lat_column="lat", lon_column="lon", verbose=False
+        )
+
+        assert os.path.exists(temp_output_file)
+
+    def test_convert_csv_custom_delimiter(self, csv_semicolon_input, temp_output_file):
+        """Test CSV with custom delimiter."""
+        convert_to_geoparquet(csv_semicolon_input, temp_output_file, delimiter=";", verbose=False)
+
+        assert os.path.exists(temp_output_file)
+        # Verify data was read correctly
+        con = duckdb.connect()
+        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        assert count == 5
+        con.close()
+
+    def test_convert_csv_skip_hilbert(self, csv_wkt_input, temp_output_file):
+        """Test CSV conversion with --skip-hilbert flag."""
+        convert_to_geoparquet(csv_wkt_input, temp_output_file, skip_hilbert=True, verbose=False)
+
+        assert os.path.exists(temp_output_file)
+
+    def test_convert_csv_mixed_geometry_types(self, csv_mixed_geoms_input, temp_output_file):
+        """Test CSV with mixed geometry types (POINTs and POLYGONs)."""
+        convert_to_geoparquet(csv_mixed_geoms_input, temp_output_file, verbose=False)
+
+        assert os.path.exists(temp_output_file)
+        # Verify we have different geometry types
+        con = duckdb.connect()
+        con.execute("INSTALL spatial;")
+        con.execute("LOAD spatial;")
+        result = con.execute(
+            f"SELECT DISTINCT ST_GeometryType(geometry) FROM '{temp_output_file}'"
+        ).fetchall()
+        geom_types = [r[0] for r in result]
+        assert len(geom_types) == 2  # Should have both POINT and POLYGON
+        con.close()
+
+
+class TestConvertCSVValidation:
+    """Test CSV/TSV validation and error handling."""
+
+    def test_convert_csv_invalid_wkt_fails_by_default(
+        self, csv_invalid_wkt_input, temp_output_file
+    ):
+        """Test that invalid WKT causes failure by default."""
+        with pytest.raises(Exception) as exc_info:
+            convert_to_geoparquet(csv_invalid_wkt_input, temp_output_file, verbose=False)
+        assert "invalid" in str(exc_info.value).lower() or "wkt" in str(exc_info.value).lower()
+
+    def test_convert_csv_invalid_wkt_skip(self, csv_invalid_wkt_input, temp_output_file):
+        """Test that --skip-invalid allows conversion with invalid WKT."""
+        convert_to_geoparquet(
+            csv_invalid_wkt_input, temp_output_file, skip_invalid=True, verbose=False
+        )
+
+        assert os.path.exists(temp_output_file)
+        # Should only have valid rows
+        con = duckdb.connect()
+        count = con.execute(f"SELECT COUNT(*) FROM '{temp_output_file}'").fetchone()[0]
+        assert count == 2  # Only 2 valid POINTs out of 4 rows
+        con.close()
+
+    def test_convert_csv_invalid_latlon_fails(self, csv_invalid_latlon_input, temp_output_file):
+        """Test that invalid lat/lon values cause failure."""
+        with pytest.raises(Exception) as exc_info:
+            convert_to_geoparquet(csv_invalid_latlon_input, temp_output_file, verbose=False)
+        assert (
+            "latitude" in str(exc_info.value).lower() or "longitude" in str(exc_info.value).lower()
+        )
+
+    def test_convert_csv_nonexistent_wkt_column(self, csv_wkt_input, temp_output_file):
+        """Test error when specified WKT column doesn't exist."""
+        with pytest.raises(Exception) as exc_info:
+            convert_to_geoparquet(
+                csv_wkt_input, temp_output_file, wkt_column="nonexistent", verbose=False
+            )
+        assert "not found" in str(exc_info.value).lower()
+
+    def test_convert_csv_nonexistent_latlon_columns(self, csv_latlon_input, temp_output_file):
+        """Test error when specified lat/lon columns don't exist."""
+        with pytest.raises(Exception) as exc_info:
+            convert_to_geoparquet(
+                csv_latlon_input,
+                temp_output_file,
+                lat_column="bad_lat",
+                lon_column="bad_lon",
+                verbose=False,
+            )
+        assert "not found" in str(exc_info.value).lower()
+
+    def test_convert_csv_lat_without_lon(self, csv_latlon_input, temp_output_file):
+        """Test error when only lat column specified without lon."""
+        with pytest.raises(Exception) as exc_info:
+            convert_to_geoparquet(
+                csv_latlon_input, temp_output_file, lat_column="lat", verbose=False
+            )
+        assert "both" in str(exc_info.value).lower()
+
+
+class TestConvertCSVCLI:
+    """Test CLI interface for CSV/TSV conversion."""
+
+    def test_cli_csv_wkt_basic(self, csv_wkt_input, temp_output_file):
+        """Test CLI basic CSV conversion with WKT."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["convert", csv_wkt_input, temp_output_file])
+
+        assert result.exit_code == 0, f"Command failed: {result.output}"
+        assert os.path.exists(temp_output_file)
+        assert "Using WKT column" in result.output
+        assert "Done" in result.output
+
+    def test_cli_csv_latlon_basic(self, csv_latlon_input, temp_output_file):
+        """Test CLI basic CSV conversion with lat/lon."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["convert", csv_latlon_input, temp_output_file])
+
+        assert result.exit_code == 0, f"Command failed: {result.output}"
+        assert os.path.exists(temp_output_file)
+        assert "lat/lon" in result.output.lower()
+
+    def test_cli_csv_explicit_wkt_column(self, csv_wkt_input, temp_output_file):
+        """Test CLI with explicit --wkt-column flag."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["convert", csv_wkt_input, temp_output_file, "--wkt-column", "wkt"]
+        )
+
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+
+    def test_cli_csv_explicit_latlon_columns(self, csv_latlon_input, temp_output_file):
+        """Test CLI with explicit --lat-column and --lon-column flags."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "convert",
+                csv_latlon_input,
+                temp_output_file,
+                "--lat-column",
+                "lat",
+                "--lon-column",
+                "lon",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+
+    def test_cli_csv_custom_delimiter(self, csv_semicolon_input, temp_output_file):
+        """Test CLI with custom --delimiter flag."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["convert", csv_semicolon_input, temp_output_file, "--delimiter", ";"]
+        )
+
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+
+    def test_cli_csv_skip_invalid(self, csv_invalid_wkt_input, temp_output_file):
+        """Test CLI with --skip-invalid flag."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["convert", csv_invalid_wkt_input, temp_output_file, "--skip-invalid"]
+        )
+
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+
+    def test_cli_csv_verbose(self, csv_wkt_input, temp_output_file):
+        """Test CLI verbose output for CSV."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["convert", csv_wkt_input, temp_output_file, "--verbose"])
+
+        assert result.exit_code == 0
+        assert "Detected columns" in result.output or "wkt" in result.output.lower()
+
+    def test_cli_tsv_autodetect(self, tsv_wkt_input, temp_output_file):
+        """Test CLI with TSV file (tab delimiter auto-detect)."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["convert", tsv_wkt_input, temp_output_file])
+
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
