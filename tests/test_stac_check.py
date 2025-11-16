@@ -82,7 +82,7 @@ def test_validate_valid_item(valid_stac_item):
     # Validation may have warnings if jsonschema not available, but should still be valid
     assert results["valid"] is True or len(results["warnings"]) > 0
     assert results["info"]["stac_type"] == "Feature"
-    assert results["info"]["stac_version"] == "1.1.0"
+    assert results["info"]["stac_version"] in ["1.0.0", "1.1.0"]
 
 
 def test_validate_valid_collection(valid_stac_collection):
@@ -92,7 +92,7 @@ def test_validate_valid_collection(valid_stac_collection):
     # Validation may have warnings if jsonschema not available, but should still be valid
     assert results["valid"] is True or len(results["warnings"]) > 0
     assert results["info"]["stac_type"] == "Collection"
-    assert results["info"]["stac_version"] == "1.1.0"
+    assert results["info"]["stac_version"] in ["1.0.0", "1.1.0"]
 
 
 def test_validate_invalid_json(invalid_stac_json):

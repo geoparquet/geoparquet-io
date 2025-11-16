@@ -21,7 +21,8 @@ from geoparquet_io.core.stac import (
 def _assert_stac_item_structure(item_dict: dict) -> None:
     """Assert basic STAC Item structure."""
     assert item_dict["type"] == "Feature"
-    assert item_dict["stac_version"] == "1.1.0"  # pystac defaults to 1.1.0
+    assert "stac_version" in item_dict
+    assert item_dict["stac_version"] in ["1.0.0", "1.1.0"]  # pystac version-dependent
     assert "id" in item_dict
     assert "bbox" in item_dict
     assert len(item_dict["bbox"]) == 4
@@ -50,7 +51,8 @@ def _assert_stac_item_links(item_dict: dict) -> None:
 def _assert_stac_collection_structure(collection_dict: dict) -> None:
     """Assert basic STAC Collection structure."""
     assert collection_dict["type"] == "Collection"
-    assert collection_dict["stac_version"] == "1.1.0"  # pystac defaults to 1.1.0
+    assert "stac_version" in collection_dict
+    assert collection_dict["stac_version"] in ["1.0.0", "1.1.0"]  # pystac version-dependent
     assert "id" in collection_dict
     assert "description" in collection_dict
     assert "extent" in collection_dict
@@ -69,7 +71,9 @@ def _assert_collection_items(
 
     assert len(item_dicts) == expected_count
     assert all(item["type"] == "Feature" for item in item_dicts)
-    assert all(item["stac_version"] == "1.1.0" for item in item_dicts)  # pystac defaults to 1.1.0
+    assert all(
+        item["stac_version"] in ["1.0.0", "1.1.0"] for item in item_dicts
+    )  # pystac version-dependent
 
 
 def _assert_collection_bounds(collection_dict: dict, item_dicts: list[dict]) -> None:
