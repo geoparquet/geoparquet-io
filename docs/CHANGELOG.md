@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2025-11-17
+
+### Added
+- `gpio convert` command for optimized GeoParquet conversion from vector formats (Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV) ([#56](https://github.com/cholmes/geoparquet-io/pull/56))
+- `gpio stac` command for STAC Item and Collection generation ([#57](https://github.com/cholmes/geoparquet-io/pull/57))
+- `gpio check stac` command for STAC validation ([#57](https://github.com/cholmes/geoparquet-io/pull/57))
+- `--prefix` option for partition commands to customize output filenames ([#62](https://github.com/cholmes/geoparquet-io/pull/62))
+
+### Changed
+- Documentation consolidated with snippets system ([#55](https://github.com/cholmes/geoparquet-io/pull/55))
+
 ## [0.3.0] - 2025-11-06
 
 ### Added
@@ -119,7 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release as `geoparquet-tools` with basic functionality.
 
-[Unreleased]: https://github.com/cholmes/geoparquet-io/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cholmes/geoparquet-io/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cholmes/geoparquet-io/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cholmes/geoparquet-io/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cholmes/geoparquet-io/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cholmes/geoparquet-io/releases/tag/v0.1.0

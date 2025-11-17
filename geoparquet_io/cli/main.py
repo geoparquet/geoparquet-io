@@ -34,7 +34,7 @@ from geoparquet_io.core.partition_by_string import (
 )
 
 # Version info
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 @click.group()
