@@ -4,6 +4,8 @@ Benchmark utilities for comparing GeoParquet conversion methods.
 Tests available converters and reports performance metrics.
 """
 
+from __future__ import annotations
+
 import json
 import platform
 import shutil

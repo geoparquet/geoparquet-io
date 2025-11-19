@@ -45,7 +45,7 @@ class TestConverterDetection:
 
     def test_all_converters_have_required_fields(self):
         """Test that all converters have required configuration."""
-        for name, info in CONVERTERS.items():
+        for _name, info in CONVERTERS.items():
             assert "name" in info
             assert "check" in info
             assert "install" in info
@@ -198,7 +198,7 @@ class TestRunBenchmark:
         """Test running benchmark and saving JSON output."""
         json_path = os.path.join(temp_output_dir, "results.json")
 
-        results = run_benchmark(
+        run_benchmark(
             input_file=str(GEOJSON_FILE),
             iterations=1,
             converters=["duckdb"],
@@ -221,7 +221,7 @@ class TestRunBenchmark:
         """Test running benchmark and keeping output files."""
         output_dir = os.path.join(temp_output_dir, "output")
 
-        results = run_benchmark(
+        run_benchmark(
             input_file=str(GEOJSON_FILE),
             iterations=1,
             converters=["duckdb"],
