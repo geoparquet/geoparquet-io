@@ -39,6 +39,7 @@ dependencies = [
     "xenon>=0.9.3",
     "pystac>=1.9.0",
     "jsonschema>=4.0.0",  # Required for pystac validation
+    "psutil>=5.9.0",
 ]
 
 [project.scripts]
@@ -63,6 +64,11 @@ docs = [
     "mkdocs>=1.5.0",
     "mkdocs-material>=9.5.0",
     "mkdocstrings[python]>=0.24.0",
+]
+benchmark = [
+    "geopandas>=0.14.0",
+    "pyogrio>=0.7.0",
+    "fiona>=1.9.0",
 ]
 
 [tool.hatch.build.targets.wheel]
