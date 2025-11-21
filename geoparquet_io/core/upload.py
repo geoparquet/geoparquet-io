@@ -181,7 +181,9 @@ def _upload_directory(
     total_size_mb = total_size / (1024 * 1024)
 
     if dry_run:
-        _print_directory_dry_run(files, source, destination, prefix, total_size_mb, pattern, profile)
+        _print_directory_dry_run(
+            files, source, destination, prefix, total_size_mb, pattern, profile
+        )
         return
 
     store, kwargs = _setup_store_and_kwargs(bucket_url, profile, chunk_concurrency, chunk_size)
@@ -357,7 +359,9 @@ async def upload_directory_async(
     print(f"Found {len(files)} file(s) to upload ({total_size_mb:.2f} MB total)")
     print()
 
-    results = await _upload_files_parallel(store, files, source, prefix, max_files, fail_fast, **kwargs)
+    results = await _upload_files_parallel(
+        store, files, source, prefix, max_files, fail_fast, **kwargs
+    )
     _print_upload_summary(results, len(files))
 
 
