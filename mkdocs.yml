@@ -52,7 +52,6 @@ nav:
     - Sorting Data: guide/sort.md
     - Adding Spatial Indices: guide/add.md
     - Partitioning Files: guide/partition.md
-    - Formatting Files: guide/format.md
     - STAC Generation: guide/stac.md
   - CLI Reference:
     - Overview: cli/overview.md
@@ -61,7 +60,6 @@ nav:
     - sort: cli/sort.md
     - add: cli/add.md
     - partition: cli/partition.md
-    - format: cli/format.md
     - stac: cli/stac.md
   - Python API:
     - Overview: api/overview.md

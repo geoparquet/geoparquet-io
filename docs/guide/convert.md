@@ -193,5 +193,4 @@ See [`gpio benchmark`](../cli/benchmark.md) for details.
 - [benchmark command](../cli/benchmark.md) - Compare conversion performance
 - [add command](add.md) - Add indices to existing GeoParquet
 - [sort command](sort.md) - Sort existing GeoParquet spatially
-- [format command](format.md) - Apply formatting to existing files
-- [check command](check.md) - Validate GeoParquet best practices
+- [check command](check.md) - Validate and fix GeoParquet files

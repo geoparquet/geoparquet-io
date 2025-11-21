@@ -6,8 +6,27 @@ import duckdb
 from geoparquet_io.core.common import find_primary_geometry_column, safe_file_url
 
 
-def check_spatial_order(parquet_file, random_sample_size, limit_rows, verbose):
-    """Check if a GeoParquet file is spatially ordered."""
+def check_spatial_order(
+    parquet_file, random_sample_size, limit_rows, verbose, return_results=False
+):
+    """Check if a GeoParquet file is spatially ordered.
+
+    Args:
+        parquet_file: Path to parquet file
+        random_sample_size: Number of rows in each random sample
+        limit_rows: Max number of rows to analyze
+        verbose: Print additional information
+        return_results: If True, return structured results dict
+
+    Returns:
+        ratio (float) if return_results=False, or dict if return_results=True containing:
+            - passed: bool
+            - ratio: float
+            - consecutive_avg: float
+            - random_avg: float
+            - issues: list of issue descriptions
+            - recommendations: list of recommendations
+    """
     safe_url = safe_file_url(parquet_file, verbose)
 
     # Get geometry column name
@@ -100,6 +119,25 @@ def check_spatial_order(parquet_file, random_sample_size, limit_rows, verbose):
             click.echo("=> Data seems strongly spatially clustered.")
         elif ratio is not None:
             click.echo("=> Data might not be strongly clustered (or is partially clustered).")
+
+    if return_results:
+        passed = ratio is not None and ratio < 0.5
+        issues = []
+        recommendations = []
+
+        if ratio is not None and ratio >= 0.5:
+            issues.append(f"Poor spatial ordering (ratio: {ratio:.2f})")
+            recommendations.append("Apply Hilbert spatial ordering for better query performance")
+
+        return {
+            "passed": passed,
+            "ratio": ratio,
+            "consecutive_avg": consecutive_avg,
+            "random_avg": random_avg,
+            "issues": issues,
+            "recommendations": recommendations,
+            "fix_available": not passed,
+        }
 
     return ratio
 

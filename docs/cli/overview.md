@@ -14,11 +14,10 @@ gpio [OPTIONS] COMMAND [ARGS]...
 
 - **[convert](convert.md)** - Convert vector formats to optimized GeoParquet
 - **[inspect](inspect.md)** - Examine file metadata and preview data
-- **[check](check.md)** - Validate files against best practices
+- **[check](check.md)** - Validate files and fix issues automatically
 - **[sort](sort.md)** - Spatially sort using Hilbert curves
 - **[add](add.md)** - Enhance files with spatial indices
 - **[partition](partition.md)** - Split files into optimized partitions
-- **[format](format.md)** - Apply formatting best practices
 - **[stac](stac.md)** - Generate STAC metadata for datasets
 - **[benchmark](benchmark.md)** - Compare conversion performance
 
@@ -79,7 +78,8 @@ gpio sort hilbert input.parquet sorted.parquet
 Some commands modify files in place:
 
 ```bash
-gpio format bbox-metadata myfile.parquet
+gpio add bbox-metadata myfile.parquet
+gpio check all myfile.parquet --fix
 ```
 
 ### Analysis Commands

@@ -129,22 +129,62 @@ def get_compression_info(parquet_file, column_name=None):
         return compression_info
 
 
-def check_row_groups(parquet_file, verbose=False):
-    """Check row group optimization and print results."""
-    stats = get_row_group_stats(parquet_file)
+def check_row_groups(parquet_file, verbose=False, return_results=False):
+    """Check row group optimization and print results.
 
-    click.echo("\nRow Group Analysis:")
-    click.echo(f"Number of row groups: {stats['num_groups']}")
+    Args:
+        parquet_file: Path to parquet file
+        verbose: Print additional information
+        return_results: If True, return structured results dict instead of only printing
+
+    Returns:
+        dict if return_results=True, containing:
+            - passed: bool
+            - stats: dict with file statistics
+            - size_status: str (optimal/suboptimal/poor)
+            - row_status: str (optimal/suboptimal/poor)
+            - issues: list of issue descriptions
+            - recommendations: list of recommendations
+    """
+    stats = get_row_group_stats(parquet_file)
 
     size_status, size_message, size_color = assess_row_group_size(
         stats["avg_group_size"], stats["total_size"]
     )
+    row_status, row_message, row_color = assess_row_count(stats["avg_rows_per_group"])
+
+    # Build results dict
+    passed = size_status == "optimal" and row_status == "optimal"
+    issues = []
+    recommendations = []
+
+    if size_status != "optimal":
+        issues.append(size_message)
+        recommendations.append("Rewrite with optimal row group size (128-256 MB)")
+
+    if row_status != "optimal":
+        issues.append(row_message)
+        recommendations.append("Target 50,000-200,000 rows per group")
+
+    results = {
+        "passed": passed,
+        "stats": stats,
+        "size_status": size_status,
+        "row_status": row_status,
+        "issues": issues,
+        "recommendations": recommendations,
+        "fix_available": not passed,
+    }
+
+    # Print results
+    click.echo("\nRow Group Analysis:")
+    click.echo(f"Number of row groups: {stats['num_groups']}")
+
     click.echo(
         click.style(f"Average group size: {format_size(stats['avg_group_size'])}", fg=size_color)
     )
     click.echo(click.style(size_message, fg=size_color))
 
-    row_status, row_message, row_color = assess_row_count(stats["avg_rows_per_group"])
     click.echo(
         click.style(f"Average rows per group: {stats['avg_rows_per_group']:,.0f}", fg=row_color)
     )
@@ -158,17 +198,83 @@ def check_row_groups(parquet_file, verbose=False):
         click.echo("- Optimal rows: 50,000-200,000 rows per group")
         click.echo("- Small files (<128 MB): single row group is fine")
 
+    if return_results:
+        return results
 
-def check_metadata_and_bbox(parquet_file, verbose=False):
-    """Check GeoParquet metadata version and bbox structure."""
+
+def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
+    """Check GeoParquet metadata version and bbox structure.
+
+    Args:
+        parquet_file: Path to parquet file
+        verbose: Print additional information
+        return_results: If True, return structured results dict
+
+    Returns:
+        dict if return_results=True, containing:
+            - passed: bool
+            - has_geo_metadata: bool
+            - version: str
+            - has_bbox_column: bool
+            - has_bbox_metadata: bool
+            - bbox_column_name: str or None
+            - issues: list of issue descriptions
+            - recommendations: list of recommendations
+    """
     metadata, _ = get_parquet_metadata(parquet_file)
     geo_meta = parse_geo_metadata(metadata, False)
 
     if not geo_meta:
         click.echo(click.style("\n❌ No GeoParquet metadata found", fg="red"))
+        if return_results:
+            return {
+                "passed": False,
+                "has_geo_metadata": False,
+                "issues": ["No GeoParquet metadata found"],
+                "recommendations": [],
+                "fix_available": False,
+            }
         return
 
     version = geo_meta.get("version", "0.0.0")
+    bbox_info = check_bbox_structure(parquet_file, verbose)
+
+    # Build results
+    issues = []
+    recommendations = []
+
+    if version < "1.1.0":
+        issues.append(f"GeoParquet version {version} is outdated")
+        recommendations.append("Upgrade to version 1.1.0+")
+
+    needs_bbox_column = not bbox_info["has_bbox_column"]
+    needs_bbox_metadata = bbox_info["has_bbox_column"] and not bbox_info["has_bbox_metadata"]
+
+    if needs_bbox_column:
+        issues.append("No bbox column found")
+        recommendations.append("Add bbox column for better query performance")
+
+    if needs_bbox_metadata:
+        issues.append("Bbox column exists but missing metadata covering")
+        recommendations.append("Add bbox covering to metadata")
+
+    passed = version >= "1.1.0" and not needs_bbox_column and not needs_bbox_metadata
+
+    results = {
+        "passed": passed,
+        "has_geo_metadata": True,
+        "version": version,
+        "has_bbox_column": bbox_info["has_bbox_column"],
+        "has_bbox_metadata": bbox_info["has_bbox_metadata"],
+        "bbox_column_name": bbox_info.get("bbox_column_name"),
+        "needs_bbox_column": needs_bbox_column,
+        "needs_bbox_metadata": needs_bbox_metadata,
+        "issues": issues,
+        "recommendations": recommendations,
+        "fix_available": needs_bbox_column or needs_bbox_metadata,
+    }
+
+    # Print results
     click.echo("\nGeoParquet Metadata:")
     version_color = "green" if version >= "1.1.0" else "yellow"
     version_prefix = "✓" if version >= "1.1.0" else "⚠️"
@@ -176,7 +282,6 @@ def check_metadata_and_bbox(parquet_file, verbose=False):
 
     click.echo(click.style(f"{version_prefix} Version {version}{version_suffix}", fg=version_color))
 
-    bbox_info = check_bbox_structure(parquet_file, verbose)
     if bbox_info["has_bbox_column"]:
         if bbox_info["has_bbox_metadata"]:
             click.echo(
@@ -198,15 +303,59 @@ def check_metadata_and_bbox(parquet_file, verbose=False):
             click.style("❌ No bbox column found (recommended for better performance)", fg="red")
         )
 
+    if return_results:
+        return results
 
-def check_compression(parquet_file, verbose=False):
-    """Check compression settings for geometry column."""
+
+def check_compression(parquet_file, verbose=False, return_results=False):
+    """Check compression settings for geometry column.
+
+    Args:
+        parquet_file: Path to parquet file
+        verbose: Print additional information
+        return_results: If True, return structured results dict
+
+    Returns:
+        dict if return_results=True, containing:
+            - passed: bool
+            - current_compression: str
+            - geometry_column: str
+            - issues: list of issue descriptions
+            - recommendations: list of recommendations
+    """
     primary_col = find_primary_geometry_column(parquet_file, verbose)
     if not primary_col:
         click.echo(click.style("\n❌ No geometry column found", fg="red"))
+        if return_results:
+            return {
+                "passed": False,
+                "current_compression": None,
+                "geometry_column": None,
+                "issues": ["No geometry column found"],
+                "recommendations": [],
+                "fix_available": False,
+            }
         return
 
     compression = get_compression_info(parquet_file, primary_col)[primary_col]
+    passed = compression == "ZSTD"
+
+    issues = []
+    recommendations = []
+    if not passed:
+        issues.append(f"{compression} compression instead of ZSTD")
+        recommendations.append("Re-compress with ZSTD for better performance")
+
+    results = {
+        "passed": passed,
+        "current_compression": compression,
+        "geometry_column": primary_col,
+        "issues": issues,
+        "recommendations": recommendations,
+        "fix_available": not passed,
+    }
+
+    # Print results
     click.echo("\nCompression Analysis:")
     if compression == "ZSTD":
         click.echo(
@@ -220,12 +369,31 @@ def check_compression(parquet_file, verbose=False):
             )
         )
 
+    if return_results:
+        return results
 
-def check_all(parquet_file, verbose=False):
-    """Run all structure checks."""
-    check_row_groups(parquet_file, verbose)
-    check_metadata_and_bbox(parquet_file, verbose)
-    check_compression(parquet_file, verbose)
+
+def check_all(parquet_file, verbose=False, return_results=False):
+    """Run all structure checks.
+
+    Args:
+        parquet_file: Path to parquet file
+        verbose: Print additional information
+        return_results: If True, return aggregated results dict
+
+    Returns:
+        dict if return_results=True, containing results from all checks
+    """
+    row_groups_result = check_row_groups(parquet_file, verbose, return_results=True)
+    bbox_result = check_metadata_and_bbox(parquet_file, verbose, return_results=True)
+    compression_result = check_compression(parquet_file, verbose, return_results=True)
+
+    if return_results:
+        return {
+            "row_groups": row_groups_result,
+            "bbox": bbox_result,
+            "compression": compression_result,
+        }
 
 
 if __name__ == "__main__":

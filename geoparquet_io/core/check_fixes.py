@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+
+import os
+import shutil
+import tempfile
+
+import click
+import duckdb
+
+from geoparquet_io.core.add_bbox_column import add_bbox_column
+from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata
+from geoparquet_io.core.common import (
+    get_parquet_metadata,
+    safe_file_url,
+    write_parquet_with_metadata,
+)
+from geoparquet_io.core.hilbert_order import hilbert_order
+
+
+def fix_compression(parquet_file, output_file, verbose=False):
+    """Re-compress file with ZSTD compression.
+
+    Args:
+        parquet_file: Path to input file
+        output_file: Path to output file
+        verbose: Print additional information
+
+    Returns:
+        dict with fix summary
+    """
+    if verbose:
+        click.echo("Applying ZSTD compression...")
+
+    safe_url = safe_file_url(parquet_file, verbose)
+
+    # Get original metadata
+    original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
+
+    # Read and rewrite with ZSTD compression
+    con = duckdb.connect()
+    con.execute("INSTALL spatial;")
+    con.execute("LOAD spatial;")
+
+    query = f"SELECT * FROM '{safe_url}'"
+
+    write_parquet_with_metadata(
+        con=con,
+        query=query,
+        output_file=output_file,
+        original_metadata=original_metadata,
+        compression="ZSTD",
+        compression_level=15,
+        row_group_rows=100000,
+        verbose=verbose,
+    )
+
+    return {"fix_applied": "Re-compressed with ZSTD", "success": True}
+
+
+def fix_bbox_column(parquet_file, output_file, verbose=False):
+    """Add missing bbox column.
+
+    Args:
+        parquet_file: Path to input file
+        output_file: Path to output file
+        verbose: Print additional information
+
+    Returns:
+        dict with fix summary
+    """
+    if verbose:
+        click.echo("Adding bbox column...")
+
+    add_bbox_column(
+        input_parquet=parquet_file,
+        output_parquet=output_file,
+        bbox_column_name="bbox",
+        dry_run=False,
+        verbose=verbose,
+        compression="ZSTD",
+        compression_level=15,
+        row_group_rows=100000,
+    )
+
+    return {"fix_applied": "Added bbox column", "success": True}
+
+
+def fix_bbox_metadata(parquet_file, output_file, verbose=False):
+    """Add missing bbox covering metadata.
+
+    Args:
+        parquet_file: Path to input file
+        output_file: Path to output file (modified in-place)
+        verbose: Print additional information
+
+    Returns:
+        dict with fix summary
+    """
+    if verbose:
+        click.echo("Adding bbox covering metadata...")
+
+    # If output is different from input, copy first
+    if parquet_file != output_file:
+        shutil.copy2(parquet_file, output_file)
+
+    # add_bbox_metadata modifies in-place
+    add_bbox_metadata(output_file, verbose=verbose)
+
+    return {"fix_applied": "Added bbox covering metadata", "success": True}
+
+
+def fix_bbox_all(parquet_file, output_file, needs_column, needs_metadata, verbose=False):
+    """Fix both bbox column and metadata issues.
+
+    Args:
+        parquet_file: Path to input file
+        output_file: Path to output file
+        needs_column: Whether to add bbox column
+        needs_metadata: Whether to add bbox metadata
+        verbose: Print additional information
+
+    Returns:
+        dict with fix summary
+    """
+    current_file = parquet_file
+    temp_file = None
+
+    if needs_column:
+        temp_file = output_file + ".tmp" if output_file == parquet_file else output_file
+        fix_bbox_column(current_file, temp_file, verbose)
+        current_file = temp_file
+
+    if needs_metadata or needs_column:
+        if current_file != output_file:
+            shutil.move(current_file, output_file)
+        fix_bbox_metadata(output_file, output_file, verbose)
+    elif temp_file and temp_file != output_file:
+        shutil.move(temp_file, output_file)
+
+    return {"fix_applied": "Fixed bbox issues", "success": True}
+
+
+def fix_spatial_ordering(parquet_file, output_file, verbose=False):
+    """Apply Hilbert spatial ordering.
+
+    Args:
+        parquet_file: Path to input file
+        output_file: Path to output file
+        verbose: Print additional information
+
+    Returns:
+        dict with fix summary
+    """
+    if verbose:
+        click.echo("Applying Hilbert spatial ordering (this may take a while)...")
+
+    hilbert_order(
+        input_parquet=parquet_file,
+        output_parquet=output_file,
+        add_bbox_flag=False,  # bbox should already be added if needed
+        verbose=verbose,
+        compression="ZSTD",
+        compression_level=15,
+        row_group_rows=100000,
+    )
+
+    return {"fix_applied": "Applied Hilbert spatial ordering", "success": True}
+
+
+def fix_row_groups(parquet_file, output_file, verbose=False):
+    """Rewrite with optimal row group size.
+
+    Args:
+        parquet_file: Path to input file
+        output_file: Path to output file
+        verbose: Print additional information
+
+    Returns:
+        dict with fix summary
+    """
+    if verbose:
+        click.echo("Optimizing row groups...")
+
+    safe_url = safe_file_url(parquet_file, verbose)
+
+    # Get original metadata
+    original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
+
+    # Read and rewrite with optimal row groups
+    con = duckdb.connect()
+    con.execute("INSTALL spatial;")
+    con.execute("LOAD spatial;")
+
+    query = f"SELECT * FROM '{safe_url}'"
+
+    write_parquet_with_metadata(
+        con=con,
+        query=query,
+        output_file=output_file,
+        original_metadata=original_metadata,
+        compression="ZSTD",
+        compression_level=15,
+        row_group_rows=100000,
+        verbose=verbose,
+    )
+
+    return {"fix_applied": "Optimized row groups", "success": True}
+
+
+def apply_all_fixes(parquet_file, output_file, check_results, verbose=False):
+    """Orchestrate all fixes based on check results.
+
+    Args:
+        parquet_file: Path to input file
+        output_file: Path to output file
+        check_results: Dict containing results from check functions
+        verbose: Print additional information
+
+    Returns:
+        dict with summary of all fixes applied
+    """
+    if verbose:
+        click.echo("\n" + "=" * 60)
+        click.echo("Starting fix process...")
+        click.echo("=" * 60)
+
+    fixes_applied = []
+    current_file = parquet_file
+    temp_files = []
+
+    try:
+        # Step 1: Add bbox column if needed
+        bbox_result = check_results.get("bbox", {})
+        if bbox_result.get("needs_bbox_column", False):
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+            temp_files.append(temp_file)
+
+            if verbose:
+                click.echo("\n[1/4] Adding bbox column...")
+
+            fix_bbox_column(current_file, temp_file, verbose)
+            current_file = temp_file
+            fixes_applied.append("Added bbox column")
+
+        # Step 2: Add bbox metadata if needed
+        if bbox_result.get("needs_bbox_metadata", False) or (
+            bbox_result.get("needs_bbox_column", False)
+            and not bbox_result.get("has_bbox_metadata", False)
+        ):
+            # For metadata, we can modify in-place
+            if current_file == parquet_file:
+                # Need to copy first if we haven't made changes yet
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+                temp_files.append(temp_file)
+                shutil.copy2(current_file, temp_file)
+                current_file = temp_file
+
+            if verbose:
+                click.echo("\n[2/4] Adding bbox covering metadata...")
+
+            fix_bbox_metadata(current_file, current_file, verbose)
+            fixes_applied.append("Added bbox covering metadata")
+
+        # Step 3: Apply Hilbert sorting if needed
+        spatial_result = check_results.get("spatial", {})
+        if spatial_result and spatial_result.get("fix_available", False):
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+            temp_files.append(temp_file)
+
+            if verbose:
+                click.echo("\n[3/4] Applying Hilbert spatial ordering...")
+                click.echo("(This operation may take several minutes on large files)")
+
+            fix_spatial_ordering(current_file, temp_file, verbose)
+            current_file = temp_file
+            fixes_applied.append("Applied Hilbert spatial ordering")
+
+        # Step 4: Fix compression + row groups (combined in final write)
+        compression_result = check_results.get("compression", {})
+        row_groups_result = check_results.get("row_groups", {})
+
+        needs_compression_fix = compression_result.get("fix_available", False)
+        needs_row_group_fix = row_groups_result.get("fix_available", False)
+
+        if needs_compression_fix or needs_row_group_fix:
+            if verbose:
+                click.echo("\n[4/4] Optimizing compression and row groups...")
+
+            # This is the final step, write to the actual output
+            fix_compression(current_file, output_file, verbose)
+
+            if needs_compression_fix:
+                fixes_applied.append("Optimized compression (ZSTD)")
+            if needs_row_group_fix:
+                fixes_applied.append("Optimized row groups (100k rows/group)")
+
+        elif current_file != output_file:
+            # No compression/row group fixes needed, just move to output
+            if verbose:
+                click.echo("\nMoving to final output location...")
+            shutil.move(current_file, output_file)
+
+        # Clean up temp files (except the one we moved to output)
+        for temp_file in temp_files:
+            if os.path.exists(temp_file) and temp_file != output_file:
+                os.remove(temp_file)
+
+        if verbose:
+            click.echo("\n" + "=" * 60)
+            click.echo("Fix process completed successfully")
+            click.echo("=" * 60)
+
+        return {
+            "fixes_applied": fixes_applied,
+            "output_file": output_file,
+            "success": True,
+        }
+
+    except Exception as e:
+        # Clean up all temp files on error
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
+
+        raise click.ClickException(f"Failed to apply fixes: {str(e)}") from e
