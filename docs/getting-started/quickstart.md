@@ -129,6 +129,19 @@ gpio check all output.parquet
 gpio inspect output.parquet
 ```
 
+### Convert, Fix, and Upload
+
+```bash
+# 1. Convert to GeoParquet
+gpio convert input.shp data.parquet
+
+# 2. Validate and fix issues
+gpio check all data.parquet --fix --fix-output data_fixed.parquet
+
+# 3. Upload to cloud storage
+gpio upload data_fixed.parquet s3://bucket/data.parquet --profile prod
+```
+
 ### Quality Check → Optimize → Validate
 
 For existing GeoParquet files:

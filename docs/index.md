@@ -10,7 +10,8 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 ## Features
 
 - **Fast**: Built on PyArrow and DuckDB for high-performance operations
-- **Comprehensive**: Sort, partition, enhance, and validate GeoParquet files
+- **Comprehensive**: Sort, partition, enhance, validate, and upload GeoParquet files
+- **Cloud-Native**: Upload to S3, GCS, and Azure with parallel transfers
 - **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and admin divisions
 - **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
 - **Flexible**: CLI and Python API for any workflow
@@ -66,6 +67,7 @@ New to geoparquet-io? Start here:
 - [sort](cli/sort.md) - Spatially sort using Hilbert curves
 - [add](cli/add.md) - Enhance files with spatial indices
 - [partition](cli/partition.md) - Split files into optimized partitions
+- [upload](cli/upload.md) - Upload files to cloud storage (S3, GCS, Azure)
 
 ## Support
 

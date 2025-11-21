@@ -48,19 +48,24 @@ nav:
     - Quick Start: getting-started/quickstart.md
   - User Guide:
     - Inspecting Files: guide/inspect.md
+    - Converting Formats: guide/convert.md
     - Checking Best Practices: guide/check.md
     - Sorting Data: guide/sort.md
     - Adding Spatial Indices: guide/add.md
     - Partitioning Files: guide/partition.md
+    - Uploading to Cloud Storage: guide/upload.md
     - STAC Generation: guide/stac.md
   - CLI Reference:
     - Overview: cli/overview.md
+    - convert: cli/convert.md
     - inspect: cli/inspect.md
     - check: cli/check.md
     - sort: cli/sort.md
     - add: cli/add.md
     - partition: cli/partition.md
+    - upload: cli/upload.md
     - stac: cli/stac.md
+    - benchmark: cli/benchmark.md
   - Python API:
     - Overview: api/overview.md
     - Core Functions: api/core.md
