@@ -48,38 +48,38 @@ def cli():
 # Check commands group
 @cli.group()
 def check():
-    """Commands for checking GeoParquet files for best practices."""
+    """Check GeoParquet files for best practices."""
     pass
 
 
 @check.command(name="all")
 @click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print full metadata and details")
-@click.option("--fix", is_flag=True, help="Automatically fix detected issues")
+@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option("--fix", is_flag=True, help="Fix detected issues")
 @click.option(
     "--fix-output",
     type=click.Path(),
-    help="Output path for fixed file (default: overwrites original with .bak backup)",
+    help="Output path for fixed file (default: overwrites with .bak backup)",
 )
 @click.option(
     "--no-backup",
     is_flag=True,
-    help="Skip creating .bak backup when fixing (requires --fix)",
+    help="Skip .bak backup when fixing",
 )
 @click.option(
     "--random-sample-size",
     default=100,
     show_default=True,
-    help="Number of rows in each sample for spatial order check.",
+    help="Sample size for spatial order check",
 )
 @click.option(
     "--limit-rows",
     default=500000,
     show_default=True,
-    help="Max number of rows to read for spatial order check.",
+    help="Max rows for spatial order check",
 )
 def check_all(parquet_file, verbose, fix, fix_output, no_backup, random_sample_size, limit_rows):
-    """Run all checks on a GeoParquet file."""
+    """Check compression, bbox, row groups, and spatial order."""
     import os
     import shutil
 
@@ -209,30 +209,30 @@ def check_all(parquet_file, verbose, fix, fix_output, no_backup, random_sample_s
     "--random-sample-size",
     default=100,
     show_default=True,
-    help="Number of rows in each sample for spatial order check.",
+    help="Sample size for spatial order check",
 )
 @click.option(
     "--limit-rows",
     default=500000,
     show_default=True,
-    help="Max number of rows to read for spatial order check.",
+    help="Max rows for spatial order check",
 )
-@click.option("--verbose", is_flag=True, help="Print additional information.")
-@click.option("--fix", is_flag=True, help="Automatically fix detected issues")
+@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option("--fix", is_flag=True, help="Fix with Hilbert ordering")
 @click.option(
     "--fix-output",
     type=click.Path(),
-    help="Output path for fixed file (default: overwrites original with .bak backup)",
+    help="Output path (default: overwrites with .bak backup)",
 )
 @click.option(
     "--no-backup",
     is_flag=True,
-    help="Skip creating .bak backup when fixing (requires --fix)",
+    help="Skip .bak backup when fixing",
 )
 def check_spatial(
     parquet_file, random_sample_size, limit_rows, verbose, fix, fix_output, no_backup
 ):
-    """Check if a GeoParquet file is spatially ordered."""
+    """Check spatial ordering."""
 
     from geoparquet_io.core.check_fixes import fix_spatial_ordering
 
@@ -271,20 +271,20 @@ def check_spatial(
 
 @check.command(name="compression")
 @click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print additional information.")
-@click.option("--fix", is_flag=True, help="Automatically fix detected issues")
+@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option("--fix", is_flag=True, help="Recompress geometry with ZSTD")
 @click.option(
     "--fix-output",
     type=click.Path(),
-    help="Output path for fixed file (default: overwrites original with .bak backup)",
+    help="Output path (default: overwrites with .bak backup)",
 )
 @click.option(
     "--no-backup",
     is_flag=True,
-    help="Skip creating .bak backup when fixing (requires --fix)",
+    help="Skip .bak backup when fixing",
 )
 def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup):
-    """Check compression settings for geometry column."""
+    """Check geometry column compression."""
     from geoparquet_io.core.check_fixes import fix_compression
     from geoparquet_io.core.check_parquet_structure import check_compression
 
@@ -308,20 +308,20 @@ def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup):
 
 @check.command(name="bbox")
 @click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print additional information.")
-@click.option("--fix", is_flag=True, help="Automatically fix detected issues")
+@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option("--fix", is_flag=True, help="Add bbox column and metadata")
 @click.option(
     "--fix-output",
     type=click.Path(),
-    help="Output path for fixed file (default: overwrites original with .bak backup)",
+    help="Output path (default: overwrites with .bak backup)",
 )
 @click.option(
     "--no-backup",
     is_flag=True,
-    help="Skip creating .bak backup when fixing (requires --fix)",
+    help="Skip .bak backup when fixing",
 )
 def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup):
-    """Check GeoParquet metadata version and bbox structure."""
+    """Check bbox column and metadata."""
     from geoparquet_io.core.check_fixes import fix_bbox_all
     from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
 
@@ -350,20 +350,20 @@ def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup):
 
 @check.command(name="row-group")
 @click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print additional information.")
-@click.option("--fix", is_flag=True, help="Automatically fix detected issues")
+@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option("--fix", is_flag=True, help="Optimize row group size")
 @click.option(
     "--fix-output",
     type=click.Path(),
-    help="Output path for fixed file (default: overwrites original with .bak backup)",
+    help="Output path (default: overwrites with .bak backup)",
 )
 @click.option(
     "--no-backup",
     is_flag=True,
-    help="Skip creating .bak backup when fixing (requires --fix)",
+    help="Skip .bak backup when fixing",
 )
 def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup):
-    """Check row group optimization."""
+    """Check row group size."""
     from geoparquet_io.core.check_fixes import fix_row_groups
     from geoparquet_io.core.check_parquet_structure import check_row_groups
 
@@ -707,21 +707,6 @@ def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output
         raise click.ClickException(str(e)) from e
 
 
-# Format commands group
-@cli.group()
-def format():
-    """Commands for formatting GeoParquet files."""
-    pass
-
-
-@format.command(name="bbox-metadata")
-@click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print detailed information")
-def format_bbox_metadata(parquet_file, verbose):
-    """Add bbox covering metadata to a GeoParquet file."""
-    add_bbox_metadata_impl(parquet_file, verbose)
-
-
 # Sort commands group
 @cli.group()
 def sort():
@@ -927,8 +912,12 @@ def add_bbox(
     """Add a bbox struct column to a GeoParquet file.
 
     Creates a new column with bounding box coordinates (xmin, ymin, xmax, ymax)
-    for each geometry feature. The bbox column improves spatial query performance
-    and adds proper bbox covering metadata to the GeoParquet file (GeoParquet 1.1).
+    for each geometry feature. Bbox covering metadata is automatically added to the
+    GeoParquet file (GeoParquet 1.1 spec). The bbox column improves spatial query
+    performance.
+
+    If your file already has a bbox column but lacks metadata, use 'add bbox-metadata'
+    instead.
     """
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -956,6 +945,20 @@ def add_bbox(
         row_group_mb,
         row_group_size,
     )
+
+
+@add.command(name="bbox-metadata")
+@click.argument("parquet_file")
+@verbose_option
+def add_bbox_metadata_cmd(parquet_file, verbose):
+    """Add bbox covering metadata for an existing bbox column.
+
+    Use this when you have a file with a bbox column but no covering metadata.
+    This modifies the file in-place, preserving all data and file properties.
+
+    If you need to add both the bbox column and metadata, use 'add bbox' instead.
+    """
+    add_bbox_metadata_impl(parquet_file, verbose)
 
 
 @add.command(name="h3")

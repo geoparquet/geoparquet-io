@@ -171,5 +171,4 @@ gpio convert data.csv out.parquet --delimiter ";"
 - [CLI Reference: convert](../cli/convert.md)
 - [add command](add.md) - Add indices to existing GeoParquet
 - [sort command](sort.md) - Sort existing GeoParquet spatially
-- [format command](format.md) - Apply formatting to existing files
-- [check command](check.md) - Validate GeoParquet best practices
+- [check command](check.md) - Validate and fix GeoParquet files

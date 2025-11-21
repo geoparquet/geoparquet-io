@@ -93,6 +93,54 @@ class TestAddCommands:
         # Should fail with non-zero exit code
         assert result.exit_code != 0
 
+    def test_add_bbox_with_metadata_always_added(self, buildings_test_file, temp_output_file):
+        """Test that bbox metadata is automatically added."""
+        import json
+
+        import pyarrow.parquet as pq
+
+        runner = CliRunner()
+        result = runner.invoke(add, ["bbox", buildings_test_file, temp_output_file])
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+
+        # Verify bbox metadata was added automatically
+        pf = pq.ParquetFile(temp_output_file)
+        metadata = pf.schema_arrow.metadata
+        assert b"geo" in metadata
+
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+
+        # Verify bbox covering metadata exists
+        assert "columns" in geo_meta
+        assert "geometry" in geo_meta["columns"]
+        assert "covering" in geo_meta["columns"]["geometry"]
+        assert "bbox" in geo_meta["columns"]["geometry"]["covering"]
+
+    def test_add_bbox_metadata_to_existing_bbox(self, temp_output_dir):
+        """Test add bbox-metadata command for files with bbox column."""
+        import shutil
+
+        # Use places file which has a bbox column
+        from pathlib import Path
+
+        places_path = Path(__file__).parent / "data" / "places_test.parquet"
+        temp_file = os.path.join(temp_output_dir, "places_copy.parquet")
+        shutil.copy2(places_path, temp_file)
+
+        runner = CliRunner()
+        result = runner.invoke(add, ["bbox-metadata", temp_file])
+        assert result.exit_code == 0
+        # Should either add metadata or report it already exists
+        assert "Added bbox covering metadata" in result.output or "already exists" in result.output
+
+    def test_add_bbox_metadata_no_bbox_column(self, buildings_test_file):
+        """Test add bbox-metadata when there's no bbox column."""
+        runner = CliRunner()
+        result = runner.invoke(add, ["bbox-metadata", buildings_test_file])
+        # Should warn that no bbox column exists
+        assert "No valid bbox column found" in result.output
+
     # H3 tests
     def test_add_h3_to_buildings(self, buildings_test_file, temp_output_file):
         """Test adding H3 column to buildings file."""

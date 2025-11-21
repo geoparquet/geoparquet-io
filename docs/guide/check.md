@@ -83,6 +83,6 @@ gpio check spatial myfile.parquet --random-sample-size 200 --limit-rows 1000000
 ## See Also
 
 - [CLI Reference: check](../cli/check.md)
-- [format command](format.md)
+- [add command](add.md) - Add spatial indices
 - [sort command](sort.md)
 - [stac command](stac.md) - Generate STAC metadata

@@ -29,6 +29,9 @@ def add_bbox_column(
         compression_level: Compression level (varies by format)
         row_group_size_mb: Target row group size in MB
         row_group_rows: Exact number of rows per row group
+
+    Note:
+        Bbox covering metadata is automatically added when the file is written.
     """
     # Get geometry column for the SQL expression
     geom_col = find_primary_geometry_column(input_parquet, verbose)
@@ -42,6 +45,8 @@ def add_bbox_column(
     )"""
 
     # Use the generic helper for all boilerplate
+    # Note: write_parquet_with_metadata automatically adds bbox covering metadata
+    # when a bbox column is detected
     add_computed_column(
         input_parquet=input_parquet,
         output_parquet=output_parquet,

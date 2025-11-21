@@ -62,11 +62,10 @@ New to geoparquet-io? Start here:
 
 - [convert](cli/convert.md) - Convert vector formats to optimized GeoParquet
 - [inspect](cli/inspect.md) - Examine file metadata and preview data
-- [check](cli/check.md) - Validate files against best practices
+- [check](cli/check.md) - Validate files and fix issues automatically
 - [sort](cli/sort.md) - Spatially sort using Hilbert curves
 - [add](cli/add.md) - Enhance files with spatial indices
 - [partition](cli/partition.md) - Split files into optimized partitions
-- [format](cli/format.md) - Apply formatting best practices
 
 ## Support
 

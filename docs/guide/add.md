@@ -10,7 +10,7 @@ Add precomputed bounding boxes for faster spatial queries:
 gpio add bbox input.parquet output.parquet
 ```
 
-Creates a struct column with `{xmin, ymin, xmax, ymax}` for each feature and adds proper bbox covering metadata.
+Creates a struct column with `{xmin, ymin, xmax, ymax}` for each feature. Bbox covering metadata is automatically added to comply with GeoParquet 1.1 spec.
 
 **Options:**
 
@@ -24,6 +24,16 @@ gpio add bbox input.parquet output.parquet --compression ZSTD --compression-leve
 # Dry run (preview SQL)
 gpio add bbox input.parquet output.parquet --dry-run
 ```
+
+### Add Bbox Metadata Only
+
+If your file already has a bbox column but lacks covering metadata (e.g., from external tools):
+
+```bash
+gpio add bbox-metadata myfile.parquet
+```
+
+This modifies the file in-place to add only the metadata, without creating a new file.
 
 ## H3 Hexagonal Cells
 
