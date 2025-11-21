@@ -1556,5 +1556,106 @@ def check_stac_cmd(stac_file, verbose):
     check_stac(stac_file, verbose)
 
 
+# Benchmark command
+@cli.command()
+@click.argument("input_file", type=click.Path(exists=True))
+@click.option(
+    "--iterations",
+    default=3,
+    type=int,
+    help="Number of iterations per converter (default: 3)",
+)
+@click.option(
+    "--converters",
+    help="Comma-separated list of converters to run (default: all available)",
+)
+@click.option(
+    "--output-json",
+    type=click.Path(),
+    help="Save results to JSON file",
+)
+@click.option(
+    "--keep-output",
+    type=click.Path(),
+    help="Directory to save converted files (default: temp dir, cleaned up)",
+)
+@click.option(
+    "--warmup/--no-warmup",
+    default=True,
+    help="Run warmup iteration before timing (default: enabled)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Output format (default: table)",
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    help="Suppress progress output, show only results",
+)
+def benchmark(
+    input_file,
+    iterations,
+    converters,
+    output_json,
+    keep_output,
+    warmup,
+    output_format,
+    quiet,
+):
+    """
+    Benchmark GeoParquet conversion performance.
+
+    Tests different conversion methods (DuckDB, GeoPandas, GDAL) on an input
+    geospatial file and reports time and memory usage.
+
+    Available converters:
+
+      \b
+      - duckdb: DuckDB spatial extension (always available)
+      - geopandas_fiona: GeoPandas with Fiona engine
+      - geopandas_pyogrio: GeoPandas with PyOGRIO engine
+      - gdal_ogr2ogr: GDAL ogr2ogr CLI
+
+    Examples:
+
+      \b
+      # Basic benchmark with all available converters
+      gpio benchmark input.geojson
+
+      \b
+      # Run specific converters with more iterations
+      gpio benchmark input.shp --converters duckdb,geopandas_pyogrio --iterations 5
+
+      \b
+      # Save results to JSON and keep converted files
+      gpio benchmark input.gpkg --output-json results.json --keep-output ./output
+
+      \b
+      # JSON output format
+      gpio benchmark input.geojson --format json
+    """
+    from geoparquet_io.core.benchmark import run_benchmark
+
+    # Parse converters string to list
+    converter_list = None
+    if converters:
+        converter_list = [c.strip() for c in converters.split(",")]
+
+    run_benchmark(
+        input_file=input_file,
+        iterations=iterations,
+        converters=converter_list,
+        output_json=output_json,
+        keep_output=keep_output,
+        warmup=warmup,
+        output_format=output_format,
+        quiet=quiet,
+    )
+
+
 if __name__ == "__main__":
     cli()

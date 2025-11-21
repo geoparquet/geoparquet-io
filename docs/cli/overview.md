@@ -20,6 +20,7 @@ gpio [OPTIONS] COMMAND [ARGS]...
 - **[partition](partition.md)** - Split files into optimized partitions
 - **[format](format.md)** - Apply formatting best practices
 - **[stac](stac.md)** - Generate STAC metadata for datasets
+- **[benchmark](benchmark.md)** - Compare conversion performance
 
 ## Global Options
 
