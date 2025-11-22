@@ -48,10 +48,35 @@ def cli():
     pass
 
 
-# Check commands group
-@cli.group()
+# Check commands group - use custom command class for default subcommand
+class DefaultGroup(click.Group):
+    """Custom Group that invokes a default command when no subcommand is provided."""
+
+    def parse_args(self, ctx, args):
+        # Special case: if --help is in args and no subcommand, show group help
+        if "--help" in args and (not args or args[0] not in self.commands):
+            # Remove --help and let the group handle it
+            return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
+
+        # Check if first arg (if it exists and doesn't start with -) is a known subcommand
+        if args and not args[0].startswith("-") and args[0] in self.commands:
+            # Normal subcommand - use default parsing
+            return super().parse_args(ctx, args)
+
+        # No subcommand or unknown subcommand - default to 'all'
+        # Insert 'all' as the subcommand
+        return super().parse_args(ctx, ["all"] + args)
+
+
+@cli.group(cls=DefaultGroup)
 def check():
-    """Check GeoParquet files for best practices."""
+    """Check GeoParquet files for best practices.
+
+    By default, runs all checks (compression, bbox, row groups, and spatial order).
+    Use subcommands for specific checks.
+
+    When run without a subcommand, all checks are performed. Options like --fix
+    can be used directly without specifying 'all'."""
     pass
 
 

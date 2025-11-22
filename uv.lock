@@ -1019,17 +1019,12 @@ dependencies = [
     { name = "jsonschema" },
     { name = "obstore" },
     { name = "pandas" },
-    { name = "pre-commit", version = "4.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "pre-commit", version = "4.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "pystac", version = "1.10.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pystac", version = "1.14.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-    { name = "radon" },
     { name = "rich" },
     { name = "s3fs" },
-    { name = "vulture" },
-    { name = "xenon" },
 ]
 
 [package.optional-dependencies]
@@ -1046,7 +1041,10 @@ dev = [
     { name = "pytest", version = "8.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pytest", version = "9.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "pytest-cov" },
+    { name = "radon" },
     { name = "ruff" },
+    { name = "vulture" },
+    { name = "xenon" },
 ]
 docs = [
     { name = "mkdocs" },
@@ -1069,20 +1067,19 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "obstore", specifier = ">=0.8.2" },
     { name = "pandas", specifier = ">=1.0.0" },
-    { name = "pre-commit", specifier = ">=4.3.0" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0.0" },
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.3.0" },
     { name = "psutil", specifier = ">=5.9.0" },
-    { name = "pyarrow", specifier = "==21.0.0" },
+    { name = "pyarrow", specifier = ">=12.0.0,<22.0.0" },
     { name = "pyogrio", marker = "extra == 'benchmark'", specifier = ">=0.7.0" },
     { name = "pystac", specifier = ">=1.9.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "radon", specifier = ">=6.0.1" },
+    { name = "radon", marker = "extra == 'dev'", specifier = ">=6.0.1" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "s3fs", specifier = ">=2023.9.0" },
-    { name = "vulture", specifier = ">=2.14" },
-    { name = "xenon", specifier = ">=0.9.3" },
+    { name = "vulture", marker = "extra == 'dev'", specifier = ">=2.14" },
+    { name = "xenon", marker = "extra == 'dev'", specifier = ">=0.9.3" },
 ]
 provides-extras = ["dev", "docs", "benchmark"]
 
