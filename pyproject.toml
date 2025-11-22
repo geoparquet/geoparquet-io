@@ -33,15 +33,11 @@ dependencies = [
     "pandas>=1.0.0",
     "fsspec>=2023.9.0",
     "rich>=13.0.0",
-    "pre-commit>=4.3.0",
-    "vulture>=2.14",
-    "radon>=6.0.1",
-    "xenon>=0.9.3",
     "pystac>=1.9.0",
-    "jsonschema>=4.0.0", # Required for pystac validation
+    "jsonschema>=4.0.0",  # Required for pystac validation
     "psutil>=5.9.0",
     "obstore>=0.8.2",
-    "aiohttp>=3.8.0",  # Required by fsspec for HTTP/HTTPS support (requests comes via xenon)
+    "aiohttp>=3.8.0",  # Required by fsspec for HTTP/HTTPS support
     "s3fs>=2023.9.0"  # Required by fsspec for S3 support
 ]
 
@@ -60,8 +56,11 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.8.0",
-    "pre-commit>=3.0.0",
+    "pre-commit>=4.3.0",
     "mypy>=1.0.0",
+    "vulture>=2.14",
+    "radon>=6.0.1",
+    "xenon>=0.9.3",
 ]
 docs = [
     "mkdocs>=1.5.0",
