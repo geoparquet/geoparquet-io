@@ -1959,17 +1959,20 @@ def upload(
       # Stop on first error instead of continuing
       gpio upload output/ s3://bucket/dataset/ --fail-fast
     """
-    upload_impl(
-        source=source,
-        destination=destination,
-        profile=profile,
-        pattern=pattern,
-        max_files=max_files,
-        chunk_concurrency=chunk_concurrency,
-        chunk_size=chunk_size,
-        fail_fast=fail_fast,
-        dry_run=dry_run,
-    )
+    try:
+        upload_impl(
+            source=source,
+            destination=destination,
+            profile=profile,
+            pattern=pattern,
+            max_files=max_files,
+            chunk_concurrency=chunk_concurrency,
+            chunk_size=chunk_size,
+            fail_fast=fail_fast,
+            dry_run=dry_run,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
 
 if __name__ == "__main__":
