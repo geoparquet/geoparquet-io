@@ -8,15 +8,23 @@ import duckdb
 
 from geoparquet_io.core.common import (
     format_size,
+    get_duckdb_connection,
+    get_remote_error_hint,
+    is_remote_url,
+    needs_httpfs,
+    safe_file_url,
     write_parquet_with_metadata,
 )
 
 
 def _validate_inputs(input_file, output_file):
     """Validate input file and output directory."""
-    if not os.path.exists(input_file):
-        raise click.ClickException(f"Input file not found: {input_file}")
+    # Only check existence for local files - remote files validated by DuckDB
+    if not is_remote_url(input_file):
+        if not os.path.exists(input_file):
+            raise click.ClickException(f"Input file not found: {input_file}")
 
+    # Output directory must always be local
     output_dir = os.path.dirname(output_file) or "."
     if not os.path.exists(output_dir):
         raise click.ClickException(f"Output directory not found: {output_dir}")
@@ -24,24 +32,27 @@ def _validate_inputs(input_file, output_file):
         raise click.ClickException(f"No write permission for: {output_dir}")
 
 
-def _setup_duckdb():
-    """Create and configure DuckDB connection."""
-    con = duckdb.connect()
+def _setup_duckdb(input_file):
+    """Create and configure DuckDB connection with appropriate extensions."""
     try:
-        con.execute("INSTALL spatial;")
-        con.execute("LOAD spatial;")
+        # Load httpfs only if needed for remote files
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
         return con
     except Exception as e:
-        con.close()
-        raise click.ClickException(f"Failed to load DuckDB spatial extension: {str(e)}") from e
+        raise click.ClickException(f"Failed to load DuckDB extensions: {str(e)}") from e
 
 
-def _detect_geometry_column(con, input_file, verbose):
+def _detect_geometry_column(con, input_file, verbose, is_parquet=False):
     """Detect geometry column name from input file."""
     if verbose:
         click.echo("Detecting geometry column from input...")
 
-    detect_query = f"SELECT * FROM ST_Read('{input_file}') LIMIT 0"
+    # For parquet files, read directly; for other formats use ST_Read
+    if is_parquet:
+        detect_query = f"SELECT * FROM read_parquet('{input_file}') LIMIT 0"
+    else:
+        detect_query = f"SELECT * FROM ST_Read('{input_file}') LIMIT 0"
+
     schema_result = con.execute(detect_query).description
 
     for col_info in schema_result:
@@ -57,10 +68,16 @@ def _detect_geometry_column(con, input_file, verbose):
     )
 
 
-def _calculate_bounds(con, input_file, geom_column, verbose):
+def _calculate_bounds(con, input_file, geom_column, verbose, is_parquet=False):
     """Calculate dataset bounds from input file."""
     if verbose:
         click.echo("Calculating dataset bounds...")
+
+    # For parquet files, read directly; for other formats use ST_Read
+    if is_parquet:
+        table_expr = f"read_parquet('{input_file}')"
+    else:
+        table_expr = f"ST_Read('{input_file}')"
 
     bounds_query = f"""
         SELECT
@@ -68,7 +85,7 @@ def _calculate_bounds(con, input_file, geom_column, verbose):
             MIN(ST_YMin({geom_column})) as ymin,
             MAX(ST_XMax({geom_column})) as xmax,
             MAX(ST_YMax({geom_column})) as ymax
-        FROM ST_Read('{input_file}')
+        FROM {table_expr}
     """
     bounds_result = con.execute(bounds_query).fetchone()
 
@@ -86,6 +103,14 @@ def _is_csv_file(input_file):
     """Check if input file is CSV/TSV format."""
     ext = os.path.splitext(input_file)[1].lower()
     return ext in [".csv", ".tsv", ".txt"]
+
+
+def _is_parquet_file(input_file):
+    """Check if input file is already Parquet format."""
+    # Handle URLs by extracting path before query params
+    path = input_file.split("?")[0]
+    ext = os.path.splitext(path)[1].lower()
+    return ext == ".parquet"
 
 
 def _build_csv_read_expr(input_file, delimiter):
@@ -521,8 +546,14 @@ def _calculate_csv_bounds(con, geom_info, skip_invalid, verbose):
     return bounds_result
 
 
-def _build_conversion_query(input_file, geom_column, skip_hilbert, bounds=None):
+def _build_conversion_query(input_file, geom_column, skip_hilbert, bounds=None, is_parquet=False):
     """Build SQL query for conversion with optional Hilbert ordering."""
+    # For parquet files, read directly; for other formats use ST_Read
+    if is_parquet:
+        table_expr = f"read_parquet('{input_file}')"
+    else:
+        table_expr = f"ST_Read('{input_file}')"
+
     base_select = f"""
         SELECT
             * EXCLUDE ({geom_column}),
@@ -533,7 +564,7 @@ def _build_conversion_query(input_file, geom_column, skip_hilbert, bounds=None):
                 xmax := ST_XMax({geom_column}),
                 ymax := ST_YMax({geom_column})
             ) AS bbox
-        FROM ST_Read('{input_file}')
+        FROM {table_expr}
     """
 
     if skip_hilbert:
@@ -602,11 +633,15 @@ def _convert_csv_path(
     return _build_csv_conversion_query(geom_info, effective_skip_hilbert, bounds, skip_invalid)
 
 
-def _convert_spatial_path(con, input_file, skip_hilbert, verbose):
+def _convert_spatial_path(con, input_file, skip_hilbert, verbose, is_parquet=False):
     """Handle standard spatial format conversion path. Returns SQL query."""
-    geom_column = _detect_geometry_column(con, input_file, verbose)
+    geom_column = _detect_geometry_column(con, input_file, verbose, is_parquet=is_parquet)
 
-    bounds = None if skip_hilbert else _calculate_bounds(con, input_file, geom_column, verbose)
+    bounds = (
+        None
+        if skip_hilbert
+        else _calculate_bounds(con, input_file, geom_column, verbose, is_parquet=is_parquet)
+    )
 
     if verbose:
         msg = "Reading input and adding bbox column..."
@@ -614,7 +649,9 @@ def _convert_spatial_path(con, input_file, skip_hilbert, verbose):
             msg = "Pass 1: Reading input, adding bbox, and applying Hilbert ordering..."
         click.echo(msg)
 
-    return _build_conversion_query(input_file, geom_column, skip_hilbert, bounds)
+    return _build_conversion_query(
+        input_file, geom_column, skip_hilbert, bounds, is_parquet=is_parquet
+    )
 
 
 def convert_to_geoparquet(
@@ -663,18 +700,28 @@ def convert_to_geoparquet(
     start_time = time.time()
 
     _validate_inputs(input_file, output_file)
+
+    # Show single progress message for remote files
+    if is_remote_url(input_file):
+        protocol = input_file.split("://")[0].upper() if "://" in input_file else "HTTP"
+        click.echo(f"📡 Reading from {protocol} (network operation may take time)...")
+
+    # Get safe URL for remote files (handles URL encoding) or validates local files
+    input_url = safe_file_url(input_file, verbose)
+
     click.echo(f"Converting {input_file}...")
 
-    con = _setup_duckdb()
+    con = _setup_duckdb(input_file)
 
-    # Check if input is CSV/TSV
+    # Check input file type
     is_csv = _is_csv_file(input_file)
+    is_parquet = _is_parquet_file(input_file)
 
     try:
         if is_csv:
             query = _convert_csv_path(
                 con,
-                input_file,
+                input_url,
                 delimiter,
                 wkt_column,
                 lat_column,
@@ -685,7 +732,9 @@ def convert_to_geoparquet(
                 verbose,
             )
         else:
-            query = _convert_spatial_path(con, input_file, skip_hilbert, verbose)
+            query = _convert_spatial_path(
+                con, input_url, skip_hilbert, verbose, is_parquet=is_parquet
+            )
 
         write_parquet_with_metadata(
             con,
@@ -708,7 +757,15 @@ def convert_to_geoparquet(
 
     except duckdb.IOException as e:
         con.close()
-        raise click.ClickException(f"Failed to read input file: {str(e)}") from e
+        error_msg = str(e)
+        # Provide helpful hints for remote file errors
+        if is_remote_url(input_file):
+            hints = get_remote_error_hint(error_msg, input_file)
+            raise click.ClickException(
+                f"Failed to read remote file.\n\n{hints}\n\nOriginal error: {error_msg}"
+            ) from e
+        else:
+            raise click.ClickException(f"Failed to read input file: {error_msg}") from e
 
     except duckdb.BinderException as e:
         con.close()

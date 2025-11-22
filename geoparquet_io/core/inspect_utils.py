@@ -52,7 +52,10 @@ def extract_file_info(parquet_file: str) -> dict[str, Any]:
                 compression = column.compression
 
     # Get file size - handle both local and remote files
-    if parquet_file.startswith(("http://", "https://")):
+    # Import here to avoid circular import
+    from geoparquet_io.core.common import is_remote_url
+
+    if is_remote_url(parquet_file):
         # For remote files, approximate from metadata
         size_bytes = None
         size_human = "N/A (remote)"

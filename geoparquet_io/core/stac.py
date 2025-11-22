@@ -16,6 +16,7 @@ from geoparquet_io.core.common import (
     find_primary_geometry_column,
     get_dataset_bounds,
     get_parquet_metadata,
+    is_remote_url,
     parse_geo_metadata,
 )
 
@@ -337,6 +338,20 @@ def generate_stac_item(
     Returns:
         STAC Item as dict (pystac.Item.to_dict())
     """
+    # TODO: Consider supporting remote files in the future if there's demand.
+    # This would require careful consideration of:
+    # - Asset hrefs pointing to files user may not control
+    # - Mixed local/remote semantics in STAC catalogs
+    # - Use cases: cataloging public datasets vs. self-owned data
+    # For now, blocking to avoid confusing semantics and edge cases.
+    if is_remote_url(parquet_file):
+        raise click.ClickException(
+            "STAC generation requires local parquet files.\n"
+            "Remote files cannot be cataloged because STAC asset hrefs would reference "
+            "files you may not control.\n"
+            "Download the file first or use 'gpio convert' to create a local copy."
+        )
+
     if verbose:
         click.echo(f"Generating STAC Item for {parquet_file}")
 
@@ -491,6 +506,15 @@ def generate_stac_collection(
     Returns:
         Tuple of (collection_dict, list_of_item_dicts)
     """
+    # Collections require local directory structure
+    # Remote directories don't make sense for STAC generation
+    if is_remote_url(partition_dir):
+        raise click.ClickException(
+            "STAC collection generation requires a local directory.\n"
+            "Remote directories cannot be cataloged.\n"
+            "Download the files first or partition a local dataset."
+        )
+
     if verbose:
         click.echo(f"Generating STAC Collection for {partition_dir}")
 

@@ -6,6 +6,9 @@ The `inspect` command provides quick, human-readable summaries of GeoParquet fil
 
 ```bash
 gpio inspect data.parquet
+
+# Or inspect remote file
+gpio inspect s3://bucket/data.parquet
 ```
 
 Shows:

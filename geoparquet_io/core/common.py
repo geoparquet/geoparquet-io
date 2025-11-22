@@ -9,19 +9,167 @@ import fsspec
 import pyarrow.parquet as pq
 
 
+def is_remote_url(path):
+    """
+    Check if path is a remote URL that DuckDB can read.
+
+    Supports:
+    - HTTP/HTTPS: http://, https://
+    - AWS S3: s3://, s3a://
+    - Azure: az://, azure://, abfs://, abfss://
+    - Google Cloud Storage: gs://, gcs://
+
+    Args:
+        path: File path or URL to check
+
+    Returns:
+        bool: True if path is a remote URL, False otherwise
+    """
+    remote_schemes = [
+        "http://",
+        "https://",
+        "s3://",
+        "s3a://",
+        "gs://",
+        "gcs://",
+        "az://",
+        "azure://",
+        "abfs://",
+        "abfss://",
+    ]
+    return any(path.startswith(scheme) for scheme in remote_schemes)
+
+
+def needs_httpfs(path):
+    """
+    Check if path requires httpfs extension (S3, Azure, GCS).
+
+    HTTP/HTTPS work without httpfs, but cloud storage protocols need it.
+
+    Args:
+        path: File path or URL to check
+
+    Returns:
+        bool: True if httpfs extension is needed
+    """
+    httpfs_schemes = [
+        "s3://",
+        "s3a://",
+        "gs://",
+        "gcs://",
+        "az://",
+        "azure://",
+        "abfs://",
+        "abfss://",
+    ]
+    return any(path.startswith(scheme) for scheme in httpfs_schemes)
+
+
+def get_duckdb_connection(load_spatial=True, load_httpfs=None):
+    """
+    Create a DuckDB connection with necessary extensions loaded.
+
+    Args:
+        load_spatial: Whether to load spatial extension (default: True)
+        load_httpfs: Whether to load httpfs extension for S3/Azure/GCS.
+                    If None (default), auto-detects based on usage.
+
+    Returns:
+        duckdb.DuckDBPyConnection: Configured connection
+    """
+    con = duckdb.connect()
+
+    # Always load spatial extension by default (core use case)
+    if load_spatial:
+        con.execute("INSTALL spatial;")
+        con.execute("LOAD spatial;")
+
+    # Load httpfs for cloud storage support
+    if load_httpfs:
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
+
+    return con
+
+
 def safe_file_url(file_path, verbose=False):
-    """Handle both local and remote files, returning safe URL."""
-    if file_path.startswith(("http://", "https://")):
-        parsed = urllib.parse.urlparse(file_path)
-        encoded_path = urllib.parse.quote(parsed.path)
-        safe_url = parsed._replace(path=encoded_path).geturl()
+    """
+    Handle both local and remote files, returning safe URL.
+
+    For remote URLs, performs URL encoding if needed.
+    For local files, validates existence.
+
+    Args:
+        file_path: Local file path or remote URL
+        verbose: Whether to print verbose output
+
+    Returns:
+        str: Safe URL or file path
+
+    Raises:
+        click.BadParameter: If local file doesn't exist
+    """
+    if is_remote_url(file_path):
+        # Remote URL - URL encode if HTTP/HTTPS
+        if file_path.startswith(("http://", "https://")):
+            parsed = urllib.parse.urlparse(file_path)
+            encoded_path = urllib.parse.quote(parsed.path)
+            safe_url = parsed._replace(path=encoded_path).geturl()
+        else:
+            safe_url = file_path
+
         if verbose:
-            click.echo(f"Reading remote file: {safe_url}")
+            protocol = file_path.split("://")[0].upper() if "://" in file_path else "HTTP"
+            click.echo(f"Reading from {protocol}: {safe_url}")
+        return safe_url
     else:
+        # Local file - check existence
         if not os.path.exists(file_path):
             raise click.BadParameter(f"Local file not found: {file_path}")
-        safe_url = file_path
-    return safe_url
+        return file_path
+
+
+def get_remote_error_hint(error_msg, file_path=""):
+    """
+    Generate helpful error messages for remote file access failures.
+
+    Args:
+        error_msg: Original error message from DuckDB or other library
+        file_path: The remote file path/URL that failed
+
+    Returns:
+        str: User-friendly error message with troubleshooting hints
+    """
+    # Simple pattern matching - check error type and return appropriate hint
+    error_lower = error_msg.lower()
+    path_lower = file_path.lower()
+
+    # Check for 403/auth errors
+    auth_error = "403" in error_msg or "forbidden" in error_lower or "access denied" in error_lower
+    if auth_error:
+        if "s3://" in path_lower:
+            return "Authentication required or access denied:\n  • S3: Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables\n  • Or configure ~/.aws/credentials file"
+        if "az://" in path_lower or "azure" in path_lower or "blob.core" in path_lower:
+            return "Authentication required or access denied:\n  • Azure: Check AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY\n  • Or set AZURE_STORAGE_SAS_TOKEN for SAS token auth"
+        if "gs://" in path_lower or "gcs://" in path_lower:
+            return "Authentication required or access denied:\n  • GCS: Check GOOGLE_APPLICATION_CREDENTIALS points to service account JSON"
+        return "Authentication required or access denied:\n  • File may be private or require authentication"
+
+    # Check for 404 errors
+    if "404" in error_msg or "not found" in error_lower or "does not exist" in error_lower:
+        base = "File not found at remote location:\n  • Verify the URL is correct\n  • Check the file exists at the specified path"
+        return f"{base}\n  • URL: {file_path}" if file_path else base
+
+    # Check for timeout
+    if "timeout" in error_lower or "timed out" in error_lower:
+        return "Connection timed out:\n  • Check network connectivity\n  • File may be very large - try a smaller file first\n  • Remote server may be slow or overloaded"
+
+    # Check for connection issues
+    if "unable to connect" in error_lower or "connection" in error_lower:
+        return "Cannot connect to remote server:\n  • Check network connectivity\n  • Verify the hostname/URL is correct\n  • Server may be down or unreachable"
+
+    # Generic
+    return "Remote file access failed:\n  • Check network connectivity\n  • Verify file URL and access permissions"
 
 
 def get_parquet_metadata(parquet_file, verbose=False):
@@ -661,10 +809,8 @@ def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
     # Check for bbox column
     bbox_info = check_bbox_structure(parquet_file, verbose)
 
-    # Create DuckDB connection
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    # Create DuckDB connection with httpfs if needed
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
     try:
         if bbox_info["has_bbox_column"]:
@@ -818,10 +964,8 @@ def add_computed_column(
         if verbose:
             click.echo(f"Adding column '{column_name}'...")
 
-    # Create DuckDB connection and load extensions
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    # Create DuckDB connection with httpfs if needed
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
     # Load additional extensions if specified
     if extensions:
