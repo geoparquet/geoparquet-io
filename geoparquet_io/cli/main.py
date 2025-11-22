@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import click
 
 from geoparquet_io.cli.decorators import (
@@ -33,6 +35,7 @@ from geoparquet_io.core.partition_by_kdtree import partition_by_kdtree as partit
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
+from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
 __version__ = "0.4.0"
@@ -1897,6 +1900,69 @@ def benchmark(
         warmup=warmup,
         output_format=output_format,
         quiet=quiet,
+    )
+
+
+@cli.command()
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("destination", type=str)
+@click.option("--profile", help="AWS profile name (S3 only)")
+@click.option("--pattern", help="Glob pattern for filtering files (e.g., '*.parquet', '**/*.json')")
+@click.option(
+    "--max-files", default=4, show_default=True, help="Max parallel file uploads for directories"
+)
+@click.option(
+    "--chunk-concurrency",
+    default=12,
+    show_default=True,
+    help="Max concurrent chunks per file",
+)
+@click.option("--chunk-size", type=int, help="Chunk size in bytes for multipart uploads")
+@click.option("--fail-fast", is_flag=True, help="Stop immediately on first error")
+@dry_run_option
+def upload(
+    source,
+    destination,
+    profile,
+    pattern,
+    max_files,
+    chunk_concurrency,
+    chunk_size,
+    fail_fast,
+    dry_run,
+):
+    """Upload file or directory to object storage.
+
+    Supports S3, GCS, Azure, and HTTP destinations. Automatically handles
+    multipart uploads and preserves directory structure.
+
+    \b
+    Examples:
+      # Single file to S3
+      gpio upload data.parquet s3://bucket/path/data.parquet --profile source-coop
+
+      \b
+      # Directory to GCS (preserves structure, uploads files in parallel)
+      gpio upload output/ gs://bucket/dataset/
+
+      \b
+      # Only parquet files with increased parallelism
+      gpio upload output/ s3://bucket/dataset/ --pattern "*.parquet" --max-files 8
+
+      \b
+      # Stop on first error instead of continuing
+      gpio upload output/ s3://bucket/dataset/ --fail-fast
+    """
+    upload_impl(
+        source=source,
+        destination=destination,
+        profile=profile,
+        pattern=pattern,
+        max_files=max_files,
+        chunk_concurrency=chunk_concurrency,
+        chunk_size=chunk_size,
+        fail_fast=fail_fast,
+        dry_run=dry_run,
     )
 
 
