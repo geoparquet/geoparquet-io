@@ -701,6 +701,11 @@ def convert_to_geoparquet(
 
     _validate_inputs(input_file, output_file)
 
+    # Show single progress message for remote files
+    if is_remote_url(input_file):
+        protocol = input_file.split("://")[0].upper() if "://" in input_file else "HTTP"
+        click.echo(f"📡 Reading from {protocol} (network operation may take time)...")
+
     # Get safe URL for remote files (handles URL encoding) or validates local files
     input_url = safe_file_url(input_file, verbose)
 

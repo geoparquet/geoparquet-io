@@ -1,5 +1,7 @@
 """Tests for remote file support (HTTPS, S3, Azure, GCS)."""
 
+import os
+
 import pytest
 from click import BadParameter
 
@@ -146,9 +148,6 @@ class TestRemoteFileReading:
         assert "POLYGON" in geom_types or "MULTIPOLYGON" in geom_types
 
 
-import os
-
-
 @pytest.mark.network
 @pytest.mark.skipif(
     not (
@@ -202,10 +201,134 @@ class TestGetDuckDBConnection:
 
     def test_get_connection_no_spatial(self):
         """Test connection without spatial."""
+        import duckdb
+
         from geoparquet_io.core.common import get_duckdb_connection
 
         con = get_duckdb_connection(load_spatial=False)
         # Spatial functions should not work
-        with pytest.raises(Exception):
+        with pytest.raises(duckdb.CatalogException):
             con.execute("SELECT ST_Point(0, 0)").fetchone()
         con.close()
+
+
+class TestRemoteErrorHints:
+    """Test error hint generation for remote file failures."""
+
+    def test_get_remote_error_hint_403_s3(self):
+        """Test hint for S3 403 Forbidden error."""
+        from geoparquet_io.core.common import get_remote_error_hint
+
+        hint = get_remote_error_hint("403 Forbidden", "s3://bucket/file.parquet")
+        assert "AWS_ACCESS_KEY_ID" in hint
+        assert "AWS_SECRET_ACCESS_KEY" in hint
+
+    def test_get_remote_error_hint_403_azure(self):
+        """Test hint for Azure 403 error."""
+        from geoparquet_io.core.common import get_remote_error_hint
+
+        hint = get_remote_error_hint("Access Denied", "az://container/file.parquet")
+        assert "AZURE_STORAGE_ACCOUNT_NAME" in hint
+        assert "AZURE_STORAGE_ACCOUNT_KEY" in hint
+
+    def test_get_remote_error_hint_403_gcs(self):
+        """Test hint for GCS 403 error."""
+        from geoparquet_io.core.common import get_remote_error_hint
+
+        hint = get_remote_error_hint("Forbidden", "gs://bucket/file.parquet")
+        assert "GOOGLE_APPLICATION_CREDENTIALS" in hint
+
+    def test_get_remote_error_hint_404(self):
+        """Test hint for 404 Not Found error."""
+        from geoparquet_io.core.common import get_remote_error_hint
+
+        hint = get_remote_error_hint("404 Not Found", "https://example.com/file.parquet")
+        assert "not found" in hint.lower()
+        assert "verify" in hint.lower() or "check" in hint.lower()
+
+    def test_get_remote_error_hint_timeout(self):
+        """Test hint for timeout error."""
+        from geoparquet_io.core.common import get_remote_error_hint
+
+        hint = get_remote_error_hint("Connection timed out", "https://example.com/file.parquet")
+        assert "timed out" in hint.lower()
+        assert "network" in hint.lower()
+
+    def test_get_remote_error_hint_connection(self):
+        """Test hint for connection error."""
+        from geoparquet_io.core.common import get_remote_error_hint
+
+        hint = get_remote_error_hint("Unable to connect", "https://example.com/file.parquet")
+        assert "connect" in hint.lower()
+        assert "network" in hint.lower()
+
+
+class TestConvertRemoteParquet:
+    """Test convert functionality with remote parquet files."""
+
+    def test_is_parquet_file(self):
+        """Test parquet file detection."""
+        from geoparquet_io.core.convert import _is_parquet_file
+
+        assert _is_parquet_file("file.parquet")
+        assert _is_parquet_file("https://example.com/file.parquet")
+        assert _is_parquet_file("s3://bucket/file.parquet")
+        assert _is_parquet_file("https://example.com/file.parquet?query=param")
+        assert not _is_parquet_file("file.geojson")
+        assert not _is_parquet_file("file.csv")
+
+    @pytest.mark.network
+    def test_convert_remote_parquet(self, tmp_path):
+        """Test converting remote parquet file."""
+        from geoparquet_io.core.convert import convert_to_geoparquet
+
+        output = tmp_path / "output.parquet"
+        url = "https://github.com/opengeospatial/geoparquet/raw/refs/heads/main/examples/example.parquet"
+
+        convert_to_geoparquet(
+            input_file=url, output_file=str(output), skip_hilbert=True, verbose=False
+        )
+
+        assert output.exists()
+        assert output.stat().st_size > 0
+
+
+class TestSTACRemoteBlocking:
+    """Test STAC generation blocks remote files appropriately."""
+
+    def test_stac_item_blocks_remote_https(self):
+        """Test STAC item generation blocks HTTPS URLs."""
+        from click import ClickException
+
+        from geoparquet_io.core.stac import generate_stac_item
+
+        with pytest.raises(ClickException, match="STAC generation requires local"):
+            generate_stac_item(
+                parquet_file="https://example.com/file.parquet",
+                bucket_prefix="s3://bucket/",
+                verbose=False,
+            )
+
+    def test_stac_item_blocks_remote_s3(self):
+        """Test STAC item generation blocks S3 URLs."""
+        from click import ClickException
+
+        from geoparquet_io.core.stac import generate_stac_item
+
+        with pytest.raises(ClickException, match="STAC generation requires local"):
+            generate_stac_item(
+                parquet_file="s3://bucket/file.parquet", bucket_prefix="s3://bucket/", verbose=False
+            )
+
+    def test_stac_collection_blocks_remote(self):
+        """Test STAC collection generation blocks remote directories."""
+        from click import ClickException
+
+        from geoparquet_io.core.stac import generate_stac_collection
+
+        with pytest.raises(ClickException, match="requires a local directory"):
+            generate_stac_collection(
+                partition_dir="s3://bucket/partitions/",
+                bucket_prefix="s3://bucket/",
+                verbose=False,
+            )

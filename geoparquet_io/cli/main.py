@@ -87,6 +87,12 @@ def check_all(parquet_file, verbose, fix, fix_output, no_backup, random_sample_s
     import shutil
 
     from geoparquet_io.core.check_fixes import apply_all_fixes
+    from geoparquet_io.core.common import is_remote_url
+
+    # Show single progress message for remote files
+    if is_remote_url(parquet_file):
+        protocol = parquet_file.split("://")[0].upper() if "://" in parquet_file else "HTTP"
+        click.echo(f"📡 Reading from {protocol} (network operations may take time)...\n")
 
     # Run all checks and collect results
     structure_results = check_structure_impl(parquet_file, verbose, return_results=True)
@@ -390,7 +396,7 @@ def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup):
 
 # Convert command
 @cli.command()
-@click.argument("input_file")  # Validation in safe_file_url() - supports remote URLs
+@click.argument("input_file")
 @click.argument("output_file", type=click.Path())
 @click.option(
     "--skip-hilbert",
@@ -522,7 +528,7 @@ def convert(
 
 # Inspect command
 @cli.command()
-@click.argument("parquet_file")  # Validation in safe_file_url() - supports remote URLs
+@click.argument("parquet_file")
 @click.option("--head", type=int, default=None, help="Show first N rows")
 @click.option("--tail", type=int, default=None, help="Show last N rows")
 @click.option(
@@ -661,7 +667,7 @@ def _handle_meta_display(
 
 
 @cli.command()
-@click.argument("parquet_file")  # Validation in safe_file_url() - supports remote URLs
+@click.argument("parquet_file")
 @click.option("--parquet", is_flag=True, help="Show only Parquet file metadata")
 @click.option("--geoparquet", is_flag=True, help="Show only GeoParquet metadata from 'geo' key")
 @click.option("--parquet-geo", is_flag=True, help="Show only Parquet geospatial metadata")
@@ -718,7 +724,7 @@ def sort():
 
 
 @sort.command(name="hilbert")
-@click.argument("input_parquet")  # Validation in safe_file_url() - supports remote URLs
+@click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path())
 @click.option(
     "--geometry-column",
@@ -1701,7 +1707,7 @@ def _handle_stac_collection(
 
 
 @cli.command()
-@click.argument("input")  # Validation in safe_file_url() - supports remote URLs
+@click.argument("input")
 @click.argument("output", type=click.Path())
 @click.option(
     "--bucket",
@@ -1776,7 +1782,7 @@ def stac(input, output, bucket, public_url, collection_id, item_id, overwrite, v
 
 
 @check.command(name="stac")
-@click.argument("stac_file")  # Validation in safe_file_url() - supports remote URLs
+@click.argument("stac_file")
 @verbose_option
 def check_stac_cmd(stac_file, verbose):
     """

@@ -27,6 +27,20 @@ Auto-detected by file extension:
 
 Any format supported by DuckDB's spatial extension can be read.
 
+## Remote Files
+
+Read from cloud storage or HTTPS:
+
+```bash
+# Convert remote file
+gpio convert https://example.com/data.geojson local.parquet
+
+# Convert from S3
+gpio convert s3://bucket/input.parquet local-optimized.parquet
+```
+
+See [Remote Files Guide](remote-files.md) for authentication setup.
+
 ## Options
 
 ### Skip Hilbert Ordering

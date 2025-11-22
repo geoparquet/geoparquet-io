@@ -110,10 +110,6 @@ def safe_file_url(file_path, verbose=False):
         click.BadParameter: If local file doesn't exist
     """
     if is_remote_url(file_path):
-        # Show helpful progress indicator for remote files (network operation)
-        protocol = file_path.split("://")[0].upper() if "://" in file_path else "HTTP"
-        click.echo(f"📡 Reading from {protocol} (this may take a moment)...")
-
         # Remote URL - URL encode if HTTP/HTTPS
         if file_path.startswith(("http://", "https://")):
             parsed = urllib.parse.urlparse(file_path)
@@ -123,7 +119,8 @@ def safe_file_url(file_path, verbose=False):
             safe_url = file_path
 
         if verbose:
-            click.echo(f"Remote file: {safe_url}")
+            protocol = file_path.split("://")[0].upper() if "://" in file_path else "HTTP"
+            click.echo(f"Reading from {protocol}: {safe_url}")
         return safe_url
     else:
         # Local file - check existence
@@ -143,61 +140,36 @@ def get_remote_error_hint(error_msg, file_path=""):
     Returns:
         str: User-friendly error message with troubleshooting hints
     """
-    hints = []
+    # Simple pattern matching - check error type and return appropriate hint
+    error_lower = error_msg.lower()
+    path_lower = file_path.lower()
 
-    # Authentication errors
-    if "403" in error_msg or "Forbidden" in error_msg or "Access Denied" in error_msg:
-        hints.append("Authentication required or access denied:")
-        if "s3://" in file_path.lower():
-            hints.append(
-                "  • S3: Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables"
-            )
-            hints.append("  • Or configure ~/.aws/credentials file")
-        elif (
-            "az://" in file_path.lower()
-            or "azure" in file_path.lower()
-            or "blob.core" in file_path.lower()
-        ):
-            hints.append(
-                "  • Azure: Check AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY"
-            )
-            hints.append("  • Or set AZURE_STORAGE_SAS_TOKEN for SAS token auth")
-        elif "gs://" in file_path.lower() or "gcs://" in file_path.lower():
-            hints.append(
-                "  • GCS: Check GOOGLE_APPLICATION_CREDENTIALS points to service account JSON"
-            )
-        else:
-            hints.append("  • File may be private or require authentication")
+    # Check for 403/auth errors
+    auth_error = "403" in error_msg or "forbidden" in error_lower or "access denied" in error_lower
+    if auth_error:
+        if "s3://" in path_lower:
+            return "Authentication required or access denied:\n  • S3: Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables\n  • Or configure ~/.aws/credentials file"
+        if "az://" in path_lower or "azure" in path_lower or "blob.core" in path_lower:
+            return "Authentication required or access denied:\n  • Azure: Check AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY\n  • Or set AZURE_STORAGE_SAS_TOKEN for SAS token auth"
+        if "gs://" in path_lower or "gcs://" in path_lower:
+            return "Authentication required or access denied:\n  • GCS: Check GOOGLE_APPLICATION_CREDENTIALS points to service account JSON"
+        return "Authentication required or access denied:\n  • File may be private or require authentication"
 
-    # File not found
-    elif "404" in error_msg or "Not Found" in error_msg or "does not exist" in error_msg.lower():
-        hints.append("File not found at remote location:")
-        hints.append("  • Verify the URL is correct")
-        hints.append("  • Check the file exists at the specified path")
-        if file_path:
-            hints.append(f"  • URL: {file_path}")
+    # Check for 404 errors
+    if "404" in error_msg or "not found" in error_lower or "does not exist" in error_lower:
+        base = "File not found at remote location:\n  • Verify the URL is correct\n  • Check the file exists at the specified path"
+        return f"{base}\n  • URL: {file_path}" if file_path else base
 
-    # Network/timeout errors
-    elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-        hints.append("Connection timed out:")
-        hints.append("  • Check network connectivity")
-        hints.append("  • File may be very large - try a smaller file first")
-        hints.append("  • Remote server may be slow or overloaded")
+    # Check for timeout
+    if "timeout" in error_lower or "timed out" in error_lower:
+        return "Connection timed out:\n  • Check network connectivity\n  • File may be very large - try a smaller file first\n  • Remote server may be slow or overloaded"
 
-    # Connection errors
-    elif "unable to connect" in error_msg.lower() or "connection" in error_msg.lower():
-        hints.append("Cannot connect to remote server:")
-        hints.append("  • Check network connectivity")
-        hints.append("  • Verify the hostname/URL is correct")
-        hints.append("  • Server may be down or unreachable")
+    # Check for connection issues
+    if "unable to connect" in error_lower or "connection" in error_lower:
+        return "Cannot connect to remote server:\n  • Check network connectivity\n  • Verify the hostname/URL is correct\n  • Server may be down or unreachable"
 
-    # Generic remote error
-    else:
-        hints.append("Remote file access failed:")
-        hints.append("  • Check network connectivity")
-        hints.append("  • Verify file URL and access permissions")
-
-    return "\n".join(hints)
+    # Generic
+    return "Remote file access failed:\n  • Check network connectivity\n  • Verify file URL and access permissions"
 
 
 def get_parquet_metadata(parquet_file, verbose=False):
