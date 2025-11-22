@@ -167,9 +167,36 @@ gpio convert https://example.com/data.geojson output.parquet
 
 ## Limitations
 
-- ❌ Wildcards in HTTPS URLs (HTTP doesn't support)
-- ❌ Writing to remote locations (keep outputs local for now)
-- ⚠ Network latency affects small operations more
+### What Works ✅
+- **Read operations**: All commands can read from remote URLs (HTTPS, S3, Azure, GCS)
+- **Inspect & check**: View metadata, validate files, check spatial properties
+- **Convert**: Convert remote files to local GeoParquet (including CSV, Shapefile, etc.)
+- **Partition**: Partition remote files with `--preview` to analyze first
+- **Add columns**: Add bbox, H3, admin divisions to remote files (output locally)
+- **Sort**: Hilbert sort remote files (output locally)
+
+### What Doesn't Work ❌
+- **STAC generation**: Cannot create STAC items/collections for remote files
+  - Rationale: STAC asset hrefs would reference files you may not control
+  - Workaround: Download file first or use `gpio convert` to create local copy
+  - Future: May support if there's demand for cataloging public datasets
+
+- **Writing to remote locations**: All outputs write to local filesystem only
+  - Rationale: Safety and simplicity - remote writes are complex and error-prone
+  - Future: Could add remote write support if needed
+
+- **Wildcards in HTTPS URLs**: `https://example.com/*.parquet` not supported
+  - Reason: HTTP protocol doesn't support directory listing
+  - S3 wildcards (`s3://bucket/*.parquet`) may work but untested
+
+- **Admin divisions remote lookup**: Admin boundary files must be local
+  - Low priority - users typically have these files locally
+
+### Performance Notes ⚠️
+- Network latency affects small operations more than large ones
+- Very large files may timeout - try smaller files first
+- DuckDB uses HTTP range requests - only fetches needed data
+- Consider caching intermediate results locally for iterative work
 
 ## Files to Modify
 
