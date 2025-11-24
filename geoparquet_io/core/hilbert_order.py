@@ -10,8 +10,15 @@ from geoparquet_io.core.common import (
     check_bbox_structure,
     find_primary_geometry_column,
     get_dataset_bounds,
+    get_duckdb_connection,
     get_parquet_metadata,
+    get_remote_error_hint,
+    is_remote_url,
+    needs_httpfs,
     safe_file_url,
+    setup_aws_profile_if_needed,
+    show_remote_read_message,
+    validate_profile_for_urls,
     write_parquet_with_metadata,
 )
 
@@ -26,6 +33,7 @@ def hilbert_order(
     compression_level=None,
     row_group_size_mb=None,
     row_group_rows=None,
+    profile=None,
 ):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -37,6 +45,10 @@ def hilbert_order(
     - bbox covering metadata
     - Preserves CRS from original file
     - Writes GeoParquet 1.1 format
+    - Supports remote inputs/outputs (S3, GCS, Azure)
+
+    Args:
+        profile: AWS profile name (S3 only, optional)
     """
     # Check input file bbox structure
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
@@ -88,6 +100,15 @@ def hilbert_order(
                 )
             )
 
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, input_parquet, output_parquet)
+
+    # Setup AWS profile if needed (for DuckDB to read from S3)
+    setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
+
+    # Show remote read message
+    show_remote_read_message(working_parquet, verbose)
+
     safe_url = safe_file_url(working_parquet, verbose)
 
     # Get metadata from original file (use original, not temp)
@@ -100,10 +121,8 @@ def hilbert_order(
     if verbose:
         click.echo(f"Using geometry column: {geometry_column}")
 
-    # Create DuckDB connection and load spatial extension
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    # Create DuckDB connection with httpfs if needed for remote files
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
 
     if verbose:
         click.echo("Calculating dataset bounds for Hilbert ordering...")
@@ -143,6 +162,7 @@ def hilbert_order(
             row_group_size_mb=row_group_size_mb,
             row_group_rows=row_group_rows,
             verbose=verbose,
+            profile=profile,
         )
 
         if verbose:
@@ -159,6 +179,14 @@ def hilbert_order(
         if verbose:
             click.echo(f"Successfully wrote ordered data to: {output_parquet}")
 
+    except duckdb.IOException as e:
+        con.close()
+        if is_remote_url(input_parquet):
+            hints = get_remote_error_hint(str(e), input_parquet)
+            raise click.ClickException(
+                f"Failed to read remote file.\n\n{hints}\n\nOriginal error: {str(e)}"
+            ) from e
+        raise
     finally:
         # Clean up temporary file if created
         if temp_file_created and os.path.exists(temp_file):

@@ -16,6 +16,7 @@ def add_h3_column(
     compression_level=None,
     row_group_size_mb=None,
     row_group_rows=None,
+    profile=None,
 ):
     """
     Add an H3 cell ID column to a GeoParquet file.
@@ -25,8 +26,8 @@ def add_h3_column(
     VARCHAR (string) for maximum portability.
 
     Args:
-        input_parquet: Path to the input parquet file
-        output_parquet: Path to the output parquet file
+        input_parquet: Path to the input parquet file (local or remote URL)
+        output_parquet: Path to the output parquet file (local or remote URL)
         h3_column_name: Name for the H3 column (default: 'h3_cell')
         h3_resolution: H3 resolution level (0-15)
                       Res 7: ~5 km², Res 9: ~0.1 km², Res 11: ~1,770 m²,
@@ -38,6 +39,7 @@ def add_h3_column(
         compression_level: Compression level (varies by format)
         row_group_size_mb: Target row group size in MB
         row_group_rows: Exact number of rows per row group
+        profile: AWS profile name (S3 only, optional)
     """
     # Validate resolution
     if not 0 <= h3_resolution <= 15:
@@ -71,6 +73,7 @@ def add_h3_column(
         row_group_rows=row_group_rows,
         dry_run_description=f"H3 cell ID at resolution {h3_resolution} (~{_get_resolution_size(h3_resolution)})",
         custom_metadata=h3_metadata,
+        profile=profile,
     )
 
     if not dry_run:

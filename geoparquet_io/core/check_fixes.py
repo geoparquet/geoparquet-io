@@ -10,20 +10,26 @@ import duckdb
 from geoparquet_io.core.add_bbox_column import add_bbox_column
 from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata
 from geoparquet_io.core.common import (
+    get_duckdb_connection,
     get_parquet_metadata,
+    get_remote_error_hint,
+    is_remote_url,
+    needs_httpfs,
     safe_file_url,
+    setup_aws_profile_if_needed,
     write_parquet_with_metadata,
 )
 from geoparquet_io.core.hilbert_order import hilbert_order
 
 
-def fix_compression(parquet_file, output_file, verbose=False):
+def fix_compression(parquet_file, output_file, verbose=False, profile=None):
     """Re-compress file with ZSTD compression.
 
     Args:
         parquet_file: Path to input file
         output_file: Path to output file
         verbose: Print additional information
+        profile: AWS profile name for S3 operations
 
     Returns:
         dict with fix summary
@@ -31,39 +37,53 @@ def fix_compression(parquet_file, output_file, verbose=False):
     if verbose:
         click.echo("Applying ZSTD compression...")
 
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, parquet_file, output_file)
+
     safe_url = safe_file_url(parquet_file, verbose)
 
     # Get original metadata
     original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
     # Read and rewrite with ZSTD compression
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
-    query = f"SELECT * FROM '{safe_url}'"
+    try:
+        query = f"SELECT * FROM '{safe_url}'"
 
-    write_parquet_with_metadata(
-        con=con,
-        query=query,
-        output_file=output_file,
-        original_metadata=original_metadata,
-        compression="ZSTD",
-        compression_level=15,
-        row_group_rows=100000,
-        verbose=verbose,
-    )
+        write_parquet_with_metadata(
+            con=con,
+            query=query,
+            output_file=output_file,
+            original_metadata=original_metadata,
+            compression="ZSTD",
+            compression_level=15,
+            row_group_rows=100000,
+            verbose=verbose,
+            profile=profile,
+        )
 
-    return {"fix_applied": "Re-compressed with ZSTD", "success": True}
+        return {"fix_applied": "Re-compressed with ZSTD", "success": True}
+    except duckdb.IOException as e:
+        con.close()
+        if is_remote_url(parquet_file):
+            hints = get_remote_error_hint(str(e), parquet_file)
+            raise click.ClickException(
+                f"Failed to read remote file.\n\n{hints}\n\nOriginal error: {str(e)}"
+            ) from e
+        raise
+    finally:
+        con.close()
 
 
-def fix_bbox_column(parquet_file, output_file, verbose=False):
+def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
     """Add missing bbox column.
 
     Args:
         parquet_file: Path to input file
         output_file: Path to output file
         verbose: Print additional information
+        profile: AWS profile name for S3 operations
 
     Returns:
         dict with fix summary
@@ -80,18 +100,20 @@ def fix_bbox_column(parquet_file, output_file, verbose=False):
         compression="ZSTD",
         compression_level=15,
         row_group_rows=100000,
+        profile=profile,
     )
 
     return {"fix_applied": "Added bbox column", "success": True}
 
 
-def fix_bbox_metadata(parquet_file, output_file, verbose=False):
+def fix_bbox_metadata(parquet_file, output_file, verbose=False, profile=None):
     """Add missing bbox covering metadata.
 
     Args:
         parquet_file: Path to input file
         output_file: Path to output file (modified in-place)
         verbose: Print additional information
+        profile: AWS profile name for S3 operations (not used for metadata-only operation)
 
     Returns:
         dict with fix summary
@@ -109,7 +131,9 @@ def fix_bbox_metadata(parquet_file, output_file, verbose=False):
     return {"fix_applied": "Added bbox covering metadata", "success": True}
 
 
-def fix_bbox_all(parquet_file, output_file, needs_column, needs_metadata, verbose=False):
+def fix_bbox_all(
+    parquet_file, output_file, needs_column, needs_metadata, verbose=False, profile=None
+):
     """Fix both bbox column and metadata issues.
 
     Args:
@@ -118,6 +142,7 @@ def fix_bbox_all(parquet_file, output_file, needs_column, needs_metadata, verbos
         needs_column: Whether to add bbox column
         needs_metadata: Whether to add bbox metadata
         verbose: Print additional information
+        profile: AWS profile name for S3 operations
 
     Returns:
         dict with fix summary
@@ -127,26 +152,27 @@ def fix_bbox_all(parquet_file, output_file, needs_column, needs_metadata, verbos
 
     if needs_column:
         temp_file = output_file + ".tmp" if output_file == parquet_file else output_file
-        fix_bbox_column(current_file, temp_file, verbose)
+        fix_bbox_column(current_file, temp_file, verbose, profile)
         current_file = temp_file
 
     if needs_metadata or needs_column:
         if current_file != output_file:
             shutil.move(current_file, output_file)
-        fix_bbox_metadata(output_file, output_file, verbose)
+        fix_bbox_metadata(output_file, output_file, verbose, profile)
     elif temp_file and temp_file != output_file:
         shutil.move(temp_file, output_file)
 
     return {"fix_applied": "Fixed bbox issues", "success": True}
 
 
-def fix_spatial_ordering(parquet_file, output_file, verbose=False):
+def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None):
     """Apply Hilbert spatial ordering.
 
     Args:
         parquet_file: Path to input file
         output_file: Path to output file
         verbose: Print additional information
+        profile: AWS profile name for S3 operations
 
     Returns:
         dict with fix summary
@@ -162,18 +188,20 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False):
         compression="ZSTD",
         compression_level=15,
         row_group_rows=100000,
+        profile=profile,
     )
 
     return {"fix_applied": "Applied Hilbert spatial ordering", "success": True}
 
 
-def fix_row_groups(parquet_file, output_file, verbose=False):
+def fix_row_groups(parquet_file, output_file, verbose=False, profile=None):
     """Rewrite with optimal row group size.
 
     Args:
         parquet_file: Path to input file
         output_file: Path to output file
         verbose: Print additional information
+        profile: AWS profile name for S3 operations
 
     Returns:
         dict with fix summary
@@ -181,33 +209,46 @@ def fix_row_groups(parquet_file, output_file, verbose=False):
     if verbose:
         click.echo("Optimizing row groups...")
 
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, parquet_file, output_file)
+
     safe_url = safe_file_url(parquet_file, verbose)
 
     # Get original metadata
     original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
     # Read and rewrite with optimal row groups
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
-    query = f"SELECT * FROM '{safe_url}'"
+    try:
+        query = f"SELECT * FROM '{safe_url}'"
 
-    write_parquet_with_metadata(
-        con=con,
-        query=query,
-        output_file=output_file,
-        original_metadata=original_metadata,
-        compression="ZSTD",
-        compression_level=15,
-        row_group_rows=100000,
-        verbose=verbose,
-    )
+        write_parquet_with_metadata(
+            con=con,
+            query=query,
+            output_file=output_file,
+            original_metadata=original_metadata,
+            compression="ZSTD",
+            compression_level=15,
+            row_group_rows=100000,
+            verbose=verbose,
+            profile=profile,
+        )
 
-    return {"fix_applied": "Optimized row groups", "success": True}
+        return {"fix_applied": "Optimized row groups", "success": True}
+    except duckdb.IOException as e:
+        con.close()
+        if is_remote_url(parquet_file):
+            hints = get_remote_error_hint(str(e), parquet_file)
+            raise click.ClickException(
+                f"Failed to read remote file.\n\n{hints}\n\nOriginal error: {str(e)}"
+            ) from e
+        raise
+    finally:
+        con.close()
 
 
-def apply_all_fixes(parquet_file, output_file, check_results, verbose=False):
+def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, profile=None):
     """Orchestrate all fixes based on check results.
 
     Args:
@@ -215,6 +256,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False):
         output_file: Path to output file
         check_results: Dict containing results from check functions
         verbose: Print additional information
+        profile: AWS profile name for S3 operations
 
     Returns:
         dict with summary of all fixes applied
@@ -238,7 +280,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False):
             if verbose:
                 click.echo("\n[1/4] Adding bbox column...")
 
-            fix_bbox_column(current_file, temp_file, verbose)
+            fix_bbox_column(current_file, temp_file, verbose, profile)
             current_file = temp_file
             fixes_applied.append("Added bbox column")
 
@@ -258,7 +300,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False):
             if verbose:
                 click.echo("\n[2/4] Adding bbox covering metadata...")
 
-            fix_bbox_metadata(current_file, current_file, verbose)
+            fix_bbox_metadata(current_file, current_file, verbose, profile)
             fixes_applied.append("Added bbox covering metadata")
 
         # Step 3: Apply Hilbert sorting if needed
@@ -271,7 +313,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False):
                 click.echo("\n[3/4] Applying Hilbert spatial ordering...")
                 click.echo("(This operation may take several minutes on large files)")
 
-            fix_spatial_ordering(current_file, temp_file, verbose)
+            fix_spatial_ordering(current_file, temp_file, verbose, profile)
             current_file = temp_file
             fixes_applied.append("Applied Hilbert spatial ordering")
 
@@ -287,7 +329,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False):
                 click.echo("\n[4/4] Optimizing compression and row groups...")
 
             # This is the final step, write to the actual output
-            fix_compression(current_file, output_file, verbose)
+            fix_compression(current_file, output_file, verbose, profile)
 
             if needs_compression_fix:
                 fixes_applied.append("Optimized compression (ZSTD)")

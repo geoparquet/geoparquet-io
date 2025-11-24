@@ -4,6 +4,8 @@ import click
 
 from geoparquet_io.core.common import (
     find_primary_geometry_column,
+    get_duckdb_connection,
+    needs_httpfs,
     safe_file_url,
 )
 
@@ -196,6 +198,7 @@ def add_kdtree_column(
     force=False,
     sample_size=100000,
     auto_target_rows=None,
+    profile=None,
 ):
     """
     Add a KD-tree cell ID column to a GeoParquet file.
@@ -209,8 +212,8 @@ def add_kdtree_column(
     Performance Note: Approximate mode is O(n), exact mode is O(n × iterations).
 
     Args:
-        input_parquet: Path to the input parquet file
-        output_parquet: Path to the output parquet file
+        input_parquet: Path to the input parquet file (local or remote URL)
+        output_parquet: Path to the output parquet file (local or remote URL)
         kdtree_column_name: Name for the KD-tree column (default: 'kdtree_cell')
         iterations: Number of recursive splits (1-20). Determines partition count: 2^iterations.
                    If None, will be auto-computed based on auto_target_rows.
@@ -223,15 +226,12 @@ def add_kdtree_column(
         force: Force operation even on large datasets (not recommended)
         sample_size: Number of points to sample for computing boundaries. None for exact mode (default: 100000)
         auto_target_rows: If set, auto-compute iterations to target this many rows per partition
+        profile: AWS profile name (S3 only, optional)
     """
     # Get total row count for auto mode or validation
     input_url = safe_file_url(input_parquet, verbose)
 
-    import duckdb
-
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
     total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
 
@@ -287,11 +287,7 @@ def add_kdtree_column(
     # Reconnect for actual processing
     input_url = safe_file_url(input_parquet, verbose)
 
-    import duckdb
-
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
     if not dry_run and auto_target_rows is None:
         # Only print if we haven't already printed in auto mode
@@ -409,6 +405,7 @@ def add_kdtree_column(
         row_group_rows=row_group_rows,
         custom_metadata=kdtree_metadata,
         verbose=verbose,
+        profile=profile,
     )
 
     con.close()

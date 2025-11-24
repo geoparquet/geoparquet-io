@@ -13,33 +13,12 @@ from geoparquet_io.core.common import (
     is_remote_url,
     needs_httpfs,
     safe_file_url,
+    setup_aws_profile_if_needed,
+    show_remote_read_message,
+    validate_output_path,
+    validate_profile_for_urls,
     write_parquet_with_metadata,
 )
-
-
-def _validate_inputs(input_file, output_file):
-    """Validate input file and output directory."""
-    # Only check existence for local files - remote files validated by DuckDB
-    if not is_remote_url(input_file):
-        if not os.path.exists(input_file):
-            raise click.ClickException(f"Input file not found: {input_file}")
-
-    # Output directory must always be local
-    output_dir = os.path.dirname(output_file) or "."
-    if not os.path.exists(output_dir):
-        raise click.ClickException(f"Output directory not found: {output_dir}")
-    if not os.access(output_dir, os.W_OK):
-        raise click.ClickException(f"No write permission for: {output_dir}")
-
-
-def _setup_duckdb(input_file):
-    """Create and configure DuckDB connection with appropriate extensions."""
-    try:
-        # Load httpfs only if needed for remote files
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
-        return con
-    except Exception as e:
-        raise click.ClickException(f"Failed to load DuckDB extensions: {str(e)}") from e
 
 
 def _detect_geometry_column(con, input_file, verbose, is_parquet=False):
@@ -668,6 +647,7 @@ def convert_to_geoparquet(
     delimiter=None,
     crs="EPSG:4326",
     skip_invalid=False,
+    profile=None,
 ):
     """
     Convert vector format to optimized GeoParquet.
@@ -693,25 +673,31 @@ def convert_to_geoparquet(
         delimiter: CSV/TSV only - Delimiter character (auto-detected if not specified)
         crs: CRS for geometry data (default: EPSG:4326/WGS84)
         skip_invalid: Skip rows with invalid geometries instead of failing
+        profile: AWS profile name for S3 operations
 
     Raises:
         click.ClickException: If input file not found or conversion fails
     """
     start_time = time.time()
 
-    _validate_inputs(input_file, output_file)
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, input_file, output_file)
+
+    # Setup AWS profile if needed (for DuckDB reads and obstore writes)
+    setup_aws_profile_if_needed(profile, input_file, output_file)
 
     # Show single progress message for remote files
-    if is_remote_url(input_file):
-        protocol = input_file.split("://")[0].upper() if "://" in input_file else "HTTP"
-        click.echo(f"📡 Reading from {protocol} (network operation may take time)...")
+    show_remote_read_message(input_file, verbose=False)
 
-    # Get safe URL for remote files (handles URL encoding) or validates local files
+    # Validate input file exists (for local files) and get safe URL
     input_url = safe_file_url(input_file, verbose)
+
+    # Validate output directory exists and is writable (for local files)
+    validate_output_path(output_file, verbose)
 
     click.echo(f"Converting {input_file}...")
 
-    con = _setup_duckdb(input_file)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
 
     # Check input file type
     is_csv = _is_csv_file(input_file)
@@ -745,14 +731,22 @@ def convert_to_geoparquet(
             compression_level=compression_level,
             row_group_rows=row_group_rows,
             verbose=verbose,
+            profile=profile,
         )
 
         # Report results
         elapsed = time.time() - start_time
-        file_size = os.path.getsize(output_file)
+        # For remote files, we can't get the size locally, skip it
+        if is_remote_url(output_file):
+            file_size = None
+        else:
+            file_size = os.path.getsize(output_file)
 
         click.echo(f"Done in {elapsed:.1f}s")
-        click.echo(f"Output: {output_file} ({format_size(file_size)})")
+        if file_size is not None:
+            click.echo(f"Output: {output_file} ({format_size(file_size)})")
+        else:
+            click.echo(f"Output: {output_file}")
         click.echo(click.style("✓ Output passes GeoParquet validation", fg="green"))
 
     except duckdb.IOException as e:
