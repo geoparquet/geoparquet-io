@@ -1,8 +1,6 @@
 """Upload GeoParquet files to cloud object storage."""
 
 import asyncio
-import os
-import subprocess
 import time
 from pathlib import Path
 from typing import Optional
@@ -25,55 +23,6 @@ async def _upload_file_with_progress(store, source: Path, target_key: str, **kwa
 
     speed_mbps = size_mb / elapsed if elapsed > 0 else 0
     print(f"✓ Upload complete ({speed_mbps:.2f} MB/s)")
-
-
-def _set_aws_credentials_from_profile(profile: str) -> None:
-    """Get AWS credentials from a profile and set as environment variables.
-
-    Uses AWS CLI to get temporary credentials for the profile and sets them
-    as environment variables that obstore can use.
-    """
-    try:
-        # Use AWS CLI to get credentials for the profile
-        result = subprocess.run(
-            ["aws", "configure", "get", "aws_access_key_id", "--profile", profile],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            os.environ["AWS_ACCESS_KEY_ID"] = result.stdout.strip()
-
-        result = subprocess.run(
-            ["aws", "configure", "get", "aws_secret_access_key", "--profile", profile],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            os.environ["AWS_SECRET_ACCESS_KEY"] = result.stdout.strip()
-
-        result = subprocess.run(
-            ["aws", "configure", "get", "aws_session_token", "--profile", profile],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            os.environ["AWS_SESSION_TOKEN"] = result.stdout.strip()
-
-        result = subprocess.run(
-            ["aws", "configure", "get", "region", "--profile", profile],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            os.environ["AWS_REGION"] = result.stdout.strip()
-    except FileNotFoundError as err:
-        raise RuntimeError(
-            "AWS CLI not found. Install it or use environment variables directly."
-        ) from err
 
 
 def _print_single_file_dry_run(
@@ -123,9 +72,14 @@ def _print_directory_dry_run(
 def _setup_store_and_kwargs(
     bucket_url: str, profile: Optional[str], chunk_concurrency: int, chunk_size: Optional[int]
 ):
-    """Setup object store and upload kwargs."""
-    if bucket_url.startswith("s3://") and profile:
-        _set_aws_credentials_from_profile(profile)
+    """
+    Setup object store and upload kwargs.
+
+    Note: Profile handling is done via AWS_PROFILE env var set by the caller
+    (see setup_aws_profile_if_needed in common.py). The obstore library
+    automatically respects AWS_PROFILE along with other standard AWS SDK
+    credential sources.
+    """
     store = obs.store.from_url(bucket_url)
     kwargs = {"max_concurrency": chunk_concurrency}
     if chunk_size:

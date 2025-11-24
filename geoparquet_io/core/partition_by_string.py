@@ -53,6 +53,7 @@ def partition_by_string(
     force: bool = False,
     skip_analysis: bool = False,
     filename_prefix: str = None,
+    profile: Optional[str] = None,
 ):
     """
     Partition a GeoParquet file by string column values or prefixes.
@@ -132,6 +133,7 @@ def partition_by_string(
         force=force,
         skip_analysis=skip_analysis,
         filename_prefix=filename_prefix,
+        profile=profile,
     )
 
     click.echo(f"Successfully created {num_partitions} partition file(s)")

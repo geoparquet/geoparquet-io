@@ -27,113 +27,70 @@ from geoparquet_io.core.partition_common import (
 )
 
 
-def partition_by_admin_hierarchical(
-    input_parquet: str,
-    output_folder: Optional[str],
-    dataset_name: str,
-    levels: list[str],
-    hive: bool = False,
-    overwrite: bool = False,
-    preview: bool = False,
-    preview_limit: int = 15,
-    verbose: bool = False,
-    force: bool = False,
-    skip_analysis: bool = False,
-    filename_prefix: Optional[str] = None,
-) -> int:
-    """
-    Partition a GeoParquet file by administrative boundaries.
-
-    This performs a two-step operation:
-    1. Spatial join with remote admin boundaries to add admin columns
-    2. Partition the enriched data by those admin columns
-
-    Args:
-        input_parquet: Input GeoParquet file path
-        output_folder: Output directory for partitioned files
-        dataset_name: Name of admin dataset ("gaul", "overture")
-        levels: List of hierarchical levels to partition by
-        hive: Use Hive-style partitioning
-        overwrite: Overwrite existing partition files
-        preview: Preview partitions without creating files
-        preview_limit: Number of partitions to show in preview
-        verbose: Enable verbose output
-        force: Force partitioning even if analysis detects issues
-        skip_analysis: Skip partition strategy analysis
-
-    Returns:
-        Number of partitions created
-    """
-    # Create dataset instance (no custom sources for now)
-    dataset = AdminDatasetFactory.create(dataset_name, source_path=None, verbose=verbose)
-
-    if verbose:
-        click.echo(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
-        click.echo(f"Remote source: {dataset.get_source()}")
-        click.echo(f"Hierarchical levels: {' → '.join(levels)}")
-
-    # Validate levels
-    dataset.validate_levels(levels)
-
-    # Get column names for the requested levels in the boundaries dataset
-    boundary_columns = dataset.get_partition_columns(levels)
-
-    if verbose:
-        click.echo(f"Boundary dataset columns: {', '.join(boundary_columns)}")
-
-    # Get input file info
-    input_url = safe_file_url(input_parquet, verbose)
-    input_geom_col = find_primary_geometry_column(input_parquet, verbose)
-    input_bbox_info = check_bbox_structure(input_parquet, verbose)
-    input_bbox_col = input_bbox_info["bbox_column_name"]
-
-    # Get admin dataset info
-    admin_geom_col = dataset.get_geometry_column()
-    admin_bbox_col = dataset.get_bbox_column()
-
-    # Create DuckDB connection
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
-    con.execute("INSTALL httpfs;")
-    con.execute("LOAD httpfs;")
-
-    # Configure S3 settings based on dataset requirements
-    dataset.configure_s3(con)
-
-    # STEP 1: Spatial join to create enriched data with admin columns
-    click.echo("\n📍 Step 1/2: Performing spatial join with admin boundaries...")
-
-    enriched_table = "_enriched_with_admin"
-
-    # Prepare admin data source
-    admin_source = dataset.prepare_data_source(con)
-
-    # Build SELECT clause for admin columns (only pull what we need)
-    admin_select_parts = []
-    output_column_names = []
-    for i, (level, col) in enumerate(zip(levels, boundary_columns)):
-        output_col = f"_admin_{level}"  # Temporary internal name
-        output_column_names.append(output_col)
-        # Handle struct field access (e.g., names['primary']) vs simple column names
+def _build_enrichment_query(
+    input_url,
+    admin_table_ref,
+    admin_where_clause,
+    admin_select_clause,
+    admin_geom_col,
+    admin_bbox_col,
+    boundary_columns,
+    input_geom_col,
+    input_bbox_col,
+    enriched_table,
+):
+    """Build enrichment query for spatial join."""
+    # Build column list for subquery - handle struct access
+    subquery_cols = []
+    for i, col in enumerate(boundary_columns):
         if "[" in col or "(" in col:
-            # SQL expression - reference the alias from subquery
-            admin_select_parts.append(f'b._col_{i} as "{output_col}"')
+            subquery_cols.append(f"{col} as _col_{i}")
         else:
-            # Simple column name - quote it
-            admin_select_parts.append(f'b."{col}" as "{output_col}"')
+            subquery_cols.append(f'"{col}"')
+    subquery_cols_str = ", ".join(subquery_cols)
 
-    admin_select_clause = ", ".join(admin_select_parts)
+    if input_bbox_col and admin_bbox_col:
+        bbox_filter = f"""
+            (a.{input_bbox_col}.xmin <= b.{admin_bbox_col}.xmax AND
+             a.{input_bbox_col}.xmax >= b.{admin_bbox_col}.xmin AND
+             a.{input_bbox_col}.ymin <= b.{admin_bbox_col}.ymax AND
+             a.{input_bbox_col}.ymax >= b.{admin_bbox_col}.ymin)
+        """
 
-    # Build admin data source with read_parquet options if needed
-    read_options = dataset.get_read_parquet_options()
-    if read_options:
-        options_str = ", ".join([f"{k}={v}" for k, v in read_options.items()])
-        admin_table_ref = f"read_parquet({admin_source}, {options_str})"
+        return f"""
+            CREATE TEMP TABLE {enriched_table} AS
+            SELECT
+                a.*,
+                {admin_select_clause}
+            FROM '{input_url}' a
+            LEFT JOIN (
+                SELECT {admin_geom_col}, {admin_bbox_col}, {subquery_cols_str}
+                FROM {admin_table_ref}
+                {admin_where_clause}
+            ) b
+            ON {bbox_filter}
+                AND ST_Intersects(b.{admin_geom_col}, a."{input_geom_col}")
+        """
     else:
-        admin_table_ref = admin_source
+        return f"""
+            CREATE TEMP TABLE {enriched_table} AS
+            SELECT
+                a.*,
+                {admin_select_clause}
+            FROM '{input_url}' a
+            LEFT JOIN (
+                SELECT {admin_geom_col}, {subquery_cols_str}
+                FROM {admin_table_ref}
+                {admin_where_clause}
+            ) b
+            ON ST_Intersects(b.{admin_geom_col}, a."{input_geom_col}")
+        """
 
-    # Build WHERE clause for admin boundaries
+
+def _build_admin_where_clause(
+    dataset, levels, con, input_url, input_bbox_col, input_geom_col, admin_bbox_col, verbose
+):
+    """Build WHERE clause for admin boundaries with filters."""
     admin_where_clauses = []
 
     # Add subtype filter if applicable
@@ -143,10 +100,8 @@ def partition_by_admin_hierarchical(
         if verbose:
             click.echo(f"  → Filtering admin boundaries: {subtype_filter}")
 
-    # Add bbox extent filter to only load admin boundaries that overlap with input data
-    # This is crucial for performance with large global datasets like Overture
+    # Add bbox extent filter
     if admin_bbox_col:
-        # Get extent of input data - use bbox column if available, otherwise calculate from geometry
         if input_bbox_col:
             extent_query = f"""
                 SELECT
@@ -157,7 +112,6 @@ def partition_by_admin_hierarchical(
                 FROM '{input_url}'
             """
         else:
-            # Calculate extent from geometry column
             extent_query = f"""
                 SELECT
                     MIN(ST_XMin("{input_geom_col}")) as xmin,
@@ -182,82 +136,109 @@ def partition_by_admin_hierarchical(
                     f"  → Filtering admin boundaries to input extent: ({xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f})"
                 )
 
-    admin_where_clause = ""
-    if admin_where_clauses:
-        admin_where_clause = "WHERE " + " AND ".join(admin_where_clauses)
+    return "WHERE " + " AND ".join(admin_where_clauses) if admin_where_clauses else ""
 
-    # Build efficient spatial join query
-    if input_bbox_col and admin_bbox_col:
-        if verbose:
-            click.echo("  → Using bbox columns for optimized spatial join")
 
-        # Only select necessary columns from boundaries dataset
-        bbox_filter = f"""
-            (a.{input_bbox_col}.xmin <= b.{admin_bbox_col}.xmax AND
-             a.{input_bbox_col}.xmax >= b.{admin_bbox_col}.xmin AND
-             a.{input_bbox_col}.ymin <= b.{admin_bbox_col}.ymax AND
-             a.{input_bbox_col}.ymax >= b.{admin_bbox_col}.ymin)
-        """
+def _build_partition_query(enriched_table, output_column_names, original_cols):
+    """Build partition query for specific combination."""
+    select_cols = ", ".join([f'"{col}"' for col in original_cols])
+    return f"""
+        SELECT {select_cols}
+        FROM {enriched_table}
+        WHERE {" AND ".join([f'"{col}" = ?' for col in output_column_names])}
+    """
 
-        # Build column list for subquery - handle struct access
-        # We need to give SQL expressions an alias so they can be referenced in the outer query
-        subquery_cols = []
-        for i, col in enumerate(boundary_columns):
-            if "[" in col or "(" in col:
-                # SQL expression - give it an alias
-                subquery_cols.append(f"{col} as _col_{i}")
-            else:
-                # Simple column, quote it
-                subquery_cols.append(f'"{col}"')
-        subquery_cols_str = ", ".join(subquery_cols)
 
-        enrichment_query = f"""
-            CREATE TEMP TABLE {enriched_table} AS
-            SELECT
-                a.*,
-                {admin_select_clause}
-            FROM '{input_url}' a
-            LEFT JOIN (
-                SELECT {admin_geom_col}, {admin_bbox_col}, {subquery_cols_str}
-                FROM {admin_table_ref}
-                {admin_where_clause}
-            ) b
-            ON {bbox_filter}
-                AND ST_Intersects(b.{admin_geom_col}, a."{input_geom_col}")
-        """
-    else:
-        if verbose:
-            click.echo("  → Using full geometry intersection (no bbox optimization)")
+def _setup_admin_dataset(dataset_name, verbose, levels):
+    """Setup and validate admin dataset."""
+    dataset = AdminDatasetFactory.create(dataset_name, source_path=None, verbose=verbose)
 
-        # Build column list for subquery - handle struct access
-        # We need to give SQL expressions an alias so they can be referenced in the outer query
-        subquery_cols = []
-        for i, col in enumerate(boundary_columns):
-            if "[" in col or "(" in col:
-                # SQL expression - give it an alias
-                subquery_cols.append(f"{col} as _col_{i}")
-            else:
-                # Simple column, quote it
-                subquery_cols.append(f'"{col}"')
-        subquery_cols_str = ", ".join(subquery_cols)
+    if verbose:
+        click.echo(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
+        click.echo(f"Remote source: {dataset.get_source()}")
+        click.echo(f"Hierarchical levels: {' → '.join(levels)}")
 
-        enrichment_query = f"""
-            CREATE TEMP TABLE {enriched_table} AS
-            SELECT
-                a.*,
-                {admin_select_clause}
-            FROM '{input_url}' a
-            LEFT JOIN (
-                SELECT {admin_geom_col}, {subquery_cols_str}
-                FROM {admin_table_ref}
-                {admin_where_clause}
-            ) b
-            ON ST_Intersects(b.{admin_geom_col}, a."{input_geom_col}")
-        """
+    dataset.validate_levels(levels)
+    boundary_columns = dataset.get_partition_columns(levels)
 
+    if verbose:
+        click.echo(f"Boundary dataset columns: {', '.join(boundary_columns)}")
+
+    return dataset, boundary_columns
+
+
+def _setup_hierarchical_connection(input_parquet, verbose):
+    """Setup connection and get file info."""
+    input_url = safe_file_url(input_parquet, verbose)
+    input_geom_col = find_primary_geometry_column(input_parquet, verbose)
+    input_bbox_info = check_bbox_structure(input_parquet, verbose)
+    input_bbox_col = input_bbox_info["bbox_column_name"]
+
+    con = duckdb.connect()
+    con.execute("INSTALL spatial;")
+    con.execute("LOAD spatial;")
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD httpfs;")
+
+    return con, input_url, input_geom_col, input_bbox_col
+
+
+def _build_admin_select_for_partitioning(levels, boundary_columns):
+    """Build admin SELECT clause for partitioning."""
+    admin_select_parts = []
+    output_column_names = []
+    for i, (level, col) in enumerate(zip(levels, boundary_columns)):
+        output_col = f"_admin_{level}"  # Temporary internal name
+        output_column_names.append(output_col)
+        # Handle struct field access vs simple column names
+        if "[" in col or "(" in col:
+            admin_select_parts.append(f'b._col_{i} as "{output_col}"')
+        else:
+            admin_select_parts.append(f'b."{col}" as "{output_col}"')
+
+    return ", ".join(admin_select_parts), output_column_names
+
+
+def _build_admin_table_reference(dataset, admin_source):
+    """Build admin table reference with read options if needed."""
+    read_options = dataset.get_read_parquet_options()
+    if read_options:
+        options_str = ", ".join([f"{k}={v}" for k, v in read_options.items()])
+        return f"read_parquet({admin_source}, {options_str})"
+    return admin_source
+
+
+def _perform_enrichment_join(
+    con,
+    enriched_table,
+    input_url,
+    admin_table_ref,
+    admin_where_clause,
+    admin_select_clause,
+    admin_geom_col,
+    admin_bbox_col,
+    boundary_columns,
+    input_geom_col,
+    input_bbox_col,
+):
+    """Perform spatial join enrichment."""
+    enrichment_query = _build_enrichment_query(
+        input_url,
+        admin_table_ref,
+        admin_where_clause,
+        admin_select_clause,
+        admin_geom_col,
+        admin_bbox_col,
+        boundary_columns,
+        input_geom_col,
+        input_bbox_col,
+        enriched_table,
+    )
     con.execute(enrichment_query)
 
-    # Get stats on enrichment
+
+def _verify_enrichment_results(con, enriched_table, output_column_names):
+    """Verify enrichment results and return stats."""
     stats_query = f"""
         SELECT
             COUNT(*) as total,
@@ -270,11 +251,243 @@ def partition_by_admin_hierarchical(
     click.echo(f"  ✓ Matched {with_admin_count:,} of {total_count:,} features to admin boundaries")
 
     if with_admin_count == 0:
-        con.close()
         raise click.ClickException(
             "No features matched to admin boundaries. Check that input data and boundaries "
             "are in compatible CRS and overlap geographically."
         )
+
+    return total_count, with_admin_count
+
+
+def _get_partition_combinations(con, enriched_table, output_column_names):
+    """Get unique partition combinations."""
+    group_by_cols = ", ".join([f'"{col}"' for col in output_column_names])
+    combinations_query = f"""
+        SELECT DISTINCT {group_by_cols}
+        FROM {enriched_table}
+        WHERE {" AND ".join([f'"{col}" IS NOT NULL' for col in output_column_names])}
+        ORDER BY {group_by_cols}
+    """
+    result = con.execute(combinations_query)
+    return result.fetchall()
+
+
+def _get_original_columns(con, input_url):
+    """Get original column names from input file."""
+    original_columns_query = f"SELECT * FROM '{input_url}' LIMIT 0"
+    original_schema = con.execute(original_columns_query)
+    return [desc[0] for desc in original_schema.description]
+
+
+def _create_all_partitions(
+    con,
+    enriched_table,
+    output_column_names,
+    combinations,
+    levels,
+    output_folder,
+    hive,
+    filename_prefix,
+    overwrite,
+    metadata,
+    verbose,
+    profile,
+    original_cols,
+):
+    """Create all partition files."""
+    partition_count = 0
+    for combination in combinations:
+        if _create_partition_file(
+            con,
+            enriched_table,
+            output_column_names,
+            combination,
+            levels,
+            output_folder,
+            hive,
+            filename_prefix,
+            overwrite,
+            metadata,
+            verbose,
+            profile,
+            original_cols,
+        ):
+            partition_count += 1
+    return partition_count
+
+
+def _create_partition_file(
+    con,
+    enriched_table,
+    output_column_names,
+    combination,
+    levels,
+    output_folder,
+    hive,
+    filename_prefix,
+    overwrite,
+    metadata,
+    verbose,
+    profile,
+    original_cols,
+):
+    """Create a single partition file."""
+    # Build nested folder path
+    folder_parts = []
+    for level, value in zip(levels, combination):
+        safe_value = sanitize_filename(str(value))
+        if hive:
+            folder_parts.append(f"{level}={safe_value}")
+        else:
+            folder_parts.append(safe_value)
+
+    # Create partition folder
+    partition_folder = os.path.join(output_folder, *folder_parts)
+    os.makedirs(partition_folder, exist_ok=True)
+
+    # Generate output filename
+    safe_last_value = sanitize_filename(str(combination[-1]))
+    filename = (
+        f"{filename_prefix}_{safe_last_value}.parquet"
+        if filename_prefix
+        else f"{safe_last_value}.parquet"
+    )
+    output_file = os.path.join(partition_folder, filename)
+
+    # Skip if exists and not overwriting
+    if os.path.exists(output_file) and not overwrite:
+        if verbose:
+            click.echo(f"  ⊘ Skipping existing: {'/'.join(folder_parts)}")
+        return False
+
+    if verbose:
+        click.echo(f"  → Creating: {'/'.join(folder_parts)}")
+
+    # Build WHERE clause
+    where_conditions = [
+        f"\"{col}\" = '{value}'" for col, value in zip(output_column_names, combination)
+    ]
+    where_clause = " AND ".join(where_conditions)
+
+    select_cols = ", ".join([f'"{col}"' for col in original_cols])
+    partition_query = f"""
+        SELECT {select_cols}
+        FROM {enriched_table}
+        WHERE {where_clause}
+    """
+
+    # Write partition
+    write_parquet_with_metadata(
+        con,
+        partition_query,
+        output_file,
+        original_metadata=metadata,
+        compression="ZSTD",
+        compression_level=15,
+        verbose=False,
+        profile=profile,
+    )
+
+    return True
+
+
+def partition_by_admin_hierarchical(
+    input_parquet: str,
+    output_folder: Optional[str],
+    dataset_name: str,
+    levels: list[str],
+    hive: bool = False,
+    overwrite: bool = False,
+    preview: bool = False,
+    preview_limit: int = 15,
+    verbose: bool = False,
+    force: bool = False,
+    skip_analysis: bool = False,
+    filename_prefix: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> int:
+    """
+    Partition a GeoParquet file by administrative boundaries.
+
+    This performs a two-step operation:
+    1. Spatial join with remote admin boundaries to add admin columns
+    2. Partition the enriched data by those admin columns
+
+    Args:
+        input_parquet: Input GeoParquet file path
+        output_folder: Output directory for partitioned files
+        dataset_name: Name of admin dataset ("gaul", "overture")
+        levels: List of hierarchical levels to partition by
+        hive: Use Hive-style partitioning
+        overwrite: Overwrite existing partition files
+        preview: Preview partitions without creating files
+        preview_limit: Number of partitions to show in preview
+        verbose: Enable verbose output
+        force: Force partitioning even if analysis detects issues
+        skip_analysis: Skip partition strategy analysis
+
+    Returns:
+        Number of partitions created
+    """
+    # Setup dataset and connection
+    dataset, boundary_columns = _setup_admin_dataset(dataset_name, verbose, levels)
+    con, input_url, input_geom_col, input_bbox_col = _setup_hierarchical_connection(
+        input_parquet, verbose
+    )
+
+    # Get admin dataset info
+    admin_geom_col = dataset.get_geometry_column()
+    admin_bbox_col = dataset.get_bbox_column()
+
+    # Configure S3 settings based on dataset requirements
+    dataset.configure_s3(con)
+
+    # STEP 1: Spatial join to create enriched data with admin columns
+    click.echo("\n📍 Step 1/2: Performing spatial join with admin boundaries...")
+
+    enriched_table = "_enriched_with_admin"
+    admin_source = dataset.prepare_data_source(con)
+
+    # Build SELECT clause for admin columns
+    admin_select_clause, output_column_names = _build_admin_select_for_partitioning(
+        levels, boundary_columns
+    )
+
+    # Build admin data source with read_parquet options if needed
+    admin_table_ref = _build_admin_table_reference(dataset, admin_source)
+
+    # Build WHERE clause for admin boundaries
+    admin_where_clause = _build_admin_where_clause(
+        dataset, levels, con, input_url, input_bbox_col, input_geom_col, admin_bbox_col, verbose
+    )
+
+    # Build efficient spatial join query
+    if input_bbox_col and admin_bbox_col and verbose:
+        click.echo("  → Using bbox columns for optimized spatial join")
+    elif not (input_bbox_col and admin_bbox_col) and verbose:
+        click.echo("  → Using full geometry intersection (no bbox optimization)")
+
+    # Perform enrichment join
+    _perform_enrichment_join(
+        con,
+        enriched_table,
+        input_url,
+        admin_table_ref,
+        admin_where_clause,
+        admin_select_clause,
+        admin_geom_col,
+        admin_bbox_col,
+        boundary_columns,
+        input_geom_col,
+        input_bbox_col,
+    )
+
+    # Verify enrichment results
+    try:
+        _verify_enrichment_results(con, enriched_table, output_column_names)
+    except click.ClickException:
+        con.close()
+        raise
 
     # STEP 2: Partition the enriched data
     click.echo(f"\n📁 Step 2/2: Partitioning by {' → '.join(levels)}...")
@@ -299,85 +512,30 @@ def partition_by_admin_hierarchical(
     os.makedirs(output_folder, exist_ok=True)
 
     # Get unique partition combinations
-    group_by_cols = ", ".join([f'"{col}"' for col in output_column_names])
-    combinations_query = f"""
-        SELECT DISTINCT {group_by_cols}
-        FROM {enriched_table}
-        WHERE {" AND ".join([f'"{col}" IS NOT NULL' for col in output_column_names])}
-        ORDER BY {group_by_cols}
-    """
-
-    result = con.execute(combinations_query)
-    combinations = result.fetchall()
+    combinations = _get_partition_combinations(con, enriched_table, output_column_names)
 
     if verbose:
         click.echo(f"  → Creating {len(combinations)} partition(s)...")
 
+    # Get original columns (exclude temporary admin columns)
+    original_cols = _get_original_columns(con, input_url)
+
     # Create each partition
-    partition_count = 0
-    for combination in combinations:
-        # Build nested folder path
-        folder_parts = []
-        for _i, (level, value) in enumerate(zip(levels, combination)):
-            safe_value = sanitize_filename(str(value))
-            if hive:
-                folder_parts.append(f"{level}={safe_value}")
-            else:
-                folder_parts.append(safe_value)
-
-        # Create partition folder
-        partition_folder = os.path.join(output_folder, *folder_parts)
-        os.makedirs(partition_folder, exist_ok=True)
-
-        # Generate output filename
-        safe_last_value = sanitize_filename(str(combination[-1]))
-        filename = (
-            f"{filename_prefix}_{safe_last_value}.parquet"
-            if filename_prefix
-            else f"{safe_last_value}.parquet"
-        )
-        output_file = os.path.join(partition_folder, filename)
-
-        # Skip if exists and not overwriting
-        if os.path.exists(output_file) and not overwrite:
-            if verbose:
-                click.echo(f"  ⊘ Skipping existing: {'/'.join(folder_parts)}")
-            continue
-
-        if verbose:
-            click.echo(f"  → Creating: {'/'.join(folder_parts)}")
-
-        # Build WHERE clause
-        where_conditions = [
-            f"\"{col}\" = '{value}'" for col, value in zip(output_column_names, combination)
-        ]
-        where_clause = " AND ".join(where_conditions)
-
-        # Build SELECT query (exclude temporary admin columns)
-        original_columns_query = f"SELECT * FROM '{input_url}' LIMIT 0"
-        original_schema = con.execute(original_columns_query)
-        original_cols = [desc[0] for desc in original_schema.description]
-
-        select_cols = ", ".join([f'"{col}"' for col in original_cols])
-
-        partition_query = f"""
-            SELECT {select_cols}
-            FROM {enriched_table}
-            WHERE {where_clause}
-        """
-
-        # Write partition
-        write_parquet_with_metadata(
-            con,
-            partition_query,
-            output_file,
-            original_metadata=metadata,
-            compression="ZSTD",
-            compression_level=15,
-            verbose=False,
-        )
-
-        partition_count += 1
+    partition_count = _create_all_partitions(
+        con,
+        enriched_table,
+        output_column_names,
+        combinations,
+        levels,
+        output_folder,
+        hive,
+        filename_prefix,
+        overwrite,
+        metadata,
+        verbose,
+        profile,
+        original_cols,
+    )
 
     con.close()
 
@@ -386,17 +544,8 @@ def partition_by_admin_hierarchical(
     return partition_count
 
 
-def _preview_hierarchical_partitions(
-    con: duckdb.DuckDBPyConnection,
-    table_name: str,
-    partition_columns: list[str],
-    level_names: list[str],
-    limit: int,
-    verbose: bool,
-) -> None:
-    """Preview hierarchical partitions without creating files."""
-
-    # Build query for partition stats
+def _get_preview_partitions(con, table_name, partition_columns, level_names):
+    """Query partition statistics for preview."""
     group_by_cols = ", ".join([f'"{col}"' for col in partition_columns])
     select_cols = ", ".join(
         [f'"{col}" as {name}' for col, name in zip(partition_columns, level_names)]
@@ -413,30 +562,27 @@ def _preview_hierarchical_partitions(
     """
 
     result = con.execute(query)
-    all_partitions = result.fetchall()
+    return result.fetchall()
 
-    if len(all_partitions) == 0:
-        click.echo("\n⚠️  No partitions would be created (no features with admin boundaries)")
-        return
 
-    # Calculate totals
-    total_records = sum(row[-1] for row in all_partitions)
-
-    # Display preview
+def _display_preview_header(level_names, all_partitions, total_records, limit):
+    """Display preview header and stats."""
     click.echo(f"\n📊 Partition Preview ({' → '.join(level_names)}):")
     click.echo(f"  Total partitions: {len(all_partitions)}")
     click.echo(f"  Total records: {total_records:,}")
     click.echo(f"\n  Top {min(limit, len(all_partitions))} partitions by size:")
 
-    # Build header
     header_parts = [f"{name:<25}" for name in level_names]
     header_parts.append(f"{'Records':>15}")
     header_parts.append(f"{'%':>8}")
     header = "  ".join(header_parts)
     click.echo(f"\n  {header}")
     click.echo(f"  {'-' * len(header)}")
+    return header
 
-    # Show partitions
+
+def _display_preview_rows(all_partitions, limit, total_records):
+    """Display preview rows."""
     for i, row in enumerate(all_partitions):
         if i >= limit:
             break
@@ -450,7 +596,9 @@ def _preview_hierarchical_partitions(
         row_parts.append(f"{percentage:>7.1f}%")
         click.echo(f"  {'  '.join(row_parts)}")
 
-    # Show summary if more exist
+
+def _display_preview_summary(all_partitions, limit, total_records, header):
+    """Display preview summary if more exist."""
     if len(all_partitions) > limit:
         remaining = len(all_partitions) - limit
         remaining_records = sum(row[-1] for row in all_partitions[limit:])
@@ -460,3 +608,24 @@ def _preview_hierarchical_partitions(
             f"  ... and {remaining} more partition(s) with {remaining_records:,} records ({remaining_pct:.1f}%)"
         )
         click.echo("\n  Use --preview-limit to show more partitions")
+
+
+def _preview_hierarchical_partitions(
+    con: duckdb.DuckDBPyConnection,
+    table_name: str,
+    partition_columns: list[str],
+    level_names: list[str],
+    limit: int,
+    verbose: bool,
+) -> None:
+    """Preview hierarchical partitions without creating files."""
+    all_partitions = _get_preview_partitions(con, table_name, partition_columns, level_names)
+
+    if len(all_partitions) == 0:
+        click.echo("\n⚠️  No partitions would be created (no features with admin boundaries)")
+        return
+
+    total_records = sum(row[-1] for row in all_partitions)
+    header = _display_preview_header(level_names, all_partitions, total_records, limit)
+    _display_preview_rows(all_partitions, limit, total_records)
+    _display_preview_summary(all_partitions, limit, total_records, header)

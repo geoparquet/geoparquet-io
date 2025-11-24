@@ -13,8 +13,8 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
 - **Fast**: Built on PyArrow and DuckDB for high-performance operations
 - **Comprehensive**: Sort, partition, enhance, validate, and upload GeoParquet files
-- **Cloud-Native**: Upload to S3, GCS, and Azure with parallel transfers
-- **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and hierarchical admin divisions
+- **Cloud-Native**: Read from and write to S3, GCS, Azure, and HTTPS sources
+- **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and admin divisions
 - **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
 - **Flexible**: CLI and Python API for any workflow
 - **Tested**: Extensive test suite across Python 3.9-3.13 and all platforms
@@ -44,6 +44,11 @@ gpio sort hilbert input.parquet output_sorted.parquet
 
 # Partition by admin boundaries
 gpio partition admin buildings.parquet output_dir/ --dataset gaul --levels continent,country
+
+# Remote-to-remote processing (S3, GCS, Azure, HTTPS)
+gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet --profile my-aws
+gpio partition h3 gs://bucket/data.parquet gs://bucket/partitions/ --resolution 9
+gpio sort hilbert https://example.com/data.parquet s3://bucket/sorted.parquet
 ```
 
 For more examples and detailed usage, see the [Quick Start Tutorial](https://cholmes.github.io/geoparquet-io/getting-started/quickstart/) and [User Guide](https://cholmes.github.io/geoparquet-io/guide/inspect/).

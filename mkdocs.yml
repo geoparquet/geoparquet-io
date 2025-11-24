@@ -53,6 +53,7 @@ nav:
     - Sorting Data: guide/sort.md
     - Adding Spatial Indices: guide/add.md
     - Partitioning Files: guide/partition.md
+    - Remote Files & Authentication: guide/remote-files.md
     - Uploading to Cloud Storage: guide/upload.md
     - STAC Generation: guide/stac.md
   - CLI Reference:

@@ -91,6 +91,19 @@ def overwrite_option(func):
     return click.option("--overwrite", is_flag=True, help="Overwrite existing files")(func)
 
 
+def profile_option(func):
+    """
+    Add --profile option to a command.
+
+    Allows specifying AWS profile name for S3 operations. This is a convenience
+    wrapper that sets the AWS_PROFILE environment variable.
+    """
+    return click.option(
+        "--profile",
+        help="AWS profile name for S3 operations (sets AWS_PROFILE env var)",
+    )(func)
+
+
 def bbox_option(func):
     """
     Add --add-bbox option to a command.

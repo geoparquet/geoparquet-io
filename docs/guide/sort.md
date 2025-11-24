@@ -6,6 +6,9 @@ The `sort` command spatially reorders GeoParquet files for optimal performance.
 
 ```bash
 gpio sort hilbert input.parquet output.parquet
+
+# From HTTPS to S3
+gpio sort hilbert https://example.com/data.parquet s3://bucket/sorted.parquet --profile prod
 ```
 
 Reorders rows using a [Hilbert space-filling curve](https://en.wikipedia.org/wiki/Hilbert_curve), which:

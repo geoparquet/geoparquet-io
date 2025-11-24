@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 
 import click
-import duckdb
 
-from geoparquet_io.core.common import find_primary_geometry_column, safe_file_url
+from geoparquet_io.core.common import (
+    find_primary_geometry_column,
+    get_duckdb_connection,
+    needs_httpfs,
+    safe_file_url,
+)
 
 
 def check_spatial_order(
@@ -34,10 +38,8 @@ def check_spatial_order(
     if verbose:
         click.echo(f"Using geometry column: {geometry_column}")
 
-    # Create DuckDB connection and load spatial extension
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    # Create DuckDB connection with httpfs if needed
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
     # First get total rows
     total_rows = con.execute(f"SELECT COUNT(*) FROM '{safe_url}'").fetchone()[0]

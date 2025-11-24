@@ -23,6 +23,33 @@ from geoparquet_io.core.common import (
 )
 
 
+def _check_parquet_schema_string(field_name, parquet_schema_str):
+    """Check Parquet schema string for geo types."""
+    import re
+
+    escaped_name = re.escape(field_name)
+    pattern = rf"{escaped_name}\s+[^(]*\(Geography"
+    if re.search(pattern, parquet_schema_str):
+        return "Geography"
+    pattern = rf"{escaped_name}\s+[^(]*\(Geometry"
+    if re.search(pattern, parquet_schema_str):
+        return "Geometry"
+    return None
+
+
+def _check_extension_type(field):
+    """Check PyArrow extension type for geo types."""
+    if hasattr(field.type, "id") and hasattr(field.type, "extension_name"):
+        ext_name = getattr(field.type, "extension_name", None)
+        if ext_name:
+            ext_name_lower = ext_name.lower()
+            if "geography" in ext_name_lower:
+                return "Geography"
+            elif "geometry" in ext_name_lower:
+                return "Geometry"
+    return None
+
+
 def detect_geo_logical_type(field, parquet_schema_str: Optional[str] = None) -> Optional[str]:
     """
     Detect if a field has a GEOMETRY or GEOGRAPHY logical type.
@@ -36,19 +63,9 @@ def detect_geo_logical_type(field, parquet_schema_str: Optional[str] = None) -> 
     """
     # First check the Parquet schema string if provided
     if parquet_schema_str:
-        import re
-
-        # Look for the field in the Parquet schema string
-        # Pattern: "field_name (Geography(...)" or "field_name (Geometry(...)"
-        field_name = field.name
-        # Escape special regex characters in field name
-        escaped_name = re.escape(field_name)
-        pattern = rf"{escaped_name}\s+[^(]*\(Geography"
-        if re.search(pattern, parquet_schema_str):
-            return "Geography"
-        pattern = rf"{escaped_name}\s+[^(]*\(Geometry"
-        if re.search(pattern, parquet_schema_str):
-            return "Geometry"
+        result = _check_parquet_schema_string(field.name, parquet_schema_str)
+        if result:
+            return result
 
     # Check the field type string representation for Geography/Geometry
     type_str = str(field.type)
@@ -58,19 +75,7 @@ def detect_geo_logical_type(field, parquet_schema_str: Optional[str] = None) -> 
         return "Geometry"
 
     # Check for logical type in PyArrow field (extension types)
-    if hasattr(field.type, "id") and hasattr(field.type, "extension_name"):
-        ext_name = getattr(field.type, "extension_name", None)
-        if ext_name:
-            ext_name_lower = ext_name.lower()
-            if "geography" in ext_name_lower:
-                return "Geography"
-            elif "geometry" in ext_name_lower:
-                return "Geometry"
-
-    # Do NOT check field metadata - that's GeoParquet level, not Parquet level
-    # Only the Parquet schema logical type and PyArrow extension types matter here
-
-    return None
+    return _check_extension_type(field)
 
 
 def parse_geometry_type_from_schema(
