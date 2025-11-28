@@ -295,3 +295,70 @@ class TestAddCommands:
     def test_add_admin_divisions(self, places_test_file, temp_output_file):
         """Test adding admin divisions (skipped - requires countries file)."""
         pass
+
+
+class TestRemoteWriteSupport:
+    """Tests for remote write functionality."""
+
+    def test_remote_url_detection(self):
+        """Test that remote URLs are correctly detected."""
+        from geoparquet_io.core.common import is_remote_url
+
+        # Test S3 URLs
+        assert is_remote_url("s3://bucket/file.parquet")
+        assert is_remote_url("s3://my-bucket/path/to/file.parquet")
+
+        # Test GCS URLs
+        assert is_remote_url("gs://bucket/file.parquet")
+
+        # Test Azure URLs
+        assert is_remote_url("az://container/file.parquet")
+
+        # Test HTTP/HTTPS URLs
+        assert is_remote_url("https://example.com/data.parquet")
+        assert is_remote_url("http://example.com/data.parquet")
+
+        # Test local paths (should return False)
+        assert not is_remote_url("local.parquet")
+        assert not is_remote_url("/path/to/file.parquet")
+        assert not is_remote_url("./relative/path.parquet")
+
+    def test_write_with_remote_output_creates_temp_file(self, buildings_test_file):
+        """Test that remote outputs trigger temp file creation."""
+        from unittest.mock import MagicMock, patch
+
+        import duckdb
+
+        from geoparquet_io.core.common import write_parquet_with_metadata
+
+        # Mock the upload function to avoid actual upload
+        mock_upload = MagicMock()
+
+        with patch("geoparquet_io.core.upload.upload", mock_upload):
+            # Create a mock DuckDB connection
+            con = duckdb.connect()
+            con.execute("INSTALL spatial; LOAD spatial;")
+
+            # Simple query to read the test file
+            from geoparquet_io.core.common import safe_file_url
+
+            input_url = safe_file_url(buildings_test_file, False)
+            query = f"SELECT * FROM '{input_url}' LIMIT 10"
+
+            # Remote S3 output
+            remote_output = "s3://test-bucket/output.parquet"
+
+            # This should create a temp file and attempt to upload
+            write_parquet_with_metadata(
+                con=con, query=query, output_file=remote_output, verbose=False
+            )
+
+            # Verify upload was called
+            assert mock_upload.called
+            # Check that the source was a local temp file
+            call_args = mock_upload.call_args
+            assert call_args is not None
+            source_path = str(call_args[1]["source"])  # Keyword arg 'source'
+            assert source_path.endswith(".parquet")
+            # Destination should be the remote URL
+            assert call_args[1]["destination"] == remote_output

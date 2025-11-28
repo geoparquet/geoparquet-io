@@ -5,11 +5,16 @@ import re
 from typing import Optional
 
 import click
-import duckdb
 
 from geoparquet_io.core.common import (
+    get_duckdb_connection,
     get_parquet_metadata,
+    needs_httpfs,
+    remote_write_context,
     safe_file_url,
+    setup_aws_profile_if_needed,
+    show_remote_read_message,
+    upload_if_remote,
     write_parquet_with_metadata,
 )
 
@@ -40,6 +45,102 @@ def sanitize_filename(value: str) -> str:
     # Collapse multiple underscores
     sanitized = re.sub(r"_+", "_", sanitized)
     return sanitized
+
+
+def _calculate_size_estimates(file_size_bytes, total_rows, min_rows, max_rows, avg_rows):
+    """Calculate partition size estimates based on file size and row distribution."""
+    if file_size_bytes > 0 and total_rows > 0:
+        bytes_per_row = file_size_bytes / total_rows
+        return (
+            int(min_rows * bytes_per_row),
+            int(max_rows * bytes_per_row),
+            int(avg_rows * bytes_per_row),
+        )
+    else:
+        # Fallback if we can't get file size - assume 1KB per row
+        return min_rows * 1000, max_rows * 1000, avg_rows * 1000
+
+
+def _check_partition_errors(
+    partition_count,
+    avg_rows,
+    avg_size_mb,
+    imbalance_ratio,
+    median_rows,
+    max_rows,
+    max_partitions,
+    min_rows_per_partition,
+    min_partition_size_mb,
+    max_imbalance_ratio,
+):
+    """Check for blocking partition strategy errors."""
+    errors = []
+
+    if partition_count > max_partitions:
+        errors.append(
+            f"Pathological partitioning: {partition_count:,} partitions exceeds maximum of {max_partitions:,}. "
+            f"This will create too many small files with poor performance."
+        )
+
+    if avg_rows < min_rows_per_partition:
+        errors.append(
+            f"Tiny partitions: Average of {avg_rows:,} rows per partition is below minimum of {min_rows_per_partition:,}. "
+            f"This will result in poor I/O performance and excessive file overhead."
+        )
+
+    if avg_size_mb < min_partition_size_mb:
+        errors.append(
+            f"Tiny partition files: Average size of {avg_size_mb:.3f} MB is below minimum of {min_partition_size_mb:.3f} MB. "
+            f"These tiny files will have poor I/O performance."
+        )
+
+    if imbalance_ratio > max_imbalance_ratio:
+        errors.append(
+            f"Extreme imbalance: Largest partition ({max_rows:,} rows) is {imbalance_ratio:.1f}x the median ({median_rows:,} rows). "
+            f"This indicates a data quality issue or wrong partition key choice."
+        )
+
+    return errors
+
+
+def _check_partition_warnings(
+    partition_count,
+    avg_rows,
+    imbalance_ratio,
+    largest_partition_pct,
+    warn_partition_count,
+    warn_min_rows,
+    warn_imbalance_ratio,
+    max_imbalance_ratio,
+    min_rows_per_partition,
+):
+    """Check for partition strategy warnings."""
+    warnings = []
+
+    if warn_imbalance_ratio <= imbalance_ratio < max_imbalance_ratio:
+        warnings.append(
+            f"Moderate imbalance: Largest partition is {imbalance_ratio:.1f}x the median. "
+            f"This might be expected (e.g., some regions are larger) but worth noting."
+        )
+
+    if warn_partition_count <= partition_count:
+        warnings.append(
+            f"Many partitions: Creating {partition_count:,} partitions. Not broken but getting unwieldy."
+        )
+
+    if min_rows_per_partition <= avg_rows < warn_min_rows:
+        warnings.append(
+            f"Small partitions: Average of {avg_rows:,} rows per partition is below recommended {warn_min_rows:,}. "
+            f"Suboptimal but might be intentional for your use case."
+        )
+
+    if largest_partition_pct > 50:
+        warnings.append(
+            f"Single partition dominates: One partition contains {largest_partition_pct:.1f}% of all data. "
+            f"This might defeat the purpose of partitioning."
+        )
+
+    return warnings
 
 
 def analyze_partition_strategy(
@@ -89,12 +190,13 @@ def analyze_partition_strategy(
     Raises:
         PartitionAnalysisError: If blocking issues are detected
     """
+    # Show remote read message
+    show_remote_read_message(input_parquet, verbose)
+
     input_url = safe_file_url(input_parquet, verbose)
 
-    # Create DuckDB connection
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    # Create DuckDB connection with httpfs if needed
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
     # Build the column expression for partitioning
     if column_prefix_length is not None:
@@ -128,7 +230,6 @@ def analyze_partition_strategy(
     result = con.execute(stats_query).fetchone()
 
     # Get approximate file size for estimation
-    # Use file size as a rough proxy for row size
     try:
         import os
 
@@ -139,26 +240,12 @@ def analyze_partition_strategy(
     con.close()
 
     # Unpack results
-    (
-        partition_count,
-        total_rows,
-        min_rows,
-        max_rows,
-        avg_rows,
-        median_rows,
-    ) = result
+    partition_count, total_rows, min_rows, max_rows, avg_rows, median_rows = result
 
     # Estimate size based on file size and row distribution
-    if file_size_bytes > 0 and total_rows > 0:
-        bytes_per_row = file_size_bytes / total_rows
-        min_size_bytes = int(min_rows * bytes_per_row)
-        max_size_bytes = int(max_rows * bytes_per_row)
-        avg_size_bytes = int(avg_rows * bytes_per_row)
-    else:
-        # Fallback if we can't get file size
-        min_size_bytes = min_rows * 1000  # Assume 1KB per row as rough estimate
-        max_size_bytes = max_rows * 1000
-        avg_size_bytes = avg_rows * 1000
+    min_size_bytes, max_size_bytes, avg_size_bytes = _calculate_size_estimates(
+        file_size_bytes, total_rows, min_rows, max_rows, avg_rows
+    )
 
     # Calculate derived metrics
     imbalance_ratio = max_rows / median_rows if median_rows > 0 else 0
@@ -166,58 +253,31 @@ def analyze_partition_strategy(
     avg_size_mb = avg_size_bytes / (1024 * 1024)
     max_size_mb = max_size_bytes / (1024 * 1024)
 
-    # Collect warnings and errors
-    warnings = []
-    errors = []
+    # Check for errors and warnings
+    errors = _check_partition_errors(
+        partition_count,
+        avg_rows,
+        avg_size_mb,
+        imbalance_ratio,
+        median_rows,
+        max_rows,
+        max_partitions,
+        min_rows_per_partition,
+        min_partition_size_mb,
+        max_imbalance_ratio,
+    )
 
-    # Check for BREAKING conditions
-    if partition_count > max_partitions:
-        errors.append(
-            f"Pathological partitioning: {partition_count:,} partitions exceeds maximum of {max_partitions:,}. "
-            f"This will create too many small files with poor performance."
-        )
-
-    if avg_rows < min_rows_per_partition:
-        errors.append(
-            f"Tiny partitions: Average of {avg_rows:,} rows per partition is below minimum of {min_rows_per_partition:,}. "
-            f"This will result in poor I/O performance and excessive file overhead."
-        )
-
-    if avg_size_mb < min_partition_size_mb:
-        errors.append(
-            f"Tiny partition files: Average size of {avg_size_mb:.3f} MB is below minimum of {min_partition_size_mb:.3f} MB. "
-            f"These tiny files will have poor I/O performance."
-        )
-
-    if imbalance_ratio > max_imbalance_ratio:
-        errors.append(
-            f"Extreme imbalance: Largest partition ({max_rows:,} rows) is {imbalance_ratio:.1f}x the median ({median_rows:,} rows). "
-            f"This indicates a data quality issue or wrong partition key choice."
-        )
-
-    # Check for WARNING conditions
-    if warn_imbalance_ratio <= imbalance_ratio < max_imbalance_ratio:
-        warnings.append(
-            f"Moderate imbalance: Largest partition is {imbalance_ratio:.1f}x the median. "
-            f"This might be expected (e.g., some regions are larger) but worth noting."
-        )
-
-    if warn_partition_count <= partition_count < max_partitions:
-        warnings.append(
-            f"Many partitions: Creating {partition_count:,} partitions. Not broken but getting unwieldy."
-        )
-
-    if min_rows_per_partition <= avg_rows < warn_min_rows:
-        warnings.append(
-            f"Small partitions: Average of {avg_rows:,} rows per partition is below recommended {warn_min_rows:,}. "
-            f"Suboptimal but might be intentional for your use case."
-        )
-
-    if largest_partition_pct > 50:
-        warnings.append(
-            f"Single partition dominates: One partition contains {largest_partition_pct:.1f}% of all data. "
-            f"This might defeat the purpose of partitioning."
-        )
+    warnings = _check_partition_warnings(
+        partition_count,
+        avg_rows,
+        imbalance_ratio,
+        largest_partition_pct,
+        warn_partition_count,
+        warn_min_rows,
+        warn_imbalance_ratio,
+        max_imbalance_ratio,
+        min_rows_per_partition,
+    )
 
     # Generate recommendations
     recommendations = _generate_recommendations(
@@ -414,12 +474,13 @@ def preview_partition(
     Returns:
         Dictionary with partition statistics
     """
+    # Show remote read message
+    show_remote_read_message(input_parquet, verbose)
+
     input_url = safe_file_url(input_parquet, verbose)
 
-    # Create DuckDB connection
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    # Create DuckDB connection with httpfs if needed
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
     # Build the column expression for partitioning
     if column_prefix_length is not None:
@@ -484,6 +545,160 @@ def preview_partition(
     }
 
 
+def _run_partition_analysis(
+    input_parquet, column_name, column_prefix_length, skip_analysis, force, verbose
+):
+    """Run partition analysis if enabled."""
+    if skip_analysis:
+        return
+
+    try:
+        analyze_partition_strategy(
+            input_parquet=input_parquet,
+            column_name=column_name,
+            column_prefix_length=column_prefix_length,
+            verbose=verbose,
+        )
+    except PartitionAnalysisError as e:
+        if not force:
+            raise click.ClickException(str(e)) from e
+        if verbose:
+            click.echo(
+                click.style(
+                    "\n⚠️  Forcing partition creation despite analysis warnings/errors...",
+                    fg="yellow",
+                    bold=True,
+                )
+            )
+
+
+def _build_column_expression(column_name, column_prefix_length):
+    """Build column expression for partitioning."""
+    if column_prefix_length is not None:
+        column_expr = f'LEFT("{column_name}", {column_prefix_length})'
+        partition_description = f"first {column_prefix_length} characters of {column_name}"
+    else:
+        column_expr = f'"{column_name}"'
+        partition_description = column_name
+    return column_expr, partition_description
+
+
+def _get_unique_partition_values(con, input_url, column_expr, column_name, verbose):
+    """Get unique partition values from input."""
+    query = f"""
+        SELECT DISTINCT {column_expr} as partition_value
+        FROM '{input_url}'
+        WHERE "{column_name}" IS NOT NULL
+        ORDER BY partition_value
+    """
+    result = con.execute(query)
+    partition_values = result.fetchall()
+
+    if len(partition_values) == 0:
+        raise click.ClickException(f"No non-NULL values found in column '{column_name}'")
+
+    if verbose:
+        click.echo(f"Found {len(partition_values)} unique partition values")
+
+    return partition_values
+
+
+def _determine_output_path(
+    actual_output, partition_value, column_name, column_prefix_length, hive, filename_prefix
+):
+    """Determine output path for partition."""
+    safe_value = sanitize_filename(str(partition_value))
+    filename = (
+        f"{filename_prefix}_{safe_value}.parquet" if filename_prefix else f"{safe_value}.parquet"
+    )
+
+    if hive:
+        if column_prefix_length is not None:
+            folder_name = f"{column_name}_prefix={safe_value}"
+        else:
+            folder_name = f"{column_name}={safe_value}"
+        write_folder = os.path.join(actual_output, folder_name)
+        os.makedirs(write_folder, exist_ok=True)
+        output_filename = os.path.join(write_folder, filename)
+    else:
+        write_folder = actual_output
+        output_filename = os.path.join(write_folder, filename)
+
+    return output_filename
+
+
+def _build_select_clause(con, input_url, column_name, keep_partition_column):
+    """Build SELECT clause, optionally excluding partition column."""
+    if keep_partition_column:
+        return "*"
+
+    schema_query = f"SELECT * FROM '{input_url}' LIMIT 0"
+    schema_result = con.execute(schema_query)
+    all_columns = [desc[0] for desc in schema_result.description]
+    columns_to_select = [f'"{col}"' for col in all_columns if col != column_name]
+    return ", ".join(columns_to_select)
+
+
+def _process_partition_value(
+    con,
+    input_url,
+    partition_value,
+    column_name,
+    column_prefix_length,
+    actual_output,
+    hive,
+    filename_prefix,
+    overwrite,
+    metadata,
+    keep_partition_column,
+    verbose,
+):
+    """Process a single partition value."""
+    output_filename = _determine_output_path(
+        actual_output, partition_value, column_name, column_prefix_length, hive, filename_prefix
+    )
+
+    if os.path.exists(output_filename) and not overwrite:
+        if verbose:
+            click.echo(f"Output file for {partition_value} already exists, skipping...")
+        return False
+
+    if verbose:
+        click.echo(f"Processing partition: {partition_value}...")
+
+    # Build WHERE clause
+    if column_prefix_length is not None:
+        where_clause = f"LEFT(\"{column_name}\", {column_prefix_length}) = '{partition_value}'"
+    else:
+        where_clause = f"\"{column_name}\" = '{partition_value}'"
+
+    # Build SELECT clause
+    select_clause = _build_select_clause(con, input_url, column_name, keep_partition_column)
+
+    # Build SELECT query for partition
+    partition_query = f"""
+        SELECT {select_clause}
+        FROM '{input_url}'
+        WHERE {where_clause}
+    """
+
+    # Write partition
+    write_parquet_with_metadata(
+        con,
+        partition_query,
+        output_filename,
+        original_metadata=metadata,
+        compression="ZSTD",
+        compression_level=15,
+        verbose=False,
+    )
+
+    if verbose:
+        click.echo(f"Wrote {output_filename}")
+
+    return True
+
+
 def partition_by_column(
     input_parquet: str,
     output_folder: str,
@@ -496,13 +711,17 @@ def partition_by_column(
     force: bool = False,
     skip_analysis: bool = False,
     filename_prefix: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.
 
+    Supports both local and remote outputs (S3, GCS, Azure). Remote outputs
+    are written to a temporary local directory, then uploaded.
+
     Args:
         input_parquet: Input file path
-        output_folder: Output directory
+        output_folder: Output directory (local path or remote URL)
         column_name: Column to partition by
         column_prefix_length: If set, use first N characters of column value
         hive: Use Hive-style partitioning
@@ -512,157 +731,81 @@ def partition_by_column(
         force: Force partitioning even if analysis detects issues
         skip_analysis: Skip partition strategy analysis (for performance)
         filename_prefix: Optional prefix for partition filenames (e.g., 'fields' → fields_USA.parquet)
+        profile: AWS profile name (S3 only, optional)
 
     Returns:
         Number of partitions created
     """
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, input_parquet, output_folder)
+
+    # Show remote read message
+    show_remote_read_message(input_parquet, verbose)
+
     input_url = safe_file_url(input_parquet, verbose)
 
     # Run partition analysis unless skipped
-    if not skip_analysis:
-        try:
-            analyze_partition_strategy(
-                input_parquet=input_parquet,
-                column_name=column_name,
-                column_prefix_length=column_prefix_length,
-                verbose=verbose,
+    _run_partition_analysis(
+        input_parquet, column_name, column_prefix_length, skip_analysis, force, verbose
+    )
+
+    with remote_write_context(output_folder, is_directory=True, verbose=verbose) as (
+        actual_output,
+        is_remote,
+    ):
+        # Get metadata before processing
+        metadata, _ = get_parquet_metadata(input_parquet, verbose)
+
+        # Create output directory
+        os.makedirs(actual_output, exist_ok=True)
+        if verbose:
+            click.echo(f"Created output directory: {actual_output}")
+
+        # Create DuckDB connection with httpfs if needed
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
+
+        # Build the column expression for partitioning
+        column_expr, partition_description = _build_column_expression(
+            column_name, column_prefix_length
+        )
+
+        # Get unique partition values
+        if verbose:
+            click.echo(f"Finding unique values for {partition_description}...")
+
+        partition_values = _get_unique_partition_values(
+            con, input_url, column_expr, column_name, verbose
+        )
+
+        # Process each partition value
+        for row in partition_values:
+            partition_value = row[0]
+            _process_partition_value(
+                con,
+                input_url,
+                partition_value,
+                column_name,
+                column_prefix_length,
+                actual_output,
+                hive,
+                filename_prefix,
+                overwrite,
+                metadata,
+                keep_partition_column,
+                verbose,
             )
-        except PartitionAnalysisError as e:
-            if not force:
-                raise click.ClickException(str(e)) from e
-            else:
-                # User forced execution despite warnings
-                if verbose:
-                    click.echo(
-                        click.style(
-                            "\n⚠️  Forcing partition creation despite analysis warnings/errors...",
-                            fg="yellow",
-                            bold=True,
-                        )
-                    )
 
-    # Get metadata before processing
-    metadata, _ = get_parquet_metadata(input_parquet, verbose)
+        con.close()
 
-    # Create output directory
-    os.makedirs(output_folder, exist_ok=True)
-    if verbose:
-        click.echo(f"Created output directory: {output_folder}")
+        partition_count = len(partition_values)
 
-    # Create DuckDB connection
-    con = duckdb.connect()
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
-
-    # Build the column expression for partitioning
-    if column_prefix_length is not None:
-        # Use LEFT() function to get first N characters
-        column_expr = f'LEFT("{column_name}", {column_prefix_length})'
-        partition_description = f"first {column_prefix_length} characters of {column_name}"
-    else:
-        column_expr = f'"{column_name}"'
-        partition_description = column_name
-
-    # Get unique partition values
-    if verbose:
-        click.echo(f"Finding unique values for {partition_description}...")
-
-    query = f"""
-        SELECT DISTINCT {column_expr} as partition_value
-        FROM '{input_url}'
-        WHERE "{column_name}" IS NOT NULL
-        ORDER BY partition_value
-    """
-
-    result = con.execute(query)
-    partition_values = result.fetchall()
-
-    if len(partition_values) == 0:
-        raise click.ClickException(f"No non-NULL values found in column '{column_name}'")
-
-    if verbose:
-        click.echo(f"Found {len(partition_values)} unique partition values")
-
-    # Process each partition value
-    for row in partition_values:
-        partition_value = row[0]
-
-        # Sanitize the value for use in filenames
-        safe_value = sanitize_filename(str(partition_value))
-
-        # Determine output path
-        # Build filename with optional prefix
-        filename = (
-            f"{filename_prefix}_{safe_value}.parquet"
-            if filename_prefix
-            else f"{safe_value}.parquet"
-        )
-
-        if hive:
-            # Hive-style: folder named "column=value"
-            if column_prefix_length is not None:
-                # For prefix partitioning, use a more descriptive folder name
-                folder_name = f"{column_name}_prefix={safe_value}"
-            else:
-                folder_name = f"{column_name}={safe_value}"
-            write_folder = os.path.join(output_folder, folder_name)
-            os.makedirs(write_folder, exist_ok=True)
-            output_filename = os.path.join(write_folder, filename)
-        else:
-            write_folder = output_folder
-            output_filename = os.path.join(write_folder, filename)
-
-        # Skip if file exists and not overwriting
-        if os.path.exists(output_filename) and not overwrite:
+        # Upload to remote if needed
+        if is_remote:
             if verbose:
-                click.echo(f"Output file for {partition_value} already exists, skipping...")
-            continue
+                click.echo(f"\nUploading {partition_count} partition files to {output_folder}...")
 
-        if verbose:
-            click.echo(f"Processing partition: {partition_value}...")
+            upload_if_remote(
+                actual_output, output_folder, profile=profile, is_directory=True, verbose=verbose
+            )
 
-        # Build WHERE clause based on whether we're using prefix or full value
-        if column_prefix_length is not None:
-            # Match rows where the prefix matches
-            where_clause = f"LEFT(\"{column_name}\", {column_prefix_length}) = '{partition_value}'"
-        else:
-            # Match rows where the full value matches
-            where_clause = f"\"{column_name}\" = '{partition_value}'"
-
-        # Build SELECT clause - exclude partition column if requested
-        if keep_partition_column:
-            select_clause = "*"
-        else:
-            # Get all column names from the input file
-            schema_query = f"SELECT * FROM '{input_url}' LIMIT 0"
-            schema_result = con.execute(schema_query)
-            all_columns = [desc[0] for desc in schema_result.description]
-
-            # Exclude the partition column
-            columns_to_select = [f'"{col}"' for col in all_columns if col != column_name]
-            select_clause = ", ".join(columns_to_select)
-
-        # Build SELECT query for partition (without COPY wrapper)
-        partition_query = f"""
-            SELECT {select_clause}
-            FROM '{input_url}'
-            WHERE {where_clause}
-        """
-
-        # Use common write function with metadata preservation
-        write_parquet_with_metadata(
-            con,
-            partition_query,
-            output_filename,
-            original_metadata=metadata,
-            compression="ZSTD",
-            compression_level=15,
-            verbose=False,
-        )
-
-        if verbose:
-            click.echo(f"Wrote {output_filename}")
-
-    con.close()
-
-    return len(partition_values)
+        return partition_count

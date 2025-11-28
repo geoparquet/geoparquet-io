@@ -23,31 +23,12 @@ Provider support via URL scheme:
 
 ## Authentication
 
-### AWS S3
+For authentication setup, see the [Remote Files guide](remote-files.md#authentication).
 
-Use AWS profiles configured in `~/.aws/credentials`:
-
-```bash
-gpio upload data.parquet s3://bucket/file.parquet --profile my-profile
-```
-
-Profile credentials are automatically loaded from AWS CLI configuration.
-
-### Google Cloud Storage
-
-Uses application default credentials. Set up with:
-
-```bash
-gcloud auth application-default login
-```
-
-### Azure Blob Storage
-
-Uses Azure CLI credentials. Set up with:
-
-```bash
-az login
-```
+**Quick reference:**
+- **AWS S3**: Use `--profile` flag or set `AWS_PROFILE` env var
+- **Google Cloud Storage**: Set `GOOGLE_APPLICATION_CREDENTIALS`
+- **Azure**: Set `AZURE_STORAGE_ACCOUNT_NAME` and `AZURE_STORAGE_ACCOUNT_KEY`
 
 ## Options
 
