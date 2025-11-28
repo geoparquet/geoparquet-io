@@ -11,7 +11,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
 - **Fast**: Built on PyArrow and DuckDB for high-performance operations
 - **Comprehensive**: Sort, partition, enhance, validate, and upload GeoParquet files
-- **Cloud-Native**: Upload to S3, GCS, and Azure with parallel transfers
+- **Cloud-Native**: Read from and write to S3, GCS, Azure, and HTTPS sources
 - **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and admin divisions
 - **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
 - **Flexible**: CLI and Python API for any workflow

@@ -1,71 +1,78 @@
 # Remote Files
 
-Read GeoParquet files from cloud storage and HTTPS URLs.
-
-## Supported Protocols
-
-- **HTTPS**: Public and private URLs
-- **S3**: `s3://bucket/path/file.parquet`
-- **Azure**: `az://container/file.parquet` or `https://account.blob.core.windows.net/...`
-- **GCS**: `gs://bucket/path/file.parquet`
-
-## Basic Usage
-
-```bash
-# Inspect remote file
-gpio inspect https://data.source.coop/path/file.parquet
-
-# Check remote file
-gpio check all s3://bucket/data.parquet
-
-# Convert remote to local
-gpio convert https://example.com/data.geojson local.parquet
-
-# Process remote, upload result
-gpio sort hilbert s3://bucket/input.parquet local-sorted.parquet
-gpio upload local-sorted.parquet s3://bucket/output/sorted.parquet
-```
+All commands work with remote URLs (`s3://`, `gs://`, `az://`, `https://`). Use them anywhere you'd use local paths.
 
 ## Authentication
 
+geoparquet-io uses standard cloud provider authentication. Configure your credentials once using your cloud provider's standard tools - no CLI flags needed for basic usage.
+
 ### AWS S3
 
+Credentials are automatically discovered in this order:
+
+1. **Environment variables**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+2. **AWS profile**: `~/.aws/credentials` via `AWS_PROFILE` env var or `--profile` flag
+3. **IAM role**: EC2/ECS/EKS instance metadata (when running on AWS infrastructure)
+
+**Examples:**
+
 ```bash
-# Environment variables
+# Use default credentials (from ~/.aws/credentials [default] or IAM role)
+gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
+
+# Use environment variables
 export AWS_ACCESS_KEY_ID=your_key
 export AWS_SECRET_ACCESS_KEY=your_secret
+gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
 
-# Or use AWS CLI
-aws configure
+# Use a named AWS profile (convenient CLI flag)
+gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet --profile production
 
-# Or use profile
-export AWS_PROFILE=your-profile
+# Or set AWS_PROFILE environment variable (equivalent to --profile)
+export AWS_PROFILE=production
+gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
 ```
 
-### Azure
+**Note:** The `--profile` flag is a convenience wrapper that sets `AWS_PROFILE` for you. Both approaches work identically.
+
+### Azure Blob Storage
+
+Azure credentials are discovered automatically when reading files:
 
 ```bash
-export AZURE_STORAGE_ACCOUNT_NAME=account
-export AZURE_STORAGE_ACCOUNT_KEY=key
+# Set account credentials via environment variables
+export AZURE_STORAGE_ACCOUNT_NAME=myaccount
+export AZURE_STORAGE_ACCOUNT_KEY=mykey
 
-# Or SAS token
-export AZURE_STORAGE_SAS_TOKEN=token
+# Or use SAS token
+export AZURE_STORAGE_SAS_TOKEN=mytoken
+
+# Then use Azure URLs
+gpio add bbox az://container/input.parquet az://container/output.parquet
 ```
 
-### Google Cloud
+**Note:** Azure support for reads is currently limited. For full Azure support, process files locally.
+
+### Google Cloud Storage
+
+GCS support requires HMAC keys (not service account JSON):
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+# Generate HMAC keys at: https://console.cloud.google.com/storage/settings
+export GCS_ACCESS_KEY_ID=your_access_key
+export GCS_SECRET_ACCESS_KEY=your_secret_key
+
+gpio add bbox gs://bucket/input.parquet gs://bucket/output.parquet
 ```
 
-## Limitations
+**Note:** DuckDB's GCS support requires HMAC keys, which differs from standard GCP authentication. For writes, obstore can use service account JSON via `GOOGLE_APPLICATION_CREDENTIALS`. For reads, use HMAC keys or process files locally.
 
-- Outputs write to local filesystem only
-- Use `gpio upload` to transfer results to cloud storage
-- STAC generation requires local files
+## Exceptions
+
+**STAC generation** (`gpio stac item` and `gpio stac collection`) requires local files because asset paths reference local storage.
+
+## Notes
+
+- Remote writes use temporary local storage (~2× output file size required)
 - HTTPS wildcards (`*.parquet`) not supported
-
-## See Also
-
-- [upload command](upload.md)
-- [convert command](convert.md)
+- For very large files (>10 GB), consider processing locally for better performance

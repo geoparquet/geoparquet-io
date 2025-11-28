@@ -6,7 +6,9 @@ from geoparquet_io.cli.decorators import (
     compression_options,
     dry_run_option,
     output_format_options,
+    overwrite_option,
     partition_options,
+    profile_option,
     verbose_option,
 )
 from geoparquet_io.cli.fix_helpers import handle_fix_common
@@ -94,6 +96,7 @@ def check():
     is_flag=True,
     help="Skip .bak backup when fixing",
 )
+@overwrite_option
 @click.option(
     "--random-sample-size",
     default=100,
@@ -106,18 +109,28 @@ def check():
     show_default=True,
     help="Max rows for spatial order check",
 )
-def check_all(parquet_file, verbose, fix, fix_output, no_backup, random_sample_size, limit_rows):
+@profile_option
+def check_all(
+    parquet_file,
+    verbose,
+    fix,
+    fix_output,
+    no_backup,
+    overwrite,
+    random_sample_size,
+    limit_rows,
+    profile,
+):
     """Check compression, bbox, row groups, and spatial order."""
     import os
-    import shutil
 
     from geoparquet_io.core.check_fixes import apply_all_fixes
-    from geoparquet_io.core.common import is_remote_url
+    from geoparquet_io.core.common import is_remote_url, show_remote_read_message
 
     # Show single progress message for remote files
+    show_remote_read_message(parquet_file, verbose=False)
     if is_remote_url(parquet_file):
-        protocol = parquet_file.split("://")[0].upper() if "://" in parquet_file else "HTTP"
-        click.echo(f"📡 Reading from {protocol} (network operations may take time)...\n")
+        click.echo()  # Add blank line after remote message
 
     # Run all checks and collect results
     structure_results = check_structure_impl(parquet_file, verbose, return_results=True)
@@ -142,6 +155,13 @@ def check_all(parquet_file, verbose, fix, fix_output, no_backup, random_sample_s
 
     # If --fix flag is set, apply fixes
     if fix:
+        from geoparquet_io.cli.fix_helpers import (
+            create_backup_if_needed,
+            handle_fix_error,
+            validate_remote_file_modification,
+            verify_fixes,
+        )
+
         # Aggregate all results
         all_results = {**structure_results, "spatial": spatial_result}
 
@@ -157,29 +177,23 @@ def check_all(parquet_file, verbose, fix, fix_output, no_backup, random_sample_s
             return
 
         # Handle remote files
-        if parquet_file.startswith(("http://", "https://", "s3://")):
-            if not fix_output:
-                raise click.BadParameter(
-                    "Cannot fix remote file in-place. Use --fix-output to specify local output path."
-                )
+        is_remote = validate_remote_file_modification(parquet_file, fix_output, overwrite)
 
         # Determine output path
         output_path = fix_output or parquet_file
         backup_path = f"{parquet_file}.bak"
 
-        # Confirm overwrite without backup
-        if no_backup and not fix_output and output_path == parquet_file:
+        # Confirm overwrite without backup for local files
+        if no_backup and not fix_output and output_path == parquet_file and not is_remote:
             click.confirm(
                 "This will overwrite the original file without backup. Continue?",
                 abort=True,
             )
 
-        # Create backup if needed
-        if not no_backup and output_path == parquet_file and os.path.exists(parquet_file):
-            if verbose:
-                click.echo(f"\nCreating backup: {backup_path}")
-            shutil.copy2(parquet_file, backup_path)
-            click.echo(click.style(f"✓ Created backup: {backup_path}", fg="green"))
+        # Create backup if needed (only for local files)
+        backup_path = create_backup_if_needed(
+            parquet_file, output_path, no_backup, is_remote, verbose
+        )
 
         # Apply fixes
         click.echo("\n" + "=" * 60)
@@ -187,7 +201,9 @@ def check_all(parquet_file, verbose, fix, fix_output, no_backup, random_sample_s
         click.echo("=" * 60)
 
         try:
-            fixes_summary = apply_all_fixes(parquet_file, output_path, all_results, verbose)
+            fixes_summary = apply_all_fixes(
+                parquet_file, output_path, all_results, verbose, profile
+            )
 
             click.echo("\n" + "=" * 60)
             click.echo("Fixes applied:")
@@ -196,44 +212,25 @@ def check_all(parquet_file, verbose, fix, fix_output, no_backup, random_sample_s
             click.echo("=" * 60)
 
             # Re-run checks to verify
-            click.echo("\nRe-validating after fixes...")
-            click.echo("=" * 60)
-
-            final_structure_results = check_structure_impl(
-                output_path, verbose=False, return_results=True
+            verify_fixes(
+                output_path,
+                check_structure_impl,
+                check_spatial_impl,
+                random_sample_size,
+                limit_rows,
             )
-            final_spatial_result = check_spatial_impl(
-                output_path, random_sample_size, limit_rows, verbose=False, return_results=True
-            )
-
-            # Check if all passed
-            all_passed = all(
-                result.get("passed", False)
-                for result in [
-                    *final_structure_results.values(),
-                    final_spatial_result,
-                ]
-                if isinstance(result, dict)
-            )
-
-            if all_passed:
-                click.echo(click.style("\n✓ All checks passed after fixes!", fg="green", bold=True))
-            else:
-                click.echo(
-                    click.style("\n⚠️  Some issues may remain after fixes", fg="yellow", bold=True)
-                )
 
             click.echo(f"\nOptimized file: {output_path}")
-            if not no_backup and output_path == parquet_file and os.path.exists(backup_path):
+            if (
+                not no_backup
+                and output_path == parquet_file
+                and backup_path
+                and os.path.exists(backup_path)
+            ):
                 click.echo(f"Backup: {backup_path}")
 
         except Exception as e:
-            click.echo(click.style(f"\n❌ Fix failed: {str(e)}", fg="red"))
-            # Restore from backup if it exists
-            if not no_backup and output_path == parquet_file and os.path.exists(backup_path):
-                click.echo("Restoring from backup...")
-                shutil.copy2(backup_path, parquet_file)
-                os.remove(backup_path)
+            handle_fix_error(e, no_backup, output_path, parquet_file, backup_path)
             raise
 
 
@@ -263,8 +260,9 @@ def check_all(parquet_file, verbose, fix, fix_output, no_backup, random_sample_s
     is_flag=True,
     help="Skip .bak backup when fixing",
 )
+@profile_option
 def check_spatial(
-    parquet_file, random_sample_size, limit_rows, verbose, fix, fix_output, no_backup
+    parquet_file, random_sample_size, limit_rows, verbose, fix, fix_output, no_backup, profile
 ):
     """Check spatial ordering."""
 
@@ -294,7 +292,7 @@ def check_spatial(
 
         click.echo("\nApplying Hilbert spatial ordering...")
         output_path, backup_path = handle_fix_common(
-            parquet_file, fix_output, no_backup, fix_spatial_ordering, verbose
+            parquet_file, fix_output, no_backup, fix_spatial_ordering, verbose, False, profile
         )
 
         click.echo(click.style("\n✓ Spatial ordering applied successfully!", fg="green"))
@@ -317,7 +315,9 @@ def check_spatial(
     is_flag=True,
     help="Skip .bak backup when fixing",
 )
-def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup):
+@overwrite_option
+@profile_option
+def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite, profile):
     """Check geometry column compression."""
     from geoparquet_io.core.check_fixes import fix_compression
     from geoparquet_io.core.check_parquet_structure import check_compression
@@ -331,7 +331,7 @@ def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup):
 
         click.echo("\nRe-compressing with ZSTD...")
         output_path, backup_path = handle_fix_common(
-            parquet_file, fix_output, no_backup, fix_compression, verbose
+            parquet_file, fix_output, no_backup, fix_compression, verbose, overwrite, profile
         )
 
         click.echo(click.style("\n✓ Compression optimized successfully!", fg="green"))
@@ -354,7 +354,9 @@ def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup):
     is_flag=True,
     help="Skip .bak backup when fixing",
 )
-def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup):
+@overwrite_option
+@profile_option
+def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite, profile):
     """Check bbox column and metadata."""
     from geoparquet_io.core.check_fixes import fix_bbox_all
     from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
@@ -369,11 +371,13 @@ def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup):
         needs_column = result.get("needs_bbox_column", False)
         needs_metadata = result.get("needs_bbox_metadata", False)
 
-        def bbox_fix_func(input_path, output_path, verbose_flag):
-            return fix_bbox_all(input_path, output_path, needs_column, needs_metadata, verbose_flag)
+        def bbox_fix_func(input_path, output_path, verbose_flag, profile_name):
+            return fix_bbox_all(
+                input_path, output_path, needs_column, needs_metadata, verbose_flag, profile_name
+            )
 
         output_path, backup_path = handle_fix_common(
-            parquet_file, fix_output, no_backup, bbox_fix_func, verbose
+            parquet_file, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
         )
 
         click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
@@ -396,7 +400,9 @@ def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup):
     is_flag=True,
     help="Skip .bak backup when fixing",
 )
-def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup):
+@overwrite_option
+@profile_option
+def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite, profile):
     """Check row group size."""
     from geoparquet_io.core.check_fixes import fix_row_groups
     from geoparquet_io.core.check_parquet_structure import check_row_groups
@@ -410,7 +416,7 @@ def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup):
 
         click.echo("\nOptimizing row groups...")
         output_path, backup_path = handle_fix_common(
-            parquet_file, fix_output, no_backup, fix_row_groups, verbose
+            parquet_file, fix_output, no_backup, fix_row_groups, verbose, overwrite, profile
         )
 
         click.echo(click.style("\n✓ Row groups optimized successfully!", fg="green"))
@@ -457,6 +463,7 @@ def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup):
 )
 @verbose_option
 @compression_options
+@profile_option
 def convert(
     input_file,
     output_file,
@@ -470,69 +477,13 @@ def convert(
     verbose,
     compression,
     compression_level,
+    profile,
 ):
     """
     Convert vector formats to optimized GeoParquet.
 
-    Automatically applies best practices:
-
-      • ZSTD compression (configurable)
-
-      • 100,000 row groups
-
-      • Bbox column with proper metadata
-
-      • Hilbert spatial ordering
-
-      • GeoParquet 1.1.0 metadata
-
-    Supported input formats (auto-detected):
-
-      • Shapefile (.shp)
-
-      • GeoJSON (.geojson, .json)
-
-      • GeoPackage (.gpkg)
-
-      • File Geodatabase (.gdb)
-
-      • CSV/TSV (.csv, .tsv, .txt)
-
-    For CSV/TSV files, geometry is auto-detected from:
-
-      • WKT columns (named: wkt, geometry, geom, the_geom, shape)
-
-      • Lat/lon pairs (named: lat/lon, latitude/longitude, y/x)
-
-    Examples:
-
-      \b
-      # Basic conversion
-      geoparquet-io convert input.shp output.parquet
-
-      \b
-      # CSV with auto-detected WKT column
-      geoparquet-io convert points.csv output.parquet
-
-      \b
-      # CSV with explicit lat/lon columns
-      geoparquet-io convert data.csv output.parquet --lat-column lat --lon-column lng
-
-      \b
-      # TSV with custom delimiter and skip invalid geometries
-      geoparquet-io convert data.txt output.parquet --delimiter '|' --skip-invalid
-
-      \b
-      # With verbose output and validation
-      geoparquet-io convert input.geojson output.parquet --verbose
-
-      \b
-      # Skip Hilbert ordering for faster conversion
-      geoparquet-io convert large.gpkg output.parquet --skip-hilbert
-
-      \b
-      # Custom compression
-      geoparquet-io convert input.shp output.parquet --compression GZIP --compression-level 9
+    Supports Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV with WKT or lat/lon columns.
+    Applies ZSTD compression, bbox metadata, and Hilbert ordering by default.
     """
     convert_to_geoparquet(
         input_file,
@@ -548,6 +499,7 @@ def convert(
         delimiter=delimiter,
         crs=crs,
         skip_invalid=skip_invalid,
+        profile=profile,
     )
 
 
@@ -560,7 +512,8 @@ def convert(
     "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
 )
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
-def inspect(parquet_file, head, tail, stats, json_output):
+@profile_option
+def inspect(parquet_file, head, tail, stats, json_output, profile):
     """
     Inspect a GeoParquet file and show metadata summary.
 
@@ -593,11 +546,21 @@ def inspect(parquet_file, head, tail, stats, json_output):
     import fsspec
     import pyarrow.parquet as pq
 
-    from geoparquet_io.core.common import safe_file_url
+    from geoparquet_io.core.common import (
+        safe_file_url,
+        setup_aws_profile_if_needed,
+        validate_profile_for_urls,
+    )
 
     # Validate mutually exclusive options
     if head and tail:
         raise click.UsageError("--head and --tail are mutually exclusive")
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, parquet_file)
+
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, parquet_file)
 
     try:
         # Extract metadata
@@ -700,7 +663,8 @@ def _handle_meta_display(
     "--row-groups", type=int, default=1, help="Number of row groups to display (default: 1)"
 )
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
-def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output):
+@profile_option
+def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output, profile):
     """
     Show comprehensive metadata for a GeoParquet file.
 
@@ -733,6 +697,14 @@ def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output
         # JSON output for scripting
         gpio meta data.parquet --json
     """
+    from geoparquet_io.core.common import setup_aws_profile_if_needed, validate_profile_for_urls
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, parquet_file)
+
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, parquet_file)
+
     try:
         _handle_meta_display(
             parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output
@@ -760,6 +732,7 @@ def sort():
 @click.option(
     "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
 )
+@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @verbose_option
 def hilbert_order(
@@ -767,6 +740,7 @@ def hilbert_order(
     output_parquet,
     geometry_column,
     add_bbox,
+    profile,
     compression,
     compression_level,
     row_group_size,
@@ -781,6 +755,8 @@ def hilbert_order(
 
     Applies optimal formatting (configurable compression, optimized row groups,
     bbox metadata) while preserving the CRS. Output is written as GeoParquet 1.1.
+
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -808,6 +784,7 @@ def hilbert_order(
             compression_level,
             row_group_mb,
             row_group_size,
+            profile,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -836,6 +813,7 @@ def add():
 @click.option(
     "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
 )
+@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @dry_run_option
 @verbose_option
@@ -845,6 +823,7 @@ def add_country_codes(
     dataset,
     levels,
     add_bbox,
+    profile,
     compression,
     compression_level,
     row_group_size,
@@ -855,6 +834,8 @@ def add_country_codes(
     """Add admin division columns via spatial join with remote boundaries datasets.
 
     Performs spatial intersection to add administrative division columns to your data.
+
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
 
     \b
     **Datasets:**
@@ -872,6 +853,10 @@ def add_country_codes(
     # Add specific GAUL levels only
     gpio add admin-divisions input.parquet output.parquet --dataset gaul \\
         --levels continent,country
+
+    \b
+    # Remote to remote
+    gpio add admin-divisions s3://in.parquet s3://out.parquet --profile my-aws
 
     \b
     # Preview SQL before execution
@@ -922,6 +907,7 @@ def add_country_codes(
         compression_level=compression_level,
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
+        profile=profile,
     )
 
 
@@ -929,6 +915,7 @@ def add_country_codes(
 @click.argument("input_parquet")
 @click.argument("output_parquet")
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
+@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @dry_run_option
 @verbose_option
@@ -936,6 +923,7 @@ def add_bbox(
     input_parquet,
     output_parquet,
     bbox_name,
+    profile,
     compression,
     compression_level,
     row_group_size,
@@ -950,8 +938,20 @@ def add_bbox(
     GeoParquet file (GeoParquet 1.1 spec). The bbox column improves spatial query
     performance.
 
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+
     If your file already has a bbox column but lacks metadata, use 'add bbox-metadata'
     instead.
+
+    Examples:
+
+        \b
+        # Local to local
+        gpio add bbox input.parquet output.parquet
+
+        \b
+        # Remote to remote
+        gpio add bbox s3://bucket/in.parquet s3://bucket/out.parquet --profile my-aws
     """
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -978,13 +978,15 @@ def add_bbox(
         compression_level,
         row_group_mb,
         row_group_size,
+        profile,
     )
 
 
 @add.command(name="bbox-metadata")
 @click.argument("parquet_file")
+@profile_option
 @verbose_option
-def add_bbox_metadata_cmd(parquet_file, verbose):
+def add_bbox_metadata_cmd(parquet_file, profile, verbose):
     """Add bbox covering metadata for an existing bbox column.
 
     Use this when you have a file with a bbox column but no covering metadata.
@@ -992,6 +994,14 @@ def add_bbox_metadata_cmd(parquet_file, verbose):
 
     If you need to add both the bbox column and metadata, use 'add bbox' instead.
     """
+    from geoparquet_io.core.common import setup_aws_profile_if_needed, validate_profile_for_urls
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, parquet_file)
+
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, parquet_file)
+
     add_bbox_metadata_impl(parquet_file, verbose)
 
 
@@ -1005,6 +1015,7 @@ def add_bbox_metadata_cmd(parquet_file, verbose):
     type=click.IntRange(0, 15),
     help="H3 resolution level (0-15). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9",
 )
+@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @dry_run_option
 @verbose_option
@@ -1013,6 +1024,7 @@ def add_h3(
     output_parquet,
     h3_name,
     resolution,
+    profile,
     compression,
     compression_level,
     row_group_size,
@@ -1028,6 +1040,8 @@ def add_h3(
 
     The cell ID is stored as a VARCHAR (string) for maximum portability across tools.
     Resolution determines cell size - higher values mean smaller cells with more precision.
+
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -1055,6 +1069,7 @@ def add_h3(
         compression_level,
         row_group_mb,
         row_group_size,
+        profile,
     )
 
 
@@ -1089,6 +1104,7 @@ def add_h3(
     is_flag=True,
     help="Use exact median computation on full dataset (slower but deterministic). Mutually exclusive with --approx.",
 )
+@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @dry_run_option
 @click.option(
@@ -1105,6 +1121,7 @@ def add_kdtree(
     auto,
     approx,
     exact,
+    profile,
     compression,
     compression_level,
     row_group_size,
@@ -1123,6 +1140,8 @@ def add_kdtree(
     deterministic computation.
 
     Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
+
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
 
     Use --verbose to track progress with iteration-by-iteration updates.
     """
@@ -1191,6 +1210,7 @@ def add_kdtree(
         force,
         sample_size,
         auto_target,
+        profile,
     )
 
 
@@ -1219,6 +1239,7 @@ def partition():
 )
 @partition_options
 @verbose_option
+@profile_option
 def partition_admin(
     input_parquet,
     output_folder,
@@ -1232,6 +1253,7 @@ def partition_admin(
     skip_analysis,
     prefix,
     verbose,
+    profile,
 ):
     """Partition by administrative boundaries via spatial join with remote datasets.
 
@@ -1290,6 +1312,7 @@ def partition_admin(
         force=force,
         skip_analysis=skip_analysis,
         filename_prefix=prefix,
+        profile=profile,
     )
 
 
@@ -1300,6 +1323,7 @@ def partition_admin(
 @click.option("--chars", type=int, help="Number of characters to use as prefix for partitioning")
 @partition_options
 @verbose_option
+@profile_option
 def partition_string(
     input_parquet,
     output_folder,
@@ -1313,6 +1337,7 @@ def partition_string(
     skip_analysis,
     prefix,
     verbose,
+    profile,
 ):
     """Partition a GeoParquet file by string column values.
 
@@ -1352,6 +1377,7 @@ def partition_string(
         force,
         skip_analysis,
         prefix,
+        profile,
     )
 
 
@@ -1376,6 +1402,7 @@ def partition_string(
 )
 @partition_options
 @verbose_option
+@profile_option
 def partition_h3(
     input_parquet,
     output_folder,
@@ -1390,6 +1417,7 @@ def partition_h3(
     skip_analysis,
     prefix,
     verbose,
+    profile,
 ):
     """Partition a GeoParquet file by H3 cells at specified resolution.
 
@@ -1440,6 +1468,7 @@ def partition_h3(
         force,
         skip_analysis,
         prefix,
+        profile,
     )
 
 
@@ -1481,6 +1510,7 @@ def partition_h3(
 )
 @partition_options
 @verbose_option
+@profile_option
 def partition_kdtree(
     input_parquet,
     output_folder,
@@ -1498,6 +1528,7 @@ def partition_kdtree(
     skip_analysis,
     prefix,
     verbose,
+    profile,
 ):
     """Partition a GeoParquet file by KD-tree cells.
 
@@ -1583,6 +1614,7 @@ def partition_kdtree(
         sample_size,
         auto_target,
         prefix,
+        profile,
     )
 
 
@@ -1808,8 +1840,9 @@ def stac(input, output, bucket, public_url, collection_id, item_id, overwrite, v
 
 @check.command(name="stac")
 @click.argument("stac_file")
+@profile_option
 @verbose_option
-def check_stac_cmd(stac_file, verbose):
+def check_stac_cmd(stac_file, profile, verbose):
     """
     Validate STAC Item or Collection JSON.
 
@@ -1828,7 +1861,14 @@ def check_stac_cmd(stac_file, verbose):
       \b
       gpio check stac output.json
     """
+    from geoparquet_io.core.common import setup_aws_profile_if_needed, validate_profile_for_urls
     from geoparquet_io.core.stac_check import check_stac
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, stac_file)
+
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, stac_file)
 
     check_stac(stac_file, verbose)
 

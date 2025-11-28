@@ -8,6 +8,9 @@ Add precomputed bounding boxes for faster spatial queries:
 
 ```bash
 gpio add bbox input.parquet output.parquet
+
+# Works with remote files
+gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet --profile prod
 ```
 
 Creates a struct column with `{xmin, ymin, xmax, ymax}` for each feature. Bbox covering metadata is automatically added to comply with GeoParquet 1.1 spec.
@@ -41,6 +44,9 @@ Add [H3](https://h3geo.org/) hexagonal cell IDs based on geometry centroids:
 
 ```bash
 gpio add h3 input.parquet output.parquet --resolution 9
+
+# From HTTPS to S3
+gpio add h3 https://example.com/data.parquet s3://bucket/indexed.parquet --resolution 9
 ```
 
 **Resolution guide:**

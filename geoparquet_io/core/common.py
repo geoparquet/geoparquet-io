@@ -1,7 +1,11 @@
 import json
 import os
 import re
+import shutil
+import tempfile
 import urllib.parse
+from contextlib import contextmanager
+from pathlib import Path
 
 import click
 import duckdb
@@ -40,6 +44,154 @@ def is_remote_url(path):
     return any(path.startswith(scheme) for scheme in remote_schemes)
 
 
+def upload_if_remote(local_path, remote_path, profile=None, is_directory=False, verbose=False):
+    """
+    Upload local file/dir to remote path if remote_path is a remote URL.
+
+    Args:
+        local_path: Local file or directory path to upload
+        remote_path: Remote URL or local path
+        profile: AWS profile name (S3 only, optional)
+        is_directory: Whether local_path is a directory
+        verbose: Whether to print verbose output
+
+    Returns:
+        bool: True if upload was performed, False if not remote
+    """
+    if not is_remote_url(remote_path):
+        return False
+
+    from geoparquet_io.core.upload import upload
+
+    if verbose:
+        # Calculate size for progress indication
+        if is_directory:
+            total_size = sum(
+                os.path.getsize(os.path.join(dirpath, filename))
+                for dirpath, _, filenames in os.walk(local_path)
+                for filename in filenames
+            )
+        else:
+            total_size = os.path.getsize(local_path)
+
+        size_mb = total_size / (1024 * 1024)
+        click.echo(f"Uploading {size_mb:.1f} MB to {remote_path}...")
+
+    pattern = "*.parquet" if is_directory else None
+    upload(
+        source=Path(local_path),
+        destination=remote_path,
+        profile=profile,
+        pattern=pattern,
+        dry_run=False,
+    )
+
+    if verbose:
+        click.echo(f"✓ Successfully uploaded to {remote_path}")
+
+    return True
+
+
+@contextmanager
+def remote_write_context(output_path, is_directory=False, verbose=False):
+    """
+    Context manager for remote writes with automatic temp file/dir cleanup.
+
+    Yields actual write path (temp for remote, original for local).
+    Handles cleanup automatically on exit.
+
+    Args:
+        output_path: Output path (local or remote URL)
+        is_directory: Whether output is a directory (for partitioning)
+        verbose: Whether to print verbose output
+
+    Yields:
+        tuple: (actual_write_path, is_remote)
+            - actual_write_path: Path to write to (temp for remote, original for local)
+            - is_remote: Boolean indicating if output is remote
+
+    Example:
+        with remote_write_context('s3://bucket/file.parquet', verbose=True) as (path, is_remote):
+            # Write to path
+            write_file(path)
+            # Cleanup and upload handled automatically
+    """
+    is_remote = is_remote_url(output_path)
+
+    if is_remote:
+        if is_directory:
+            temp_path = tempfile.mkdtemp(prefix="gpio_")
+        else:
+            temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
+            os.close(temp_fd)
+
+        if verbose:
+            click.echo(f"Remote output detected: {output_path}")
+            click.echo(
+                f"Writing to temporary {'directory' if is_directory else 'file'}: {temp_path}"
+            )
+    else:
+        temp_path = output_path
+
+    try:
+        yield temp_path, is_remote
+    finally:
+        if is_remote and os.path.exists(temp_path):
+            try:
+                if is_directory:
+                    shutil.rmtree(temp_path)
+                else:
+                    os.unlink(temp_path)
+                if verbose:
+                    click.echo(
+                        f"Cleaned up temporary {'directory' if is_directory else 'file'}: {temp_path}"
+                    )
+            except Exception as e:
+                if verbose:
+                    click.echo(
+                        f"Warning: Could not clean up temp {'directory' if is_directory else 'file'} {temp_path}: {e}"
+                    )
+
+
+def is_s3_url(path):
+    """
+    Check if path is an S3 URL.
+
+    Args:
+        path: File path or URL to check
+
+    Returns:
+        bool: True if path is S3
+    """
+    return isinstance(path, str) and path.startswith(("s3://", "s3a://"))
+
+
+def is_azure_url(path):
+    """
+    Check if path is an Azure Blob Storage URL.
+
+    Args:
+        path: File path or URL to check
+
+    Returns:
+        bool: True if path is Azure
+    """
+    return isinstance(path, str) and path.startswith(("az://", "azure://", "abfs://", "abfss://"))
+
+
+def is_gcs_url(path):
+    """
+    Check if path is a Google Cloud Storage URL.
+
+    Args:
+        path: File path or URL to check
+
+    Returns:
+        bool: True if path is GCS
+    """
+    return isinstance(path, str) and path.startswith(("gs://", "gcs://"))
+
+
 def needs_httpfs(path):
     """
     Check if path requires httpfs extension (S3, Azure, GCS).
@@ -65,9 +217,121 @@ def needs_httpfs(path):
     return any(path.startswith(scheme) for scheme in httpfs_schemes)
 
 
+def setup_aws_profile_if_needed(profile, *paths):
+    """
+    Set AWS_PROFILE environment variable if profile specified and S3 URLs detected.
+
+    This allows both DuckDB (via credential_chain) and obstore to use the specified
+    AWS profile for authentication. The profile is resolved using standard AWS SDK
+    mechanisms (reads from ~/.aws/credentials, ~/.aws/config, etc.).
+
+    Note: This is a convenience wrapper. Setting AWS_PROFILE env var directly
+    has the same effect.
+
+    Args:
+        profile: AWS profile name or None
+        *paths: Variable number of file paths to check for S3 URLs
+
+    Example:
+        setup_aws_profile_if_needed(profile, input_file, output_file)
+        # Equivalent to: os.environ['AWS_PROFILE'] = profile
+    """
+    if not profile:
+        return
+
+    # Check if any path is S3
+    has_s3 = any(p and is_s3_url(p) for p in paths)
+    if has_s3:
+        os.environ["AWS_PROFILE"] = profile
+
+
+def validate_profile_for_urls(profile, *urls):
+    """
+    Validate that profile parameter is only used with S3 URLs.
+
+    The --profile flag sets AWS credentials for S3 operations. Using it with
+    other cloud providers (GCS, Azure) would be confusing since they use
+    different authentication mechanisms.
+
+    Args:
+        profile: AWS profile name or None
+        *urls: Variable number of file paths to validate
+
+    Raises:
+        click.BadParameter: If profile is used with non-S3 remote URLs
+
+    Example:
+        validate_profile_for_urls(profile, input_file, output_file)
+    """
+    if not profile:
+        return
+
+    for url in urls:
+        if url and is_remote_url(url) and not is_s3_url(url):
+            protocol = url.split("://")[0].upper() if "://" in url else "unknown"
+            raise click.BadParameter(
+                f"--profile flag is only valid for S3 URLs, but got {protocol} URL: {url}\n"
+                f"For {protocol} authentication, use environment variables or default credentials."
+            )
+
+
+def show_remote_read_message(file_path, verbose=False):
+    """
+    Show consistent message when reading from remote files.
+
+    Args:
+        file_path: Path to check (local or remote)
+        verbose: If True, show detailed message
+    """
+    if not is_remote_url(file_path):
+        return
+
+    protocol = file_path.split("://")[0].upper() if "://" in file_path else "HTTP"
+    if verbose:
+        click.echo(f"📡 Reading from {protocol}: {file_path}")
+    else:
+        click.echo(f"📡 Reading from {protocol} (network operations may take time)...")
+
+
+def validate_output_path(output_path, verbose=False):
+    """
+    Validate output path for local files (remote URLs pass through).
+
+    For local paths:
+    - Check parent directory exists
+    - Check parent directory is writable
+
+    For remote URLs:
+    - No validation needed (handled by remote_write_context)
+
+    Args:
+        output_path: Local file path or remote URL
+        verbose: Whether to print verbose output
+
+    Raises:
+        click.ClickException: If local directory doesn't exist or isn't writable
+    """
+    if is_remote_url(output_path):
+        # Remote outputs handled by remote_write_context
+        return
+
+    output_dir = os.path.dirname(output_path) or "."
+    if not os.path.exists(output_dir):
+        raise click.ClickException(f"Output directory not found: {output_dir}")
+    if not os.access(output_dir, os.W_OK):
+        raise click.ClickException(f"No write permission for: {output_dir}")
+
+
 def get_duckdb_connection(load_spatial=True, load_httpfs=None):
     """
     Create a DuckDB connection with necessary extensions loaded.
+
+    When load_httpfs=True, also loads the aws extension and configures
+    automatic credential discovery for S3 access. Credentials are discovered
+    via the AWS SDK in this order:
+    1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+    2. AWS profile (AWS_PROFILE env var or ~/.aws/credentials)
+    3. IAM role (EC2/ECS/EKS instance metadata)
 
     Args:
         load_spatial: Whether to load spatial extension (default: True)
@@ -75,7 +339,7 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None):
                     If None (default), auto-detects based on usage.
 
     Returns:
-        duckdb.DuckDBPyConnection: Configured connection
+        duckdb.DuckDBPyConnection: Configured connection with extensions loaded
     """
     con = duckdb.connect()
 
@@ -88,6 +352,23 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None):
     if load_httpfs:
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
+
+        # Load aws extension for S3 authentication
+        # This works in conjunction with httpfs to provide authenticated S3 access
+        con.execute("INSTALL aws;")
+        con.execute("LOAD aws;")
+
+        # Configure automatic credential discovery using AWS SDK
+        # This respects AWS_PROFILE, ~/.aws/credentials, env vars, and IAM roles
+        # Use VALIDATION 'none' to allow creating secret without immediate credentials
+        # (credentials will be discovered at query time)
+        con.execute("""
+            CREATE OR REPLACE SECRET (
+                TYPE s3,
+                PROVIDER credential_chain,
+                VALIDATION 'none'
+            );
+        """)
 
     return con
 
@@ -616,14 +897,21 @@ def write_parquet_with_metadata(
     row_group_rows=None,
     custom_metadata=None,
     verbose=False,
+    profile=None,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
 
+    Supports both local and remote outputs (S3, GCS, Azure). Remote outputs
+    are written to a temporary local file, then uploaded.
+
+    Note: Remote writes require ~2× output file size in local disk space
+    for temporary processing.
+
     Args:
         con: DuckDB connection
         query: SQL query to execute
-        output_file: Path to output file
+        output_file: Path to output file (local path or remote URL)
         original_metadata: Original metadata from source file
         compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
         compression_level: Compression level (varies by format)
@@ -631,34 +919,48 @@ def write_parquet_with_metadata(
         row_group_rows: Exact number of rows per row group
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
+        profile: AWS profile name (S3 only, optional)
 
     Returns:
         None
     """
-    # Validate compression settings
-    compression, compression_level, compression_desc = validate_compression_settings(
-        compression, compression_level, verbose
-    )
+    # Setup AWS profile if needed (for writes to S3)
+    setup_aws_profile_if_needed(profile, output_file)
 
-    if verbose:
-        click.echo(f"Writing output with {compression_desc} compression...")
-
-    # Build and execute query
-    final_query = build_copy_query(query, output_file, compression)
-    con.execute(final_query)
-
-    # Rewrite with metadata and optimal settings
-    if original_metadata or verbose or row_group_size_mb or row_group_rows:
-        rewrite_with_metadata(
-            output_file,
-            original_metadata,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            custom_metadata,
-            verbose,
+    with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
+        actual_output,
+        is_remote,
+    ):
+        # Validate compression settings
+        compression, compression_level, compression_desc = validate_compression_settings(
+            compression, compression_level, verbose
         )
+
+        if verbose:
+            click.echo(f"Writing output with {compression_desc} compression...")
+
+        # Build and execute query
+        final_query = build_copy_query(query, actual_output, compression)
+        con.execute(final_query)
+
+        # Rewrite with metadata and optimal settings
+        if original_metadata or verbose or row_group_size_mb or row_group_rows:
+            rewrite_with_metadata(
+                actual_output,
+                original_metadata,
+                compression,
+                compression_level,
+                row_group_size_mb,
+                row_group_rows,
+                custom_metadata,
+                verbose,
+            )
+
+        # Upload to remote if needed
+        if is_remote:
+            upload_if_remote(
+                actual_output, output_file, profile=profile, is_directory=False, verbose=verbose
+            )
 
 
 def update_metadata(output_file, original_metadata):
@@ -679,6 +981,71 @@ def format_size(size_bytes):
             return f"{size_bytes:.2f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.2f} TB"
+
+
+def _find_bbox_column_in_schema(schema, verbose):
+    """Find bbox column in schema by conventional names or structure."""
+    conventional_names = ["bbox", "bounds", "extent"]
+    for field in schema:
+        if field.name in conventional_names or (
+            isinstance(field.type, type(schema[0].type))
+            and str(field.type).startswith("struct<")
+            and all(f in str(field.type) for f in ["xmin", "ymin", "xmax", "ymax"])
+        ):
+            if verbose:
+                click.echo(f"Found bbox column: {field.name} with type {field.type}")
+            return field.name
+    return None
+
+
+def _check_bbox_metadata_covering(metadata, has_bbox_column, verbose):
+    """Check if metadata contains proper bbox covering."""
+    if not (metadata and b"geo" in metadata and has_bbox_column):
+        return False
+
+    try:
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+        if verbose:
+            click.echo("\nParsed geo metadata:")
+            click.echo(json.dumps(geo_meta, indent=2))
+
+        if isinstance(geo_meta, dict) and "columns" in geo_meta:
+            columns = geo_meta["columns"]
+            for _col_name, col_info in columns.items():
+                if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
+                    bbox_refs = col_info["covering"]["bbox"]
+                    # Check if the bbox covering has the required structure
+                    if (
+                        isinstance(bbox_refs, dict)
+                        and all(key in bbox_refs for key in ["xmin", "ymin", "xmax", "ymax"])
+                        and all(
+                            isinstance(ref, list) and len(ref) == 2 for ref in bbox_refs.values()
+                        )
+                    ):
+                        referenced_bbox_column = bbox_refs["xmin"][0]
+                        if verbose:
+                            click.echo(
+                                f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
+                            )
+                        return True
+    except json.JSONDecodeError:
+        if verbose:
+            click.echo("Failed to parse geo metadata as JSON")
+
+    return False
+
+
+def _determine_bbox_status(has_bbox_column, bbox_column_name, has_bbox_metadata):
+    """Determine bbox status and message."""
+    if has_bbox_column and has_bbox_metadata:
+        return "optimal", f"✓ Found bbox column '{bbox_column_name}' with proper metadata covering"
+    elif has_bbox_column:
+        return (
+            "suboptimal",
+            f"⚠️  Found bbox column '{bbox_column_name}' but no bbox covering metadata (recommended for better performance)",
+        )
+    else:
+        return "poor", "❌ No valid bbox column found"
 
 
 def check_bbox_structure(parquet_file, verbose=False):
@@ -703,70 +1070,15 @@ def check_bbox_structure(parquet_file, verbose=False):
         for field in schema:
             click.echo(f"  {field.name}: {field.type}")
 
-    # First find the bbox column in the schema
-    bbox_column_name = None
-    has_bbox_column = False
+    # Find the bbox column in the schema
+    bbox_column_name = _find_bbox_column_in_schema(schema, verbose)
+    has_bbox_column = bbox_column_name is not None
 
-    # Look for conventional names first
-    conventional_names = ["bbox", "bounds", "extent"]
-    for field in schema:
-        if field.name in conventional_names or (
-            isinstance(field.type, type(schema[0].type))
-            and str(field.type).startswith("struct<")
-            and all(f in str(field.type) for f in ["xmin", "ymin", "xmax", "ymax"])
-        ):
-            bbox_column_name = field.name
-            has_bbox_column = True
-            if verbose:
-                click.echo(f"Found bbox column: {field.name} with type {field.type}")
-            break
-
-    # Then check metadata for bbox covering that specifically references the bbox column
-    has_bbox_metadata = False
-    if metadata and b"geo" in metadata and has_bbox_column:
-        try:
-            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-            if verbose:
-                click.echo("\nParsed geo metadata:")
-                click.echo(json.dumps(geo_meta, indent=2))
-
-            if isinstance(geo_meta, dict) and "columns" in geo_meta:
-                columns = geo_meta["columns"]
-                for _col_name, col_info in columns.items():
-                    if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
-                        bbox_refs = col_info["covering"]["bbox"]
-                        # Check if the bbox covering has the required structure
-                        if (
-                            isinstance(bbox_refs, dict)
-                            and all(key in bbox_refs for key in ["xmin", "ymin", "xmax", "ymax"])
-                            and all(
-                                isinstance(ref, list) and len(ref) == 2
-                                for ref in bbox_refs.values()
-                            )
-                        ):
-                            referenced_bbox_column = bbox_refs["xmin"][
-                                0
-                            ]  # Get column name from any coordinate
-                            has_bbox_metadata = True
-                            if verbose:
-                                click.echo(
-                                    f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
-                                )
-                            break
-        except json.JSONDecodeError:
-            if verbose:
-                click.echo("Failed to parse geo metadata as JSON")
+    # Check metadata for bbox covering
+    has_bbox_metadata = _check_bbox_metadata_covering(metadata, has_bbox_column, verbose)
 
     # Determine status and message
-    if has_bbox_column and has_bbox_metadata:
-        status = "optimal"
-        message = f"✓ Found bbox column '{bbox_column_name}' with proper metadata covering"
-    elif has_bbox_column:
-        status = "suboptimal"
-        message = f"⚠️  Found bbox column '{bbox_column_name}' but no bbox covering metadata (recommended for better performance)"
-    else:
-        status = "poor"
-        message = "❌ No valid bbox column found"
+    status, message = _determine_bbox_status(has_bbox_column, bbox_column_name, has_bbox_metadata)
 
     if verbose:
         click.echo("\nFinal results:")
@@ -783,6 +1095,44 @@ def check_bbox_structure(parquet_file, verbose=False):
         "status": status,
         "message": message,
     }
+
+
+def _build_bounds_query(safe_url, bbox_info, geometry_column, verbose):
+    """Build query for bounds calculation."""
+    if bbox_info["has_bbox_column"]:
+        bbox_col = bbox_info["bbox_column_name"]
+        if verbose:
+            click.echo(f"Using bbox column '{bbox_col}' for fast bounds calculation")
+
+        return f"""
+        SELECT
+            MIN({bbox_col}.xmin) as xmin,
+            MIN({bbox_col}.ymin) as ymin,
+            MAX({bbox_col}.xmax) as xmax,
+            MAX({bbox_col}.ymax) as ymax
+        FROM '{safe_url}'
+        """
+    else:
+        click.echo(
+            click.style(
+                f"⚠️  No bbox column found - calculating bounds from geometry column '{geometry_column}' (this may be slow)",
+                fg="yellow",
+            )
+        )
+        click.echo(
+            click.style(
+                "💡 Tip: Add a bbox column for faster operations with 'gpio add bbox'", fg="cyan"
+            )
+        )
+
+        return f"""
+        SELECT
+            MIN(ST_XMin({geometry_column})) as xmin,
+            MIN(ST_YMin({geometry_column})) as ymin,
+            MAX(ST_XMax({geometry_column})) as xmax,
+            MAX(ST_YMax({geometry_column})) as ymax
+        FROM '{safe_url}'
+        """
 
 
 def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
@@ -813,44 +1163,7 @@ def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
     try:
-        if bbox_info["has_bbox_column"]:
-            # Use bbox column for fast bounds calculation
-            bbox_col = bbox_info["bbox_column_name"]
-            if verbose:
-                click.echo(f"Using bbox column '{bbox_col}' for fast bounds calculation")
-
-            query = f"""
-            SELECT
-                MIN({bbox_col}.xmin) as xmin,
-                MIN({bbox_col}.ymin) as ymin,
-                MAX({bbox_col}.xmax) as xmax,
-                MAX({bbox_col}.ymax) as ymax
-            FROM '{safe_url}'
-            """
-        else:
-            # Calculate from geometry column (slower)
-            click.echo(
-                click.style(
-                    f"⚠️  No bbox column found - calculating bounds from geometry column '{geometry_column}' (this may be slow)",
-                    fg="yellow",
-                )
-            )
-            click.echo(
-                click.style(
-                    "💡 Tip: Add a bbox column for faster operations with 'gpio add bbox'",
-                    fg="cyan",
-                )
-            )
-
-            query = f"""
-            SELECT
-                MIN(ST_XMin({geometry_column})) as xmin,
-                MIN(ST_YMin({geometry_column})) as ymin,
-                MAX(ST_XMax({geometry_column})) as xmax,
-                MAX(ST_YMax({geometry_column})) as ymax
-            FROM '{safe_url}'
-            """
-
+        query = _build_bounds_query(safe_url, bbox_info, geometry_column, verbose)
         result = con.execute(query).fetchone()
 
         if result and all(v is not None for v in result):
@@ -885,6 +1198,7 @@ def add_computed_column(
     row_group_rows=None,
     dry_run_description=None,
     custom_metadata=None,
+    profile=None,
 ):
     """
     Add a computed column to a GeoParquet file using SQL expression.
@@ -896,10 +1210,11 @@ def add_computed_column(
     - Query execution
     - Metadata preservation
     - Dry-run support
+    - Remote input/output support
 
     Args:
-        input_parquet: Path to input file
-        output_parquet: Path to output file
+        input_parquet: Path to input file (local or remote URL)
+        output_parquet: Path to output file (local or remote URL)
         column_name: Name for the new column
         sql_expression: SQL expression to compute column value
         extensions: DuckDB extensions to load beyond 'spatial' (e.g., ['h3'])
@@ -911,6 +1226,7 @@ def add_computed_column(
         row_group_rows: Exact number of rows per row group
         dry_run_description: Optional description for dry-run output
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
+        profile: AWS profile name (S3 only, optional)
 
     Example:
         add_computed_column(
@@ -1033,6 +1349,7 @@ TO '{output_parquet}'
         row_group_rows=row_group_rows,
         custom_metadata=custom_metadata,
         verbose=verbose,
+        profile=profile,
     )
 
 

@@ -20,6 +20,9 @@ gpio partition string input.parquet output/ --column mgrs_code --chars 2
 
 # Hive-style partitioning
 gpio partition string input.parquet output/ --column region --hive
+
+# To cloud storage
+gpio partition string s3://bucket/input.parquet s3://bucket/output/ --column region --profile prod
 ```
 
 ## By H3 Cells
