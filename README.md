@@ -39,6 +39,9 @@ gpio check all myfile.parquet
 # Add bounding box column for faster queries
 gpio add bbox input.parquet output.parquet
 
+# Select only specific fields
+gpio select input.parquet output.parquet --fields "id,name,geometry"
+
 # Sort using Hilbert curve for spatial locality
 gpio sort hilbert input.parquet output_sorted.parquet
 

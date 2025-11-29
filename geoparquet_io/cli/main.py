@@ -20,6 +20,7 @@ from geoparquet_io.core.check_parquet_structure import check_all as check_struct
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
+from geoparquet_io.core.select import parse_fields, select_fields
 from geoparquet_io.core.inspect_utils import (
     extract_columns_info,
     extract_file_info,
@@ -501,6 +502,129 @@ def convert(
         skip_invalid=skip_invalid,
         profile=profile,
     )
+
+
+# Select command
+@cli.command()
+@click.argument("input_parquet")
+@click.argument("output_parquet", type=click.Path())
+@click.option(
+    "--fields",
+    required=True,
+    help=(
+        "Comma-separated list of fields to select (or exclude if --exclude is specified). "
+        "Field names with spaces, commas or double-quotes should be surrounded with "
+        'double-quote characters. Double-quotes in field names should be escaped with backslash. '
+        'Example: --fields "regular_field,\\"field with space\\",\\"field with \\\\\\" quote\\""'
+    ),
+)
+@click.option(
+    "--exclude",
+    is_flag=True,
+    help="Exclude the specified fields instead of selecting them (select all fields except those listed)",
+)
+@click.option(
+    "--ignore-missing-fields",
+    is_flag=True,
+    help="Emit a warning instead of an error when a specified field does not exist in the input",
+)
+@verbose_option
+@output_format_options
+@profile_option
+def select(
+    input_parquet,
+    output_parquet,
+    fields,
+    exclude,
+    ignore_missing_fields,
+    verbose,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    profile,
+):
+    """
+    Select a subset of fields from a GeoParquet file.
+
+    Creates a new GeoParquet file containing only the specified fields.
+    The geometry column is automatically included to preserve valid GeoParquet format
+    unless explicitly excluded.
+
+    \b
+    **Field Selection:**
+    By default, only the fields specified with --fields are included in the output.
+    Use --exclude to instead keep all fields EXCEPT those specified.
+
+    \b
+    **Quoting Field Names:**
+    Field names containing spaces, commas, or double-quotes must be quoted:
+    - Surround with double-quotes: "field name"
+    - Escape internal double-quotes with backslash: "field with \\" quote"
+
+    \b
+    **Examples:**
+
+    \b
+    # Select specific fields
+    gpio select input.parquet output.parquet --fields "id,name,geometry"
+
+    \b
+    # Exclude fields (keep all others)
+    gpio select input.parquet output.parquet --fields "temp_field,debug_info" --exclude
+
+    \b
+    # Handle field names with spaces
+    gpio select input.parquet output.parquet --fields "id,\\"field with space\\",name"
+
+    \b
+    # Ignore missing fields with warning
+    gpio select input.parquet output.parquet --fields "id,maybe_exists" --ignore-missing-fields
+
+    \b
+    # Remote input/output
+    gpio select s3://bucket/input.parquet s3://bucket/output.parquet \\
+        --fields "id,name" --profile my-aws
+    """
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_io.core.common import parse_size_string
+
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}") from e
+
+    # Parse fields string
+    parsed_fields = parse_fields(fields)
+    if not parsed_fields:
+        raise click.UsageError("No fields specified. Use --fields to specify at least one field.")
+
+    if verbose:
+        click.echo(f"Parsed fields: {parsed_fields}")
+
+    try:
+        select_fields(
+            input_parquet=input_parquet,
+            output_parquet=output_parquet,
+            fields=parsed_fields,
+            exclude=exclude,
+            ignore_missing=ignore_missing_fields,
+            verbose=verbose,
+            compression=compression.upper(),
+            compression_level=compression_level,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
+            profile=profile,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 # Inspect command
