@@ -25,6 +25,7 @@ from geoparquet_io.core.inspect_utils import (
     extract_file_info,
     extract_geo_info,
     format_json_output,
+    format_markdown_output,
     format_terminal_output,
     get_column_statistics,
     get_preview_data,
@@ -512,8 +513,9 @@ def convert(
     "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
 )
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
+@click.option("--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files")
 @profile_option
-def inspect(parquet_file, head, tail, stats, json_output, profile):
+def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profile):
     """
     Inspect a GeoParquet file and show metadata summary.
 
@@ -542,6 +544,10 @@ def inspect(parquet_file, head, tail, stats, json_output, profile):
         \b
         # JSON output for scripting
         gpio inspect data.parquet --json
+
+        \b
+        # Markdown output for README files
+        gpio inspect data.parquet --markdown
     """
     import fsspec
     import pyarrow.parquet as pq
@@ -555,6 +561,9 @@ def inspect(parquet_file, head, tail, stats, json_output, profile):
     # Validate mutually exclusive options
     if head and tail:
         raise click.UsageError("--head and --tail are mutually exclusive")
+
+    if json_output and markdown_output:
+        raise click.UsageError("--json and --markdown are mutually exclusive")
 
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, parquet_file)
@@ -590,6 +599,11 @@ def inspect(parquet_file, head, tail, stats, json_output, profile):
         if json_output:
             output = format_json_output(
                 file_info, geo_info, columns_info, preview_table, statistics
+            )
+            click.echo(output)
+        elif markdown_output:
+            output = format_markdown_output(
+                file_info, geo_info, columns_info, preview_table, preview_mode, statistics
             )
             click.echo(output)
         else:
