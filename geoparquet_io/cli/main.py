@@ -20,7 +20,6 @@ from geoparquet_io.core.check_parquet_structure import check_all as check_struct
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
-from geoparquet_io.core.select import parse_fields, select_fields
 from geoparquet_io.core.inspect_utils import (
     extract_columns_info,
     extract_file_info,
@@ -38,6 +37,7 @@ from geoparquet_io.core.partition_by_kdtree import partition_by_kdtree as partit
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
+from geoparquet_io.core.select import parse_fields, select_fields
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
@@ -514,7 +514,7 @@ def convert(
     help=(
         "Comma-separated list of fields to select (or exclude if --exclude is specified). "
         "Field names with spaces, commas or double-quotes should be surrounded with "
-        'double-quote characters. Double-quotes in field names should be escaped with backslash. '
+        "double-quote characters. Double-quotes in field names should be escaped with backslash. "
         'Example: --fields "regular_field,\\"field with space\\",\\"field with \\\\\\" quote\\""'
     ),
 )

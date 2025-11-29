@@ -2,7 +2,6 @@
 Core functionality for selecting/excluding fields from GeoParquet files.
 """
 
-import re
 
 import click
 import fsspec
@@ -140,7 +139,9 @@ def validate_fields(
         else:
             if ignore_missing:
                 click.echo(
-                    click.style(f"Warning: Field '{field}' not found in input, skipping", fg="yellow")
+                    click.style(
+                        f"Warning: Field '{field}' not found in input, skipping", fg="yellow"
+                    )
                 )
             else:
                 raise click.ClickException(
