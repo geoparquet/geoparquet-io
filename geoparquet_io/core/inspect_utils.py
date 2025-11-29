@@ -2,7 +2,7 @@
 Utilities for inspecting GeoParquet files.
 
 Provides functions to extract metadata, preview data, calculate statistics,
-and format output for terminal and JSON.
+and format output for terminal, JSON, and Markdown.
 """
 
 import json
@@ -715,8 +715,10 @@ def format_markdown_output(
             for col in columns_info:
                 value = preview_table.column(col["name"])[i].as_py()
                 formatted = format_value_for_display(value, col["type"], col["is_geometry"])
-                # Escape pipe characters in values
+                # Escape markdown special characters in table cells
                 formatted = formatted.replace("|", "\\|")
+                formatted = formatted.replace("\n", " ")
+                formatted = formatted.replace("\r", "")
                 row_values.append(formatted)
             lines.append("| " + " | ".join(row_values) + " |")
 
