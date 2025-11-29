@@ -2,7 +2,6 @@
 Core functionality for selecting/excluding fields from GeoParquet files.
 """
 
-
 import click
 import fsspec
 import pyarrow.parquet as pq
