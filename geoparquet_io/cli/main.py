@@ -513,7 +513,9 @@ def convert(
     "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
 )
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
-@click.option("--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files")
+@click.option(
+    "--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files"
+)
 @profile_option
 def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profile):
     """
