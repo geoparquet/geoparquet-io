@@ -507,8 +507,22 @@ def convert(
 # Inspect command
 @cli.command()
 @click.argument("parquet_file")
-@click.option("--head", type=int, default=None, help="Show first N rows")
-@click.option("--tail", type=int, default=None, help="Show last N rows")
+@click.option(
+    "--head",
+    type=int,
+    is_flag=False,
+    flag_value=10,
+    default=None,
+    help="Show first N rows (default: 10 if no value specified)",
+)
+@click.option(
+    "--tail",
+    type=int,
+    is_flag=False,
+    flag_value=10,
+    default=None,
+    help="Show last N rows (default: 10 if no value specified)",
+)
 @click.option(
     "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
 )

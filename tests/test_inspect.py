@@ -52,6 +52,15 @@ def test_inspect_head(runner, test_file):
     )  # May show fewer if file has < 5 rows
 
 
+def test_inspect_head_default(runner, test_file):
+    """Test inspect with --head flag without explicit value (defaults to 10)."""
+    result = runner.invoke(cli, ["inspect", test_file, "--head"])
+
+    assert result.exit_code == 0
+    assert "Preview (first" in result.output
+    assert "10 rows" in result.output or "rows)" in result.output
+
+
 def test_inspect_tail(runner, test_file):
     """Test inspect with --tail flag."""
     result = runner.invoke(cli, ["inspect", test_file, "--tail", "3"])
@@ -59,6 +68,15 @@ def test_inspect_tail(runner, test_file):
     assert result.exit_code == 0
     assert "Preview (last" in result.output
     assert "3 rows" in result.output or "rows)" in result.output
+
+
+def test_inspect_tail_default(runner, test_file):
+    """Test inspect with --tail flag without explicit value (defaults to 10)."""
+    result = runner.invoke(cli, ["inspect", test_file, "--tail"])
+
+    assert result.exit_code == 0
+    assert "Preview (last" in result.output
+    assert "10 rows" in result.output or "rows)" in result.output
 
 
 def test_inspect_head_tail_exclusive(runner, test_file):
