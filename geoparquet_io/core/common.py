@@ -1211,10 +1211,11 @@ def add_computed_column(
     - Metadata preservation
     - Dry-run support
     - Remote input/output support
+    - Streaming input/output support (Arrow IPC via stdin/stdout)
 
     Args:
-        input_parquet: Path to input file (local or remote URL)
-        output_parquet: Path to output file (local or remote URL)
+        input_parquet: Path to input file, remote URL, or "-" for stdin
+        output_parquet: Path to output file, "-" for stdout, or None for auto-detect
         column_name: Name for the new column
         sql_expression: SQL expression to compute column value
         extensions: DuckDB extensions to load beyond 'spatial' (e.g., ['h3'])
@@ -1238,14 +1239,22 @@ def add_computed_column(
             custom_metadata={'covering': {'h3': {'column': 'h3_cell', 'resolution': 9}}}
         )
     """
-    # Get safe URL for input file
-    input_url = safe_file_url(input_parquet, verbose)
+    from geoparquet_io.core.stream_io import open_input, write_output
+    from geoparquet_io.core.streaming import is_stdin, should_stream_output
 
-    # Get geometry column (for reference)
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    # Check if we're in streaming mode
+    is_streaming_input = is_stdin(input_parquet)
+    is_streaming_output = should_stream_output(output_parquet)
 
-    # Dry-run mode header
-    if dry_run:
+    # Suppress verbose output when streaming to stdout (would corrupt the stream)
+    if is_streaming_output:
+        verbose = False
+
+    # Handle dry-run mode for file-based input
+    if dry_run and not is_streaming_input:
+        input_url = safe_file_url(input_parquet, verbose)
+        geom_col = find_primary_geometry_column(input_parquet, verbose)
+
         click.echo(
             click.style(
                 "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
@@ -1254,59 +1263,13 @@ def add_computed_column(
             )
         )
         click.echo(click.style(f"-- Input file: {input_url}", fg="cyan"))
-        click.echo(click.style(f"-- Output file: {output_parquet}", fg="cyan"))
+        click.echo(click.style(f"-- Output: {output_parquet or '(stdout)'}", fg="cyan"))
         click.echo(click.style(f"-- Geometry column: {geom_col}", fg="cyan"))
         click.echo(click.style(f"-- New column: {column_name}", fg="cyan"))
         if dry_run_description:
             click.echo(click.style(f"-- Description: {dry_run_description}", fg="cyan"))
         click.echo()
 
-    # Check if column already exists (skip in dry-run)
-    if not dry_run:
-        with fsspec.open(input_url, "rb") as f:
-            pf = pq.ParquetFile(f)
-            schema = pf.schema_arrow
-
-        for field in schema:
-            if field.name == column_name:
-                raise click.ClickException(
-                    f"Column '{column_name}' already exists in the file. "
-                    f"Please choose a different name."
-                )
-
-        # Get metadata before processing
-        metadata, _ = get_parquet_metadata(input_parquet, verbose)
-
-        if verbose:
-            click.echo(f"Adding column '{column_name}'...")
-
-    # Create DuckDB connection with httpfs if needed
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-
-    # Load additional extensions if specified
-    if extensions:
-        for ext in extensions:
-            if verbose and not dry_run:
-                click.echo(f"Loading DuckDB extension: {ext}")
-            con.execute(f"INSTALL {ext} FROM community;")
-            con.execute(f"LOAD {ext};")
-
-    # Get total count (skip in dry-run)
-    if not dry_run:
-        total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
-        click.echo(f"Processing {total_count:,} features...")
-
-    # Build the query
-    query = f"""
-        SELECT
-            *,
-            {sql_expression} AS {column_name}
-        FROM '{input_url}'
-    """
-
-    # Handle dry-run display
-    if dry_run:
-        # Show formatted query with COPY wrapper
         compression_desc = compression
         if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
             compression_desc = f"{compression}:{compression_level}"
@@ -1314,8 +1277,14 @@ def add_computed_column(
         duckdb_compression = (
             compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
         )
+        query = f"""
+        SELECT
+            *,
+            {sql_expression} AS {column_name}
+        FROM '{input_url}'
+    """
         display_query = f"""COPY ({query.strip()})
-TO '{output_parquet}'
+TO '{output_parquet or "(stdout)"}'
 (FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
 
         click.echo(click.style("-- Main query:", fg="cyan"))
@@ -1323,34 +1292,66 @@ TO '{output_parquet}'
         click.echo(click.style(f"\n-- Note: Using {compression_desc} compression", fg="cyan"))
         click.echo(
             click.style(
-                "-- This query creates a new parquet file with the computed column added", fg="cyan"
-            )
-        )
-        click.echo(
-            click.style(
-                "-- Metadata would also be updated with proper GeoParquet covering information",
-                fg="cyan",
+                "-- This query creates output with the computed column added", fg="cyan"
             )
         )
         return
 
-    # Execute the query using existing write helper
-    if verbose:
-        click.echo(f"Creating column '{column_name}'...")
+    # Use unified streaming/file I/O
+    with open_input(input_parquet, verbose=verbose) as (source_ref, metadata, is_stream, con):
+        # Load additional extensions if specified
+        if extensions:
+            for ext in extensions:
+                if verbose:
+                    click.echo(f"Loading DuckDB extension: {ext}")
+                con.execute(f"INSTALL {ext} FROM community;")
+                con.execute(f"LOAD {ext};")
 
-    write_parquet_with_metadata(
-        con,
-        query,
-        output_parquet,
-        original_metadata=metadata,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        custom_metadata=custom_metadata,
-        verbose=verbose,
-        profile=profile,
-    )
+        # Check if column already exists
+        if is_stream:
+            # For streaming, check the registered table's schema
+            schema_result = con.execute(f"DESCRIBE {source_ref}").fetchall()
+            existing_columns = [row[0] for row in schema_result]
+        else:
+            # For files, use fsspec
+            input_url = safe_file_url(input_parquet, verbose=False)
+            with fsspec.open(input_url, "rb") as f:
+                pf = pq.ParquetFile(f)
+                existing_columns = [field.name for field in pf.schema_arrow]
+
+        if column_name in existing_columns:
+            raise click.ClickException(
+                f"Column '{column_name}' already exists in the input. "
+                f"Please choose a different name."
+            )
+
+        # Get row count for progress display
+        if verbose:
+            total_count = con.execute(f"SELECT COUNT(*) FROM {source_ref}").fetchone()[0]
+            click.echo(f"Processing {total_count:,} features...")
+            click.echo(f"Adding column '{column_name}'...")
+
+        # Build the query
+        query = f"""
+            SELECT
+                *,
+                {sql_expression} AS {column_name}
+            FROM {source_ref}
+        """
+
+        # Execute and write output (handles both streaming and file output)
+        write_output(
+            con,
+            query,
+            output_parquet,
+            original_metadata=metadata,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            verbose=verbose,
+            profile=profile,
+        )
 
 
 def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):

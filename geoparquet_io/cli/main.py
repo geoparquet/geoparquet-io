@@ -738,7 +738,7 @@ def sort():
 
 @sort.command(name="hilbert")
 @click.argument("input_parquet")
-@click.argument("output_parquet", type=click.Path())
+@click.argument("output_parquet", type=click.Path(), required=False, default=None)
 @click.option(
     "--geometry-column",
     "-g",
@@ -772,7 +772,17 @@ def hilbert_order(
     Applies optimal formatting (configurable compression, optimized row groups,
     bbox metadata) while preserving the CRS. Output is written as GeoParquet 1.1.
 
-    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    Supports local, remote (S3, GCS, Azure), and streaming (stdin/stdout) I/O.
+
+    Streaming Examples:
+
+        \b
+        # Pipe from add bbox, output to file
+        gpio add bbox input.parquet | gpio sort hilbert - output.parquet
+
+        \b
+        # Read from stdin, write to stdout (explicit)
+        gpio add bbox input.parquet - | gpio sort hilbert - -
     """
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -929,7 +939,7 @@ def add_country_codes(
 
 @add.command(name="bbox")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
@@ -954,7 +964,7 @@ def add_bbox(
     GeoParquet file (GeoParquet 1.1 spec). The bbox column improves spatial query
     performance.
 
-    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    Supports local, remote (S3, GCS, Azure), and streaming (stdin/stdout) I/O.
 
     If your file already has a bbox column but lacks metadata, use 'add bbox-metadata'
     instead.
@@ -964,6 +974,14 @@ def add_bbox(
         \b
         # Local to local
         gpio add bbox input.parquet output.parquet
+
+        \b
+        # Streaming: pipe to another command (auto-detect stdout)
+        gpio add bbox input.parquet | gpio sort hilbert - output.parquet
+
+        \b
+        # Streaming: explicit stdin and stdout
+        cat input.arrow | gpio add bbox - -
 
         \b
         # Remote to remote

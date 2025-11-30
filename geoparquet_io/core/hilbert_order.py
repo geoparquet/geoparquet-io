@@ -21,6 +21,8 @@ from geoparquet_io.core.common import (
     validate_profile_for_urls,
     write_parquet_with_metadata,
 )
+from geoparquet_io.core.stream_io import open_input, write_output
+from geoparquet_io.core.streaming import is_stdin, should_stream_output
 
 
 def hilbert_order(
@@ -46,10 +48,162 @@ def hilbert_order(
     - Preserves CRS from original file
     - Writes GeoParquet 1.1 format
     - Supports remote inputs/outputs (S3, GCS, Azure)
+    - Supports streaming input/output (Arrow IPC via stdin/stdout)
 
     Args:
+        input_parquet: Path to input file, remote URL, or "-" for stdin
+        output_parquet: Path to output file, "-" for stdout, or None for auto-detect
+        geometry_column: Name of the geometry column (default: auto-detect)
+        add_bbox_flag: Add bbox column if missing (not supported for streaming input)
+        verbose: Whether to print verbose output
+        compression: Compression type for file output
+        compression_level: Compression level for file output
+        row_group_size_mb: Row group size for file output
+        row_group_rows: Row group rows for file output
         profile: AWS profile name (S3 only, optional)
     """
+    # Check if we're in streaming mode
+    is_streaming_input = is_stdin(input_parquet)
+    is_streaming_output = should_stream_output(output_parquet)
+
+    # Suppress verbose when streaming to stdout (would corrupt the stream)
+    if is_streaming_output:
+        verbose = False
+
+    # Streaming mode path
+    if is_streaming_input:
+        if add_bbox_flag:
+            click.echo(
+                click.style(
+                    "Note: --add-bbox is not supported with streaming input. "
+                    "Bounds will be calculated from geometry.",
+                    fg="yellow",
+                ),
+                err=True,
+            )
+
+        _hilbert_order_streaming(
+            input_parquet,
+            output_parquet,
+            geometry_column,
+            verbose,
+            compression,
+            compression_level,
+            row_group_size_mb,
+            row_group_rows,
+            profile,
+        )
+        return
+
+    # File-based mode path (original logic)
+    _hilbert_order_file(
+        input_parquet,
+        output_parquet,
+        geometry_column,
+        add_bbox_flag,
+        verbose,
+        compression,
+        compression_level,
+        row_group_size_mb,
+        row_group_rows,
+        profile,
+    )
+
+
+def _hilbert_order_streaming(
+    input_parquet,
+    output_parquet,
+    geometry_column,
+    verbose,
+    compression,
+    compression_level,
+    row_group_size_mb,
+    row_group_rows,
+    profile,
+):
+    """Handle Hilbert ordering with streaming input."""
+    with open_input(input_parquet, verbose=verbose) as (source_ref, metadata, is_stream, con):
+        # Find geometry column from schema
+        schema_result = con.execute(f"DESCRIBE {source_ref}").fetchall()
+        column_names = [row[0] for row in schema_result]
+
+        # Auto-detect geometry column
+        if geometry_column == "geometry":
+            # Check for 'geometry' first, then look for other common names
+            if "geometry" in column_names:
+                geometry_column = "geometry"
+            elif "geom" in column_names:
+                geometry_column = "geom"
+            else:
+                # Fall back to first BLOB/BINARY column (likely WKB geometry)
+                geometry_column = "geometry"
+
+        if verbose:
+            click.echo(f"Using geometry column: {geometry_column}", err=True)
+            click.echo("Calculating dataset bounds for Hilbert ordering...", err=True)
+
+        # Calculate bounds from the registered table
+        bounds_query = f"""
+            SELECT
+                MIN(ST_XMin({geometry_column})) as xmin,
+                MIN(ST_YMin({geometry_column})) as ymin,
+                MAX(ST_XMax({geometry_column})) as xmax,
+                MAX(ST_YMax({geometry_column})) as ymax
+            FROM {source_ref}
+        """
+        result = con.execute(bounds_query).fetchone()
+
+        if not result or any(v is None for v in result):
+            raise click.ClickException("Could not calculate dataset bounds from stream")
+
+        xmin, ymin, xmax, ymax = result
+
+        if verbose:
+            click.echo(
+                f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})", err=True
+            )
+            click.echo("Reordering data using Hilbert curve...", err=True)
+
+        # Build and execute Hilbert ordering query
+        order_query = f"""
+            SELECT *
+            FROM {source_ref}
+            ORDER BY ST_Hilbert(
+                {geometry_column},
+                ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))
+            )
+        """
+
+        write_output(
+            con,
+            order_query,
+            output_parquet,
+            original_metadata=metadata,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            verbose=verbose,
+            profile=profile,
+        )
+
+        if verbose:
+            click.echo("Hilbert ordering completed successfully", err=True)
+
+
+def _hilbert_order_file(
+    input_parquet,
+    output_parquet,
+    geometry_column,
+    add_bbox_flag,
+    verbose,
+    compression,
+    compression_level,
+    row_group_size_mb,
+    row_group_rows,
+    profile,
+):
+    """Handle Hilbert ordering with file-based input (original logic)."""
     # Check input file bbox structure
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
 
@@ -101,10 +255,12 @@ def hilbert_order(
             )
 
     # Validate profile is only used with S3
-    validate_profile_for_urls(profile, input_parquet, output_parquet)
+    if output_parquet:
+        validate_profile_for_urls(profile, input_parquet, output_parquet)
 
     # Setup AWS profile if needed (for DuckDB to read from S3)
-    setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
+    if output_parquet:
+        setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
 
     # Show remote read message
     show_remote_read_message(working_parquet, verbose)
@@ -140,7 +296,6 @@ def hilbert_order(
         click.echo("Reordering data using Hilbert curve...")
 
     # Build SELECT query for Hilbert ordering (without COPY wrapper)
-    # The write_parquet_with_metadata function will add the COPY wrapper
     order_query = f"""
         SELECT *
         FROM '{safe_url}'
@@ -151,19 +306,34 @@ def hilbert_order(
     """
 
     try:
-        # Use the common write function with metadata preservation
-        write_parquet_with_metadata(
-            con,
-            order_query,
-            output_parquet,
-            original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            verbose=verbose,
-            profile=profile,
-        )
+        # Check if output is streaming
+        if should_stream_output(output_parquet):
+            write_output(
+                con,
+                order_query,
+                output_parquet,
+                original_metadata=metadata,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                verbose=verbose,
+                profile=profile,
+            )
+        else:
+            # Use the common write function with metadata preservation
+            write_parquet_with_metadata(
+                con,
+                order_query,
+                output_parquet,
+                original_metadata=metadata,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                verbose=verbose,
+                profile=profile,
+            )
 
         if verbose:
             click.echo("Hilbert ordering completed successfully")
@@ -176,7 +346,7 @@ def hilbert_order(
                 )
             )
 
-        if verbose:
+        if verbose and output_parquet:
             click.echo(f"Successfully wrote ordered data to: {output_parquet}")
 
     except duckdb.IOException as e:
