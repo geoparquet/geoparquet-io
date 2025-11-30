@@ -12,6 +12,7 @@ from geoparquet_io.core.inspect_utils import (
     extract_file_info,
     extract_geo_info,
     format_geometry_display,
+    format_markdown_output,
     parse_wkb_type,
 )
 
@@ -243,6 +244,74 @@ def test_format_geometry_display():
     assert "some string" in result
 
 
+def test_format_markdown_output():
+    """Test markdown output formatting function."""
+    file_info = {
+        "file_path": "/path/to/data.parquet",
+        "size_bytes": 1024,
+        "size_human": "1.00 KB",
+        "rows": 100,
+        "row_groups": 1,
+        "compression": "ZSTD",
+    }
+    geo_info = {
+        "has_geo_metadata": True,
+        "version": "1.0.0",
+        "crs": "EPSG:4326",
+        "bbox": [-180.0, -90.0, 180.0, 90.0],
+        "primary_column": "geometry",
+    }
+    columns_info = [
+        {"name": "id", "type": "int64", "is_geometry": False},
+        {"name": "geometry", "type": "binary", "is_geometry": True},
+    ]
+
+    result = format_markdown_output(file_info, geo_info, columns_info)
+
+    # Verify markdown structure
+    assert "## data.parquet" in result
+    assert "### Metadata" in result
+    assert "- **Size:** 1.00 KB" in result
+    assert "- **Rows:** 100" in result
+    assert "- **Row Groups:** 1" in result
+    assert "- **Compression:** ZSTD" in result
+    assert "- **GeoParquet Version:** 1.0.0" in result
+    assert "- **CRS:** EPSG:4326" in result
+    assert "- **Bbox:** [-180.000000, -90.000000, 180.000000, 90.000000]" in result
+    assert "### Columns (2)" in result
+    assert "| Name | Type |" in result
+    assert "| id | int64 |" in result
+    assert "| geometry 🌍 | binary |" in result
+
+
+def test_format_markdown_output_no_geo_metadata():
+    """Test markdown output without geo metadata."""
+    file_info = {
+        "file_path": "/path/to/data.parquet",
+        "size_bytes": 1024,
+        "size_human": "1.00 KB",
+        "rows": 50,
+        "row_groups": 1,
+        "compression": None,
+    }
+    geo_info = {
+        "has_geo_metadata": False,
+        "version": None,
+        "crs": None,
+        "bbox": None,
+        "primary_column": None,
+    }
+    columns_info = [
+        {"name": "value", "type": "string", "is_geometry": False},
+    ]
+
+    result = format_markdown_output(file_info, geo_info, columns_info)
+
+    # Verify no geo metadata message
+    assert "*No GeoParquet metadata found*" in result
+    assert "### Columns (1)" in result
+
+
 def test_inspect_with_buildings_file(runner):
     """Test inspect with buildings test file."""
     buildings_file = os.path.join(os.path.dirname(__file__), "data", "buildings_test.parquet")
@@ -304,3 +373,51 @@ def test_inspect_help(runner):
     assert "--tail" in result.output
     assert "--stats" in result.output
     assert "--json" in result.output
+    assert "--markdown" in result.output
+
+
+def test_inspect_markdown(runner, test_file):
+    """Test inspect with --markdown flag."""
+    result = runner.invoke(cli, ["inspect", test_file, "--markdown"])
+
+    assert result.exit_code == 0
+
+    # Verify markdown structure
+    assert "## places_test.parquet" in result.output
+    assert "### Metadata" in result.output
+    assert "- **Size:**" in result.output
+    assert "- **Rows:**" in result.output
+    assert "- **Row Groups:**" in result.output
+    assert "### Columns" in result.output
+    assert "| Name | Type |" in result.output
+    assert "|------|------|" in result.output
+
+
+def test_inspect_markdown_with_head(runner, test_file):
+    """Test markdown output includes preview data when --head is specified."""
+    result = runner.invoke(cli, ["inspect", test_file, "--markdown", "--head", "2"])
+
+    assert result.exit_code == 0
+
+    # Verify preview section exists
+    assert "### Preview (first 2 rows)" in result.output
+    # Check for table structure
+    assert result.output.count("|") > 10  # Multiple pipe characters for tables
+
+
+def test_inspect_markdown_with_tail(runner, test_file):
+    """Test markdown output includes preview data when --tail is specified."""
+    result = runner.invoke(cli, ["inspect", test_file, "--markdown", "--tail", "3"])
+
+    assert result.exit_code == 0
+
+    # Verify preview section exists
+    assert "### Preview (last 3 rows)" in result.output
+
+
+def test_inspect_markdown_json_exclusive(runner, test_file):
+    """Test that --markdown and --json are mutually exclusive."""
+    result = runner.invoke(cli, ["inspect", test_file, "--markdown", "--json"])
+
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower()
