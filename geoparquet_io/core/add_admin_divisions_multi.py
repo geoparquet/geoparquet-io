@@ -18,8 +18,9 @@ from geoparquet_io.core.common import (
     find_primary_geometry_column,
     get_parquet_metadata,
     safe_file_url,
-    write_parquet_with_metadata,
 )
+from geoparquet_io.core.stream_io import write_output
+from geoparquet_io.core.streaming import should_stream_output
 
 
 def _build_admin_subquery(
@@ -424,7 +425,7 @@ TO '{output_parquet}'
 
 def add_admin_divisions_multi(
     input_parquet: str,
-    output_parquet: str,
+    output_parquet: Optional[str],
     dataset_name: str,
     levels: list[str],
     dataset_source: Optional[str] = None,
@@ -440,9 +441,13 @@ def add_admin_divisions_multi(
     """
     Add admin division columns from a multi-level admin dataset.
 
+    Supports local, remote (S3, GCS, Azure), and streaming (stdout) output.
+    Note: Input must be a file (not stdin) as we need to perform spatial joins
+    with remote admin boundary datasets.
+
     Args:
         input_parquet: Input GeoParquet file (local or remote URL)
-        output_parquet: Output GeoParquet file (local or remote URL)
+        output_parquet: Output path, "-" for stdout, or None for auto-detect
         dataset_name: Name of admin dataset ("current", "gaul", "overture")
         levels: List of hierarchical levels to add as columns
         dataset_source: Optional custom path/URL to admin dataset
@@ -455,6 +460,13 @@ def add_admin_divisions_multi(
         row_group_rows: Exact number of rows per row group
         profile: AWS profile name (S3 only, optional)
     """
+    # Check for streaming output
+    is_streaming_output = should_stream_output(output_parquet)
+
+    # Suppress verbose output when streaming to stdout
+    if is_streaming_output:
+        verbose = False
+
     # Setup dataset and columns
     (
         dataset,
@@ -485,8 +497,8 @@ def add_admin_divisions_multi(
     # Create DuckDB connection
     con = _setup_duckdb_connection(dataset)
 
-    # Get total input count (skip in dry-run)
-    if not dry_run:
+    # Get total input count (skip in dry-run and streaming)
+    if not dry_run and not is_streaming_output:
         total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
         click.echo(f"Processing {total_count:,} input features...")
 
@@ -526,7 +538,7 @@ def add_admin_divisions_multi(
     if verbose:
         click.echo("Performing spatial join with admin boundaries...")
 
-    write_parquet_with_metadata(
+    write_output(
         con,
         query,
         output_parquet,
@@ -539,17 +551,20 @@ def add_admin_divisions_multi(
         profile=profile,
     )
 
-    # Get statistics about the results
-    total_features, features_with_admin, unique_counts = _get_result_stats(
-        con, output_parquet, dataset, levels, verbose
-    )
-    con.close()
+    # Get statistics about the results (skip when streaming)
+    if not is_streaming_output:
+        total_features, features_with_admin, unique_counts = _get_result_stats(
+            con, output_parquet, dataset, levels, verbose
+        )
+        con.close()
 
-    click.echo("\nResults:")
-    click.echo(
-        f"- Added admin division data to {features_with_admin:,} of {total_features:,} features"
-    )
-    for level, count in unique_counts:
-        click.echo(f"- Found {count:,} unique {level} values")
+        click.echo("\nResults:")
+        click.echo(
+            f"- Added admin division data to {features_with_admin:,} of {total_features:,} features"
+        )
+        for level, count in unique_counts:
+            click.echo(f"- Found {count:,} unique {level} values")
 
-    click.echo(f"\nSuccessfully wrote output to: {output_parquet}")
+        click.echo(f"\nSuccessfully wrote output to: {output_parquet}")
+    else:
+        con.close()
