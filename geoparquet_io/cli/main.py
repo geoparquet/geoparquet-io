@@ -1618,6 +1618,203 @@ def partition_kdtree(
     )
 
 
+@partition.command(name="apply")
+@click.argument("operation", type=click.Choice([
+    "add-bbox", "add-h3", "sort-hilbert", "check", "fix"
+]))
+@click.argument("partition_path")
+@click.argument("output_path", required=False)
+@click.option("--in-place", is_flag=True, help="Modify files in place (no output path needed)")
+@click.option("--concurrency", default=4, show_default=True, help="Number of files to process in parallel")
+@click.option(
+    "--error-handling",
+    type=click.Choice(["fail-fast", "continue"]),
+    default="fail-fast",
+    show_default=True,
+    help="Stop on first error or continue processing all files",
+)
+@click.option("--pattern", default="**/*.parquet", show_default=True, help="File pattern to match")
+@profile_option
+@verbose_option
+def partition_apply(
+    operation,
+    partition_path,
+    output_path,
+    in_place,
+    concurrency,
+    error_handling,
+    pattern,
+    profile,
+    verbose,
+):
+    """Apply an operation to all files in a partition.
+
+    Processes multiple GeoParquet files in parallel, applying the specified
+    operation to each file. Supports both local directories and remote
+    partitions (S3, GCS, Azure).
+
+    \b
+    **Operations:**
+    - add-bbox: Add bbox column and metadata to each file
+    - add-h3: Add H3 cell column to each file
+    - sort-hilbert: Apply Hilbert spatial ordering to each file
+    - check: Run all checks on each file
+    - fix: Apply fixes to each file
+
+    \b
+    **Examples:**
+
+    \b
+    # Add bbox to all files in a local partition
+    gpio partition apply add-bbox ./partitions/ ./output/
+
+    \b
+    # Sort all files in-place with high parallelism
+    gpio partition apply sort-hilbert ./data/ --in-place --concurrency 8
+
+    \b
+    # Process S3 partition
+    gpio partition apply add-bbox s3://bucket/data/ s3://bucket/output/ --profile my-aws
+
+    \b
+    # Check all files, continue on errors
+    gpio partition apply check ./partitions/ --error-handling continue
+    """
+    from geoparquet_io.core.partition_ops import (
+        PartitionResult,
+        apply_operation_to_partition,
+        detect_input_type,
+    )
+
+    # Validate arguments
+    if not in_place and not output_path:
+        raise click.UsageError("OUTPUT_PATH is required unless using --in-place")
+
+    if in_place and output_path:
+        raise click.UsageError("Cannot specify OUTPUT_PATH with --in-place")
+
+    # Determine effective output path
+    effective_output = None if in_place else output_path
+
+    # Check that input is a partition
+    input_type = detect_input_type(partition_path)
+    if input_type == "file":
+        raise click.UsageError(
+            f"Expected a partition directory, got a file: {partition_path}\n"
+            "Use the regular command (e.g., 'gpio add bbox') for single files."
+        )
+
+    # Map operation names to functions and kwargs
+    error_mode = "fail_fast" if error_handling == "fail-fast" else "continue"
+
+    if operation == "add-bbox":
+        from geoparquet_io.core.add_bbox_column import _add_bbox_column_single
+
+        click.echo(f"Adding bbox column to partition: {partition_path}")
+        result = apply_operation_to_partition(
+            operation_fn=_add_bbox_column_single,
+            input_partition=partition_path,
+            output_partition=effective_output,
+            file_pattern=pattern,
+            concurrency=concurrency,
+            error_handling=error_mode,
+            profile=profile,
+            verbose=verbose,
+            bbox_column_name="bbox",
+            dry_run=False,
+        )
+
+    elif operation == "add-h3":
+        from geoparquet_io.core.add_h3_column import _add_h3_column_single
+
+        click.echo(f"Adding H3 column to partition: {partition_path}")
+        result = apply_operation_to_partition(
+            operation_fn=_add_h3_column_single,
+            input_partition=partition_path,
+            output_partition=effective_output,
+            file_pattern=pattern,
+            concurrency=concurrency,
+            error_handling=error_mode,
+            profile=profile,
+            verbose=verbose,
+            h3_column_name="h3_cell",
+            resolution=9,
+            dry_run=False,
+        )
+
+    elif operation == "sort-hilbert":
+        from geoparquet_io.core.hilbert_order import _hilbert_order_single
+
+        click.echo(f"Sorting by Hilbert curve: {partition_path}")
+        result = apply_operation_to_partition(
+            operation_fn=_hilbert_order_single,
+            input_partition=partition_path,
+            output_partition=effective_output,
+            file_pattern=pattern,
+            concurrency=concurrency,
+            error_handling=error_mode,
+            profile=profile,
+            verbose=verbose,
+            geometry_column="geometry",
+            add_bbox=False,
+        )
+
+    elif operation == "check":
+        click.echo(f"Checking partition: {partition_path}")
+        click.echo("Note: Check results will be printed for each file.")
+
+        def check_wrapper(input_path, output_path, **kwargs):
+            """Wrapper to run checks and print results."""
+            check_structure_impl(input_path, kwargs.get("verbose", False), return_results=False)
+
+        result = apply_operation_to_partition(
+            operation_fn=check_wrapper,
+            input_partition=partition_path,
+            output_partition=partition_path,  # Checks don't modify files
+            file_pattern=pattern,
+            concurrency=concurrency,
+            error_handling=error_mode,
+            profile=profile,
+            verbose=verbose,
+        )
+
+    elif operation == "fix":
+        from geoparquet_io.core.check_fixes import apply_all_fixes
+
+        click.echo(f"Fixing partition: {partition_path}")
+
+        def fix_wrapper(input_path, output_path, **kwargs):
+            """Wrapper to check and fix a file."""
+            # Run checks first
+            structure_results = check_structure_impl(
+                input_path, kwargs.get("verbose", False), return_results=True
+            )
+            spatial_result = check_spatial_impl(
+                input_path, 100, 500000, kwargs.get("verbose", False), return_results=True
+            )
+            all_results = {**structure_results, "spatial": spatial_result}
+
+            # Apply fixes
+            apply_all_fixes(
+                input_path, output_path, all_results, kwargs.get("verbose", False), kwargs.get("profile")
+            )
+
+        result = apply_operation_to_partition(
+            operation_fn=fix_wrapper,
+            input_partition=partition_path,
+            output_partition=effective_output,
+            file_pattern=pattern,
+            concurrency=concurrency,
+            error_handling=error_mode,
+            profile=profile,
+            verbose=verbose,
+        )
+
+    # Report results
+    if result.failed > 0 and error_mode == "fail_fast":
+        result.raise_if_any_failed()
+
+
 # STAC commands
 def _check_output_stac_item(output_path, output: str, overwrite: bool) -> None:
     """Check if output already exists and is a STAC Item, handle overwrite."""
