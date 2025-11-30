@@ -2,7 +2,7 @@
 Utilities for inspecting GeoParquet files.
 
 Provides functions to extract metadata, preview data, calculate statistics,
-and format output for terminal and JSON.
+and format output for terminal, JSON, and Markdown.
 """
 
 import json
@@ -614,3 +614,145 @@ def format_json_output(
         output["statistics"] = None
 
     return json.dumps(output, indent=2)
+
+
+def format_markdown_output(
+    file_info: dict[str, Any],
+    geo_info: dict[str, Any],
+    columns_info: list[dict[str, Any]],
+    preview_table: Optional[pa.Table] = None,
+    preview_mode: Optional[str] = None,
+    stats: Optional[dict[str, dict[str, Any]]] = None,
+) -> str:
+    """
+    Format output as Markdown for README files or documentation.
+
+    Args:
+        file_info: File information dict
+        geo_info: Geo information dict
+        columns_info: Column information list
+        preview_table: Optional preview data table
+        preview_mode: "head" or "tail" (when preview_table is provided)
+        stats: Optional statistics dict
+
+    Returns:
+        str: Markdown string
+    """
+    lines = []
+
+    # File header
+    file_name = os.path.basename(file_info["file_path"])
+    lines.append(f"## {file_name}")
+    lines.append("")
+
+    # Metadata section
+    lines.append("### Metadata")
+    lines.append("")
+    lines.append(f"- **Size:** {file_info['size_human']}")
+    lines.append(f"- **Rows:** {file_info['rows']:,}")
+    lines.append(f"- **Row Groups:** {file_info['row_groups']}")
+
+    if file_info.get("compression"):
+        lines.append(f"- **Compression:** {file_info['compression']}")
+
+    if geo_info["has_geo_metadata"]:
+        if geo_info.get("version"):
+            lines.append(f"- **GeoParquet Version:** {geo_info['version']}")
+
+        crs_display = geo_info["crs"] if geo_info["crs"] else "Not specified"
+        lines.append(f"- **CRS:** {crs_display}")
+
+        if geo_info["bbox"]:
+            bbox = geo_info["bbox"]
+            if len(bbox) == 4:
+                lines.append(
+                    f"- **Bbox:** [{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}]"
+                )
+            else:
+                lines.append(f"- **Bbox:** {bbox}")
+    else:
+        lines.append("")
+        lines.append("*No GeoParquet metadata found*")
+
+    lines.append("")
+
+    # Columns table
+    num_cols = len(columns_info)
+    lines.append(f"### Columns ({num_cols})")
+    lines.append("")
+    lines.append("| Name | Type |")
+    lines.append("|------|------|")
+
+    for col in columns_info:
+        name = col["name"]
+        if col["is_geometry"]:
+            name = f"{name} 🌍"
+        lines.append(f"| {name} | {col['type']} |")
+
+    lines.append("")
+
+    # Preview table
+    if preview_table is not None and preview_table.num_rows > 0:
+        preview_label = (
+            f"Preview (first {preview_table.num_rows} rows)"
+            if preview_mode == "head"
+            else f"Preview (last {preview_table.num_rows} rows)"
+        )
+        lines.append(f"### {preview_label}")
+        lines.append("")
+
+        # Build header row
+        header_row = "| " + " | ".join(col["name"] for col in columns_info) + " |"
+        lines.append(header_row)
+
+        # Build separator row
+        separator_row = "|" + "|".join("------" for _ in columns_info) + "|"
+        lines.append(separator_row)
+
+        # Build data rows
+        for i in range(preview_table.num_rows):
+            row_values = []
+            for col in columns_info:
+                value = preview_table.column(col["name"])[i].as_py()
+                formatted = format_value_for_display(value, col["type"], col["is_geometry"])
+                # Escape markdown special characters in table cells
+                formatted = formatted.replace("|", "\\|")
+                formatted = formatted.replace("\n", " ")
+                formatted = formatted.replace("\r", "")
+                row_values.append(formatted)
+            lines.append("| " + " | ".join(row_values) + " |")
+
+        lines.append("")
+
+    # Statistics table
+    if stats:
+        lines.append("### Statistics")
+        lines.append("")
+        lines.append("| Column | Nulls | Min | Max | Unique |")
+        lines.append("|--------|-------|-----|-----|--------|")
+
+        for col in columns_info:
+            col_name = col["name"]
+            col_stats = stats.get(col_name, {})
+
+            nulls = col_stats.get("nulls", 0)
+            min_val = col_stats.get("min")
+            max_val = col_stats.get("max")
+            unique = col_stats.get("unique")
+
+            # Format values
+            min_str = str(min_val) if min_val is not None else "-"
+            max_str = str(max_val) if max_val is not None else "-"
+            unique_str = f"~{unique:,}" if unique is not None else "-"
+
+            # Truncate long values
+            if len(min_str) > 20:
+                min_str = min_str[:17] + "..."
+            if len(max_str) > 20:
+                max_str = max_str[:17] + "..."
+
+            lines.append(f"| {col_name} | {nulls:,} | {min_str} | {max_str} | {unique_str} |")
+
+        lines.append("")
+
+    return "\n".join(lines)
