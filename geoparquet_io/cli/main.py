@@ -19,6 +19,7 @@ from geoparquet_io.core.add_kdtree_column import add_kdtree_column as add_kdtree
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
 from geoparquet_io.core.inspect_utils import (
     extract_columns_info,
@@ -613,6 +614,159 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
                 file_info, geo_info, columns_info, preview_table, preview_mode, statistics
             )
 
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+# Extract command
+@cli.command()
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path())
+@click.option(
+    "--include-cols",
+    help="Comma-separated columns to include (geometry and bbox always included unless excluded)",
+)
+@click.option(
+    "--exclude-cols",
+    help="Comma-separated columns to exclude",
+)
+@click.option(
+    "--bbox",
+    help="Bounding box filter: xmin,ymin,xmax,ymax",
+)
+@click.option(
+    "--geometry",
+    help="Geometry filter: GeoJSON, WKT, @filepath, or - for stdin",
+)
+@click.option(
+    "--use-first-geometry",
+    is_flag=True,
+    help="Use first geometry if FeatureCollection contains multiple",
+)
+@click.option(
+    "--where",
+    help="DuckDB WHERE clause for filtering rows",
+)
+@output_format_options
+@dry_run_option
+@verbose_option
+@profile_option
+def extract(
+    input_file,
+    output_file,
+    include_cols,
+    exclude_cols,
+    bbox,
+    geometry,
+    use_first_geometry,
+    where,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    dry_run,
+    verbose,
+    profile,
+):
+    """
+    Extract columns and rows from GeoParquet files.
+
+    Supports column selection, spatial filtering, SQL filtering, and
+    multiple input files via glob patterns (merged into single output).
+
+    Column Selection:
+
+      --include-cols: Select only specified columns (geometry and bbox
+      columns are always included unless explicitly excluded)
+
+      --exclude-cols: Select all columns except those specified
+
+    Spatial Filtering:
+
+      --bbox: Filter by bounding box. Uses bbox column for fast filtering
+      when available, otherwise calculates from geometry.
+
+      --geometry: Filter by intersection with a geometry. Accepts:
+        - Inline GeoJSON or WKT
+        - @filepath to read from file
+        - "-" to read from stdin
+
+    SQL Filtering:
+
+      --where: Apply arbitrary DuckDB WHERE clause
+
+    Examples:
+
+        \b
+        # Extract specific columns
+        gpio extract data.parquet output.parquet --include-cols id,name,area
+
+        \b
+        # Exclude columns
+        gpio extract data.parquet output.parquet --exclude-cols internal_id,temp
+
+        \b
+        # Filter by bounding box
+        gpio extract data.parquet output.parquet --bbox -122.5,37.5,-122.0,38.0
+
+        \b
+        # Filter by geometry from file
+        gpio extract data.parquet output.parquet --geometry @boundary.geojson
+
+        \b
+        # Filter by geometry from stdin
+        cat boundary.geojson | gpio extract data.parquet output.parquet --geometry -
+
+        \b
+        # SQL WHERE filter
+        gpio extract data.parquet output.parquet --where "population > 10000"
+
+        \b
+        # Combined filters with glob pattern
+        gpio extract "data/*.parquet" output.parquet \\
+            --include-cols id,name \\
+            --bbox -122.5,37.5,-122.0,38.0 \\
+            --where "status = 'active'"
+
+        \b
+        # Remote file with spatial filter
+        gpio extract s3://bucket/data.parquet output.parquet \\
+            --profile my-aws \\
+            --bbox -122.5,37.5,-122.0,38.0
+    """
+    # Validate mutually exclusive row group options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse row group size string if provided
+    from geoparquet_io.core.common import parse_size_string
+
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}") from e
+
+    try:
+        extract_impl(
+            input_parquet=input_file,
+            output_parquet=output_file,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
+            bbox=bbox,
+            geometry=geometry,
+            where=where,
+            use_first_geometry=use_first_geometry,
+            dry_run=dry_run,
+            verbose=verbose,
+            compression=compression.upper(),
+            compression_level=compression_level,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
+            profile=profile,
+        )
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
