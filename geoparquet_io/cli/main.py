@@ -429,7 +429,7 @@ def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup, overw
 # Convert command
 @cli.command()
 @click.argument("input_file")
-@click.argument("output_file", type=click.Path())
+@click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
     "--skip-hilbert",
     is_flag=True,
@@ -485,6 +485,18 @@ def convert(
 
     Supports Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV with WKT or lat/lon columns.
     Applies ZSTD compression, bbox metadata, and Hilbert ordering by default.
+
+    Supports local, remote (S3, GCS, Azure), and streaming (stdout) output.
+
+    Streaming Examples:
+
+        \\b
+        # Convert GeoJSON and pipe to another command
+        gpio convert input.geojson | gpio add h3 - output.parquet
+
+        \\b
+        # Explicit stdout
+        gpio convert input.shp - | gpio sort hilbert - output.parquet
     """
     convert_to_geoparquet(
         input_file,
@@ -824,7 +836,7 @@ def add():
 
 @add.command(name="admin-divisions")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option(
     "--dataset",
     type=click.Choice(["gaul", "overture"], case_sensitive=False),
@@ -861,7 +873,9 @@ def add_country_codes(
 
     Performs spatial intersection to add administrative division columns to your data.
 
-    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    Supports local, remote (S3, GCS, Azure), and streaming (stdout) output.
+    Note: Input must be a file (not stdin) as we need to perform spatial joins
+    with remote admin boundary datasets.
 
     \b
     **Datasets:**
@@ -883,6 +897,10 @@ def add_country_codes(
     \b
     # Remote to remote
     gpio add admin-divisions s3://in.parquet s3://out.parquet --profile my-aws
+
+    \b
+    # Stream output to another command
+    gpio add admin-divisions input.parquet --dataset gaul | gpio sort hilbert - output.parquet
 
     \b
     # Preview SQL before execution
@@ -1041,7 +1059,7 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
 
 @add.command(name="h3")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option("--h3-name", default="h3_cell", help="Name for the H3 column (default: h3_cell)")
 @click.option(
     "--resolution",
@@ -1075,7 +1093,17 @@ def add_h3(
     The cell ID is stored as a VARCHAR (string) for maximum portability across tools.
     Resolution determines cell size - higher values mean smaller cells with more precision.
 
-    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    Supports local, remote (S3, GCS, Azure), and streaming (stdin/stdout) I/O.
+
+    Streaming Examples:
+
+        \b
+        # Pipe from add bbox, output to file
+        gpio add bbox input.parquet | gpio add h3 - output.parquet
+
+        \b
+        # Chain multiple operations
+        gpio add bbox input.parquet | gpio add h3 - | gpio sort hilbert - output.parquet
     """
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -1109,7 +1137,7 @@ def add_h3(
 
 @add.command(name="kdtree")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option(
     "--kdtree-name",
     default="kdtree_cell",
@@ -1175,9 +1203,19 @@ def add_kdtree(
 
     Performance Note: Approximate mode is O(n), exact mode is O(n × log2(partitions)).
 
-    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    Supports local, remote (S3, GCS, Azure), and streaming (stdin/stdout) I/O.
 
     Use --verbose to track progress with iteration-by-iteration updates.
+
+    Streaming Examples:
+
+        \\b
+        # Pipe from add bbox, output to file
+        gpio add bbox input.parquet | gpio add kdtree - output.parquet
+
+        \\b
+        # Chain multiple operations
+        gpio add bbox input.parquet | gpio add kdtree - | gpio sort hilbert - output.parquet
     """
     import math
 

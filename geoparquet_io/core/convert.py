@@ -17,8 +17,9 @@ from geoparquet_io.core.common import (
     show_remote_read_message,
     validate_output_path,
     validate_profile_for_urls,
-    write_parquet_with_metadata,
 )
+from geoparquet_io.core.stream_io import write_output
+from geoparquet_io.core.streaming import should_stream_output
 
 
 def _detect_geometry_column(con, input_file, verbose, is_parquet=False):
@@ -659,9 +660,11 @@ def convert_to_geoparquet(
     - Hilbert spatial ordering (unless --skip-hilbert)
     - GeoParquet 1.1.0 metadata
 
+    Supports local, remote (S3, GCS, Azure), and streaming (stdout) output.
+
     Args:
         input_file: Path to input file (Shapefile, GeoJSON, GeoPackage, CSV/TSV, etc.)
-        output_file: Path to output GeoParquet file
+        output_file: Path to output GeoParquet, "-" for stdout, or None for auto-detect
         skip_hilbert: Skip Hilbert ordering (faster, less optimal)
         verbose: Print detailed progress
         compression: Compression type (default: ZSTD)
@@ -680,22 +683,30 @@ def convert_to_geoparquet(
     """
     start_time = time.time()
 
+    # Check for streaming output
+    is_streaming_output = should_stream_output(output_file)
+
+    # Suppress verbose output when streaming to stdout
+    if is_streaming_output:
+        verbose = False
+
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_file, output_file)
 
     # Setup AWS profile if needed (for DuckDB reads and obstore writes)
     setup_aws_profile_if_needed(profile, input_file, output_file)
 
-    # Show single progress message for remote files
-    show_remote_read_message(input_file, verbose=False)
+    # Show single progress message for remote files (not when streaming)
+    if not is_streaming_output:
+        show_remote_read_message(input_file, verbose=False)
 
     # Validate input file exists (for local files) and get safe URL
     input_url = safe_file_url(input_file, verbose)
 
-    # Validate output directory exists and is writable (for local files)
-    validate_output_path(output_file, verbose)
-
-    click.echo(f"Converting {input_file}...")
+    # Validate output directory exists and is writable (for local files, not streaming)
+    if not is_streaming_output:
+        validate_output_path(output_file, verbose)
+        click.echo(f"Converting {input_file}...")
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
 
@@ -722,7 +733,7 @@ def convert_to_geoparquet(
                 con, input_url, skip_hilbert, verbose, is_parquet=is_parquet
             )
 
-        write_parquet_with_metadata(
+        write_output(
             con,
             query,
             output_file,
@@ -734,20 +745,21 @@ def convert_to_geoparquet(
             profile=profile,
         )
 
-        # Report results
-        elapsed = time.time() - start_time
-        # For remote files, we can't get the size locally, skip it
-        if is_remote_url(output_file):
-            file_size = None
-        else:
-            file_size = os.path.getsize(output_file)
+        # Report results (skip when streaming)
+        if not is_streaming_output:
+            elapsed = time.time() - start_time
+            # For remote files, we can't get the size locally, skip it
+            if is_remote_url(output_file):
+                file_size = None
+            else:
+                file_size = os.path.getsize(output_file)
 
-        click.echo(f"Done in {elapsed:.1f}s")
-        if file_size is not None:
-            click.echo(f"Output: {output_file} ({format_size(file_size)})")
-        else:
-            click.echo(f"Output: {output_file}")
-        click.echo(click.style("✓ Output passes GeoParquet validation", fg="green"))
+            click.echo(f"Done in {elapsed:.1f}s")
+            if file_size is not None:
+                click.echo(f"Output: {output_file} ({format_size(file_size)})")
+            else:
+                click.echo(f"Output: {output_file}")
+            click.echo(click.style("✓ Output passes GeoParquet validation", fg="green"))
 
     except duckdb.IOException as e:
         con.close()
