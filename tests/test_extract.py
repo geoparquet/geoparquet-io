@@ -138,7 +138,9 @@ class TestParseGeometryInput:
 
     def test_inline_geojson_polygon(self):
         """Test parsing inline GeoJSON polygon."""
-        geojson = '{"type": "Polygon", "coordinates": [[[-1, -1], [-1, 1], [1, 1], [1, -1], [-1, -1]]]}'
+        geojson = (
+            '{"type": "Polygon", "coordinates": [[[-1, -1], [-1, 1], [1, 1], [1, -1], [-1, -1]]]}'
+        )
         result = parse_geometry_input(geojson)
         assert "POLYGON" in result.upper()
 
@@ -341,7 +343,9 @@ class TestBuildSpatialFilter:
     def test_geometry_filter(self):
         """Test geometry WKT filter."""
         bbox_info = {"has_bbox_column": False}
-        result = build_spatial_filter(None, "POLYGON((-1 -1, -1 1, 1 1, 1 -1, -1 -1))", bbox_info, "geometry")
+        result = build_spatial_filter(
+            None, "POLYGON((-1 -1, -1 1, 1 1, 1 -1, -1 -1))", bbox_info, "geometry"
+        )
         assert "ST_Intersects" in result
         assert "ST_GeomFromText" in result
 
@@ -391,7 +395,9 @@ class TestBuildExtractQuery:
     def test_with_both_filters(self):
         """Test query with both spatial and WHERE filters."""
         spatial_filter = '"bbox".xmax >= -1'
-        result = build_extract_query("input.parquet", ["id", "geometry"], spatial_filter, "id > 100")
+        result = build_extract_query(
+            "input.parquet", ["id", "geometry"], spatial_filter, "id > 100"
+        )
         assert "WHERE" in result
         assert spatial_filter in result
         assert "id > 100" in result
@@ -516,7 +522,9 @@ class TestExtractIntegration:
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
 
-        geojson = '{"type":"Polygon","coordinates":[[[-0.5,10],[-0.5,11],[0.5,11],[0.5,10],[-0.5,10]]]}'
+        geojson = (
+            '{"type":"Polygon","coordinates":[[[-0.5,10],[-0.5,11],[0.5,11],[0.5,10],[-0.5,10]]]}'
+        )
         extract(str(PLACES_PARQUET), output_file, geometry=geojson)
 
         # Verify filtered rows

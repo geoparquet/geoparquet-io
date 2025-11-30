@@ -10,8 +10,6 @@ import sys
 from pathlib import Path
 
 import click
-import fsspec
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
     check_bbox_structure,
@@ -71,6 +69,109 @@ def convert_geojson_to_wkt(geojson: dict) -> str:
         con.close()
 
 
+def _read_geometry_from_stdin() -> str:
+    """Read geometry from stdin."""
+    if sys.stdin.isatty():
+        raise click.ClickException(
+            "No geometry provided on stdin. Pipe geometry data or use @file syntax."
+        )
+    return sys.stdin.read().strip()
+
+
+def _resolve_geometry_file(geometry_input: str) -> str | None:
+    """
+    Resolve file path from geometry input.
+
+    Returns file path if input refers to a file, None otherwise.
+    """
+    if geometry_input.startswith("@"):
+        return geometry_input[1:]
+
+    # Check if it looks like a file path (not inline geometry)
+    if not geometry_input.strip().startswith(("{", "POLYGON", "POINT", "LINESTRING", "MULTI")):
+        potential_path = Path(geometry_input)
+        if potential_path.exists() and potential_path.suffix.lower() in (
+            ".geojson",
+            ".json",
+            ".wkt",
+        ):
+            return geometry_input
+
+    return None
+
+
+def _extract_geometry_from_geojson(geojson: dict, use_first: bool) -> dict:
+    """
+    Extract geometry from GeoJSON, handling Feature and FeatureCollection.
+
+    Args:
+        geojson: Parsed GeoJSON object
+        use_first: If True, use first geometry from FeatureCollection
+
+    Returns:
+        dict: The geometry object
+
+    Raises:
+        click.ClickException: If geometry cannot be extracted
+    """
+    if geojson.get("type") == "FeatureCollection":
+        features = geojson.get("features", [])
+        if not features:
+            raise click.ClickException("FeatureCollection is empty - no geometries found")
+        if len(features) > 1 and not use_first:
+            raise click.ClickException(
+                f"Multiple geometries ({len(features)}) found in FeatureCollection. "
+                "Use --use-first-geometry to use only the first geometry."
+            )
+        geom = features[0].get("geometry")
+        if not geom:
+            raise click.ClickException("First feature has no geometry")
+        return geom
+
+    if geojson.get("type") == "Feature":
+        geom = geojson.get("geometry")
+        if not geom:
+            raise click.ClickException("Feature has no geometry")
+        return geom
+
+    # Already a geometry object
+    return geojson
+
+
+def _parse_geojson_to_wkt(geometry_input: str, use_first: bool) -> str:
+    """Parse GeoJSON string to WKT."""
+    try:
+        geojson = json.loads(geometry_input)
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"Invalid GeoJSON: {e}") from e
+
+    geojson = _extract_geometry_from_geojson(geojson, use_first)
+
+    try:
+        return convert_geojson_to_wkt(geojson)
+    except Exception as e:
+        raise click.ClickException(f"Failed to convert GeoJSON to WKT: {e}") from e
+
+
+def _validate_wkt(wkt: str, original_input: str) -> str:
+    """Validate WKT string."""
+    valid_prefixes = (
+        "POINT",
+        "LINESTRING",
+        "POLYGON",
+        "MULTIPOINT",
+        "MULTILINESTRING",
+        "MULTIPOLYGON",
+        "GEOMETRYCOLLECTION",
+    )
+    if not any(wkt.upper().startswith(prefix) for prefix in valid_prefixes):
+        raise click.ClickException(
+            f"Could not parse geometry input as GeoJSON or WKT.\n"
+            f"Input: {original_input[:100]}{'...' if len(original_input) > 100 else ''}"
+        )
+    return wkt
+
+
 def parse_geometry_input(geometry_input: str, use_first: bool = False) -> str:
     """
     Parse geometry from various input formats.
@@ -96,81 +197,21 @@ def parse_geometry_input(geometry_input: str, use_first: bool = False) -> str:
 
     # Handle stdin
     if geometry_input == "-":
-        if sys.stdin.isatty():
-            raise click.ClickException(
-                "No geometry provided on stdin. Pipe geometry data or use @file syntax."
-            )
-        geometry_input = sys.stdin.read().strip()
+        geometry_input = _read_geometry_from_stdin()
 
-    # Handle file reference (@filepath or auto-detect)
-    file_path = None
-    if geometry_input.startswith("@"):
-        file_path = geometry_input[1:]
-    elif not geometry_input.strip().startswith(("{", "POLYGON", "POINT", "LINESTRING", "MULTI")):
-        # Check if it looks like a file path
-        potential_path = Path(geometry_input)
-        if potential_path.exists() and potential_path.suffix.lower() in (
-            ".geojson",
-            ".json",
-            ".wkt",
-        ):
-            file_path = geometry_input
-
+    # Handle file reference
+    file_path = _resolve_geometry_file(geometry_input)
     if file_path:
         path = Path(file_path)
         if not path.exists():
             raise click.ClickException(f"Geometry file not found: {file_path}")
         geometry_input = path.read_text().strip()
 
-    # Parse GeoJSON to WKT if needed
+    # Parse to WKT
     if geometry_input.strip().startswith("{"):
-        try:
-            geojson = json.loads(geometry_input)
-        except json.JSONDecodeError as e:
-            raise click.ClickException(f"Invalid GeoJSON: {e}") from e
+        return _parse_geojson_to_wkt(geometry_input, use_first)
 
-        # Handle FeatureCollection - extract geometry
-        if geojson.get("type") == "FeatureCollection":
-            features = geojson.get("features", [])
-            if not features:
-                raise click.ClickException("FeatureCollection is empty - no geometries found")
-            if len(features) > 1 and not use_first:
-                raise click.ClickException(
-                    f"Multiple geometries ({len(features)}) found in FeatureCollection. "
-                    "Use --use-first-geometry to use only the first geometry."
-                )
-            geojson = features[0].get("geometry")
-            if not geojson:
-                raise click.ClickException("First feature has no geometry")
-        elif geojson.get("type") == "Feature":
-            geojson = geojson.get("geometry")
-            if not geojson:
-                raise click.ClickException("Feature has no geometry")
-
-        # Convert GeoJSON to WKT
-        try:
-            wkt = convert_geojson_to_wkt(geojson)
-        except Exception as e:
-            raise click.ClickException(f"Failed to convert GeoJSON to WKT: {e}") from e
-    else:
-        # Assume it's WKT - validate it
-        wkt = geometry_input.strip()
-        valid_prefixes = (
-            "POINT",
-            "LINESTRING",
-            "POLYGON",
-            "MULTIPOINT",
-            "MULTILINESTRING",
-            "MULTIPOLYGON",
-            "GEOMETRYCOLLECTION",
-        )
-        if not any(wkt.upper().startswith(prefix) for prefix in valid_prefixes):
-            raise click.ClickException(
-                f"Could not parse geometry input as GeoJSON or WKT.\n"
-                f"Input: {original_input[:100]}{'...' if len(original_input) > 100 else ''}"
-            )
-
-    return wkt
+    return _validate_wkt(geometry_input.strip(), original_input)
 
 
 def get_schema_columns(input_parquet: str) -> list[str]:
@@ -183,8 +224,6 @@ def get_schema_columns(input_parquet: str) -> list[str]:
     Returns:
         list: Column names
     """
-    # For glob patterns, we need to get schema from one file
-    # DuckDB can handle this for us
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
     try:
         safe_url = safe_file_url(input_parquet, verbose=False)
@@ -220,22 +259,13 @@ def build_column_selection(
         list: Columns to select (preserving original order)
     """
     if include_cols:
-        # Start with requested columns
         selected = set(include_cols)
-
         # Always add geometry unless explicitly excluded
-        if exclude_cols and geometry_col in exclude_cols:
-            pass  # User explicitly excluded geometry
-        else:
+        if not (exclude_cols and geometry_col in exclude_cols):
             selected.add(geometry_col)
-
         # Always add bbox unless explicitly excluded
-        if bbox_col:
-            if exclude_cols and bbox_col in exclude_cols:
-                pass  # User explicitly excluded bbox
-            else:
-                selected.add(bbox_col)
-
+        if bbox_col and not (exclude_cols and bbox_col in exclude_cols):
+            selected.add(bbox_col)
     elif exclude_cols:
         selected = set(all_columns) - set(exclude_cols)
     else:
@@ -281,36 +311,23 @@ def build_spatial_filter(
 
     Uses bbox column for fast filtering when available (bbox covering),
     then applies precise geometry intersection.
-
-    Args:
-        bbox: Bounding box tuple (xmin, ymin, xmax, ymax) or None
-        geometry_wkt: WKT geometry string or None
-        bbox_info: Result from check_bbox_structure
-        geometry_col: Name of geometry column
-
-    Returns:
-        str: WHERE clause conditions or None if no spatial filter
     """
     conditions = []
 
     if bbox:
         xmin, ymin, xmax, ymax = bbox
         if bbox_info.get("has_bbox_column"):
-            # Fast bbox filter using covering column
             bbox_col = bbox_info["bbox_column_name"]
             conditions.append(
                 f'("{bbox_col}".xmax >= {xmin} AND "{bbox_col}".xmin <= {xmax} '
                 f'AND "{bbox_col}".ymax >= {ymin} AND "{bbox_col}".ymin <= {ymax})'
             )
         else:
-            # Slower but works without bbox column
             conditions.append(
-                f'ST_Intersects("{geometry_col}", '
-                f"ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
+                f'ST_Intersects("{geometry_col}", ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))'
             )
 
     if geometry_wkt:
-        # Escape single quotes in WKT
         escaped_wkt = geometry_wkt.replace("'", "''")
         conditions.append(f"ST_Intersects(\"{geometry_col}\", ST_GeomFromText('{escaped_wkt}'))")
 
@@ -323,18 +340,7 @@ def build_extract_query(
     spatial_filter: str | None,
     where_clause: str | None,
 ) -> str:
-    """
-    Build the complete extraction query.
-
-    Args:
-        input_path: Input file path or glob pattern
-        columns: Columns to select
-        spatial_filter: Spatial WHERE conditions or None
-        where_clause: User-provided WHERE clause or None
-
-    Returns:
-        str: Complete SELECT query
-    """
+    """Build the complete extraction query."""
     col_list = ", ".join(f'"{c}"' for c in columns)
     query = f"SELECT {col_list} FROM read_parquet('{input_path}')"
 
@@ -348,6 +354,127 @@ def build_extract_query(
         query += " WHERE " + " AND ".join(conditions)
 
     return query
+
+
+def _print_dry_run_output(
+    input_parquet: str,
+    output_parquet: str,
+    geometry_col: str,
+    bbox_col: str | None,
+    selected_columns: list[str],
+    bbox: str | None,
+    geometry: str | None,
+    where: str | None,
+    query: str,
+    compression: str,
+    compression_level: int | None,
+) -> None:
+    """Print dry run output."""
+    click.echo(
+        click.style(
+            "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
+            fg="yellow",
+            bold=True,
+        )
+    )
+    click.echo(click.style(f"-- Input: {input_parquet}", fg="cyan"))
+    click.echo(click.style(f"-- Output: {output_parquet}", fg="cyan"))
+    click.echo(click.style(f"-- Geometry column: {geometry_col}", fg="cyan"))
+    if bbox_col:
+        click.echo(click.style(f"-- Bbox column: {bbox_col}", fg="cyan"))
+    click.echo(click.style(f"-- Selected columns: {len(selected_columns)}", fg="cyan"))
+    if bbox:
+        click.echo(click.style(f"-- Bbox filter: {bbox}", fg="cyan"))
+    if geometry:
+        click.echo(click.style("-- Geometry filter: (provided)", fg="cyan"))
+    if where:
+        click.echo(click.style(f"-- WHERE clause: {where}", fg="cyan"))
+    click.echo()
+
+    compression_desc = compression
+    if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
+        compression_desc = f"{compression}:{compression_level}"
+
+    duckdb_compression = compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
+    display_query = f"""COPY ({query})
+TO '{output_parquet}'
+(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
+
+    click.echo(click.style("-- Main query:", fg="cyan"))
+    click.echo(display_query)
+    click.echo(click.style(f"\n-- Note: Using {compression_desc} compression", fg="cyan"))
+
+
+def _execute_extraction(
+    input_parquet: str,
+    output_parquet: str,
+    query: str,
+    safe_url: str,
+    spatial_filter: str | None,
+    where: str | None,
+    selected_columns: list[str],
+    verbose: bool,
+    compression: str,
+    compression_level: int | None,
+    row_group_size_mb: float | None,
+    row_group_rows: int | None,
+    profile: str | None,
+) -> None:
+    """Execute the extraction query and write output."""
+    if verbose:
+        click.echo(f"Input: {input_parquet}")
+        click.echo(f"Output: {output_parquet}")
+        click.echo(f"Selecting {len(selected_columns)} columns: {', '.join(selected_columns)}")
+        if spatial_filter:
+            click.echo("Applying spatial filter")
+        if where:
+            click.echo(f"Applying WHERE clause: {where}")
+
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
+
+    try:
+        # Build count query with filters
+        conditions = []
+        if spatial_filter:
+            conditions.append(f"({spatial_filter})")
+        if where:
+            conditions.append(f"({where})")
+
+        count_query = f"SELECT COUNT(*) FROM read_parquet('{safe_url}')"
+        if conditions:
+            count_query += " WHERE " + " AND ".join(conditions)
+
+        total_count = con.execute(count_query).fetchone()[0]
+        click.echo(f"Extracting {total_count:,} rows...")
+
+        if total_count == 0:
+            click.echo(click.style("Warning: No rows match the specified filters.", fg="yellow"))
+
+        # Get metadata from input for preservation
+        metadata = None
+        try:
+            metadata, _ = get_parquet_metadata(input_parquet, verbose=False)
+        except Exception:
+            pass  # Metadata preservation is optional
+
+        # Write output
+        write_parquet_with_metadata(
+            con,
+            query,
+            output_parquet,
+            original_metadata=metadata,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            verbose=verbose,
+            profile=profile,
+        )
+
+        click.echo(click.style(f"Extracted {total_count:,} rows to {output_parquet}", fg="green"))
+
+    finally:
+        con.close()
 
 
 def extract(
@@ -372,23 +499,6 @@ def extract(
 
     Supports column selection, spatial filtering (bbox, geometry),
     SQL filtering, and multiple input files via glob patterns.
-
-    Args:
-        input_parquet: Input file path, URL, or glob pattern
-        output_parquet: Output file path
-        include_cols: Comma-separated columns to include
-        exclude_cols: Comma-separated columns to exclude
-        bbox: Bounding box string "xmin,ymin,xmax,ymax"
-        geometry: GeoJSON/WKT geometry, @filepath, or "-" for stdin
-        where: DuckDB WHERE clause
-        use_first_geometry: Use first geometry from FeatureCollection
-        dry_run: Print SQL without executing
-        verbose: Print verbose output
-        compression: Compression type
-        compression_level: Compression level
-        row_group_size_mb: Target row group size in MB
-        row_group_rows: Exact number of rows per row group
-        profile: AWS profile name for S3
     """
     # Parse column lists
     include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
@@ -428,97 +538,33 @@ def extract(
     # Build the query
     query = build_extract_query(safe_url, selected_columns, spatial_filter, where)
 
-    # Dry run mode
     if dry_run:
-        click.echo(
-            click.style(
-                "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
-                fg="yellow",
-                bold=True,
-            )
-        )
-        click.echo(click.style(f"-- Input: {input_parquet}", fg="cyan"))
-        click.echo(click.style(f"-- Output: {output_parquet}", fg="cyan"))
-        click.echo(click.style(f"-- Geometry column: {geometry_col}", fg="cyan"))
-        if bbox_col:
-            click.echo(click.style(f"-- Bbox column: {bbox_col}", fg="cyan"))
-        click.echo(click.style(f"-- Selected columns: {len(selected_columns)}", fg="cyan"))
-        if bbox:
-            click.echo(click.style(f"-- Bbox filter: {bbox}", fg="cyan"))
-        if geometry:
-            click.echo(click.style(f"-- Geometry filter: (provided)", fg="cyan"))
-        if where:
-            click.echo(click.style(f"-- WHERE clause: {where}", fg="cyan"))
-        click.echo()
-
-        compression_desc = compression
-        if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
-            compression_desc = f"{compression}:{compression_level}"
-
-        duckdb_compression = compression.lower() if compression != "UNCOMPRESSED" else "uncompressed"
-        display_query = f"""COPY ({query})
-TO '{output_parquet}'
-(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
-
-        click.echo(click.style("-- Main query:", fg="cyan"))
-        click.echo(display_query)
-        click.echo(click.style(f"\n-- Note: Using {compression_desc} compression", fg="cyan"))
-        return
-
-    # Execute the extraction
-    if verbose:
-        click.echo(f"Input: {input_parquet}")
-        click.echo(f"Output: {output_parquet}")
-        click.echo(f"Selecting {len(selected_columns)} columns: {', '.join(selected_columns)}")
-        if spatial_filter:
-            click.echo(f"Applying spatial filter")
-        if where:
-            click.echo(f"Applying WHERE clause: {where}")
-
-    # Create DuckDB connection
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-
-    try:
-        # Get row count for progress
-        count_query = f"SELECT COUNT(*) FROM read_parquet('{safe_url}')"
-        conditions = []
-        if spatial_filter:
-            conditions.append(f"({spatial_filter})")
-        if where:
-            conditions.append(f"({where})")
-        if conditions:
-            count_query = f"SELECT COUNT(*) FROM read_parquet('{safe_url}') WHERE " + " AND ".join(
-                conditions
-            )
-
-        total_count = con.execute(count_query).fetchone()[0]
-        click.echo(f"Extracting {total_count:,} rows...")
-
-        if total_count == 0:
-            click.echo(click.style("Warning: No rows match the specified filters.", fg="yellow"))
-
-        # Get metadata from input for preservation
-        metadata = None
-        try:
-            metadata, _ = get_parquet_metadata(input_parquet, verbose=False)
-        except Exception:
-            pass  # Metadata preservation is optional
-
-        # Write output
-        write_parquet_with_metadata(
-            con,
-            query,
+        _print_dry_run_output(
+            input_parquet,
             output_parquet,
-            original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            verbose=verbose,
-            profile=profile,
+            geometry_col,
+            bbox_col,
+            selected_columns,
+            bbox,
+            geometry,
+            where,
+            query,
+            compression,
+            compression_level,
         )
-
-        click.echo(click.style(f"Extracted {total_count:,} rows to {output_parquet}", fg="green"))
-
-    finally:
-        con.close()
+    else:
+        _execute_extraction(
+            input_parquet,
+            output_parquet,
+            query,
+            safe_url,
+            spatial_filter,
+            where,
+            selected_columns,
+            verbose,
+            compression,
+            compression_level,
+            row_group_size_mb,
+            row_group_rows,
+            profile,
+        )
