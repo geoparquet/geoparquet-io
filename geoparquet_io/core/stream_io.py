@@ -192,6 +192,7 @@ def write_output(
     row_group_rows: Optional[int] = None,
     verbose: bool = False,
     profile: Optional[str] = None,
+    custom_metadata: Optional[dict] = None,
 ) -> None:
     """
     Execute query and write result to file or stream.
@@ -212,6 +213,7 @@ def write_output(
         row_group_rows: Row group rows for file output
         verbose: Whether to print verbose output
         profile: AWS profile for S3 output
+        custom_metadata: Optional dict with custom metadata (e.g., H3 covering info)
 
     Raises:
         click.UsageError: If no output and stdout is a terminal
@@ -244,6 +246,7 @@ def write_output(
             compression_level=compression_level,
             row_group_size_mb=row_group_size_mb,
             row_group_rows=row_group_rows,
+            custom_metadata=custom_metadata,
             verbose=verbose,
             profile=profile,
         )

@@ -503,6 +503,164 @@ def find_primary_geometry_column(parquet_file, verbose=False):
     return "geometry"
 
 
+def _find_geometry_column_from_metadata_dict(metadata):
+    """
+    Get geometry column name from metadata dict.
+
+    Args:
+        metadata: Schema metadata dict (with bytes keys)
+
+    Returns:
+        str or None: Geometry column name or None if not found
+    """
+    if not metadata or b"geo" not in metadata:
+        return None
+    try:
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+        if isinstance(geo_meta, dict):
+            return geo_meta.get("primary_column", "geometry")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    return None
+
+
+def _wrap_query_with_wkb_conversion(query, geometry_column):
+    """
+    Wrap query to convert DuckDB geometry back to WKB for Arrow export.
+
+    DuckDB's fetch_arrow_table() exports geometry in DuckDB's native format,
+    not WKB. This wraps the query to convert geometry back to WKB using ST_AsWKB.
+
+    Args:
+        query: SQL query string
+        geometry_column: Name of geometry column to convert
+
+    Returns:
+        str: Wrapped query with ST_AsWKB conversion
+    """
+    if not geometry_column:
+        return query
+
+    return f"""
+        WITH __wkb_source AS ({query})
+        SELECT * REPLACE (ST_AsWKB({geometry_column}) AS {geometry_column})
+        FROM __wkb_source
+    """
+
+
+def _find_bbox_column_in_table(schema, verbose=False):
+    """
+    Find bbox column in a PyArrow schema by conventional names or structure.
+
+    Args:
+        schema: PyArrow schema
+        verbose: Whether to print verbose output
+
+    Returns:
+        str or None: Name of bbox column if found
+    """
+    import pyarrow as pa
+
+    conventional_names = ["bbox", "bounds", "extent"]
+    for field in schema:
+        if field.name in conventional_names or (
+            pa.types.is_struct(field.type)
+            and all(
+                f in [sf.name for sf in field.type]
+                for f in ["xmin", "ymin", "xmax", "ymax"]
+            )
+        ):
+            if verbose:
+                click.echo(f"Found bbox column: {field.name} with type {field.type}")
+            return field.name
+    return None
+
+
+def _check_bbox_structure_from_table(table, verbose=False):
+    """
+    Check bbox structure from a PyArrow table (in-memory version).
+
+    Args:
+        table: PyArrow table
+        verbose: Whether to print verbose output
+
+    Returns:
+        dict: Results including has_bbox_column, bbox_column_name, etc.
+    """
+    schema = table.schema
+    metadata = schema.metadata or {}
+
+    bbox_column_name = _find_bbox_column_in_table(schema, verbose)
+    has_bbox_column = bbox_column_name is not None
+
+    # Check metadata for bbox covering
+    has_bbox_metadata = _check_bbox_metadata_covering(metadata, has_bbox_column, verbose)
+
+    return {
+        "has_bbox_column": has_bbox_column,
+        "bbox_column_name": bbox_column_name,
+        "has_bbox_metadata": has_bbox_metadata,
+    }
+
+
+def _extract_geometry_types_from_table(table, geom_col):
+    """
+    Extract geometry types from WKB data in a PyArrow table.
+
+    Args:
+        table: PyArrow table with WKB geometry column
+        geom_col: Name of the geometry column
+
+    Returns:
+        list: List of geometry type names (e.g., ["Polygon", "MultiPolygon"])
+    """
+    import pyarrow as pa
+
+    if geom_col not in table.column_names:
+        return []
+
+    # WKB type codes to names
+    wkb_type_names = {
+        1: "Point",
+        2: "LineString",
+        3: "Polygon",
+        4: "MultiPoint",
+        5: "MultiLineString",
+        6: "MultiPolygon",
+        7: "GeometryCollection",
+    }
+
+    geom_column = table.column(geom_col)
+    geometry_types = set()
+
+    # Sample up to 10000 rows to determine geometry types
+    sample_size = min(len(geom_column), 10000)
+    for i in range(sample_size):
+        chunk_idx = 0
+        local_idx = i
+        while local_idx >= len(geom_column.chunks[chunk_idx]):
+            local_idx -= len(geom_column.chunks[chunk_idx])
+            chunk_idx += 1
+
+        value = geom_column.chunks[chunk_idx][local_idx]
+        if value.is_valid:
+            wkb_bytes = value.as_py()
+            if wkb_bytes and len(wkb_bytes) >= 5:
+                # WKB format: 1 byte endian + 4 bytes type
+                byte_order = wkb_bytes[0]
+                if byte_order == 0:  # Big endian
+                    wkb_type = int.from_bytes(wkb_bytes[1:5], "big")
+                else:  # Little endian
+                    wkb_type = int.from_bytes(wkb_bytes[1:5], "little")
+
+                # Handle 2D, Z, M, ZM variants (type & 0xFF gives base type)
+                base_type = wkb_type & 0xFF
+                if base_type in wkb_type_names:
+                    geometry_types.add(wkb_type_names[base_type])
+
+    return sorted(list(geometry_types))
+
+
 def _parse_existing_geo_metadata(original_metadata):
     """Parse existing geo metadata from original parquet metadata."""
     if not original_metadata or b"geo" not in original_metadata:
@@ -516,7 +674,12 @@ def _parse_existing_geo_metadata(original_metadata):
 def _initialize_geo_metadata(geo_meta, geom_col):
     """Initialize or upgrade geo metadata structure."""
     if not geo_meta:
-        return {"version": "1.1.0", "primary_column": geom_col, "columns": {}}
+        # Initialize fresh geo metadata with the geometry column entry
+        return {
+            "version": "1.1.0",
+            "primary_column": geom_col,
+            "columns": {geom_col: {}},
+        }
 
     # Upgrade to 1.1.0 if it's an older version
     geo_meta["version"] = "1.1.0"
@@ -902,11 +1065,13 @@ def write_parquet_with_metadata(
     """
     Write a parquet file with proper compression and metadata handling.
 
+    Uses Arrow IPC internally for efficient in-memory processing:
+    - Executes query with fetch_arrow_table() instead of writing intermediate files
+    - Builds metadata in-memory
+    - Writes directly to output with PyArrow
+
     Supports both local and remote outputs (S3, GCS, Azure). Remote outputs
     are written to a temporary local file, then uploaded.
-
-    Note: Remote writes require ~2× output file size in local disk space
-    for temporary processing.
 
     Args:
         con: DuckDB connection
@@ -939,22 +1104,87 @@ def write_parquet_with_metadata(
         if verbose:
             click.echo(f"Writing output with {compression_desc} compression...")
 
-        # Build and execute query
-        final_query = build_copy_query(query, actual_output, compression)
-        con.execute(final_query)
+        # Find geometry column for WKB conversion
+        geom_col = _find_geometry_column_from_metadata_dict(original_metadata)
+        if not geom_col:
+            # Fall back to common geometry column names
+            geom_col = "geometry"
 
-        # Rewrite with metadata and optimal settings
-        if original_metadata or verbose or row_group_size_mb or row_group_rows:
-            rewrite_with_metadata(
-                actual_output,
-                original_metadata,
-                compression,
-                compression_level,
-                row_group_size_mb,
-                row_group_rows,
-                custom_metadata,
-                verbose,
-            )
+        # Wrap query to convert geometry back to WKB for portable output
+        wkb_query = _wrap_query_with_wkb_conversion(query, geom_col)
+
+        # Execute query and fetch as Arrow table (no intermediate file)
+        result = con.execute(wkb_query)
+        table = result.fetch_arrow_table()
+
+        # Build metadata in-memory
+        existing_metadata = table.schema.metadata or {}
+        new_metadata = {}
+
+        # Copy non-geo metadata from existing
+        for k, v in existing_metadata.items():
+            if not k.decode("utf-8").startswith("geo"):
+                new_metadata[k] = v
+
+        # Check bbox structure from in-memory table
+        bbox_info = _check_bbox_structure_from_table(table, verbose=False)
+
+        # Create geo metadata - use original metadata if provided, else existing
+        metadata_source = original_metadata if original_metadata else existing_metadata
+        geo_meta = create_geo_metadata(metadata_source, geom_col, bbox_info, custom_metadata, verbose)
+
+        # Add geometry_types if not already present (required by GeoParquet spec)
+        if geom_col in geo_meta.get("columns", {}) and "geometry_types" not in geo_meta["columns"][geom_col]:
+            geometry_types = _extract_geometry_types_from_table(table, geom_col)
+            if geometry_types:
+                geo_meta["columns"][geom_col]["geometry_types"] = geometry_types
+
+        new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+
+        # Update table schema with new metadata
+        new_table = table.replace_schema_metadata(new_metadata)
+
+        # Calculate optimal row groups based on table size
+        rows_per_group = calculate_row_group_size(
+            new_table.num_rows,
+            new_table.nbytes,  # Use in-memory size as estimate
+            target_row_group_size_mb=row_group_size_mb,
+            target_row_group_rows=row_group_rows,
+        )
+
+        # Set PyArrow compression parameters
+        pa_compression = compression if compression != "UNCOMPRESSED" else None
+        if compression in ["GZIP", "ZSTD", "BROTLI"]:
+            pa_compression_level = compression_level
+        else:
+            pa_compression_level = None
+
+        # Build write kwargs
+        write_kwargs = {
+            "row_group_size": rows_per_group,
+            "compression": pa_compression,
+            "write_statistics": True,
+            "use_dictionary": True,
+            "version": "2.6",
+        }
+
+        # Add compression level for supported formats
+        if pa_compression_level is not None:
+            write_kwargs["compression_level"] = pa_compression_level
+
+        # Write directly with PyArrow (single write, no intermediate file)
+        pq.write_table(new_table, actual_output, **write_kwargs)
+
+        if verbose:
+            if compression in ["GZIP", "ZSTD", "BROTLI"]:
+                compression_desc = f"{compression}:{compression_level}"
+            else:
+                compression_desc = compression
+            click.echo(f"✓ File written with {compression_desc} compression and updated metadata")
+            if row_group_rows:
+                click.echo(f"  Row group size: {rows_per_group:,} rows")
+            elif row_group_size_mb:
+                click.echo(f"  Row group size: ~{row_group_size_mb}MB ({rows_per_group:,} rows)")
 
         # Upload to remote if needed
         if is_remote:
@@ -1351,6 +1581,7 @@ TO '{output_parquet or "(stdout)"}'
             row_group_rows=row_group_rows,
             verbose=verbose,
             profile=profile,
+            custom_metadata=custom_metadata,
         )
 
 
