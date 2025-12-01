@@ -261,7 +261,7 @@ def _parse_wkb_geometry(
     offset += 4
 
     # Check for Z, M, ZM flags (type values >= 1000)
-    has_z = geom_type >= 1000 and geom_type < 2000 or geom_type >= 3000
+    has_z = (geom_type >= 1000 and geom_type < 2000) or geom_type >= 3000
     base_type = geom_type % 1000
 
     type_map = {

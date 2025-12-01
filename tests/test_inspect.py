@@ -61,10 +61,10 @@ def test_inspect_head_wkt_output(runner, test_file):
     # The output should contain WKT geometry with coordinates, not just <POINT>
     # The table may wrap the output across lines, but we should see:
     # - POINT (the geometry type) - not <POINT>
-    # - The opening parenthesis followed by coordinates
+    # - The coordinates with the longitude value
     assert "POINT" in result.output
     # Check for coordinate pattern (negative number indicating longitude)
-    assert "(-0.924753" in result.output or "-0.924753" in result.output
+    assert "-0.924753" in result.output
     # Should not show just the type placeholder
     assert "<POINT>" not in result.output
 
