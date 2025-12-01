@@ -212,20 +212,238 @@ def parse_wkb_type(wkb_bytes: bytes) -> str:
         return "GEOMETRY"
 
 
-def format_geometry_display(value: Any) -> str:
+def wkb_to_wkt(wkb_bytes: bytes, max_coords: int = 10) -> Optional[str]:
     """
-    Format a geometry value for display.
+    Convert WKB binary data to WKT string representation.
+
+    Supports Point, LineString, Polygon, MultiPoint, MultiLineString,
+    MultiPolygon, and GeometryCollection types. Handles both 2D and 3D
+    (with Z) geometries.
+
+    Args:
+        wkb_bytes: WKB binary data
+        max_coords: Maximum number of coordinate pairs to include before truncating.
+                   Use -1 for no limit. Default is 10.
+
+    Returns:
+        str: WKT string representation, or None if parsing fails
+    """
+    if not wkb_bytes or len(wkb_bytes) < 5:
+        return None
+
+    try:
+        return _parse_wkb_geometry(wkb_bytes, 0, max_coords)[0]
+    except (struct.error, IndexError, ValueError):
+        return None
+
+
+def _parse_wkb_geometry(
+    wkb_bytes: bytes, offset: int, max_coords: int
+) -> tuple[str, int]:
+    """
+    Parse a WKB geometry starting at the given offset.
+
+    Args:
+        wkb_bytes: WKB binary data
+        offset: Starting offset in bytes
+        max_coords: Maximum number of coordinate pairs to include
+
+    Returns:
+        tuple: (WKT string, bytes consumed)
+    """
+    # Read byte order
+    byte_order = wkb_bytes[offset]
+    endian = ">" if byte_order == 0 else "<"
+    offset += 1
+
+    # Read geometry type
+    geom_type = struct.unpack(f"{endian}I", wkb_bytes[offset : offset + 4])[0]
+    offset += 4
+
+    # Check for Z, M, ZM flags (type values >= 1000)
+    has_z = geom_type >= 1000 and geom_type < 2000 or geom_type >= 3000
+    base_type = geom_type % 1000
+
+    type_map = {
+        1: "POINT",
+        2: "LINESTRING",
+        3: "POLYGON",
+        4: "MULTIPOINT",
+        5: "MULTILINESTRING",
+        6: "MULTIPOLYGON",
+        7: "GEOMETRYCOLLECTION",
+    }
+
+    geom_name = type_map.get(base_type, "GEOMETRY")
+
+    if base_type == 1:  # POINT
+        return _parse_point(wkb_bytes, offset, endian, has_z, geom_name)
+    elif base_type == 2:  # LINESTRING
+        return _parse_linestring(wkb_bytes, offset, endian, has_z, geom_name, max_coords)
+    elif base_type == 3:  # POLYGON
+        return _parse_polygon(wkb_bytes, offset, endian, has_z, geom_name, max_coords)
+    elif base_type == 4:  # MULTIPOINT
+        return _parse_multi(wkb_bytes, offset, endian, "MULTIPOINT", max_coords)
+    elif base_type == 5:  # MULTILINESTRING
+        return _parse_multi(wkb_bytes, offset, endian, "MULTILINESTRING", max_coords)
+    elif base_type == 6:  # MULTIPOLYGON
+        return _parse_multi(wkb_bytes, offset, endian, "MULTIPOLYGON", max_coords)
+    elif base_type == 7:  # GEOMETRYCOLLECTION
+        return _parse_multi(wkb_bytes, offset, endian, "GEOMETRYCOLLECTION", max_coords)
+    else:
+        return f"<{geom_name}>", offset
+
+
+def _parse_point(
+    wkb_bytes: bytes, offset: int, endian: str, has_z: bool, geom_name: str
+) -> tuple[str, int]:
+    """Parse a Point geometry."""
+    x = struct.unpack(f"{endian}d", wkb_bytes[offset : offset + 8])[0]
+    offset += 8
+    y = struct.unpack(f"{endian}d", wkb_bytes[offset : offset + 8])[0]
+    offset += 8
+
+    if has_z:
+        z = struct.unpack(f"{endian}d", wkb_bytes[offset : offset + 8])[0]
+        offset += 8
+        wkt = f"{geom_name} ({x:.6f} {y:.6f} {z:.6f})"
+    else:
+        wkt = f"{geom_name} ({x:.6f} {y:.6f})"
+
+    return wkt, offset
+
+
+def _parse_linestring(
+    wkb_bytes: bytes,
+    offset: int,
+    endian: str,
+    has_z: bool,
+    geom_name: str,
+    max_coords: int,
+) -> tuple[str, int]:
+    """Parse a LineString geometry."""
+    num_points = struct.unpack(f"{endian}I", wkb_bytes[offset : offset + 4])[0]
+    offset += 4
+
+    coords = []
+    truncated = False
+    for i in range(num_points):
+        x = struct.unpack(f"{endian}d", wkb_bytes[offset : offset + 8])[0]
+        offset += 8
+        y = struct.unpack(f"{endian}d", wkb_bytes[offset : offset + 8])[0]
+        offset += 8
+
+        if has_z:
+            z = struct.unpack(f"{endian}d", wkb_bytes[offset : offset + 8])[0]
+            offset += 8
+            coord = f"{x:.6f} {y:.6f} {z:.6f}"
+        else:
+            coord = f"{x:.6f} {y:.6f}"
+
+        if max_coords == -1 or i < max_coords:
+            coords.append(coord)
+        elif i == max_coords:
+            truncated = True
+
+    coord_str = ", ".join(coords)
+    if truncated:
+        coord_str += ", ..."
+
+    return f"{geom_name} ({coord_str})", offset
+
+
+def _parse_polygon(
+    wkb_bytes: bytes,
+    offset: int,
+    endian: str,
+    has_z: bool,
+    geom_name: str,
+    max_coords: int,
+) -> tuple[str, int]:
+    """Parse a Polygon geometry."""
+    num_rings = struct.unpack(f"{endian}I", wkb_bytes[offset : offset + 4])[0]
+    offset += 4
+
+    rings = []
+    for _ in range(num_rings):
+        num_points = struct.unpack(f"{endian}I", wkb_bytes[offset : offset + 4])[0]
+        offset += 4
+
+        coords = []
+        truncated = False
+        for i in range(num_points):
+            x = struct.unpack(f"{endian}d", wkb_bytes[offset : offset + 8])[0]
+            offset += 8
+            y = struct.unpack(f"{endian}d", wkb_bytes[offset : offset + 8])[0]
+            offset += 8
+
+            if has_z:
+                z = struct.unpack(f"{endian}d", wkb_bytes[offset : offset + 8])[0]
+                offset += 8
+                coord = f"{x:.6f} {y:.6f} {z:.6f}"
+            else:
+                coord = f"{x:.6f} {y:.6f}"
+
+            if max_coords == -1 or i < max_coords:
+                coords.append(coord)
+            elif i == max_coords:
+                truncated = True
+
+        coord_str = ", ".join(coords)
+        if truncated:
+            coord_str += ", ..."
+        rings.append(f"({coord_str})")
+
+    return f"{geom_name} ({', '.join(rings)})", offset
+
+
+def _parse_multi(
+    wkb_bytes: bytes, offset: int, endian: str, geom_name: str, max_coords: int
+) -> tuple[str, int]:
+    """Parse a Multi* or GeometryCollection geometry."""
+    num_geoms = struct.unpack(f"{endian}I", wkb_bytes[offset : offset + 4])[0]
+    offset += 4
+
+    geoms = []
+    for _ in range(num_geoms):
+        # Each sub-geometry is a full WKB geometry
+        sub_wkt, offset = _parse_wkb_geometry(wkb_bytes, offset, max_coords)
+        # For multi geometries, we need to extract just the coordinates part
+        if geom_name == "GEOMETRYCOLLECTION":
+            geoms.append(sub_wkt)
+        else:
+            # Remove the type prefix for multi geometries
+            # e.g., "POINT (1 2)" -> "(1 2)"
+            if "(" in sub_wkt:
+                paren_idx = sub_wkt.index("(")
+                geoms.append(sub_wkt[paren_idx:])
+            else:
+                geoms.append(sub_wkt)
+
+    return f"{geom_name} ({', '.join(geoms)})", offset
+
+
+def format_geometry_display(value: Any, max_coords: int = 10) -> str:
+    """
+    Format a geometry value for display as WKT.
 
     Args:
         value: Geometry value (WKB bytes or other)
+        max_coords: Maximum number of coordinate pairs to include before truncating.
+                   Use -1 for no limit. Default is 10.
 
     Returns:
-        str: Formatted geometry display string
+        str: Formatted geometry display string in WKT format
     """
     if value is None:
         return "NULL"
 
     if isinstance(value, bytes):
+        # Try to convert WKB to WKT
+        wkt = wkb_to_wkt(value, max_coords)
+        if wkt:
+            return wkt
+        # Fall back to type-only display if parsing fails
         geom_type = parse_wkb_type(value)
         return f"<{geom_type}>"
 

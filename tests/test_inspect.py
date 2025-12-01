@@ -14,6 +14,7 @@ from geoparquet_io.core.inspect_utils import (
     format_geometry_display,
     format_markdown_output,
     parse_wkb_type,
+    wkb_to_wkt,
 )
 
 
@@ -50,6 +51,22 @@ def test_inspect_head(runner, test_file):
     assert (
         "5 rows" in result.output or "rows)" in result.output
     )  # May show fewer if file has < 5 rows
+
+
+def test_inspect_head_wkt_output(runner, test_file):
+    """Test inspect with --head shows WKT geometry instead of just type."""
+    result = runner.invoke(cli, ["inspect", test_file, "--head", "1"])
+
+    assert result.exit_code == 0
+    # The output should contain WKT geometry with coordinates, not just <POINT>
+    # The table may wrap the output across lines, but we should see:
+    # - POINT (the geometry type) - not <POINT>
+    # - The opening parenthesis followed by coordinates
+    assert "POINT" in result.output
+    # Check for coordinate pattern (negative number indicating longitude)
+    assert "(-0.924753" in result.output or "-0.924753" in result.output
+    # Should not show just the type placeholder
+    assert "<POINT>" not in result.output
 
 
 def test_inspect_tail(runner, test_file):
@@ -230,18 +247,83 @@ def test_parse_wkb_type():
 
 
 def test_format_geometry_display():
-    """Test geometry display formatting."""
+    """Test geometry display formatting with WKT output."""
+    import struct
+
     # None value
     assert format_geometry_display(None) == "NULL"
 
-    # Point WKB
-    point_wkb = bytes([0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    # Point WKB with actual coordinates (0, 0)
+    # Build complete Point WKB: byte_order(1) + type(4) + x(8) + y(8)
+    point_wkb = bytes([0x01, 0x01, 0x00, 0x00, 0x00])  # little endian, Point type
+    point_wkb += struct.pack("<d", 1.5)  # x = 1.5
+    point_wkb += struct.pack("<d", 2.5)  # y = 2.5
     result = format_geometry_display(point_wkb)
+    assert "POINT" in result
+    assert "1.5" in result
+    assert "2.5" in result
+
+    # Incomplete WKB should fall back to type-only display
+    incomplete_wkb = bytes([0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    result = format_geometry_display(incomplete_wkb)
     assert "<POINT>" in result
 
     # Non-bytes value
     result = format_geometry_display("some string")
     assert "some string" in result
+
+
+def test_wkb_to_wkt():
+    """Test WKB to WKT conversion function."""
+    import struct
+
+    # Test Point WKB
+    point_wkb = bytes([0x01, 0x01, 0x00, 0x00, 0x00])  # little endian, Point type
+    point_wkb += struct.pack("<d", -122.4194)  # x (longitude)
+    point_wkb += struct.pack("<d", 37.7749)  # y (latitude)
+    result = wkb_to_wkt(point_wkb)
+    assert result is not None
+    assert "POINT" in result
+    assert "-122.419400" in result
+    assert "37.774900" in result
+
+    # Test LineString WKB
+    # LineString with 2 points
+    linestring_wkb = bytes([0x01, 0x02, 0x00, 0x00, 0x00])  # little endian, LineString
+    linestring_wkb += struct.pack("<I", 2)  # 2 points
+    linestring_wkb += struct.pack("<d", 0.0) + struct.pack("<d", 0.0)  # point 1
+    linestring_wkb += struct.pack("<d", 1.0) + struct.pack("<d", 1.0)  # point 2
+    result = wkb_to_wkt(linestring_wkb)
+    assert result is not None
+    assert "LINESTRING" in result
+    assert "0.000000 0.000000" in result
+    assert "1.000000 1.000000" in result
+
+    # Test Polygon WKB (simple rectangle)
+    polygon_wkb = bytes([0x01, 0x03, 0x00, 0x00, 0x00])  # little endian, Polygon
+    polygon_wkb += struct.pack("<I", 1)  # 1 ring
+    polygon_wkb += struct.pack("<I", 5)  # 5 points (closed ring)
+    polygon_wkb += struct.pack("<d", 0.0) + struct.pack("<d", 0.0)
+    polygon_wkb += struct.pack("<d", 1.0) + struct.pack("<d", 0.0)
+    polygon_wkb += struct.pack("<d", 1.0) + struct.pack("<d", 1.0)
+    polygon_wkb += struct.pack("<d", 0.0) + struct.pack("<d", 1.0)
+    polygon_wkb += struct.pack("<d", 0.0) + struct.pack("<d", 0.0)  # close ring
+    result = wkb_to_wkt(polygon_wkb)
+    assert result is not None
+    assert "POLYGON" in result
+
+    # Test empty/invalid bytes
+    assert wkb_to_wkt(b"") is None
+    assert wkb_to_wkt(bytes([0x01])) is None
+
+    # Test max_coords truncation
+    linestring_wkb = bytes([0x01, 0x02, 0x00, 0x00, 0x00])  # little endian, LineString
+    linestring_wkb += struct.pack("<I", 15)  # 15 points
+    for i in range(15):
+        linestring_wkb += struct.pack("<d", float(i)) + struct.pack("<d", float(i))
+    result = wkb_to_wkt(linestring_wkb, max_coords=5)
+    assert result is not None
+    assert "..." in result  # Should be truncated
 
 
 def test_format_markdown_output():
