@@ -9,6 +9,7 @@ from geoparquet_io.cli.decorators import (
     overwrite_option,
     partition_options,
     profile_option,
+    show_sql_option,
     verbose_option,
 )
 from geoparquet_io.cli.fix_helpers import handle_fix_common
@@ -649,6 +650,7 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
 )
 @output_format_options
 @dry_run_option
+@show_sql_option
 @verbose_option
 @profile_option
 def extract(
@@ -665,6 +667,7 @@ def extract(
     row_group_size,
     row_group_size_mb,
     dry_run,
+    show_sql,
     verbose,
     profile,
 ):
@@ -760,6 +763,7 @@ def extract(
             where=where,
             use_first_geometry=use_first_geometry,
             dry_run=dry_run,
+            show_sql=show_sql,
             verbose=verbose,
             compression=compression.upper(),
             compression_level=compression_level,
