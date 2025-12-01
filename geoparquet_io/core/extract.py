@@ -17,9 +17,180 @@ from geoparquet_io.core.common import (
     get_duckdb_connection,
     get_parquet_metadata,
     needs_httpfs,
+    parse_geo_metadata,
     safe_file_url,
     write_parquet_with_metadata,
 )
+
+
+def _looks_like_latlong_bbox(bbox: tuple[float, float, float, float]) -> bool:
+    """Check if bbox values look like lat/long coordinates."""
+    xmin, ymin, xmax, ymax = bbox
+    # Lat/long: x (lon) is -180 to 180, y (lat) is -90 to 90
+    return -180 <= xmin <= 180 and -180 <= xmax <= 180 and -90 <= ymin <= 90 and -90 <= ymax <= 90
+
+
+def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
+    """
+    Check if CRS is geographic (lat/long) vs projected.
+
+    Returns:
+        True if geographic, False if projected, None if unknown
+    """
+    if crs_info is None:
+        return None
+
+    if isinstance(crs_info, str):
+        crs_upper = crs_info.upper()
+        # Common geographic CRS codes
+        if any(
+            code in crs_upper
+            for code in ["4326", "CRS84", "CRS:84", "OGC:CRS84", "4269", "4267"]
+        ):
+            return True
+        return None
+
+    if isinstance(crs_info, dict):
+        # Check PROJJSON type
+        crs_type = crs_info.get("type", "")
+        if crs_type == "GeographicCRS":
+            return True
+        if crs_type == "ProjectedCRS":
+            return False
+
+        # Check EPSG code
+        crs_id = crs_info.get("id", {})
+        if isinstance(crs_id, dict):
+            code = crs_id.get("code")
+            if code in [4326, 4269, 4267]:  # Common geographic codes
+                return True
+
+    return None
+
+
+def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | None:
+    """
+    Get CRS info from GeoParquet metadata or Arrow extension metadata.
+
+    Returns CRS info dict/string or None if not found.
+    """
+    import fsspec
+    import pyarrow.parquet as pq
+
+    # First try GeoParquet file-level metadata
+    try:
+        metadata, _ = get_parquet_metadata(input_parquet, verbose=False)
+        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        if geo_meta:
+            columns_meta = geo_meta.get("columns", {})
+            if geometry_col in columns_meta:
+                crs_info = columns_meta[geometry_col].get("crs")
+                if crs_info:
+                    return crs_info
+    except Exception:
+        pass
+
+    # Fall back to Arrow extension metadata on geometry column
+    try:
+        safe_url = safe_file_url(input_parquet, verbose=False)
+        with fsspec.open(safe_url, "rb") as f:
+            pf = pq.ParquetFile(f)
+            schema = pf.schema_arrow
+            if geometry_col in schema.names:
+                field = schema.field(geometry_col)
+                if field.metadata:
+                    ext_meta = field.metadata.get(b"ARROW:extension:metadata")
+                    if ext_meta:
+                        ext_data = json.loads(ext_meta.decode("utf-8"))
+                        if "crs" in ext_data:
+                            return ext_data["crs"]
+    except Exception:
+        pass
+
+    return None
+
+
+def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
+    """Get actual data bounds from file."""
+    try:
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
+        safe_url = safe_file_url(input_parquet, verbose=False)
+        result = con.execute(f"""
+            SELECT
+                MIN(ST_XMin("{geometry_col}")) as xmin,
+                MIN(ST_YMin("{geometry_col}")) as ymin,
+                MAX(ST_XMax("{geometry_col}")) as xmax,
+                MAX(ST_YMax("{geometry_col}")) as ymax
+            FROM read_parquet('{safe_url}')
+        """).fetchone()
+        con.close()
+        if result and all(v is not None for v in result):
+            return result
+    except Exception:
+        pass
+    return None
+
+
+def _get_crs_display_name(crs_info: dict | str | None) -> str:
+    """Get human-readable CRS name."""
+    if crs_info is None:
+        return "unknown"
+
+    if isinstance(crs_info, str):
+        return crs_info
+
+    if isinstance(crs_info, dict):
+        # Try to get name
+        name = crs_info.get("name")
+        if name:
+            # Also add EPSG code if available
+            crs_id = crs_info.get("id", {})
+            if isinstance(crs_id, dict):
+                authority = crs_id.get("authority", "EPSG")
+                code = crs_id.get("code")
+                if code:
+                    return f"{name} ({authority}:{code})"
+            return name
+
+        # Fall back to EPSG code
+        crs_id = crs_info.get("id", {})
+        if isinstance(crs_id, dict):
+            authority = crs_id.get("authority", "EPSG")
+            code = crs_id.get("code")
+            if code:
+                return f"{authority}:{code}"
+
+    return "unknown"
+
+
+def _warn_if_crs_mismatch(
+    bbox: tuple[float, float, float, float],
+    input_parquet: str,
+    geometry_col: str,
+) -> None:
+    """Warn if bbox looks like lat/long but data is in a projected CRS."""
+    if not _looks_like_latlong_bbox(bbox):
+        return  # User's bbox doesn't look like lat/long, no warning needed
+
+    crs_info = _get_crs_from_file(input_parquet, geometry_col)
+    is_geographic = _is_geographic_crs(crs_info)
+
+    if is_geographic is False:  # Definitely projected
+        crs_name = _get_crs_display_name(crs_info)
+        data_bounds = _get_data_bounds(input_parquet, geometry_col)
+
+        msg = (
+            f"\nWarning: Your bbox appears to be in lat/long coordinates, but the data "
+            f"uses a projected CRS ({crs_name})."
+        )
+        if data_bounds:
+            msg += (
+                f"\nData bounds: xmin={data_bounds[0]:.2f}, ymin={data_bounds[1]:.2f}, "
+                f"xmax={data_bounds[2]:.2f}, ymax={data_bounds[3]:.2f}"
+            )
+        msg += "\nIf you get 0 results, try using coordinates in the data's CRS."
+
+        click.echo(click.style(msg, fg="yellow"))
 
 
 def parse_bbox(bbox_str: str) -> tuple[float, float, float, float]:
@@ -535,6 +706,10 @@ def extract(
 
     # Parse bbox if provided
     bbox_tuple = parse_bbox(bbox) if bbox else None
+
+    # Warn if bbox looks like lat/long but data is projected
+    if bbox_tuple and not dry_run:
+        _warn_if_crs_mismatch(bbox_tuple, input_parquet, geometry_col)
 
     # Parse geometry if provided
     geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
