@@ -646,7 +646,8 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
 )
 @click.option(
     "--where",
-    help="DuckDB WHERE clause for filtering rows",
+    help='DuckDB WHERE clause for filtering rows. Column names with special '
+    'characters need double quotes in SQL (e.g., "crop:name"). Shell escaping varies.',
 )
 @output_format_options
 @dry_run_option
@@ -723,6 +724,11 @@ def extract(
         \b
         # SQL WHERE filter
         gpio extract data.parquet output.parquet --where "population > 10000"
+
+        \b
+        # WHERE with special column names (double quotes in SQL)
+        # Note: macOS may show harmless plist warnings with complex escaping
+        gpio extract data.parquet output.parquet --where '"crop:name" = '\''wheat'\'''
 
         \b
         # Combined filters with glob pattern
