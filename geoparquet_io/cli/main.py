@@ -625,11 +625,11 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
 @click.argument("output_file", type=click.Path())
 @click.option(
     "--include-cols",
-    help="Comma-separated columns to include (geometry and bbox always included unless excluded)",
+    help="Comma-separated columns to include (geometry and bbox auto-added unless in --exclude-cols)",
 )
 @click.option(
     "--exclude-cols",
-    help="Comma-separated columns to exclude",
+    help="Comma-separated columns to exclude (can be used with --include-cols to exclude geometry/bbox)",
 )
 @click.option(
     "--bbox",
@@ -646,7 +646,7 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
 )
 @click.option(
     "--where",
-    help='DuckDB WHERE clause for filtering rows. Column names with special '
+    help="DuckDB WHERE clause for filtering rows. Column names with special "
     'characters need double quotes in SQL (e.g., "crop:name"). Shell escaping varies.',
 )
 @output_format_options
@@ -681,9 +681,10 @@ def extract(
     Column Selection:
 
       --include-cols: Select only specified columns (geometry and bbox
-      columns are always included unless explicitly excluded)
+      columns are always included unless in --exclude-cols)
 
-      --exclude-cols: Select all columns except those specified
+      --exclude-cols: Select all columns except those specified. Can be
+      combined with --include-cols to exclude geometry/bbox columns only.
 
     Spatial Filtering:
 

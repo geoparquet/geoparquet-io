@@ -478,14 +478,36 @@ class TestExtractIntegration:
         assert "placemaker_url" not in columns
         assert "fsq_place_id" not in columns
 
-    def test_extract_mutually_exclusive_error(self, output_file):
-        """Test that include and exclude are mutually exclusive."""
+    def test_extract_include_and_exclude_geometry(self, output_file):
+        """Test that include and exclude can be combined to exclude geometry/bbox."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+
+        # Use include_cols for columns, exclude geometry
+        extract(
+            str(PLACES_PARQUET), output_file, include_cols="name,address", exclude_cols="geometry"
+        )
+
+        # Verify geometry was excluded but other columns present
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
+        columns = [row[0] for row in result]
+        assert "name" in columns
+        assert "address" in columns
+        assert "geometry" not in columns
+        con.close()
+
+    def test_extract_overlap_non_special_error(self, output_file):
+        """Test that non-geometry/bbox columns cannot be in both include and exclude."""
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
 
         with pytest.raises(click.ClickException) as exc_info:
-            extract(str(PLACES_PARQUET), output_file, include_cols="name", exclude_cols="address")
-        assert "mutually exclusive" in str(exc_info.value)
+            extract(
+                str(PLACES_PARQUET), output_file, include_cols="name,address", exclude_cols="name"
+            )
+        assert "cannot be in both" in str(exc_info.value).lower()
 
     def test_extract_bbox_filter(self, output_file):
         """Test extracting with bbox filter."""
