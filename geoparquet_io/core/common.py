@@ -322,7 +322,7 @@ def validate_output_path(output_path, verbose=False):
         raise click.ClickException(f"No write permission for: {output_dir}")
 
 
-def get_duckdb_connection(load_spatial=True, load_httpfs=None):
+def get_duckdb_connection(load_spatial=True, load_httpfs=None, s3_anonymous=False):
     """
     Create a DuckDB connection with necessary extensions loaded.
 
@@ -337,6 +337,8 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None):
         load_spatial: Whether to load spatial extension (default: True)
         load_httpfs: Whether to load httpfs extension for S3/Azure/GCS.
                     If None (default), auto-detects based on usage.
+        s3_anonymous: If True, use anonymous access for S3 (no credentials).
+                     Use for public buckets like Overture Maps.
 
     Returns:
         duckdb.DuckDBPyConnection: Configured connection with extensions loaded
@@ -358,19 +360,69 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None):
         con.execute("INSTALL aws;")
         con.execute("LOAD aws;")
 
-        # Configure automatic credential discovery using AWS SDK
-        # This respects AWS_PROFILE, ~/.aws/credentials, env vars, and IAM roles
-        # Use VALIDATION 'none' to allow creating secret without immediate credentials
-        # (credentials will be discovered at query time)
-        con.execute("""
-            CREATE OR REPLACE SECRET (
-                TYPE s3,
-                PROVIDER credential_chain,
-                VALIDATION 'none'
-            );
-        """)
+        if s3_anonymous:
+            # Configure anonymous access for public S3 buckets (no credentials)
+            # This is needed for public datasets like Overture Maps
+            con.execute("""
+                CREATE OR REPLACE SECRET (
+                    TYPE s3,
+                    PROVIDER config,
+                    KEY_ID '',
+                    SECRET ''
+                );
+            """)
+        else:
+            # Configure automatic credential discovery using AWS SDK
+            # This respects AWS_PROFILE, ~/.aws/credentials, env vars, and IAM roles
+            # Use VALIDATION 'none' to allow creating secret without immediate credentials
+            # (credentials will be discovered at query time)
+            con.execute("""
+                CREATE OR REPLACE SECRET (
+                    TYPE s3,
+                    PROVIDER credential_chain,
+                    VALIDATION 'none'
+                );
+            """)
 
     return con
+
+
+def execute_with_s3_fallback(con, query, s3_path=None):
+    """
+    Execute a query with automatic fallback to anonymous S3 access on 403 errors.
+
+    If the query fails with HTTP 403 (access denied), automatically reconfigures
+    the connection for anonymous S3 access and retries. This allows public S3
+    buckets (like Overture Maps) to work without any configuration.
+
+    Args:
+        con: DuckDB connection
+        query: SQL query to execute
+        s3_path: Optional S3 path for better error messages
+
+    Returns:
+        Query result from con.execute()
+
+    Raises:
+        duckdb.Error: If query fails for reasons other than S3 access
+    """
+    try:
+        return con.execute(query)
+    except duckdb.HTTPException as e:
+        error_msg = str(e)
+        # Check if it's a 403 error (access denied) on S3
+        if "HTTP 403" in error_msg or "Access Denied" in error_msg:
+            # Reconfigure for anonymous access and retry
+            con.execute("""
+                CREATE OR REPLACE SECRET (
+                    TYPE s3,
+                    PROVIDER config,
+                    KEY_ID '',
+                    SECRET ''
+                );
+            """)
+            return con.execute(query)
+        raise
 
 
 def safe_file_url(file_path, verbose=False):
