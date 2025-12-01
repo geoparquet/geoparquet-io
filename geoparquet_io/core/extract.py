@@ -414,6 +414,7 @@ def _execute_extraction(
     where: str | None,
     selected_columns: list[str],
     verbose: bool,
+    show_sql: bool,
     compression: str,
     compression_level: int | None,
     row_group_size_mb: float | None,
@@ -444,6 +445,10 @@ def _execute_extraction(
         if conditions:
             count_query += " WHERE " + " AND ".join(conditions)
 
+        if show_sql:
+            click.echo(click.style("\n-- Count query:", fg="cyan"))
+            click.echo(f"{count_query};")
+
         total_count = con.execute(count_query).fetchone()[0]
         click.echo(f"Extracting {total_count:,} rows...")
 
@@ -468,6 +473,7 @@ def _execute_extraction(
             row_group_size_mb=row_group_size_mb,
             row_group_rows=row_group_rows,
             verbose=verbose,
+            show_sql=show_sql,
             profile=profile,
         )
 
@@ -487,6 +493,7 @@ def extract(
     where: str | None = None,
     use_first_geometry: bool = False,
     dry_run: bool = False,
+    show_sql: bool = False,
     verbose: bool = False,
     compression: str = "ZSTD",
     compression_level: int | None = None,
@@ -562,6 +569,7 @@ def extract(
             where,
             selected_columns,
             verbose,
+            show_sql,
             compression,
             compression_level,
             row_group_size_mb,
