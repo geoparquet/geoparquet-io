@@ -24,6 +24,11 @@ from geoparquet_io.core.common import (
     parse_geo_metadata,
     safe_file_url,
 )
+from geoparquet_io.core.metadata_utils import (
+    detect_geo_logical_type,
+    extract_bbox_from_row_group_stats,
+    parse_geometry_type_from_schema,
+)
 
 
 def extract_file_info(parquet_file: str) -> dict[str, Any]:
@@ -73,75 +78,207 @@ def extract_file_info(parquet_file: str) -> dict[str, Any]:
     }
 
 
+def _extract_crs_string(crs_info: Any) -> Optional[str]:
+    """Extract CRS string from various formats."""
+    if isinstance(crs_info, dict):
+        if "id" in crs_info:
+            crs_id = crs_info["id"]
+            if isinstance(crs_id, dict):
+                authority = crs_id.get("authority", "EPSG")
+                code = crs_id.get("code")
+                if code:
+                    return f"{authority}:{code}"
+            else:
+                return str(crs_id)
+        elif "$schema" in crs_info:
+            return "PROJJSON"
+        elif "wkt" in crs_info:
+            return "WKT"
+    elif crs_info:
+        return str(crs_info)
+    return None
+
+
+def _detect_metadata_mismatches(
+    parquet_geo_info: dict[str, Any],
+    geoparquet_info: dict[str, Any],
+) -> list[str]:
+    """
+    Detect mismatches between Parquet native geo metadata and GeoParquet metadata.
+
+    Returns a list of warning messages for any mismatches found.
+    """
+    warnings = []
+
+    parquet_crs = parquet_geo_info.get("crs")
+    geoparquet_crs = geoparquet_info.get("crs")
+
+    # Compare CRS - only warn if both are set and different
+    if parquet_crs and geoparquet_crs:
+        # Normalize for comparison (both could be "OGC:CRS84" or "EPSG:4326" etc.)
+        parquet_crs_norm = str(parquet_crs).upper().replace("(DEFAULT)", "").strip()
+        geoparquet_crs_norm = str(geoparquet_crs).upper().replace("(DEFAULT)", "").strip()
+        if parquet_crs_norm != geoparquet_crs_norm:
+            warnings.append(
+                f"CRS mismatch: Parquet geo type has '{parquet_crs}' "
+                f"but GeoParquet metadata has '{geoparquet_crs}'"
+            )
+    elif parquet_crs and not geoparquet_crs:
+        warnings.append(
+            f"CRS in Parquet geo type ('{parquet_crs}') but missing in GeoParquet metadata"
+        )
+    elif geoparquet_crs and not parquet_crs:
+        # GeoParquet has CRS but Parquet type doesn't - might be expected
+        pass
+
+    # Compare edges (only relevant for Geography type)
+    parquet_edges = parquet_geo_info.get("edges")
+    geoparquet_edges = geoparquet_info.get("edges")
+
+    if parquet_edges and geoparquet_edges:
+        if parquet_edges.lower() != geoparquet_edges.lower():
+            warnings.append(
+                f"Edges mismatch: Parquet geo type has '{parquet_edges}' "
+                f"but GeoParquet metadata has '{geoparquet_edges}'"
+            )
+
+    # Compare geometry types
+    parquet_geom_type = parquet_geo_info.get("geometry_type")
+    geoparquet_geom_types = geoparquet_info.get("geometry_types")
+
+    if parquet_geom_type and geoparquet_geom_types:
+        if isinstance(geoparquet_geom_types, list):
+            geom_types_lower = [g.lower() for g in geoparquet_geom_types]
+            if parquet_geom_type.lower() not in geom_types_lower:
+                warnings.append(
+                    f"Geometry type mismatch: Parquet geo type restricts to '{parquet_geom_type}' "
+                    f"but GeoParquet metadata allows {geoparquet_geom_types}"
+                )
+
+    return warnings
+
+
 def extract_geo_info(parquet_file: str) -> dict[str, Any]:
     """
-    Extract GeoParquet-specific information from metadata.
+    Extract geospatial information from both Parquet native types and GeoParquet metadata.
+
+    This function detects:
+    1. Native Parquet GEOMETRY/GEOGRAPHY logical types
+    2. GeoParquet metadata from the 'geo' key
+    3. Mismatches between the two (returned as warnings)
 
     Args:
         parquet_file: Path to the parquet file
 
     Returns:
-        dict: Geo info including CRS, bbox, primary_column, version
+        dict: Geo info including:
+            - parquet_type: "Geometry", "Geography", or "No Parquet geo logical type"
+            - has_geo_metadata: Whether GeoParquet metadata exists
+            - version: GeoParquet version
+            - crs: CRS (from GeoParquet or Parquet type, with source noted)
+            - bbox: Bounding box
+            - primary_column: Primary geometry column name
+            - geometry_types: List of geometry types (from GeoParquet metadata)
+            - edges: Edge interpretation (for Geography type)
+            - warnings: List of mismatch warnings (if any)
     """
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    # Read schema and metadata
+    with fsspec.open(safe_url, "rb") as f:
+        pf = pq.ParquetFile(f)
+        schema = pf.schema_arrow
+        parquet_schema_str = str(pf.metadata.schema)
+
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
     geo_meta = parse_geo_metadata(metadata, verbose=False)
 
-    if not geo_meta:
-        return {
-            "has_geo_metadata": False,
-            "version": None,
-            "crs": None,
-            "bbox": None,
-            "primary_column": None,
+    # Detect Parquet native geo type
+    parquet_type = "No Parquet geo logical type"
+    parquet_geo_info = {}
+    geometry_column = None
+
+    for field in schema:
+        geo_type = detect_geo_logical_type(field, parquet_schema_str)
+        if geo_type:
+            parquet_type = geo_type
+            geometry_column = field.name
+
+            # Parse additional details from Parquet schema
+            geom_details = parse_geometry_type_from_schema(field.name, parquet_schema_str)
+            if geom_details:
+                parquet_geo_info["geometry_type"] = geom_details.get("geometry_type")
+                parquet_geo_info["coordinate_dimension"] = geom_details.get("coordinate_dimension")
+                parquet_geo_info["crs"] = geom_details.get("crs")
+                parquet_geo_info["edges"] = geom_details.get("algorithm")
+            break
+
+    # Extract GeoParquet metadata
+    geoparquet_info = {}
+    if geo_meta:
+        version = geo_meta.get("version")
+        primary_column = geo_meta.get("primary_column", "geometry")
+        columns_meta = geo_meta.get("columns", {})
+
+        crs = None
+        bbox = None
+        geometry_types = None
+        edges = None
+
+        if primary_column in columns_meta:
+            col_meta = columns_meta[primary_column]
+            crs = _extract_crs_string(col_meta.get("crs"))
+            bbox = col_meta.get("bbox")
+            geometry_types = col_meta.get("geometry_types")
+            edges = col_meta.get("edges")
+
+        # Per GeoParquet spec, if CRS is not specified, it defaults to OGC:CRS84
+        if crs is None and primary_column in columns_meta:
+            crs = "OGC:CRS84 (default)"
+
+        geoparquet_info = {
+            "version": version,
+            "crs": crs,
+            "bbox": bbox,
+            "primary_column": primary_column,
+            "geometry_types": geometry_types,
+            "edges": edges,
         }
 
-    # Extract version
-    version = geo_meta.get("version")
+        # Use GeoParquet primary_column if we didn't find one from Parquet type
+        if not geometry_column:
+            geometry_column = primary_column
 
-    # Extract CRS and bbox from primary geometry column
-    primary_column = geo_meta.get("primary_column", "geometry")
-    columns_meta = geo_meta.get("columns", {})
+    # Determine the effective primary column
+    primary_column = geometry_column or "geometry"
 
-    crs = None
-    bbox = None
+    # Determine effective CRS (prefer GeoParquet, fallback to Parquet type)
+    effective_crs = geoparquet_info.get("crs") or parquet_geo_info.get("crs")
+    if not effective_crs and (geo_meta or parquet_type != "No Parquet geo logical type"):
+        effective_crs = "OGC:CRS84 (default)"
 
-    if primary_column in columns_meta:
-        col_meta = columns_meta[primary_column]
-        crs_info = col_meta.get("crs")
+    # Determine effective bbox
+    # Priority: GeoParquet metadata bbox, then calculate from row group stats
+    effective_bbox = geoparquet_info.get("bbox")
+    if not effective_bbox and parquet_type != "No Parquet geo logical type":
+        # Try to calculate bbox from row group statistics (bbox struct column)
+        effective_bbox = extract_bbox_from_row_group_stats(parquet_file, primary_column)
 
-        # Extract CRS string (handle both dict and simple formats)
-        if isinstance(crs_info, dict):
-            # Try different CRS formats
-            if "id" in crs_info:
-                crs_id = crs_info["id"]
-                if isinstance(crs_id, dict):
-                    authority = crs_id.get("authority", "EPSG")
-                    code = crs_id.get("code")
-                    if code:
-                        crs = f"{authority}:{code}"
-                else:
-                    crs = str(crs_id)
-            elif "$schema" in crs_info:
-                # PROJJSON format
-                crs = "PROJJSON"
-            elif "wkt" in crs_info:
-                crs = "WKT"
-        elif crs_info:
-            crs = str(crs_info)
-
-        # Extract bbox
-        bbox = col_meta.get("bbox")
-
-    # Per GeoParquet spec, if CRS is not specified, it defaults to EPSG:4326
-    if crs is None and primary_column in columns_meta:
-        crs = "EPSG:4326 (default)"
+    # Detect mismatches
+    warnings = []
+    if geo_meta and parquet_type != "No Parquet geo logical type":
+        warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
 
     return {
-        "has_geo_metadata": True,
-        "version": version,
-        "crs": crs,
-        "bbox": bbox,
+        "parquet_type": parquet_type,
+        "has_geo_metadata": geo_meta is not None,
+        "version": geoparquet_info.get("version"),
+        "crs": effective_crs,
+        "bbox": effective_bbox,
         "primary_column": primary_column,
+        "geometry_types": geoparquet_info.get("geometry_types"),
+        "edges": geoparquet_info.get("edges") or parquet_geo_info.get("edges"),
+        "warnings": warnings,
     }
 
 
@@ -440,6 +577,13 @@ def format_terminal_output(
     if file_info.get("compression"):
         console.print(f"Compression: [cyan]{file_info['compression']}[/cyan]")
 
+    # Parquet type (new field)
+    parquet_type = geo_info.get("parquet_type", "No Parquet geo logical type")
+    if parquet_type in ("Geometry", "Geography"):
+        console.print(f"Parquet Type: [cyan]{parquet_type}[/cyan]")
+    else:
+        console.print(f"Parquet Type: [dim]{parquet_type}[/dim]")
+
     if geo_info["has_geo_metadata"]:
         # GeoParquet version
         if geo_info.get("version"):
@@ -448,6 +592,25 @@ def format_terminal_output(
         crs_display = geo_info["crs"] if geo_info["crs"] else "Not specified"
         console.print(f"CRS: [cyan]{crs_display}[/cyan]")
 
+        # Geometry types (if available)
+        if geo_info.get("geometry_types"):
+            geom_types = ", ".join(geo_info["geometry_types"])
+            console.print(f"Geometry Types: [cyan]{geom_types}[/cyan]")
+
+        if geo_info["bbox"]:
+            bbox = geo_info["bbox"]
+            if len(bbox) == 4:
+                console.print(
+                    f"Bbox: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
+                )
+            else:
+                console.print(f"Bbox: [cyan]{bbox}[/cyan]")
+    elif parquet_type in ("Geometry", "Geography"):
+        # Has Parquet geo type but no GeoParquet metadata
+        console.print("[dim]No GeoParquet metadata (using Parquet geo type)[/dim]")
+        crs_display = geo_info["crs"] if geo_info["crs"] else "OGC:CRS84 (default)"
+        console.print(f"CRS: [cyan]{crs_display}[/cyan]")
+        # Display bbox calculated from row group stats
         if geo_info["bbox"]:
             bbox = geo_info["bbox"]
             if len(bbox) == 4:
@@ -458,6 +621,13 @@ def format_terminal_output(
                 console.print(f"Bbox: [cyan]{bbox}[/cyan]")
     else:
         console.print("[yellow]No GeoParquet metadata found[/yellow]")
+
+    # Display warnings for metadata mismatches
+    warnings = geo_info.get("warnings", [])
+    if warnings:
+        console.print()
+        for warning in warnings:
+            console.print(f"[yellow]⚠ {warning}[/yellow]")
 
     console.print()
 
@@ -581,9 +751,12 @@ def format_json_output(
         "rows": file_info["rows"],
         "row_groups": file_info["row_groups"],
         "compression": file_info.get("compression"),
+        "parquet_type": geo_info.get("parquet_type", "No Parquet geo logical type"),
         "geoparquet_version": geo_info.get("version"),
         "crs": geo_info.get("crs"),
+        "geometry_types": geo_info.get("geometry_types"),
         "bbox": geo_info.get("bbox"),
+        "warnings": geo_info.get("warnings", []),
         "columns": [
             {
                 "name": col["name"],
@@ -655,6 +828,10 @@ def format_markdown_output(
     if file_info.get("compression"):
         lines.append(f"- **Compression:** {file_info['compression']}")
 
+    # Parquet type (new field)
+    parquet_type = geo_info.get("parquet_type", "No Parquet geo logical type")
+    lines.append(f"- **Parquet Type:** {parquet_type}")
+
     if geo_info["has_geo_metadata"]:
         if geo_info.get("version"):
             lines.append(f"- **GeoParquet Version:** {geo_info['version']}")
@@ -662,6 +839,26 @@ def format_markdown_output(
         crs_display = geo_info["crs"] if geo_info["crs"] else "Not specified"
         lines.append(f"- **CRS:** {crs_display}")
 
+        # Geometry types (if available)
+        if geo_info.get("geometry_types"):
+            geom_types = ", ".join(geo_info["geometry_types"])
+            lines.append(f"- **Geometry Types:** {geom_types}")
+
+        if geo_info["bbox"]:
+            bbox = geo_info["bbox"]
+            if len(bbox) == 4:
+                lines.append(
+                    f"- **Bbox:** [{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}]"
+                )
+            else:
+                lines.append(f"- **Bbox:** {bbox}")
+    elif parquet_type in ("Geometry", "Geography"):
+        # Has Parquet geo type but no GeoParquet metadata
+        lines.append("")
+        lines.append("*No GeoParquet metadata (using Parquet geo type)*")
+        crs_display = geo_info["crs"] if geo_info["crs"] else "OGC:CRS84 (default)"
+        lines.append(f"- **CRS:** {crs_display}")
+        # Display bbox calculated from row group stats
         if geo_info["bbox"]:
             bbox = geo_info["bbox"]
             if len(bbox) == 4:
@@ -673,6 +870,14 @@ def format_markdown_output(
     else:
         lines.append("")
         lines.append("*No GeoParquet metadata found*")
+
+    # Display warnings for metadata mismatches
+    warnings = geo_info.get("warnings", [])
+    if warnings:
+        lines.append("")
+        lines.append("**Warnings:**")
+        for warning in warnings:
+            lines.append(f"- ⚠️ {warning}")
 
     lines.append("")
 

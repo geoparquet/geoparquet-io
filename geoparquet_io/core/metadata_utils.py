@@ -212,6 +212,97 @@ def parse_geometry_type_from_schema(
     return result if result else None
 
 
+def extract_bbox_from_row_group_stats(
+    parquet_file: str,
+    geometry_column: str,
+) -> Optional[list[float]]:
+    """
+    Extract overall bbox from row group statistics for a geometry column.
+
+    This looks for a bbox struct column associated with the geometry column
+    and calculates the overall bbox from the min/max statistics across all row groups.
+
+    Args:
+        parquet_file: Path to the parquet file
+        geometry_column: Name of the geometry column
+
+    Returns:
+        list: [xmin, ymin, xmax, ymax] or None if bbox cannot be calculated
+    """
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    with fsspec.open(safe_url, "rb") as f:
+        pf = pq.ParquetFile(f)
+        schema = pf.schema_arrow
+        parquet_metadata = pf.metadata
+
+    # Find bbox struct column associated with geometry column
+    bbox_col_name = None
+    for field in schema:
+        if str(field.type).startswith("struct<") and "xmin" in str(field.type):
+            # Pattern 1: geometry -> geometry_bbox
+            if field.name.endswith("_bbox"):
+                base_name = field.name[:-5]
+                if base_name == geometry_column:
+                    bbox_col_name = field.name
+                    break
+            # Pattern 2: Just named 'bbox'
+            elif field.name == "bbox":
+                bbox_col_name = field.name
+                break
+
+    if not bbox_col_name:
+        return None
+
+    # Calculate overall bbox from all row groups
+    overall_xmin = None
+    overall_ymin = None
+    overall_xmax = None
+    overall_ymax = None
+
+    for rg_idx in range(parquet_metadata.num_row_groups):
+        rg = parquet_metadata.row_group(rg_idx)
+
+        xmin_val = None
+        ymin_val = None
+        xmax_val = None
+        ymax_val = None
+
+        for col_idx in range(rg.num_columns):
+            col = rg.column(col_idx)
+            path = col.path_in_schema
+
+            if path == f"{bbox_col_name}.xmin" and col.is_stats_set:
+                if col.statistics.has_min_max:
+                    xmin_val = col.statistics.min
+            elif path == f"{bbox_col_name}.ymin" and col.is_stats_set:
+                if col.statistics.has_min_max:
+                    ymin_val = col.statistics.min
+            elif path == f"{bbox_col_name}.xmax" and col.is_stats_set:
+                if col.statistics.has_min_max:
+                    xmax_val = col.statistics.max
+            elif path == f"{bbox_col_name}.ymax" and col.is_stats_set:
+                if col.statistics.has_min_max:
+                    ymax_val = col.statistics.max
+
+        if all(v is not None for v in [xmin_val, ymin_val, xmax_val, ymax_val]):
+            if overall_xmin is None:
+                overall_xmin = xmin_val
+                overall_ymin = ymin_val
+                overall_xmax = xmax_val
+                overall_ymax = ymax_val
+            else:
+                overall_xmin = min(overall_xmin, xmin_val)
+                overall_ymin = min(overall_ymin, ymin_val)
+                overall_xmax = max(overall_xmax, xmax_val)
+                overall_ymax = max(overall_ymax, ymax_val)
+
+    if overall_xmin is not None:
+        return [overall_xmin, overall_ymin, overall_xmax, overall_ymax]
+
+    return None
+
+
 def format_parquet_metadata_enhanced(
     parquet_file: str,
     json_output: bool,

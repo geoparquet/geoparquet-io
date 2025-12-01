@@ -421,3 +421,106 @@ def test_inspect_markdown_json_exclusive(runner, test_file):
 
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output.lower()
+
+
+# Tests for Parquet native geo type detection
+
+
+@pytest.fixture
+def parquet_geo_only_file():
+    """Provide path to test file with Parquet geo type but no GeoParquet metadata."""
+    return os.path.join(os.path.dirname(__file__), "data", "fields_geom_type_only.parquet")
+
+
+@pytest.fixture
+def parquet_v2_file():
+    """Provide path to test file with both Parquet geo type and GeoParquet metadata."""
+    return os.path.join(os.path.dirname(__file__), "data", "fields_v2.parquet")
+
+
+def test_inspect_parquet_geo_type_only(runner, parquet_geo_only_file):
+    """Test inspect shows Parquet type for file with only Parquet geo type."""
+    result = runner.invoke(cli, ["inspect", parquet_geo_only_file])
+
+    assert result.exit_code == 0
+    assert "Parquet Type: Geometry" in result.output
+    assert "No GeoParquet metadata (using Parquet geo type)" in result.output
+    # Should still show CRS (default)
+    assert "CRS:" in result.output
+    # Should calculate and show bbox from row group stats
+    assert "Bbox:" in result.output
+
+
+def test_inspect_parquet_geo_type_with_geoparquet(runner, parquet_v2_file):
+    """Test inspect shows both Parquet type and GeoParquet metadata."""
+    result = runner.invoke(cli, ["inspect", parquet_v2_file])
+
+    assert result.exit_code == 0
+    assert "Parquet Type: Geometry" in result.output
+    assert "GeoParquet Version: 2.0.0" in result.output
+    assert "Geometry Types: Polygon" in result.output
+    assert "Bbox:" in result.output
+
+
+def test_inspect_json_parquet_type(runner, parquet_geo_only_file):
+    """Test JSON output includes parquet_type field."""
+    result = runner.invoke(cli, ["inspect", parquet_geo_only_file, "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+
+    assert "parquet_type" in data
+    assert data["parquet_type"] == "Geometry"
+    assert data["geoparquet_version"] is None
+    assert "warnings" in data
+    assert data["warnings"] == []
+
+
+def test_inspect_json_with_geoparquet(runner, parquet_v2_file):
+    """Test JSON output includes all geo info when both Parquet type and GeoParquet exist."""
+    result = runner.invoke(cli, ["inspect", parquet_v2_file, "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+
+    assert data["parquet_type"] == "Geometry"
+    assert data["geoparquet_version"] == "2.0.0"
+    assert data["geometry_types"] == ["Polygon"]
+    assert data["bbox"] is not None
+    assert len(data["bbox"]) == 4
+
+
+def test_inspect_markdown_parquet_type(runner, parquet_geo_only_file):
+    """Test markdown output includes Parquet Type field."""
+    result = runner.invoke(cli, ["inspect", parquet_geo_only_file, "--markdown"])
+
+    assert result.exit_code == 0
+    assert "- **Parquet Type:** Geometry" in result.output
+    assert "No GeoParquet metadata (using Parquet geo type)" in result.output
+    # Should calculate and show bbox from row group stats
+    assert "- **Bbox:**" in result.output
+
+
+def test_extract_geo_info_parquet_type_only(parquet_geo_only_file):
+    """Test extract_geo_info returns parquet_type for file with only Parquet geo type."""
+    geo_info = extract_geo_info(parquet_geo_only_file)
+
+    assert geo_info["parquet_type"] == "Geometry"
+    assert geo_info["has_geo_metadata"] is False
+    assert geo_info["version"] is None
+    assert geo_info["primary_column"] == "geometry"
+    assert geo_info["warnings"] == []
+    # Bbox should be calculated from row group stats
+    assert geo_info["bbox"] is not None
+    assert len(geo_info["bbox"]) == 4
+
+
+def test_extract_geo_info_with_both(parquet_v2_file):
+    """Test extract_geo_info returns both Parquet type and GeoParquet metadata."""
+    geo_info = extract_geo_info(parquet_v2_file)
+
+    assert geo_info["parquet_type"] == "Geometry"
+    assert geo_info["has_geo_metadata"] is True
+    assert geo_info["version"] == "2.0.0"
+    assert geo_info["geometry_types"] == ["Polygon"]
+    assert geo_info["bbox"] is not None
