@@ -44,8 +44,7 @@ def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
         crs_upper = crs_info.upper()
         # Common geographic CRS codes
         if any(
-            code in crs_upper
-            for code in ["4326", "CRS84", "CRS:84", "OGC:CRS84", "4269", "4267"]
+            code in crs_upper for code in ["4326", "CRS84", "CRS:84", "OGC:CRS84", "4269", "4267"]
         ):
             return True
         return None
@@ -415,8 +414,9 @@ def build_column_selection(
     Build list of columns to select.
 
     Rules:
-    - If include_cols: select only those + geometry + bbox (unless explicitly excluded)
-    - If exclude_cols: select all except those
+    - If include_cols only: select those + geometry + bbox
+    - If exclude_cols only: select all except those
+    - If both: select include_cols, but exclude_cols can remove geometry/bbox
     - geometry and bbox always included unless in exclude_cols
 
     Args:
@@ -429,16 +429,18 @@ def build_column_selection(
     Returns:
         list: Columns to select (preserving original order)
     """
+    exclude_set = set(exclude_cols) if exclude_cols else set()
+
     if include_cols:
         selected = set(include_cols)
         # Always add geometry unless explicitly excluded
-        if not (exclude_cols and geometry_col in exclude_cols):
+        if geometry_col not in exclude_set:
             selected.add(geometry_col)
         # Always add bbox unless explicitly excluded
-        if bbox_col and not (exclude_cols and bbox_col in exclude_cols):
+        if bbox_col and bbox_col not in exclude_set:
             selected.add(bbox_col)
     elif exclude_cols:
-        selected = set(all_columns) - set(exclude_cols)
+        selected = set(all_columns) - exclude_set
     else:
         selected = set(all_columns)
 
@@ -682,18 +684,27 @@ def extract(
     include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
     exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
 
-    # Validate mutually exclusive options
-    if include_list and exclude_list:
-        raise click.ClickException("--include-cols and --exclude-cols are mutually exclusive")
-
-    # Get safe URL for input
+    # Get schema info early so we can validate column overlap
     safe_url = safe_file_url(input_parquet, verbose)
-
-    # Get schema info
     all_columns = get_schema_columns(input_parquet)
     geometry_col = find_primary_geometry_column(input_parquet, verbose)
     bbox_info = check_bbox_structure(input_parquet, verbose=False)
     bbox_col = bbox_info.get("bbox_column_name")
+
+    # Validate columns in both lists - only geometry and bbox allowed in both
+    if include_list and exclude_list:
+        special_cols = {geometry_col}
+        if bbox_col:
+            special_cols.add(bbox_col)
+
+        overlap = set(include_list) & set(exclude_list)
+        non_special_overlap = overlap - special_cols
+        if non_special_overlap:
+            raise click.ClickException(
+                f"Columns cannot be in both --include-cols and --exclude-cols: "
+                f"{', '.join(sorted(non_special_overlap))}\n"
+                f"Only geometry ({geometry_col}) and bbox ({bbox_col}) columns can appear in both."
+            )
 
     # Validate columns
     validate_columns(include_list, all_columns, "--include-cols")
