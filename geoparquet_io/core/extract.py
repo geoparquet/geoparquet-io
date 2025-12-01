@@ -6,6 +6,7 @@ SQL filtering, and multiple input files via glob patterns.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -21,6 +22,60 @@ from geoparquet_io.core.common import (
     safe_file_url,
     write_parquet_with_metadata,
 )
+
+# SQL keywords that could be dangerous in a WHERE clause
+# These could modify data or database structure
+DANGEROUS_SQL_KEYWORDS = [
+    "DROP",
+    "DELETE",
+    "INSERT",
+    "UPDATE",
+    "CREATE",
+    "ALTER",
+    "TRUNCATE",
+    "EXEC",
+    "EXECUTE",
+    "MERGE",
+    "REPLACE",
+    "GRANT",
+    "REVOKE",
+]
+
+
+def validate_where_clause(where_clause: str) -> None:
+    """
+    Validate WHERE clause for potentially dangerous SQL keywords.
+
+    This is a basic safety check to prevent accidental or intentional
+    SQL injection attacks. It checks for keywords that could modify
+    data or database structure.
+
+    Note: This feature is intended for trusted users. For untrusted input,
+    additional validation or parameterized queries would be required.
+
+    Args:
+        where_clause: The WHERE clause string to validate
+
+    Raises:
+        click.ClickException: If dangerous SQL keywords are found
+    """
+    # Build pattern to match dangerous keywords as whole words (case-insensitive)
+    # Use word boundaries to avoid false positives (e.g., "UPDATED_AT" shouldn't match)
+    upper_clause = where_clause.upper()
+    found_keywords = []
+
+    for keyword in DANGEROUS_SQL_KEYWORDS:
+        # Match keyword as a whole word
+        pattern = rf"\b{keyword}\b"
+        if re.search(pattern, upper_clause):
+            found_keywords.append(keyword)
+
+    if found_keywords:
+        raise click.ClickException(
+            f"WHERE clause contains potentially dangerous SQL keywords: {', '.join(found_keywords)}. "
+            "Only SELECT-style filtering expressions are allowed in --where. "
+            "If you need to perform data modifications, use DuckDB directly."
+        )
 
 
 def _looks_like_latlong_bbox(bbox: tuple[float, float, float, float]) -> bool:
@@ -87,6 +142,7 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
                 if crs_info:
                     return crs_info
     except Exception:
+        # CRS extraction is optional - fall back to Arrow metadata or return None
         pass
 
     # Fall back to Arrow extension metadata on geometry column
@@ -104,6 +160,7 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
                         if "crs" in ext_data:
                             return ext_data["crs"]
     except Exception:
+        # CRS extraction is optional - file may not have CRS metadata
         pass
 
     return None
@@ -126,6 +183,7 @@ def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
         if result and all(v is not None for v in result):
             return result
     except Exception:
+        # Bounds extraction is optional - used only for warning messages
         pass
     return None
 
@@ -203,7 +261,7 @@ def parse_bbox(bbox_str: str) -> tuple[float, float, float, float]:
         tuple: (xmin, ymin, xmax, ymax)
 
     Raises:
-        click.ClickException: If format is invalid
+        click.ClickException: If format is invalid or coordinates are reversed
     """
     try:
         parts = [float(x.strip()) for x in bbox_str.split(",")]
@@ -211,7 +269,17 @@ def parse_bbox(bbox_str: str) -> tuple[float, float, float, float]:
             raise click.ClickException(
                 f"Invalid bbox format. Expected 4 values (xmin,ymin,xmax,ymax), got {len(parts)}"
             )
-        return tuple(parts)
+        xmin, ymin, xmax, ymax = parts
+
+        # Validate coordinate ordering
+        if xmin > xmax or ymin > ymax:
+            raise click.ClickException(
+                f"Invalid bbox: coordinates appear to be reversed. "
+                f"xmin ({xmin}) must be <= xmax ({xmax}), and ymin ({ymin}) must be <= ymax ({ymax}). "
+                "Expected order: xmin,ymin,xmax,ymax."
+            )
+
+        return (xmin, ymin, xmax, ymax)
     except ValueError as e:
         raise click.ClickException(
             f"Invalid bbox format. Expected numeric values: xmin,ymin,xmax,ymax. Error: {e}"
@@ -709,6 +777,10 @@ def extract(
     # Validate columns
     validate_columns(include_list, all_columns, "--include-cols")
     validate_columns(exclude_list, all_columns, "--exclude-cols")
+
+    # Validate WHERE clause for dangerous SQL keywords
+    if where:
+        validate_where_clause(where)
 
     # Build column selection
     selected_columns = build_column_selection(

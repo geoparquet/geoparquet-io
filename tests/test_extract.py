@@ -8,6 +8,7 @@ SQL filtering, and various input formats.
 import json
 import os
 import tempfile
+import uuid
 from pathlib import Path
 
 import click
@@ -24,6 +25,7 @@ from geoparquet_io.core.extract import (
     parse_bbox,
     parse_geometry_input,
     validate_columns,
+    validate_where_clause,
 )
 
 # Test data paths
@@ -75,6 +77,84 @@ class TestParseBbox:
         with pytest.raises(click.ClickException) as exc_info:
             parse_bbox("a,b,c,d")
         assert "Expected numeric values" in str(exc_info.value)
+
+    def test_bbox_reversed_x_coordinates(self):
+        """Test bbox with reversed x coordinates (xmax < xmin)."""
+        with pytest.raises(click.ClickException) as exc_info:
+            parse_bbox("10,0,5,10")  # xmin=10, xmax=5 is invalid
+        assert "reversed" in str(exc_info.value).lower()
+        assert "xmin" in str(exc_info.value).lower()
+
+    def test_bbox_reversed_y_coordinates(self):
+        """Test bbox with reversed y coordinates (ymax < ymin)."""
+        with pytest.raises(click.ClickException) as exc_info:
+            parse_bbox("0,10,10,5")  # ymin=10, ymax=5 is invalid
+        assert "reversed" in str(exc_info.value).lower()
+        assert "ymin" in str(exc_info.value).lower()
+
+    def test_bbox_equal_coordinates_valid(self):
+        """Test bbox with equal min/max (point) is valid."""
+        result = parse_bbox("5,5,5,5")
+        assert result == (5.0, 5.0, 5.0, 5.0)
+
+
+class TestValidateWhereClause:
+    """Tests for validate_where_clause function."""
+
+    def test_valid_where_clause(self):
+        """Test that valid WHERE clauses pass validation."""
+        # Should not raise any exception
+        validate_where_clause("name LIKE '%Hotel%'")
+        validate_where_clause("id > 100 AND status = 'active'")
+        validate_where_clause("category IN ('food', 'lodging')")
+        validate_where_clause("created_at >= '2024-01-01'")
+
+    def test_drop_keyword_blocked(self):
+        """Test that DROP keyword is blocked."""
+        with pytest.raises(click.ClickException) as exc_info:
+            validate_where_clause("1=1; DROP TABLE users; --")
+        assert "DROP" in str(exc_info.value)
+        assert "dangerous" in str(exc_info.value).lower()
+
+    def test_delete_keyword_blocked(self):
+        """Test that DELETE keyword is blocked."""
+        with pytest.raises(click.ClickException) as exc_info:
+            validate_where_clause("DELETE FROM users WHERE 1=1")
+        assert "DELETE" in str(exc_info.value)
+
+    def test_insert_keyword_blocked(self):
+        """Test that INSERT keyword is blocked."""
+        with pytest.raises(click.ClickException) as exc_info:
+            validate_where_clause("1=1; INSERT INTO users VALUES (1, 'hacker')")
+        assert "INSERT" in str(exc_info.value)
+
+    def test_update_keyword_blocked(self):
+        """Test that UPDATE keyword is blocked."""
+        with pytest.raises(click.ClickException) as exc_info:
+            validate_where_clause("1=1; UPDATE users SET admin=true")
+        assert "UPDATE" in str(exc_info.value)
+
+    def test_create_keyword_blocked(self):
+        """Test that CREATE keyword is blocked."""
+        with pytest.raises(click.ClickException) as exc_info:
+            validate_where_clause("1=1; CREATE TABLE evil ()")
+        assert "CREATE" in str(exc_info.value)
+
+    def test_column_name_with_keyword_allowed(self):
+        """Test that column names containing keywords are allowed."""
+        # These should NOT raise exceptions because the keywords are
+        # part of column names, not standalone keywords
+        validate_where_clause("updated_at > '2024-01-01'")
+        validate_where_clause("created_by = 'admin'")
+        validate_where_clause("deletion_flag = false")
+
+    def test_multiple_dangerous_keywords(self):
+        """Test error message includes all found dangerous keywords."""
+        with pytest.raises(click.ClickException) as exc_info:
+            validate_where_clause("DROP TABLE x; DELETE FROM y")
+        error_msg = str(exc_info.value)
+        assert "DROP" in error_msg
+        assert "DELETE" in error_msg
 
 
 class TestConvertGeojsonToWkt:
@@ -187,36 +267,39 @@ class TestParseGeometryInput:
 
     def test_file_reference_geojson(self):
         """Test loading geometry from file with @ prefix."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".geojson", delete=False) as f:
-            json.dump({"type": "Point", "coordinates": [0, 0]}, f)
-            f.flush()
-            try:
-                result = parse_geometry_input(f"@{f.name}")
-                assert "POINT" in result.upper()
-            finally:
-                os.unlink(f.name)
+        # Use unique filename to avoid Windows file locking issues
+        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
+        try:
+            tmp_path.write_text(json.dumps({"type": "Point", "coordinates": [0, 0]}))
+            result = parse_geometry_input(f"@{tmp_path}")
+            assert "POINT" in result.upper()
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     def test_file_reference_wkt(self):
         """Test loading geometry from WKT file with @ prefix."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".wkt", delete=False) as f:
-            f.write("POINT(0 0)")
-            f.flush()
-            try:
-                result = parse_geometry_input(f"@{f.name}")
-                assert "POINT" in result.upper()
-            finally:
-                os.unlink(f.name)
+        # Use unique filename to avoid Windows file locking issues
+        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.wkt"
+        try:
+            tmp_path.write_text("POINT(0 0)")
+            result = parse_geometry_input(f"@{tmp_path}")
+            assert "POINT" in result.upper()
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     def test_auto_detect_file(self):
         """Test auto-detecting file by extension."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".geojson", delete=False) as f:
-            json.dump({"type": "Point", "coordinates": [0, 0]}, f)
-            f.flush()
-            try:
-                result = parse_geometry_input(f.name)
-                assert "POINT" in result.upper()
-            finally:
-                os.unlink(f.name)
+        # Use unique filename to avoid Windows file locking issues
+        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
+        try:
+            tmp_path.write_text(json.dumps({"type": "Point", "coordinates": [0, 0]}))
+            result = parse_geometry_input(str(tmp_path))
+            assert "POINT" in result.upper()
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     def test_file_not_found(self):
         """Test error when file not found."""
@@ -422,12 +505,24 @@ class TestExtractIntegration:
 
     @pytest.fixture
     def output_file(self):
-        """Create a temporary output file path."""
-        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
-            yield f.name
-        # Cleanup after test
-        if os.path.exists(f.name):
-            os.unlink(f.name)
+        """Create a temporary output file path.
+
+        Uses a unique filename instead of NamedTemporaryFile to avoid
+        Windows file locking issues with DuckDB.
+        """
+        # Generate unique path without creating the file
+        tmp_path = Path(tempfile.gettempdir()) / f"test_output_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        # Cleanup after test - try multiple times for Windows
+        if tmp_path.exists():
+            for _ in range(3):
+                try:
+                    tmp_path.unlink()
+                    break
+                except PermissionError:
+                    import time
+
+                    time.sleep(0.1)  # Give Windows time to release file handles
 
     def test_extract_all_columns(self, output_file):
         """Test extracting all columns."""
@@ -439,9 +534,12 @@ class TestExtractIntegration:
         # Verify output
         assert os.path.exists(output_file)
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
-        assert result[0] == 766  # Original row count
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            assert result[0] == 766  # Original row count
+        finally:
+            con.close()
 
     def test_extract_include_cols(self, output_file):
         """Test extracting with include columns."""
@@ -452,14 +550,17 @@ class TestExtractIntegration:
 
         # Verify output has only selected columns + geometry + bbox
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
-        columns = [row[0] for row in result]
-        assert "name" in columns
-        assert "address" in columns
-        assert "geometry" in columns
-        assert "bbox" in columns
-        assert "fsq_place_id" not in columns
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
+            columns = [row[0] for row in result]
+            assert "name" in columns
+            assert "address" in columns
+            assert "geometry" in columns
+            assert "bbox" in columns
+            assert "fsq_place_id" not in columns
+        finally:
+            con.close()
 
     def test_extract_exclude_cols(self, output_file):
         """Test extracting with exclude columns."""
@@ -470,13 +571,16 @@ class TestExtractIntegration:
 
         # Verify output doesn't have excluded columns
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
-        columns = [row[0] for row in result]
-        assert "name" in columns
-        assert "geometry" in columns
-        assert "placemaker_url" not in columns
-        assert "fsq_place_id" not in columns
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
+            columns = [row[0] for row in result]
+            assert "name" in columns
+            assert "geometry" in columns
+            assert "placemaker_url" not in columns
+            assert "fsq_place_id" not in columns
+        finally:
+            con.close()
 
     def test_extract_include_and_exclude_geometry(self, output_file):
         """Test that include and exclude can be combined to exclude geometry/bbox."""
@@ -490,13 +594,15 @@ class TestExtractIntegration:
 
         # Verify geometry was excluded but other columns present
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
-        columns = [row[0] for row in result]
-        assert "name" in columns
-        assert "address" in columns
-        assert "geometry" not in columns
-        con.close()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
+            columns = [row[0] for row in result]
+            assert "name" in columns
+            assert "address" in columns
+            assert "geometry" not in columns
+        finally:
+            con.close()
 
     def test_extract_overlap_non_special_error(self, output_file):
         """Test that non-geometry/bbox columns cannot be in both include and exclude."""
@@ -519,10 +625,13 @@ class TestExtractIntegration:
 
         # Verify fewer rows
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
-        assert result[0] < 766  # Should be filtered
-        assert result[0] > 0  # But not empty
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            assert result[0] < 766  # Should be filtered
+            assert result[0] > 0  # But not empty
+        finally:
+            con.close()
 
     def test_extract_geometry_filter_wkt(self, output_file):
         """Test extracting with WKT geometry filter."""
@@ -534,10 +643,13 @@ class TestExtractIntegration:
 
         # Verify filtered rows
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
-        assert result[0] < 766
-        assert result[0] > 0
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            assert result[0] < 766
+            assert result[0] > 0
+        finally:
+            con.close()
 
     def test_extract_geometry_filter_geojson(self, output_file):
         """Test extracting with GeoJSON geometry filter."""
@@ -551,10 +663,13 @@ class TestExtractIntegration:
 
         # Verify filtered rows
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
-        assert result[0] < 766
-        assert result[0] > 0
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            assert result[0] < 766
+            assert result[0] > 0
+        finally:
+            con.close()
 
     def test_extract_where_clause(self, output_file):
         """Test extracting with WHERE clause."""
@@ -565,10 +680,13 @@ class TestExtractIntegration:
 
         # Verify filtered rows
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
-        assert result[0] < 766
-        assert result[0] > 0
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            assert result[0] < 766
+            assert result[0] > 0
+        finally:
+            con.close()
 
     def test_extract_combined_filters(self, output_file):
         """Test extracting with combined filters."""
@@ -585,19 +703,22 @@ class TestExtractIntegration:
 
         # Verify output
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
 
-        # Check row count (should be very few with all filters)
-        result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
-        assert result[0] < 766
+            # Check row count (should be very few with all filters)
+            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            assert result[0] < 766
 
-        # Check columns
-        result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
-        columns = [row[0] for row in result]
-        assert "name" in columns
-        assert "address" in columns
-        assert "geometry" in columns
-        assert "fsq_place_id" not in columns
+            # Check columns
+            result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
+            columns = [row[0] for row in result]
+            assert "name" in columns
+            assert "address" in columns
+            assert "geometry" in columns
+            assert "fsq_place_id" not in columns
+        finally:
+            con.close()
 
     def test_extract_dry_run(self, output_file, capsys):
         """Test dry run mode."""
@@ -638,9 +759,12 @@ class TestExtractIntegration:
         # File should be created but with 0 rows
         assert os.path.exists(output_file)
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
-        assert result[0] == 0
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            result = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()
+            assert result[0] == 0
+        finally:
+            con.close()
 
         # Warning should be displayed
         captured = capsys.readouterr()
@@ -657,12 +781,16 @@ class TestExtractIntegration:
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(output_file)
-        metadata = pf.schema_arrow.metadata
-        assert b"geo" in metadata
+        try:
+            metadata = pf.schema_arrow.metadata
+            assert b"geo" in metadata
 
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        assert "primary_column" in geo_meta
-        assert geo_meta["primary_column"] == "geometry"
+            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+            assert "primary_column" in geo_meta
+            assert geo_meta["primary_column"] == "geometry"
+        finally:
+            # Ensure file handle is released on Windows
+            del pf
 
 
 class TestExtractCLI:
@@ -670,11 +798,24 @@ class TestExtractCLI:
 
     @pytest.fixture
     def output_file(self):
-        """Create a temporary output file path."""
-        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
-            yield f.name
-        if os.path.exists(f.name):
-            os.unlink(f.name)
+        """Create a temporary output file path.
+
+        Uses a unique filename instead of NamedTemporaryFile to avoid
+        Windows file locking issues with DuckDB.
+        """
+        # Generate unique path without creating the file
+        tmp_path = Path(tempfile.gettempdir()) / f"test_cli_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        # Cleanup after test - try multiple times for Windows
+        if tmp_path.exists():
+            for _ in range(3):
+                try:
+                    tmp_path.unlink()
+                    break
+                except PermissionError:
+                    import time
+
+                    time.sleep(0.1)  # Give Windows time to release file handles
 
     def test_cli_help(self):
         """Test CLI help output."""
@@ -723,12 +864,15 @@ class TestExtractCLI:
 
         # Verify columns
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        cols_result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
-        columns = [row[0] for row in cols_result]
-        assert "name" in columns
-        assert "geometry" in columns
-        assert "fsq_place_id" not in columns
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            cols_result = con.execute(f"DESCRIBE SELECT * FROM '{output_file}'").fetchall()
+            columns = [row[0] for row in cols_result]
+            assert "name" in columns
+            assert "geometry" in columns
+            assert "fsq_place_id" not in columns
+        finally:
+            con.close()
 
     def test_cli_bbox(self, output_file):
         """Test CLI with bbox filter."""
@@ -747,10 +891,13 @@ class TestExtractCLI:
 
         # Verify filtered
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        count = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()[0]
-        assert count < 766
-        assert count > 0
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            count = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()[0]
+            assert count < 766
+            assert count > 0
+        finally:
+            con.close()
 
     def test_cli_dry_run(self, output_file):
         """Test CLI dry run."""
@@ -778,11 +925,24 @@ class TestExtractRemote:
 
     @pytest.fixture
     def output_file(self):
-        """Create a temporary output file path."""
-        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
-            yield f.name
-        if os.path.exists(f.name):
-            os.unlink(f.name)
+        """Create a temporary output file path.
+
+        Uses a unique filename instead of NamedTemporaryFile to avoid
+        Windows file locking issues with DuckDB.
+        """
+        # Generate unique path without creating the file
+        tmp_path = Path(tempfile.gettempdir()) / f"test_remote_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        # Cleanup after test - try multiple times for Windows
+        if tmp_path.exists():
+            for _ in range(3):
+                try:
+                    tmp_path.unlink()
+                    break
+                except PermissionError:
+                    import time
+
+                    time.sleep(0.1)  # Give Windows time to release file handles
 
     def test_remote_file_bbox(self, output_file):
         """Test extracting from remote file with bbox filter."""
@@ -796,7 +956,10 @@ class TestExtractRemote:
 
         assert os.path.exists(output_file)
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        count = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()[0]
-        assert count > 0
-        assert count < 617941  # Less than total rows
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            count = con.execute(f"SELECT COUNT(*) FROM '{output_file}'").fetchone()[0]
+            assert count > 0
+            assert count < 617941  # Less than total rows
+        finally:
+            con.close()
