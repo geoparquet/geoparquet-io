@@ -97,6 +97,187 @@ def find_subdivision_code_column(con, countries_source, is_subquery=False):
     return None
 
 
+def _handle_bbox_optimization(file_path, bbox_info, add_bbox_flag, file_label, verbose):
+    """Handle bbox structure warning and optionally add bbox."""
+    if bbox_info["status"] == "optimal":
+        return bbox_info
+
+    click.echo(
+        click.style(
+            f"\nWarning: {file_label} could benefit from bbox optimization:\n"
+            + bbox_info["message"],
+            fg="yellow",
+        )
+    )
+
+    if not add_bbox_flag:
+        click.echo(
+            click.style(
+                f"💡 Tip: Run this command with --add-bbox to automatically add bbox optimization to the {file_label.lower()}",
+                fg="cyan",
+            )
+        )
+        return bbox_info
+
+    if not bbox_info["has_bbox_column"]:
+        click.echo(f"Adding bbox column to {file_label.lower()}...")
+        from geoparquet_io.core.common import add_bbox
+
+        add_bbox(file_path, "bbox", verbose)
+        click.echo(
+            click.style(f"✓ Added bbox column and metadata to {file_label.lower()}", fg="green")
+        )
+    elif not bbox_info["has_bbox_metadata"]:
+        click.echo(f"Adding bbox metadata to {file_label.lower()}...")
+        from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata
+
+        add_bbox_metadata(file_path, verbose)
+
+    return check_bbox_structure(file_path, verbose)
+
+
+def _build_select_clause(country_code_col, subdivision_code_col, using_default):
+    """Build the SELECT clause for country and subdivision codes."""
+    # Country code selection
+    if country_code_col == "admin:country_code":
+        country_select = f'b."{country_code_col}"'
+    else:
+        country_select = f'b."{country_code_col}" as "admin:country_code"'
+
+    # Subdivision code selection
+    if not subdivision_code_col:
+        return country_select
+
+    if using_default and subdivision_code_col == "region":
+        subdivision_select = (
+            ", CASE WHEN b.region LIKE '%-%' THEN split_part(b.region, '-', 2) "
+            'ELSE b.region END as "admin:subdivision_code"'
+        )
+    elif subdivision_code_col == "admin:subdivision_code":
+        subdivision_select = f', b."{subdivision_code_col}"'
+    else:
+        subdivision_select = f', b."{subdivision_code_col}" as "admin:subdivision_code"'
+
+    return country_select + subdivision_select
+
+
+def _build_spatial_join_query(
+    input_url,
+    countries_source,
+    select_clause,
+    input_geom_col,
+    countries_geom_col,
+    input_bbox_col,
+    countries_bbox_col,
+):
+    """Build the spatial join query based on bbox availability."""
+    if input_bbox_col and countries_bbox_col:
+        return f"""
+    SELECT
+        a.*,
+        {select_clause}
+    FROM '{input_url}' a
+    LEFT JOIN {countries_source} b
+    ON (a.{input_bbox_col}.xmin <= b.{countries_bbox_col}.xmax AND
+        a.{input_bbox_col}.xmax >= b.{countries_bbox_col}.xmin AND
+        a.{input_bbox_col}.ymin <= b.{countries_bbox_col}.ymax AND
+        a.{input_bbox_col}.ymax >= b.{countries_bbox_col}.ymin)
+        AND ST_Intersects(b.{countries_geom_col}, a.{input_geom_col})
+"""
+    return f"""
+    SELECT
+        a.*,
+        {select_clause}
+    FROM '{input_url}' a
+    LEFT JOIN {countries_source} b
+    ON ST_Intersects(b.{countries_geom_col}, a.{input_geom_col})
+"""
+
+
+def _build_filter_table_sql(table_name, source_url, bbox_col, bounds):
+    """Build SQL to create filtered countries table from bounds."""
+    xmin, ymin, xmax, ymax = bounds
+    if isinstance(xmin, str):  # placeholder values
+        return f"""CREATE TEMP TABLE {table_name} AS
+SELECT * FROM '{source_url}'
+WHERE {bbox_col}.xmin <= {xmax}
+  AND {bbox_col}.xmax >= {xmin}
+  AND {bbox_col}.ymin <= {ymax}
+  AND {bbox_col}.ymax >= {ymin};"""
+    return f"""CREATE TEMP TABLE {table_name} AS
+SELECT * FROM '{source_url}'
+WHERE {bbox_col}.xmin <= {xmax:.6f}
+  AND {bbox_col}.xmax >= {xmin:.6f}
+  AND {bbox_col}.ymin <= {ymax:.6f}
+  AND {bbox_col}.ymax >= {ymin:.6f};"""
+
+
+def _setup_default_countries(
+    con,
+    input_parquet,
+    input_url,
+    input_geom_col,
+    input_bbox_col,
+    default_countries_url,
+    countries_bbox_col,
+    countries_table,
+    dry_run,
+    verbose,
+):
+    """Setup filtered countries table for default Overture dataset."""
+    # Show dry-run info for bounds calculation
+    if dry_run:
+        click.echo(
+            click.style(
+                "-- Step 1: Calculate bounding box of input data to filter remote countries",
+                fg="cyan",
+            )
+        )
+        if input_bbox_col:
+            bounds_sql = f"SELECT MIN({input_bbox_col}.xmin) as xmin, ... FROM '{input_url}';"
+        else:
+            bounds_sql = f"SELECT MIN(ST_XMin({input_geom_col})) as xmin, ... FROM '{input_url}';"
+        click.echo(bounds_sql)
+        click.echo()
+        click.echo(click.style("-- Calculating actual bounds...", fg="yellow"))
+
+    if verbose and not dry_run:
+        click.echo("Calculating bounding box of input data to filter remote countries file...")
+
+    bounds = get_dataset_bounds(input_parquet, input_geom_col, verbose=(verbose and not dry_run))
+
+    if not bounds:
+        if dry_run:
+            bounds = ("<xmin>", "<ymin>", "<xmax>", "<ymax>")
+            click.echo(click.style("-- Note: Could not calculate actual bounds", fg="yellow"))
+        else:
+            raise click.ClickException("Could not calculate dataset bounds")
+    else:
+        if dry_run:
+            click.echo(click.style(f"-- Bounds calculated: {bounds}", fg="green"))
+        elif verbose:
+            click.echo(f"Input bbox: {bounds}")
+
+    if dry_run:
+        click.echo()
+        click.echo(click.style("-- Step 2: Create filtered countries table", fg="cyan"))
+
+    create_table_sql = _build_filter_table_sql(
+        countries_table, default_countries_url, countries_bbox_col, bounds
+    )
+
+    if dry_run:
+        click.echo(create_table_sql)
+        click.echo()
+    else:
+        if verbose:
+            click.echo("Creating temporary table with filtered countries...")
+        con.execute(create_table_sql)
+        if verbose:
+            count = con.execute(f"SELECT COUNT(*) FROM {countries_table}").fetchone()[0]
+            click.echo(f"Loaded {count} countries overlapping with input data")
+
+
 def add_country_codes(
     input_parquet,
     countries_parquet,
@@ -185,84 +366,19 @@ def add_country_codes(
     if not dry_run:
         metadata, _ = get_parquet_metadata(input_parquet, verbose)
 
-        # Check bbox structure and provide warnings
-        if input_bbox_info["status"] != "optimal":
-            click.echo(
-                click.style(
-                    "\nWarning: Input file could benefit from bbox optimization:\n"
-                    + input_bbox_info["message"],
-                    fg="yellow",
-                )
-            )
-            if add_bbox_flag:
-                # Fix the bbox issue based on what's missing
-                if not input_bbox_info["has_bbox_column"]:
-                    click.echo("Adding bbox column to input file...")
-                    from geoparquet_io.core.common import add_bbox
+        # Check and optionally fix bbox structure for input file
+        input_bbox_info = _handle_bbox_optimization(
+            input_parquet, input_bbox_info, add_bbox_flag, "Input file", verbose
+        )
+        input_bbox_col = input_bbox_info["bbox_column_name"]
 
-                    add_bbox(input_parquet, "bbox", verbose)
-                    click.echo(
-                        click.style("✓ Added bbox column and metadata to input file", fg="green")
-                    )
-                    # Re-check after adding bbox
-                    input_bbox_info = check_bbox_structure(input_parquet, verbose)
-                    input_bbox_col = input_bbox_info["bbox_column_name"]
-                elif not input_bbox_info["has_bbox_metadata"]:
-                    click.echo("Adding bbox metadata to input file...")
-                    from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata
-
-                    add_bbox_metadata(input_parquet, verbose)
-                    # Re-check after adding metadata
-                    input_bbox_info = check_bbox_structure(input_parquet, verbose)
-            else:
-                click.echo(
-                    click.style(
-                        "💡 Tip: Run this command with --add-bbox to automatically add bbox optimization to the input file",
-                        fg="cyan",
-                    )
-                )
-
-        # Check bbox structure for countries file (only if not using default)
+        # Check and optionally fix bbox structure for countries file (only if not using default)
         if not using_default:
             countries_bbox_info = check_bbox_structure(countries_parquet, verbose)
+            countries_bbox_info = _handle_bbox_optimization(
+                countries_parquet, countries_bbox_info, add_bbox_flag, "Countries file", verbose
+            )
             countries_bbox_col = countries_bbox_info["bbox_column_name"]
-            if countries_bbox_info["status"] != "optimal":
-                click.echo(
-                    click.style(
-                        "\nWarning: Countries file could benefit from bbox optimization:\n"
-                        + countries_bbox_info["message"],
-                        fg="yellow",
-                    )
-                )
-                if add_bbox_flag:
-                    # Fix the bbox issue based on what's missing
-                    if not countries_bbox_info["has_bbox_column"]:
-                        click.echo("Adding bbox column to countries file...")
-                        from geoparquet_io.core.common import add_bbox
-
-                        add_bbox(countries_parquet, "bbox", verbose)
-                        click.echo(
-                            click.style(
-                                "✓ Added bbox column and metadata to countries file", fg="green"
-                            )
-                        )
-                        # Re-check after adding bbox
-                        countries_bbox_info = check_bbox_structure(countries_parquet, verbose)
-                        countries_bbox_col = countries_bbox_info["bbox_column_name"]
-                    elif not countries_bbox_info["has_bbox_metadata"]:
-                        click.echo("Adding bbox metadata to countries file...")
-                        from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata
-
-                        add_bbox_metadata(countries_parquet, verbose)
-                        # Re-check after adding metadata
-                        countries_bbox_info = check_bbox_structure(countries_parquet, verbose)
-                else:
-                    click.echo(
-                        click.style(
-                            "💡 Tip: Run this command with --add-bbox to automatically add bbox optimization to the countries file",
-                            fg="cyan",
-                        )
-                    )
 
         if verbose:
             click.echo(
@@ -286,122 +402,18 @@ def add_country_codes(
     # Handle filtering for default countries file
     countries_table = "filtered_countries"
     if using_default:
-        # Need to calculate bounds and create filtered table
-        if dry_run:
-            # Show the SQL for calculating bounds
-            click.echo(
-                click.style(
-                    "-- Step 1: Calculate bounding box of input data to filter remote countries",
-                    fg="cyan",
-                )
-            )
-
-            # Build the bounds SQL based on whether bbox column exists
-            if input_bbox_col:
-                bounds_sql = f"""SELECT
-    MIN({input_bbox_col}.xmin) as xmin,
-    MIN({input_bbox_col}.ymin) as ymin,
-    MAX({input_bbox_col}.xmax) as xmax,
-    MAX({input_bbox_col}.ymax) as ymax
-FROM '{input_url}';"""
-            else:
-                bounds_sql = f"""SELECT
-    MIN(ST_XMin({input_geom_col})) as xmin,
-    MIN(ST_YMin({input_geom_col})) as ymin,
-    MAX(ST_XMax({input_geom_col})) as xmax,
-    MAX(ST_YMax({input_geom_col})) as ymax
-FROM '{input_url}';"""
-
-            click.echo(bounds_sql)
-            click.echo()
-
-            # Calculate actual bounds for the dry-run display
-            click.echo(
-                click.style(
-                    "-- Calculating actual bounds for use in subsequent queries...", fg="yellow"
-                )
-            )
-
-        # Calculate bounds (for both dry-run and actual execution)
-        if verbose and not dry_run:
-            click.echo("Calculating bounding box of input data to filter remote countries file...")
-
-        bounds = get_dataset_bounds(
-            input_parquet, input_geom_col, verbose=(verbose and not dry_run)
+        _setup_default_countries(
+            con,
+            input_parquet,
+            input_url,
+            input_geom_col,
+            input_bbox_col,
+            default_countries_url,
+            countries_bbox_col,
+            countries_table,
+            dry_run,
+            verbose,
         )
-
-        if not bounds:
-            if dry_run:
-                # Use placeholder values for dry-run
-                xmin, ymin, xmax, ymax = "<xmin>", "<ymin>", "<xmax>", "<ymax>"
-                click.echo(
-                    click.style(
-                        "-- Note: Could not calculate actual bounds, showing placeholder values",
-                        fg="yellow",
-                    )
-                )
-            else:
-                raise click.ClickException("Could not calculate dataset bounds")
-        else:
-            xmin, ymin, xmax, ymax = bounds
-            if dry_run:
-                click.echo(
-                    click.style(
-                        f"-- Bounds calculated: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})",
-                        fg="green",
-                    )
-                )
-            elif verbose:
-                click.echo(f"Input bbox: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
-
-        if dry_run:
-            click.echo()
-            click.echo(
-                click.style(
-                    "-- Step 2: Create temporary table with filtered countries using bbox filtering",
-                    fg="cyan",
-                )
-            )
-            click.echo(
-                click.style(
-                    "-- Note: source.coop countries file has bbox column for fast filtering",
-                    fg="cyan",
-                )
-            )
-
-        # Build the CREATE TABLE query using bbox filtering
-        # We know the default countries file has a bbox column, so use it for filtering
-        if isinstance(xmin, str):  # Using placeholder values
-            create_table_sql = f"""CREATE TEMP TABLE {countries_table} AS
-SELECT * FROM '{default_countries_url}'
-WHERE {countries_bbox_col}.xmin <= {xmax}
-  AND {countries_bbox_col}.xmax >= {xmin}
-  AND {countries_bbox_col}.ymin <= {ymax}
-  AND {countries_bbox_col}.ymax >= {ymin};"""
-        else:  # Using actual numeric bounds
-            create_table_sql = f"""CREATE TEMP TABLE {countries_table} AS
-SELECT * FROM '{default_countries_url}'
-WHERE {countries_bbox_col}.xmin <= {xmax:.6f}
-  AND {countries_bbox_col}.xmax >= {xmin:.6f}
-  AND {countries_bbox_col}.ymin <= {ymax:.6f}
-  AND {countries_bbox_col}.ymax >= {ymin:.6f};"""
-
-        if dry_run:
-            click.echo(create_table_sql)
-            click.echo()
-        else:
-            # Execute the CREATE TABLE query
-            if verbose:
-                click.echo("Creating temporary table with filtered countries...")
-
-            con.execute(create_table_sql)
-
-            if verbose:
-                # Count how many countries were loaded
-                country_count = con.execute(f"SELECT COUNT(*) FROM {countries_table}").fetchone()[0]
-                click.echo(f"Loaded {country_count} countries overlapping with input data")
-
-        # For the main query, use the temp table
         countries_source = countries_table
     else:
         # For custom countries file, just reference the file directly
@@ -423,83 +435,40 @@ WHERE {countries_bbox_col}.xmin <= {xmax:.6f}
             if verbose:
                 click.echo(f"Using country code column: {country_code_col}")
 
-    # Build country code selection
-    if country_code_col == "admin:country_code":
-        country_select = f'b."{country_code_col}"'
-    else:
-        country_select = f'b."{country_code_col}" as "admin:country_code"'
-
     # Determine the subdivision code column
     subdivision_code_col = None
     if using_default:
-        # Default Overture dataset has 'region' column
         subdivision_code_col = "region"
         if verbose and not dry_run:
             click.echo(
                 f"Using subdivision code column: {subdivision_code_col} (default countries file)"
             )
-    else:
-        if not dry_run:
-            # For actual execution, find the appropriate column
-            subdivision_code_col = find_subdivision_code_column(
-                con, countries_source, is_subquery=(countries_source == countries_table)
-            )
-            if subdivision_code_col and verbose:
-                click.echo(f"Using subdivision code column: {subdivision_code_col}")
+    elif not dry_run:
+        subdivision_code_col = find_subdivision_code_column(
+            con, countries_source, is_subquery=(countries_source == countries_table)
+        )
+        if subdivision_code_col and verbose:
+            click.echo(f"Using subdivision code column: {subdivision_code_col}")
 
-    # Build subdivision code selection
-    if subdivision_code_col:
-        # Check if we need to transform (for Overture data with 'region' column)
-        if using_default and subdivision_code_col == "region":
-            # Apply Overture transformation to strip country prefix
-            subdivision_select = (
-                ", CASE WHEN b.region LIKE '%-%' THEN split_part(b.region, '-', 2) "
-                'ELSE b.region END as "admin:subdivision_code"'
-            )
-        elif subdivision_code_col == "admin:subdivision_code":
-            subdivision_select = f', b."{subdivision_code_col}"'
-        else:
-            subdivision_select = f', b."{subdivision_code_col}" as "admin:subdivision_code"'
-    else:
-        subdivision_select = ""
+    # Build select clause using helper
+    select_clause = _build_select_clause(country_code_col, subdivision_code_col, using_default)
 
-    # Combine country and subdivision selections
-    select_clause = country_select + subdivision_select
-
-    # Build spatial join query based on bbox availability
+    # Build spatial join query using helper
     if input_bbox_col and countries_bbox_col:
         if verbose and not dry_run:
             click.echo("Using bbox columns for initial filtering...")
+    elif not dry_run:
+        click.echo("No bbox columns available, using full geometry intersection...")
 
-        # Build SELECT query (without COPY wrapper for new method)
-        query = f"""
-    SELECT
-        a.*,
-        {select_clause}
-    FROM '{input_url}' a
-    LEFT JOIN {countries_source} b
-    ON (a.{input_bbox_col}.xmin <= b.{countries_bbox_col}.xmax AND
-        a.{input_bbox_col}.xmax >= b.{countries_bbox_col}.xmin AND
-        a.{input_bbox_col}.ymin <= b.{countries_bbox_col}.ymax AND
-        a.{input_bbox_col}.ymax >= b.{countries_bbox_col}.ymin)  -- Fast bbox intersection test
-        AND ST_Intersects(  -- More expensive precise check only on bbox matches
-            b.{countries_geom_col},
-            a.{input_geom_col}
-        )
-"""
-    else:
-        if not dry_run:
-            click.echo("No bbox columns available, using full geometry intersection...")
-
-        # Build SELECT query (without COPY wrapper for new method)
-        query = f"""
-    SELECT
-        a.*,
-        {select_clause}
-    FROM '{input_url}' a
-    LEFT JOIN {countries_source} b
-    ON ST_Intersects(b.{countries_geom_col}, a.{input_geom_col})
-"""
+    query = _build_spatial_join_query(
+        input_url,
+        countries_source,
+        select_clause,
+        input_geom_col,
+        countries_geom_col,
+        input_bbox_col,
+        countries_bbox_col,
+    )
 
     if dry_run:
         # In dry-run mode, just show the query
