@@ -242,18 +242,32 @@ def test_parse_wkb_type():
 
 def test_format_geometry_display():
     """Test geometry display formatting."""
+    import struct
+
     # None value
     assert format_geometry_display(None) == "NULL"
 
-    # Point WKB (incomplete - should fall back to type-only display)
-    point_wkb = bytes([0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    # Complete Point WKB - should show WKT when DuckDB works, or <POINT> fallback
+    point_wkb = bytes([0x01, 0x01, 0x00, 0x00, 0x00])  # little endian, Point type
+    point_wkb += struct.pack("<d", 1.5)  # x = 1.5
+    point_wkb += struct.pack("<d", 2.5)  # y = 2.5
     result = format_geometry_display(point_wkb)
-    # Should either show WKT or fall back to <POINT> if DuckDB unavailable
+    # Should either show WKT format or fall back to <POINT> if DuckDB unavailable
     assert "POINT" in result
 
     # Non-bytes value
     result = format_geometry_display("some string")
     assert "some string" in result
+
+
+def test_format_geometry_display_fallback():
+    """Test geometry display falls back to type-only display for invalid WKB."""
+    # Invalid/incomplete WKB that can't be parsed as valid geometry
+    # Should fall back to type-only display <POINT>
+    incomplete_wkb = bytes([0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    result = format_geometry_display(incomplete_wkb)
+    # This incomplete WKB should fall back to <POINT> format
+    assert "POINT" in result
 
 
 def test_wkb_to_wkt():

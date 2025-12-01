@@ -226,9 +226,9 @@ def wkb_to_wkt(wkb_bytes: bytes) -> Optional[str]:
         return None
 
     try:
-        con = duckdb.connect()
-        con.execute("INSTALL spatial;")
-        con.execute("LOAD spatial;")
+        from geoparquet_io.core.common import get_duckdb_connection
+
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         result = con.execute(
             "SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes]
         ).fetchone()
@@ -236,7 +236,7 @@ def wkb_to_wkt(wkb_bytes: bytes) -> Optional[str]:
         if result and result[0]:
             return result[0]
         return None
-    except Exception:
+    except (duckdb.Error, duckdb.IOException, ImportError):
         return None
 
 
