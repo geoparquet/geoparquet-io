@@ -212,6 +212,184 @@ def parse_geometry_type_from_schema(
     return result if result else None
 
 
+def _detect_geo_columns(schema, parquet_schema_str: str) -> dict[str, str]:
+    """Detect geometry/geography columns from schema."""
+    geo_columns = {}
+    for field in schema:
+        geo_type = detect_geo_logical_type(field, parquet_schema_str)
+        if geo_type:
+            geo_columns[field.name] = geo_type
+    return geo_columns
+
+
+def _detect_bbox_columns(schema, geo_columns: dict[str, str]) -> dict[str, str]:
+    """Find bbox struct columns associated with geometry columns."""
+    bbox_columns = {}
+    for field in schema:
+        type_str = str(field.type)
+        if not (type_str.startswith("struct<") and "xmin" in type_str):
+            continue
+        # Pattern 1: geometry -> geometry_bbox
+        if field.name.endswith("_bbox"):
+            base_name = field.name[:-5]
+            if base_name in [f.name for f in schema]:
+                bbox_columns[base_name] = field.name
+        # Pattern 2: Just named 'bbox' - associate with geometry columns
+        elif field.name == "bbox":
+            for geom_name in geo_columns.keys():
+                bbox_columns[geom_name] = field.name
+    return bbox_columns
+
+
+def _extract_rg_bbox(rg, bbox_col_name: str) -> dict[str, float] | None:
+    """Extract bbox values from a row group's bbox struct column."""
+    values = {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
+    for col_idx in range(rg.num_columns):
+        col = rg.column(col_idx)
+        path = col.path_in_schema
+        if not col.is_stats_set or not col.statistics.has_min_max:
+            continue
+        if path == f"{bbox_col_name}.xmin":
+            values["xmin"] = col.statistics.min
+        elif path == f"{bbox_col_name}.ymin":
+            values["ymin"] = col.statistics.min
+        elif path == f"{bbox_col_name}.xmax":
+            values["xmax"] = col.statistics.max
+        elif path == f"{bbox_col_name}.ymax":
+            values["ymax"] = col.statistics.max
+    if all(v is not None for v in values.values()):
+        return values
+    return None
+
+
+def _build_column_dict(col, is_geo: bool, geo_type: str | None) -> dict[str, Any]:
+    """Build column metadata dictionary for JSON output."""
+    col_dict = {
+        "path_in_schema": col.path_in_schema,
+        "file_offset": col.file_offset,
+        "file_path": col.file_path,
+        "physical_type": col.physical_type,
+        "num_values": col.num_values,
+        "total_compressed_size": col.total_compressed_size,
+        "total_uncompressed_size": col.total_uncompressed_size,
+        "compression": col.compression,
+        "encodings": [str(enc) for enc in col.encodings] if hasattr(col, "encodings") else [],
+        "is_geo": is_geo,
+        "geo_type": geo_type,
+    }
+    if col.is_stats_set:
+        stats = col.statistics
+        col_dict["statistics"] = {
+            "has_min_max": getattr(stats, "has_min_max", False),
+            "has_null_count": getattr(stats, "has_null_count", False),
+            "null_count": getattr(stats, "null_count", None),
+        }
+        if stats.has_min_max and not is_geo:
+            try:
+                col_dict["statistics"]["min"] = str(stats.min)
+                col_dict["statistics"]["max"] = str(stats.max)
+            except Exception:
+                pass
+    return col_dict
+
+
+def _extract_crs_from_field_metadata(field) -> Any | None:
+    """Extract CRS from field metadata if present."""
+    if not field.metadata:
+        return None
+    for key, value in field.metadata.items():
+        key_str = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+        if "crs" in key_str.lower():
+            value_str = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+            try:
+                return json.loads(value_str)
+            except Exception:
+                return value_str
+    return None
+
+
+def _build_geo_column_info(field, parquet_schema_str: str) -> dict[str, Any]:
+    """Build geo column info dictionary from a schema field."""
+    geo_type = detect_geo_logical_type(field, parquet_schema_str)
+    col_info = {
+        "logical_type": geo_type,
+        "geometry_type": None,
+        "coordinate_dimension": None,
+        "crs": None,
+        "edges": None,
+        "row_group_stats": [],
+    }
+    geom_details = parse_geometry_type_from_schema(field.name, parquet_schema_str)
+    if geom_details:
+        col_info["geometry_type"] = geom_details.get("geometry_type")
+        col_info["coordinate_dimension"] = geom_details.get("coordinate_dimension")
+        if geom_details.get("crs"):
+            col_info["crs"] = geom_details.get("crs")
+        if geom_details.get("algorithm"):
+            col_info["edges"] = geom_details.get("algorithm")
+    if not col_info["crs"]:
+        col_info["crs"] = _extract_crs_from_field_metadata(field)
+    return col_info
+
+
+def _extract_rg_stats(rg, col_name: str, bbox_columns: dict) -> dict[str, Any]:
+    """Extract row group statistics for a geometry column."""
+    rg_stats: dict[str, Any] = {}
+    # Get bbox from associated struct column
+    if col_name in bbox_columns:
+        bbox = _extract_rg_bbox(rg, bbox_columns[col_name])
+        if bbox:
+            rg_stats.update(bbox)
+    # Get null count from geometry column
+    for col_idx in range(rg.num_columns):
+        col = rg.column(col_idx)
+        if col.path_in_schema == col_name and col.is_stats_set:
+            if col.statistics.has_null_count:
+                rg_stats["null_count"] = col.statistics.null_count
+            break
+    return rg_stats
+
+
+def _calculate_overall_bbox(row_group_stats: list[dict]) -> dict[str, float] | None:
+    """Calculate overall bbox from row group statistics."""
+    overall = {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
+    for rg_stat in row_group_stats:
+        if not all(k in rg_stat for k in ["xmin", "ymin", "xmax", "ymax"]):
+            continue
+        if overall["xmin"] is None:
+            overall = {k: rg_stat[k] for k in ["xmin", "ymin", "xmax", "ymax"]}
+        else:
+            overall["xmin"] = min(overall["xmin"], rg_stat["xmin"])
+            overall["ymin"] = min(overall["ymin"], rg_stat["ymin"])
+            overall["xmax"] = max(overall["xmax"], rg_stat["xmax"])
+            overall["ymax"] = max(overall["ymax"], rg_stat["ymax"])
+    return overall if overall["xmin"] is not None else None
+
+
+def _get_column_minmax(col, is_geo: bool, bbox_columns: dict, rg) -> tuple[str, str]:
+    """Get min/max display values for a column."""
+    col_name = col.path_in_schema
+    if is_geo and col_name in bbox_columns:
+        bbox = _extract_rg_bbox(rg, bbox_columns[col_name])
+        if bbox:
+            return (
+                f"({bbox['xmin']:.6f}, {bbox['ymin']:.6f})",
+                f"({bbox['xmax']:.6f}, {bbox['ymax']:.6f})",
+            )
+    elif not is_geo and col.is_stats_set and col.statistics.has_min_max:
+        try:
+            min_val = str(col.statistics.min)
+            max_val = str(col.statistics.max)
+            if len(min_val) > 20:
+                min_val = min_val[:17] + "..."
+            if len(max_val) > 20:
+                max_val = max_val[:17] + "..."
+            return min_val, max_val
+        except Exception:
+            pass
+    return "-", "-"
+
+
 def format_parquet_metadata_enhanced(
     parquet_file: str,
     json_output: bool,
@@ -237,29 +415,9 @@ def format_parquet_metadata_enhanced(
     # Get Parquet schema string for better type detection
     parquet_schema_str = str(parquet_metadata.schema)
 
-    # Detect geo columns - ONLY those with Parquet Geometry/Geography logical types
-    # Do NOT use GeoParquet metadata or make assumptions based on column names
-    geo_columns = {}
-    for field in schema:
-        geo_type = detect_geo_logical_type(field, parquet_schema_str)
-        if geo_type:
-            geo_columns[field.name] = geo_type
-
-    # Find bbox struct columns associated with geometry columns
-    bbox_columns = {}  # Maps geometry column name to bbox struct column name
-    for field in schema:
-        if str(field.type).startswith("struct<") and "xmin" in str(field.type):
-            # This looks like a bbox struct - try to find associated geometry column
-            # Pattern 1: geometry -> geometry_bbox
-            if field.name.endswith("_bbox"):
-                base_name = field.name[:-5]  # Remove '_bbox'
-                if base_name in [f.name for f in schema]:
-                    bbox_columns[base_name] = field.name
-            # Pattern 2: Just named 'bbox' - associate with any geometry column found
-            elif field.name == "bbox":
-                # Find geometry columns to associate with
-                for geom_name in geo_columns.keys():
-                    bbox_columns[geom_name] = field.name
+    # Detect geo and bbox columns using helper functions
+    geo_columns = _detect_geo_columns(schema, parquet_schema_str)
+    bbox_columns = _detect_bbox_columns(schema, geo_columns)
 
     if json_output:
         # JSON output
@@ -293,45 +451,7 @@ def format_parquet_metadata_enhanced(
                 col = rg.column(j)
                 col_name = col.path_in_schema
                 is_geo = col_name in geo_columns
-
-                col_dict = {
-                    "path_in_schema": col_name,
-                    "file_offset": col.file_offset,
-                    "file_path": col.file_path,
-                    "physical_type": col.physical_type,
-                    "num_values": col.num_values,
-                    "total_compressed_size": col.total_compressed_size,
-                    "total_uncompressed_size": col.total_uncompressed_size,
-                    "compression": col.compression,
-                    "encodings": [str(enc) for enc in col.encodings]
-                    if hasattr(col, "encodings")
-                    else [],
-                    "is_geo": is_geo,
-                    "geo_type": geo_columns.get(col_name),
-                }
-
-                # Add statistics if available
-                if col.is_stats_set:
-                    stats = col.statistics
-                    col_dict["statistics"] = {
-                        "has_min_max": stats.has_min_max
-                        if hasattr(stats, "has_min_max")
-                        else False,
-                        "has_null_count": stats.has_null_count
-                        if hasattr(stats, "has_null_count")
-                        else False,
-                        "null_count": stats.null_count if hasattr(stats, "null_count") else None,
-                    }
-
-                    # Add min/max if available (only for non-geo columns)
-                    # Geo columns get bbox from struct columns, not from their own statistics
-                    if stats.has_min_max and not is_geo:
-                        try:
-                            col_dict["statistics"]["min"] = str(stats.min)
-                            col_dict["statistics"]["max"] = str(stats.max)
-                        except Exception:
-                            pass
-
+                col_dict = _build_column_dict(col, is_geo, geo_columns.get(col_name))
                 rg_dict["columns"].append(col_dict)
 
             metadata_dict["row_groups"].append(rg_dict)
@@ -388,71 +508,17 @@ def format_parquet_metadata_enhanced(
             for j in range(rg.num_columns):
                 col = rg.column(j)
                 col_name = col.path_in_schema
-
-                # Check if this is a geo column
                 is_geo = col_name in geo_columns
                 geo_type = geo_columns.get(col_name)
 
-                # Format column name
-                if is_geo:
-                    col_name_display = Text(f"🌍 {col_name}", style="cyan bold")
-                else:
-                    col_name_display = col_name
+                # Format column name and type
+                col_name_display = Text(f"🌍 {col_name}", style="cyan bold") if is_geo else col_name
+                type_display = (
+                    f"{col.physical_type}({geo_type})" if is_geo and geo_type else col.physical_type
+                )
 
-                # Format type with geo annotation
-                if is_geo and geo_type:
-                    type_display = f"{col.physical_type}({geo_type})"
-                else:
-                    type_display = col.physical_type
-
-                # Get min/max values if available
-                min_val = "-"
-                max_val = "-"
-
-                # For geometry columns, ONLY get bbox from associated struct column
-                if is_geo and col_name in bbox_columns:
-                    bbox_col_name = bbox_columns[col_name]
-                    # Look for the bbox struct components in this row group
-                    xmin_val = None
-                    ymin_val = None
-                    xmax_val = None
-                    ymax_val = None
-
-                    for k in range(rg.num_columns):
-                        bbox_component = rg.column(k)
-                        path = bbox_component.path_in_schema
-
-                        if path == f"{bbox_col_name}.xmin" and bbox_component.is_stats_set:
-                            if bbox_component.statistics.has_min_max:
-                                xmin_val = bbox_component.statistics.min
-                        elif path == f"{bbox_col_name}.ymin" and bbox_component.is_stats_set:
-                            if bbox_component.statistics.has_min_max:
-                                ymin_val = bbox_component.statistics.min
-                        elif path == f"{bbox_col_name}.xmax" and bbox_component.is_stats_set:
-                            if bbox_component.statistics.has_min_max:
-                                xmax_val = bbox_component.statistics.max
-                        elif path == f"{bbox_col_name}.ymax" and bbox_component.is_stats_set:
-                            if bbox_component.statistics.has_min_max:
-                                ymax_val = bbox_component.statistics.max
-
-                    if all(v is not None for v in [xmin_val, ymin_val, xmax_val, ymax_val]):
-                        min_val = f"({xmin_val:.6f}, {ymin_val:.6f})"
-                        max_val = f"({xmax_val:.6f}, {ymax_val:.6f})"
-
-                # For non-geo columns, get min/max from column statistics
-                if not is_geo and col.is_stats_set:
-                    stats = col.statistics
-                    if stats.has_min_max:
-                        try:
-                            min_val = str(stats.min)
-                            max_val = str(stats.max)
-                            # Truncate if too long
-                            if len(min_val) > 20:
-                                min_val = min_val[:17] + "..."
-                            if len(max_val) > 20:
-                                max_val = max_val[:17] + "..."
-                        except Exception:
-                            pass
+                # Get min/max values using helper
+                min_val, max_val = _get_column_minmax(col, is_geo, bbox_columns, rg)
 
                 table.add_row(
                     col_name_display,
@@ -502,69 +568,15 @@ def format_parquet_geo_metadata(
     # Get Parquet schema string for better type detection
     parquet_schema_str = str(parquet_metadata.schema)
 
-    # Extract geospatial metadata from schema
-    # ONLY include columns with Parquet Geometry/Geography logical types
-    # Do NOT make assumptions based on column names
+    # Extract geospatial metadata from schema using helper functions
+    geo_columns = _detect_geo_columns(schema, parquet_schema_str)
+    bbox_columns = _detect_bbox_columns(schema, geo_columns)
+
+    # Build geo column info for each detected geo column
     geo_columns_info = {}
-
-    # Find bbox struct columns associated with geometry columns
-    bbox_columns = {}  # Maps geometry column name to bbox struct column name
     for field in schema:
-        if str(field.type).startswith("struct<") and "xmin" in str(field.type):
-            # This looks like a bbox struct - try to find associated geometry column
-            # Pattern 1: geometry -> geometry_bbox
-            if field.name.endswith("_bbox"):
-                base_name = field.name[:-5]  # Remove '_bbox'
-                if base_name in [f.name for f in schema]:
-                    bbox_columns[base_name] = field.name
-            # Pattern 2: Just named 'bbox' - associate with any geometry column found
-            elif field.name == "bbox":
-                # Will associate after we find geometry columns
-                pass
-
-    for field in schema:
-        geo_type = detect_geo_logical_type(field, parquet_schema_str)
-        if geo_type:
-            # Check if there's a bbox struct named just 'bbox' to associate
-            for f in schema:
-                if f.name == "bbox" and str(f.type).startswith("struct<") and "xmin" in str(f.type):
-                    bbox_columns[field.name] = f.name
-
-            col_info = {
-                "logical_type": geo_type,
-                "geometry_type": None,
-                "coordinate_dimension": None,
-                "crs": None,
-                "edges": None,
-                "row_group_stats": [],
-            }
-
-            # Parse geometry type details from Parquet schema
-            geom_details = parse_geometry_type_from_schema(field.name, parquet_schema_str)
-            if geom_details:
-                col_info["geometry_type"] = geom_details.get("geometry_type")
-                col_info["coordinate_dimension"] = geom_details.get("coordinate_dimension")
-                # CRS from Parquet schema takes precedence
-                if geom_details.get("crs"):
-                    col_info["crs"] = geom_details.get("crs")
-                # Algorithm (edge interpretation) for Geography type
-                if geom_details.get("algorithm"):
-                    col_info["edges"] = geom_details.get("algorithm")
-
-            # If no CRS from schema, try to extract from field metadata
-            if not col_info["crs"] and field.metadata:
-                for key, value in field.metadata.items():
-                    key_str = key.decode("utf-8") if isinstance(key, bytes) else str(key)
-                    if "crs" in key_str.lower():
-                        value_str = (
-                            value.decode("utf-8") if isinstance(value, bytes) else str(value)
-                        )
-                        try:
-                            col_info["crs"] = json.loads(value_str)
-                        except Exception:
-                            col_info["crs"] = value_str
-
-            geo_columns_info[field.name] = col_info
+        if field.name in geo_columns:
+            geo_columns_info[field.name] = _build_geo_column_info(field, parquet_schema_str)
 
     # Extract statistics from row groups
     # Always read ALL row groups for overall bbox calculation
@@ -578,50 +590,8 @@ def format_parquet_geo_metadata(
     for col_name in geo_columns_info.keys():
         for rg_idx in range(num_rg_to_check):
             rg = parquet_metadata.row_group(rg_idx)
-            rg_stats = {"row_group": rg_idx}
-
-            # ONLY get bbox from associated struct column (not from geometry column's own WKB statistics)
-            if col_name in bbox_columns:
-                bbox_col_name = bbox_columns[col_name]
-                # Look for the bbox struct components in this row group
-                xmin_val = None
-                ymin_val = None
-                xmax_val = None
-                ymax_val = None
-
-                for col_idx in range(rg.num_columns):
-                    bbox_component = rg.column(col_idx)
-                    path = bbox_component.path_in_schema
-
-                    if path == f"{bbox_col_name}.xmin" and bbox_component.is_stats_set:
-                        if bbox_component.statistics.has_min_max:
-                            xmin_val = bbox_component.statistics.min
-                    elif path == f"{bbox_col_name}.ymin" and bbox_component.is_stats_set:
-                        if bbox_component.statistics.has_min_max:
-                            ymin_val = bbox_component.statistics.min
-                    elif path == f"{bbox_col_name}.xmax" and bbox_component.is_stats_set:
-                        if bbox_component.statistics.has_min_max:
-                            xmax_val = bbox_component.statistics.max
-                    elif path == f"{bbox_col_name}.ymax" and bbox_component.is_stats_set:
-                        if bbox_component.statistics.has_min_max:
-                            ymax_val = bbox_component.statistics.max
-
-                if all(v is not None for v in [xmin_val, ymin_val, xmax_val, ymax_val]):
-                    rg_stats["xmin"] = xmin_val
-                    rg_stats["ymin"] = ymin_val
-                    rg_stats["xmax"] = xmax_val
-                    rg_stats["ymax"] = ymax_val
-
-            # Get null count from geometry column
-            for col_idx in range(rg.num_columns):
-                col = rg.column(col_idx)
-                if col.path_in_schema == col_name:
-                    if col.is_stats_set:
-                        stats = col.statistics
-                        if stats.has_null_count:
-                            rg_stats["null_count"] = stats.null_count
-                    break
-
+            rg_stats = _extract_rg_stats(rg, col_name, bbox_columns)
+            rg_stats["row_group"] = rg_idx
             if rg_stats:
                 geo_columns_info[col_name]["row_group_stats"].append(rg_stats)
 
@@ -704,29 +674,12 @@ def format_parquet_geo_metadata(
                 else:
                     console.print("    Edges: [dim]N/A (only applies to Geography type)[/dim]")
 
-                # Calculate overall bbox from all row groups
-                overall_xmin = None
-                overall_ymin = None
-                overall_xmax = None
-                overall_ymax = None
-
-                for rg_stat in col_info["row_group_stats"]:
-                    if all(k in rg_stat for k in ["xmin", "ymin", "xmax", "ymax"]):
-                        if overall_xmin is None:
-                            overall_xmin = rg_stat["xmin"]
-                            overall_ymin = rg_stat["ymin"]
-                            overall_xmax = rg_stat["xmax"]
-                            overall_ymax = rg_stat["ymax"]
-                        else:
-                            overall_xmin = min(overall_xmin, rg_stat["xmin"])
-                            overall_ymin = min(overall_ymin, rg_stat["ymin"])
-                            overall_xmax = max(overall_xmax, rg_stat["xmax"])
-                            overall_ymax = max(overall_ymax, rg_stat["ymax"])
-
-                if overall_xmin is not None:
+                # Calculate and display overall bbox
+                overall_bbox = _calculate_overall_bbox(col_info["row_group_stats"])
+                if overall_bbox:
                     console.print(
-                        f"    Overall Bbox: [{overall_xmin:.6f}, {overall_ymin:.6f}, "
-                        f"{overall_xmax:.6f}, {overall_ymax:.6f}]"
+                        f"    Overall Bbox: [{overall_bbox['xmin']:.6f}, {overall_bbox['ymin']:.6f}, "
+                        f"{overall_bbox['xmax']:.6f}, {overall_bbox['ymax']:.6f}]"
                     )
 
                 # Row group statistics (only show first num_rg_to_show)
