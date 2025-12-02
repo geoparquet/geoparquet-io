@@ -652,6 +652,9 @@ def _process_partition_value(
     metadata,
     keep_partition_column,
     verbose,
+    geoparquet_version="1.1",
+    crs=None,
+    keep_bbox=None,
 ):
     """Process a single partition value."""
     output_filename = _determine_output_path(
@@ -691,6 +694,9 @@ def _process_partition_value(
         compression="ZSTD",
         compression_level=15,
         verbose=False,
+        geoparquet_version=geoparquet_version,
+        crs=crs,
+        keep_bbox=keep_bbox,
     )
 
     if verbose:
@@ -712,6 +718,8 @@ def partition_by_column(
     skip_analysis: bool = False,
     filename_prefix: Optional[str] = None,
     profile: Optional[str] = None,
+    geoparquet_version: str = "1.1",
+    keep_bbox: Optional[bool] = None,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.
@@ -732,10 +740,13 @@ def partition_by_column(
         skip_analysis: Skip partition strategy analysis (for performance)
         filename_prefix: Optional prefix for partition filenames (e.g., 'fields' → fields_USA.parquet)
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version for output (1, 1.1, 2.0, parquet_geo_only)
 
     Returns:
         Number of partitions created
     """
+    from geoparquet_io.core.geoparquet_version import extract_crs_from_file
+
     # Setup AWS profile if needed
     setup_aws_profile_if_needed(profile, input_parquet, output_folder)
 
@@ -755,6 +766,9 @@ def partition_by_column(
     ):
         # Get metadata before processing
         metadata, _ = get_parquet_metadata(input_parquet, verbose)
+
+        # Extract CRS from input file for version-aware output
+        input_crs = extract_crs_from_file(input_parquet, verbose=verbose)
 
         # Create output directory
         os.makedirs(actual_output, exist_ok=True)
@@ -793,6 +807,9 @@ def partition_by_column(
                 metadata,
                 keep_partition_column,
                 verbose,
+                geoparquet_version=geoparquet_version,
+                crs=input_crs,
+                keep_bbox=keep_bbox,
             )
 
         con.close()

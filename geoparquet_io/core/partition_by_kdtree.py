@@ -29,6 +29,8 @@ def partition_by_kdtree(
     auto_target_rows: tuple = None,
     filename_prefix: str = None,
     profile: str = None,
+    geoparquet_version: str = "1.1",
+    keep_bbox: bool = None,
 ):
     """
     Partition a GeoParquet file by KD-tree cells.
@@ -186,6 +188,8 @@ def partition_by_kdtree(
             skip_analysis=skip_analysis,
             filename_prefix=filename_prefix,
             profile=profile,
+            geoparquet_version=geoparquet_version,
+            keep_bbox=keep_bbox,
         )
 
         if verbose:

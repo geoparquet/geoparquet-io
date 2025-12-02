@@ -293,6 +293,9 @@ def _create_all_partitions(
     verbose,
     profile,
     original_cols,
+    geoparquet_version="1.1",
+    crs=None,
+    keep_bbox=None,
 ):
     """Create all partition files."""
     partition_count = 0
@@ -311,6 +314,9 @@ def _create_all_partitions(
             verbose,
             profile,
             original_cols,
+            geoparquet_version=geoparquet_version,
+            crs=crs,
+            keep_bbox=keep_bbox,
         ):
             partition_count += 1
     return partition_count
@@ -330,6 +336,9 @@ def _create_partition_file(
     verbose,
     profile,
     original_cols,
+    geoparquet_version="1.1",
+    crs=None,
+    keep_bbox=None,
 ):
     """Create a single partition file."""
     # Build nested folder path
@@ -386,6 +395,9 @@ def _create_partition_file(
         compression_level=15,
         verbose=False,
         profile=profile,
+        geoparquet_version=geoparquet_version,
+        crs=crs,
+        keep_bbox=keep_bbox,
     )
 
     return True
@@ -405,6 +417,8 @@ def partition_by_admin_hierarchical(
     skip_analysis: bool = False,
     filename_prefix: Optional[str] = None,
     profile: Optional[str] = None,
+    geoparquet_version: str = "1.1",
+    keep_bbox: Optional[bool] = None,
 ) -> int:
     """
     Partition a GeoParquet file by administrative boundaries.
@@ -508,6 +522,11 @@ def partition_by_admin_hierarchical(
     # Get metadata from input for preservation
     metadata, _ = get_parquet_metadata(input_parquet, verbose)
 
+    # Extract CRS from input file for version-aware output
+    from geoparquet_io.core.geoparquet_version import extract_crs_from_file
+
+    input_crs = extract_crs_from_file(input_parquet, verbose=verbose)
+
     # Create output directory
     os.makedirs(output_folder, exist_ok=True)
 
@@ -535,6 +554,8 @@ def partition_by_admin_hierarchical(
         verbose,
         profile,
         original_cols,
+        geoparquet_version=geoparquet_version,
+        crs=input_crs,
     )
 
     con.close()

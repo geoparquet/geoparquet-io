@@ -5,6 +5,8 @@ import click
 from geoparquet_io.cli.decorators import (
     compression_options,
     dry_run_option,
+    geoparquet_version_option,
+    keep_bbox_option,
     output_format_options,
     overwrite_option,
     partition_options,
@@ -465,6 +467,8 @@ def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup, overw
 @verbose_option
 @compression_options
 @profile_option
+@geoparquet_version_option
+@keep_bbox_option
 def convert(
     input_file,
     output_file,
@@ -479,6 +483,8 @@ def convert(
     compression,
     compression_level,
     profile,
+    geoparquet_version,
+    keep_bbox,
 ):
     """
     Convert vector formats to optimized GeoParquet.
@@ -501,6 +507,8 @@ def convert(
         crs=crs,
         skip_invalid=skip_invalid,
         profile=profile,
+        geoparquet_version=geoparquet_version,
+        keep_bbox=keep_bbox,
     )
 
 
@@ -751,6 +759,8 @@ def sort():
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @verbose_option
+@geoparquet_version_option
+@keep_bbox_option
 def hilbert_order(
     input_parquet,
     output_parquet,
@@ -762,6 +772,8 @@ def hilbert_order(
     row_group_size,
     row_group_size_mb,
     verbose,
+    geoparquet_version,
+    keep_bbox,
 ):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -770,7 +782,7 @@ def hilbert_order(
     by their position along a Hilbert space-filling curve.
 
     Applies optimal formatting (configurable compression, optimized row groups,
-    bbox metadata) while preserving the CRS. Output is written as GeoParquet 1.1.
+    bbox metadata) while preserving the CRS.
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
@@ -801,6 +813,8 @@ def hilbert_order(
             row_group_mb,
             row_group_size,
             profile,
+            geoparquet_version,
+            keep_bbox,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -935,6 +949,7 @@ def add_country_codes(
 @output_format_options
 @dry_run_option
 @verbose_option
+@geoparquet_version_option
 def add_bbox(
     input_parquet,
     output_parquet,
@@ -946,6 +961,7 @@ def add_bbox(
     row_group_size_mb,
     dry_run,
     verbose,
+    geoparquet_version,
 ):
     """Add a bbox struct column to a GeoParquet file.
 
@@ -995,6 +1011,7 @@ def add_bbox(
         row_group_mb,
         row_group_size,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1035,6 +1052,8 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
 @output_format_options
 @dry_run_option
 @verbose_option
+@geoparquet_version_option
+@keep_bbox_option
 def add_h3(
     input_parquet,
     output_parquet,
@@ -1047,6 +1066,8 @@ def add_h3(
     row_group_size_mb,
     dry_run,
     verbose,
+    geoparquet_version,
+    keep_bbox,
 ):
     """Add an H3 cell ID column to a GeoParquet file.
 
@@ -1086,6 +1107,8 @@ def add_h3(
         row_group_mb,
         row_group_size,
         profile,
+        geoparquet_version,
+        keep_bbox,
     )
 
 
@@ -1129,6 +1152,8 @@ def add_h3(
     help="Force operation on large datasets without confirmation",
 )
 @verbose_option
+@geoparquet_version_option
+@keep_bbox_option
 def add_kdtree(
     input_parquet,
     output_parquet,
@@ -1145,6 +1170,8 @@ def add_kdtree(
     dry_run,
     force,
     verbose,
+    geoparquet_version,
+    keep_bbox,
 ):
     """Add a KD-tree cell ID column to a GeoParquet file.
 
@@ -1227,6 +1254,8 @@ def add_kdtree(
         sample_size,
         auto_target,
         profile,
+        geoparquet_version,
+        keep_bbox,
     )
 
 
@@ -1256,6 +1285,8 @@ def partition():
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
+@keep_bbox_option
 def partition_admin(
     input_parquet,
     output_folder,
@@ -1270,6 +1301,8 @@ def partition_admin(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
+    keep_bbox,
 ):
     """Partition by administrative boundaries via spatial join with remote datasets.
 
@@ -1329,6 +1362,8 @@ def partition_admin(
         skip_analysis=skip_analysis,
         filename_prefix=prefix,
         profile=profile,
+        geoparquet_version=geoparquet_version,
+        keep_bbox=keep_bbox,
     )
 
 
@@ -1340,6 +1375,8 @@ def partition_admin(
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
+@keep_bbox_option
 def partition_string(
     input_parquet,
     output_folder,
@@ -1354,6 +1391,8 @@ def partition_string(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
+    keep_bbox,
 ):
     """Partition a GeoParquet file by string column values.
 
@@ -1394,6 +1433,8 @@ def partition_string(
         skip_analysis,
         prefix,
         profile,
+        geoparquet_version,
+        keep_bbox,
     )
 
 
@@ -1419,6 +1460,8 @@ def partition_string(
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
+@keep_bbox_option
 def partition_h3(
     input_parquet,
     output_folder,
@@ -1434,6 +1477,8 @@ def partition_h3(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
+    keep_bbox,
 ):
     """Partition a GeoParquet file by H3 cells at specified resolution.
 
@@ -1485,6 +1530,8 @@ def partition_h3(
         skip_analysis,
         prefix,
         profile,
+        geoparquet_version,
+        keep_bbox,
     )
 
 
@@ -1527,6 +1574,8 @@ def partition_h3(
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
+@keep_bbox_option
 def partition_kdtree(
     input_parquet,
     output_folder,
@@ -1545,6 +1594,8 @@ def partition_kdtree(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
+    keep_bbox,
 ):
     """Partition a GeoParquet file by KD-tree cells.
 
@@ -1631,6 +1682,8 @@ def partition_kdtree(
         auto_target,
         prefix,
         profile,
+        geoparquet_version,
+        keep_bbox,
     )
 
 

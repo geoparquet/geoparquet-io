@@ -128,6 +128,46 @@ def prefix_option(func):
     )(func)
 
 
+def geoparquet_version_option(func):
+    """
+    Add --geoparquet-version option to a command.
+
+    Allows specifying the GeoParquet version for output files:
+    - 1: GeoParquet 1.0 (geo key only, no Parquet geo type)
+    - 1.1: GeoParquet 1.1 (default, geo key only)
+    - 2.0: GeoParquet 2.0 (geo key AND Parquet geo type with CRS)
+    - parquet_geo_only: Only Parquet geo type, no geo key
+    """
+    return click.option(
+        "--geoparquet-version",
+        type=click.Choice(["1", "1.1", "2.0", "parquet_geo_only"]),
+        default="1.1",
+        show_default=True,
+        help="GeoParquet version for output (1, 1.1, 2.0, or parquet_geo_only)",
+    )(func)
+
+
+def keep_bbox_option(func):
+    """
+    Add --keep-bbox option to a command.
+
+    For GeoParquet 2.0 and parquet_geo_only, the separate bbox column is removed
+    by default (since native bbox support is in the Parquet geo type).
+    Use this flag to retain the bbox column in output.
+
+    Uses flag_value=True with default=None so:
+    - Not specified: None (auto mode - remove for v2.0, keep for v1.x)
+    - --keep-bbox: True (always keep)
+    """
+    return click.option(
+        "--keep-bbox",
+        is_flag=True,
+        flag_value=True,
+        default=None,
+        help="Keep bbox column in output (by default, removed for v2.0/parquet_geo_only which have native bbox)",
+    )(func)
+
+
 def partition_options(func):
     """
     Add standard partitioning options to a command.

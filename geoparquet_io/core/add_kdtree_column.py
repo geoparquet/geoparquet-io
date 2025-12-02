@@ -199,6 +199,8 @@ def add_kdtree_column(
     sample_size=100000,
     auto_target_rows=None,
     profile=None,
+    geoparquet_version="1.1",
+    keep_bbox=None,
 ):
     """
     Add a KD-tree cell ID column to a GeoParquet file.
@@ -227,6 +229,7 @@ def add_kdtree_column(
         sample_size: Number of points to sample for computing boundaries. None for exact mode (default: 100000)
         auto_target_rows: If set, auto-compute iterations to target this many rows per partition
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version for output (1, 1.1, 2.0, parquet_geo_only)
     """
     # Get total row count for auto mode or validation
     input_url = safe_file_url(input_parquet, verbose)
@@ -388,8 +391,10 @@ def add_kdtree_column(
 
     # Get metadata before processing
     from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+    from geoparquet_io.core.geoparquet_version import extract_crs_from_file
 
     metadata, _ = get_parquet_metadata(input_parquet, verbose)
+    input_crs = extract_crs_from_file(input_parquet, verbose=verbose)
 
     # Execute the query and write output
     if verbose:
@@ -406,6 +411,9 @@ def add_kdtree_column(
         custom_metadata=kdtree_metadata,
         verbose=verbose,
         profile=profile,
+        geoparquet_version=geoparquet_version,
+        crs=input_crs,
+        keep_bbox=keep_bbox,
     )
 
     con.close()

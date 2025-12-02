@@ -34,6 +34,8 @@ def hilbert_order(
     row_group_size_mb=None,
     row_group_rows=None,
     profile=None,
+    geoparquet_version="1.1",
+    keep_bbox=None,
 ):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -44,11 +46,12 @@ def hilbert_order(
     - Configurable row group sizes
     - bbox covering metadata
     - Preserves CRS from original file
-    - Writes GeoParquet 1.1 format
+    - Writes GeoParquet format (version based on geoparquet_version param)
     - Supports remote inputs/outputs (S3, GCS, Azure)
 
     Args:
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version for output (1, 1.1, 2.0, parquet_geo_only)
     """
     # Check input file bbox structure
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
@@ -150,6 +153,11 @@ def hilbert_order(
         )
     """
 
+    # Extract CRS from input file to preserve it
+    from geoparquet_io.core.geoparquet_version import extract_crs_from_file
+
+    input_crs = extract_crs_from_file(input_parquet, verbose=verbose)
+
     try:
         # Use the common write function with metadata preservation
         write_parquet_with_metadata(
@@ -163,6 +171,9 @@ def hilbert_order(
             row_group_rows=row_group_rows,
             verbose=verbose,
             profile=profile,
+            geoparquet_version=geoparquet_version,
+            crs=input_crs,
+            keep_bbox=keep_bbox,
         )
 
         if verbose:

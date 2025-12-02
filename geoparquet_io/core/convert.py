@@ -380,9 +380,21 @@ def _validate_wkt_and_check_crs(con, csv_read, wkt_col, skip_invalid, verbose):
     _warn_if_projected_crs(con, csv_read, wkt_col)
 
 
-def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid):
+def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, skip_bbox=False):
     """Build SQL query for CSV/TSV conversion with geometry construction."""
     csv_read = geom_info["csv_read"]
+
+    # Build bbox expression if needed
+    def get_bbox_expr(geom_ref):
+        if skip_bbox:
+            return ""
+        return f""",
+                STRUCT_PACK(
+                    xmin := ST_XMin({geom_ref}),
+                    ymin := ST_YMin({geom_ref}),
+                    xmax := ST_XMax({geom_ref}),
+                    ymax := ST_YMax({geom_ref})
+                ) AS bbox"""
 
     # Build geometry expression and exclusion list
     if geom_info["type"] == "wkt":
@@ -394,6 +406,7 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid):
         # Use TRY_CAST which silently returns NULL for invalid WKT
         if skip_invalid:
             # Use TRY_CAST to parse WKT and return NULL for invalid strings
+            bbox_expr = get_bbox_expr("geometry")
             query_base = f"""
                 WITH parsed_geoms AS (
                     SELECT
@@ -403,13 +416,7 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid):
                 )
                 SELECT
                     * EXCLUDE (geometry),
-                    geometry,
-                    STRUCT_PACK(
-                        xmin := ST_XMin(geometry),
-                        ymin := ST_YMin(geometry),
-                        xmax := ST_XMax(geometry),
-                        ymax := ST_YMax(geometry)
-                    ) AS bbox
+                    geometry{bbox_expr}
                 FROM parsed_geoms
                 WHERE geometry IS NOT NULL
             """
@@ -431,17 +438,12 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid):
         raise click.ClickException("Unknown geometry type in CSV detection")
 
     # Build base query (for non-skip_invalid or lat/lon)
+    bbox_expr = get_bbox_expr(geom_expr)
     if skip_hilbert:
         return f"""
             SELECT
                 * EXCLUDE ({exclude_cols}),
-                {geom_expr} AS geometry,
-                STRUCT_PACK(
-                    xmin := ST_XMin({geom_expr}),
-                    ymin := ST_YMin({geom_expr}),
-                    xmax := ST_XMax({geom_expr}),
-                    ymax := ST_YMax({geom_expr})
-                ) AS bbox
+                {geom_expr} AS geometry{bbox_expr}
             FROM {csv_read}
             {where_clause}
         """
@@ -451,13 +453,7 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid):
     return f"""
         SELECT
             * EXCLUDE ({exclude_cols}),
-            {geom_expr} AS geometry,
-            STRUCT_PACK(
-                xmin := ST_XMin({geom_expr}),
-                ymin := ST_YMin({geom_expr}),
-                xmax := ST_XMax({geom_expr}),
-                ymax := ST_YMax({geom_expr})
-            ) AS bbox
+            {geom_expr} AS geometry{bbox_expr}
         FROM {csv_read}
         {where_clause}
         ORDER BY ST_Hilbert(
@@ -525,7 +521,9 @@ def _calculate_csv_bounds(con, geom_info, skip_invalid, verbose):
     return bounds_result
 
 
-def _build_conversion_query(input_file, geom_column, skip_hilbert, bounds=None, is_parquet=False):
+def _build_conversion_query(
+    input_file, geom_column, skip_hilbert, bounds=None, is_parquet=False, skip_bbox=False
+):
     """Build SQL query for conversion with optional Hilbert ordering."""
     # For parquet files, read directly; for other formats use ST_Read
     if is_parquet:
@@ -533,16 +531,22 @@ def _build_conversion_query(input_file, geom_column, skip_hilbert, bounds=None, 
     else:
         table_expr = f"ST_Read('{input_file}')"
 
-    base_select = f"""
-        SELECT
-            * EXCLUDE ({geom_column}),
-            {geom_column} AS geometry,
+    # Build bbox column expression if needed
+    if skip_bbox:
+        bbox_expr = ""
+    else:
+        bbox_expr = """,
             STRUCT_PACK(
                 xmin := ST_XMin({geom_column}),
                 ymin := ST_YMin({geom_column}),
                 xmax := ST_XMax({geom_column}),
                 ymax := ST_YMax({geom_column})
-            ) AS bbox
+            ) AS bbox""".format(geom_column=geom_column)
+
+    base_select = f"""
+        SELECT
+            * EXCLUDE ({geom_column}),
+            {geom_column} AS geometry{bbox_expr}
         FROM {table_expr}
     """
 
@@ -569,6 +573,7 @@ def _convert_csv_path(
     skip_hilbert,
     skip_invalid,
     verbose,
+    skip_bbox=False,
 ):
     """Handle CSV/TSV conversion path. Returns SQL query."""
     geom_info = _detect_csv_geometry_column(
@@ -604,15 +609,24 @@ def _convert_csv_path(
     )
 
     if verbose:
-        msg = "Reading CSV and creating geometries..."
-        if not effective_skip_hilbert:
-            msg = "Reading CSV, creating geometries, and applying Hilbert ordering..."
+        if skip_bbox:
+            msg = "Reading CSV and creating geometries..."
+            if not effective_skip_hilbert:
+                msg = "Reading CSV, creating geometries, and applying Hilbert ordering..."
+        else:
+            msg = "Reading CSV and creating geometries with bbox..."
+            if not effective_skip_hilbert:
+                msg = "Reading CSV, creating geometries with bbox, and applying Hilbert ordering..."
         click.echo(msg)
 
-    return _build_csv_conversion_query(geom_info, effective_skip_hilbert, bounds, skip_invalid)
+    return _build_csv_conversion_query(
+        geom_info, effective_skip_hilbert, bounds, skip_invalid, skip_bbox=skip_bbox
+    )
 
 
-def _convert_spatial_path(con, input_file, skip_hilbert, verbose, is_parquet=False):
+def _convert_spatial_path(
+    con, input_file, skip_hilbert, verbose, is_parquet=False, skip_bbox=False
+):
     """Handle standard spatial format conversion path. Returns SQL query."""
     geom_column = _detect_geometry_column(con, input_file, verbose, is_parquet=is_parquet)
 
@@ -623,13 +637,18 @@ def _convert_spatial_path(con, input_file, skip_hilbert, verbose, is_parquet=Fal
     )
 
     if verbose:
-        msg = "Reading input and adding bbox column..."
-        if not skip_hilbert:
-            msg = "Pass 1: Reading input, adding bbox, and applying Hilbert ordering..."
+        if skip_bbox:
+            msg = "Reading input..."
+            if not skip_hilbert:
+                msg = "Pass 1: Reading input and applying Hilbert ordering..."
+        else:
+            msg = "Reading input and adding bbox column..."
+            if not skip_hilbert:
+                msg = "Pass 1: Reading input, adding bbox, and applying Hilbert ordering..."
         click.echo(msg)
 
     return _build_conversion_query(
-        input_file, geom_column, skip_hilbert, bounds, is_parquet=is_parquet
+        input_file, geom_column, skip_hilbert, bounds, is_parquet=is_parquet, skip_bbox=skip_bbox
     )
 
 
@@ -648,6 +667,8 @@ def convert_to_geoparquet(
     crs="EPSG:4326",
     skip_invalid=False,
     profile=None,
+    geoparquet_version="1.1",
+    keep_bbox=None,
 ):
     """
     Convert vector format to optimized GeoParquet.
@@ -657,7 +678,7 @@ def convert_to_geoparquet(
     - 100k row groups
     - Bbox column with metadata
     - Hilbert spatial ordering (unless --skip-hilbert)
-    - GeoParquet 1.1.0 metadata
+    - GeoParquet metadata (version based on geoparquet_version param)
 
     Args:
         input_file: Path to input file (Shapefile, GeoJSON, GeoPackage, CSV/TSV, etc.)
@@ -674,6 +695,7 @@ def convert_to_geoparquet(
         crs: CRS for geometry data (default: EPSG:4326/WGS84)
         skip_invalid: Skip rows with invalid geometries instead of failing
         profile: AWS profile name for S3 operations
+        geoparquet_version: GeoParquet version for output (1, 1.1, 2.0, parquet_geo_only)
 
     Raises:
         click.ClickException: If input file not found or conversion fails
@@ -703,6 +725,20 @@ def convert_to_geoparquet(
     is_csv = _is_csv_file(input_file)
     is_parquet = _is_parquet_file(input_file)
 
+    # Extract CRS from input file if it's a parquet file
+    input_crs = None
+    if is_parquet:
+        from geoparquet_io.core.geoparquet_version import extract_crs_from_file
+
+        input_crs = extract_crs_from_file(input_url, verbose=verbose)
+
+    # Determine if we should skip adding bbox in the query
+    # For GeoParquet 2.0/parquet_geo_only, native geo type handles bbox
+    # unless user explicitly requests to keep bbox
+    from geoparquet_io.core.geoparquet_version import should_remove_bbox_column
+
+    skip_bbox_in_query = should_remove_bbox_column(geoparquet_version) and keep_bbox is not True
+
     try:
         if is_csv:
             query = _convert_csv_path(
@@ -716,10 +752,16 @@ def convert_to_geoparquet(
                 skip_hilbert,
                 skip_invalid,
                 verbose,
+                skip_bbox=skip_bbox_in_query,
             )
         else:
             query = _convert_spatial_path(
-                con, input_url, skip_hilbert, verbose, is_parquet=is_parquet
+                con,
+                input_url,
+                skip_hilbert,
+                verbose,
+                is_parquet=is_parquet,
+                skip_bbox=skip_bbox_in_query,
             )
 
         write_parquet_with_metadata(
@@ -732,6 +774,9 @@ def convert_to_geoparquet(
             row_group_rows=row_group_rows,
             verbose=verbose,
             profile=profile,
+            geoparquet_version=geoparquet_version,
+            crs=input_crs,
+            keep_bbox=keep_bbox,
         )
 
         # Report results

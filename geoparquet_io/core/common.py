@@ -561,7 +561,13 @@ def _add_custom_covering(geo_meta, geom_col, custom_metadata, verbose):
 
 
 def create_geo_metadata(
-    original_metadata, geom_col, bbox_info, custom_metadata=None, verbose=False
+    original_metadata,
+    geom_col,
+    bbox_info,
+    custom_metadata=None,
+    verbose=False,
+    geoparquet_version="1.1",
+    crs=None,
 ):
     """
     Create or update GeoParquet metadata with spatial index covering information.
@@ -572,16 +578,29 @@ def create_geo_metadata(
         bbox_info: Result from check_bbox_structure
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
+        geoparquet_version: GeoParquet version for output (1, 1.1, 2.0, parquet_geo_only)
+        crs: CRS to embed (PROJJSON dict or None for default)
 
     Returns:
         dict: Updated geo metadata
     """
+    from geoparquet_io.core.geoparquet_version import get_version_string
+
     geo_meta = _parse_existing_geo_metadata(original_metadata)
     geo_meta = _initialize_geo_metadata(geo_meta, geom_col)
+
+    # Set version string based on geoparquet_version
+    version_string = get_version_string(geoparquet_version)
+    if version_string:
+        geo_meta["version"] = version_string
 
     # Add encoding if not present (required by GeoParquet spec)
     if "encoding" not in geo_meta["columns"][geom_col]:
         geo_meta["columns"][geom_col]["encoding"] = "WKB"
+
+    # Add CRS if provided
+    if crs is not None:
+        geo_meta["columns"][geom_col]["crs"] = crs
 
     # Add bbox covering if needed
     _add_bbox_covering(geo_meta, geom_col, bbox_info, verbose)
@@ -736,18 +755,21 @@ def validate_compression_settings(compression, compression_level, verbose=False)
     return compression, compression_level, compression_desc
 
 
-def build_copy_query(query, output_file, compression):
+def build_copy_query(query, output_file, compression, geoparquet_version="1.1"):
     """
-    Build a DuckDB COPY query with proper compression settings.
+    Build a DuckDB COPY query with proper compression settings and version.
 
     Args:
         query: SELECT query or existing COPY query
         output_file: Output file path
         compression: Compression type (already validated)
+        geoparquet_version: GeoParquet version for output (1, 1.1, 2.0, parquet_geo_only)
 
     Returns:
         str: Complete COPY query
     """
+    from geoparquet_io.core.geoparquet_version import format_copy_options
+
     # Map to DuckDB compression names
     duckdb_compression_map = {
         "ZSTD": "zstd",
@@ -759,7 +781,10 @@ def build_copy_query(query, output_file, compression):
     }
     duckdb_compression = duckdb_compression_map[compression]
 
-    # Modify query to use the specified compression
+    # Get copy options including version
+    copy_options = format_copy_options(geoparquet_version, duckdb_compression)
+
+    # Modify query to use the specified compression and version
     if "COPY (" in query and "TO '" in query:
         # Extract the query parts
         query_parts = query.split("TO '")
@@ -768,14 +793,14 @@ def build_copy_query(query, output_file, compression):
             # Find the end of the output path
             path_end = output_path_and_rest.find("'")
             if path_end > 0:
-                # Rebuild query with compression
+                # Rebuild query with compression and version
                 base_query = query_parts[0] + f"TO '{output_file}'"
-                query = base_query + f"\n(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"
+                query = base_query + f"\n({copy_options});"
     else:
         # Assume it's a SELECT query that needs COPY wrapper
         query = f"""COPY ({query})
 TO '{output_file}'
-(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
+({copy_options});"""
 
     return query
 
@@ -789,6 +814,9 @@ def rewrite_with_metadata(
     row_group_rows=None,
     custom_metadata=None,
     verbose=False,
+    geoparquet_version="1.1",
+    crs=None,
+    keep_bbox=None,
 ):
     """
     Rewrite a parquet file with updated metadata and compression settings.
@@ -802,9 +830,22 @@ def rewrite_with_metadata(
         row_group_rows: Exact number of rows per row group
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
+        geoparquet_version: GeoParquet version for output (1, 1.1, 2.0, parquet_geo_only)
+        crs: CRS to embed (PROJJSON dict or None for default)
+        keep_bbox: Whether to keep bbox column. None=auto (remove for v2.0), True=keep, False=remove
     """
+    from geoparquet_io.core.geoparquet_version import (
+        apply_parquet_geo_type_crs,
+        should_remove_bbox_column,
+        should_write_geo_key,
+        validate_crs_for_version,
+    )
+
     if verbose:
         click.echo("Updating metadata and optimizing file structure...")
+
+    # Validate CRS for target version
+    validated_crs = validate_crs_for_version(crs, geoparquet_version, verbose)
 
     # Check if this is a Hive-partitioned file by examining the parent directory
     parent_dir = os.path.basename(os.path.dirname(output_file))
@@ -819,6 +860,31 @@ def rewrite_with_metadata(
         # Read the written file normally
         table = pq.read_table(output_file)
 
+    # Determine if we should remove bbox columns
+    # Default behavior: remove for v2.0/parquet_geo_only (they have native bbox support)
+    remove_bbox = False
+    bbox_cols_removed = []
+    if keep_bbox is None:
+        # Auto mode: remove for v2.0/parquet_geo_only
+        remove_bbox = should_remove_bbox_column(geoparquet_version)
+    elif keep_bbox is False:
+        remove_bbox = True
+    # If keep_bbox is True, we don't remove
+
+    if remove_bbox:
+        # Detect ALL bbox columns from schema and remove them
+        bbox_cols_to_remove = _find_all_bbox_columns_in_schema(table.schema, verbose=False)
+        for bbox_col in bbox_cols_to_remove:
+            if bbox_col in table.column_names:
+                if verbose:
+                    click.echo(
+                        f"Removing bbox column '{bbox_col}' (native bbox in Parquet geo type)"
+                    )
+                # Remove the column from the table
+                col_idx = table.column_names.index(bbox_col)
+                table = table.remove_column(col_idx)
+                bbox_cols_removed.append(bbox_col)
+
     # Prepare metadata
     existing_metadata = table.schema.metadata or {}
     new_metadata = {}
@@ -832,14 +898,41 @@ def rewrite_with_metadata(
     geom_col = find_primary_geometry_column(output_file, verbose=False)
     bbox_info = check_bbox_structure(output_file, verbose=False)
 
-    # Create geo metadata - use existing metadata if no original provided
-    # This preserves DuckDB-generated metadata (encoding, geometry_types, etc.)
-    metadata_source = original_metadata if original_metadata else existing_metadata
-    geo_meta = create_geo_metadata(metadata_source, geom_col, bbox_info, custom_metadata, verbose)
-    new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+    # If we removed any bbox columns, update bbox_info to reflect this
+    if bbox_cols_removed:
+        bbox_info = {
+            "has_bbox_column": False,
+            "has_bbox_covering_metadata": False,
+            "bbox_column_name": None,
+            "status": "no_bbox",
+            "message": f"bbox column(s) removed for GeoParquet 2.0 output: {', '.join(bbox_cols_removed)}",
+        }
+
+    # Create geo metadata if this version uses it
+    if should_write_geo_key(geoparquet_version):
+        # Use existing metadata if no original provided
+        # This preserves DuckDB-generated metadata (encoding, geometry_types, etc.)
+        metadata_source = original_metadata if original_metadata else existing_metadata
+        geo_meta = create_geo_metadata(
+            metadata_source,
+            geom_col,
+            bbox_info,
+            custom_metadata,
+            verbose,
+            geoparquet_version=geoparquet_version,
+            crs=validated_crs,
+        )
+        new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+
+    # Get schema and potentially apply CRS to Parquet geo type
+    schema = table.schema
+    schema = apply_parquet_geo_type_crs(schema, geom_col, validated_crs, geoparquet_version)
 
     # Update table schema with new metadata
     new_table = table.replace_schema_metadata(new_metadata)
+    # If schema changed (CRS in geo type), cast to new schema
+    if schema != table.schema:
+        new_table = new_table.cast(schema)
 
     # Calculate optimal row groups
     file_size = os.path.getsize(output_file)
@@ -898,6 +991,9 @@ def write_parquet_with_metadata(
     custom_metadata=None,
     verbose=False,
     profile=None,
+    geoparquet_version="1.1",
+    crs=None,
+    keep_bbox=None,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
@@ -920,6 +1016,9 @@ def write_parquet_with_metadata(
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version for output (1, 1.1, 2.0, parquet_geo_only)
+        crs: CRS to embed (PROJJSON dict or None for default)
+        keep_bbox: Whether to keep bbox column. None=auto (remove for v2.0), True=keep, False=remove
 
     Returns:
         None
@@ -939,12 +1038,24 @@ def write_parquet_with_metadata(
         if verbose:
             click.echo(f"Writing output with {compression_desc} compression...")
 
-        # Build and execute query
-        final_query = build_copy_query(query, actual_output, compression)
+        # Build and execute query with version option
+        final_query = build_copy_query(query, actual_output, compression, geoparquet_version)
         con.execute(final_query)
 
         # Rewrite with metadata and optimal settings
-        if original_metadata or verbose or row_group_size_mb or row_group_rows:
+        # Always rewrite if keep_bbox is not None (user specified) or if v2.0 (may need to remove bbox)
+        from geoparquet_io.core.geoparquet_version import should_remove_bbox_column
+
+        needs_rewrite = (
+            original_metadata
+            or verbose
+            or row_group_size_mb
+            or row_group_rows
+            or crs
+            or keep_bbox is not None
+            or should_remove_bbox_column(geoparquet_version)
+        )
+        if needs_rewrite:
             rewrite_with_metadata(
                 actual_output,
                 original_metadata,
@@ -954,6 +1065,9 @@ def write_parquet_with_metadata(
                 row_group_rows,
                 custom_metadata,
                 verbose,
+                geoparquet_version=geoparquet_version,
+                crs=crs,
+                keep_bbox=keep_bbox,
             )
 
         # Upload to remote if needed
@@ -984,18 +1098,38 @@ def format_size(size_bytes):
 
 
 def _find_bbox_column_in_schema(schema, verbose):
-    """Find bbox column in schema by conventional names or structure."""
-    conventional_names = ["bbox", "bounds", "extent"]
+    """Find first bbox column in schema by conventional names or structure."""
+    columns = _find_all_bbox_columns_in_schema(schema, verbose)
+    return columns[0] if columns else None
+
+
+def _find_all_bbox_columns_in_schema(schema, verbose):
+    """Find ALL bbox columns in schema by conventional names or structure."""
+    # Match conventional names and variants like bbox_1, bbox_2, etc.
+    import re
+
+    conventional_patterns = [
+        re.compile(r"^bbox(_\d+)?$"),  # bbox, bbox_1, bbox_2, etc.
+        re.compile(r"^bounds(_\d+)?$"),
+        re.compile(r"^extent(_\d+)?$"),
+    ]
+
+    bbox_columns = []
     for field in schema:
-        if field.name in conventional_names or (
-            isinstance(field.type, type(schema[0].type))
-            and str(field.type).startswith("struct<")
-            and all(f in str(field.type) for f in ["xmin", "ymin", "xmax", "ymax"])
-        ):
+        # Check if name matches a conventional pattern
+        matches_name = any(pattern.match(field.name) for pattern in conventional_patterns)
+
+        # Check if it's a struct with xmin/ymin/xmax/ymax
+        is_bbox_struct = str(field.type).startswith("struct<") and all(
+            f in str(field.type) for f in ["xmin", "ymin", "xmax", "ymax"]
+        )
+
+        if matches_name or is_bbox_struct:
             if verbose:
                 click.echo(f"Found bbox column: {field.name} with type {field.type}")
-            return field.name
-    return None
+            bbox_columns.append(field.name)
+
+    return bbox_columns
 
 
 def _check_bbox_metadata_covering(metadata, has_bbox_column, verbose):
@@ -1199,6 +1333,8 @@ def add_computed_column(
     dry_run_description=None,
     custom_metadata=None,
     profile=None,
+    geoparquet_version="1.1",
+    keep_bbox=None,
 ):
     """
     Add a computed column to a GeoParquet file using SQL expression.
@@ -1227,6 +1363,7 @@ def add_computed_column(
         dry_run_description: Optional description for dry-run output
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version for output (1, 1.1, 2.0, parquet_geo_only)
 
     Example:
         add_computed_column(
@@ -1338,6 +1475,11 @@ TO '{output_parquet}'
     if verbose:
         click.echo(f"Creating column '{column_name}'...")
 
+    # Extract CRS from input file to preserve it
+    from geoparquet_io.core.geoparquet_version import extract_crs_from_file
+
+    input_crs = extract_crs_from_file(input_parquet, verbose=verbose)
+
     write_parquet_with_metadata(
         con,
         query,
@@ -1350,6 +1492,9 @@ TO '{output_parquet}'
         custom_metadata=custom_metadata,
         verbose=verbose,
         profile=profile,
+        geoparquet_version=geoparquet_version,
+        crs=input_crs,
+        keep_bbox=keep_bbox,
     )
 
 
