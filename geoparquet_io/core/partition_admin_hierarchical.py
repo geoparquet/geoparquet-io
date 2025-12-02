@@ -9,7 +9,6 @@ This module provides partitioning by administrative boundaries through a two-ste
 """
 
 import os
-from typing import Optional
 
 import click
 import duckdb
@@ -187,7 +186,7 @@ def _build_admin_select_for_partitioning(levels, boundary_columns):
     """Build admin SELECT clause for partitioning."""
     admin_select_parts = []
     output_column_names = []
-    for i, (level, col) in enumerate(zip(levels, boundary_columns)):
+    for i, (level, col) in enumerate(zip(levels, boundary_columns, strict=True)):
         output_col = f"_admin_{level}"  # Temporary internal name
         output_column_names.append(output_col)
         # Handle struct field access vs simple column names
@@ -334,7 +333,7 @@ def _create_partition_file(
     """Create a single partition file."""
     # Build nested folder path
     folder_parts = []
-    for level, value in zip(levels, combination):
+    for level, value in zip(levels, combination, strict=True):
         safe_value = sanitize_filename(str(value))
         if hive:
             folder_parts.append(f"{level}={safe_value}")
@@ -365,7 +364,8 @@ def _create_partition_file(
 
     # Build WHERE clause
     where_conditions = [
-        f"\"{col}\" = '{value}'" for col, value in zip(output_column_names, combination)
+        f"\"{col}\" = '{value}'"
+        for col, value in zip(output_column_names, combination, strict=True)
     ]
     where_clause = " AND ".join(where_conditions)
 
@@ -393,7 +393,7 @@ def _create_partition_file(
 
 def partition_by_admin_hierarchical(
     input_parquet: str,
-    output_folder: Optional[str],
+    output_folder: str | None,
     dataset_name: str,
     levels: list[str],
     hive: bool = False,
@@ -403,8 +403,8 @@ def partition_by_admin_hierarchical(
     verbose: bool = False,
     force: bool = False,
     skip_analysis: bool = False,
-    filename_prefix: Optional[str] = None,
-    profile: Optional[str] = None,
+    filename_prefix: str | None = None,
+    profile: str | None = None,
 ) -> int:
     """
     Partition a GeoParquet file by administrative boundaries.
@@ -548,7 +548,7 @@ def _get_preview_partitions(con, table_name, partition_columns, level_names):
     """Query partition statistics for preview."""
     group_by_cols = ", ".join([f'"{col}"' for col in partition_columns])
     select_cols = ", ".join(
-        [f'"{col}" as {name}' for col, name in zip(partition_columns, level_names)]
+        [f'"{col}" as {name}' for col, name in zip(partition_columns, level_names, strict=True)]
     )
 
     query = f"""

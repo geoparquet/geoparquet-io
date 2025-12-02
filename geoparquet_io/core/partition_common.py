@@ -2,7 +2,6 @@
 
 import os
 import re
-from typing import Optional
 
 import click
 
@@ -146,7 +145,7 @@ def _check_partition_warnings(
 def analyze_partition_strategy(
     input_parquet: str,
     column_name: str,
-    column_prefix_length: Optional[int] = None,
+    column_prefix_length: int | None = None,
     max_partitions: int = 10000,
     min_rows_per_partition: int = 100,
     min_partition_size_mb: float = 0.001,  # 1KB
@@ -331,7 +330,7 @@ def _generate_recommendations(
     max_rows: int,
     avg_size_mb: float,
     imbalance_ratio: float,
-    column_prefix_length: Optional[int] = None,
+    column_prefix_length: int | None = None,
 ) -> list:
     """
     Generate actionable recommendations based on partition analysis.
@@ -406,7 +405,7 @@ def _generate_recommendations(
 
 
 def _display_partition_analysis(
-    analysis: dict, column_name: str, column_prefix_length: Optional[int]
+    analysis: dict, column_name: str, column_prefix_length: int | None
 ) -> None:
     """Display partition analysis results in a formatted way."""
     partition_desc = f"'{column_name}'"
@@ -457,7 +456,7 @@ def _display_partition_analysis(
 def preview_partition(
     input_parquet: str,
     column_name: str,
-    column_prefix_length: Optional[int] = None,
+    column_prefix_length: int | None = None,
     limit: int = 15,
     verbose: bool = False,
 ) -> dict:
@@ -703,15 +702,15 @@ def partition_by_column(
     input_parquet: str,
     output_folder: str,
     column_name: str,
-    column_prefix_length: Optional[int] = None,
+    column_prefix_length: int | None = None,
     hive: bool = False,
     overwrite: bool = False,
     verbose: bool = False,
     keep_partition_column: bool = True,
     force: bool = False,
     skip_analysis: bool = False,
-    filename_prefix: Optional[str] = None,
-    profile: Optional[str] = None,
+    filename_prefix: str | None = None,
+    profile: str | None = None,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.

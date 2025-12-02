@@ -3,7 +3,6 @@
 import asyncio
 import time
 from pathlib import Path
-from typing import Optional
 
 import obstore as obs
 
@@ -26,7 +25,7 @@ async def _upload_file_with_progress(store, source: Path, target_key: str, **kwa
 
 
 def _print_single_file_dry_run(
-    source: Path, destination: str, target_key: str, size_mb: float, profile: Optional[str]
+    source: Path, destination: str, target_key: str, size_mb: float, profile: str | None
 ) -> None:
     """Print dry-run information for single file upload."""
     print("\n=== DRY RUN MODE - No files will be uploaded ===\n")
@@ -46,8 +45,8 @@ def _print_directory_dry_run(
     destination: str,
     prefix: str,
     total_size_mb: float,
-    pattern: Optional[str],
-    profile: Optional[str],
+    pattern: str | None,
+    profile: str | None,
 ) -> None:
     """Print dry-run information for directory upload."""
     print("\n=== DRY RUN MODE - No files will be uploaded ===\n")
@@ -70,7 +69,7 @@ def _print_directory_dry_run(
 
 
 def _setup_store_and_kwargs(
-    bucket_url: str, profile: Optional[str], chunk_concurrency: int, chunk_size: Optional[int]
+    bucket_url: str, profile: str | None, chunk_concurrency: int, chunk_size: int | None
 ):
     """
     Setup object store and upload kwargs.
@@ -92,9 +91,9 @@ def _upload_single_file(
     destination: str,
     bucket_url: str,
     prefix: str,
-    profile: Optional[str],
+    profile: str | None,
     chunk_concurrency: int,
-    chunk_size: Optional[int],
+    chunk_size: int | None,
     dry_run: bool,
 ) -> None:
     """Upload a single file."""
@@ -115,11 +114,11 @@ def _upload_directory(
     destination: str,
     bucket_url: str,
     prefix: str,
-    profile: Optional[str],
-    pattern: Optional[str],
+    profile: str | None,
+    pattern: str | None,
     max_files: int,
     chunk_concurrency: int,
-    chunk_size: Optional[int],
+    chunk_size: int | None,
     fail_fast: bool,
     dry_run: bool,
 ) -> None:
@@ -157,11 +156,11 @@ def _upload_directory(
 def upload(
     source: Path,
     destination: str,
-    profile: Optional[str] = None,
-    pattern: Optional[str] = None,
+    profile: str | None = None,
+    pattern: str | None = None,
     max_files: int = 4,
     chunk_concurrency: int = 12,
-    chunk_size: Optional[int] = None,
+    chunk_size: int | None = None,
     fail_fast: bool = False,
     dry_run: bool = False,
 ) -> None:
@@ -212,7 +211,7 @@ def upload(
 
 async def upload_file_async(
     store, source: Path, target_key: str, **kwargs
-) -> tuple[Path, Optional[Exception]]:
+) -> tuple[Path, Exception | None]:
     """Upload a single file asynchronously.
 
     Returns:
@@ -237,7 +236,7 @@ async def upload_file_async(
         return source, e
 
 
-def _find_files(source: Path, pattern: Optional[str]) -> list[Path]:
+def _find_files(source: Path, pattern: str | None) -> list[Path]:
     """Find all files in directory matching pattern."""
     files = list(source.rglob(pattern) if pattern else source.rglob("*"))
     return [f for f in files if f.is_file()]
@@ -286,7 +285,7 @@ async def upload_directory_async(
     store,
     source: Path,
     prefix: str,
-    pattern: Optional[str],
+    pattern: str | None,
     max_files: int,
     fail_fast: bool,
     **kwargs,
