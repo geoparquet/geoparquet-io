@@ -6,7 +6,7 @@ including Parquet file metadata, Parquet geospatial metadata, and GeoParquet met
 """
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 import click
 import fsspec
@@ -50,7 +50,7 @@ def _check_extension_type(field):
     return None
 
 
-def detect_geo_logical_type(field, parquet_schema_str: Optional[str] = None) -> Optional[str]:
+def detect_geo_logical_type(field, parquet_schema_str: str | None = None) -> str | None:
     """
     Detect if a field has a GEOMETRY or GEOGRAPHY logical type.
 
@@ -80,7 +80,7 @@ def detect_geo_logical_type(field, parquet_schema_str: Optional[str] = None) -> 
 
 def parse_geometry_type_from_schema(
     field_name: str, parquet_schema_str: str
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Parse geometry type details from Parquet schema string.
 
@@ -215,8 +215,8 @@ def parse_geometry_type_from_schema(
 def format_parquet_metadata_enhanced(
     parquet_file: str,
     json_output: bool,
-    row_groups_limit: Optional[int] = 1,
-    primary_geom_col: Optional[str] = None,
+    row_groups_limit: int | None = 1,
+    primary_geom_col: str | None = None,
 ) -> None:
     """
     Format and output enhanced Parquet file metadata with geo column highlighting.
@@ -479,7 +479,7 @@ def format_parquet_metadata_enhanced(
 
 
 def format_parquet_geo_metadata(
-    parquet_file: str, json_output: bool, row_groups_limit: Optional[int] = 1
+    parquet_file: str, json_output: bool, row_groups_limit: int | None = 1
 ) -> None:
     """
     Format and output geospatial metadata from Parquet format specification.
@@ -918,7 +918,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
 
 def format_all_metadata(
-    parquet_file: str, json_output: bool, row_groups_limit: Optional[int] = 1
+    parquet_file: str, json_output: bool, row_groups_limit: int | None = 1
 ) -> None:
     """
     Format and output all three metadata sections.

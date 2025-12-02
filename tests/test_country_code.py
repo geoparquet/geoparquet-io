@@ -19,7 +19,7 @@ class TestFindCountryCodeColumn:
     def create_test_parquet(self, columns, data, filename):
         """Helper to create a test parquet file with specified columns."""
         table_dict = {}
-        for col, values in zip(columns, data):
+        for col, values in zip(columns, data, strict=True):
             table_dict[col] = values
 
         table = pa.table(table_dict)

@@ -649,6 +649,11 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
     help="DuckDB WHERE clause for filtering rows. Column names with special "
     'characters need double quotes in SQL (e.g., "crop:name"). Shell escaping varies.',
 )
+@click.option(
+    "--limit",
+    type=int,
+    help="Maximum number of rows to extract.",
+)
 @output_format_options
 @dry_run_option
 @show_sql_option
@@ -663,6 +668,7 @@ def extract(
     geometry,
     use_first_geometry,
     where,
+    limit,
     compression,
     compression_level,
     row_group_size,
@@ -743,6 +749,10 @@ def extract(
         gpio extract s3://bucket/data.parquet output.parquet \\
             --profile my-aws \\
             --bbox -122.5,37.5,-122.0,38.0
+
+        \b
+        # Extract first 1000 rows
+        gpio extract data.parquet output.parquet --limit 1000
     """
     # Validate mutually exclusive row group options
     if row_group_size and row_group_size_mb:
@@ -768,6 +778,7 @@ def extract(
             bbox=bbox,
             geometry=geometry,
             where=where,
+            limit=limit,
             use_first_geometry=use_first_geometry,
             dry_run=dry_run,
             show_sql=show_sql,

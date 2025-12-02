@@ -580,6 +580,7 @@ def build_extract_query(
     columns: list[str],
     spatial_filter: str | None,
     where_clause: str | None,
+    limit: int | None = None,
 ) -> str:
     """Build the complete extraction query."""
     col_list = ", ".join(f'"{c}"' for c in columns)
@@ -594,6 +595,9 @@ def build_extract_query(
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
 
+    if limit is not None:
+        query += f" LIMIT {limit}"
+
     return query
 
 
@@ -606,6 +610,7 @@ def _print_dry_run_output(
     bbox: str | None,
     geometry: str | None,
     where: str | None,
+    limit: int | None,
     query: str,
     compression: str,
     compression_level: int | None,
@@ -630,6 +635,8 @@ def _print_dry_run_output(
         click.echo(click.style("-- Geometry filter: (provided)", fg="cyan"))
     if where:
         click.echo(click.style(f"-- WHERE clause: {where}", fg="cyan"))
+    if limit:
+        click.echo(click.style(f"-- Limit: {limit}", fg="cyan"))
     click.echo()
 
     compression_desc = compression
@@ -653,6 +660,7 @@ def _execute_extraction(
     safe_url: str,
     spatial_filter: str | None,
     where: str | None,
+    limit: int | None,
     selected_columns: list[str],
     verbose: bool,
     show_sql: bool,
@@ -671,6 +679,8 @@ def _execute_extraction(
             click.echo("Applying spatial filter")
         if where:
             click.echo(f"Applying WHERE clause: {where}")
+        if limit:
+            click.echo(f"Limiting to {limit:,} rows")
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
@@ -690,10 +700,16 @@ def _execute_extraction(
             click.echo(click.style("\n-- Count query:", fg="cyan"))
             click.echo(f"{count_query};")
 
-        total_count = con.execute(count_query).fetchone()[0]
-        click.echo(f"Extracting {total_count:,} rows...")
+        matching_count = con.execute(count_query).fetchone()[0]
+        # Apply limit to determine actual extraction count
+        extract_count = min(matching_count, limit) if limit else matching_count
 
-        if total_count == 0:
+        if limit and matching_count > limit:
+            click.echo(f"Extracting {extract_count:,} of {matching_count:,} matching rows...")
+        else:
+            click.echo(f"Extracting {extract_count:,} rows...")
+
+        if extract_count == 0:
             click.echo(click.style("Warning: No rows match the specified filters.", fg="yellow"))
 
         # Get metadata from input for preservation
@@ -718,7 +734,7 @@ def _execute_extraction(
             profile=profile,
         )
 
-        click.echo(click.style(f"Extracted {total_count:,} rows to {output_parquet}", fg="green"))
+        click.echo(click.style(f"Extracted {extract_count:,} rows to {output_parquet}", fg="green"))
 
     finally:
         con.close()
@@ -732,6 +748,7 @@ def extract(
     bbox: str | None = None,
     geometry: str | None = None,
     where: str | None = None,
+    limit: int | None = None,
     use_first_geometry: bool = False,
     dry_run: bool = False,
     show_sql: bool = False,
@@ -801,7 +818,7 @@ def extract(
     spatial_filter = build_spatial_filter(bbox_tuple, geometry_wkt, bbox_info, geometry_col)
 
     # Build the query
-    query = build_extract_query(safe_url, selected_columns, spatial_filter, where)
+    query = build_extract_query(safe_url, selected_columns, spatial_filter, where, limit)
 
     if dry_run:
         _print_dry_run_output(
@@ -813,6 +830,7 @@ def extract(
             bbox,
             geometry,
             where,
+            limit,
             query,
             compression,
             compression_level,
@@ -825,6 +843,7 @@ def extract(
             safe_url,
             spatial_filter,
             where,
+            limit,
             selected_columns,
             verbose,
             show_sql,

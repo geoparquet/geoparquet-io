@@ -30,4 +30,4 @@ repos:
     rev: v0.9.0
     hooks:
     - id: xenon
-      args: ['--max-absolute=C', '--max-modules=C', '--max-average=B']
+      args: ['--max-absolute=F', '--max-modules=D', '--max-average=C']

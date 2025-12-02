@@ -8,7 +8,7 @@ and format output for terminal, JSON, and Markdown.
 import json
 import os
 import struct
-from typing import Any, Optional
+from typing import Any
 
 import duckdb
 import fsspec
@@ -145,9 +145,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
     }
 
 
-def extract_columns_info(
-    schema: pa.Schema, primary_geom_col: Optional[str]
-) -> list[dict[str, Any]]:
+def extract_columns_info(schema: pa.Schema, primary_geom_col: str | None) -> list[dict[str, Any]]:
     """
     Extract column information from schema.
 
@@ -286,7 +284,7 @@ def format_value_for_json(value: Any, is_geometry: bool) -> Any:
 
 
 def get_preview_data(
-    parquet_file: str, head: Optional[int] = None, tail: Optional[int] = None
+    parquet_file: str, head: int | None = None, tail: int | None = None
 ) -> tuple[pa.Table, str]:
     """
     Read preview data from a Parquet file.
@@ -409,9 +407,9 @@ def format_terminal_output(
     file_info: dict[str, Any],
     geo_info: dict[str, Any],
     columns_info: list[dict[str, Any]],
-    preview_table: Optional[pa.Table] = None,
-    preview_mode: Optional[str] = None,
-    stats: Optional[dict[str, dict[str, Any]]] = None,
+    preview_table: pa.Table | None = None,
+    preview_mode: str | None = None,
+    stats: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """
     Format and print terminal output using Rich.
@@ -558,8 +556,8 @@ def format_json_output(
     file_info: dict[str, Any],
     geo_info: dict[str, Any],
     columns_info: list[dict[str, Any]],
-    preview_table: Optional[pa.Table] = None,
-    stats: Optional[dict[str, dict[str, Any]]] = None,
+    preview_table: pa.Table | None = None,
+    stats: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """
     Format output as JSON.
@@ -620,9 +618,9 @@ def format_markdown_output(
     file_info: dict[str, Any],
     geo_info: dict[str, Any],
     columns_info: list[dict[str, Any]],
-    preview_table: Optional[pa.Table] = None,
-    preview_mode: Optional[str] = None,
-    stats: Optional[dict[str, dict[str, Any]]] = None,
+    preview_table: pa.Table | None = None,
+    preview_mode: str | None = None,
+    stats: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """
     Format output as Markdown for README files or documentation.
