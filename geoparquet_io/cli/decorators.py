@@ -82,6 +82,19 @@ def verbose_option(func):
     return click.option("--verbose", "-v", is_flag=True, help="Print verbose output")(func)
 
 
+def show_sql_option(func):
+    """
+    Add --show-sql option to a command.
+
+    Prints the exact SQL statements that will be executed.
+    """
+    return click.option(
+        "--show-sql",
+        is_flag=True,
+        help="Print exact SQL statements as they are executed",
+    )(func)
+
+
 def overwrite_option(func):
     """
     Add --overwrite option to a command.

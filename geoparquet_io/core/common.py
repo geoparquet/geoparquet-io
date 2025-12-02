@@ -897,6 +897,7 @@ def write_parquet_with_metadata(
     row_group_rows=None,
     custom_metadata=None,
     verbose=False,
+    show_sql=False,
     profile=None,
 ):
     """
@@ -919,6 +920,7 @@ def write_parquet_with_metadata(
         row_group_rows: Exact number of rows per row group
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
+        show_sql: Whether to print SQL statements before execution
         profile: AWS profile name (S3 only, optional)
 
     Returns:
@@ -941,6 +943,11 @@ def write_parquet_with_metadata(
 
         # Build and execute query
         final_query = build_copy_query(query, actual_output, compression)
+
+        if show_sql:
+            click.echo(click.style("\n-- COPY query:", fg="cyan"))
+            click.echo(final_query)
+
         con.execute(final_query)
 
         # Rewrite with metadata and optimal settings
