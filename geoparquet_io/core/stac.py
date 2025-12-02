@@ -7,7 +7,6 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import click
 import pystac
@@ -21,7 +20,7 @@ from geoparquet_io.core.common import (
 )
 
 
-def _detect_stac_file(file_path: Path) -> Optional[str]:
+def _detect_stac_file(file_path: Path) -> str | None:
     """Detect if a file is a STAC Item or Collection."""
     if file_path.suffix.lower() != ".json":
         return None
@@ -40,7 +39,7 @@ def _detect_stac_file(file_path: Path) -> Optional[str]:
     return None
 
 
-def _detect_stac_directory(dir_path: Path) -> Optional[str]:
+def _detect_stac_directory(dir_path: Path) -> str | None:
     """Detect if a directory is a pure STAC Collection (no parquet files)."""
     collection_file = dir_path / "collection.json"
     if not collection_file.exists():
@@ -66,7 +65,7 @@ def _detect_stac_directory(dir_path: Path) -> Optional[str]:
     return "Collection"
 
 
-def detect_stac(input_path: str) -> Optional[str]:
+def detect_stac(input_path: str) -> str | None:
     """
     Detect if input is already a STAC Item or Collection.
 
@@ -89,7 +88,7 @@ def detect_stac(input_path: str) -> Optional[str]:
     return None
 
 
-def detect_pmtiles(base_path: str, verbose: bool = False) -> Optional[str]:
+def detect_pmtiles(base_path: str, verbose: bool = False) -> str | None:
     """
     Detect PMTiles overview file in directory.
 
@@ -162,7 +161,7 @@ def generate_stac_geometry(parquet_file: str, verbose: bool = False) -> dict:
     }
 
 
-def generate_item_id(parquet_file: str, partition_key: Optional[str] = None) -> str:
+def generate_item_id(parquet_file: str, partition_key: str | None = None) -> str:
     """
     Generate unique STAC Item ID from filename or partition key.
 
@@ -181,9 +180,7 @@ def generate_item_id(parquet_file: str, partition_key: Optional[str] = None) -> 
         return Path(parquet_file).stem
 
 
-def construct_asset_href(
-    filename: str, bucket_prefix: str, public_url: Optional[str] = None
-) -> str:
+def construct_asset_href(filename: str, bucket_prefix: str, public_url: str | None = None) -> str:
     """
     Construct asset href from bucket prefix and optional public URL.
 
@@ -207,9 +204,7 @@ def construct_asset_href(
     return f"{bucket_prefix}/{filename}"
 
 
-def _add_projection_properties(
-    item: pystac.Item, geo_meta: Optional[dict], parquet_file: str
-) -> None:
+def _add_projection_properties(item: pystac.Item, geo_meta: dict | None, parquet_file: str) -> None:
     """Add projection info to STAC Item properties if available."""
     if not geo_meta:
         return
@@ -242,7 +237,7 @@ def _add_pmtiles_asset(
     item: pystac.Item,
     parquet_file: str,
     bucket_prefix: str,
-    public_url: Optional[str],
+    public_url: str | None,
     verbose: bool,
     show_warning: bool = True,
 ) -> None:
@@ -272,7 +267,7 @@ def _add_pmtiles_asset(
 
 
 def _add_self_link(
-    item: pystac.Item, item_id: str, bucket_prefix: str, public_url: Optional[str]
+    item: pystac.Item, item_id: str, bucket_prefix: str, public_url: str | None
 ) -> None:
     """Add self link to STAC Item."""
     item.add_link(
@@ -284,7 +279,7 @@ def _add_self_link(
     )
 
 
-def _add_collection_link(item: pystac.Item, bucket_prefix: str, public_url: Optional[str]) -> None:
+def _add_collection_link(item: pystac.Item, bucket_prefix: str, public_url: str | None) -> None:
     """Add collection/parent link to STAC Item."""
     item.add_link(
         pystac.Link(
@@ -316,8 +311,8 @@ def get_file_datetime(parquet_file: str) -> datetime:
 def generate_stac_item(
     parquet_file: str,
     bucket_prefix: str,
-    public_url: Optional[str] = None,
-    item_id: Optional[str] = None,
+    public_url: str | None = None,
+    item_id: str | None = None,
     verbose: bool = False,
 ) -> dict:
     """
@@ -419,8 +414,8 @@ def generate_stac_item(
 def _generate_stac_item_no_warning(
     parquet_file: str,
     bucket_prefix: str,
-    public_url: Optional[str] = None,
-    item_id: Optional[str] = None,
+    public_url: str | None = None,
+    item_id: str | None = None,
     add_collection_link: bool = False,
 ) -> dict:
     """
@@ -489,8 +484,8 @@ def _generate_stac_item_no_warning(
 def generate_stac_collection(
     partition_dir: str,
     bucket_prefix: str,
-    public_url: Optional[str] = None,
-    collection_id: Optional[str] = None,
+    public_url: str | None = None,
+    collection_id: str | None = None,
     verbose: bool = False,
 ) -> tuple[dict, list[dict]]:
     """
@@ -589,11 +584,11 @@ def _find_partition_files(partition_dir: str) -> list[Path]:
 
 
 def _generate_collection_items(
-    all_files: list[Path], bucket_prefix: str, public_url: Optional[str]
+    all_files: list[Path], bucket_prefix: str, public_url: str | None
 ) -> tuple[list[dict], list[float]]:
     """Generate STAC items for all partition files and calculate overall bounds."""
     items = []
-    overall_bounds: Optional[list[float]] = None
+    overall_bounds: list[float] | None = None
 
     for parquet_file in all_files:
         partition_key = parquet_file.stem
@@ -627,7 +622,7 @@ def _add_collection_pmtiles(
     collection: pystac.Collection,
     partition_dir: str,
     bucket_prefix: str,
-    public_url: Optional[str],
+    public_url: str | None,
     verbose: bool,
 ) -> None:
     """Add PMTiles asset to STAC Collection if present."""

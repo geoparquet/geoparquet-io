@@ -6,7 +6,7 @@ including Parquet file metadata, Parquet geospatial metadata, and GeoParquet met
 """
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 import click
 import fsspec
@@ -50,7 +50,7 @@ def _check_extension_type(field):
     return None
 
 
-def detect_geo_logical_type(field, parquet_schema_str: Optional[str] = None) -> Optional[str]:
+def detect_geo_logical_type(field, parquet_schema_str: str | None = None) -> str | None:
     """
     Detect if a field has a GEOMETRY or GEOGRAPHY logical type.
 
@@ -80,7 +80,7 @@ def detect_geo_logical_type(field, parquet_schema_str: Optional[str] = None) -> 
 
 def parse_geometry_type_from_schema(
     field_name: str, parquet_schema_str: str
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Parse geometry type details from Parquet schema string.
 
@@ -241,7 +241,7 @@ def _detect_bbox_columns(schema, geo_columns: dict[str, str]) -> dict[str, str]:
     return bbox_columns
 
 
-def _extract_rg_bbox(rg, bbox_col_name: str) -> Optional[dict[str, float]]:
+def _extract_rg_bbox(rg, bbox_col_name: str) -> dict[str, float] | None:
     """Extract bbox values from a row group's bbox struct column."""
     values = {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
     for col_idx in range(rg.num_columns):
@@ -262,7 +262,7 @@ def _extract_rg_bbox(rg, bbox_col_name: str) -> Optional[dict[str, float]]:
     return None
 
 
-def _build_column_dict(col, is_geo: bool, geo_type: Optional[str]) -> dict[str, Any]:
+def _build_column_dict(col, is_geo: bool, geo_type: str | None) -> dict[str, Any]:
     """Build column metadata dictionary for JSON output."""
     col_dict = {
         "path_in_schema": col.path_in_schema,
@@ -293,7 +293,7 @@ def _build_column_dict(col, is_geo: bool, geo_type: Optional[str]) -> dict[str, 
     return col_dict
 
 
-def _extract_crs_from_field_metadata(field) -> Optional[Any]:
+def _extract_crs_from_field_metadata(field) -> Any | None:
     """Extract CRS from field metadata if present."""
     if not field.metadata:
         return None
@@ -350,7 +350,7 @@ def _extract_rg_stats(rg, col_name: str, bbox_columns: dict) -> dict[str, Any]:
     return rg_stats
 
 
-def _calculate_overall_bbox(row_group_stats: list[dict]) -> Optional[dict[str, float]]:
+def _calculate_overall_bbox(row_group_stats: list[dict]) -> dict[str, float] | None:
     """Calculate overall bbox from row group statistics."""
     overall = {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
     for rg_stat in row_group_stats:
@@ -393,8 +393,8 @@ def _get_column_minmax(col, is_geo: bool, bbox_columns: dict, rg) -> tuple[str, 
 def format_parquet_metadata_enhanced(
     parquet_file: str,
     json_output: bool,
-    row_groups_limit: Optional[int] = 1,
-    primary_geom_col: Optional[str] = None,
+    row_groups_limit: int | None = 1,
+    primary_geom_col: str | None = None,
 ) -> None:
     """
     Format and output enhanced Parquet file metadata with geo column highlighting.
@@ -545,7 +545,7 @@ def format_parquet_metadata_enhanced(
 
 
 def format_parquet_geo_metadata(
-    parquet_file: str, json_output: bool, row_groups_limit: Optional[int] = 1
+    parquet_file: str, json_output: bool, row_groups_limit: int | None = 1
 ) -> None:
     """
     Format and output geospatial metadata from Parquet format specification.
@@ -871,7 +871,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
 
 def format_all_metadata(
-    parquet_file: str, json_output: bool, row_groups_limit: Optional[int] = 1
+    parquet_file: str, json_output: bool, row_groups_limit: int | None = 1
 ) -> None:
     """
     Format and output all three metadata sections.

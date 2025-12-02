@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-from typing import Optional
 
 import click
 import fsspec
@@ -44,7 +43,7 @@ def partition_by_string(
     input_parquet: str,
     output_folder: str,
     column: str,
-    chars: Optional[int] = None,
+    chars: int | None = None,
     hive: bool = False,
     overwrite: bool = False,
     preview: bool = False,
@@ -53,7 +52,7 @@ def partition_by_string(
     force: bool = False,
     skip_analysis: bool = False,
     filename_prefix: str = None,
-    profile: Optional[str] = None,
+    profile: str | None = None,
 ):
     """
     Partition a GeoParquet file by string column values or prefixes.
