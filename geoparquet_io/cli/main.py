@@ -462,6 +462,14 @@ def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup, overw
     is_flag=True,
     help="CSV/TSV: Skip rows with invalid geometries instead of failing",
 )
+@click.option(
+    "--geoparquet-version",
+    type=click.Choice(["1.0", "1.1", "2.0", "parquet-geo-only"]),
+    default=None,
+    help="GeoParquet version to write. 2.0 uses native Parquet geo types. "
+    "parquet-geo-only writes Parquet geo types without GeoParquet metadata. "
+    "Default: 1.1",
+)
 @verbose_option
 @compression_options
 @profile_option
@@ -475,6 +483,7 @@ def convert(
     delimiter,
     crs,
     skip_invalid,
+    geoparquet_version,
     verbose,
     compression,
     compression_level,
@@ -501,6 +510,7 @@ def convert(
         crs=crs,
         skip_invalid=skip_invalid,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
 

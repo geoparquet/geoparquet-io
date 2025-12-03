@@ -2,6 +2,7 @@
 Pytest configuration and shared fixtures for geoparquet-io tests.
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -9,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
+import pyarrow.parquet as pq
 import pytest
 
 # Test data directory
@@ -64,3 +66,96 @@ def duckdb_connection():
         yield con
     finally:
         con.close()
+
+
+# Helper functions for GeoParquet version testing
+
+
+def get_geoparquet_version(parquet_file):
+    """
+    Extract GeoParquet version from file metadata.
+
+    Args:
+        parquet_file: Path to the parquet file
+
+    Returns:
+        str: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0") or None
+    """
+    pf = pq.ParquetFile(parquet_file)
+    metadata = pf.schema_arrow.metadata
+    if metadata and b"geo" in metadata:
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+        return geo_meta.get("version")
+    return None
+
+
+def has_native_geo_types(parquet_file):
+    """
+    Check if file uses Parquet GEOMETRY/GEOGRAPHY logical types.
+
+    Args:
+        parquet_file: Path to the parquet file
+
+    Returns:
+        bool: True if file has native Parquet geo types
+    """
+    pf = pq.ParquetFile(parquet_file)
+    schema_str = str(pf.metadata.schema)
+    return "Geometry" in schema_str or "Geography" in schema_str
+
+
+def has_geoparquet_metadata(parquet_file):
+    """
+    Check if file has 'geo' metadata key (GeoParquet metadata).
+
+    Args:
+        parquet_file: Path to the parquet file
+
+    Returns:
+        bool: True if file has GeoParquet metadata
+    """
+    pf = pq.ParquetFile(parquet_file)
+    metadata = pf.schema_arrow.metadata
+    return metadata is not None and b"geo" in metadata
+
+
+def get_geo_metadata(parquet_file):
+    """
+    Get the full GeoParquet metadata from a file.
+
+    Args:
+        parquet_file: Path to the parquet file
+
+    Returns:
+        dict: GeoParquet metadata or None
+    """
+    pf = pq.ParquetFile(parquet_file)
+    metadata = pf.schema_arrow.metadata
+    if metadata and b"geo" in metadata:
+        return json.loads(metadata[b"geo"].decode("utf-8"))
+    return None
+
+
+# Test data file fixtures
+@pytest.fixture
+def fields_v2_file(test_data_dir):
+    """Return path to the fields_v2.parquet test file."""
+    return str(test_data_dir / "fields_v2.parquet")
+
+
+@pytest.fixture
+def fields_geom_type_only_file(test_data_dir):
+    """Return path to the fields_geom_type_only.parquet test file."""
+    return str(test_data_dir / "fields_geom_type_only.parquet")
+
+
+@pytest.fixture
+def fields_geom_type_only_5070_file(test_data_dir):
+    """Return path to the fields_geom_type_only_5070.parquet test file."""
+    return str(test_data_dir / "fields_geom_type_only_5070.parquet")
+
+
+@pytest.fixture
+def geojson_input(test_data_dir):
+    """Return path to the buildings_test.geojson test file."""
+    return str(test_data_dir / "buildings_test.geojson")
