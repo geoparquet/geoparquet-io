@@ -12,6 +12,22 @@ import duckdb
 import fsspec
 import pyarrow.parquet as pq
 
+# GeoParquet version configuration
+# Maps CLI version options to DuckDB parameters and metadata settings
+# Note: For v2, we skip pyarrow rewrite to preserve native Parquet Geometry types
+# that DuckDB writes. DuckDB already produces correct GeoParquet 2.0 metadata.
+GEOPARQUET_VERSIONS = {
+    "1.0": {"duckdb_param": "V1", "metadata_version": "1.0.0", "rewrite_metadata": True},
+    "1.1": {"duckdb_param": "V1", "metadata_version": "1.1.0", "rewrite_metadata": True},
+    "2.0": {"duckdb_param": "V2", "metadata_version": "2.0.0", "rewrite_metadata": False},
+    "parquet-geo-only": {
+        "duckdb_param": "NONE",
+        "metadata_version": None,
+        "rewrite_metadata": False,
+    },
+}
+DEFAULT_GEOPARQUET_VERSION = "1.1"
+
 
 def is_remote_url(path):
     """
@@ -513,13 +529,22 @@ def _parse_existing_geo_metadata(original_metadata):
         return None
 
 
-def _initialize_geo_metadata(geo_meta, geom_col):
-    """Initialize or upgrade geo metadata structure."""
-    if not geo_meta:
-        return {"version": "1.1.0", "primary_column": geom_col, "columns": {}}
+def _initialize_geo_metadata(geo_meta, geom_col, version="1.1.0"):
+    """Initialize or upgrade geo metadata structure.
 
-    # Upgrade to 1.1.0 if it's an older version
-    geo_meta["version"] = "1.1.0"
+    Args:
+        geo_meta: Existing geo metadata dict or None
+        geom_col: Name of the geometry column
+        version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
+
+    Returns:
+        dict: Initialized geo metadata structure
+    """
+    if not geo_meta:
+        return {"version": version, "primary_column": geom_col, "columns": {}}
+
+    # Set the specified version
+    geo_meta["version"] = version
     if "columns" not in geo_meta:
         geo_meta["columns"] = {}
     if geom_col not in geo_meta["columns"]:
@@ -561,7 +586,12 @@ def _add_custom_covering(geo_meta, geom_col, custom_metadata, verbose):
 
 
 def create_geo_metadata(
-    original_metadata, geom_col, bbox_info, custom_metadata=None, verbose=False
+    original_metadata,
+    geom_col,
+    bbox_info,
+    custom_metadata=None,
+    verbose=False,
+    version="1.1.0",
 ):
     """
     Create or update GeoParquet metadata with spatial index covering information.
@@ -572,12 +602,13 @@ def create_geo_metadata(
         bbox_info: Result from check_bbox_structure
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
+        version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
 
     Returns:
         dict: Updated geo metadata
     """
     geo_meta = _parse_existing_geo_metadata(original_metadata)
-    geo_meta = _initialize_geo_metadata(geo_meta, geom_col)
+    geo_meta = _initialize_geo_metadata(geo_meta, geom_col, version=version)
 
     # Add encoding if not present (required by GeoParquet spec)
     if "encoding" not in geo_meta["columns"][geom_col]:
@@ -736,14 +767,15 @@ def validate_compression_settings(compression, compression_level, verbose=False)
     return compression, compression_level, compression_desc
 
 
-def build_copy_query(query, output_file, compression):
+def build_copy_query(query, output_file, compression, geoparquet_version=None):
     """
-    Build a DuckDB COPY query with proper compression settings.
+    Build a DuckDB COPY query with proper compression and GeoParquet version settings.
 
     Args:
         query: SELECT query or existing COPY query
         output_file: Output file path
         compression: Compression type (already validated)
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
 
     Returns:
         str: Complete COPY query
@@ -759,7 +791,16 @@ def build_copy_query(query, output_file, compression):
     }
     duckdb_compression = duckdb_compression_map[compression]
 
-    # Modify query to use the specified compression
+    # Get GeoParquet version setting for DuckDB
+    version_config = GEOPARQUET_VERSIONS.get(
+        geoparquet_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
+    )
+    duckdb_gp_version = version_config["duckdb_param"]
+
+    # Build COPY options
+    copy_options = f"FORMAT PARQUET, COMPRESSION '{duckdb_compression}', GEOPARQUET_VERSION '{duckdb_gp_version}'"
+
+    # Modify query to use the specified settings
     if "COPY (" in query and "TO '" in query:
         # Extract the query parts
         query_parts = query.split("TO '")
@@ -768,14 +809,14 @@ def build_copy_query(query, output_file, compression):
             # Find the end of the output path
             path_end = output_path_and_rest.find("'")
             if path_end > 0:
-                # Rebuild query with compression
+                # Rebuild query with options
                 base_query = query_parts[0] + f"TO '{output_file}'"
-                query = base_query + f"\n(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"
+                query = base_query + f"\n({copy_options});"
     else:
         # Assume it's a SELECT query that needs COPY wrapper
         query = f"""COPY ({query})
 TO '{output_file}'
-(FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
+({copy_options});"""
 
     return query
 
@@ -789,6 +830,7 @@ def rewrite_with_metadata(
     row_group_rows=None,
     custom_metadata=None,
     verbose=False,
+    metadata_version="1.1.0",
 ):
     """
     Rewrite a parquet file with updated metadata and compression settings.
@@ -802,6 +844,7 @@ def rewrite_with_metadata(
         row_group_rows: Exact number of rows per row group
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
+        metadata_version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
     """
     if verbose:
         click.echo("Updating metadata and optimizing file structure...")
@@ -835,7 +878,9 @@ def rewrite_with_metadata(
     # Create geo metadata - use existing metadata if no original provided
     # This preserves DuckDB-generated metadata (encoding, geometry_types, etc.)
     metadata_source = original_metadata if original_metadata else existing_metadata
-    geo_meta = create_geo_metadata(metadata_source, geom_col, bbox_info, custom_metadata, verbose)
+    geo_meta = create_geo_metadata(
+        metadata_source, geom_col, bbox_info, custom_metadata, verbose, version=metadata_version
+    )
     new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
     # Update table schema with new metadata
@@ -898,6 +943,7 @@ def write_parquet_with_metadata(
     custom_metadata=None,
     verbose=False,
     profile=None,
+    geoparquet_version=None,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
@@ -920,12 +966,18 @@ def write_parquet_with_metadata(
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
 
     Returns:
         None
     """
     # Setup AWS profile if needed (for writes to S3)
     setup_aws_profile_if_needed(profile, output_file)
+
+    # Get version configuration
+    version_config = GEOPARQUET_VERSIONS.get(
+        geoparquet_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
+    )
 
     with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
         actual_output,
@@ -938,13 +990,20 @@ def write_parquet_with_metadata(
 
         if verbose:
             click.echo(f"Writing output with {compression_desc} compression...")
+            if geoparquet_version:
+                click.echo(f"Using GeoParquet version: {geoparquet_version}")
 
-        # Build and execute query
-        final_query = build_copy_query(query, actual_output, compression)
+        # Build and execute query with version-specific settings
+        final_query = build_copy_query(
+            query, actual_output, compression, geoparquet_version=geoparquet_version
+        )
         con.execute(final_query)
 
-        # Rewrite with metadata and optimal settings
-        if original_metadata or verbose or row_group_size_mb or row_group_rows:
+        # Rewrite with metadata and optimal settings (skip for parquet-geo-only)
+        should_rewrite = version_config["rewrite_metadata"] and (
+            original_metadata or verbose or row_group_size_mb or row_group_rows or True
+        )
+        if should_rewrite:
             rewrite_with_metadata(
                 actual_output,
                 original_metadata,
@@ -954,6 +1013,7 @@ def write_parquet_with_metadata(
                 row_group_rows,
                 custom_metadata,
                 verbose,
+                metadata_version=version_config["metadata_version"],
             )
 
         # Upload to remote if needed

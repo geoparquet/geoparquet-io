@@ -648,6 +648,7 @@ def convert_to_geoparquet(
     crs="EPSG:4326",
     skip_invalid=False,
     profile=None,
+    geoparquet_version=None,
 ):
     """
     Convert vector format to optimized GeoParquet.
@@ -657,7 +658,7 @@ def convert_to_geoparquet(
     - 100k row groups
     - Bbox column with metadata
     - Hilbert spatial ordering (unless --skip-hilbert)
-    - GeoParquet 1.1.0 metadata
+    - GeoParquet metadata (version configurable)
 
     Args:
         input_file: Path to input file (Shapefile, GeoJSON, GeoPackage, CSV/TSV, etc.)
@@ -674,6 +675,7 @@ def convert_to_geoparquet(
         crs: CRS for geometry data (default: EPSG:4326/WGS84)
         skip_invalid: Skip rows with invalid geometries instead of failing
         profile: AWS profile name for S3 operations
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
 
     Raises:
         click.ClickException: If input file not found or conversion fails
@@ -732,6 +734,7 @@ def convert_to_geoparquet(
             row_group_rows=row_group_rows,
             verbose=verbose,
             profile=profile,
+            geoparquet_version=geoparquet_version,
         )
 
         # Report results
