@@ -64,20 +64,36 @@ def verify_fixes(
         output_path, random_sample_size, limit_rows, verbose=False, return_results=True
     )
 
-    # Check if all passed
-    all_passed = all(
-        result.get("passed", False)
-        for result in [
-            *final_structure_results.values(),
-            final_spatial_result,
-        ]
-        if isinstance(result, dict)
-    )
+    # Collect failing checks with their issues
+    failing_checks = []
+    check_names = {
+        "row_groups": "Row Groups",
+        "bbox": "Bbox/Metadata",
+        "compression": "Compression",
+    }
+
+    for check_key, result in final_structure_results.items():
+        if isinstance(result, dict) and not result.get("passed", False):
+            check_name = check_names.get(check_key, check_key)
+            issues = result.get("issues", [])
+            failing_checks.append((check_name, issues))
+
+    if isinstance(final_spatial_result, dict) and not final_spatial_result.get("passed", False):
+        issues = final_spatial_result.get("issues", [])
+        failing_checks.append(("Spatial Ordering", issues))
+
+    all_passed = len(failing_checks) == 0
 
     if all_passed:
         click.echo(click.style("\n✓ All checks passed after fixes!", fg="green", bold=True))
     else:
-        click.echo(click.style("\n⚠️  Some issues may remain after fixes", fg="yellow", bold=True))
+        click.echo(click.style("\n⚠️  Some issues remain after fixes:", fg="yellow", bold=True))
+        for check_name, issues in failing_checks:
+            if issues:
+                for issue in issues:
+                    click.echo(click.style(f"   - {check_name}: {issue}", fg="yellow"))
+            else:
+                click.echo(click.style(f"   - {check_name}: check did not pass", fg="yellow"))
 
     return all_passed
 

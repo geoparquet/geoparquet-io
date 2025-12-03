@@ -455,3 +455,234 @@ class TestExistingTestFiles:
     def test_fields_5070_no_geoparquet_metadata(self, fields_geom_type_only_5070_file):
         """Test fields_geom_type_only_5070.parquet has NO GeoParquet metadata."""
         assert not has_geoparquet_metadata(fields_geom_type_only_5070_file)
+
+
+class TestCheckBboxVersionAware:
+    """Test version-aware bbox checking."""
+
+    def test_check_bbox_v2_no_bbox_passes(self, fields_v2_file):
+        """V2 file without bbox should pass (bbox not recommended)."""
+        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+        result = check_metadata_and_bbox(fields_v2_file, verbose=False, return_results=True)
+
+        assert result["passed"] is True
+        assert result["file_type"] == "geoparquet_v2"
+        assert result["has_bbox_column"] is False
+        assert result["needs_bbox_removal"] is False
+        assert result["fix_available"] is False
+
+    def test_check_bbox_parquet_geo_only_with_bbox_reports_warning(
+        self, fields_geom_type_only_file
+    ):
+        """Parquet-geo-only file with bbox should warn it's unnecessary."""
+        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+        result = check_metadata_and_bbox(
+            fields_geom_type_only_file, verbose=False, return_results=True
+        )
+
+        assert result["passed"] is False
+        assert result["file_type"] == "parquet_geo_only"
+        assert result["has_bbox_column"] is True
+        assert result["needs_bbox_removal"] is True
+        assert result["fix_available"] is True
+        assert len(result["issues"]) > 0
+        assert "not needed" in result["issues"][0].lower()
+
+    def test_check_bbox_parquet_geo_only_no_bbox_passes(self, fields_geom_type_only_5070_file):
+        """Parquet-geo-only file without bbox should pass."""
+        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+        result = check_metadata_and_bbox(
+            fields_geom_type_only_5070_file, verbose=False, return_results=True
+        )
+
+        assert result["passed"] is True
+        assert result["file_type"] == "parquet_geo_only"
+        assert result["has_bbox_column"] is False
+        assert result["needs_bbox_removal"] is False
+        assert result["fix_available"] is False
+
+    def test_check_bbox_parquet_geo_only_no_metadata_not_error(self, fields_geom_type_only_file):
+        """Parquet-geo-only should not report 'no metadata' as a critical error."""
+        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+        result = check_metadata_and_bbox(
+            fields_geom_type_only_file, verbose=False, return_results=True
+        )
+
+        # Should recognize it as parquet_geo_only, not unknown
+        assert result["file_type"] == "parquet_geo_only"
+        assert result["has_geo_metadata"] is False
+        assert result["has_native_geo_types"] is True
+
+    def test_check_bbox_v2_file_type_detection(self, fields_v2_file):
+        """V2 file should be correctly detected as geoparquet_v2."""
+        from geoparquet_io.core.common import detect_geoparquet_file_type
+
+        result = detect_geoparquet_file_type(fields_v2_file, verbose=False)
+
+        assert result["file_type"] == "geoparquet_v2"
+        assert result["has_geo_metadata"] is True
+        assert result["geo_version"] == "2.0.0"
+        assert result["has_native_geo_types"] is True
+        assert result["bbox_recommended"] is False
+
+    def test_check_bbox_parquet_geo_only_file_type_detection(self, fields_geom_type_only_file):
+        """Parquet-geo-only file should be correctly detected."""
+        from geoparquet_io.core.common import detect_geoparquet_file_type
+
+        result = detect_geoparquet_file_type(fields_geom_type_only_file, verbose=False)
+
+        assert result["file_type"] == "parquet_geo_only"
+        assert result["has_geo_metadata"] is False
+        assert result["geo_version"] is None
+        assert result["has_native_geo_types"] is True
+        assert result["bbox_recommended"] is False
+
+
+class TestCheckBboxFix:
+    """Test bbox fix functionality for different versions."""
+
+    def test_fix_removes_bbox_from_parquet_geo_only(
+        self, fields_geom_type_only_file, temp_output_file
+    ):
+        """--fix on parquet-geo-only with bbox should remove it."""
+        from geoparquet_io.core.check_fixes import fix_bbox_removal
+        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+        # Verify original has bbox
+        original_result = check_metadata_and_bbox(
+            fields_geom_type_only_file, verbose=False, return_results=True
+        )
+        assert original_result["has_bbox_column"] is True
+
+        # Apply fix
+        fix_bbox_removal(
+            fields_geom_type_only_file,
+            temp_output_file,
+            bbox_column_name="bbox",
+            verbose=False,
+        )
+
+        # Verify fixed file has no bbox
+        fixed_result = check_metadata_and_bbox(temp_output_file, verbose=False, return_results=True)
+        assert fixed_result["has_bbox_column"] is False
+        assert fixed_result["passed"] is True
+
+    def test_fix_preserves_native_geo_type(self, fields_geom_type_only_file, temp_output_file):
+        """Bbox removal should preserve native Parquet Geometry type."""
+        from geoparquet_io.core.check_fixes import fix_bbox_removal
+
+        fix_bbox_removal(
+            fields_geom_type_only_file,
+            temp_output_file,
+            bbox_column_name="bbox",
+            verbose=False,
+        )
+
+        assert has_native_geo_types(temp_output_file)
+
+    def test_fix_preserves_data(self, fields_geom_type_only_file, temp_output_file):
+        """Bbox removal should preserve all other data."""
+        from geoparquet_io.core.check_fixes import fix_bbox_removal
+
+        # Get original row count
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        original_count = con.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')"
+        ).fetchone()[0]
+
+        fix_bbox_removal(
+            fields_geom_type_only_file,
+            temp_output_file,
+            bbox_column_name="bbox",
+            verbose=False,
+        )
+
+        # Verify row count preserved
+        fixed_count = con.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
+        ).fetchone()[0]
+        con.close()
+
+        assert fixed_count == original_count
+
+    def test_cli_check_bbox_fix_removes_bbox(self, fields_geom_type_only_file, temp_output_file):
+        """CLI check bbox --fix should remove bbox from parquet-geo-only file."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "check",
+                "bbox",
+                fields_geom_type_only_file,
+                "--fix",
+                "--fix-output",
+                temp_output_file,
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "removed" in result.output.lower()
+
+        # Verify bbox was removed
+        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+        fixed_result = check_metadata_and_bbox(temp_output_file, verbose=False, return_results=True)
+        assert fixed_result["has_bbox_column"] is False
+
+    def test_fix_preserves_parquet_geo_only_format(
+        self, fields_geom_type_only_file, temp_output_file
+    ):
+        """Fixing parquet-geo-only file should NOT add GeoParquet metadata."""
+        from geoparquet_io.core.check_fixes import fix_bbox_removal
+
+        fix_bbox_removal(
+            fields_geom_type_only_file,
+            temp_output_file,
+            bbox_column_name="bbox",
+            verbose=False,
+        )
+
+        # Should still be parquet-geo-only (no GeoParquet metadata)
+        assert not has_geoparquet_metadata(temp_output_file)
+        assert has_native_geo_types(temp_output_file)
+
+
+class TestVersionPreservation:
+    """Test that fixes preserve the original GeoParquet version."""
+
+    def test_get_version_from_check_results_v2(self):
+        """Test version detection for v2 files."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {"bbox": {"file_type": "geoparquet_v2", "version": "2.0.0"}}
+        version = get_geoparquet_version_from_check_results(check_results)
+        assert version == "2.0"
+
+    def test_get_version_from_check_results_parquet_geo_only(self):
+        """Test version detection for parquet-geo-only files."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {"bbox": {"file_type": "parquet_geo_only"}}
+        version = get_geoparquet_version_from_check_results(check_results)
+        assert version == "parquet-geo-only"
+
+    def test_get_version_from_check_results_v1_1(self):
+        """Test version detection for v1.1 files."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.1.0"}}
+        version = get_geoparquet_version_from_check_results(check_results)
+        assert version == "1.1"
+
+    def test_get_version_from_check_results_v1_0(self):
+        """Test version detection for v1.0 files."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.0.0"}}
+        version = get_geoparquet_version_from_check_results(check_results)
+        assert version == "1.0"

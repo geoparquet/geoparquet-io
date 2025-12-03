@@ -212,6 +212,102 @@ def parse_geometry_type_from_schema(
     return result if result else None
 
 
+def has_parquet_geo_row_group_stats(
+    parquet_file: str, geometry_column: Optional[str] = None
+) -> dict:
+    """
+    Check if file has row group statistics for geometry columns.
+
+    For files with native Parquet geo types, checks if bbox struct columns exist
+    with proper min/max statistics in row groups that can be used for spatial filtering.
+
+    Args:
+        parquet_file: Path to the parquet file
+        geometry_column: Name of the geometry column (auto-detected if None)
+
+    Returns:
+        dict with:
+            - has_stats: bool - Whether valid row group stats exist
+            - stats_source: str - "bbox_struct" if bbox struct column has stats, None otherwise
+            - sample_bbox: list - [xmin, ymin, xmax, ymax] from first row group, or None
+    """
+    result = {
+        "has_stats": False,
+        "stats_source": None,
+        "sample_bbox": None,
+    }
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    with fsspec.open(safe_url, "rb") as f:
+        pf = pq.ParquetFile(f)
+        schema = pf.schema_arrow
+        parquet_metadata = pf.metadata
+
+    # Auto-detect geometry column if not specified
+    if not geometry_column:
+        parquet_schema_str = str(parquet_metadata.schema)
+        for field in schema:
+            geo_type = detect_geo_logical_type(field, parquet_schema_str)
+            if geo_type:
+                geometry_column = field.name
+                break
+
+    if not geometry_column:
+        return result
+
+    # Find bbox struct column associated with geometry column
+    bbox_col_name = None
+    for field in schema:
+        if str(field.type).startswith("struct<") and "xmin" in str(field.type):
+            # Pattern 1: geometry -> geometry_bbox
+            if field.name.endswith("_bbox"):
+                base_name = field.name[:-5]
+                if base_name == geometry_column:
+                    bbox_col_name = field.name
+                    break
+            # Pattern 2: Just named 'bbox'
+            elif field.name == "bbox":
+                bbox_col_name = field.name
+                break
+
+    if not bbox_col_name:
+        return result
+
+    # Check first row group for stats
+    if parquet_metadata.num_row_groups > 0:
+        rg = parquet_metadata.row_group(0)
+
+        xmin_val = None
+        ymin_val = None
+        xmax_val = None
+        ymax_val = None
+
+        for col_idx in range(rg.num_columns):
+            col = rg.column(col_idx)
+            path = col.path_in_schema
+
+            if path == f"{bbox_col_name}.xmin" and col.is_stats_set:
+                if col.statistics.has_min_max:
+                    xmin_val = col.statistics.min
+            elif path == f"{bbox_col_name}.ymin" and col.is_stats_set:
+                if col.statistics.has_min_max:
+                    ymin_val = col.statistics.min
+            elif path == f"{bbox_col_name}.xmax" and col.is_stats_set:
+                if col.statistics.has_min_max:
+                    xmax_val = col.statistics.max
+            elif path == f"{bbox_col_name}.ymax" and col.is_stats_set:
+                if col.statistics.has_min_max:
+                    ymax_val = col.statistics.max
+
+        if all(v is not None for v in [xmin_val, ymin_val, xmax_val, ymax_val]):
+            result["has_stats"] = True
+            result["stats_source"] = "bbox_struct"
+            result["sample_bbox"] = [xmin_val, ymin_val, xmax_val, ymax_val]
+
+    return result
+
+
 def extract_bbox_from_row_group_stats(
     parquet_file: str,
     geometry_column: str,

@@ -7,12 +7,14 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
     check_bbox_structure,
+    detect_geoparquet_file_type,
     find_primary_geometry_column,
     format_size,
     get_parquet_metadata,
     parse_geo_metadata,
     safe_file_url,
 )
+from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 
 
 def get_row_group_stats(parquet_file):
@@ -58,21 +60,21 @@ def assess_row_group_size(avg_group_size_bytes, total_size_bytes):
     avg_group_size_mb = avg_group_size_bytes / (1024 * 1024)
     total_size_mb = total_size_bytes / (1024 * 1024)
 
-    if total_size_mb < 128:
+    if total_size_mb < 64:
         return "optimal", "Row group size is appropriate for small file", "green"
 
-    if 128 <= avg_group_size_mb <= 256:
-        return "optimal", "Row group size is optimal (128-256 MB)", "green"
-    elif 64 <= avg_group_size_mb < 128 or 256 < avg_group_size_mb <= 512:
+    if 64 <= avg_group_size_mb <= 256:
+        return "optimal", "Row group size is optimal (64-256 MB)", "green"
+    elif 32 <= avg_group_size_mb < 64 or 256 < avg_group_size_mb <= 512:
         return (
             "suboptimal",
-            "Row group size is suboptimal. Recommended size is 128-256 MB",
+            "Row group size is suboptimal. Recommended size is 64-256 MB",
             "yellow",
         )
     else:
         return (
             "poor",
-            "Row group size is outside recommended range. Target 128-256 MB for best performance",
+            "Row group size is outside recommended range. Target 64-256 MB for best performance",
             "red",
         )
 
@@ -194,49 +196,150 @@ def check_row_groups(parquet_file, verbose=False, return_results=False):
 
     if size_status != "optimal" or row_status != "optimal":
         click.echo("\nRow Group Guidelines:")
-        click.echo("- Optimal size: 128-256 MB per row group")
+        click.echo("- Optimal size: 64-256 MB per row group")
         click.echo("- Optimal rows: 50,000-200,000 rows per group")
-        click.echo("- Small files (<128 MB): single row group is fine")
+        click.echo("- Small files (<64 MB): single row group is fine")
 
     if return_results:
         return results
 
 
-def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
-    """Check GeoParquet metadata version and bbox structure.
+def _check_parquet_geo_only(parquet_file, file_type_info, verbose, return_results):
+    """Check parquet-geo-only file (no geo metadata is expected)."""
+    bbox_info = check_bbox_structure(parquet_file, verbose)
+    stats_info = has_parquet_geo_row_group_stats(parquet_file)
 
-    Args:
-        parquet_file: Path to parquet file
-        verbose: Print additional information
-        return_results: If True, return structured results dict
+    issues = []
+    recommendations = []
 
-    Returns:
-        dict if return_results=True, containing:
-            - passed: bool
-            - has_geo_metadata: bool
-            - version: str
-            - has_bbox_column: bool
-            - has_bbox_metadata: bool
-            - bbox_column_name: str or None
-            - issues: list of issue descriptions
-            - recommendations: list of recommendations
-    """
+    # For parquet-geo-only, bbox column is NOT recommended
+    if bbox_info["has_bbox_column"]:
+        issues.append(
+            f"Bbox column '{bbox_info['bbox_column_name']}' found "
+            "(not needed for native Parquet geo types)"
+        )
+        recommendations.append(
+            "Remove bbox column with --fix (native geo types provide row group stats)"
+        )
+
+    passed = not bbox_info["has_bbox_column"]
+
+    # Print results
+    click.echo("\nParquet Geo Analysis:")
+    click.echo(click.style("✓ File uses native Parquet GEOMETRY/GEOGRAPHY types", fg="green"))
+    click.echo(
+        click.style("⚠️  No GeoParquet metadata (file uses parquet-geo-only format)", fg="yellow")
+    )
+    click.echo(
+        click.style(
+            "   Use 'gpio convert --geoparquet-version 2.0' to add GeoParquet 2.0 metadata",
+            fg="cyan",
+        )
+    )
+
+    if bbox_info["has_bbox_column"]:
+        click.echo(
+            click.style(
+                f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found "
+                "(unnecessary - native geo types have row group stats)",
+                fg="yellow",
+            )
+        )
+        click.echo(click.style("   Use --fix to remove the bbox column", fg="cyan"))
+    else:
+        click.echo(
+            click.style("✓ No bbox column (correct for native Parquet geo types)", fg="green")
+        )
+
+    if stats_info["has_stats"]:
+        click.echo(
+            click.style("✓ Row group statistics available for spatial filtering", fg="green")
+        )
+
+    if return_results:
+        return {
+            "passed": passed,
+            "file_type": "parquet_geo_only",
+            "has_geo_metadata": False,
+            "has_native_geo_types": True,
+            "has_bbox_column": bbox_info["has_bbox_column"],
+            "bbox_column_name": bbox_info.get("bbox_column_name"),
+            "has_row_group_stats": stats_info["has_stats"],
+            "needs_bbox_removal": bbox_info["has_bbox_column"],
+            "issues": issues,
+            "recommendations": recommendations,
+            "fix_available": bbox_info["has_bbox_column"],
+        }
+
+
+def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results):
+    """Check GeoParquet 2.0 file (bbox not recommended)."""
+    bbox_info = check_bbox_structure(parquet_file, verbose)
+    stats_info = has_parquet_geo_row_group_stats(parquet_file)
+
+    issues = []
+    recommendations = []
+
+    # For v2, bbox column is NOT recommended
+    if bbox_info["has_bbox_column"]:
+        issues.append(
+            f"Bbox column '{bbox_info['bbox_column_name']}' found (not needed for GeoParquet 2.0)"
+        )
+        recommendations.append(
+            "Remove bbox column with --fix (native geo types provide row group stats)"
+        )
+
+    passed = not bbox_info["has_bbox_column"]
+
+    # Print results
+    click.echo("\nGeoParquet 2.0 Metadata:")
+    click.echo(click.style(f"✓ Version {file_type_info['geo_version']}", fg="green"))
+    click.echo(click.style("✓ Uses native Parquet GEOMETRY/GEOGRAPHY types", fg="green"))
+
+    if bbox_info["has_bbox_column"]:
+        click.echo(
+            click.style(
+                f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found (not recommended for 2.0)",
+                fg="yellow",
+            )
+        )
+        click.echo(
+            click.style(
+                "   Native Parquet geo types provide row group stats for spatial filtering.",
+                fg="cyan",
+            )
+        )
+        click.echo(click.style("   Use --fix to remove the bbox column", fg="cyan"))
+    else:
+        click.echo(click.style("✓ No bbox column (correct for GeoParquet 2.0)", fg="green"))
+
+    if stats_info["has_stats"]:
+        click.echo(
+            click.style("✓ Row group statistics available for spatial filtering", fg="green")
+        )
+
+    if return_results:
+        return {
+            "passed": passed,
+            "file_type": "geoparquet_v2",
+            "has_geo_metadata": True,
+            "version": file_type_info["geo_version"],
+            "has_native_geo_types": True,
+            "has_bbox_column": bbox_info["has_bbox_column"],
+            "bbox_column_name": bbox_info.get("bbox_column_name"),
+            "has_row_group_stats": stats_info["has_stats"],
+            "needs_bbox_removal": bbox_info["has_bbox_column"],
+            "issues": issues,
+            "recommendations": recommendations,
+            "fix_available": bbox_info["has_bbox_column"],
+        }
+
+
+def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results):
+    """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
     metadata, _ = get_parquet_metadata(parquet_file)
     geo_meta = parse_geo_metadata(metadata, False)
-
-    if not geo_meta:
-        click.echo(click.style("\n❌ No GeoParquet metadata found", fg="red"))
-        if return_results:
-            return {
-                "passed": False,
-                "has_geo_metadata": False,
-                "issues": ["No GeoParquet metadata found"],
-                "recommendations": [],
-                "fix_available": False,
-            }
-        return
-
-    version = geo_meta.get("version", "0.0.0")
+    version = geo_meta.get("version", "0.0.0") if geo_meta else "0.0.0"
     bbox_info = check_bbox_structure(parquet_file, verbose)
 
     # Build results
@@ -260,20 +363,6 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
 
     passed = version >= "1.1.0" and not needs_bbox_column and not needs_bbox_metadata
 
-    results = {
-        "passed": passed,
-        "has_geo_metadata": True,
-        "version": version,
-        "has_bbox_column": bbox_info["has_bbox_column"],
-        "has_bbox_metadata": bbox_info["has_bbox_metadata"],
-        "bbox_column_name": bbox_info.get("bbox_column_name"),
-        "needs_bbox_column": needs_bbox_column,
-        "needs_bbox_metadata": needs_bbox_metadata,
-        "issues": issues,
-        "recommendations": recommendations,
-        "fix_available": needs_bbox_column or needs_bbox_metadata,
-    }
-
     # Print results
     click.echo("\nGeoParquet Metadata:")
     version_color = "green" if version >= "1.1.0" else "yellow"
@@ -286,15 +375,16 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
         if bbox_info["has_bbox_metadata"]:
             click.echo(
                 click.style(
-                    f"✓ Found bbox column '{bbox_info['bbox_column_name']}' with proper metadata covering",
+                    f"✓ Found bbox column '{bbox_info['bbox_column_name']}' "
+                    "with proper metadata covering",
                     fg="green",
                 )
             )
         else:
             click.echo(
                 click.style(
-                    f"⚠️  Found bbox column '{bbox_info['bbox_column_name']}' but missing bbox covering metadata "
-                    "(add to metadata to help inform clients)",
+                    f"⚠️  Found bbox column '{bbox_info['bbox_column_name']}' but missing "
+                    "bbox covering metadata (add to metadata to help inform clients)",
                     fg="yellow",
                 )
             )
@@ -304,7 +394,74 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
         )
 
     if return_results:
-        return results
+        return {
+            "passed": passed,
+            "file_type": "geoparquet_v1",
+            "has_geo_metadata": True,
+            "version": version,
+            "has_bbox_column": bbox_info["has_bbox_column"],
+            "has_bbox_metadata": bbox_info["has_bbox_metadata"],
+            "bbox_column_name": bbox_info.get("bbox_column_name"),
+            "needs_bbox_column": needs_bbox_column,
+            "needs_bbox_metadata": needs_bbox_metadata,
+            "issues": issues,
+            "recommendations": recommendations,
+            "fix_available": needs_bbox_column or needs_bbox_metadata,
+        }
+
+
+def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
+    """Check GeoParquet metadata version and bbox structure (version-aware).
+
+    Handles three file types differently:
+    - GeoParquet 1.x: Bbox column is recommended for spatial filtering
+    - GeoParquet 2.0: Bbox column is NOT recommended (native geo types provide stats)
+    - Parquet-geo-only: Bbox column is NOT recommended (native geo types provide stats)
+
+    Args:
+        parquet_file: Path to parquet file
+        verbose: Print additional information
+        return_results: If True, return structured results dict
+
+    Returns:
+        dict if return_results=True, containing:
+            - passed: bool
+            - file_type: str (geoparquet_v1, geoparquet_v2, parquet_geo_only, unknown)
+            - has_geo_metadata: bool
+            - version: str (for v1/v2)
+            - has_bbox_column: bool
+            - bbox_column_name: str or None
+            - issues: list of issue descriptions
+            - recommendations: list of recommendations
+            - fix_available: bool
+            - needs_bbox_removal: bool (for v2/parquet-geo-only with bbox)
+    """
+    # Detect file type first
+    file_type_info = detect_geoparquet_file_type(parquet_file, verbose)
+
+    # Handle parquet-geo-only case (no geo metadata is intentional)
+    if file_type_info["file_type"] == "parquet_geo_only":
+        return _check_parquet_geo_only(parquet_file, file_type_info, verbose, return_results)
+
+    # Handle GeoParquet 2.0 case
+    if file_type_info["file_type"] == "geoparquet_v2":
+        return _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results)
+
+    # Handle GeoParquet 1.x case
+    if file_type_info["file_type"] == "geoparquet_v1":
+        return _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results)
+
+    # Unknown file type - no geo indicators found
+    click.echo(click.style("\n❌ No GeoParquet metadata found", fg="red"))
+    if return_results:
+        return {
+            "passed": False,
+            "file_type": "unknown",
+            "has_geo_metadata": False,
+            "issues": ["No GeoParquet metadata or native Parquet geo types found"],
+            "recommendations": [],
+            "fix_available": False,
+        }
 
 
 def check_compression(parquet_file, verbose=False, return_results=False):
