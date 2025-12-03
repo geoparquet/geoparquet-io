@@ -686,3 +686,147 @@ class TestVersionPreservation:
         check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.0.0"}}
         version = get_geoparquet_version_from_check_results(check_results)
         assert version == "1.0"
+
+
+class TestConvertSkipsBbox:
+    """Test that convert skips bbox for 2.0 and parquet-geo-only."""
+
+    def test_convert_2_0_no_bbox_column(self, geojson_input, temp_output_file):
+        """Converting to 2.0 should not add bbox column."""
+        from geoparquet_io.core.common import check_bbox_structure
+
+        convert_to_geoparquet(
+            geojson_input,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="2.0",
+        )
+
+        bbox_info = check_bbox_structure(temp_output_file)
+        assert bbox_info["has_bbox_column"] is False
+
+    def test_convert_parquet_geo_only_no_bbox_column(self, geojson_input, temp_output_file):
+        """Converting to parquet-geo-only should not add bbox column."""
+        from geoparquet_io.core.common import check_bbox_structure
+
+        convert_to_geoparquet(
+            geojson_input,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="parquet-geo-only",
+        )
+
+        bbox_info = check_bbox_structure(temp_output_file)
+        assert bbox_info["has_bbox_column"] is False
+
+    def test_convert_1_1_has_bbox_column(self, geojson_input, temp_output_file):
+        """Converting to 1.1 should add bbox column."""
+        from geoparquet_io.core.common import check_bbox_structure
+
+        convert_to_geoparquet(
+            geojson_input,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="1.1",
+        )
+
+        bbox_info = check_bbox_structure(temp_output_file)
+        assert bbox_info["has_bbox_column"] is True
+
+    def test_convert_1_0_has_bbox_column(self, geojson_input, temp_output_file):
+        """Converting to 1.0 should add bbox column."""
+        from geoparquet_io.core.common import check_bbox_structure
+
+        convert_to_geoparquet(
+            geojson_input,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="1.0",
+        )
+
+        bbox_info = check_bbox_structure(temp_output_file)
+        assert bbox_info["has_bbox_column"] is True
+
+    def test_convert_removes_existing_bbox_to_2_0(
+        self, fields_geom_type_only_file, temp_output_file
+    ):
+        """Converting parquet with bbox to 2.0 should remove bbox."""
+        from geoparquet_io.core.common import check_bbox_structure
+
+        # Verify source has bbox
+        source_bbox = check_bbox_structure(fields_geom_type_only_file)
+        assert source_bbox["has_bbox_column"] is True
+
+        convert_to_geoparquet(
+            fields_geom_type_only_file,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="2.0",
+        )
+
+        # Verify output has no bbox
+        result_bbox = check_bbox_structure(temp_output_file)
+        assert result_bbox["has_bbox_column"] is False
+
+    def test_convert_removes_existing_bbox_to_parquet_geo_only(
+        self, fields_geom_type_only_file, temp_output_file
+    ):
+        """Converting parquet with bbox to parquet-geo-only should remove bbox."""
+        from geoparquet_io.core.common import check_bbox_structure
+
+        # Verify source has bbox
+        source_bbox = check_bbox_structure(fields_geom_type_only_file)
+        assert source_bbox["has_bbox_column"] is True
+
+        convert_to_geoparquet(
+            fields_geom_type_only_file,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="parquet-geo-only",
+        )
+
+        # Verify output has no bbox
+        result_bbox = check_bbox_structure(temp_output_file)
+        assert result_bbox["has_bbox_column"] is False
+
+    def test_convert_preserves_bbox_for_1_1_from_parquet(
+        self, fields_geom_type_only_file, temp_output_file
+    ):
+        """Converting parquet with bbox to 1.1 should preserve bbox."""
+        from geoparquet_io.core.common import check_bbox_structure
+
+        convert_to_geoparquet(
+            fields_geom_type_only_file,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="1.1",
+        )
+
+        result_bbox = check_bbox_structure(temp_output_file)
+        assert result_bbox["has_bbox_column"] is True
+
+    def test_convert_preserves_data_when_removing_bbox(
+        self, fields_geom_type_only_file, temp_output_file
+    ):
+        """Converting to 2.0 should preserve all data except bbox."""
+        # Get original row count (exclude bbox column)
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        original_count = con.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')"
+        ).fetchone()[0]
+
+        convert_to_geoparquet(
+            fields_geom_type_only_file,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="2.0",
+        )
+
+        # Verify row count preserved
+        result_count = con.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
+        ).fetchone()[0]
+        con.close()
+
+        assert result_count == original_count

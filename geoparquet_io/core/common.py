@@ -29,6 +29,21 @@ GEOPARQUET_VERSIONS = {
 DEFAULT_GEOPARQUET_VERSION = "1.1"
 
 
+def should_skip_bbox(geoparquet_version):
+    """Check if bbox column should be skipped for this GeoParquet version.
+
+    For GeoParquet 2.0 and parquet-geo-only, bbox columns are not needed because
+    native Parquet geo types provide row group statistics for spatial filtering.
+
+    Args:
+        geoparquet_version: Version string (e.g., "1.1", "2.0", "parquet-geo-only")
+
+    Returns:
+        bool: True if bbox should be skipped, False if bbox should be added
+    """
+    return geoparquet_version in ("2.0", "parquet-geo-only")
+
+
 def detect_geoparquet_file_type(parquet_file, verbose=False):
     """
     Detect the GeoParquet/Parquet-geo type of a file.
