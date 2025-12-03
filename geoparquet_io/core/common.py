@@ -29,6 +29,84 @@ GEOPARQUET_VERSIONS = {
 DEFAULT_GEOPARQUET_VERSION = "1.1"
 
 
+def detect_geoparquet_file_type(parquet_file, verbose=False):
+    """
+    Detect the GeoParquet/Parquet-geo type of a file.
+
+    Determines whether a file is:
+    - GeoParquet 1.x (has geo metadata with version 1.x)
+    - GeoParquet 2.0 (has geo metadata with version 2.x, uses native Parquet geo types)
+    - Parquet-geo-only (has native Parquet geo types but NO geo metadata)
+    - Unknown (no geo indicators found)
+
+    Args:
+        parquet_file: Path to the parquet file
+        verbose: Whether to print verbose output
+
+    Returns:
+        dict with:
+            - has_geo_metadata: bool - Has 'geo' key in metadata
+            - geo_version: str - GeoParquet version from metadata (e.g., "1.1.0", "2.0.0") or None
+            - has_native_geo_types: bool - Has Parquet GEOMETRY/GEOGRAPHY logical types
+            - file_type: str - One of: "geoparquet_v1", "geoparquet_v2", "parquet_geo_only", "unknown"
+            - bbox_recommended: bool - Whether bbox column is recommended for this file type
+    """
+    # Import here to avoid circular import
+    from geoparquet_io.core.metadata_utils import detect_geo_logical_type
+
+    result = {
+        "has_geo_metadata": False,
+        "geo_version": None,
+        "has_native_geo_types": False,
+        "file_type": "unknown",
+        "bbox_recommended": True,  # Default for v1.x
+    }
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    with fsspec.open(safe_url, "rb") as f:
+        pf = pq.ParquetFile(f)
+        metadata = pf.schema_arrow.metadata
+        schema = pf.schema_arrow
+        parquet_schema_str = str(pf.metadata.schema)
+
+    # Check for geo metadata
+    if metadata and b"geo" in metadata:
+        result["has_geo_metadata"] = True
+        try:
+            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+            if isinstance(geo_meta, dict) and "version" in geo_meta:
+                result["geo_version"] = geo_meta["version"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Check for native Parquet geo types
+    for field in schema:
+        geo_type = detect_geo_logical_type(field, parquet_schema_str)
+        if geo_type:
+            result["has_native_geo_types"] = True
+            break
+
+    # Determine file type
+    if result["has_geo_metadata"]:
+        version = result["geo_version"]
+        if version and version.startswith("2."):
+            result["file_type"] = "geoparquet_v2"
+            result["bbox_recommended"] = False  # V2 uses native geo row group stats
+        else:
+            result["file_type"] = "geoparquet_v1"
+            result["bbox_recommended"] = True  # V1.x needs bbox for spatial filtering
+    elif result["has_native_geo_types"]:
+        result["file_type"] = "parquet_geo_only"
+        result["bbox_recommended"] = False  # Native geo types provide row group stats
+    # else: remains "unknown"
+
+    if verbose:
+        click.echo(f"File type detection: {result}")
+
+    return result
+
+
 def is_remote_url(path):
     """
     Check if path is a remote URL that DuckDB can read.

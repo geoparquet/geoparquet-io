@@ -344,7 +344,7 @@ def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup, ove
 @check.command(name="bbox")
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
-@click.option("--fix", is_flag=True, help="Add bbox column and metadata")
+@click.option("--fix", is_flag=True, help="Fix bbox (add for v1.x, remove for v2/parquet-geo)")
 @click.option(
     "--fix-output",
     type=click.Path(),
@@ -358,8 +358,13 @@ def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup, ove
 @overwrite_option
 @profile_option
 def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite, profile):
-    """Check bbox column and metadata."""
-    from geoparquet_io.core.check_fixes import fix_bbox_all
+    """Check bbox column and metadata (version-aware).
+
+    For GeoParquet 1.x: bbox column is recommended for spatial filtering.
+    For GeoParquet 2.0/parquet-geo-only: bbox column is NOT recommended
+    (native Parquet geo types provide row group statistics).
+    """
+    from geoparquet_io.core.check_fixes import fix_bbox_all, fix_bbox_removal
     from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
 
     result = check_metadata_and_bbox(parquet_file, verbose, return_results=True)
@@ -369,22 +374,47 @@ def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite,
             click.echo(click.style("\n✓ No fix needed - bbox is optimal!", fg="green"))
             return
 
-        needs_column = result.get("needs_bbox_column", False)
-        needs_metadata = result.get("needs_bbox_metadata", False)
+        # Check if this is a removal (v2/parquet-geo-only) or addition (v1.x)
+        if result.get("needs_bbox_removal", False):
+            # V2 or parquet-geo-only: remove bbox column
+            bbox_column_name = result.get("bbox_column_name")
 
-        def bbox_fix_func(input_path, output_path, verbose_flag, profile_name):
-            return fix_bbox_all(
-                input_path, output_path, needs_column, needs_metadata, verbose_flag, profile_name
+            def bbox_fix_func(input_path, output_path, verbose_flag, profile_name):
+                return fix_bbox_removal(
+                    input_path, output_path, bbox_column_name, verbose_flag, profile_name
+                )
+
+            output_path, backup_path = handle_fix_common(
+                parquet_file, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
             )
 
-        output_path, backup_path = handle_fix_common(
-            parquet_file, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
-        )
+            click.echo(click.style("\n✓ Bbox column removed successfully!", fg="green"))
+            click.echo(f"Optimized file: {output_path}")
+            if backup_path:
+                click.echo(f"Backup: {backup_path}")
+        else:
+            # V1.x: add bbox column/metadata (existing logic)
+            needs_column = result.get("needs_bbox_column", False)
+            needs_metadata = result.get("needs_bbox_metadata", False)
 
-        click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
-        click.echo(f"Optimized file: {output_path}")
-        if backup_path:
-            click.echo(f"Backup: {backup_path}")
+            def bbox_fix_func(input_path, output_path, verbose_flag, profile_name):
+                return fix_bbox_all(
+                    input_path,
+                    output_path,
+                    needs_column,
+                    needs_metadata,
+                    verbose_flag,
+                    profile_name,
+                )
+
+            output_path, backup_path = handle_fix_common(
+                parquet_file, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
+            )
+
+            click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
+            click.echo(f"Optimized file: {output_path}")
+            if backup_path:
+                click.echo(f"Backup: {backup_path}")
 
 
 @check.command(name="row-group")
