@@ -154,8 +154,8 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
     Returns:
         dict with fix summary
     """
-    if verbose:
-        click.echo(f"Removing bbox column '{bbox_column_name}'...")
+    # Always inform user when removing bbox column
+    click.echo(f"Removing bbox column '{bbox_column_name}' (not needed for native geo types)")
 
     # Setup AWS profile if needed
     setup_aws_profile_if_needed(profile, parquet_file, output_file)
@@ -390,9 +390,6 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
         if bbox_result.get("needs_bbox_removal", False):
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
             temp_files.append(temp_file)
-
-            if verbose:
-                click.echo("\n[1/4] Removing unnecessary bbox column...")
 
             bbox_column_name = bbox_result.get("bbox_column_name")
             fix_bbox_removal(current_file, temp_file, bbox_column_name, verbose, profile)

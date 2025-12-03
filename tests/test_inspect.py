@@ -524,3 +524,107 @@ def test_extract_geo_info_with_both(parquet_v2_file):
     assert geo_info["version"] == "2.0.0"
     assert geo_info["geometry_types"] == ["Polygon"]
     assert geo_info["bbox"] is not None
+
+
+class TestCRSComparison:
+    """Test CRS comparison and extraction functions."""
+
+    def test_extract_crs_identifier_from_projjson(self):
+        """Test extracting CRS identifier from PROJJSON dict."""
+        from geoparquet_io.core.inspect_utils import _extract_crs_identifier
+
+        projjson = {
+            "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+            "type": "ProjectedCRS",
+            "name": "MGI / Austria Lambert",
+            "id": {"authority": "EPSG", "code": 31287},
+        }
+        result = _extract_crs_identifier(projjson)
+        assert result == ("EPSG", 31287)
+
+    def test_extract_crs_identifier_from_epsg_string(self):
+        """Test extracting CRS identifier from EPSG:CODE string."""
+        from geoparquet_io.core.inspect_utils import _extract_crs_identifier
+
+        assert _extract_crs_identifier("EPSG:4326") == ("EPSG", 4326)
+        assert _extract_crs_identifier("epsg:31287") == ("EPSG", 31287)
+        # OGC:CRS84 is a special case - not a numeric code, so returns None
+        assert _extract_crs_identifier("OGC:CRS84") is None
+
+    def test_extract_crs_identifier_from_urn(self):
+        """Test extracting CRS identifier from URN format."""
+        from geoparquet_io.core.inspect_utils import _extract_crs_identifier
+
+        assert _extract_crs_identifier("urn:ogc:def:crs:EPSG::4326") == ("EPSG", 4326)
+        assert _extract_crs_identifier("urn:ogc:def:crs:EPSG::31287") == ("EPSG", 31287)
+
+    def test_extract_crs_identifier_returns_none_for_invalid(self):
+        """Test that invalid CRS formats return None."""
+        from geoparquet_io.core.inspect_utils import _extract_crs_identifier
+
+        assert _extract_crs_identifier(None) is None
+        assert _extract_crs_identifier({}) is None
+        assert _extract_crs_identifier("invalid") is None
+        assert _extract_crs_identifier({"no_id": "here"}) is None
+
+    def test_crs_are_equivalent_projjson_vs_epsg_string(self):
+        """Test that PROJJSON and EPSG string for same CRS are equivalent."""
+        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+
+        projjson = {
+            "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+            "type": "ProjectedCRS",
+            "name": "MGI / Austria Lambert",
+            "id": {"authority": "EPSG", "code": 31287},
+        }
+        assert _crs_are_equivalent(projjson, "EPSG:31287") is True
+        assert _crs_are_equivalent("EPSG:31287", projjson) is True
+
+    def test_crs_are_equivalent_same_strings(self):
+        """Test that identical CRS strings are equivalent."""
+        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+
+        assert _crs_are_equivalent("EPSG:4326", "EPSG:4326") is True
+        assert _crs_are_equivalent("epsg:4326", "EPSG:4326") is True
+
+    def test_crs_are_not_equivalent_different_codes(self):
+        """Test that different CRS codes are not equivalent."""
+        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+
+        assert _crs_are_equivalent("EPSG:4326", "EPSG:31287") is False
+
+    def test_crs_are_not_equivalent_when_unextractable(self):
+        """Test that unextractable CRS values are not equivalent."""
+        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+
+        assert _crs_are_equivalent(None, "EPSG:4326") is False
+        assert _crs_are_equivalent("invalid", "EPSG:4326") is False
+        assert _crs_are_equivalent({}, "EPSG:4326") is False
+
+    def test_detect_mismatches_no_false_positive_for_same_crs(self):
+        """Test that PROJJSON and EPSG string for same CRS don't trigger mismatch."""
+        from geoparquet_io.core.inspect_utils import _detect_metadata_mismatches
+
+        parquet_geo_info = {
+            "crs": {
+                "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+                "type": "ProjectedCRS",
+                "name": "MGI / Austria Lambert",
+                "id": {"authority": "EPSG", "code": 31287},
+            }
+        }
+        geoparquet_info = {"crs": "EPSG:31287"}
+
+        warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
+        assert len(warnings) == 0
+
+    def test_detect_mismatches_reports_actual_mismatch(self):
+        """Test that actual CRS mismatches are reported."""
+        from geoparquet_io.core.inspect_utils import _detect_metadata_mismatches
+
+        parquet_geo_info = {"crs": "EPSG:4326"}
+        geoparquet_info = {"crs": "EPSG:31287"}
+
+        warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
+        assert len(warnings) == 1
+        assert "CRS mismatch" in warnings[0]

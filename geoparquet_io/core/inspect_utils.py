@@ -99,6 +99,74 @@ def _extract_crs_string(crs_info: Any) -> Optional[str]:
     return None
 
 
+def _extract_crs_identifier(crs_info: Any) -> Optional[tuple[str, int]]:
+    """
+    Extract normalized CRS identifier (authority, code) from various formats.
+
+    Handles:
+    - PROJJSON dicts with id.authority and id.code
+    - Strings like "EPSG:31287", "epsg:31287"
+    - URN format like "urn:ogc:def:crs:EPSG::31287"
+
+    Returns:
+        tuple of (authority, code) like ("EPSG", 31287), or None if not extractable
+    """
+    if isinstance(crs_info, dict):
+        # PROJJSON format - look for id.authority and id.code
+        if "id" in crs_info:
+            crs_id = crs_info["id"]
+            if isinstance(crs_id, dict):
+                authority = crs_id.get("authority", "").upper()
+                code = crs_id.get("code")
+                if authority and code:
+                    return (authority, int(code))
+        return None
+
+    if isinstance(crs_info, str):
+        crs_str = crs_info.strip().upper()
+
+        # Handle "EPSG:31287" format
+        if ":" in crs_str and not crs_str.startswith("URN:"):
+            parts = crs_str.split(":")
+            if len(parts) == 2:
+                try:
+                    return (parts[0], int(parts[1]))
+                except ValueError:
+                    pass
+
+        # Handle URN format "urn:ogc:def:crs:EPSG::31287"
+        if crs_str.startswith("URN:OGC:DEF:CRS:"):
+            parts = crs_str.split(":")
+            if len(parts) >= 7:
+                authority = parts[4]
+                try:
+                    code = int(parts[-1])
+                    return (authority, code)
+                except ValueError:
+                    pass
+
+    return None
+
+
+def _crs_are_equivalent(crs1: Any, crs2: Any) -> bool:
+    """
+    Check if two CRS values are equivalent.
+
+    Compares by extracting authority and code from both values.
+    Handles PROJJSON dicts, "EPSG:31287" strings, and URN formats.
+
+    Returns:
+        True if CRS values represent the same coordinate system
+    """
+    id1 = _extract_crs_identifier(crs1)
+    id2 = _extract_crs_identifier(crs2)
+
+    if id1 is None or id2 is None:
+        return False
+
+    return id1 == id2
+
+
 def _detect_metadata_mismatches(
     parquet_geo_info: dict[str, Any],
     geoparquet_info: dict[str, Any],
@@ -115,17 +183,19 @@ def _detect_metadata_mismatches(
 
     # Compare CRS - only warn if both are set and different
     if parquet_crs and geoparquet_crs:
-        # Normalize for comparison (both could be "OGC:CRS84" or "EPSG:4326" etc.)
-        parquet_crs_norm = str(parquet_crs).upper().replace("(DEFAULT)", "").strip()
-        geoparquet_crs_norm = str(geoparquet_crs).upper().replace("(DEFAULT)", "").strip()
-        if parquet_crs_norm != geoparquet_crs_norm:
+        # Use semantic comparison (handles PROJJSON vs "EPSG:31287" etc.)
+        if not _crs_are_equivalent(parquet_crs, geoparquet_crs):
+            # Extract display strings for the warning message
+            parquet_crs_display = _extract_crs_string(parquet_crs) or str(parquet_crs)
+            geoparquet_crs_display = _extract_crs_string(geoparquet_crs) or str(geoparquet_crs)
             warnings.append(
-                f"CRS mismatch: Parquet geo type has '{parquet_crs}' "
-                f"but GeoParquet metadata has '{geoparquet_crs}'"
+                f"CRS mismatch: Parquet geo type has '{parquet_crs_display}' "
+                f"but GeoParquet metadata has '{geoparquet_crs_display}'"
             )
     elif parquet_crs and not geoparquet_crs:
+        parquet_crs_display = _extract_crs_string(parquet_crs) or str(parquet_crs)
         warnings.append(
-            f"CRS in Parquet geo type ('{parquet_crs}') but missing in GeoParquet metadata"
+            f"CRS in Parquet geo type ('{parquet_crs_display}') but missing in GeoParquet metadata"
         )
     elif geoparquet_crs and not parquet_crs:
         # GeoParquet has CRS but Parquet type doesn't - might be expected
