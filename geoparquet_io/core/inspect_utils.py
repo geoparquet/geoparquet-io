@@ -99,6 +99,39 @@ def _extract_crs_string(crs_info: Any) -> Optional[str]:
     return None
 
 
+def _format_crs_for_display(crs_info: Any, include_default: bool = True) -> str:
+    """
+    Format CRS for display output.
+
+    Converts any CRS format (PROJJSON dict, EPSG string, None) to a
+    consistent display string like "EPSG:31287" or "OGC:CRS84 (default)".
+
+    Args:
+        crs_info: CRS in any format (PROJJSON dict, EPSG string, None)
+        include_default: Whether to show "(default)" for None CRS
+
+    Returns:
+        Display string like "EPSG:31287" or "OGC:CRS84 (default)"
+    """
+    if crs_info is None:
+        return "OGC:CRS84 (default)" if include_default else "Not specified"
+
+    # Try to extract EPSG code from PROJJSON
+    identifier = _extract_crs_identifier(crs_info)
+    if identifier:
+        authority, code = identifier
+        return f"{authority}:{code}"
+
+    # Fallback to existing extraction
+    result = _extract_crs_string(crs_info)
+    if result:
+        return result
+
+    # Last resort - truncate if too long
+    crs_str = str(crs_info)
+    return crs_str[:50] + "..." if len(crs_str) > 50 else crs_str
+
+
 def _extract_crs_identifier(crs_info: Any) -> Optional[tuple[str, int]]:
     """
     Extract normalized CRS identifier (authority, code) from various formats.
@@ -297,14 +330,12 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
 
         if primary_column in columns_meta:
             col_meta = columns_meta[primary_column]
-            crs = _extract_crs_string(col_meta.get("crs"))
+            crs = col_meta.get("crs")  # Keep raw PROJJSON, don't convert to string
             bbox = col_meta.get("bbox")
             geometry_types = col_meta.get("geometry_types")
             edges = col_meta.get("edges")
 
-        # Per GeoParquet spec, if CRS is not specified, it defaults to OGC:CRS84
-        if crs is None and primary_column in columns_meta:
-            crs = "OGC:CRS84 (default)"
+        # Note: Keep crs as None if not specified - default handling is a display concern
 
         geoparquet_info = {
             "version": version,
@@ -323,9 +354,8 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
     primary_column = geometry_column or "geometry"
 
     # Determine effective CRS (prefer GeoParquet, fallback to Parquet type)
+    # Keep as raw PROJJSON - display functions will handle default formatting
     effective_crs = geoparquet_info.get("crs") or parquet_geo_info.get("crs")
-    if not effective_crs and (geo_meta or parquet_type != "No Parquet geo logical type"):
-        effective_crs = "OGC:CRS84 (default)"
 
     # Determine effective bbox
     # Priority: GeoParquet metadata bbox, then calculate from row group stats
@@ -659,7 +689,7 @@ def format_terminal_output(
         if geo_info.get("version"):
             console.print(f"GeoParquet Version: [cyan]{geo_info['version']}[/cyan]")
 
-        crs_display = geo_info["crs"] if geo_info["crs"] else "Not specified"
+        crs_display = _format_crs_for_display(geo_info["crs"])
         console.print(f"CRS: [cyan]{crs_display}[/cyan]")
 
         # Geometry types (if available)
@@ -678,7 +708,7 @@ def format_terminal_output(
     elif parquet_type in ("Geometry", "Geography"):
         # Has Parquet geo type but no GeoParquet metadata
         console.print("[dim]No GeoParquet metadata (using Parquet geo type)[/dim]")
-        crs_display = geo_info["crs"] if geo_info["crs"] else "OGC:CRS84 (default)"
+        crs_display = _format_crs_for_display(geo_info["crs"])
         console.print(f"CRS: [cyan]{crs_display}[/cyan]")
         # Display bbox calculated from row group stats
         if geo_info["bbox"]:
@@ -823,7 +853,7 @@ def format_json_output(
         "compression": file_info.get("compression"),
         "parquet_type": geo_info.get("parquet_type", "No Parquet geo logical type"),
         "geoparquet_version": geo_info.get("version"),
-        "crs": geo_info.get("crs"),
+        "crs": _format_crs_for_display(geo_info.get("crs"), include_default=False),
         "geometry_types": geo_info.get("geometry_types"),
         "bbox": geo_info.get("bbox"),
         "warnings": geo_info.get("warnings", []),
@@ -906,7 +936,7 @@ def format_markdown_output(
         if geo_info.get("version"):
             lines.append(f"- **GeoParquet Version:** {geo_info['version']}")
 
-        crs_display = geo_info["crs"] if geo_info["crs"] else "Not specified"
+        crs_display = _format_crs_for_display(geo_info["crs"])
         lines.append(f"- **CRS:** {crs_display}")
 
         # Geometry types (if available)
@@ -926,7 +956,7 @@ def format_markdown_output(
         # Has Parquet geo type but no GeoParquet metadata
         lines.append("")
         lines.append("*No GeoParquet metadata (using Parquet geo type)*")
-        crs_display = geo_info["crs"] if geo_info["crs"] else "OGC:CRS84 (default)"
+        crs_display = _format_crs_for_display(geo_info["crs"])
         lines.append(f"- **CRS:** {crs_display}")
         # Display bbox calculated from row group stats
         if geo_info["bbox"]:

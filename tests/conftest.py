@@ -156,6 +156,16 @@ def fields_geom_type_only_5070_file(test_data_dir):
 
 
 @pytest.fixture
+def austria_bbox_covering_file(test_data_dir):
+    """Return path to the austria_bbox_covering.parquet test file.
+
+    This file has a non-standard bbox column name ('geometry_bbox')
+    that is properly registered in the GeoParquet covering metadata.
+    """
+    return str(test_data_dir / "austria_bbox_covering.parquet")
+
+
+@pytest.fixture
 def geojson_input(test_data_dir):
     """Return path to the buildings_test.geojson test file."""
     return str(test_data_dir / "buildings_test.geojson")
