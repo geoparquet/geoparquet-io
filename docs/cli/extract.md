@@ -30,7 +30,14 @@ This will show all available options for the `extract` command.
 
 ### Output Options
 
---8<-- "_includes/common-cli-options.md"
+- `--compression` - Compression type: ZSTD (default), GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED
+- `--compression-level` - Compression level (varies by type)
+- `--row-group-size-mb` - Target row group size (e.g. '256MB', '1GB')
+- `--row-group-size` - Exact number of rows per row group
+- `--dry-run` - Preview SQL without executing
+- `--show-sql` - Print SQL statements as executed
+- `--verbose` - Print verbose output
+- `--profile` - AWS profile name for S3 operations
 
 ## Examples
 
