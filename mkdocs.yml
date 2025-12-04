@@ -49,6 +49,7 @@ nav:
   - User Guide:
     - Inspecting Files: guide/inspect.md
     - Converting Formats: guide/convert.md
+    - Selecting Fields: guide/select.md
     - Checking Best Practices: guide/check.md
     - Sorting Data: guide/sort.md
     - Adding Spatial Indices: guide/add.md
@@ -59,6 +60,7 @@ nav:
   - CLI Reference:
     - Overview: cli/overview.md
     - convert: cli/convert.md
+    - select: cli/select.md
     - inspect: cli/inspect.md
     - check: cli/check.md
     - sort: cli/sort.md

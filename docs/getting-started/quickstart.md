@@ -65,7 +65,21 @@ This checks:
 - Bbox metadata structure
 - Row group optimization
 
-### 4. Optimize Existing Files
+### 4. Select Specific Fields
+
+Create a lighter file by keeping only the fields you need:
+
+```bash
+# Select specific fields
+gpio select input.parquet output.parquet --fields "id,name,category"
+
+# Or exclude fields you don't want
+gpio select input.parquet output.parquet --fields "temp,debug" --exclude
+```
+
+The geometry column is automatically included to preserve a valid GeoParquet file.
+
+### 5. Optimize Existing Files
 
 If you already have GeoParquet files, enhance them with spatial indices.
 
@@ -81,7 +95,7 @@ Sort data using a Hilbert curve for better spatial locality:
 gpio sort hilbert input.parquet sorted.parquet
 ```
 
-### 5. Add Spatial Indices
+### 6. Add Spatial Indices
 
 Enhance your data with additional spatial indexing:
 
@@ -96,7 +110,7 @@ gpio add kdtree input.parquet output_kdtree.parquet
 gpio add admin-divisions buildings.parquet buildings_with_countries.parquet
 ```
 
-### 6. Partition Large Datasets
+### 7. Partition Large Datasets
 
 Split large files into manageable partitions:
 
