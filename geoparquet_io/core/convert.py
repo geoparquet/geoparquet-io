@@ -7,11 +7,16 @@ import click
 import duckdb
 
 from geoparquet_io.core.common import (
+    _format_crs_display,
+    detect_crs_from_spatial_file,
+    extract_crs_from_parquet,
     format_size,
     get_duckdb_connection,
     get_remote_error_hint,
+    is_default_crs,
     is_remote_url,
     needs_httpfs,
+    parse_crs_string_to_projjson,
     safe_file_url,
     setup_aws_profile_if_needed,
     show_remote_read_message,
@@ -783,6 +788,50 @@ def convert_to_geoparquet(
     is_csv = _is_csv_file(input_file)
     is_parquet = _is_parquet_file(input_file)
 
+    # Determine effective CRS for output
+    # --crs parameter is ONLY valid for CSV/TSV files
+    # For spatial files, CRS is auto-detected and must be present
+    user_specified_crs = crs != "EPSG:4326"  # User explicitly provided non-default CRS
+    effective_crs = None
+
+    if user_specified_crs:
+        # --crs is only valid for CSV/TSV files
+        if not is_csv:
+            raise click.ClickException(
+                f"The --crs option is only valid for CSV/TSV files.\n"
+                f"For {os.path.splitext(input_file)[1]} files, CRS is read from the file metadata."
+            )
+        # User explicitly specified a CRS for CSV, convert to PROJJSON
+        effective_crs = parse_crs_string_to_projjson(crs, con)
+        if verbose:
+            click.echo(f"Using user-specified CRS: {crs}")
+    elif is_csv:
+        # CSV with default CRS - effective_crs stays None (use default)
+        pass
+    elif is_parquet:
+        # Parquet files - detect CRS from file
+        detected_crs = extract_crs_from_parquet(input_url, verbose=verbose)
+        if detected_crs and not is_default_crs(detected_crs):
+            effective_crs = detected_crs
+            if verbose:
+                click.echo(f"Preserving input CRS: {_format_crs_display(detected_crs)}")
+    else:
+        # Spatial files (GPKG, GeoJSON, Shapefile) - CRS must be present
+        detected_crs = detect_crs_from_spatial_file(input_url, con, verbose=verbose)
+        if detected_crs is None:
+            raise click.ClickException(
+                f"No CRS found in input file: {input_file}\n"
+                f"Spatial files (GeoPackage, Shapefile, GeoJSON, etc.) must have a defined CRS."
+            )
+        # Only set effective_crs if it's non-default (skip writing default CRS)
+        if is_default_crs(detected_crs):
+            if verbose:
+                click.echo("Input has default CRS (WGS84), not writing explicit CRS")
+        else:
+            effective_crs = detected_crs
+            if verbose:
+                click.echo(f"Detected input CRS: {_format_crs_display(detected_crs)}")
+
     try:
         if is_csv:
             query = _convert_csv_path(
@@ -819,6 +868,7 @@ def convert_to_geoparquet(
             verbose=verbose,
             profile=profile,
             geoparquet_version=geoparquet_version,
+            input_crs=effective_crs,
         )
 
         # Report results

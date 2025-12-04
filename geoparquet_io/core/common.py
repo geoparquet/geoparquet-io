@@ -5,7 +5,9 @@ import shutil
 import tempfile
 import urllib.parse
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import click
 import duckdb
@@ -27,6 +29,49 @@ GEOPARQUET_VERSIONS = {
     },
 }
 DEFAULT_GEOPARQUET_VERSION = "1.1"
+
+
+@dataclass
+class ParquetWriteSettings:
+    """
+    Central configuration for Parquet write best practices.
+    Single source of truth for compression, row groups, and other settings.
+    """
+
+    compression: str = "ZSTD"
+    compression_level: int = 15
+    row_group_rows: Optional[int] = None
+    row_group_size_mb: Optional[int] = None
+
+    # Best practice constants
+    DEFAULT_COMPRESSION = "ZSTD"
+    DEFAULT_COMPRESSION_LEVEL = 15
+    DEFAULT_ROW_GROUP_ROWS = 100_000
+    DEFAULT_PARQUET_VERSION = "2.6"
+
+    def get_pyarrow_kwargs(self, calculated_row_group_size: Optional[int] = None) -> dict:
+        """Get kwargs dict for PyArrow write_table()."""
+        pa_compression = self.compression if self.compression != "UNCOMPRESSED" else None
+        pa_compression_level = (
+            self.compression_level if self.compression in ["GZIP", "ZSTD", "BROTLI"] else None
+        )
+
+        row_group_size = (
+            calculated_row_group_size or self.row_group_rows or self.DEFAULT_ROW_GROUP_ROWS
+        )
+
+        kwargs = {
+            "row_group_size": row_group_size,
+            "compression": pa_compression,
+            "write_statistics": True,
+            "use_dictionary": True,
+            "version": self.DEFAULT_PARQUET_VERSION,
+        }
+
+        if pa_compression_level is not None:
+            kwargs["compression_level"] = pa_compression_level
+
+        return kwargs
 
 
 def should_skip_bbox(geoparquet_version):
@@ -612,6 +657,356 @@ def find_primary_geometry_column(parquet_file, verbose=False):
     return "geometry"
 
 
+# CRS handling functions for GeoParquet 2.0 and parquet-geo-only
+
+
+def _extract_crs_identifier(crs_info):
+    """
+    Extract normalized CRS identifier (authority, code) from various formats.
+
+    Handles PROJJSON dicts, "EPSG:CODE" strings, and URN formats.
+    Returns tuple of (authority, code) like ("EPSG", 31287) or ("OGC", "CRS84"), or None.
+    Code is int for numeric codes, str for non-numeric (e.g., CRS84).
+    """
+    if isinstance(crs_info, dict):
+        if "id" in crs_info:
+            crs_id = crs_info["id"]
+            if isinstance(crs_id, dict):
+                authority = crs_id.get("authority", "").upper()
+                code = crs_id.get("code")
+                if authority and code:
+                    # Try to convert to int, but keep as string if not numeric
+                    try:
+                        return (authority, int(code))
+                    except (ValueError, TypeError):
+                        return (authority, str(code).upper())
+        return None
+
+    if isinstance(crs_info, str):
+        crs_str = crs_info.strip().upper()
+        if ":" in crs_str and not crs_str.startswith("URN:"):
+            parts = crs_str.split(":")
+            if len(parts) == 2:
+                try:
+                    return (parts[0], int(parts[1]))
+                except ValueError:
+                    # Non-numeric code (e.g., OGC:CRS84)
+                    return (parts[0], parts[1])
+        if crs_str.startswith("URN:OGC:DEF:CRS:"):
+            parts = crs_str.split(":")
+            if len(parts) >= 7:
+                try:
+                    return (parts[4], int(parts[-1]))
+                except ValueError:
+                    return (parts[4], parts[-1])
+
+    return None
+
+
+def is_default_crs(crs):
+    """
+    Check if CRS is the default (OGC:CRS84 or EPSG:4326).
+
+    Returns True if CRS is None, empty, or represents WGS84.
+    Used to skip CRS rewriting when output would be default anyway.
+    """
+    if not crs:
+        return True
+
+    identifier = _extract_crs_identifier(crs)
+    if identifier:
+        authority, code = identifier
+        if authority == "EPSG" and code == 4326:
+            return True
+        if authority == "OGC" and str(code).upper() == "CRS84":
+            return True
+
+    return False
+
+
+def extract_crs_from_parquet(parquet_file, verbose=False):
+    """
+    Extract CRS (as PROJJSON dict) from a Parquet file.
+
+    Checks in order:
+    1. GeoParquet metadata (columns.<geom_col>.crs)
+    2. Parquet native geo type (from schema string)
+
+    Args:
+        parquet_file: Path to the parquet file
+        verbose: Whether to print verbose output
+
+    Returns:
+        dict: PROJJSON CRS dict, or None if no CRS found or CRS is default
+    """
+    from geoparquet_io.core.metadata_utils import parse_geometry_type_from_schema
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    with fsspec.open(safe_url, "rb") as f:
+        pf = pq.ParquetFile(f)
+        schema = pf.schema_arrow
+        parquet_schema_str = str(pf.metadata.schema)
+        metadata = schema.metadata
+
+    # First, try GeoParquet metadata
+    if metadata and b"geo" in metadata:
+        try:
+            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+            primary_col = geo_meta.get("primary_column", "geometry")
+            columns = geo_meta.get("columns", {})
+            if primary_col in columns:
+                crs = columns[primary_col].get("crs")
+                if crs and not is_default_crs(crs):
+                    if verbose:
+                        click.echo(f"Found CRS in GeoParquet metadata: {_format_crs_display(crs)}")
+                    return crs
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Second, try Parquet native geo type
+    for field in schema:
+        geom_details = parse_geometry_type_from_schema(field.name, parquet_schema_str)
+        if geom_details and "crs" in geom_details:
+            crs = geom_details["crs"]
+            if crs and not is_default_crs(crs):
+                if verbose:
+                    click.echo(f"Found CRS in Parquet geo type: {_format_crs_display(crs)}")
+                return crs
+
+    return None
+
+
+def detect_crs_from_spatial_file(input_file, con, verbose=False):
+    """
+    Detect CRS from a spatial file (GeoJSON, GPKG, Shapefile).
+
+    Uses DuckDB's ST_Read_Meta which returns metadata including full PROJJSON CRS.
+
+    Args:
+        input_file: Path to the spatial file
+        con: DuckDB connection (with spatial extension loaded)
+        verbose: Whether to print verbose output
+
+    Returns:
+        dict: PROJJSON CRS dict, or None if no CRS found in file metadata.
+              Note: Returns CRS even if it's default (EPSG:4326). Caller should
+              use is_default_crs() to decide whether to write it.
+    """
+    try:
+        result = con.execute(f"""
+            SELECT * FROM ST_Read_Meta('{input_file}')
+        """).fetchone()
+
+        if result:
+            # Result structure: (path, driver, driver_long, layers_list)
+            layers = result[3]  # List of layer dicts
+            if layers and len(layers) > 0:
+                layer = layers[0]
+                geometry_fields = layer.get("geometry_fields", [])
+                if geometry_fields:
+                    crs_info = geometry_fields[0].get("crs", {})
+                    # Extract PROJJSON if available
+                    projjson_str = crs_info.get("projjson")
+                    if projjson_str:
+                        crs = json.loads(projjson_str)
+                        if verbose:
+                            click.echo(f"Found CRS in spatial file: {_format_crs_display(crs)}")
+                        return crs
+                    # Fallback to auth_name/auth_code
+                    auth_name = crs_info.get("auth_name")
+                    auth_code = crs_info.get("auth_code")
+                    if auth_name and auth_code:
+                        crs = {"id": {"authority": auth_name, "code": int(auth_code)}}
+                        if verbose:
+                            click.echo(f"Found CRS: {auth_name}:{auth_code}")
+                        return crs
+    except Exception as e:
+        if verbose:
+            click.echo(f"Could not detect CRS from spatial file: {e}")
+
+    return None
+
+
+def _format_crs_display(crs):
+    """Format CRS for display (extract EPSG code if possible)."""
+    if not crs:
+        return "None"
+    identifier = _extract_crs_identifier(crs)
+    if identifier:
+        return f"{identifier[0]}:{identifier[1]}"
+    return str(crs)[:50] + "..." if len(str(crs)) > 50 else str(crs)
+
+
+def apply_crs_to_parquet(
+    parquet_file,
+    crs,
+    geometry_column="geometry",
+    compression="ZSTD",
+    compression_level=15,
+    row_group_rows=None,
+    verbose=False,
+):
+    """
+    Rewrite a Parquet file to add CRS to the geometry column.
+
+    Uses geoarrow-pyarrow to set CRS on the geometry column type,
+    which writes it into both the Parquet schema and Arrow extension metadata.
+
+    Args:
+        parquet_file: Path to the parquet file to rewrite
+        crs: PROJJSON dict with CRS information
+        geometry_column: Name of the geometry column
+        compression: Compression type for output
+        compression_level: Compression level
+        row_group_rows: Number of rows per row group
+        verbose: Whether to print verbose output
+    """
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+
+    if verbose:
+        click.echo(f"Applying CRS {_format_crs_display(crs)} to {geometry_column} column...")
+
+    # Read the file
+    table = pq.read_table(parquet_file)
+
+    # Get the geometry column and convert to WKB format with geoarrow
+    # Using as_wkb preserves binary WKB and writes proper Parquet GEOMETRY type
+    geom_col = table.column(geometry_column)
+    wkb_arr = ga.as_wkb(geom_col)
+
+    # Create new type with CRS
+    new_type = wkb_arr.type.with_crs(crs)
+
+    # Create new chunks with the CRS type using from_storage
+    # This preserves the CRS unlike cast() which resets it
+    new_chunks = []
+    for chunk in wkb_arr.chunks:
+        new_chunk = pa.ExtensionArray.from_storage(new_type, chunk.storage)
+        new_chunks.append(new_chunk)
+
+    geom_with_crs = pa.chunked_array(new_chunks, type=new_type)
+
+    # Replace the column in the table
+    col_index = table.schema.get_field_index(geometry_column)
+    new_table = table.set_column(col_index, geometry_column, geom_with_crs)
+
+    # Use central configuration for write settings
+    settings = ParquetWriteSettings(
+        compression=compression, compression_level=compression_level, row_group_rows=row_group_rows
+    )
+    write_kwargs = settings.get_pyarrow_kwargs()
+
+    # Write back with all best practices
+    pq.write_table(new_table, parquet_file, **write_kwargs)
+
+    if verbose:
+        click.echo("CRS applied successfully")
+
+
+def add_crs_to_geoparquet_metadata(
+    parquet_file, crs, compression="ZSTD", compression_level=15, row_group_rows=None, verbose=False
+):
+    """
+    Add CRS to GeoParquet 'geo' metadata.
+
+    Used for GeoParquet 2.0 files where CRS should be in both
+    the Parquet native type AND the GeoParquet metadata.
+
+    Args:
+        parquet_file: Path to the parquet file
+        crs: PROJJSON dict with CRS information
+        compression: Compression type
+        compression_level: Compression level
+        row_group_rows: Number of rows per row group
+        verbose: Whether to print verbose output
+    """
+    if verbose:
+        click.echo(f"Adding CRS to GeoParquet metadata: {_format_crs_display(crs)}")
+
+    table = pq.read_table(parquet_file)
+    metadata = table.schema.metadata or {}
+
+    # Parse existing geo metadata or create new
+    if b"geo" in metadata:
+        geo_meta = json.loads(metadata[b"geo"])
+    else:
+        geo_meta = {"version": "2.0.0", "primary_column": "geometry", "columns": {}}
+
+    # Add CRS to geometry column
+    geom_col = geo_meta.get("primary_column", "geometry")
+    if geom_col not in geo_meta["columns"]:
+        geo_meta["columns"][geom_col] = {}
+    geo_meta["columns"][geom_col]["crs"] = crs
+
+    # Write back with same compression settings
+    new_metadata = dict(metadata)
+    new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+    new_table = table.replace_schema_metadata(new_metadata)
+
+    # Use central configuration for write settings
+    settings = ParquetWriteSettings(
+        compression=compression, compression_level=compression_level, row_group_rows=row_group_rows
+    )
+    write_kwargs = settings.get_pyarrow_kwargs()
+    pq.write_table(new_table, parquet_file, **write_kwargs)
+
+    if verbose:
+        click.echo("CRS added to GeoParquet metadata")
+
+
+def parse_crs_string_to_projjson(crs_string, con=None):
+    """
+    Convert a CRS string (like "EPSG:5070") to PROJJSON dict.
+
+    Uses DuckDB's spatial extension to look up the CRS definition.
+
+    Args:
+        crs_string: CRS string like "EPSG:5070" or "EPSG:4326"
+        con: DuckDB connection (optional, will create one if not provided)
+
+    Returns:
+        dict: PROJJSON dict, or simple id dict if lookup fails
+    """
+    identifier = _extract_crs_identifier(crs_string)
+    if not identifier:
+        return None
+
+    authority, code = identifier
+
+    # Try to get full PROJJSON from DuckDB
+    if con is None:
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        should_close = True
+    else:
+        should_close = False
+
+    try:
+        # Create a simple point and get its CRS via ST_Transform metadata
+        # This is a workaround since DuckDB doesn't have direct CRS lookup
+        result = con.execute(f"""
+            SELECT ST_AsText(ST_Transform(
+                ST_Point(0, 0)::GEOMETRY,
+                'EPSG:4326',
+                '{authority}:{code}'
+            ))
+        """).fetchone()
+
+        # If transform succeeds, return simple PROJJSON with id
+        if result:
+            return {"id": {"authority": authority, "code": code}}
+    except Exception:
+        pass
+    finally:
+        if should_close:
+            con.close()
+
+    # Fallback to simple id dict
+    return {"id": {"authority": authority, "code": code}}
+
+
 def _parse_existing_geo_metadata(original_metadata):
     """Parse existing geo metadata from original parquet metadata."""
     if not original_metadata or b"geo" not in original_metadata:
@@ -860,7 +1255,14 @@ def validate_compression_settings(compression, compression_level, verbose=False)
     return compression, compression_level, compression_desc
 
 
-def build_copy_query(query, output_file, compression, geoparquet_version=None):
+def build_copy_query(
+    query,
+    output_file,
+    compression,
+    compression_level=15,
+    row_group_rows=None,
+    geoparquet_version=None,
+):
     """
     Build a DuckDB COPY query with proper compression and GeoParquet version settings.
 
@@ -868,6 +1270,8 @@ def build_copy_query(query, output_file, compression, geoparquet_version=None):
         query: SELECT query or existing COPY query
         output_file: Output file path
         compression: Compression type (already validated)
+        compression_level: Compression level (for ZSTD, GZIP, BROTLI)
+        row_group_rows: Number of rows per row group (optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
 
     Returns:
@@ -890,8 +1294,22 @@ def build_copy_query(query, output_file, compression, geoparquet_version=None):
     )
     duckdb_gp_version = version_config["duckdb_param"]
 
-    # Build COPY options
-    copy_options = f"FORMAT PARQUET, COMPRESSION '{duckdb_compression}', GEOPARQUET_VERSION '{duckdb_gp_version}'"
+    # Build COPY options with all parameters
+    copy_options_list = [
+        "FORMAT PARQUET",
+        f"COMPRESSION '{duckdb_compression}'",
+        f"GEOPARQUET_VERSION '{duckdb_gp_version}'",
+    ]
+
+    # Add compression level for supported formats
+    if compression in ["ZSTD", "GZIP", "BROTLI"]:
+        copy_options_list.append(f"COMPRESSION_LEVEL {compression_level}")
+
+    # Add row group size if specified
+    if row_group_rows:
+        copy_options_list.append(f"ROW_GROUP_SIZE {row_group_rows}")
+
+    copy_options = ", ".join(copy_options_list)
 
     # Modify query to use the specified settings
     if "COPY (" in query and "TO '" in query:
@@ -924,6 +1342,7 @@ def rewrite_with_metadata(
     custom_metadata=None,
     verbose=False,
     metadata_version="1.1.0",
+    input_crs=None,
 ):
     """
     Rewrite a parquet file with updated metadata and compression settings.
@@ -938,6 +1357,7 @@ def rewrite_with_metadata(
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
         metadata_version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
+        input_crs: PROJJSON dict with CRS to include in geo metadata (optional)
     """
     if verbose:
         click.echo("Updating metadata and optimizing file structure...")
@@ -974,6 +1394,15 @@ def rewrite_with_metadata(
     geo_meta = create_geo_metadata(
         metadata_source, geom_col, bbox_info, custom_metadata, verbose, version=metadata_version
     )
+
+    # Add CRS to geo metadata if provided (for GeoParquet 1.x)
+    if input_crs and not is_default_crs(input_crs):
+        if geom_col not in geo_meta.get("columns", {}):
+            geo_meta["columns"][geom_col] = {}
+        geo_meta["columns"][geom_col]["crs"] = input_crs
+        if verbose:
+            click.echo(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
+
     new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
     # Update table schema with new metadata
@@ -988,26 +1417,14 @@ def rewrite_with_metadata(
         target_row_group_rows=row_group_rows,
     )
 
-    # Set PyArrow compression parameters
-    pa_compression = compression if compression != "UNCOMPRESSED" else None
-    # PyArrow supports compression levels for GZIP, ZSTD, and BROTLI
-    if compression in ["GZIP", "ZSTD", "BROTLI"]:
-        pa_compression_level = compression_level
-    else:
-        pa_compression_level = None
-
-    # Build write kwargs
-    write_kwargs = {
-        "row_group_size": rows_per_group,
-        "compression": pa_compression,
-        "write_statistics": True,
-        "use_dictionary": True,
-        "version": "2.6",
-    }
-
-    # Add compression level for supported formats
-    if pa_compression_level is not None:
-        write_kwargs["compression_level"] = pa_compression_level
+    # Use central configuration for write settings
+    settings = ParquetWriteSettings(
+        compression=compression,
+        compression_level=compression_level,
+        row_group_rows=row_group_rows,
+        row_group_size_mb=row_group_size_mb,
+    )
+    write_kwargs = settings.get_pyarrow_kwargs(calculated_row_group_size=rows_per_group)
 
     # Rewrite the file
     pq.write_table(new_table, output_file, **write_kwargs)
@@ -1037,6 +1454,7 @@ def write_parquet_with_metadata(
     verbose=False,
     profile=None,
     geoparquet_version=None,
+    input_crs=None,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
@@ -1060,6 +1478,7 @@ def write_parquet_with_metadata(
         verbose: Whether to print verbose output
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
+        input_crs: PROJJSON dict with CRS from input file (for 2.0/parquet-geo-only)
 
     Returns:
         None
@@ -1088,9 +1507,41 @@ def write_parquet_with_metadata(
 
         # Build and execute query with version-specific settings
         final_query = build_copy_query(
-            query, actual_output, compression, geoparquet_version=geoparquet_version
+            query,
+            actual_output,
+            compression,
+            compression_level=compression_level,
+            row_group_rows=row_group_rows,
+            geoparquet_version=geoparquet_version,
         )
         con.execute(final_query)
+
+        # For 2.0 and parquet-geo-only, apply CRS to Parquet native type if non-default
+        if geoparquet_version in ("2.0", "parquet-geo-only"):
+            if input_crs and not is_default_crs(input_crs):
+                if verbose:
+                    click.echo(
+                        f"Applying CRS {_format_crs_display(input_crs)} to Parquet native type..."
+                    )
+                apply_crs_to_parquet(
+                    actual_output,
+                    input_crs,
+                    compression=compression,
+                    compression_level=compression_level,
+                    row_group_rows=row_group_rows,
+                    verbose=verbose,
+                )
+
+                # For 2.0, also add CRS to GeoParquet metadata
+                if geoparquet_version == "2.0":
+                    add_crs_to_geoparquet_metadata(
+                        actual_output,
+                        input_crs,
+                        compression=compression,
+                        compression_level=compression_level,
+                        row_group_rows=row_group_rows,
+                        verbose=verbose,
+                    )
 
         # Rewrite with metadata and optimal settings (skip for parquet-geo-only)
         should_rewrite = version_config["rewrite_metadata"] and (
@@ -1107,6 +1558,7 @@ def write_parquet_with_metadata(
                 custom_metadata,
                 verbose,
                 metadata_version=version_config["metadata_version"],
+                input_crs=input_crs,
             )
 
         # Upload to remote if needed
