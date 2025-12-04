@@ -43,7 +43,7 @@ from geoparquet_io.core.partition_by_string import (
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
-__version__ = "0.4.0"
+__version__ = "0.5.1"
 
 
 @click.group()
