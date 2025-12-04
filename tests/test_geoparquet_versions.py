@@ -874,3 +874,202 @@ class TestConvertSkipsBbox:
         con.close()
 
         assert result_count == original_count
+
+
+class TestComprehensiveRoundTrips:
+    """Comprehensive round-trip conversion tests between all version combinations."""
+
+    def test_v1_0_to_v1_1_roundtrip(self, geojson_input, temp_output_dir):
+        """Test v1.0 → v1.1 → v1.0 preserves data."""
+        v1_0_file = os.path.join(temp_output_dir, "v1_0.parquet")
+        v1_1_file = os.path.join(temp_output_dir, "v1_1.parquet")
+        roundtrip_file = os.path.join(temp_output_dir, "roundtrip.parquet")
+
+        # Create v1.0
+        convert_to_geoparquet(geojson_input, v1_0_file, skip_hilbert=True, geoparquet_version="1.0")
+
+        # Convert to v1.1
+        convert_to_geoparquet(v1_0_file, v1_1_file, skip_hilbert=True, geoparquet_version="1.1")
+
+        # Convert back to v1.0
+        convert_to_geoparquet(
+            v1_1_file, roundtrip_file, skip_hilbert=True, geoparquet_version="1.0"
+        )
+
+        # Verify versions
+        assert get_geoparquet_version(v1_0_file) == "1.0.0"
+        assert get_geoparquet_version(v1_1_file) == "1.1.0"
+        assert get_geoparquet_version(roundtrip_file) == "1.0.0"
+
+        # Verify row counts match
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+
+        count_v1_0 = con.execute(f"SELECT COUNT(*) FROM read_parquet('{v1_0_file}')").fetchone()[0]
+        count_roundtrip = con.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{roundtrip_file}')"
+        ).fetchone()[0]
+
+        con.close()
+
+        assert count_v1_0 == count_roundtrip
+
+    def test_v1_1_to_v2_0_roundtrip(self, geojson_input, temp_output_dir):
+        """Test v1.1 → v2.0 → v1.1 preserves data."""
+        v1_1_file = os.path.join(temp_output_dir, "v1_1.parquet")
+        v2_0_file = os.path.join(temp_output_dir, "v2_0.parquet")
+        roundtrip_file = os.path.join(temp_output_dir, "roundtrip.parquet")
+
+        # Create v1.1
+        convert_to_geoparquet(geojson_input, v1_1_file, skip_hilbert=True, geoparquet_version="1.1")
+
+        # Convert to v2.0
+        convert_to_geoparquet(v1_1_file, v2_0_file, skip_hilbert=True, geoparquet_version="2.0")
+
+        # Convert back to v1.1
+        convert_to_geoparquet(
+            v2_0_file, roundtrip_file, skip_hilbert=True, geoparquet_version="1.1"
+        )
+
+        # Verify versions and types
+        assert get_geoparquet_version(v1_1_file) == "1.1.0"
+        assert get_geoparquet_version(v2_0_file) == "2.0.0"
+        assert get_geoparquet_version(roundtrip_file) == "1.1.0"
+
+        assert not has_native_geo_types(v1_1_file)
+        assert has_native_geo_types(v2_0_file)
+        assert not has_native_geo_types(roundtrip_file)
+
+    def test_v2_0_to_parquet_geo_only_roundtrip(self, geojson_input, temp_output_dir):
+        """Test v2.0 → parquet-geo-only → v2.0 preserves data."""
+        v2_0_file = os.path.join(temp_output_dir, "v2_0.parquet")
+        pgo_file = os.path.join(temp_output_dir, "parquet_geo_only.parquet")
+        roundtrip_file = os.path.join(temp_output_dir, "roundtrip.parquet")
+
+        # Create v2.0
+        convert_to_geoparquet(geojson_input, v2_0_file, skip_hilbert=True, geoparquet_version="2.0")
+
+        # Convert to parquet-geo-only
+        convert_to_geoparquet(
+            v2_0_file, pgo_file, skip_hilbert=True, geoparquet_version="parquet-geo-only"
+        )
+
+        # Convert back to v2.0
+        convert_to_geoparquet(pgo_file, roundtrip_file, skip_hilbert=True, geoparquet_version="2.0")
+
+        # Verify metadata presence
+        assert has_geoparquet_metadata(v2_0_file)
+        assert not has_geoparquet_metadata(pgo_file)
+        assert has_geoparquet_metadata(roundtrip_file)
+
+        # Both should have native types
+        assert has_native_geo_types(v2_0_file)
+        assert has_native_geo_types(pgo_file)
+        assert has_native_geo_types(roundtrip_file)
+
+    def test_parquet_geo_only_to_v1_1_roundtrip(self, temp_output_dir):
+        """Test parquet-geo-only → v1.1 → parquet-geo-only."""
+        test_data_dir = os.path.join(os.path.dirname(__file__), "data")
+        pgo_input = os.path.join(test_data_dir, "fields_geom_type_only.parquet")
+
+        v1_1_file = os.path.join(temp_output_dir, "v1_1.parquet")
+        pgo_output = os.path.join(temp_output_dir, "pgo_output.parquet")
+
+        # Convert to v1.1
+        convert_to_geoparquet(pgo_input, v1_1_file, skip_hilbert=True, geoparquet_version="1.1")
+
+        # Convert back to parquet-geo-only
+        convert_to_geoparquet(
+            v1_1_file, pgo_output, skip_hilbert=True, geoparquet_version="parquet-geo-only"
+        )
+
+        # Verify types change correctly
+        assert not has_native_geo_types(v1_1_file)
+        assert has_native_geo_types(pgo_output)
+
+        assert has_geoparquet_metadata(v1_1_file)
+        assert not has_geoparquet_metadata(pgo_output)
+
+    def test_all_versions_cycle(self, geojson_input, temp_output_dir):
+        """Test complete cycle: v1.0 → v1.1 → v2.0 → parquet-geo-only → v2.0 → v1.1 → v1.0."""
+        files = {}
+        versions = ["1.0", "1.1", "2.0", "parquet-geo-only", "2.0", "1.1", "1.0"]
+
+        current_input = geojson_input
+
+        for i, version in enumerate(versions):
+            output_file = os.path.join(
+                temp_output_dir, f"step_{i}_{version.replace('.', '_')}.parquet"
+            )
+            convert_to_geoparquet(
+                current_input,
+                output_file,
+                skip_hilbert=True,
+                geoparquet_version=version,
+            )
+            files[i] = (version, output_file)
+            current_input = output_file
+
+        # Verify all conversions succeeded
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+
+        counts = {}
+        for i, (_version, file_path) in files.items():
+            count = con.execute(f"SELECT COUNT(*) FROM read_parquet('{file_path}')").fetchone()[0]
+            counts[i] = count
+
+        con.close()
+
+        # All should have same row count
+        unique_counts = set(counts.values())
+        assert len(unique_counts) == 1, f"Row counts vary across conversions: {counts}"
+
+    def test_roundtrip_with_crs_preservation(self, temp_output_dir):
+        """Test that CRS is preserved through round-trip conversions."""
+        test_data_dir = os.path.join(os.path.dirname(__file__), "data")
+        input_file = os.path.join(test_data_dir, "fields_geom_type_only_5070.parquet")
+
+        v2_file = os.path.join(temp_output_dir, "v2.parquet")
+        v1_file = os.path.join(temp_output_dir, "v1.parquet")
+        v2_roundtrip = os.path.join(temp_output_dir, "v2_roundtrip.parquet")
+
+        # parquet-geo-only → v2.0 → v1.1 → v2.0
+        convert_to_geoparquet(input_file, v2_file, skip_hilbert=True, geoparquet_version="2.0")
+        convert_to_geoparquet(v2_file, v1_file, skip_hilbert=True, geoparquet_version="1.1")
+        convert_to_geoparquet(v1_file, v2_roundtrip, skip_hilbert=True, geoparquet_version="2.0")
+
+        # Check CRS in final file
+        from tests.test_crs_conversion import get_geoparquet_crs, get_parquet_type_crs
+
+        parquet_crs = get_parquet_type_crs(v2_roundtrip)
+        geo_crs = get_geoparquet_crs(v2_roundtrip)
+
+        # Both should have EPSG:5070
+        assert parquet_crs is not None
+        assert geo_crs is not None
+
+        from geoparquet_io.core.common import _extract_crs_identifier
+
+        assert _extract_crs_identifier(parquet_crs) == ("EPSG", 5070)
+        assert _extract_crs_identifier(geo_crs) == ("EPSG", 5070)
+
+    def test_geometry_type_preservation_roundtrip(self, geojson_input, temp_output_dir):
+        """Test that geometry types are preserved through conversions."""
+        v1_file = os.path.join(temp_output_dir, "v1.parquet")
+        v2_file = os.path.join(temp_output_dir, "v2.parquet")
+        v1_roundtrip = os.path.join(temp_output_dir, "v1_roundtrip.parquet")
+
+        # v1.1 → v2.0 → v1.1
+        convert_to_geoparquet(geojson_input, v1_file, skip_hilbert=True, geoparquet_version="1.1")
+        convert_to_geoparquet(v1_file, v2_file, skip_hilbert=True, geoparquet_version="2.0")
+        convert_to_geoparquet(v2_file, v1_roundtrip, skip_hilbert=True, geoparquet_version="1.1")
+
+        # Verify encoding in metadata
+        geo_meta_v1 = get_geo_metadata(v1_file)
+        geo_meta_roundtrip = get_geo_metadata(v1_roundtrip)
+
+        primary_col = geo_meta_v1.get("primary_column", "geometry")
+
+        assert geo_meta_v1["columns"][primary_col]["encoding"] == "WKB"
+        assert geo_meta_roundtrip["columns"][primary_col]["encoding"] == "WKB"

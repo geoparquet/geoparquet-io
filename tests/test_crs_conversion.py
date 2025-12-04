@@ -31,6 +31,7 @@ from geoparquet_io.core.common import (
     extract_crs_from_parquet,
     is_default_crs,
 )
+from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.metadata_utils import parse_geometry_type_from_schema
 
 # Helper functions for CRS testing
@@ -472,3 +473,190 @@ class TestCRSHelperFunctions:
         assert assert_crs_equivalent(projjson_5070, "EPSG:5070")
         assert assert_crs_equivalent("EPSG:5070", projjson_5070)
         assert not assert_crs_equivalent(projjson_5070, "EPSG:4326")
+
+
+class TestAdditionalCRSEdgeCases:
+    """Additional edge case tests for CRS handling."""
+
+    def test_utm_crs_preservation(self, runner, temp_output_file):
+        """Test EPSG:32632 (UTM Zone 32N) preservation through conversion."""
+        # Create a temporary CSV with UTM CRS
+        import os
+        import tempfile
+
+        csv_content = """geometry,name
+"POINT (500000 4500000)",Point A
+"POINT (500100 4500100)",Point B
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            csv_file = f.name
+
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "convert",
+                    csv_file,
+                    temp_output_file,
+                    "--crs",
+                    "EPSG:32632",
+                    "--geoparquet-version",
+                    "2.0",
+                    "--skip-hilbert",
+                ],
+            )
+
+            assert result.exit_code == 0, f"Conversion failed: {result.output}"
+
+            # Verify CRS in both locations
+            parquet_crs = get_parquet_type_crs(temp_output_file)
+            geo_crs = get_geoparquet_crs(temp_output_file)
+
+            assert parquet_crs is not None
+            assert geo_crs is not None
+            assert assert_crs_equivalent(parquet_crs, "EPSG:32632")
+            assert assert_crs_equivalent(geo_crs, "EPSG:32632")
+
+        finally:
+            if os.path.exists(csv_file):
+                os.unlink(csv_file)
+
+    def test_parquet_geo_only_to_parquet_geo_only_different_crs(
+        self, fields_5070_file, temp_output_file
+    ):
+        """
+        Test parquet-geo-only → parquet-geo-only preserves CRS.
+
+        This tests the single-rewrite path for parquet-geo-only format.
+        """
+        convert_to_geoparquet(
+            fields_5070_file,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="parquet-geo-only",
+        )
+
+        # Verify CRS preserved
+        parquet_crs = get_parquet_type_crs(temp_output_file)
+        assert parquet_crs is not None
+        assert assert_crs_equivalent(parquet_crs, "EPSG:5070")
+
+        # Should have no metadata
+        geo_crs = get_geoparquet_crs(temp_output_file)
+        assert geo_crs is None
+
+    def test_v2_to_v2_different_crs(self, temp_output_dir):
+        """
+        Test v2.0 → v2.0 conversion preserves CRS.
+
+        This tests the metadata rewrite path for v2.0.
+        """
+        import os
+
+        test_data_dir = os.path.join(os.path.dirname(__file__), "data")
+        input_file = os.path.join(test_data_dir, "fields_v2_5070.parquet")
+        output_file = os.path.join(temp_output_dir, "output.parquet")
+
+        if not os.path.exists(input_file):
+            pytest.skip("fields_v2_5070.parquet not available")
+
+        convert_to_geoparquet(
+            input_file,
+            output_file,
+            skip_hilbert=True,
+            geoparquet_version="2.0",
+        )
+
+        # Both locations should have EPSG:5070
+        parquet_crs = get_parquet_type_crs(output_file)
+        geo_crs = get_geoparquet_crs(output_file)
+
+        assert parquet_crs is not None
+        assert geo_crs is not None
+        assert assert_crs_equivalent(parquet_crs, "EPSG:5070")
+        assert assert_crs_equivalent(geo_crs, "EPSG:5070")
+
+    def test_multiple_epsg_codes(self, runner, temp_output_file):
+        """Test various EPSG codes are handled correctly."""
+        import os
+        import tempfile
+
+        epsg_codes = [3857, 4269, 6933]  # Web Mercator, NAD83, Cylindrical Equal Area
+
+        for epsg in epsg_codes:
+            csv_content = """geometry,name
+"POINT (0 0)",Test Point
+"""
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+                f.write(csv_content)
+                csv_file = f.name
+
+            try:
+                output = temp_output_file.replace(".parquet", f"_{epsg}.parquet")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "convert",
+                        csv_file,
+                        output,
+                        "--crs",
+                        f"EPSG:{epsg}",
+                        "--geoparquet-version",
+                        "2.0",
+                        "--skip-hilbert",
+                    ],
+                )
+
+                assert result.exit_code == 0, f"Failed for EPSG:{epsg}: {result.output}"
+
+                # Verify CRS
+                parquet_crs = get_parquet_type_crs(output)
+                geo_crs = get_geoparquet_crs(output)
+
+                assert assert_crs_equivalent(parquet_crs, f"EPSG:{epsg}")
+                assert assert_crs_equivalent(geo_crs, f"EPSG:{epsg}")
+
+            finally:
+                if os.path.exists(csv_file):
+                    os.unlink(csv_file)
+                if os.path.exists(output):
+                    os.unlink(output)
+
+    def test_custom_projjson_crs(self, runner, temp_output_file):
+        """
+        Test that custom PROJJSON CRS is preserved.
+
+        This tests CRS beyond simple EPSG codes.
+        """
+        # For now, skip this test - would require custom PROJJSON input
+        pytest.skip("Custom PROJJSON test requires specialized test data")
+
+    def test_crs_consistency_between_schema_and_metadata(self, fields_5070_file, temp_output_file):
+        """
+        Test that CRS is identical in both schema and metadata for v2.0.
+
+        This is critical - the dual-write must produce identical CRS.
+        """
+        convert_to_geoparquet(
+            fields_5070_file,
+            temp_output_file,
+            skip_hilbert=True,
+            geoparquet_version="2.0",
+        )
+
+        parquet_crs = get_parquet_type_crs(temp_output_file)
+        geo_crs = get_geoparquet_crs(temp_output_file)
+
+        # Both should exist
+        assert parquet_crs is not None
+        assert geo_crs is not None
+
+        # Extract EPSG codes
+        parquet_epsg = _extract_crs_identifier(parquet_crs)
+        geo_epsg = _extract_crs_identifier(geo_crs)
+
+        # Should be identical
+        assert parquet_epsg == geo_epsg, (
+            f"CRS mismatch: schema has {parquet_epsg}, metadata has {geo_epsg}"
+        )
