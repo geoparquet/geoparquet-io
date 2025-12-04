@@ -456,6 +456,36 @@ class TestExistingTestFiles:
         """Test fields_geom_type_only_5070.parquet has NO GeoParquet metadata."""
         assert not has_geoparquet_metadata(fields_geom_type_only_5070_file)
 
+    def test_austria_bbox_covering_has_geoparquet_metadata(self, austria_bbox_covering_file):
+        """Test austria_bbox_covering.parquet has GeoParquet 1.1 metadata."""
+        assert has_geoparquet_metadata(austria_bbox_covering_file)
+        assert get_geoparquet_version(austria_bbox_covering_file) == "1.1.0"
+
+    def test_austria_bbox_covering_has_nonstandard_bbox_name(self, austria_bbox_covering_file):
+        """Test austria_bbox_covering.parquet has 'geometry_bbox' column (not 'bbox')."""
+        from geoparquet_io.core.common import check_bbox_structure
+
+        bbox_info = check_bbox_structure(austria_bbox_covering_file)
+        assert bbox_info["has_bbox_column"] is True
+        assert bbox_info["bbox_column_name"] == "geometry_bbox"
+        assert bbox_info["has_bbox_metadata"] is True
+
+    def test_austria_bbox_covering_has_proper_covering_metadata(self, austria_bbox_covering_file):
+        """Test austria_bbox_covering.parquet has proper bbox covering in geo metadata."""
+        geo_meta = get_geo_metadata(austria_bbox_covering_file)
+        assert geo_meta is not None
+
+        # Check that covering references the correct column
+        geom_col_meta = geo_meta["columns"]["geometry"]
+        assert "covering" in geom_col_meta
+        assert "bbox" in geom_col_meta["covering"]
+
+        bbox_covering = geom_col_meta["covering"]["bbox"]
+        assert bbox_covering["xmin"] == ["geometry_bbox", "xmin"]
+        assert bbox_covering["ymin"] == ["geometry_bbox", "ymin"]
+        assert bbox_covering["xmax"] == ["geometry_bbox", "xmax"]
+        assert bbox_covering["ymax"] == ["geometry_bbox", "ymax"]
+
 
 class TestCheckBboxVersionAware:
     """Test version-aware bbox checking."""
@@ -540,6 +570,20 @@ class TestCheckBboxVersionAware:
         assert result["geo_version"] is None
         assert result["has_native_geo_types"] is True
         assert result["bbox_recommended"] is False
+
+    def test_check_bbox_v1_nonstandard_bbox_column_passes(self, austria_bbox_covering_file):
+        """V1.1 file with non-standard bbox column name should pass if properly registered."""
+        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+        result = check_metadata_and_bbox(
+            austria_bbox_covering_file, verbose=False, return_results=True
+        )
+
+        assert result["passed"] is True
+        assert result["file_type"] == "geoparquet_v1"
+        assert result["has_bbox_column"] is True
+        assert result["bbox_column_name"] == "geometry_bbox"
+        assert result["has_bbox_metadata"] is True
 
 
 class TestCheckBboxFix:

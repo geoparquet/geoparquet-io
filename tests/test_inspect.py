@@ -602,9 +602,35 @@ class TestCRSComparison:
         assert _crs_are_equivalent({}, "EPSG:4326") is False
 
     def test_detect_mismatches_no_false_positive_for_same_crs(self):
+        """Test that identical PROJJSON CRS dicts don't trigger mismatch."""
+        from geoparquet_io.core.inspect_utils import _detect_metadata_mismatches
+
+        # Now both sources provide PROJJSON (not string)
+        parquet_geo_info = {
+            "crs": {
+                "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+                "type": "ProjectedCRS",
+                "name": "MGI / Austria Lambert",
+                "id": {"authority": "EPSG", "code": 31287},
+            }
+        }
+        geoparquet_info = {
+            "crs": {
+                "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+                "type": "ProjectedCRS",
+                "name": "MGI / Austria Lambert",
+                "id": {"authority": "EPSG", "code": 31287},
+            }
+        }
+
+        warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
+        assert len(warnings) == 0
+
+    def test_detect_mismatches_projjson_vs_string_same_crs(self):
         """Test that PROJJSON and EPSG string for same CRS don't trigger mismatch."""
         from geoparquet_io.core.inspect_utils import _detect_metadata_mismatches
 
+        # This tests backwards compatibility - should still work with mixed formats
         parquet_geo_info = {
             "crs": {
                 "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
@@ -628,3 +654,25 @@ class TestCRSComparison:
         warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
         assert len(warnings) == 1
         assert "CRS mismatch" in warnings[0]
+
+    def test_format_crs_for_display_projjson(self):
+        """Test that PROJJSON is formatted as EPSG code."""
+        from geoparquet_io.core.inspect_utils import _format_crs_for_display
+
+        projjson = {
+            "id": {"authority": "EPSG", "code": 31287},
+        }
+        assert _format_crs_for_display(projjson) == "EPSG:31287"
+
+    def test_format_crs_for_display_none(self):
+        """Test that None CRS shows default."""
+        from geoparquet_io.core.inspect_utils import _format_crs_for_display
+
+        assert _format_crs_for_display(None) == "OGC:CRS84 (default)"
+        assert _format_crs_for_display(None, include_default=False) == "Not specified"
+
+    def test_format_crs_for_display_epsg_string(self):
+        """Test that EPSG string is passed through."""
+        from geoparquet_io.core.inspect_utils import _format_crs_for_display
+
+        assert _format_crs_for_display("EPSG:4326") == "EPSG:4326"
