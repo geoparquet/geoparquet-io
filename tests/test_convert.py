@@ -170,16 +170,16 @@ class TestConvertCore:
         convert_to_geoparquet(
             shapefile_input,
             temp_output_file,
-            compression="GZIP",
-            compression_level=6,
+            compression="ZSTD",
+            compression_level=15,
             verbose=False,
         )
 
         assert os.path.exists(temp_output_file)
         compression_info = get_compression_info(temp_output_file)
-        # Check that geometry column has GZIP compression
+        # Check that geometry column has ZSTD compression
         geom_compression = compression_info.get("geometry")
-        assert geom_compression == "GZIP"
+        assert geom_compression == "ZSTD"
 
     def test_convert_invalid_input(self, temp_output_file):
         """Test error handling for missing input file."""

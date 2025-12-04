@@ -169,3 +169,33 @@ def austria_bbox_covering_file(test_data_dir):
 def geojson_input(test_data_dir):
     """Return path to the buildings_test.geojson test file."""
     return str(test_data_dir / "buildings_test.geojson")
+
+
+@pytest.fixture
+def gpkg_buildings(test_data_dir):
+    """Return path to the buildings_test.gpkg test file."""
+    return str(test_data_dir / "buildings_test.gpkg")
+
+
+@pytest.fixture
+def buildings_gpkg_6933(test_data_dir):
+    """Return path to the buildings_test_6933.gpkg test file (EPSG:6933)."""
+    return str(test_data_dir / "buildings_test_6933.gpkg")
+
+
+@pytest.fixture
+def shapefile_buildings(test_data_dir):
+    """Return path to the buildings_test.shp test file."""
+    return str(test_data_dir / "buildings_test.shp")
+
+
+@pytest.fixture
+def csv_points_wkt(test_data_dir):
+    """Return path to the points_wkt.csv test file."""
+    return str(test_data_dir / "points_wkt.csv")
+
+
+@pytest.fixture
+def fields_5070_file(test_data_dir):
+    """Return path to the fields_geom_type_only_5070.parquet test file."""
+    return str(test_data_dir / "fields_geom_type_only_5070.parquet")
