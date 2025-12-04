@@ -845,13 +845,15 @@ def apply_crs_to_parquet(
     compression="ZSTD",
     compression_level=15,
     row_group_rows=None,
+    add_to_geo_metadata=False,
     verbose=False,
 ):
     """
     Rewrite a Parquet file to add CRS to the geometry column.
 
     Uses geoarrow-pyarrow to set CRS on the geometry column type,
-    which writes it into both the Parquet schema and Arrow extension metadata.
+    which writes it into the Parquet schema. Optionally also adds CRS
+    to GeoParquet 'geo' metadata in the same write operation.
 
     Args:
         parquet_file: Path to the parquet file to rewrite
@@ -860,13 +862,17 @@ def apply_crs_to_parquet(
         compression: Compression type for output
         compression_level: Compression level
         row_group_rows: Number of rows per row group
+        add_to_geo_metadata: If True, also add CRS to GeoParquet 'geo' metadata (for v2.0)
         verbose: Whether to print verbose output
     """
     import geoarrow.pyarrow as ga
     import pyarrow as pa
 
     if verbose:
-        click.echo(f"Applying CRS {_format_crs_display(crs)} to {geometry_column} column...")
+        target = (
+            "Parquet schema and GeoParquet metadata" if add_to_geo_metadata else "Parquet schema"
+        )
+        click.echo(f"Applying CRS {_format_crs_display(crs)} to {target}...")
 
     # Read the file
     table = pq.read_table(parquet_file)
@@ -892,13 +898,34 @@ def apply_crs_to_parquet(
     col_index = table.schema.get_field_index(geometry_column)
     new_table = table.set_column(col_index, geometry_column, geom_with_crs)
 
+    # If requested, also add CRS to GeoParquet metadata (for v2.0)
+    if add_to_geo_metadata:
+        metadata = new_table.schema.metadata or {}
+
+        # Parse existing geo metadata or create new
+        if b"geo" in metadata:
+            geo_meta = json.loads(metadata[b"geo"])
+        else:
+            geo_meta = {"version": "2.0.0", "primary_column": geometry_column, "columns": {}}
+
+        # Add CRS to geometry column in metadata
+        geom_col_name = geo_meta.get("primary_column", geometry_column)
+        if geom_col_name not in geo_meta["columns"]:
+            geo_meta["columns"][geom_col_name] = {}
+        geo_meta["columns"][geom_col_name]["crs"] = crs
+
+        # Update table metadata
+        new_metadata = dict(metadata)
+        new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+        new_table = new_table.replace_schema_metadata(new_metadata)
+
     # Use central configuration for write settings
     settings = ParquetWriteSettings(
         compression=compression, compression_level=compression_level, row_group_rows=row_group_rows
     )
     write_kwargs = settings.get_pyarrow_kwargs()
 
-    # Write back with all best practices
+    # Write back with all best practices (single write!)
     pq.write_table(new_table, parquet_file, **write_kwargs)
 
     if verbose:
@@ -911,8 +938,9 @@ def add_crs_to_geoparquet_metadata(
     """
     Add CRS to GeoParquet 'geo' metadata.
 
-    Used for GeoParquet 2.0 files where CRS should be in both
-    the Parquet native type AND the GeoParquet metadata.
+    NOTE: This function is kept for compatibility but is no longer used internally.
+    For GeoParquet 2.0, use apply_crs_to_parquet() with add_to_geo_metadata=True
+    to write CRS to both Parquet schema and geo metadata in a single write operation.
 
     Args:
         parquet_file: Path to the parquet file
@@ -1301,8 +1329,8 @@ def build_copy_query(
         f"GEOPARQUET_VERSION '{duckdb_gp_version}'",
     ]
 
-    # Add compression level for supported formats
-    if compression in ["ZSTD", "GZIP", "BROTLI"]:
+    # Add compression level only for ZSTD (DuckDB only supports it for ZSTD)
+    if compression == "ZSTD" and compression_level is not None:
         copy_options_list.append(f"COMPRESSION_LEVEL {compression_level}")
 
     # Add row group size if specified
@@ -1523,25 +1551,17 @@ def write_parquet_with_metadata(
                     click.echo(
                         f"Applying CRS {_format_crs_display(input_crs)} to Parquet native type..."
                     )
+                # For v2.0, write CRS to BOTH schema and metadata in single pass
+                # For parquet-geo-only, write CRS to schema only
                 apply_crs_to_parquet(
                     actual_output,
                     input_crs,
                     compression=compression,
                     compression_level=compression_level,
                     row_group_rows=row_group_rows,
+                    add_to_geo_metadata=(geoparquet_version == "2.0"),
                     verbose=verbose,
                 )
-
-                # For 2.0, also add CRS to GeoParquet metadata
-                if geoparquet_version == "2.0":
-                    add_crs_to_geoparquet_metadata(
-                        actual_output,
-                        input_crs,
-                        compression=compression,
-                        compression_level=compression_level,
-                        row_group_rows=row_group_rows,
-                        verbose=verbose,
-                    )
 
         # Rewrite with metadata and optimal settings (skip for parquet-geo-only)
         should_rewrite = version_config["rewrite_metadata"] and (

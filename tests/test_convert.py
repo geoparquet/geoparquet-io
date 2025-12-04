@@ -350,18 +350,18 @@ class TestConvertCLI:
                 shapefile_input,
                 temp_output_file,
                 "--compression",
-                "GZIP",
+                "ZSTD",
                 "--compression-level",
-                "6",
+                "15",
             ],
         )
 
         assert result.exit_code == 0
         assert os.path.exists(temp_output_file)
 
-        # Verify GZIP compression was applied
+        # Verify ZSTD compression was applied
         compression_info = get_compression_info(temp_output_file)
-        assert compression_info.get("geometry") == "GZIP"
+        assert compression_info.get("geometry") == "ZSTD"
 
     def test_cli_invalid_input(self):
         """Test error handling for missing input."""
