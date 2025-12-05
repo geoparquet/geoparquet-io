@@ -104,6 +104,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
 
     crs = None
     bbox = None
+    geometry_types = None
 
     if primary_column in columns_meta:
         col_meta = columns_meta[primary_column]
@@ -132,6 +133,9 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
         # Extract bbox
         bbox = col_meta.get("bbox")
 
+        # Extract geometry_types
+        geometry_types = col_meta.get("geometry_types")
+
     # Per GeoParquet spec, if CRS is not specified, it defaults to EPSG:4326
     if crs is None and primary_column in columns_meta:
         crs = "EPSG:4326 (default)"
@@ -142,6 +146,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
         "crs": crs,
         "bbox": bbox,
         "primary_column": primary_column,
+        "geometry_types": geometry_types,
     }
 
 
@@ -210,27 +215,94 @@ def parse_wkb_type(wkb_bytes: bytes) -> str:
         return "GEOMETRY"
 
 
-def format_geometry_display(value: Any) -> str:
+def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 60) -> str:
+    """
+    Convert WKB bytes to WKT and truncate for preview display.
+
+    Args:
+        wkb_bytes: WKB binary data
+        max_length: Maximum length of WKT string to return
+
+    Returns:
+        str: Truncated WKT string or fallback geometry type
+    """
+    if not wkb_bytes or len(wkb_bytes) < 5:
+        return "<GEOMETRY>"
+
+    try:
+        con = duckdb.connect()
+        con.execute("LOAD spatial;")
+        result = con.execute("SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes]).fetchone()
+        con.close()
+
+        if result and result[0]:
+            wkt = result[0]
+            if len(wkt) > max_length:
+                return wkt[: max_length - 3] + "..."
+            return wkt
+        else:
+            # Fall back to geometry type
+            return f"<{parse_wkb_type(wkb_bytes)}>"
+    except Exception:
+        # Fall back to geometry type on any error
+        return f"<{parse_wkb_type(wkb_bytes)}>"
+
+
+def format_geometry_display(value: Any, max_length: int = 60) -> str:
     """
     Format a geometry value for display.
 
     Args:
         value: Geometry value (WKB bytes or other)
+        max_length: Maximum length for WKT preview
 
     Returns:
-        str: Formatted geometry display string
+        str: Formatted geometry display string (WKT preview or fallback)
     """
     if value is None:
         return "NULL"
 
     if isinstance(value, bytes):
-        geom_type = parse_wkb_type(value)
-        return f"<{geom_type}>"
+        return wkb_to_wkt_preview(value, max_length)
 
     return str(value)
 
 
-def format_value_for_display(value: Any, column_type: str, is_geometry: bool) -> str:
+def format_bbox_display(value: dict, max_length: int = 60) -> str:
+    """
+    Format a bbox struct value for display.
+
+    Args:
+        value: Dict with xmin, ymin, xmax, ymax keys
+        max_length: Maximum length of output string
+
+    Returns:
+        str: Formatted bbox string like [xmin, ymin, xmax, ymax]
+    """
+    try:
+        xmin = value.get("xmin", 0)
+        ymin = value.get("ymin", 0)
+        xmax = value.get("xmax", 0)
+        ymax = value.get("ymax", 0)
+        formatted = f"[{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]"
+        if len(formatted) > max_length:
+            return formatted[: max_length - 3] + "..."
+        return formatted
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def is_bbox_value(value: Any) -> bool:
+    """Check if a value is a bbox struct (dict with xmin, ymin, xmax, ymax)."""
+    if not isinstance(value, dict):
+        return False
+    bbox_keys = {"xmin", "ymin", "xmax", "ymax"}
+    return bbox_keys.issubset(value.keys())
+
+
+def format_value_for_display(
+    value: Any, column_type: str, is_geometry: bool, max_length: int = 60
+) -> str:
     """
     Format a cell value for terminal display.
 
@@ -238,6 +310,7 @@ def format_value_for_display(value: Any, column_type: str, is_geometry: bool) ->
         value: Cell value
         column_type: Column type string
         is_geometry: Whether this is a geometry column
+        max_length: Maximum length for geometry WKT preview
 
     Returns:
         str: Formatted display string
@@ -246,7 +319,11 @@ def format_value_for_display(value: Any, column_type: str, is_geometry: bool) ->
         return "NULL"
 
     if is_geometry:
-        return format_geometry_display(value)
+        return format_geometry_display(value, max_length)
+
+    # Format bbox struct columns nicely
+    if is_bbox_value(value):
+        return format_bbox_display(value, max_length)
 
     # Truncate long strings
     value_str = str(value)
@@ -256,13 +333,14 @@ def format_value_for_display(value: Any, column_type: str, is_geometry: bool) ->
     return value_str
 
 
-def format_value_for_json(value: Any, is_geometry: bool) -> Any:
+def format_value_for_json(value: Any, is_geometry: bool, max_length: int = 80) -> Any:
     """
     Format a cell value for JSON output.
 
     Args:
         value: Cell value
         is_geometry: Whether this is a geometry column
+        max_length: Maximum length for geometry WKT preview
 
     Returns:
         JSON-serializable value
@@ -272,8 +350,12 @@ def format_value_for_json(value: Any, is_geometry: bool) -> Any:
 
     if is_geometry:
         if isinstance(value, bytes):
-            return format_geometry_display(value)
+            return format_geometry_display(value, max_length)
         return str(value)
+
+    # Format bbox struct columns nicely
+    if is_bbox_value(value):
+        return format_bbox_display(value, max_length)
 
     # Handle various types
     if isinstance(value, (int, float, str, bool)):
@@ -454,6 +536,10 @@ def format_terminal_output(
                 )
             else:
                 console.print(f"Bbox: [cyan]{bbox}[/cyan]")
+
+        if geo_info.get("geometry_types"):
+            geom_types_str = ", ".join(geo_info["geometry_types"])
+            console.print(f"Geometry Types: [cyan]{geom_types_str}[/cyan]")
     else:
         console.print("[yellow]No GeoParquet metadata found[/yellow]")
 
@@ -489,6 +575,16 @@ def format_terminal_output(
         )
         console.print(f"{preview_label}:")
 
+        # Calculate dynamic max_length for geometry WKT based on terminal width
+        # Reserve space for table borders, padding, and other columns
+        terminal_width = console.width
+        num_cols = len(columns_info)
+        # Estimate overhead: ~3 chars per column for borders/padding, plus some margin
+        overhead = num_cols * 4 + 10
+        available_width = terminal_width - overhead
+        # Divide among columns, with min 40 and max 120 for geometry
+        geom_max_length = max(40, min(120, available_width // max(num_cols, 1)))
+
         # Create preview table
         preview = Table(show_header=True, header_style="bold")
 
@@ -501,7 +597,9 @@ def format_terminal_output(
             row_data = []
             for col in columns_info:
                 value = preview_table.column(col["name"])[i].as_py()
-                formatted = format_value_for_display(value, col["type"], col["is_geometry"])
+                formatted = format_value_for_display(
+                    value, col["type"], col["is_geometry"], geom_max_length
+                )
                 row_data.append(formatted)
             preview.add_row(*row_data)
 
@@ -582,6 +680,7 @@ def format_json_output(
         "geoparquet_version": geo_info.get("version"),
         "crs": geo_info.get("crs"),
         "bbox": geo_info.get("bbox"),
+        "geometry_types": geo_info.get("geometry_types"),
         "columns": [
             {
                 "name": col["name"],
@@ -599,7 +698,7 @@ def format_json_output(
             row = {}
             for col in columns_info:
                 value = preview_table.column(col["name"])[i].as_py()
-                row[col["name"]] = format_value_for_json(value, col["is_geometry"])
+                row[col["name"]] = format_value_for_json(value, col["is_geometry"], max_length=80)
             preview_rows.append(row)
         output["preview"] = preview_rows
     else:
@@ -668,6 +767,10 @@ def format_markdown_output(
                 )
             else:
                 lines.append(f"- **Bbox:** {bbox}")
+
+        if geo_info.get("geometry_types"):
+            geom_types_str = ", ".join(geo_info["geometry_types"])
+            lines.append(f"- **Geometry Types:** {geom_types_str}")
     else:
         lines.append("")
         lines.append("*No GeoParquet metadata found*")
@@ -712,7 +815,9 @@ def format_markdown_output(
             row_values = []
             for col in columns_info:
                 value = preview_table.column(col["name"])[i].as_py()
-                formatted = format_value_for_display(value, col["type"], col["is_geometry"])
+                formatted = format_value_for_display(
+                    value, col["type"], col["is_geometry"], max_length=80
+                )
                 # Escape markdown special characters in table cells
                 formatted = formatted.replace("|", "\\|")
                 formatted = formatted.replace("\n", " ")
