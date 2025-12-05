@@ -10,7 +10,6 @@ or remote URLs, with automatic caching and error handling.
 
 import os
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import click
 import duckdb
@@ -24,7 +23,7 @@ class AdminDataset(ABC):
     hierarchical level support (e.g., continent → country → subdivisions).
     """
 
-    def __init__(self, source_path: Optional[str] = None, verbose: bool = False):
+    def __init__(self, source_path: str | None = None, verbose: bool = False):
         """
         Initialize the admin dataset.
 
@@ -87,7 +86,7 @@ class AdminDataset(ABC):
         pass
 
     @abstractmethod
-    def get_bbox_column(self) -> Optional[str]:
+    def get_bbox_column(self) -> str | None:
         """
         Get the name of the bbox column in this dataset, if available.
 
@@ -159,7 +158,7 @@ class AdminDataset(ABC):
         """
         return {}
 
-    def get_subtype_filter(self, levels: list[str]) -> Optional[str]:
+    def get_subtype_filter(self, levels: list[str]) -> str | None:
         """
         Get SQL WHERE clause to filter by subtype (for datasets that use subtype).
 
@@ -171,7 +170,7 @@ class AdminDataset(ABC):
         """
         return None
 
-    def get_column_transform(self, level_name: str) -> Optional[str]:
+    def get_column_transform(self, level_name: str) -> str | None:
         """
         Get SQL expression to transform a column value for Vecorel compliance.
 
@@ -268,7 +267,7 @@ class CurrentAdminDataset(AdminDataset):
     def get_geometry_column(self) -> str:
         return "geometry"
 
-    def get_bbox_column(self) -> Optional[str]:
+    def get_bbox_column(self) -> str | None:
         return "bbox"
 
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
@@ -309,7 +308,7 @@ class GAULAdminDataset(AdminDataset):
     def get_geometry_column(self) -> str:
         return "geometry"
 
-    def get_bbox_column(self) -> Optional[str]:
+    def get_bbox_column(self) -> str | None:
         return "geometry_bbox"
 
     def configure_s3(self, con: duckdb.DuckDBPyConnection) -> None:
@@ -366,14 +365,14 @@ class OvertureAdminDataset(AdminDataset):
     def get_geometry_column(self) -> str:
         return "geometry"
 
-    def get_bbox_column(self) -> Optional[str]:
+    def get_bbox_column(self) -> str | None:
         return "bbox"
 
     def get_read_parquet_options(self) -> dict:
         """Overture uses Hive partitioning."""
         return {"hive_partitioning": 1}
 
-    def get_subtype_filter(self, levels: list[str]) -> Optional[str]:
+    def get_subtype_filter(self, levels: list[str]) -> str | None:
         """Filter by subtype to only load relevant admin levels."""
         # Map level names to Overture subtype values
         level_to_subtype = {
@@ -386,7 +385,7 @@ class OvertureAdminDataset(AdminDataset):
             return f"subtype IN ({subtype_list})"
         return None
 
-    def get_column_transform(self, level_name: str) -> Optional[str]:
+    def get_column_transform(self, level_name: str) -> str | None:
         """
         Get SQL expression to transform a column value for Vecorel compliance.
 
@@ -454,7 +453,7 @@ class AdminDatasetFactory:
 
     @classmethod
     def create(
-        cls, dataset_name: str, source_path: Optional[str] = None, verbose: bool = False
+        cls, dataset_name: str, source_path: str | None = None, verbose: bool = False
     ) -> AdminDataset:
         """
         Create an admin dataset instance.

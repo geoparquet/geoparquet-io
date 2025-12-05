@@ -7,7 +7,6 @@ import urllib.parse
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import click
 import duckdb
@@ -40,8 +39,8 @@ class ParquetWriteSettings:
 
     compression: str = "ZSTD"
     compression_level: int = 15
-    row_group_rows: Optional[int] = None
-    row_group_size_mb: Optional[int] = None
+    row_group_rows: int | None = None
+    row_group_size_mb: int | None = None
 
     # Best practice constants
     DEFAULT_COMPRESSION = "ZSTD"
@@ -49,7 +48,7 @@ class ParquetWriteSettings:
     DEFAULT_ROW_GROUP_ROWS = 100_000
     DEFAULT_PARQUET_VERSION = "2.6"
 
-    def get_pyarrow_kwargs(self, calculated_row_group_size: Optional[int] = None) -> dict:
+    def get_pyarrow_kwargs(self, calculated_row_group_size: int | None = None) -> dict:
         """Get kwargs dict for PyArrow write_table()."""
         pa_compression = self.compression if self.compression != "UNCOMPRESSED" else None
         pa_compression_level = (
@@ -1480,6 +1479,7 @@ def write_parquet_with_metadata(
     row_group_rows=None,
     custom_metadata=None,
     verbose=False,
+    show_sql=False,
     profile=None,
     geoparquet_version=None,
     input_crs=None,
@@ -1504,6 +1504,7 @@ def write_parquet_with_metadata(
         row_group_rows: Exact number of rows per row group
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
+        show_sql: Whether to print SQL statements before execution
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         input_crs: PROJJSON dict with CRS from input file (for 2.0/parquet-geo-only)
@@ -1542,6 +1543,11 @@ def write_parquet_with_metadata(
             row_group_rows=row_group_rows,
             geoparquet_version=geoparquet_version,
         )
+
+        if show_sql:
+            click.echo(click.style("\n-- COPY query:", fg="cyan"))
+            click.echo(final_query)
+
         con.execute(final_query)
 
         # For 2.0 and parquet-geo-only, apply CRS to Parquet native type if non-default
