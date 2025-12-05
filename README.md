@@ -17,7 +17,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 - **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and admin divisions
 - **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
 - **Flexible**: CLI and Python API for any workflow
-- **Tested**: Extensive test suite across Python 3.9-3.13 and all platforms
+- **Tested**: Extensive test suite across Python 3.10-3.13 and all platforms
 
 ## Installation
 

@@ -7,8 +7,6 @@ This module extends the add_country_codes functionality to support
 multiple admin datasets with hierarchical level support.
 """
 
-from typing import Optional
-
 import click
 import duckdb
 
@@ -55,7 +53,7 @@ def _build_admin_subquery(
 def _build_admin_select_clause(dataset, levels, partition_columns):
     """Build SELECT clause for admin columns with transformations."""
     admin_select_parts = []
-    for i, (level, col) in enumerate(zip(levels, partition_columns)):
+    for i, (level, col) in enumerate(zip(levels, partition_columns, strict=True)):
         output_col_name = dataset.get_output_column_name(level)
         col_transform = dataset.get_column_transform(level)
 
@@ -220,7 +218,7 @@ def _get_result_stats(con, output_parquet, dataset, levels, verbose):
     features_with_admin = stats[1]
 
     unique_counts = []
-    for level, output_col in zip(levels, output_col_names):
+    for level, output_col in zip(levels, output_col_names, strict=True):
         count_query = f"""
         SELECT COUNT(DISTINCT "{output_col}") as unique_count
         FROM '{output_parquet}'
@@ -427,15 +425,15 @@ def add_admin_divisions_multi(
     output_parquet: str,
     dataset_name: str,
     levels: list[str],
-    dataset_source: Optional[str] = None,
+    dataset_source: str | None = None,
     add_bbox_flag: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
     compression: str = "ZSTD",
-    compression_level: Optional[int] = None,
-    row_group_size_mb: Optional[float] = None,
-    row_group_rows: Optional[int] = None,
-    profile: Optional[str] = None,
+    compression_level: int | None = None,
+    row_group_size_mb: float | None = None,
+    row_group_rows: int | None = None,
+    profile: str | None = None,
 ):
     """
     Add admin division columns from a multi-level admin dataset.

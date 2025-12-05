@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "geoparquet-io"
-version = "0.4.0"
+version = "0.5.1"
 description = "Fast I/O and transformation tools for GeoParquet files"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [
     { name = "Chris Holmes", email = "cholmes@9eo.org" }
@@ -19,7 +19,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -90,7 +89,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = [
@@ -115,7 +114,7 @@ ignore = [
 known-first-party = ["geoparquet_io"]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

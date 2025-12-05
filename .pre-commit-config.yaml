@@ -27,8 +27,8 @@ repos:
       - id: vulture
 
     # monitor code complexity
-  # - repo: https://github.com/rubik/xenon
-  #   rev: v0.9.0
-  #   hooks:
-  #   - id: xenon
-  #     args: ['--max-absolute=B', '--max-modules=B', '--max-average=A']
+  - repo: https://github.com/rubik/xenon
+    rev: v0.9.0
+    hooks:
+    - id: xenon
+      args: ['--max-absolute=E', '--max-modules=D', '--max-average=C']
