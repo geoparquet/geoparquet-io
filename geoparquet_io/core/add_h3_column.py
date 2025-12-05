@@ -5,11 +5,11 @@ import click
 from geoparquet_io.core.common import add_computed_column, find_primary_geometry_column
 
 
-def add_h3_column(
+def _add_h3_column_single(
     input_parquet,
     output_parquet,
     h3_column_name="h3_cell",
-    h3_resolution=9,
+    resolution=9,
     dry_run=False,
     verbose=False,
     compression="ZSTD",
@@ -19,28 +19,13 @@ def add_h3_column(
     profile=None,
 ):
     """
-    Add an H3 cell ID column to a GeoParquet file.
+    Add an H3 cell ID column to a single GeoParquet file.
 
-    Computes H3 cell IDs based on geometry centroids using the H3
-    hierarchical hexagonal grid system. The cell ID is stored as a
-    VARCHAR (string) for maximum portability.
-
-    Args:
-        input_parquet: Path to the input parquet file (local or remote URL)
-        output_parquet: Path to the output parquet file (local or remote URL)
-        h3_column_name: Name for the H3 column (default: 'h3_cell')
-        h3_resolution: H3 resolution level (0-15)
-                      Res 7: ~5 km², Res 9: ~0.1 km², Res 11: ~1,770 m²,
-                      Res 13: ~44 m², Res 15: ~0.9 m²
-                      Default: 9 (good balance for most use cases)
-        dry_run: Whether to print SQL commands without executing them
-        verbose: Whether to print verbose output
-        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
-        compression_level: Compression level (varies by format)
-        row_group_size_mb: Target row group size in MB
-        row_group_rows: Exact number of rows per row group
-        profile: AWS profile name (S3 only, optional)
+    This is the single-file implementation. Use add_h3_column() for the
+    auto-detecting wrapper that handles both files and partitions.
     """
+    h3_resolution = resolution  # Alias for compatibility
+
     # Validate resolution
     if not 0 <= h3_resolution <= 15:
         raise click.BadParameter(f"H3 resolution must be between 0 and 15, got {h3_resolution}")
@@ -81,6 +66,59 @@ def add_h3_column(
             f"Successfully added H3 column '{h3_column_name}' "
             f"(resolution {h3_resolution}) to: {output_parquet}"
         )
+
+
+def add_h3_column(
+    input_parquet,
+    output_parquet,
+    h3_column_name="h3_cell",
+    h3_resolution=9,
+    dry_run=False,
+    verbose=False,
+    compression="ZSTD",
+    compression_level=None,
+    row_group_size_mb=None,
+    row_group_rows=None,
+    profile=None,
+):
+    """
+    Add an H3 cell ID column to a GeoParquet file.
+
+    Computes H3 cell IDs based on geometry centroids using the H3
+    hierarchical hexagonal grid system. The cell ID is stored as a
+    VARCHAR (string) for maximum portability.
+
+    Args:
+        input_parquet: Path to the input parquet file (local or remote URL)
+        output_parquet: Path to the output parquet file (local or remote URL)
+        h3_column_name: Name for the H3 column (default: 'h3_cell')
+        h3_resolution: H3 resolution level (0-15)
+                      Res 7: ~5 km², Res 9: ~0.1 km², Res 11: ~1,770 m²,
+                      Res 13: ~44 m², Res 15: ~0.9 m²
+                      Default: 9 (good balance for most use cases)
+        dry_run: Whether to print SQL commands without executing them
+        verbose: Whether to print verbose output
+        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+        compression_level: Compression level (varies by format)
+        row_group_size_mb: Target row group size in MB
+        row_group_rows: Exact number of rows per row group
+        profile: AWS profile name (S3 only, optional)
+    """
+    # For now, just call the single-file implementation
+    # Partition detection can be added later following the add_bbox_column pattern
+    _add_h3_column_single(
+        input_parquet=input_parquet,
+        output_parquet=output_parquet,
+        h3_column_name=h3_column_name,
+        resolution=h3_resolution,
+        dry_run=dry_run,
+        verbose=verbose,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
+        profile=profile,
+    )
 
 
 def _get_resolution_size(resolution):

@@ -6,7 +6,7 @@ import click
 import duckdb
 
 from geoparquet_io.core.common import (
-    add_bbox,
+    add_bbox as add_bbox_to_file,
     check_bbox_structure,
     find_primary_geometry_column,
     get_dataset_bounds,
@@ -23,11 +23,11 @@ from geoparquet_io.core.common import (
 )
 
 
-def hilbert_order(
+def _hilbert_order_single(
     input_parquet,
     output_parquet,
     geometry_column="geometry",
-    add_bbox_flag=False,
+    add_bbox=False,
     verbose=False,
     compression="ZSTD",
     compression_level=None,
@@ -36,20 +36,12 @@ def hilbert_order(
     profile=None,
 ):
     """
-    Reorder a GeoParquet file using Hilbert curve ordering.
+    Reorder a single GeoParquet file using Hilbert curve ordering.
 
-    Takes an input GeoParquet file and creates a new file with rows ordered
-    by their position along a Hilbert space-filling curve. Applies best practices:
-    - Configurable compression (default ZSTD)
-    - Configurable row group sizes
-    - bbox covering metadata
-    - Preserves CRS from original file
-    - Writes GeoParquet 1.1 format
-    - Supports remote inputs/outputs (S3, GCS, Azure)
-
-    Args:
-        profile: AWS profile name (S3 only, optional)
+    This is the single-file implementation. Use hilbert_order() for the
+    public API.
     """
+    add_bbox_flag = add_bbox  # Alias for compatibility
     # Check input file bbox structure
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
 
@@ -74,7 +66,7 @@ def hilbert_order(
         shutil.copy2(input_parquet, temp_file)
 
         # Add bbox to the temp file
-        add_bbox(temp_file, "bbox", verbose)
+        add_bbox_to_file(temp_file, "bbox", verbose)
         click.echo(click.style("✓ Added bbox column for optimized processing", fg="green"))
 
         working_parquet = temp_file
@@ -197,6 +189,48 @@ def hilbert_order(
             except Exception as e:
                 if verbose:
                     click.echo(f"Warning: Could not remove temporary file: {e}")
+
+
+def hilbert_order(
+    input_parquet,
+    output_parquet,
+    geometry_column="geometry",
+    add_bbox_flag=False,
+    verbose=False,
+    compression="ZSTD",
+    compression_level=None,
+    row_group_size_mb=None,
+    row_group_rows=None,
+    profile=None,
+):
+    """
+    Reorder a GeoParquet file using Hilbert curve ordering.
+
+    Takes an input GeoParquet file and creates a new file with rows ordered
+    by their position along a Hilbert space-filling curve. Applies best practices:
+    - Configurable compression (default ZSTD)
+    - Configurable row group sizes
+    - bbox covering metadata
+    - Preserves CRS from original file
+    - Writes GeoParquet 1.1 format
+    - Supports remote inputs/outputs (S3, GCS, Azure)
+
+    Args:
+        profile: AWS profile name (S3 only, optional)
+    """
+    # Call the single-file implementation
+    _hilbert_order_single(
+        input_parquet=input_parquet,
+        output_parquet=output_parquet,
+        geometry_column=geometry_column,
+        add_bbox=add_bbox_flag,
+        verbose=verbose,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
+        profile=profile,
+    )
 
 
 if __name__ == "__main__":
