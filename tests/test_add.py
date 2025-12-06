@@ -37,13 +37,52 @@ class TestAddCommands:
         bbox_info = [col for col in bbox_col if col[0] == "bbox"][0]
         assert "STRUCT" in bbox_info[1]
 
-    def test_add_bbox_to_places(self, places_test_file, temp_output_file):
-        """Test adding bbox column to places file (which already has bbox)."""
+    def test_add_bbox_to_places_skips_existing(self, places_test_file, temp_output_file):
+        """Test adding bbox to file with existing bbox skips and informs user."""
         runner = CliRunner()
         result = runner.invoke(add, ["bbox", places_test_file, temp_output_file])
-        # Should fail because bbox column already exists
-        assert result.exit_code != 0
-        assert "already exists" in result.output
+        # Should succeed but not create output file (bbox already exists)
+        assert result.exit_code == 0
+        assert "already has bbox column" in result.output or "covering metadata" in result.output
+        # Output file should NOT be created since we're skipping
+        assert not os.path.exists(temp_output_file)
+
+    def test_add_bbox_force_replaces_existing(self, places_test_file, temp_output_file):
+        """Test --force flag replaces existing bbox column."""
+        runner = CliRunner()
+        result = runner.invoke(add, ["bbox", places_test_file, temp_output_file, "--force"])
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+        assert "Replacing existing bbox column" in result.output
+
+        # Verify only 1 bbox column exists in output
+        conn = duckdb.connect()
+        columns = conn.execute(f'DESCRIBE SELECT * FROM "{temp_output_file}"').fetchall()
+        bbox_columns = [col for col in columns if col[0] == "bbox"]
+        assert len(bbox_columns) == 1
+
+        # Verify row count preserved
+        input_count = conn.execute(f'SELECT COUNT(*) FROM "{places_test_file}"').fetchone()[0]
+        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        assert input_count == output_count
+
+    def test_add_bbox_force_with_custom_name(self, places_test_file, temp_output_file):
+        """Test --force with custom name keeps both columns and warns."""
+        runner = CliRunner()
+        result = runner.invoke(
+            add, ["bbox", places_test_file, temp_output_file, "--force", "--bbox-name", "bounds"]
+        )
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+        # Should warn about 2 bbox columns
+        assert "2 bbox columns" in result.output
+
+        # Verify both bbox and bounds columns exist
+        conn = duckdb.connect()
+        columns = conn.execute(f'DESCRIBE SELECT * FROM "{temp_output_file}"').fetchall()
+        column_names = [col[0] for col in columns]
+        assert "bbox" in column_names  # Original kept
+        assert "bounds" in column_names  # New one added
 
     def test_add_bbox_with_custom_name(self, buildings_test_file, temp_output_file):
         """Test adding bbox column with custom name."""
