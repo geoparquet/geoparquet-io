@@ -7,7 +7,7 @@
 
 Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
-**📚 [Full Documentation](https://cholmes.github.io/geoparquet-io/)** | **[Quick Start Tutorial](https://cholmes.github.io/geoparquet-io/getting-started/quickstart/)**
+**📚 [Full Documentation](https://geoparquet.org/geoparquet-io/)** | **[Quick Start Tutorial](https://geoparquet.org/geoparquet-io/getting-started/quickstart/)**
 
 ## Features
 
@@ -25,7 +25,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 pip install geoparquet-io
 ```
 
-See the [Installation Guide](https://cholmes.github.io/geoparquet-io/getting-started/installation/) for other options (uv, from source) and requirements.
+See the [Installation Guide](https://geoparquet.org/geoparquet-io/getting-started/installation/) for other options (uv, from source) and requirements.
 
 ## Quick Start
 
@@ -51,7 +51,7 @@ gpio partition h3 gs://bucket/data.parquet gs://bucket/partitions/ --resolution 
 gpio sort hilbert https://example.com/data.parquet s3://bucket/sorted.parquet
 ```
 
-For more examples and detailed usage, see the [Quick Start Tutorial](https://cholmes.github.io/geoparquet-io/getting-started/quickstart/) and [User Guide](https://cholmes.github.io/geoparquet-io/guide/inspect/).
+For more examples and detailed usage, see the [Quick Start Tutorial](https://geoparquet.org/geoparquet-io/getting-started/quickstart/) and [User Guide](https://geoparquet.org/geoparquet-io/guide/inspect/).
 
 ## Contributing
 
@@ -59,7 +59,7 @@ Contributions are welcome! See [CONTRIBUTING.md](docs/contributing.md) for devel
 
 ## Links
 
-- **Documentation**: [https://cholmes.github.io/geoparquet-io/](https://cholmes.github.io/geoparquet-io/)
+- **Documentation**: [https://geoparquet.org/geoparquet-io/](https://geoparquet.org/geoparquet-io/)
 - **PyPI**: [https://pypi.org/project/geoparquet-io/](https://pypi.org/project/geoparquet-io/) (coming soon)
 - **Issues**: [https://github.com/cholmes/geoparquet-io/issues](https://github.com/cholmes/geoparquet-io/issues)
 
