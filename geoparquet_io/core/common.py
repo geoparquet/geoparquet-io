@@ -1056,7 +1056,7 @@ def _initialize_geo_metadata(geo_meta, geom_col, version="1.1.0"):
         dict: Initialized geo metadata structure
     """
     if not geo_meta:
-        return {"version": version, "primary_column": geom_col, "columns": {}}
+        return {"version": version, "primary_column": geom_col, "columns": {geom_col: {}}}
 
     # Set the specified version
     geo_meta["version"] = version

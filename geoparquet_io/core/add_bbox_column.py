@@ -5,6 +5,7 @@ import click
 from geoparquet_io.core.common import (
     add_computed_column,
     check_bbox_structure,
+    detect_geoparquet_file_type,
     find_primary_geometry_column,
 )
 
@@ -48,6 +49,19 @@ def add_bbox_column(
     Note:
         Bbox covering metadata is automatically added when the file is written.
     """
+    # Check for parquet-geo-only input and warn user (skip in dry-run mode)
+    if not dry_run:
+        file_type_info = detect_geoparquet_file_type(input_parquet, verbose)
+        if file_type_info["file_type"] == "parquet_geo_only":
+            click.echo(
+                click.style(
+                    "Note: Input file uses native Parquet geometry types without GeoParquet metadata. "
+                    "Bbox column is not required for spatial statistics as native geo types provide "
+                    "row group statistics. Proceeding with bbox addition anyway.",
+                    fg="yellow",
+                )
+            )
+
     # Check for existing bbox column (skip in dry-run mode)
     replace_column = None
     if not dry_run:
