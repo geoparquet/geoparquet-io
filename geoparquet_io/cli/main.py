@@ -1150,6 +1150,11 @@ def add_country_codes(
 @click.argument("input_parquet")
 @click.argument("output_parquet")
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Replace existing bbox column instead of skipping",
+)
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @geoparquet_version_option
@@ -1159,6 +1164,7 @@ def add_bbox(
     input_parquet,
     output_parquet,
     bbox_name,
+    force,
     profile,
     compression,
     compression_level,
@@ -1175,10 +1181,11 @@ def add_bbox(
     GeoParquet file (GeoParquet 1.1 spec). The bbox column improves spatial query
     performance.
 
-    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    If the file already has a bbox column with covering metadata, the command will
+    inform you and exit successfully (no action needed). Use --force to replace an
+    existing bbox column.
 
-    If your file already has a bbox column but lacks metadata, use 'add bbox-metadata'
-    instead.
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
 
     Examples:
 
@@ -1189,6 +1196,10 @@ def add_bbox(
         \b
         # Remote to remote
         gpio add bbox s3://bucket/in.parquet s3://bucket/out.parquet --profile my-aws
+
+        \b
+        # Force replace existing bbox
+        gpio add bbox input.parquet output.parquet --force
     """
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -1216,6 +1227,7 @@ def add_bbox(
         row_group_mb,
         row_group_size,
         profile,
+        force,
         geoparquet_version,
     )
 
