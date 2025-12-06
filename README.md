@@ -1,7 +1,7 @@
 # geoparquet-io
 
 [![Tests](https://github.com/cholmes/geoparquet-io/actions/workflows/tests.yml/badge.svg)](https://github.com/cholmes/geoparquet-io/actions/workflows/tests.yml)
-[![Python Version](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/cholmes/geoparquet-io)
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/cholmes/geoparquet-io)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/cholmes/geoparquet-io/blob/main/LICENSE)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
@@ -12,10 +12,11 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 ## Features
 
 - **Fast**: Built on PyArrow and DuckDB for high-performance operations
-- **Comprehensive**: Sort, partition, enhance, validate, and upload GeoParquet files
+- **Comprehensive**: Sort, extract, partition, enhance, validate, and upload GeoParquet files
 - **Cloud-Native**: Read from and write to S3, GCS, Azure, and HTTPS sources
 - **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and admin divisions
-- **Best Practices**: Automatic optimization following GeoParquet 1.1 spec
+- **Best Practices**: Automatic optimization following GeoParquet 1.1 and 2.0 specs
+- **Parquet Geo Types support**: Read and write Parquet geometry and geography types.
 - **Flexible**: CLI and Python API for any workflow
 - **Tested**: Extensive test suite across Python 3.10-3.13 and all platforms
 
