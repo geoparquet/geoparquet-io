@@ -10,6 +10,7 @@ import duckdb
 from geoparquet_io.core.add_bbox_column import add_bbox_column
 from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata
 from geoparquet_io.core.common import (
+    detect_geoparquet_file_type,
     get_duckdb_connection,
     get_parquet_metadata,
     get_remote_error_hint,
@@ -22,7 +23,9 @@ from geoparquet_io.core.common import (
 from geoparquet_io.core.hilbert_order import hilbert_order
 
 
-def fix_compression(parquet_file, output_file, verbose=False, profile=None):
+def fix_compression(
+    parquet_file, output_file, verbose=False, profile=None, geoparquet_version=None
+):
     """Re-compress file with ZSTD compression.
 
     Args:
@@ -30,6 +33,7 @@ def fix_compression(parquet_file, output_file, verbose=False, profile=None):
         output_file: Path to output file
         verbose: Print additional information
         profile: AWS profile name for S3 operations
+        geoparquet_version: GeoParquet version to preserve (1.0, 1.1, 2.0, parquet-geo-only)
 
     Returns:
         dict with fix summary
@@ -42,8 +46,10 @@ def fix_compression(parquet_file, output_file, verbose=False, profile=None):
 
     safe_url = safe_file_url(parquet_file, verbose)
 
-    # Get original metadata
-    original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
+    # Get original metadata (only needed for v1.x)
+    original_metadata = None
+    if geoparquet_version in (None, "1.0", "1.1"):
+        original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
     # Read and rewrite with ZSTD compression
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
@@ -61,6 +67,7 @@ def fix_compression(parquet_file, output_file, verbose=False, profile=None):
             row_group_rows=100000,
             verbose=verbose,
             profile=profile,
+            geoparquet_version=geoparquet_version,
         )
 
         return {"fix_applied": "Re-compressed with ZSTD", "success": True}
@@ -131,6 +138,73 @@ def fix_bbox_metadata(parquet_file, output_file, verbose=False, profile=None):
     return {"fix_applied": "Added bbox covering metadata", "success": True}
 
 
+def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False, profile=None):
+    """Remove bbox column from a file.
+
+    Used for GeoParquet 2.0 and parquet-geo-only files where bbox is not needed
+    because native Parquet geo types provide row group statistics for spatial filtering.
+
+    Args:
+        parquet_file: Path to input file
+        output_file: Path to output file
+        bbox_column_name: Name of the bbox column to remove
+        verbose: Print additional information
+        profile: AWS profile name for S3 operations
+
+    Returns:
+        dict with fix summary
+    """
+    # Always inform user when removing bbox column
+    click.echo(f"Removing bbox column '{bbox_column_name}' (not needed for native geo types)")
+
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, parquet_file, output_file)
+
+    safe_url = safe_file_url(parquet_file, verbose)
+
+    # Detect file type to determine output version
+    file_type_info = detect_geoparquet_file_type(parquet_file, verbose)
+
+    # Determine GeoParquet version for output
+    if file_type_info["file_type"] == "parquet_geo_only":
+        gp_version = "parquet-geo-only"
+    elif file_type_info["geo_version"] and file_type_info["geo_version"].startswith("2."):
+        gp_version = "2.0"
+    else:
+        gp_version = "1.1"  # Fallback, shouldn't happen for removal
+
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
+
+    try:
+        # Select all columns EXCEPT the bbox column
+        query = f"SELECT * EXCLUDE ({bbox_column_name}) FROM '{safe_url}'"
+
+        write_parquet_with_metadata(
+            con=con,
+            query=query,
+            output_file=output_file,
+            original_metadata=None,  # Don't preserve old metadata with bbox covering
+            compression="ZSTD",
+            compression_level=15,
+            row_group_rows=100000,
+            verbose=verbose,
+            profile=profile,
+            geoparquet_version=gp_version,
+        )
+
+        return {"fix_applied": f"Removed bbox column '{bbox_column_name}'", "success": True}
+    except duckdb.IOException as e:
+        con.close()
+        if is_remote_url(parquet_file):
+            hints = get_remote_error_hint(str(e), parquet_file)
+            raise click.ClickException(
+                f"Failed to read remote file.\n\n{hints}\n\nOriginal error: {str(e)}"
+            ) from e
+        raise
+    finally:
+        con.close()
+
+
 def fix_bbox_all(
     parquet_file, output_file, needs_column, needs_metadata, verbose=False, profile=None
 ):
@@ -194,7 +268,7 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     return {"fix_applied": "Applied Hilbert spatial ordering", "success": True}
 
 
-def fix_row_groups(parquet_file, output_file, verbose=False, profile=None):
+def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geoparquet_version=None):
     """Rewrite with optimal row group size.
 
     Args:
@@ -202,6 +276,7 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None):
         output_file: Path to output file
         verbose: Print additional information
         profile: AWS profile name for S3 operations
+        geoparquet_version: GeoParquet version to preserve (1.0, 1.1, 2.0, parquet-geo-only)
 
     Returns:
         dict with fix summary
@@ -214,8 +289,10 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None):
 
     safe_url = safe_file_url(parquet_file, verbose)
 
-    # Get original metadata
-    original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
+    # Get original metadata (only needed for v1.x)
+    original_metadata = None
+    if geoparquet_version in (None, "1.0", "1.1"):
+        original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
     # Read and rewrite with optimal row groups
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
@@ -233,6 +310,7 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None):
             row_group_rows=100000,
             verbose=verbose,
             profile=profile,
+            geoparquet_version=geoparquet_version,
         )
 
         return {"fix_applied": "Optimized row groups", "success": True}
@@ -246,6 +324,35 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None):
         raise
     finally:
         con.close()
+
+
+def get_geoparquet_version_from_check_results(check_results):
+    """Determine the GeoParquet version to use based on check results.
+
+    This helper ensures we preserve the original file's version when fixing.
+
+    Args:
+        check_results: Dict containing results from check functions
+
+    Returns:
+        str: GeoParquet version string (1.0, 1.1, 2.0, parquet-geo-only) or None for default
+    """
+    bbox_result = check_results.get("bbox", {})
+    file_type = bbox_result.get("file_type", "unknown")
+
+    if file_type == "geoparquet_v2":
+        return "2.0"
+    elif file_type == "parquet_geo_only":
+        return "parquet-geo-only"
+    elif file_type == "geoparquet_v1":
+        # Check the specific version from metadata
+        version = bbox_result.get("version", "1.1.0")
+        if version and version.startswith("1.0"):
+            return "1.0"
+        return "1.1"
+    else:
+        # Unknown or no geo metadata - default to 1.1
+        return None
 
 
 def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, profile=None):
@@ -270,10 +377,27 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
     current_file = parquet_file
     temp_files = []
 
+    # Determine the GeoParquet version to preserve
+    geoparquet_version = get_geoparquet_version_from_check_results(check_results)
+    if verbose and geoparquet_version:
+        click.echo(f"Preserving GeoParquet version: {geoparquet_version}")
+
     try:
-        # Step 1: Add bbox column if needed
+        # Handle bbox based on file type
         bbox_result = check_results.get("bbox", {})
-        if bbox_result.get("needs_bbox_column", False):
+
+        # Step 1: Remove bbox column if needed (v2/parquet-geo-only)
+        if bbox_result.get("needs_bbox_removal", False):
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+            temp_files.append(temp_file)
+
+            bbox_column_name = bbox_result.get("bbox_column_name")
+            fix_bbox_removal(current_file, temp_file, bbox_column_name, verbose, profile)
+            current_file = temp_file
+            fixes_applied.append(f"Removed bbox column '{bbox_column_name}'")
+
+        # Step 1 (alt): Add bbox column if needed (v1.x)
+        elif bbox_result.get("needs_bbox_column", False):
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
             temp_files.append(temp_file)
 
@@ -284,10 +408,13 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
             current_file = temp_file
             fixes_applied.append("Added bbox column")
 
-        # Step 2: Add bbox metadata if needed
-        if bbox_result.get("needs_bbox_metadata", False) or (
-            bbox_result.get("needs_bbox_column", False)
-            and not bbox_result.get("has_bbox_metadata", False)
+        # Step 2: Add bbox metadata if needed (v1.x only, skip for v2/parquet-geo-only)
+        if not bbox_result.get("needs_bbox_removal", False) and (
+            bbox_result.get("needs_bbox_metadata", False)
+            or (
+                bbox_result.get("needs_bbox_column", False)
+                and not bbox_result.get("has_bbox_metadata", False)
+            )
         ):
             # For metadata, we can modify in-place
             if current_file == parquet_file:
@@ -329,7 +456,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
                 click.echo("\n[4/4] Optimizing compression and row groups...")
 
             # This is the final step, write to the actual output
-            fix_compression(current_file, output_file, verbose, profile)
+            fix_compression(current_file, output_file, verbose, profile, geoparquet_version)
 
             if needs_compression_fix:
                 fixes_applied.append("Optimized compression (ZSTD)")

@@ -390,6 +390,121 @@ def _get_column_minmax(col, is_geo: bool, bbox_columns: dict, rg) -> tuple[str, 
     return "-", "-"
 
 
+def has_parquet_geo_row_group_stats(parquet_file: str, geometry_column: str | None = None) -> dict:
+    """
+    Check if file has row group statistics for geometry columns.
+
+    For files with native Parquet geo types, checks if bbox struct columns exist
+    with proper min/max statistics in row groups that can be used for spatial filtering.
+
+    Args:
+        parquet_file: Path to the parquet file
+        geometry_column: Name of the geometry column (auto-detected if None)
+
+    Returns:
+        dict with:
+            - has_stats: bool - Whether valid row group stats exist
+            - stats_source: str - "bbox_struct" if bbox struct column has stats, None otherwise
+            - sample_bbox: list - [xmin, ymin, xmax, ymax] from first row group, or None
+    """
+    result = {
+        "has_stats": False,
+        "stats_source": None,
+        "sample_bbox": None,
+    }
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    with fsspec.open(safe_url, "rb") as f:
+        pf = pq.ParquetFile(f)
+        schema = pf.schema_arrow
+        parquet_metadata = pf.metadata
+
+    # Auto-detect geometry column if not specified
+    if not geometry_column:
+        parquet_schema_str = str(parquet_metadata.schema)
+        for field in schema:
+            geo_type = detect_geo_logical_type(field, parquet_schema_str)
+            if geo_type:
+                geometry_column = field.name
+                break
+
+    if not geometry_column:
+        return result
+
+    # Use helper function to find bbox columns
+    geo_columns = {geometry_column: "Geometry"}  # Placeholder type
+    bbox_columns = _detect_bbox_columns(schema, geo_columns)
+    bbox_col_name = bbox_columns.get(geometry_column)
+
+    if not bbox_col_name:
+        return result
+
+    # Check first row group for stats using helper
+    if parquet_metadata.num_row_groups > 0:
+        rg = parquet_metadata.row_group(0)
+        bbox = _extract_rg_bbox(rg, bbox_col_name)
+
+        if bbox:
+            result["has_stats"] = True
+            result["stats_source"] = "bbox_struct"
+            result["sample_bbox"] = [bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"]]
+
+    return result
+
+
+def extract_bbox_from_row_group_stats(
+    parquet_file: str,
+    geometry_column: str,
+) -> list[float] | None:
+    """
+    Extract overall bbox from row group statistics for a geometry column.
+
+    This looks for a bbox struct column associated with the geometry column
+    and calculates the overall bbox from the min/max statistics across all row groups.
+
+    Args:
+        parquet_file: Path to the parquet file
+        geometry_column: Name of the geometry column
+
+    Returns:
+        list: [xmin, ymin, xmax, ymax] or None if bbox cannot be calculated
+    """
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    with fsspec.open(safe_url, "rb") as f:
+        pf = pq.ParquetFile(f)
+        schema = pf.schema_arrow
+        parquet_metadata = pf.metadata
+
+    # Use helper function to find bbox columns
+    geo_columns = {geometry_column: "Geometry"}  # Placeholder type
+    bbox_columns = _detect_bbox_columns(schema, geo_columns)
+    bbox_col_name = bbox_columns.get(geometry_column)
+
+    if not bbox_col_name:
+        return None
+
+    # Calculate overall bbox from all row groups using helper
+    row_group_stats = []
+    for rg_idx in range(parquet_metadata.num_row_groups):
+        rg = parquet_metadata.row_group(rg_idx)
+        bbox = _extract_rg_bbox(rg, bbox_col_name)
+        if bbox:
+            row_group_stats.append(bbox)
+
+    overall_bbox = _calculate_overall_bbox(row_group_stats)
+    if overall_bbox:
+        return [
+            overall_bbox["xmin"],
+            overall_bbox["ymin"],
+            overall_bbox["xmax"],
+            overall_bbox["ymax"],
+        ]
+
+    return None
+
+
 def format_parquet_metadata_enhanced(
     parquet_file: str,
     json_output: bool,
