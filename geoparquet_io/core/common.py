@@ -1830,6 +1830,7 @@ def add_computed_column(
     dry_run_description=None,
     custom_metadata=None,
     profile=None,
+    geoparquet_version=None,
 ):
     """
     Add a computed column to a GeoParquet file using SQL expression.
@@ -1981,6 +1982,7 @@ TO '{output_parquet}'
         custom_metadata=custom_metadata,
         verbose=verbose,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
 

@@ -434,6 +434,7 @@ def add_admin_divisions_multi(
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
     profile: str | None = None,
+    geoparquet_version: str | None = None,
 ):
     """
     Add admin division columns from a multi-level admin dataset.
@@ -535,6 +536,7 @@ def add_admin_divisions_multi(
         row_group_rows=row_group_rows,
         verbose=verbose,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
     # Get statistics about the results

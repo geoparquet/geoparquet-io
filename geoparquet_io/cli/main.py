@@ -5,6 +5,7 @@ import click
 from geoparquet_io.cli.decorators import (
     compression_options,
     dry_run_option,
+    geoparquet_version_option,
     output_format_options,
     overwrite_option,
     partition_options,
@@ -494,14 +495,7 @@ def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup, overw
     is_flag=True,
     help="CSV/TSV: Skip rows with invalid geometries instead of failing",
 )
-@click.option(
-    "--geoparquet-version",
-    type=click.Choice(["1.0", "1.1", "2.0", "parquet-geo-only"]),
-    default=None,
-    help="GeoParquet version to write. 2.0 uses native Parquet geo types. "
-    "parquet-geo-only writes Parquet geo types without GeoParquet metadata. "
-    "Default: 1.1",
-)
+@geoparquet_version_option
 @verbose_option
 @compression_options
 @profile_option
@@ -695,6 +689,7 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
     help="Maximum number of rows to extract.",
 )
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @show_sql_option
 @verbose_option
@@ -713,6 +708,7 @@ def extract(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     show_sql,
     verbose,
@@ -828,6 +824,7 @@ def extract(
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
             profile=profile,
+            geoparquet_version=geoparquet_version,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -966,6 +963,7 @@ def sort():
 )
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @verbose_option
 def hilbert_order(
     input_parquet,
@@ -977,6 +975,7 @@ def hilbert_order(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     verbose,
 ):
     """
@@ -986,7 +985,7 @@ def hilbert_order(
     by their position along a Hilbert space-filling curve.
 
     Applies optimal formatting (configurable compression, optimized row groups,
-    bbox metadata) while preserving the CRS. Output is written as GeoParquet 1.1.
+    bbox metadata) while preserving the CRS.
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
@@ -1017,6 +1016,7 @@ def hilbert_order(
             row_group_mb,
             row_group_size,
             profile,
+            geoparquet_version,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -1047,6 +1047,7 @@ def add():
 )
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @verbose_option
 def add_country_codes(
@@ -1060,6 +1061,7 @@ def add_country_codes(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     verbose,
 ):
@@ -1140,6 +1142,7 @@ def add_country_codes(
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
 
@@ -1149,6 +1152,7 @@ def add_country_codes(
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @verbose_option
 def add_bbox(
@@ -1160,6 +1164,7 @@ def add_bbox(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     verbose,
 ):
@@ -1211,6 +1216,7 @@ def add_bbox(
         row_group_mb,
         row_group_size,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1249,6 +1255,7 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
 )
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @verbose_option
 def add_h3(
@@ -1261,6 +1268,7 @@ def add_h3(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     verbose,
 ):
@@ -1302,6 +1310,7 @@ def add_h3(
         row_group_mb,
         row_group_size,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1338,6 +1347,7 @@ def add_h3(
 )
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @click.option(
     "--force",
@@ -1358,6 +1368,7 @@ def add_kdtree(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     force,
     verbose,
@@ -1443,6 +1454,7 @@ def add_kdtree(
         sample_size,
         auto_target,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1472,6 +1484,7 @@ def partition():
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
 def partition_admin(
     input_parquet,
     output_folder,
@@ -1486,6 +1499,7 @@ def partition_admin(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
 ):
     """Partition by administrative boundaries via spatial join with remote datasets.
 
@@ -1545,6 +1559,7 @@ def partition_admin(
         skip_analysis=skip_analysis,
         filename_prefix=prefix,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
 
@@ -1556,6 +1571,7 @@ def partition_admin(
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
 def partition_string(
     input_parquet,
     output_folder,
@@ -1570,6 +1586,7 @@ def partition_string(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
 ):
     """Partition a GeoParquet file by string column values.
 
@@ -1610,6 +1627,7 @@ def partition_string(
         skip_analysis,
         prefix,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1635,6 +1653,7 @@ def partition_string(
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
 def partition_h3(
     input_parquet,
     output_folder,
@@ -1650,6 +1669,7 @@ def partition_h3(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
 ):
     """Partition a GeoParquet file by H3 cells at specified resolution.
 
@@ -1701,6 +1721,7 @@ def partition_h3(
         skip_analysis,
         prefix,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1743,6 +1764,7 @@ def partition_h3(
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
 def partition_kdtree(
     input_parquet,
     output_folder,
@@ -1761,6 +1783,7 @@ def partition_kdtree(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
 ):
     """Partition a GeoParquet file by KD-tree cells.
 
@@ -1847,6 +1870,7 @@ def partition_kdtree(
         auto_target,
         prefix,
         profile,
+        geoparquet_version,
     )
 
 

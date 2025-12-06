@@ -669,6 +669,7 @@ def _execute_extraction(
     row_group_size_mb: float | None,
     row_group_rows: int | None,
     profile: str | None,
+    geoparquet_version: str | None = None,
 ) -> None:
     """Execute the extraction query and write output."""
     if verbose:
@@ -732,6 +733,7 @@ def _execute_extraction(
             verbose=verbose,
             show_sql=show_sql,
             profile=profile,
+            geoparquet_version=geoparquet_version,
         )
 
         click.echo(click.style(f"Extracted {extract_count:,} rows to {output_parquet}", fg="green"))
@@ -758,6 +760,7 @@ def extract(
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
     profile: str | None = None,
+    geoparquet_version: str | None = None,
 ) -> None:
     """
     Extract columns and rows from GeoParquet files.
@@ -852,4 +855,5 @@ def extract(
             row_group_size_mb,
             row_group_rows,
             profile,
+            geoparquet_version,
         )

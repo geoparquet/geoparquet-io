@@ -1073,3 +1073,206 @@ class TestComprehensiveRoundTrips:
 
         assert geo_meta_v1["columns"][primary_col]["encoding"] == "WKB"
         assert geo_meta_roundtrip["columns"][primary_col]["encoding"] == "WKB"
+
+
+class TestExtractGeoParquetVersion:
+    """Test --geoparquet-version option on extract command."""
+
+    def test_extract_default_version(self, fields_v2_file, temp_output_file):
+        """Test extract uses default version (1.1)."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["extract", fields_v2_file, temp_output_file, "--limit", "5"],
+        )
+
+        assert result.exit_code == 0, f"Failed with: {result.output}"
+        assert os.path.exists(temp_output_file)
+        assert get_geoparquet_version(temp_output_file) == "1.1.0"
+
+    def test_extract_version_2_0(self, fields_v2_file, temp_output_file):
+        """Test extract with explicit 2.0 version."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "extract",
+                fields_v2_file,
+                temp_output_file,
+                "--limit",
+                "5",
+                "--geoparquet-version",
+                "2.0",
+            ],
+        )
+
+        assert result.exit_code == 0, f"Failed with: {result.output}"
+        assert get_geoparquet_version(temp_output_file) == "2.0.0"
+        assert has_native_geo_types(temp_output_file)
+
+    def test_extract_parquet_geo_only(self, fields_v2_file, temp_output_file):
+        """Test extract with parquet-geo-only version."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "extract",
+                fields_v2_file,
+                temp_output_file,
+                "--limit",
+                "5",
+                "--geoparquet-version",
+                "parquet-geo-only",
+            ],
+        )
+
+        assert result.exit_code == 0, f"Failed with: {result.output}"
+        assert has_native_geo_types(temp_output_file)
+        assert not has_geoparquet_metadata(temp_output_file)
+
+
+class TestSortHilbertGeoParquetVersion:
+    """Test --geoparquet-version option on sort hilbert command."""
+
+    def test_sort_hilbert_default_version(self, places_test_file, temp_output_file):
+        """Test sort hilbert uses default version (1.1)."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["sort", "hilbert", places_test_file, temp_output_file],
+        )
+
+        assert result.exit_code == 0
+        assert os.path.exists(temp_output_file)
+        assert get_geoparquet_version(temp_output_file) == "1.1.0"
+
+    def test_sort_hilbert_version_2_0(self, places_test_file, temp_output_file):
+        """Test sort hilbert with explicit 2.0 version."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "sort",
+                "hilbert",
+                places_test_file,
+                temp_output_file,
+                "--geoparquet-version",
+                "2.0",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert get_geoparquet_version(temp_output_file) == "2.0.0"
+        assert has_native_geo_types(temp_output_file)
+
+    def test_sort_hilbert_version_1_0(self, places_test_file, temp_output_file):
+        """Test sort hilbert with explicit 1.0 version."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "sort",
+                "hilbert",
+                places_test_file,
+                temp_output_file,
+                "--geoparquet-version",
+                "1.0",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert get_geoparquet_version(temp_output_file) == "1.0.0"
+        assert not has_native_geo_types(temp_output_file)
+
+
+class TestAddBboxGeoParquetVersion:
+    """Test --geoparquet-version option on add bbox command."""
+
+    def test_add_bbox_default_version(self, buildings_test_file, temp_output_file):
+        """Test add bbox uses default version (1.1)."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["add", "bbox", buildings_test_file, temp_output_file],
+        )
+
+        assert result.exit_code == 0, f"Failed with: {result.output}"
+        assert os.path.exists(temp_output_file)
+        assert get_geoparquet_version(temp_output_file) == "1.1.0"
+
+    def test_add_bbox_version_1_0(self, buildings_test_file, temp_output_file):
+        """Test add bbox with explicit 1.0 version."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "add",
+                "bbox",
+                buildings_test_file,
+                temp_output_file,
+                "--geoparquet-version",
+                "1.0",
+            ],
+        )
+
+        assert result.exit_code == 0, f"Failed with: {result.output}"
+        assert get_geoparquet_version(temp_output_file) == "1.0.0"
+
+
+class TestPartitionGeoParquetVersion:
+    """Test --geoparquet-version option on partition commands."""
+
+    def test_partition_string_default_version(self, buildings_test_file, temp_output_dir):
+        """Test partition string uses default version (1.1)."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "partition",
+                "string",
+                buildings_test_file,
+                temp_output_dir,
+                "--column",
+                "id",
+                "--skip-analysis",
+                "--force",
+            ],
+        )
+
+        assert result.exit_code == 0, f"Failed with: {result.output}"
+
+        # Find a partition file
+        parquet_files = [f for f in os.listdir(temp_output_dir) if f.endswith(".parquet")]
+        assert len(parquet_files) > 0
+
+        partition_file = os.path.join(temp_output_dir, parquet_files[0])
+        assert get_geoparquet_version(partition_file) == "1.1.0"
+
+    def test_partition_string_version_2_0(self, buildings_test_file, temp_output_dir):
+        """Test partition string with explicit 2.0 version."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "partition",
+                "string",
+                buildings_test_file,
+                temp_output_dir,
+                "--column",
+                "id",
+                "--skip-analysis",
+                "--force",
+                "--geoparquet-version",
+                "2.0",
+            ],
+        )
+
+        assert result.exit_code == 0, f"Failed with: {result.output}"
+
+        # Find a partition file
+        parquet_files = [f for f in os.listdir(temp_output_dir) if f.endswith(".parquet")]
+        assert len(parquet_files) > 0
+
+        partition_file = os.path.join(temp_output_dir, parquet_files[0])
+        assert get_geoparquet_version(partition_file) == "2.0.0"
+        assert has_native_geo_types(partition_file)

@@ -651,6 +651,7 @@ def _process_partition_value(
     metadata,
     keep_partition_column,
     verbose,
+    geoparquet_version=None,
 ):
     """Process a single partition value."""
     output_filename = _determine_output_path(
@@ -690,6 +691,7 @@ def _process_partition_value(
         compression="ZSTD",
         compression_level=15,
         verbose=False,
+        geoparquet_version=geoparquet_version,
     )
 
     if verbose:
@@ -711,6 +713,7 @@ def partition_by_column(
     skip_analysis: bool = False,
     filename_prefix: str | None = None,
     profile: str | None = None,
+    geoparquet_version: str | None = None,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.
@@ -792,6 +795,7 @@ def partition_by_column(
                 metadata,
                 keep_partition_column,
                 verbose,
+                geoparquet_version,
             )
 
         con.close()

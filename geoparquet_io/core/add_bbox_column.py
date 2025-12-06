@@ -16,6 +16,7 @@ def add_bbox_column(
     row_group_size_mb=None,
     row_group_rows=None,
     profile=None,
+    geoparquet_version=None,
 ):
     """
     Add a bbox struct column to a GeoParquet file.
@@ -31,6 +32,7 @@ def add_bbox_column(
         row_group_size_mb: Target row group size in MB
         row_group_rows: Exact number of rows per row group
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
 
     Note:
         Bbox covering metadata is automatically added when the file is written.
@@ -63,6 +65,7 @@ def add_bbox_column(
         row_group_rows=row_group_rows,
         dry_run_description="Bounding box struct (xmin, ymin, xmax, ymax)",
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
     if not dry_run:
