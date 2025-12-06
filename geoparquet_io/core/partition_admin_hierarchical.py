@@ -292,6 +292,7 @@ def _create_all_partitions(
     verbose,
     profile,
     original_cols,
+    geoparquet_version=None,
 ):
     """Create all partition files."""
     partition_count = 0
@@ -310,6 +311,7 @@ def _create_all_partitions(
             verbose,
             profile,
             original_cols,
+            geoparquet_version,
         ):
             partition_count += 1
     return partition_count
@@ -329,6 +331,7 @@ def _create_partition_file(
     verbose,
     profile,
     original_cols,
+    geoparquet_version=None,
 ):
     """Create a single partition file."""
     # Build nested folder path
@@ -386,6 +389,7 @@ def _create_partition_file(
         compression_level=15,
         verbose=False,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
     return True
@@ -405,6 +409,7 @@ def partition_by_admin_hierarchical(
     skip_analysis: bool = False,
     filename_prefix: str | None = None,
     profile: str | None = None,
+    geoparquet_version: str | None = None,
 ) -> int:
     """
     Partition a GeoParquet file by administrative boundaries.
@@ -535,6 +540,7 @@ def partition_by_admin_hierarchical(
         verbose,
         profile,
         original_cols,
+        geoparquet_version,
     )
 
     con.close()

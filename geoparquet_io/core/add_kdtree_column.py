@@ -199,6 +199,7 @@ def add_kdtree_column(
     sample_size=100000,
     auto_target_rows=None,
     profile=None,
+    geoparquet_version=None,
 ):
     """
     Add a KD-tree cell ID column to a GeoParquet file.
@@ -406,6 +407,7 @@ def add_kdtree_column(
         custom_metadata=kdtree_metadata,
         verbose=verbose,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
     con.close()

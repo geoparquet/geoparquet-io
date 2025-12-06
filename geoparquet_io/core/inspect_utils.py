@@ -24,6 +24,11 @@ from geoparquet_io.core.common import (
     parse_geo_metadata,
     safe_file_url,
 )
+from geoparquet_io.core.metadata_utils import (
+    detect_geo_logical_type,
+    extract_bbox_from_row_group_stats,
+    parse_geometry_type_from_schema,
+)
 
 
 def extract_file_info(parquet_file: str) -> dict[str, Any]:
@@ -73,80 +78,307 @@ def extract_file_info(parquet_file: str) -> dict[str, Any]:
     }
 
 
+def _extract_crs_string(crs_info: Any) -> str | None:
+    """Extract CRS string from various formats."""
+    if isinstance(crs_info, dict):
+        if "id" in crs_info:
+            crs_id = crs_info["id"]
+            if isinstance(crs_id, dict):
+                authority = crs_id.get("authority", "EPSG")
+                code = crs_id.get("code")
+                if code:
+                    return f"{authority}:{code}"
+            else:
+                return str(crs_id)
+        elif "$schema" in crs_info:
+            return "PROJJSON"
+        elif "wkt" in crs_info:
+            return "WKT"
+    elif crs_info:
+        return str(crs_info)
+    return None
+
+
+def _format_crs_for_display(crs_info: Any, include_default: bool = True) -> str:
+    """
+    Format CRS for display output.
+
+    Converts any CRS format (PROJJSON dict, EPSG string, None) to a
+    consistent display string like "EPSG:31287" or "OGC:CRS84 (default)".
+
+    Args:
+        crs_info: CRS in any format (PROJJSON dict, EPSG string, None)
+        include_default: Whether to show "(default)" for None CRS
+
+    Returns:
+        Display string like "EPSG:31287" or "OGC:CRS84 (default)"
+    """
+    if crs_info is None:
+        return "OGC:CRS84 (default)" if include_default else "Not specified"
+
+    # Try to extract EPSG code from PROJJSON
+    identifier = _extract_crs_identifier(crs_info)
+    if identifier:
+        authority, code = identifier
+        return f"{authority}:{code}"
+
+    # Fallback to existing extraction
+    result = _extract_crs_string(crs_info)
+    if result:
+        return result
+
+    # Last resort - truncate if too long
+    crs_str = str(crs_info)
+    return crs_str[:50] + "..." if len(crs_str) > 50 else crs_str
+
+
+def _extract_crs_identifier(crs_info: Any) -> tuple[str, int] | None:
+    """
+    Extract normalized CRS identifier (authority, code) from various formats.
+
+    Handles:
+    - PROJJSON dicts with id.authority and id.code
+    - Strings like "EPSG:31287", "epsg:31287"
+    - URN format like "urn:ogc:def:crs:EPSG::31287"
+
+    Returns:
+        tuple of (authority, code) like ("EPSG", 31287), or None if not extractable
+    """
+    if isinstance(crs_info, dict):
+        # PROJJSON format - look for id.authority and id.code
+        if "id" in crs_info:
+            crs_id = crs_info["id"]
+            if isinstance(crs_id, dict):
+                authority = crs_id.get("authority", "").upper()
+                code = crs_id.get("code")
+                if authority and code:
+                    return (authority, int(code))
+        return None
+
+    if isinstance(crs_info, str):
+        crs_str = crs_info.strip().upper()
+
+        # Handle "EPSG:31287" format
+        if ":" in crs_str and not crs_str.startswith("URN:"):
+            parts = crs_str.split(":")
+            if len(parts) == 2:
+                try:
+                    return (parts[0], int(parts[1]))
+                except ValueError:
+                    pass
+
+        # Handle URN format "urn:ogc:def:crs:EPSG::31287"
+        if crs_str.startswith("URN:OGC:DEF:CRS:"):
+            parts = crs_str.split(":")
+            if len(parts) >= 7:
+                authority = parts[4]
+                try:
+                    code = int(parts[-1])
+                    return (authority, code)
+                except ValueError:
+                    pass
+
+    return None
+
+
+def _crs_are_equivalent(crs1: Any, crs2: Any) -> bool:
+    """
+    Check if two CRS values are equivalent.
+
+    Compares by extracting authority and code from both values.
+    Handles PROJJSON dicts, "EPSG:31287" strings, and URN formats.
+
+    Returns:
+        True if CRS values represent the same coordinate system
+    """
+    id1 = _extract_crs_identifier(crs1)
+    id2 = _extract_crs_identifier(crs2)
+
+    if id1 is None or id2 is None:
+        return False
+
+    return id1 == id2
+
+
+def _detect_metadata_mismatches(
+    parquet_geo_info: dict[str, Any],
+    geoparquet_info: dict[str, Any],
+) -> list[str]:
+    """
+    Detect mismatches between Parquet native geo metadata and GeoParquet metadata.
+
+    Returns a list of warning messages for any mismatches found.
+    """
+    warnings = []
+
+    parquet_crs = parquet_geo_info.get("crs")
+    geoparquet_crs = geoparquet_info.get("crs")
+
+    # Compare CRS - only warn if both are set and different
+    if parquet_crs and geoparquet_crs:
+        # Use semantic comparison (handles PROJJSON vs "EPSG:31287" etc.)
+        if not _crs_are_equivalent(parquet_crs, geoparquet_crs):
+            # Extract display strings for the warning message
+            parquet_crs_display = _extract_crs_string(parquet_crs) or str(parquet_crs)
+            geoparquet_crs_display = _extract_crs_string(geoparquet_crs) or str(geoparquet_crs)
+            warnings.append(
+                f"CRS mismatch: Parquet geo type has '{parquet_crs_display}' "
+                f"but GeoParquet metadata has '{geoparquet_crs_display}'"
+            )
+    elif parquet_crs and not geoparquet_crs:
+        parquet_crs_display = _extract_crs_string(parquet_crs) or str(parquet_crs)
+        warnings.append(
+            f"CRS in Parquet geo type ('{parquet_crs_display}') but missing in GeoParquet metadata"
+        )
+    elif geoparquet_crs and not parquet_crs:
+        # GeoParquet has CRS but Parquet type doesn't - might be expected
+        pass
+
+    # Compare edges (only relevant for Geography type)
+    parquet_edges = parquet_geo_info.get("edges")
+    geoparquet_edges = geoparquet_info.get("edges")
+
+    if parquet_edges and geoparquet_edges:
+        if parquet_edges.lower() != geoparquet_edges.lower():
+            warnings.append(
+                f"Edges mismatch: Parquet geo type has '{parquet_edges}' "
+                f"but GeoParquet metadata has '{geoparquet_edges}'"
+            )
+
+    # Compare geometry types
+    parquet_geom_type = parquet_geo_info.get("geometry_type")
+    geoparquet_geom_types = geoparquet_info.get("geometry_types")
+
+    if parquet_geom_type and geoparquet_geom_types:
+        if isinstance(geoparquet_geom_types, list):
+            geom_types_lower = [g.lower() for g in geoparquet_geom_types]
+            if parquet_geom_type.lower() not in geom_types_lower:
+                warnings.append(
+                    f"Geometry type mismatch: Parquet geo type restricts to '{parquet_geom_type}' "
+                    f"but GeoParquet metadata allows {geoparquet_geom_types}"
+                )
+
+    return warnings
+
+
 def extract_geo_info(parquet_file: str) -> dict[str, Any]:
     """
-    Extract GeoParquet-specific information from metadata.
+    Extract geospatial information from both Parquet native types and GeoParquet metadata.
+
+    This function detects:
+    1. Native Parquet GEOMETRY/GEOGRAPHY logical types
+    2. GeoParquet metadata from the 'geo' key
+    3. Mismatches between the two (returned as warnings)
 
     Args:
         parquet_file: Path to the parquet file
 
     Returns:
-        dict: Geo info including CRS, bbox, primary_column, version
+        dict: Geo info including:
+            - parquet_type: "Geometry", "Geography", or "No Parquet geo logical type"
+            - has_geo_metadata: Whether GeoParquet metadata exists
+            - version: GeoParquet version
+            - crs: CRS (from GeoParquet or Parquet type, with source noted)
+            - bbox: Bounding box
+            - primary_column: Primary geometry column name
+            - geometry_types: List of geometry types (from GeoParquet metadata)
+            - edges: Edge interpretation (for Geography type)
+            - warnings: List of mismatch warnings (if any)
     """
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    # Read schema and metadata
+    with fsspec.open(safe_url, "rb") as f:
+        pf = pq.ParquetFile(f)
+        schema = pf.schema_arrow
+        parquet_schema_str = str(pf.metadata.schema)
+
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
     geo_meta = parse_geo_metadata(metadata, verbose=False)
 
-    if not geo_meta:
-        return {
-            "has_geo_metadata": False,
-            "version": None,
-            "crs": None,
-            "bbox": None,
-            "primary_column": None,
+    # Detect Parquet native geo type
+    parquet_type = "No Parquet geo logical type"
+    parquet_geo_info = {}
+    geometry_column = None
+
+    for field in schema:
+        geo_type = detect_geo_logical_type(field, parquet_schema_str)
+        if geo_type:
+            parquet_type = geo_type
+            geometry_column = field.name
+
+            # Parse additional details from Parquet schema
+            geom_details = parse_geometry_type_from_schema(field.name, parquet_schema_str)
+            if geom_details:
+                parquet_geo_info["geometry_type"] = geom_details.get("geometry_type")
+                parquet_geo_info["coordinate_dimension"] = geom_details.get("coordinate_dimension")
+                parquet_geo_info["crs"] = geom_details.get("crs")
+                parquet_geo_info["edges"] = geom_details.get("algorithm")
+            break
+
+    # Extract GeoParquet metadata
+    geoparquet_info = {}
+    if geo_meta:
+        version = geo_meta.get("version")
+        primary_column = geo_meta.get("primary_column", "geometry")
+        columns_meta = geo_meta.get("columns", {})
+
+        crs = None
+        bbox = None
+        geometry_types = None
+        edges = None
+
+        if primary_column in columns_meta:
+            col_meta = columns_meta[primary_column]
+            crs = col_meta.get("crs")  # Keep raw PROJJSON, don't convert to string
+            bbox = col_meta.get("bbox")
+            geometry_types = col_meta.get("geometry_types")
+            edges = col_meta.get("edges")
+
+        # Note: Keep crs as None if not specified - default handling is a display concern
+
+        geoparquet_info = {
+            "version": version,
+            "crs": crs,
+            "bbox": bbox,
+            "primary_column": primary_column,
+            "geometry_types": geometry_types,
+            "edges": edges,
         }
 
-    # Extract version
-    version = geo_meta.get("version")
+        # Use GeoParquet primary_column if we didn't find one from Parquet type
+        if not geometry_column:
+            geometry_column = primary_column
 
-    # Extract CRS and bbox from primary geometry column
-    primary_column = geo_meta.get("primary_column", "geometry")
-    columns_meta = geo_meta.get("columns", {})
+    # Determine the effective primary column
+    primary_column = geometry_column or "geometry"
 
-    crs = None
-    bbox = None
-    geometry_types = None
+    # Determine effective CRS (prefer GeoParquet, fallback to Parquet type)
+    # Keep as raw PROJJSON - display functions will handle default formatting
+    effective_crs = geoparquet_info.get("crs") or parquet_geo_info.get("crs")
 
-    if primary_column in columns_meta:
-        col_meta = columns_meta[primary_column]
-        crs_info = col_meta.get("crs")
+    # Determine effective bbox
+    # Priority: GeoParquet metadata bbox, then calculate from row group stats
+    effective_bbox = geoparquet_info.get("bbox")
+    if not effective_bbox and parquet_type != "No Parquet geo logical type":
+        # Try to calculate bbox from row group statistics (bbox struct column)
+        effective_bbox = extract_bbox_from_row_group_stats(parquet_file, primary_column)
 
-        # Extract CRS string (handle both dict and simple formats)
-        if isinstance(crs_info, dict):
-            # Try different CRS formats
-            if "id" in crs_info:
-                crs_id = crs_info["id"]
-                if isinstance(crs_id, dict):
-                    authority = crs_id.get("authority", "EPSG")
-                    code = crs_id.get("code")
-                    if code:
-                        crs = f"{authority}:{code}"
-                else:
-                    crs = str(crs_id)
-            elif "$schema" in crs_info:
-                # PROJJSON format
-                crs = "PROJJSON"
-            elif "wkt" in crs_info:
-                crs = "WKT"
-        elif crs_info:
-            crs = str(crs_info)
-
-        # Extract bbox
-        bbox = col_meta.get("bbox")
-
-        # Extract geometry_types
-        geometry_types = col_meta.get("geometry_types")
-
-    # Per GeoParquet spec, if CRS is not specified, it defaults to EPSG:4326
-    if crs is None and primary_column in columns_meta:
-        crs = "EPSG:4326 (default)"
+    # Detect mismatches
+    warnings = []
+    if geo_meta and parquet_type != "No Parquet geo logical type":
+        warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
 
     return {
-        "has_geo_metadata": True,
-        "version": version,
-        "crs": crs,
-        "bbox": bbox,
+        "parquet_type": parquet_type,
+        "has_geo_metadata": geo_meta is not None,
+        "version": geoparquet_info.get("version"),
+        "crs": effective_crs,
+        "bbox": effective_bbox,
         "primary_column": primary_column,
-        "geometry_types": geometry_types,
+        "geometry_types": geoparquet_info.get("geometry_types"),
+        "edges": geoparquet_info.get("edges") or parquet_geo_info.get("edges"),
+        "warnings": warnings,
     }
 
 
@@ -215,94 +447,27 @@ def parse_wkb_type(wkb_bytes: bytes) -> str:
         return "GEOMETRY"
 
 
-def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 60) -> str:
-    """
-    Convert WKB bytes to WKT and truncate for preview display.
-
-    Args:
-        wkb_bytes: WKB binary data
-        max_length: Maximum length of WKT string to return
-
-    Returns:
-        str: Truncated WKT string or fallback geometry type
-    """
-    if not wkb_bytes or len(wkb_bytes) < 5:
-        return "<GEOMETRY>"
-
-    try:
-        con = duckdb.connect()
-        con.execute("LOAD spatial;")
-        result = con.execute("SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes]).fetchone()
-        con.close()
-
-        if result and result[0]:
-            wkt = result[0]
-            if len(wkt) > max_length:
-                return wkt[: max_length - 3] + "..."
-            return wkt
-        else:
-            # Fall back to geometry type
-            return f"<{parse_wkb_type(wkb_bytes)}>"
-    except Exception:
-        # Fall back to geometry type on any error
-        return f"<{parse_wkb_type(wkb_bytes)}>"
-
-
-def format_geometry_display(value: Any, max_length: int = 60) -> str:
+def format_geometry_display(value: Any) -> str:
     """
     Format a geometry value for display.
 
     Args:
         value: Geometry value (WKB bytes or other)
-        max_length: Maximum length for WKT preview
 
     Returns:
-        str: Formatted geometry display string (WKT preview or fallback)
+        str: Formatted geometry display string
     """
     if value is None:
         return "NULL"
 
     if isinstance(value, bytes):
-        return wkb_to_wkt_preview(value, max_length)
+        geom_type = parse_wkb_type(value)
+        return f"<{geom_type}>"
 
     return str(value)
 
 
-def format_bbox_display(value: dict, max_length: int = 60) -> str:
-    """
-    Format a bbox struct value for display.
-
-    Args:
-        value: Dict with xmin, ymin, xmax, ymax keys
-        max_length: Maximum length of output string
-
-    Returns:
-        str: Formatted bbox string like [xmin, ymin, xmax, ymax]
-    """
-    try:
-        xmin = value.get("xmin", 0)
-        ymin = value.get("ymin", 0)
-        xmax = value.get("xmax", 0)
-        ymax = value.get("ymax", 0)
-        formatted = f"[{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]"
-        if len(formatted) > max_length:
-            return formatted[: max_length - 3] + "..."
-        return formatted
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def is_bbox_value(value: Any) -> bool:
-    """Check if a value is a bbox struct (dict with xmin, ymin, xmax, ymax)."""
-    if not isinstance(value, dict):
-        return False
-    bbox_keys = {"xmin", "ymin", "xmax", "ymax"}
-    return bbox_keys.issubset(value.keys())
-
-
-def format_value_for_display(
-    value: Any, column_type: str, is_geometry: bool, max_length: int = 60
-) -> str:
+def format_value_for_display(value: Any, column_type: str, is_geometry: bool) -> str:
     """
     Format a cell value for terminal display.
 
@@ -310,7 +475,6 @@ def format_value_for_display(
         value: Cell value
         column_type: Column type string
         is_geometry: Whether this is a geometry column
-        max_length: Maximum length for geometry WKT preview
 
     Returns:
         str: Formatted display string
@@ -319,11 +483,7 @@ def format_value_for_display(
         return "NULL"
 
     if is_geometry:
-        return format_geometry_display(value, max_length)
-
-    # Format bbox struct columns nicely
-    if is_bbox_value(value):
-        return format_bbox_display(value, max_length)
+        return format_geometry_display(value)
 
     # Truncate long strings
     value_str = str(value)
@@ -333,14 +493,13 @@ def format_value_for_display(
     return value_str
 
 
-def format_value_for_json(value: Any, is_geometry: bool, max_length: int = 80) -> Any:
+def format_value_for_json(value: Any, is_geometry: bool) -> Any:
     """
     Format a cell value for JSON output.
 
     Args:
         value: Cell value
         is_geometry: Whether this is a geometry column
-        max_length: Maximum length for geometry WKT preview
 
     Returns:
         JSON-serializable value
@@ -350,12 +509,8 @@ def format_value_for_json(value: Any, is_geometry: bool, max_length: int = 80) -
 
     if is_geometry:
         if isinstance(value, bytes):
-            return format_geometry_display(value, max_length)
+            return format_geometry_display(value)
         return str(value)
-
-    # Format bbox struct columns nicely
-    if is_bbox_value(value):
-        return format_bbox_display(value, max_length)
 
     # Handle various types
     if isinstance(value, (int, float, str, bool)):
@@ -520,13 +675,25 @@ def format_terminal_output(
     if file_info.get("compression"):
         console.print(f"Compression: [cyan]{file_info['compression']}[/cyan]")
 
+    # Parquet type (new field)
+    parquet_type = geo_info.get("parquet_type", "No Parquet geo logical type")
+    if parquet_type in ("Geometry", "Geography"):
+        console.print(f"Parquet Type: [cyan]{parquet_type}[/cyan]")
+    else:
+        console.print(f"Parquet Type: [dim]{parquet_type}[/dim]")
+
     if geo_info["has_geo_metadata"]:
         # GeoParquet version
         if geo_info.get("version"):
             console.print(f"GeoParquet Version: [cyan]{geo_info['version']}[/cyan]")
 
-        crs_display = geo_info["crs"] if geo_info["crs"] else "Not specified"
+        crs_display = _format_crs_for_display(geo_info["crs"])
         console.print(f"CRS: [cyan]{crs_display}[/cyan]")
+
+        # Geometry types (if available)
+        if geo_info.get("geometry_types"):
+            geom_types = ", ".join(geo_info["geometry_types"])
+            console.print(f"Geometry Types: [cyan]{geom_types}[/cyan]")
 
         if geo_info["bbox"]:
             bbox = geo_info["bbox"]
@@ -536,12 +703,29 @@ def format_terminal_output(
                 )
             else:
                 console.print(f"Bbox: [cyan]{bbox}[/cyan]")
-
-        if geo_info.get("geometry_types"):
-            geom_types_str = ", ".join(geo_info["geometry_types"])
-            console.print(f"Geometry Types: [cyan]{geom_types_str}[/cyan]")
+    elif parquet_type in ("Geometry", "Geography"):
+        # Has Parquet geo type but no GeoParquet metadata
+        console.print("[dim]No GeoParquet metadata (using Parquet geo type)[/dim]")
+        crs_display = _format_crs_for_display(geo_info["crs"])
+        console.print(f"CRS: [cyan]{crs_display}[/cyan]")
+        # Display bbox calculated from row group stats
+        if geo_info["bbox"]:
+            bbox = geo_info["bbox"]
+            if len(bbox) == 4:
+                console.print(
+                    f"Bbox: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
+                )
+            else:
+                console.print(f"Bbox: [cyan]{bbox}[/cyan]")
     else:
         console.print("[yellow]No GeoParquet metadata found[/yellow]")
+
+    # Display warnings for metadata mismatches
+    warnings = geo_info.get("warnings", [])
+    if warnings:
+        console.print()
+        for warning in warnings:
+            console.print(f"[yellow]⚠ {warning}[/yellow]")
 
     console.print()
 
@@ -575,16 +759,6 @@ def format_terminal_output(
         )
         console.print(f"{preview_label}:")
 
-        # Calculate dynamic max_length for geometry WKT based on terminal width
-        # Reserve space for table borders, padding, and other columns
-        terminal_width = console.width
-        num_cols = len(columns_info)
-        # Estimate overhead: ~3 chars per column for borders/padding, plus some margin
-        overhead = num_cols * 4 + 10
-        available_width = terminal_width - overhead
-        # Divide among columns, with min 40 and max 120 for geometry
-        geom_max_length = max(40, min(120, available_width // max(num_cols, 1)))
-
         # Create preview table
         preview = Table(show_header=True, header_style="bold")
 
@@ -597,9 +771,7 @@ def format_terminal_output(
             row_data = []
             for col in columns_info:
                 value = preview_table.column(col["name"])[i].as_py()
-                formatted = format_value_for_display(
-                    value, col["type"], col["is_geometry"], geom_max_length
-                )
+                formatted = format_value_for_display(value, col["type"], col["is_geometry"])
                 row_data.append(formatted)
             preview.add_row(*row_data)
 
@@ -677,10 +849,12 @@ def format_json_output(
         "rows": file_info["rows"],
         "row_groups": file_info["row_groups"],
         "compression": file_info.get("compression"),
+        "parquet_type": geo_info.get("parquet_type", "No Parquet geo logical type"),
         "geoparquet_version": geo_info.get("version"),
-        "crs": geo_info.get("crs"),
-        "bbox": geo_info.get("bbox"),
+        "crs": _format_crs_for_display(geo_info.get("crs"), include_default=False),
         "geometry_types": geo_info.get("geometry_types"),
+        "bbox": geo_info.get("bbox"),
+        "warnings": geo_info.get("warnings", []),
         "columns": [
             {
                 "name": col["name"],
@@ -698,7 +872,7 @@ def format_json_output(
             row = {}
             for col in columns_info:
                 value = preview_table.column(col["name"])[i].as_py()
-                row[col["name"]] = format_value_for_json(value, col["is_geometry"], max_length=80)
+                row[col["name"]] = format_value_for_json(value, col["is_geometry"])
             preview_rows.append(row)
         output["preview"] = preview_rows
     else:
@@ -752,12 +926,21 @@ def format_markdown_output(
     if file_info.get("compression"):
         lines.append(f"- **Compression:** {file_info['compression']}")
 
+    # Parquet type (new field)
+    parquet_type = geo_info.get("parquet_type", "No Parquet geo logical type")
+    lines.append(f"- **Parquet Type:** {parquet_type}")
+
     if geo_info["has_geo_metadata"]:
         if geo_info.get("version"):
             lines.append(f"- **GeoParquet Version:** {geo_info['version']}")
 
-        crs_display = geo_info["crs"] if geo_info["crs"] else "Not specified"
+        crs_display = _format_crs_for_display(geo_info["crs"])
         lines.append(f"- **CRS:** {crs_display}")
+
+        # Geometry types (if available)
+        if geo_info.get("geometry_types"):
+            geom_types = ", ".join(geo_info["geometry_types"])
+            lines.append(f"- **Geometry Types:** {geom_types}")
 
         if geo_info["bbox"]:
             bbox = geo_info["bbox"]
@@ -767,13 +950,32 @@ def format_markdown_output(
                 )
             else:
                 lines.append(f"- **Bbox:** {bbox}")
-
-        if geo_info.get("geometry_types"):
-            geom_types_str = ", ".join(geo_info["geometry_types"])
-            lines.append(f"- **Geometry Types:** {geom_types_str}")
+    elif parquet_type in ("Geometry", "Geography"):
+        # Has Parquet geo type but no GeoParquet metadata
+        lines.append("")
+        lines.append("*No GeoParquet metadata (using Parquet geo type)*")
+        crs_display = _format_crs_for_display(geo_info["crs"])
+        lines.append(f"- **CRS:** {crs_display}")
+        # Display bbox calculated from row group stats
+        if geo_info["bbox"]:
+            bbox = geo_info["bbox"]
+            if len(bbox) == 4:
+                lines.append(
+                    f"- **Bbox:** [{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}]"
+                )
+            else:
+                lines.append(f"- **Bbox:** {bbox}")
     else:
         lines.append("")
         lines.append("*No GeoParquet metadata found*")
+
+    # Display warnings for metadata mismatches
+    warnings = geo_info.get("warnings", [])
+    if warnings:
+        lines.append("")
+        lines.append("**Warnings:**")
+        for warning in warnings:
+            lines.append(f"- ⚠️ {warning}")
 
     lines.append("")
 
@@ -815,9 +1017,7 @@ def format_markdown_output(
             row_values = []
             for col in columns_info:
                 value = preview_table.column(col["name"])[i].as_py()
-                formatted = format_value_for_display(
-                    value, col["type"], col["is_geometry"], max_length=80
-                )
+                formatted = format_value_for_display(value, col["type"], col["is_geometry"])
                 # Escape markdown special characters in table cells
                 formatted = formatted.replace("|", "\\|")
                 formatted = formatted.replace("\n", " ")

@@ -421,3 +421,258 @@ def test_inspect_markdown_json_exclusive(runner, test_file):
 
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output.lower()
+
+
+# Tests for Parquet native geo type detection
+
+
+@pytest.fixture
+def parquet_geo_only_file():
+    """Provide path to test file with Parquet geo type but no GeoParquet metadata."""
+    return os.path.join(os.path.dirname(__file__), "data", "fields_pgo_crs84_bbox_snappy.parquet")
+
+
+@pytest.fixture
+def parquet_v2_file():
+    """Provide path to test file with both Parquet geo type and GeoParquet metadata."""
+    return os.path.join(os.path.dirname(__file__), "data", "fields_gpq2_crs84_zstd.parquet")
+
+
+def test_inspect_parquet_geo_type_only(runner, parquet_geo_only_file):
+    """Test inspect shows Parquet type for file with only Parquet geo type."""
+    result = runner.invoke(cli, ["inspect", parquet_geo_only_file])
+
+    assert result.exit_code == 0
+    assert "Parquet Type: Geometry" in result.output
+    assert "No GeoParquet metadata (using Parquet geo type)" in result.output
+    # Should still show CRS (default)
+    assert "CRS:" in result.output
+    # Should calculate and show bbox from row group stats
+    assert "Bbox:" in result.output
+
+
+def test_inspect_parquet_geo_type_with_geoparquet(runner, parquet_v2_file):
+    """Test inspect shows both Parquet type and GeoParquet metadata."""
+    result = runner.invoke(cli, ["inspect", parquet_v2_file])
+
+    assert result.exit_code == 0
+    assert "Parquet Type: Geometry" in result.output
+    assert "GeoParquet Version: 2.0.0" in result.output
+    assert "Geometry Types: Polygon" in result.output
+    assert "Bbox:" in result.output
+
+
+def test_inspect_json_parquet_type(runner, parquet_geo_only_file):
+    """Test JSON output includes parquet_type field."""
+    result = runner.invoke(cli, ["inspect", parquet_geo_only_file, "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+
+    assert "parquet_type" in data
+    assert data["parquet_type"] == "Geometry"
+    assert data["geoparquet_version"] is None
+    assert "warnings" in data
+    assert data["warnings"] == []
+
+
+def test_inspect_json_with_geoparquet(runner, parquet_v2_file):
+    """Test JSON output includes all geo info when both Parquet type and GeoParquet exist."""
+    result = runner.invoke(cli, ["inspect", parquet_v2_file, "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+
+    assert data["parquet_type"] == "Geometry"
+    assert data["geoparquet_version"] == "2.0.0"
+    assert data["geometry_types"] == ["Polygon"]
+    assert data["bbox"] is not None
+    assert len(data["bbox"]) == 4
+
+
+def test_inspect_markdown_parquet_type(runner, parquet_geo_only_file):
+    """Test markdown output includes Parquet Type field."""
+    result = runner.invoke(cli, ["inspect", parquet_geo_only_file, "--markdown"])
+
+    assert result.exit_code == 0
+    assert "- **Parquet Type:** Geometry" in result.output
+    assert "No GeoParquet metadata (using Parquet geo type)" in result.output
+    # Should calculate and show bbox from row group stats
+    assert "- **Bbox:**" in result.output
+
+
+def test_extract_geo_info_parquet_type_only(parquet_geo_only_file):
+    """Test extract_geo_info returns parquet_type for file with only Parquet geo type."""
+    geo_info = extract_geo_info(parquet_geo_only_file)
+
+    assert geo_info["parquet_type"] == "Geometry"
+    assert geo_info["has_geo_metadata"] is False
+    assert geo_info["version"] is None
+    assert geo_info["primary_column"] == "geometry"
+    assert geo_info["warnings"] == []
+    # Bbox should be calculated from row group stats
+    assert geo_info["bbox"] is not None
+    assert len(geo_info["bbox"]) == 4
+
+
+def test_extract_geo_info_with_both(parquet_v2_file):
+    """Test extract_geo_info returns both Parquet type and GeoParquet metadata."""
+    geo_info = extract_geo_info(parquet_v2_file)
+
+    assert geo_info["parquet_type"] == "Geometry"
+    assert geo_info["has_geo_metadata"] is True
+    assert geo_info["version"] == "2.0.0"
+    assert geo_info["geometry_types"] == ["Polygon"]
+    assert geo_info["bbox"] is not None
+
+
+class TestCRSComparison:
+    """Test CRS comparison and extraction functions."""
+
+    def test_extract_crs_identifier_from_projjson(self):
+        """Test extracting CRS identifier from PROJJSON dict."""
+        from geoparquet_io.core.inspect_utils import _extract_crs_identifier
+
+        projjson = {
+            "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+            "type": "ProjectedCRS",
+            "name": "MGI / Austria Lambert",
+            "id": {"authority": "EPSG", "code": 31287},
+        }
+        result = _extract_crs_identifier(projjson)
+        assert result == ("EPSG", 31287)
+
+    def test_extract_crs_identifier_from_epsg_string(self):
+        """Test extracting CRS identifier from EPSG:CODE string."""
+        from geoparquet_io.core.inspect_utils import _extract_crs_identifier
+
+        assert _extract_crs_identifier("EPSG:4326") == ("EPSG", 4326)
+        assert _extract_crs_identifier("epsg:31287") == ("EPSG", 31287)
+        # OGC:CRS84 is a special case - not a numeric code, so returns None
+        assert _extract_crs_identifier("OGC:CRS84") is None
+
+    def test_extract_crs_identifier_from_urn(self):
+        """Test extracting CRS identifier from URN format."""
+        from geoparquet_io.core.inspect_utils import _extract_crs_identifier
+
+        assert _extract_crs_identifier("urn:ogc:def:crs:EPSG::4326") == ("EPSG", 4326)
+        assert _extract_crs_identifier("urn:ogc:def:crs:EPSG::31287") == ("EPSG", 31287)
+
+    def test_extract_crs_identifier_returns_none_for_invalid(self):
+        """Test that invalid CRS formats return None."""
+        from geoparquet_io.core.inspect_utils import _extract_crs_identifier
+
+        assert _extract_crs_identifier(None) is None
+        assert _extract_crs_identifier({}) is None
+        assert _extract_crs_identifier("invalid") is None
+        assert _extract_crs_identifier({"no_id": "here"}) is None
+
+    def test_crs_are_equivalent_projjson_vs_epsg_string(self):
+        """Test that PROJJSON and EPSG string for same CRS are equivalent."""
+        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+
+        projjson = {
+            "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+            "type": "ProjectedCRS",
+            "name": "MGI / Austria Lambert",
+            "id": {"authority": "EPSG", "code": 31287},
+        }
+        assert _crs_are_equivalent(projjson, "EPSG:31287") is True
+        assert _crs_are_equivalent("EPSG:31287", projjson) is True
+
+    def test_crs_are_equivalent_same_strings(self):
+        """Test that identical CRS strings are equivalent."""
+        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+
+        assert _crs_are_equivalent("EPSG:4326", "EPSG:4326") is True
+        assert _crs_are_equivalent("epsg:4326", "EPSG:4326") is True
+
+    def test_crs_are_not_equivalent_different_codes(self):
+        """Test that different CRS codes are not equivalent."""
+        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+
+        assert _crs_are_equivalent("EPSG:4326", "EPSG:31287") is False
+
+    def test_crs_are_not_equivalent_when_unextractable(self):
+        """Test that unextractable CRS values are not equivalent."""
+        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+
+        assert _crs_are_equivalent(None, "EPSG:4326") is False
+        assert _crs_are_equivalent("invalid", "EPSG:4326") is False
+        assert _crs_are_equivalent({}, "EPSG:4326") is False
+
+    def test_detect_mismatches_no_false_positive_for_same_crs(self):
+        """Test that identical PROJJSON CRS dicts don't trigger mismatch."""
+        from geoparquet_io.core.inspect_utils import _detect_metadata_mismatches
+
+        # Now both sources provide PROJJSON (not string)
+        parquet_geo_info = {
+            "crs": {
+                "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+                "type": "ProjectedCRS",
+                "name": "MGI / Austria Lambert",
+                "id": {"authority": "EPSG", "code": 31287},
+            }
+        }
+        geoparquet_info = {
+            "crs": {
+                "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+                "type": "ProjectedCRS",
+                "name": "MGI / Austria Lambert",
+                "id": {"authority": "EPSG", "code": 31287},
+            }
+        }
+
+        warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
+        assert len(warnings) == 0
+
+    def test_detect_mismatches_projjson_vs_string_same_crs(self):
+        """Test that PROJJSON and EPSG string for same CRS don't trigger mismatch."""
+        from geoparquet_io.core.inspect_utils import _detect_metadata_mismatches
+
+        # This tests backwards compatibility - should still work with mixed formats
+        parquet_geo_info = {
+            "crs": {
+                "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
+                "type": "ProjectedCRS",
+                "name": "MGI / Austria Lambert",
+                "id": {"authority": "EPSG", "code": 31287},
+            }
+        }
+        geoparquet_info = {"crs": "EPSG:31287"}
+
+        warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
+        assert len(warnings) == 0
+
+    def test_detect_mismatches_reports_actual_mismatch(self):
+        """Test that actual CRS mismatches are reported."""
+        from geoparquet_io.core.inspect_utils import _detect_metadata_mismatches
+
+        parquet_geo_info = {"crs": "EPSG:4326"}
+        geoparquet_info = {"crs": "EPSG:31287"}
+
+        warnings = _detect_metadata_mismatches(parquet_geo_info, geoparquet_info)
+        assert len(warnings) == 1
+        assert "CRS mismatch" in warnings[0]
+
+    def test_format_crs_for_display_projjson(self):
+        """Test that PROJJSON is formatted as EPSG code."""
+        from geoparquet_io.core.inspect_utils import _format_crs_for_display
+
+        projjson = {
+            "id": {"authority": "EPSG", "code": 31287},
+        }
+        assert _format_crs_for_display(projjson) == "EPSG:31287"
+
+    def test_format_crs_for_display_none(self):
+        """Test that None CRS shows default."""
+        from geoparquet_io.core.inspect_utils import _format_crs_for_display
+
+        assert _format_crs_for_display(None) == "OGC:CRS84 (default)"
+        assert _format_crs_for_display(None, include_default=False) == "Not specified"
+
+    def test_format_crs_for_display_epsg_string(self):
+        """Test that EPSG string is passed through."""
+        from geoparquet_io.core.inspect_utils import _format_crs_for_display
+
+        assert _format_crs_for_display("EPSG:4326") == "EPSG:4326"

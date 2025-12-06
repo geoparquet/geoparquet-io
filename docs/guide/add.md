@@ -15,11 +15,30 @@ gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet --profile pro
 
 Creates a struct column with `{xmin, ymin, xmax, ymax}` for each feature. Bbox covering metadata is automatically added to comply with GeoParquet 1.1 spec.
 
+### Existing Bbox Detection
+
+The command automatically checks for existing bbox columns:
+
+- **If bbox exists with metadata**: Informs you and exits successfully (no action needed)
+- **If bbox exists without metadata**: Suggests using `gpio add bbox-metadata` instead
+- **Use `--force`**: Replace existing bbox column with a freshly computed one
+
+```bash
+# Check and skip if bbox already exists
+gpio add bbox input.parquet output.parquet
+
+# Force replace existing bbox
+gpio add bbox input.parquet output.parquet --force
+```
+
 **Options:**
 
 ```bash
 # Custom column name
 gpio add bbox input.parquet output.parquet --bbox-name bounds
+
+# Force replace existing bbox
+gpio add bbox input.parquet output.parquet --force
 
 # With compression settings
 gpio add bbox input.parquet output.parquet --compression ZSTD --compression-level 15

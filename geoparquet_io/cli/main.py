@@ -5,6 +5,7 @@ import click
 from geoparquet_io.cli.decorators import (
     compression_options,
     dry_run_option,
+    geoparquet_version_option,
     output_format_options,
     overwrite_option,
     partition_options,
@@ -346,7 +347,7 @@ def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup, ove
 @check.command(name="bbox")
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
-@click.option("--fix", is_flag=True, help="Add bbox column and metadata")
+@click.option("--fix", is_flag=True, help="Fix bbox (add for v1.x, remove for v2/parquet-geo)")
 @click.option(
     "--fix-output",
     type=click.Path(),
@@ -360,8 +361,13 @@ def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup, ove
 @overwrite_option
 @profile_option
 def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite, profile):
-    """Check bbox column and metadata."""
-    from geoparquet_io.core.check_fixes import fix_bbox_all
+    """Check bbox column and metadata (version-aware).
+
+    For GeoParquet 1.x: bbox column is recommended for spatial filtering.
+    For GeoParquet 2.0/parquet-geo-only: bbox column is NOT recommended
+    (native Parquet geo types provide row group statistics).
+    """
+    from geoparquet_io.core.check_fixes import fix_bbox_all, fix_bbox_removal
     from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
 
     result = check_metadata_and_bbox(parquet_file, verbose, return_results=True)
@@ -371,22 +377,47 @@ def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite,
             click.echo(click.style("\n✓ No fix needed - bbox is optimal!", fg="green"))
             return
 
-        needs_column = result.get("needs_bbox_column", False)
-        needs_metadata = result.get("needs_bbox_metadata", False)
+        # Check if this is a removal (v2/parquet-geo-only) or addition (v1.x)
+        if result.get("needs_bbox_removal", False):
+            # V2 or parquet-geo-only: remove bbox column
+            bbox_column_name = result.get("bbox_column_name")
 
-        def bbox_fix_func(input_path, output_path, verbose_flag, profile_name):
-            return fix_bbox_all(
-                input_path, output_path, needs_column, needs_metadata, verbose_flag, profile_name
+            def bbox_fix_func(input_path, output_path, verbose_flag, profile_name):
+                return fix_bbox_removal(
+                    input_path, output_path, bbox_column_name, verbose_flag, profile_name
+                )
+
+            output_path, backup_path = handle_fix_common(
+                parquet_file, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
             )
 
-        output_path, backup_path = handle_fix_common(
-            parquet_file, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
-        )
+            click.echo(click.style("\n✓ Bbox column removed successfully!", fg="green"))
+            click.echo(f"Optimized file: {output_path}")
+            if backup_path:
+                click.echo(f"Backup: {backup_path}")
+        else:
+            # V1.x: add bbox column/metadata (existing logic)
+            needs_column = result.get("needs_bbox_column", False)
+            needs_metadata = result.get("needs_bbox_metadata", False)
 
-        click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
-        click.echo(f"Optimized file: {output_path}")
-        if backup_path:
-            click.echo(f"Backup: {backup_path}")
+            def bbox_fix_func(input_path, output_path, verbose_flag, profile_name):
+                return fix_bbox_all(
+                    input_path,
+                    output_path,
+                    needs_column,
+                    needs_metadata,
+                    verbose_flag,
+                    profile_name,
+                )
+
+            output_path, backup_path = handle_fix_common(
+                parquet_file, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
+            )
+
+            click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
+            click.echo(f"Optimized file: {output_path}")
+            if backup_path:
+                click.echo(f"Backup: {backup_path}")
 
 
 @check.command(name="row-group")
@@ -464,6 +495,7 @@ def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup, overw
     is_flag=True,
     help="CSV/TSV: Skip rows with invalid geometries instead of failing",
 )
+@geoparquet_version_option
 @verbose_option
 @compression_options
 @profile_option
@@ -477,6 +509,7 @@ def convert(
     delimiter,
     crs,
     skip_invalid,
+    geoparquet_version,
     verbose,
     compression,
     compression_level,
@@ -503,6 +536,7 @@ def convert(
         crs=crs,
         skip_invalid=skip_invalid,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
 
@@ -655,6 +689,7 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
     help="Maximum number of rows to extract.",
 )
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @show_sql_option
 @verbose_option
@@ -673,6 +708,7 @@ def extract(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     show_sql,
     verbose,
@@ -788,6 +824,7 @@ def extract(
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
             profile=profile,
+            geoparquet_version=geoparquet_version,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -926,6 +963,7 @@ def sort():
 )
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @verbose_option
 def hilbert_order(
     input_parquet,
@@ -937,6 +975,7 @@ def hilbert_order(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     verbose,
 ):
     """
@@ -946,7 +985,7 @@ def hilbert_order(
     by their position along a Hilbert space-filling curve.
 
     Applies optimal formatting (configurable compression, optimized row groups,
-    bbox metadata) while preserving the CRS. Output is written as GeoParquet 1.1.
+    bbox metadata) while preserving the CRS.
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
@@ -977,6 +1016,7 @@ def hilbert_order(
             row_group_mb,
             row_group_size,
             profile,
+            geoparquet_version,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -1007,6 +1047,7 @@ def add():
 )
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @verbose_option
 def add_country_codes(
@@ -1020,6 +1061,7 @@ def add_country_codes(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     verbose,
 ):
@@ -1100,6 +1142,7 @@ def add_country_codes(
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
 
@@ -1107,19 +1150,27 @@ def add_country_codes(
 @click.argument("input_parquet")
 @click.argument("output_parquet")
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Replace existing bbox column instead of skipping",
+)
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @verbose_option
 def add_bbox(
     input_parquet,
     output_parquet,
     bbox_name,
+    force,
     profile,
     compression,
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     verbose,
 ):
@@ -1130,10 +1181,11 @@ def add_bbox(
     GeoParquet file (GeoParquet 1.1 spec). The bbox column improves spatial query
     performance.
 
-    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    If the file already has a bbox column with covering metadata, the command will
+    inform you and exit successfully (no action needed). Use --force to replace an
+    existing bbox column.
 
-    If your file already has a bbox column but lacks metadata, use 'add bbox-metadata'
-    instead.
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
 
     Examples:
 
@@ -1144,6 +1196,10 @@ def add_bbox(
         \b
         # Remote to remote
         gpio add bbox s3://bucket/in.parquet s3://bucket/out.parquet --profile my-aws
+
+        \b
+        # Force replace existing bbox
+        gpio add bbox input.parquet output.parquet --force
     """
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -1171,6 +1227,8 @@ def add_bbox(
         row_group_mb,
         row_group_size,
         profile,
+        force,
+        geoparquet_version,
     )
 
 
@@ -1209,6 +1267,7 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
 )
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @verbose_option
 def add_h3(
@@ -1221,6 +1280,7 @@ def add_h3(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     verbose,
 ):
@@ -1262,6 +1322,7 @@ def add_h3(
         row_group_mb,
         row_group_size,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1298,6 +1359,7 @@ def add_h3(
 )
 @click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
+@geoparquet_version_option
 @dry_run_option
 @click.option(
     "--force",
@@ -1318,6 +1380,7 @@ def add_kdtree(
     compression_level,
     row_group_size,
     row_group_size_mb,
+    geoparquet_version,
     dry_run,
     force,
     verbose,
@@ -1403,6 +1466,7 @@ def add_kdtree(
         sample_size,
         auto_target,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1432,6 +1496,7 @@ def partition():
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
 def partition_admin(
     input_parquet,
     output_folder,
@@ -1446,6 +1511,7 @@ def partition_admin(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
 ):
     """Partition by administrative boundaries via spatial join with remote datasets.
 
@@ -1505,6 +1571,7 @@ def partition_admin(
         skip_analysis=skip_analysis,
         filename_prefix=prefix,
         profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
 
@@ -1516,6 +1583,7 @@ def partition_admin(
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
 def partition_string(
     input_parquet,
     output_folder,
@@ -1530,6 +1598,7 @@ def partition_string(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
 ):
     """Partition a GeoParquet file by string column values.
 
@@ -1570,6 +1639,7 @@ def partition_string(
         skip_analysis,
         prefix,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1595,6 +1665,7 @@ def partition_string(
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
 def partition_h3(
     input_parquet,
     output_folder,
@@ -1610,6 +1681,7 @@ def partition_h3(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
 ):
     """Partition a GeoParquet file by H3 cells at specified resolution.
 
@@ -1661,6 +1733,7 @@ def partition_h3(
         skip_analysis,
         prefix,
         profile,
+        geoparquet_version,
     )
 
 
@@ -1703,6 +1776,7 @@ def partition_h3(
 @partition_options
 @verbose_option
 @profile_option
+@geoparquet_version_option
 def partition_kdtree(
     input_parquet,
     output_folder,
@@ -1721,6 +1795,7 @@ def partition_kdtree(
     prefix,
     verbose,
     profile,
+    geoparquet_version,
 ):
     """Partition a GeoParquet file by KD-tree cells.
 
@@ -1807,6 +1882,7 @@ def partition_kdtree(
         auto_target,
         prefix,
         profile,
+        geoparquet_version,
     )
 
 

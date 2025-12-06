@@ -312,11 +312,11 @@ class TestHilbertSort:
                 sample_parquet,
                 temp_output,
                 "--compression",
-                "gzip",
+                "zstd",
                 "--compression-level",
-                "9",
+                "15",
             ],
-            expected_compression="GZIP",
+            expected_compression="ZSTD",
             expect_bbox=False,
         )
 
@@ -350,11 +350,11 @@ class TestAddBbox:
                 sample_parquet,
                 temp_output,
                 "--compression",
-                "brotli",
+                "zstd",
                 "--compression-level",
-                "11",
+                "15",
             ],
-            expected_compression="BROTLI",
+            expected_compression="ZSTD",
             expect_bbox=True,
         )
 

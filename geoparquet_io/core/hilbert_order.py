@@ -34,6 +34,7 @@ def hilbert_order(
     row_group_size_mb=None,
     row_group_rows=None,
     profile=None,
+    geoparquet_version=None,
 ):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -44,11 +45,11 @@ def hilbert_order(
     - Configurable row group sizes
     - bbox covering metadata
     - Preserves CRS from original file
-    - Writes GeoParquet 1.1 format
     - Supports remote inputs/outputs (S3, GCS, Azure)
 
     Args:
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
     """
     # Check input file bbox structure
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
@@ -163,6 +164,7 @@ def hilbert_order(
             row_group_rows=row_group_rows,
             verbose=verbose,
             profile=profile,
+            geoparquet_version=geoparquet_version,
         )
 
         if verbose:
