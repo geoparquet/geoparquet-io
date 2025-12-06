@@ -1830,6 +1830,7 @@ def add_computed_column(
     dry_run_description=None,
     custom_metadata=None,
     profile=None,
+    replace_column=None,
 ):
     """
     Add a computed column to a GeoParquet file using SQL expression.
@@ -1858,6 +1859,7 @@ def add_computed_column(
         dry_run_description: Optional description for dry-run output
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         profile: AWS profile name (S3 only, optional)
+        replace_column: Name of existing column to replace (uses EXCLUDE in query)
 
     Example:
         add_computed_column(
@@ -1892,24 +1894,29 @@ def add_computed_column(
             click.echo(click.style(f"-- Description: {dry_run_description}", fg="cyan"))
         click.echo()
 
-    # Check if column already exists (skip in dry-run)
+    # Check if column already exists (skip in dry-run or when replacing)
     if not dry_run:
         with fsspec.open(input_url, "rb") as f:
             pf = pq.ParquetFile(f)
             schema = pf.schema_arrow
 
-        for field in schema:
-            if field.name == column_name:
-                raise click.ClickException(
-                    f"Column '{column_name}' already exists in the file. "
-                    f"Please choose a different name."
-                )
+        # Only check for column collision if not replacing
+        if not replace_column:
+            for field in schema:
+                if field.name == column_name:
+                    raise click.ClickException(
+                        f"Column '{column_name}' already exists in the file. "
+                        f"Please choose a different name."
+                    )
 
         # Get metadata before processing
         metadata, _ = get_parquet_metadata(input_parquet, verbose)
 
         if verbose:
-            click.echo(f"Adding column '{column_name}'...")
+            if replace_column:
+                click.echo(f"Replacing column '{replace_column}' with '{column_name}'...")
+            else:
+                click.echo(f"Adding column '{column_name}'...")
 
     # Create DuckDB connection with httpfs if needed
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
@@ -1928,7 +1935,16 @@ def add_computed_column(
         click.echo(f"Processing {total_count:,} features...")
 
     # Build the query
-    query = f"""
+    # Use EXCLUDE to drop existing column when replacing
+    if replace_column:
+        query = f"""
+        SELECT
+            * EXCLUDE ({replace_column}),
+            {sql_expression} AS {column_name}
+        FROM '{input_url}'
+    """
+    else:
+        query = f"""
         SELECT
             *,
             {sql_expression} AS {column_name}
