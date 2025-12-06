@@ -970,7 +970,7 @@ class TestComprehensiveRoundTrips:
     def test_parquet_geo_only_to_v1_1_roundtrip(self, temp_output_dir):
         """Test parquet-geo-only → v1.1 → parquet-geo-only."""
         test_data_dir = os.path.join(os.path.dirname(__file__), "data")
-        pgo_input = os.path.join(test_data_dir, "fields_geom_type_only.parquet")
+        pgo_input = os.path.join(test_data_dir, "fields_pgo_crs84_bbox_snappy.parquet")
 
         v1_1_file = os.path.join(temp_output_dir, "v1_1.parquet")
         pgo_output = os.path.join(temp_output_dir, "pgo_output.parquet")
@@ -1028,7 +1028,7 @@ class TestComprehensiveRoundTrips:
     def test_roundtrip_with_crs_preservation(self, temp_output_dir):
         """Test that CRS is preserved through round-trip conversions."""
         test_data_dir = os.path.join(os.path.dirname(__file__), "data")
-        input_file = os.path.join(test_data_dir, "fields_geom_type_only_5070.parquet")
+        input_file = os.path.join(test_data_dir, "fields_pgo_5070_snappy.parquet")
 
         v2_file = os.path.join(temp_output_dir, "v2.parquet")
         v1_file = os.path.join(temp_output_dir, "v1.parquet")

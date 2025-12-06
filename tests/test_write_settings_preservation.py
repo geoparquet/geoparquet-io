@@ -321,7 +321,7 @@ class TestCrossVersionSettingsPreservation:
         """
         # Create v2.0 file first
         test_data_dir = os.path.join(os.path.dirname(__file__), "data")
-        fields_5070 = os.path.join(test_data_dir, "fields_geom_type_only_5070.parquet")
+        fields_5070 = os.path.join(test_data_dir, "fields_pgo_5070_snappy.parquet")
         v2_file = os.path.join(temp_output_dir, "v2.parquet")
         v1_file = os.path.join(temp_output_dir, "v1.parquet")
 

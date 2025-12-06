@@ -362,7 +362,7 @@ class TestCRSConsistencyAcrossConversions:
 
         # Create v2.0 file from test data with EPSG:5070
         test_data_dir = os.path.join(os.path.dirname(__file__), "data")
-        fields_5070 = os.path.join(test_data_dir, "fields_geom_type_only_5070.parquet")
+        fields_5070 = os.path.join(test_data_dir, "fields_pgo_5070_snappy.parquet")
 
         convert_to_geoparquet(fields_5070, v2_file, skip_hilbert=True, geoparquet_version="2.0")
 

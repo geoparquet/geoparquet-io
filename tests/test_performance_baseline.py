@@ -118,8 +118,8 @@ class TestComparativePerformance:
         After consolidation: Should be similar.
         """
         test_data_dir = os.path.join(os.path.dirname(__file__), "data")
-        fields_5070 = os.path.join(test_data_dir, "fields_geom_type_only_5070.parquet")
-        fields_default = os.path.join(test_data_dir, "fields_geom_type_only.parquet")
+        fields_5070 = os.path.join(test_data_dir, "fields_pgo_5070_snappy.parquet")
+        fields_default = os.path.join(test_data_dir, "fields_pgo_crs84_bbox_snappy.parquet")
 
         output_crs = os.path.join(temp_output_dir, "with_crs.parquet")
         output_no_crs = os.path.join(temp_output_dir, "without_crs.parquet")
@@ -279,7 +279,9 @@ class TestFileSize:
         min_size = min(sizes.values())
         variance = (max_size - min_size) / min_size
 
-        assert variance < 0.15, f"File size variance {variance:.1%} exceeds 15%"
+        # Note: Variance threshold increased to 25% because with smaller test files
+        # (100 rows), metadata overhead is proportionally larger
+        assert variance < 0.25, f"File size variance {variance:.1%} exceeds 25%"
 
 
 @pytest.mark.skip(reason="File I/O monitoring requires platform-specific tools")

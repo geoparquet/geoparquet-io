@@ -139,13 +139,13 @@ def test_data_dir():
 @pytest.fixture
 def fields_5070_file(test_data_dir):
     """Return path to parquet-geo-only file with EPSG:5070 CRS."""
-    return os.path.join(test_data_dir, "fields_geom_type_only_5070.parquet")
+    return os.path.join(test_data_dir, "fields_pgo_5070_snappy.parquet")
 
 
 @pytest.fixture
 def fields_geom_type_only_file(test_data_dir):
     """Return path to parquet-geo-only file (default CRS)."""
-    return os.path.join(test_data_dir, "fields_geom_type_only.parquet")
+    return os.path.join(test_data_dir, "fields_pgo_crs84_bbox_snappy.parquet")
 
 
 @pytest.fixture
@@ -555,11 +555,11 @@ class TestAdditionalCRSEdgeCases:
         import os
 
         test_data_dir = os.path.join(os.path.dirname(__file__), "data")
-        input_file = os.path.join(test_data_dir, "fields_v2_5070.parquet")
+        input_file = os.path.join(test_data_dir, "fields_gpq2_5070_brotli.parquet")
         output_file = os.path.join(temp_output_dir, "output.parquet")
 
         if not os.path.exists(input_file):
-            pytest.skip("fields_v2_5070.parquet not available")
+            pytest.skip("fields_gpq2_5070_brotli.parquet not available")
 
         convert_to_geoparquet(
             input_file,

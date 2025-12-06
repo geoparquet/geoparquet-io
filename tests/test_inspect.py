@@ -429,13 +429,13 @@ def test_inspect_markdown_json_exclusive(runner, test_file):
 @pytest.fixture
 def parquet_geo_only_file():
     """Provide path to test file with Parquet geo type but no GeoParquet metadata."""
-    return os.path.join(os.path.dirname(__file__), "data", "fields_geom_type_only.parquet")
+    return os.path.join(os.path.dirname(__file__), "data", "fields_pgo_crs84_bbox_snappy.parquet")
 
 
 @pytest.fixture
 def parquet_v2_file():
     """Provide path to test file with both Parquet geo type and GeoParquet metadata."""
-    return os.path.join(os.path.dirname(__file__), "data", "fields_v2.parquet")
+    return os.path.join(os.path.dirname(__file__), "data", "fields_gpq2_crs84_zstd.parquet")
 
 
 def test_inspect_parquet_geo_type_only(runner, parquet_geo_only_file):

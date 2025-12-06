@@ -139,20 +139,20 @@ def get_geo_metadata(parquet_file):
 # Test data file fixtures
 @pytest.fixture
 def fields_v2_file(test_data_dir):
-    """Return path to the fields_v2.parquet test file."""
-    return str(test_data_dir / "fields_v2.parquet")
+    """Return path to the GeoParquet 2.0 test file (CRS84, ZSTD)."""
+    return str(test_data_dir / "fields_gpq2_crs84_zstd.parquet")
 
 
 @pytest.fixture
 def fields_geom_type_only_file(test_data_dir):
-    """Return path to the fields_geom_type_only.parquet test file."""
-    return str(test_data_dir / "fields_geom_type_only.parquet")
+    """Return path to the Parquet Geo Only test file (CRS84, with bbox, SNAPPY)."""
+    return str(test_data_dir / "fields_pgo_crs84_bbox_snappy.parquet")
 
 
 @pytest.fixture
 def fields_geom_type_only_5070_file(test_data_dir):
-    """Return path to the fields_geom_type_only_5070.parquet test file."""
-    return str(test_data_dir / "fields_geom_type_only_5070.parquet")
+    """Return path to the Parquet Geo Only test file (EPSG:5070, SNAPPY)."""
+    return str(test_data_dir / "fields_pgo_5070_snappy.parquet")
 
 
 @pytest.fixture
@@ -197,5 +197,5 @@ def csv_points_wkt(test_data_dir):
 
 @pytest.fixture
 def fields_5070_file(test_data_dir):
-    """Return path to the fields_geom_type_only_5070.parquet test file."""
-    return str(test_data_dir / "fields_geom_type_only_5070.parquet")
+    """Return path to the Parquet Geo Only test file (EPSG:5070, SNAPPY)."""
+    return str(test_data_dir / "fields_pgo_5070_snappy.parquet")
