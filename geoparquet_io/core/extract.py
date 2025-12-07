@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 
 import click
+import fsspec
+import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
     check_bbox_structure,
@@ -23,6 +25,13 @@ from geoparquet_io.core.common import (
     safe_file_url,
     write_parquet_with_metadata,
 )
+
+def get_parquet_row_count(parquet_file: str) -> int:
+    """Get row count from parquet file metadata (O(1) - reads footer only)."""
+    with fsspec.open(parquet_file, "rb") as f:
+        pf = pq.ParquetFile(f)
+        return pf.metadata.num_rows
+
 
 # SQL keywords that could be dangerous in a WHERE clause
 # These could modify data or database structure
@@ -689,39 +698,17 @@ def _execute_extraction(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
     try:
-        # Count matching rows (unless skipped for performance)
-        matching_count = None
-        extract_count = None
-
+        # Get total row count from input file metadata (fast - reads footer only)
+        # Only do this if not skip_count
+        input_total_rows = None
         if not skip_count:
-            # Build count query with filters
-            conditions = []
-            if spatial_filter:
-                conditions.append(f"({spatial_filter})")
-            if where:
-                conditions.append(f"({where})")
+            try:
+                path_for_count = metadata_path if metadata_path else input_parquet
+                input_total_rows = get_parquet_row_count(path_for_count)
+            except Exception:
+                pass  # Total count is optional
 
-            count_query = f"SELECT COUNT(*) FROM read_parquet('{safe_url}')"
-            if conditions:
-                count_query += " WHERE " + " AND ".join(conditions)
-
-            if show_sql:
-                click.echo(click.style("\n-- Count query:", fg="cyan"))
-                click.echo(f"{count_query};")
-
-            matching_count = con.execute(count_query).fetchone()[0]
-            # Apply limit to determine actual extraction count
-            extract_count = min(matching_count, limit) if limit else matching_count
-
-            if limit and matching_count > limit:
-                click.echo(f"Extracting {extract_count:,} of {matching_count:,} matching rows...")
-            else:
-                click.echo(f"Extracting {extract_count:,} rows...")
-
-            if extract_count == 0:
-                click.echo(click.style("Warning: No rows match the specified filters.", fg="yellow"))
-        else:
-            click.echo("Extracting rows (count skipped)...")
+        click.echo("Extracting rows...")
 
         # Get metadata from input for preservation
         # Use metadata_path if available (handles glob patterns), otherwise fall back to input_parquet
@@ -748,10 +735,20 @@ def _execute_extraction(
             geoparquet_version=geoparquet_version,
         )
 
-        if extract_count is not None:
-            click.echo(click.style(f"Extracted {extract_count:,} rows to {output_parquet}", fg="green"))
+        # Get extracted row count from output file metadata (fast - reads footer only)
+        extracted_count = get_parquet_row_count(output_parquet)
+
+        if input_total_rows is not None:
+            click.echo(
+                click.style(
+                    f"Extracted {extracted_count:,} rows (out of {input_total_rows:,} total) to {output_parquet}",
+                    fg="green",
+                )
+            )
         else:
-            click.echo(click.style(f"Extracted rows to {output_parquet}", fg="green"))
+            click.echo(
+                click.style(f"Extracted {extracted_count:,} rows to {output_parquet}", fg="green")
+            )
 
     finally:
         con.close()
