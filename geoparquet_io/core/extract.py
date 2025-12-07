@@ -19,6 +19,7 @@ from geoparquet_io.core.common import (
     get_parquet_metadata,
     needs_httpfs,
     parse_geo_metadata,
+    resolve_single_file_for_metadata,
     safe_file_url,
     write_parquet_with_metadata,
 )
@@ -661,6 +662,7 @@ def _execute_extraction(
     spatial_filter: str | None,
     where: str | None,
     limit: int | None,
+    skip_count: bool,
     selected_columns: list[str],
     verbose: bool,
     show_sql: bool,
@@ -670,6 +672,7 @@ def _execute_extraction(
     row_group_rows: int | None,
     profile: str | None,
     geoparquet_version: str | None = None,
+    metadata_path: str | None = None,
 ) -> None:
     """Execute the extraction query and write output."""
     if verbose:
@@ -686,37 +689,46 @@ def _execute_extraction(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
 
     try:
-        # Build count query with filters
-        conditions = []
-        if spatial_filter:
-            conditions.append(f"({spatial_filter})")
-        if where:
-            conditions.append(f"({where})")
+        # Count matching rows (unless skipped for performance)
+        matching_count = None
+        extract_count = None
 
-        count_query = f"SELECT COUNT(*) FROM read_parquet('{safe_url}')"
-        if conditions:
-            count_query += " WHERE " + " AND ".join(conditions)
+        if not skip_count:
+            # Build count query with filters
+            conditions = []
+            if spatial_filter:
+                conditions.append(f"({spatial_filter})")
+            if where:
+                conditions.append(f"({where})")
 
-        if show_sql:
-            click.echo(click.style("\n-- Count query:", fg="cyan"))
-            click.echo(f"{count_query};")
+            count_query = f"SELECT COUNT(*) FROM read_parquet('{safe_url}')"
+            if conditions:
+                count_query += " WHERE " + " AND ".join(conditions)
 
-        matching_count = con.execute(count_query).fetchone()[0]
-        # Apply limit to determine actual extraction count
-        extract_count = min(matching_count, limit) if limit else matching_count
+            if show_sql:
+                click.echo(click.style("\n-- Count query:", fg="cyan"))
+                click.echo(f"{count_query};")
 
-        if limit and matching_count > limit:
-            click.echo(f"Extracting {extract_count:,} of {matching_count:,} matching rows...")
+            matching_count = con.execute(count_query).fetchone()[0]
+            # Apply limit to determine actual extraction count
+            extract_count = min(matching_count, limit) if limit else matching_count
+
+            if limit and matching_count > limit:
+                click.echo(f"Extracting {extract_count:,} of {matching_count:,} matching rows...")
+            else:
+                click.echo(f"Extracting {extract_count:,} rows...")
+
+            if extract_count == 0:
+                click.echo(click.style("Warning: No rows match the specified filters.", fg="yellow"))
         else:
-            click.echo(f"Extracting {extract_count:,} rows...")
-
-        if extract_count == 0:
-            click.echo(click.style("Warning: No rows match the specified filters.", fg="yellow"))
+            click.echo("Extracting rows (count skipped)...")
 
         # Get metadata from input for preservation
+        # Use metadata_path if available (handles glob patterns), otherwise fall back to input_parquet
         metadata = None
         try:
-            metadata, _ = get_parquet_metadata(input_parquet, verbose=False)
+            path_for_metadata = metadata_path if metadata_path else input_parquet
+            metadata, _ = get_parquet_metadata(path_for_metadata, verbose=False)
         except Exception:
             pass  # Metadata preservation is optional
 
@@ -736,7 +748,10 @@ def _execute_extraction(
             geoparquet_version=geoparquet_version,
         )
 
-        click.echo(click.style(f"Extracted {extract_count:,} rows to {output_parquet}", fg="green"))
+        if extract_count is not None:
+            click.echo(click.style(f"Extracted {extract_count:,} rows to {output_parquet}", fg="green"))
+        else:
+            click.echo(click.style(f"Extracted rows to {output_parquet}", fg="green"))
 
     finally:
         con.close()
@@ -751,6 +766,7 @@ def extract(
     geometry: str | None = None,
     where: str | None = None,
     limit: int | None = None,
+    skip_count: bool = False,
     use_first_geometry: bool = False,
     dry_run: bool = False,
     show_sql: bool = False,
@@ -772,11 +788,15 @@ def extract(
     include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
     exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
 
+    # Resolve glob pattern to single file for metadata operations
+    # For glob patterns like s3://bucket/path/*.parquet, this expands to first matching file
+    # DuckDB will use the original glob pattern for querying
+    metadata_path = resolve_single_file_for_metadata(input_parquet, verbose)
+
     # Get schema info early so we can validate column overlap
-    safe_url = safe_file_url(input_parquet, verbose)
-    all_columns = get_schema_columns(input_parquet)
-    geometry_col = find_primary_geometry_column(input_parquet, verbose)
-    bbox_info = check_bbox_structure(input_parquet, verbose=False)
+    all_columns = get_schema_columns(metadata_path)
+    geometry_col = find_primary_geometry_column(metadata_path, verbose)
+    bbox_info = check_bbox_structure(metadata_path, verbose=False)
     bbox_col = bbox_info.get("bbox_column_name")
 
     # Validate columns in both lists - only geometry and bbox allowed in both
@@ -812,7 +832,7 @@ def extract(
 
     # Warn if bbox looks like lat/long but data is projected
     if bbox_tuple and not dry_run:
-        _warn_if_crs_mismatch(bbox_tuple, input_parquet, geometry_col)
+        _warn_if_crs_mismatch(bbox_tuple, metadata_path, geometry_col)
 
     # Parse geometry if provided
     geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
@@ -820,7 +840,8 @@ def extract(
     # Build spatial filter
     spatial_filter = build_spatial_filter(bbox_tuple, geometry_wkt, bbox_info, geometry_col)
 
-    # Build the query
+    # Build the query - use original input_parquet to preserve glob pattern for DuckDB
+    safe_url = safe_file_url(input_parquet, verbose)
     query = build_extract_query(safe_url, selected_columns, spatial_filter, where, limit)
 
     if dry_run:
@@ -847,6 +868,7 @@ def extract(
             spatial_filter,
             where,
             limit,
+            skip_count,
             selected_columns,
             verbose,
             show_sql,
@@ -856,4 +878,5 @@ def extract(
             row_group_rows,
             profile,
             geoparquet_version,
+            metadata_path,
         )

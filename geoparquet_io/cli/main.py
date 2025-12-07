@@ -688,6 +688,11 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
     type=int,
     help="Maximum number of rows to extract.",
 )
+@click.option(
+    "--skip-count",
+    is_flag=True,
+    help="Skip counting total matching rows before extraction (faster for large datasets).",
+)
 @output_format_options
 @geoparquet_version_option
 @dry_run_option
@@ -704,6 +709,7 @@ def extract(
     use_first_geometry,
     where,
     limit,
+    skip_count,
     compression,
     compression_level,
     row_group_size,
@@ -815,6 +821,7 @@ def extract(
             geometry=geometry,
             where=where,
             limit=limit,
+            skip_count=skip_count,
             use_first_geometry=use_first_geometry,
             dry_run=dry_run,
             show_sql=show_sql,
