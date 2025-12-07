@@ -163,8 +163,8 @@ class TestPartitionCommands:
         assert len(output_files) > 0
         # All files should be .parquet
         assert all(f.endswith(".parquet") for f in output_files)
-        # H3 cell prefixes should be 9 characters (resolution 9)
-        assert all(len(f.replace(".parquet", "")) == 9 for f in output_files)
+        # H3 cell IDs are always 15 characters regardless of resolution
+        assert all(len(f.replace(".parquet", "")) == 15 for f in output_files)
 
     def test_partition_h3_custom_resolution(self, buildings_test_file, temp_output_dir):
         """Test partition h3 with custom resolution."""
@@ -177,8 +177,8 @@ class TestPartitionCommands:
         # Should have created partition files
         output_files = os.listdir(temp_output_dir)
         assert len(output_files) > 0
-        # H3 cell prefixes should be 7 characters (resolution 7)
-        assert all(len(f.replace(".parquet", "")) == 7 for f in output_files)
+        # H3 cell IDs are always 15 characters regardless of resolution
+        assert all(len(f.replace(".parquet", "")) == 15 for f in output_files)
 
     def test_partition_h3_with_hive(self, buildings_test_file, temp_output_dir):
         """Test partition h3 command with Hive-style partitioning."""
@@ -357,8 +357,9 @@ class TestPartitionCommands:
 
         # Check that H3 column IS in the output files (default for Hive)
         sample_file = os.path.join(sample_dir, parquet_files[0])
-        table = pq.read_table(sample_file)
-        column_names = table.schema.names
+        # Use ParquetFile to read single file without auto-detecting Hive partitioning
+        pf = pq.ParquetFile(sample_file)
+        column_names = pf.schema_arrow.names
         assert "h3_cell" in column_names, (
             "H3 column should be kept by default for Hive partitioning"
         )
@@ -414,7 +415,8 @@ class TestPartitionCommands:
         for f in output_files:
             # Remove prefix and .parquet extension to get H3 cell
             h3_cell = f.replace("buildings_", "").replace(".parquet", "")
-            assert len(h3_cell) == 9, f"Expected 9-char H3 cell, got {h3_cell}"
+            # H3 cell IDs are always 15 characters regardless of resolution
+            assert len(h3_cell) == 15, f"Expected 15-char H3 cell, got {h3_cell}"
 
     def test_partition_string_with_prefix_and_hive(self, places_test_file, temp_output_dir):
         """Test partition string with prefix and Hive-style partitioning."""
