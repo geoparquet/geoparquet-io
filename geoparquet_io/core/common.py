@@ -13,9 +13,9 @@ import duckdb
 import fsspec
 import pyarrow.parquet as pq
 
-# Per-bucket cache for S3 access mode (anonymous vs authenticated)
-# This avoids repeated fallback attempts for the same bucket
-_s3_bucket_access_cache: dict[str, str] = {}  # bucket -> "anonymous" | "authenticated"
+# Per-bucket cache for S3 buckets that require authentication
+# Buckets not in this set are accessed without credentials (works for public buckets)
+_s3_buckets_needing_auth: set[str] = set()
 
 
 def _extract_bucket_name(path: str) -> str:
@@ -27,64 +27,16 @@ def _extract_bucket_name(path: str) -> str:
 
 def _clear_s3_cache():
     """Clear S3 access cache (useful for testing)."""
-    global _s3_bucket_access_cache
-    _s3_bucket_access_cache = {}
+    global _s3_buckets_needing_auth
+    _s3_buckets_needing_auth = set()
 
 
-def _is_s3_auth_rejection(exception: Exception) -> bool:
-    """Detect if exception indicates S3 rejected authenticated request (public bucket)."""
+def _needs_s3_auth(exception: Exception) -> bool:
+    """Detect if exception indicates S3 bucket requires authentication."""
     error_str = str(exception).lower()
-    # These indicate the bucket rejects signed requests (wants anonymous)
-    rejection_indicators = ["403", "forbidden", "access denied", "invalidaccesskeyid"]
-    return any(ind in error_str for ind in rejection_indicators)
-
-
-def open_with_fsspec(path: str, mode: str = "rb"):
-    """
-    Open a file with fsspec, auto-detecting anonymous access for S3.
-
-    For S3 paths, tries anonymous access first (for public buckets like Overture Maps),
-    then falls back to authenticated access. Results are cached per bucket.
-
-    Args:
-        path: File path or URL
-        mode: Open mode (default: "rb")
-
-    Returns:
-        fsspec file handle context manager
-    """
-    # Non-S3 paths: use fsspec directly
-    if not path.startswith(("s3://", "s3a://")):
-        return fsspec.open(path, mode)
-
-    bucket = _extract_bucket_name(path)
-    cached_mode = _s3_bucket_access_cache.get(bucket)
-
-    # Use cached mode if available
-    if cached_mode == "anonymous":
-        return fsspec.open(path, mode, anon=True)
-    elif cached_mode == "authenticated":
-        return fsspec.open(path, mode)
-
-    # Auto-detect: try anonymous first (handles public buckets like Overture)
-    try:
-        fs = fsspec.open(path, mode, anon=True)
-        # Test that we can actually access the file
-        with fs as f:
-            f.read(1)  # Read 1 byte to verify access
-        # Success - cache and return new handle
-        _s3_bucket_access_cache[bucket] = "anonymous"
-        return fsspec.open(path, mode, anon=True)
-    except Exception as e:
-        if not _is_s3_auth_rejection(e):
-            # Not an auth issue - could be file not found, etc.
-            # Still try authenticated before giving up
-            pass
-        # Fall through to authenticated
-
-    # Try authenticated
-    _s3_bucket_access_cache[bucket] = "authenticated"
-    return fsspec.open(path, mode)
+    # 403 without credentials means we need to authenticate
+    auth_indicators = ["403", "forbidden", "access denied", "unauthorized"]
+    return any(ind in error_str for ind in auth_indicators)
 
 
 # GeoParquet version configuration
@@ -333,15 +285,11 @@ def _find_first_matching_remote_file(path: str, verbose: bool = False) -> str:
     base_url = f"{protocol}://{base_path}"
 
     # Get filesystem using base path WITHOUT glob - this avoids the slow glob expansion
-    # Use cache-based S3 access mode detection
+    # For S3, use anonymous access unless we know the bucket requires auth
     storage_options = {}
     if protocol in ("s3", "s3a"):
         bucket = _extract_bucket_name(path)
-        cached_mode = _s3_bucket_access_cache.get(bucket)
-        if cached_mode == "anonymous":
-            storage_options = {"anon": True}
-        elif cached_mode is None:
-            # Not cached yet - try anonymous first (will be cached by other functions)
+        if bucket not in _s3_buckets_needing_auth:
             storage_options = {"anon": True}
     fs, _, _ = fsspec.get_fs_token_paths(base_url, storage_options=storage_options)
 
@@ -711,27 +659,22 @@ def validate_output_path(output_path, verbose=False):
         raise click.ClickException(f"No write permission for: {output_dir}")
 
 
-def get_duckdb_connection(load_spatial=True, load_httpfs=None, s3_anonymous=False):
+def get_duckdb_connection(load_spatial=True, load_httpfs=None, use_s3_auth=False):
     """
     Create a DuckDB connection with necessary extensions loaded.
 
-    When load_httpfs=True, also loads the aws extension and configures
-    automatic credential discovery for S3 access. Credentials are discovered
-    via the AWS SDK in this order:
-    1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-    2. AWS profile (AWS_PROFILE env var or ~/.aws/credentials)
-    3. IAM role (EC2/ECS/EKS instance metadata)
+    By default, S3 access uses no credentials, which works for public buckets.
+    DuckDB automatically handles region detection for public S3 buckets.
 
-    When s3_anonymous=True, uses anonymous (unsigned) S3 access instead.
-    This is required for some public S3 buckets (like Overture Maps) that
-    don't accept authenticated requests.
+    When use_s3_auth=True, loads the aws extension and configures credential
+    discovery for private S3 buckets.
 
     Args:
         load_spatial: Whether to load spatial extension (default: True)
         load_httpfs: Whether to load httpfs extension for S3/Azure/GCS.
                     If None (default), auto-detects based on usage.
-        s3_anonymous: Whether to use anonymous S3 access (default: False).
-                     When True, no credentials are sent with S3 requests.
+        use_s3_auth: Whether to configure AWS credential chain for S3 (default: False).
+                    Only needed for private buckets.
 
     Returns:
         duckdb.DuckDBPyConnection: Configured connection with extensions loaded
@@ -748,29 +691,11 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None, s3_anonymous=Fals
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
 
-        if s3_anonymous:
-            # Use anonymous S3 access (no credentials)
-            # Required for public buckets like Overture Maps that reject authenticated requests
-            # Note: We don't set a specific region - DuckDB will auto-detect from bucket
-            con.execute("SET s3_url_style = 'vhost';")
-            con.execute("""
-                CREATE OR REPLACE SECRET (
-                    TYPE s3,
-                    PROVIDER config,
-                    KEY_ID '',
-                    SECRET ''
-                );
-            """)
-        else:
-            # Load aws extension for S3 authentication
-            # This works in conjunction with httpfs to provide authenticated S3 access
+        # Only configure AWS credentials if explicitly requested (for private buckets)
+        # Public buckets work without any secret - DuckDB handles them automatically
+        if use_s3_auth:
             con.execute("INSTALL aws;")
             con.execute("LOAD aws;")
-
-            # Configure automatic credential discovery using AWS SDK
-            # This respects AWS_PROFILE, ~/.aws/credentials, env vars, and IAM roles
-            # Use VALIDATION 'none' to allow creating secret without immediate credentials
-            # (credentials will be discovered at query time)
             con.execute("""
                 CREATE OR REPLACE SECRET (
                     TYPE s3,
@@ -787,10 +712,11 @@ def get_duckdb_connection_for_s3(
     load_spatial: bool = True,
 ) -> duckdb.DuckDBPyConnection:
     """
-    Get DuckDB connection with auto-detected S3 access mode for the given path.
+    Get DuckDB connection configured for S3 access.
 
-    For S3 paths, tries anonymous access first (for public buckets like Overture Maps),
-    then falls back to authenticated access. Results are cached per bucket.
+    For S3 paths, uses no credentials by default (works for public buckets).
+    If a bucket is known to require auth (from previous attempts), uses
+    credential chain. Results are cached per bucket.
 
     Args:
         path: S3 path to access (used to determine bucket and access mode)
@@ -804,30 +730,25 @@ def get_duckdb_connection_for_s3(
         return get_duckdb_connection(load_spatial=load_spatial, load_httpfs=needs_httpfs(path))
 
     bucket = _extract_bucket_name(path)
-    cached_mode = _s3_bucket_access_cache.get(bucket)
 
-    # Use cached mode if available
-    if cached_mode == "anonymous":
-        return get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, s3_anonymous=True)
-    elif cached_mode == "authenticated":
-        return get_duckdb_connection(
-            load_spatial=load_spatial, load_httpfs=True, s3_anonymous=False
-        )
+    # If we know this bucket needs auth, use credential chain
+    if bucket in _s3_buckets_needing_auth:
+        return get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, use_s3_auth=True)
 
-    # Auto-detect: try anonymous first
-    con = get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, s3_anonymous=True)
+    # Try without credentials first (works for public buckets)
+    con = get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, use_s3_auth=False)
     try:
         # Lightweight test query - use glob-safe path (first file if glob pattern)
         test_path = resolve_single_file_for_metadata(path, verbose=False)
         con.execute(f"SELECT 1 FROM read_parquet('{test_path}') LIMIT 1").fetchone()
-        _s3_bucket_access_cache[bucket] = "anonymous"
         return con
     except Exception as e:
         con.close()
-        if _is_s3_auth_rejection(e):
-            _s3_bucket_access_cache[bucket] = "authenticated"
+        if _needs_s3_auth(e):
+            # This bucket requires authentication - cache and retry
+            _s3_buckets_needing_auth.add(bucket)
             return get_duckdb_connection(
-                load_spatial=load_spatial, load_httpfs=True, s3_anonymous=False
+                load_spatial=load_spatial, load_httpfs=True, use_s3_auth=True
             )
         raise
 

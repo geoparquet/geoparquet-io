@@ -26,7 +26,9 @@ def _get_connection_for_file(parquet_file: str, existing_con=None):
     if is_s3_url(parquet_file):
         return get_duckdb_connection_for_s3(parquet_file, load_spatial=True), True
     else:
-        return get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file)), True
+        return get_duckdb_connection(
+            load_spatial=True, load_httpfs=needs_httpfs(parquet_file)
+        ), True
 
 
 def _safe_url(parquet_file: str) -> str:
