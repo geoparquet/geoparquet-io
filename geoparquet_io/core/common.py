@@ -10,7 +10,6 @@ from pathlib import Path
 
 import click
 import duckdb
-import fsspec
 import pyarrow.parquet as pq
 
 # Per-bucket cache for S3 buckets that require authentication
@@ -225,160 +224,6 @@ def has_glob_pattern(path: str) -> bool:
         bool: True if path contains glob characters (*, ?, [), False otherwise
     """
     return any(c in path for c in ("*", "?", "["))
-
-
-def expand_remote_glob(path: str, verbose: bool = False) -> list[str]:
-    """
-    Expand glob pattern for remote URLs using fsspec.
-
-    Args:
-        path: Remote URL with glob pattern (e.g., s3://bucket/path/*.parquet)
-        verbose: Whether to print verbose output
-
-    Returns:
-        list[str]: Sorted list of matching file paths with full URLs
-
-    Raises:
-        click.ClickException: If no files match the pattern
-    """
-    fs, _, _ = fsspec.get_fs_token_paths(path)
-    matches = fs.glob(path)
-    if not matches:
-        raise click.ClickException(f"No files found matching pattern: {path}")
-    # Reconstruct full URLs with protocol
-    protocol = path.split("://")[0]
-    return [f"{protocol}://{match}" for match in sorted(matches)]
-
-
-def _find_first_matching_remote_file(path: str, verbose: bool = False) -> str:
-    """
-    Find first matching file for a remote glob pattern without listing all matches.
-
-    For patterns like s3://bucket/partition=*/file.parquet, this stops
-    at the first match instead of listing all partitions.
-
-    IMPORTANT: Avoids calling fsspec.get_fs_token_paths() with glob patterns
-    as that triggers full glob expansion internally. Instead, extracts the
-    base path and uses fs.ls() to walk directories.
-    """
-    import fnmatch
-
-    protocol = path.split("://")[0]
-    path_without_protocol = path.split("://", 1)[1]
-    parts = path_without_protocol.split("/")
-
-    # Find the first part with a wildcard
-    base_parts = []
-    wildcard_idx = -1
-    for i, part in enumerate(parts):
-        if any(c in part for c in ("*", "?", "[")):
-            wildcard_idx = i
-            break
-        base_parts.append(part)
-
-    if wildcard_idx == -1:
-        # No wildcard found, return as-is
-        return path
-
-    # Build base path (without glob) to get filesystem
-    base_path = "/".join(base_parts)
-    base_url = f"{protocol}://{base_path}"
-
-    # Get filesystem using base path WITHOUT glob - this avoids the slow glob expansion
-    # For S3, use anonymous access unless we know the bucket requires auth
-    storage_options = {}
-    if protocol in ("s3", "s3a"):
-        bucket = _extract_bucket_name(path)
-        if bucket not in _s3_buckets_needing_auth:
-            storage_options = {"anon": True}
-    fs, _, _ = fsspec.get_fs_token_paths(base_url, storage_options=storage_options)
-
-    # Now walk directories to find first match
-    def find_first_match(current_path: str, pattern_parts: list, part_idx: int) -> str | None:
-        """Recursively find first matching file."""
-        if part_idx >= len(pattern_parts):
-            return None
-
-        pattern_part = pattern_parts[part_idx]
-        is_last_part = part_idx == len(pattern_parts) - 1
-
-        try:
-            items = fs.ls(current_path, detail=False)
-        except Exception:
-            return None
-
-        for item in sorted(items):
-            # Get just the filename/dirname part
-            item_name = item.split("/")[-1]
-
-            if fnmatch.fnmatch(item_name, pattern_part):
-                if is_last_part:
-                    # Found a match
-                    return f"{protocol}://{item}"
-                else:
-                    # Continue searching in subdirectory
-                    result = find_first_match(item, pattern_parts, part_idx + 1)
-                    if result:
-                        return result
-
-        return None
-
-    # Start searching from base path with remaining pattern parts
-    result = find_first_match(base_path, parts, wildcard_idx)
-
-    if result:
-        if verbose:
-            click.echo(f"Resolved glob pattern to first match for metadata: {result}")
-        return result
-
-    raise click.ClickException(f"No files found matching pattern: {path}")
-
-
-def resolve_single_file_for_metadata(path: str, verbose: bool = False) -> str:
-    """
-    Resolve a path to a single file for metadata reading.
-
-    For glob patterns (local or remote), expands the pattern and returns
-    the first matching file. This allows metadata operations (which use
-    fsspec.open() or direct file access) to work with glob patterns, while
-    DuckDB queries can still use the original glob pattern.
-
-    For non-glob patterns, returns the path unchanged.
-
-    Optimized for large partitioned datasets by finding the first match
-    without listing all files.
-
-    Args:
-        path: File path or URL, potentially with glob pattern
-        verbose: Whether to print verbose output
-
-    Returns:
-        str: Resolved file path (first match if glob, otherwise unchanged)
-
-    Examples:
-        >>> resolve_single_file_for_metadata("s3://bucket/path/*.parquet")
-        "s3://bucket/path/file1.parquet"
-        >>> resolve_single_file_for_metadata("/local/path/*.parquet")
-        "/local/path/file1.parquet"
-        >>> resolve_single_file_for_metadata("/local/file.parquet")
-        "/local/file.parquet"
-    """
-    if not has_glob_pattern(path):
-        return path
-
-    # Handle remote URLs - find first match only (optimization for large datasets)
-    if is_remote_url(path):
-        return _find_first_matching_remote_file(path, verbose)
-
-    # Handle local globs using standard library glob
-    import glob as glob_module
-
-    matches = sorted(glob_module.glob(path))
-    if not matches:
-        raise click.ClickException(f"No files found matching pattern: {path}")
-    if verbose:
-        click.echo(f"Resolved glob pattern to first match for metadata: {matches[0]}")
-    return matches[0]
 
 
 def upload_if_remote(local_path, remote_path, profile=None, is_directory=False, verbose=False):
@@ -738,9 +583,8 @@ def get_duckdb_connection_for_s3(
     # Try without credentials first (works for public buckets)
     con = get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, use_s3_auth=False)
     try:
-        # Lightweight test query - use glob-safe path (first file if glob pattern)
-        test_path = resolve_single_file_for_metadata(path, verbose=False)
-        con.execute(f"SELECT 1 FROM read_parquet('{test_path}') LIMIT 1").fetchone()
+        # Lightweight test query - DuckDB handles glob patterns natively
+        con.execute(f"SELECT 1 FROM read_parquet('{path}') LIMIT 1").fetchone()
         return con
     except Exception as e:
         con.close()

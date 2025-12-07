@@ -19,7 +19,6 @@ from geoparquet_io.core.common import (
     get_duckdb_connection_for_s3,
     get_parquet_metadata,
     needs_httpfs,
-    resolve_single_file_for_metadata,
     safe_file_url,
     write_parquet_with_metadata,
 )
@@ -690,7 +689,6 @@ def _execute_extraction(
     row_group_rows: int | None,
     profile: str | None,
     geoparquet_version: str | None = None,
-    metadata_path: str | None = None,
 ) -> None:
     """Execute the extraction query and write output."""
     if verbose:
@@ -712,23 +710,21 @@ def _execute_extraction(
 
     try:
         # Get total row count from input file metadata (fast - reads footer only)
-        # Only do this if not skip_count
+        # DuckDB handles glob patterns natively
         input_total_rows = None
         if not skip_count:
             try:
-                path_for_count = metadata_path if metadata_path else input_parquet
-                input_total_rows = get_parquet_row_count(path_for_count)
+                input_total_rows = get_parquet_row_count(input_parquet)
             except Exception:
                 pass  # Total count is optional
 
         click.echo("Extracting rows...")
 
         # Get metadata from input for preservation
-        # Use metadata_path if available (handles glob patterns), otherwise fall back to input_parquet
+        # DuckDB handles glob patterns natively
         metadata = None
         try:
-            path_for_metadata = metadata_path if metadata_path else input_parquet
-            metadata, _ = get_parquet_metadata(path_for_metadata, verbose=False)
+            metadata, _ = get_parquet_metadata(input_parquet, verbose=False)
         except Exception:
             pass  # Metadata preservation is optional
 
@@ -845,15 +841,11 @@ def _extract_impl(
     include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
     exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
 
-    # Resolve glob pattern to single file for metadata operations
-    # For glob patterns like s3://bucket/path/*.parquet, this expands to first matching file
-    # DuckDB will use the original glob pattern for querying
-    metadata_path = resolve_single_file_for_metadata(input_parquet, verbose)
-
     # Get schema info early so we can validate column overlap
-    all_columns = get_schema_columns(metadata_path)
-    geometry_col = find_primary_geometry_column(metadata_path, verbose)
-    bbox_info = check_bbox_structure(metadata_path, verbose=False)
+    # DuckDB handles glob patterns natively for all metadata operations
+    all_columns = get_schema_columns(input_parquet)
+    geometry_col = find_primary_geometry_column(input_parquet, verbose)
+    bbox_info = check_bbox_structure(input_parquet, verbose=False)
     bbox_col = bbox_info.get("bbox_column_name")
 
     # Validate columns in both lists - only geometry and bbox allowed in both
@@ -889,7 +881,7 @@ def _extract_impl(
 
     # Warn if bbox looks like lat/long but data is projected
     if bbox_tuple and not dry_run:
-        _warn_if_crs_mismatch(bbox_tuple, metadata_path, geometry_col)
+        _warn_if_crs_mismatch(bbox_tuple, input_parquet, geometry_col)
 
     # Parse geometry if provided
     geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
@@ -935,5 +927,4 @@ def _extract_impl(
             row_group_rows,
             profile,
             geoparquet_version,
-            metadata_path,
         )
