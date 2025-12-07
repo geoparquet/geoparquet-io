@@ -13,6 +13,80 @@ import duckdb
 import fsspec
 import pyarrow.parquet as pq
 
+# Per-bucket cache for S3 access mode (anonymous vs authenticated)
+# This avoids repeated fallback attempts for the same bucket
+_s3_bucket_access_cache: dict[str, str] = {}  # bucket -> "anonymous" | "authenticated"
+
+
+def _extract_bucket_name(path: str) -> str:
+    """Extract bucket name from S3 URL."""
+    # s3://bucket-name/path -> bucket-name
+    path_without_protocol = path.split("://", 1)[1]
+    return path_without_protocol.split("/")[0]
+
+
+def _clear_s3_cache():
+    """Clear S3 access cache (useful for testing)."""
+    global _s3_bucket_access_cache
+    _s3_bucket_access_cache = {}
+
+
+def _is_s3_auth_rejection(exception: Exception) -> bool:
+    """Detect if exception indicates S3 rejected authenticated request (public bucket)."""
+    error_str = str(exception).lower()
+    # These indicate the bucket rejects signed requests (wants anonymous)
+    rejection_indicators = ["403", "forbidden", "access denied", "invalidaccesskeyid"]
+    return any(ind in error_str for ind in rejection_indicators)
+
+
+def open_with_fsspec(path: str, mode: str = "rb"):
+    """
+    Open a file with fsspec, auto-detecting anonymous access for S3.
+
+    For S3 paths, tries anonymous access first (for public buckets like Overture Maps),
+    then falls back to authenticated access. Results are cached per bucket.
+
+    Args:
+        path: File path or URL
+        mode: Open mode (default: "rb")
+
+    Returns:
+        fsspec file handle context manager
+    """
+    # Non-S3 paths: use fsspec directly
+    if not path.startswith(("s3://", "s3a://")):
+        return fsspec.open(path, mode)
+
+    bucket = _extract_bucket_name(path)
+    cached_mode = _s3_bucket_access_cache.get(bucket)
+
+    # Use cached mode if available
+    if cached_mode == "anonymous":
+        return fsspec.open(path, mode, anon=True)
+    elif cached_mode == "authenticated":
+        return fsspec.open(path, mode)
+
+    # Auto-detect: try anonymous first (handles public buckets like Overture)
+    try:
+        fs = fsspec.open(path, mode, anon=True)
+        # Test that we can actually access the file
+        with fs as f:
+            f.read(1)  # Read 1 byte to verify access
+        # Success - cache and return new handle
+        _s3_bucket_access_cache[bucket] = "anonymous"
+        return fsspec.open(path, mode, anon=True)
+    except Exception as e:
+        if not _is_s3_auth_rejection(e):
+            # Not an auth issue - could be file not found, etc.
+            # Still try authenticated before giving up
+            pass
+        # Fall through to authenticated
+
+    # Try authenticated
+    _s3_bucket_access_cache[bucket] = "authenticated"
+    return fsspec.open(path, mode)
+
+
 # GeoParquet version configuration
 # Maps CLI version options to DuckDB parameters and metadata settings
 # Note: For v2, we skip pyarrow rewrite to preserve native Parquet Geometry types
@@ -123,7 +197,7 @@ def detect_geoparquet_file_type(parquet_file, verbose=False):
 
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with fsspec.open(safe_url, "rb") as f:
+    with open_with_fsspec(safe_url, "rb") as f:
         pf = pq.ParquetFile(f)
         metadata = pf.schema_arrow.metadata
         schema = pf.schema_arrow
@@ -268,7 +342,17 @@ def _find_first_matching_remote_file(path: str, verbose: bool = False) -> str:
     base_url = f"{protocol}://{base_path}"
 
     # Get filesystem using base path WITHOUT glob - this avoids the slow glob expansion
-    fs, _, _ = fsspec.get_fs_token_paths(base_url)
+    # Use cache-based S3 access mode detection
+    storage_options = {}
+    if protocol in ("s3", "s3a"):
+        bucket = _extract_bucket_name(path)
+        cached_mode = _s3_bucket_access_cache.get(bucket)
+        if cached_mode == "anonymous":
+            storage_options = {"anon": True}
+        elif cached_mode is None:
+            # Not cached yet - try anonymous first (will be cached by other functions)
+            storage_options = {"anon": True}
+    fs, _, _ = fsspec.get_fs_token_paths(base_url, storage_options=storage_options)
 
     # Now walk directories to find first match
     def find_first_match(current_path: str, pattern_parts: list, part_idx: int) -> str | None:
@@ -636,7 +720,7 @@ def validate_output_path(output_path, verbose=False):
         raise click.ClickException(f"No write permission for: {output_dir}")
 
 
-def get_duckdb_connection(load_spatial=True, load_httpfs=None):
+def get_duckdb_connection(load_spatial=True, load_httpfs=None, s3_anonymous=False):
     """
     Create a DuckDB connection with necessary extensions loaded.
 
@@ -647,10 +731,16 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None):
     2. AWS profile (AWS_PROFILE env var or ~/.aws/credentials)
     3. IAM role (EC2/ECS/EKS instance metadata)
 
+    When s3_anonymous=True, uses anonymous (unsigned) S3 access instead.
+    This is required for some public S3 buckets (like Overture Maps) that
+    don't accept authenticated requests.
+
     Args:
         load_spatial: Whether to load spatial extension (default: True)
         load_httpfs: Whether to load httpfs extension for S3/Azure/GCS.
                     If None (default), auto-detects based on usage.
+        s3_anonymous: Whether to use anonymous S3 access (default: False).
+                     When True, no credentials are sent with S3 requests.
 
     Returns:
         duckdb.DuckDBPyConnection: Configured connection with extensions loaded
@@ -667,24 +757,88 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None):
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
 
-        # Load aws extension for S3 authentication
-        # This works in conjunction with httpfs to provide authenticated S3 access
-        con.execute("INSTALL aws;")
-        con.execute("LOAD aws;")
+        if s3_anonymous:
+            # Use anonymous S3 access (no credentials)
+            # Required for public buckets like Overture Maps that reject authenticated requests
+            # Note: We don't set a specific region - DuckDB will auto-detect from bucket
+            con.execute("SET s3_url_style = 'vhost';")
+            con.execute("""
+                CREATE OR REPLACE SECRET (
+                    TYPE s3,
+                    PROVIDER config,
+                    KEY_ID '',
+                    SECRET ''
+                );
+            """)
+        else:
+            # Load aws extension for S3 authentication
+            # This works in conjunction with httpfs to provide authenticated S3 access
+            con.execute("INSTALL aws;")
+            con.execute("LOAD aws;")
 
-        # Configure automatic credential discovery using AWS SDK
-        # This respects AWS_PROFILE, ~/.aws/credentials, env vars, and IAM roles
-        # Use VALIDATION 'none' to allow creating secret without immediate credentials
-        # (credentials will be discovered at query time)
-        con.execute("""
-            CREATE OR REPLACE SECRET (
-                TYPE s3,
-                PROVIDER credential_chain,
-                VALIDATION 'none'
-            );
-        """)
+            # Configure automatic credential discovery using AWS SDK
+            # This respects AWS_PROFILE, ~/.aws/credentials, env vars, and IAM roles
+            # Use VALIDATION 'none' to allow creating secret without immediate credentials
+            # (credentials will be discovered at query time)
+            con.execute("""
+                CREATE OR REPLACE SECRET (
+                    TYPE s3,
+                    PROVIDER credential_chain,
+                    VALIDATION 'none'
+                );
+            """)
 
     return con
+
+
+def get_duckdb_connection_for_s3(
+    path: str,
+    load_spatial: bool = True,
+) -> duckdb.DuckDBPyConnection:
+    """
+    Get DuckDB connection with auto-detected S3 access mode for the given path.
+
+    For S3 paths, tries anonymous access first (for public buckets like Overture Maps),
+    then falls back to authenticated access. Results are cached per bucket.
+
+    Args:
+        path: S3 path to access (used to determine bucket and access mode)
+        load_spatial: Whether to load spatial extension (default: True)
+
+    Returns:
+        duckdb.DuckDBPyConnection: Configured connection with appropriate S3 access
+    """
+    # Non-S3 paths: use standard connection
+    if not path.startswith(("s3://", "s3a://")):
+        return get_duckdb_connection(load_spatial=load_spatial, load_httpfs=needs_httpfs(path))
+
+    bucket = _extract_bucket_name(path)
+    cached_mode = _s3_bucket_access_cache.get(bucket)
+
+    # Use cached mode if available
+    if cached_mode == "anonymous":
+        return get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, s3_anonymous=True)
+    elif cached_mode == "authenticated":
+        return get_duckdb_connection(
+            load_spatial=load_spatial, load_httpfs=True, s3_anonymous=False
+        )
+
+    # Auto-detect: try anonymous first
+    con = get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, s3_anonymous=True)
+    try:
+        # Lightweight test query - use glob-safe path (first file if glob pattern)
+        test_path = resolve_single_file_for_metadata(path, verbose=False)
+        con.execute(f"SELECT 1 FROM read_parquet('{test_path}') LIMIT 1").fetchone()
+        _s3_bucket_access_cache[bucket] = "anonymous"
+        return con
+    except Exception as e:
+        con.close()
+        if _is_s3_auth_rejection(e):
+            _s3_bucket_access_cache[bucket] = "authenticated"
+            return get_duckdb_connection(
+                load_spatial=load_spatial, load_httpfs=True, s3_anonymous=False
+            )
+        raise
 
 
 def safe_file_url(file_path, verbose=False):
@@ -769,7 +923,7 @@ def get_remote_error_hint(error_msg, file_path=""):
 
 def get_parquet_metadata(parquet_file, verbose=False):
     """Get Parquet file metadata."""
-    with fsspec.open(parquet_file, "rb") as f:
+    with open_with_fsspec(parquet_file, "rb") as f:
         pf = pq.ParquetFile(f)
         metadata = pf.schema_arrow.metadata
         schema = pf.schema_arrow
@@ -903,7 +1057,7 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
 
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with fsspec.open(safe_url, "rb") as f:
+    with open_with_fsspec(safe_url, "rb") as f:
         pf = pq.ParquetFile(f)
         schema = pf.schema_arrow
         parquet_schema_str = str(pf.metadata.schema)
@@ -1852,7 +2006,7 @@ def check_bbox_structure(parquet_file, verbose=False):
             - status (str): "optimal", "suboptimal", or "poor"
             - message (str): Human readable description
     """
-    with fsspec.open(safe_file_url(parquet_file), "rb") as f:
+    with open_with_fsspec(safe_file_url(parquet_file), "rb") as f:
         pf = pq.ParquetFile(f)
         metadata = pf.schema_arrow.metadata
         schema = pf.schema_arrow
@@ -2058,7 +2212,7 @@ def add_computed_column(
 
     # Check if column already exists (skip in dry-run or when replacing)
     if not dry_run:
-        with fsspec.open(input_url, "rb") as f:
+        with open_with_fsspec(input_url, "rb") as f:
             pf = pq.ParquetFile(f)
             schema = pf.schema_arrow
 
@@ -2185,7 +2339,7 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
         click.ClickException: If column already exists or operation fails
     """
     # Check if column already exists
-    with fsspec.open(safe_file_url(parquet_file), "rb") as f:
+    with open_with_fsspec(safe_file_url(parquet_file), "rb") as f:
         pf = pq.ParquetFile(f)
         schema = pf.schema_arrow
 

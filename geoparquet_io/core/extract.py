@@ -18,17 +18,20 @@ from geoparquet_io.core.common import (
     check_bbox_structure,
     find_primary_geometry_column,
     get_duckdb_connection,
+    get_duckdb_connection_for_s3,
     get_parquet_metadata,
     needs_httpfs,
+    open_with_fsspec,
     parse_geo_metadata,
     resolve_single_file_for_metadata,
     safe_file_url,
     write_parquet_with_metadata,
 )
 
+
 def get_parquet_row_count(parquet_file: str) -> int:
     """Get row count from parquet file metadata (O(1) - reads footer only)."""
-    with fsspec.open(parquet_file, "rb") as f:
+    with open_with_fsspec(parquet_file, "rb") as f:
         pf = pq.ParquetFile(f)
         return pf.metadata.num_rows
 
@@ -138,7 +141,6 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
 
     Returns CRS info dict/string or None if not found.
     """
-    import fsspec
     import pyarrow.parquet as pq
 
     # First try GeoParquet file-level metadata
@@ -472,7 +474,11 @@ def get_schema_columns(input_parquet: str) -> list[str]:
     Returns:
         list: Column names
     """
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
+    # Use auto-detecting S3 connection for S3 paths
+    if needs_httpfs(input_parquet):
+        con = get_duckdb_connection_for_s3(input_parquet, load_spatial=True)
+    else:
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         safe_url = safe_file_url(input_parquet, verbose=False)
         result = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{safe_url}')").fetchall()
@@ -695,7 +701,11 @@ def _execute_extraction(
         if limit:
             click.echo(f"Limiting to {limit:,} rows")
 
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
+    # Use auto-detecting S3 connection for S3 paths
+    if needs_httpfs(input_parquet):
+        con = get_duckdb_connection_for_s3(input_parquet, load_spatial=True)
+    else:
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
 
     try:
         # Get total row count from input file metadata (fast - reads footer only)
@@ -780,7 +790,54 @@ def extract(
 
     Supports column selection, spatial filtering (bbox, geometry),
     SQL filtering, and multiple input files via glob patterns.
+
+    S3 access mode (anonymous vs authenticated) is auto-detected per bucket.
     """
+    _extract_impl(
+        input_parquet,
+        output_parquet,
+        include_cols,
+        exclude_cols,
+        bbox,
+        geometry,
+        where,
+        limit,
+        skip_count,
+        use_first_geometry,
+        dry_run,
+        show_sql,
+        verbose,
+        compression,
+        compression_level,
+        row_group_size_mb,
+        row_group_rows,
+        profile,
+        geoparquet_version,
+    )
+
+
+def _extract_impl(
+    input_parquet: str,
+    output_parquet: str,
+    include_cols: str | None,
+    exclude_cols: str | None,
+    bbox: str | None,
+    geometry: str | None,
+    where: str | None,
+    limit: int | None,
+    skip_count: bool,
+    use_first_geometry: bool,
+    dry_run: bool,
+    show_sql: bool,
+    verbose: bool,
+    compression: str,
+    compression_level: int | None,
+    row_group_size_mb: float | None,
+    row_group_rows: int | None,
+    profile: str | None,
+    geoparquet_version: str | None,
+) -> None:
+    """Internal implementation of extract with auto-detecting S3 access."""
     # Parse column lists
     include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
     exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
