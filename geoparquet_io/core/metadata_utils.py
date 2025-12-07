@@ -9,16 +9,12 @@ import json
 from typing import Any
 
 import click
-import fsspec
-import pyarrow.parquet as pq
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from geoparquet_io.core.common import (
     format_size,
-    get_parquet_metadata,
-    parse_geo_metadata,
     safe_file_url,
 )
 
@@ -407,6 +403,12 @@ def has_parquet_geo_row_group_stats(parquet_file: str, geometry_column: str | No
             - stats_source: str - "bbox_struct" if bbox struct column has stats, None otherwise
             - sample_bbox: list - [xmin, ymin, xmax, ymax] from first row group, or None
     """
+    from geoparquet_io.core.duckdb_metadata import (
+        detect_geometry_columns,
+        get_per_row_group_bbox_stats,
+        has_bbox_column,
+    )
+
     result = {
         "has_stats": False,
         "stats_source": None,
@@ -415,40 +417,34 @@ def has_parquet_geo_row_group_stats(parquet_file: str, geometry_column: str | No
 
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-        parquet_metadata = pf.metadata
-
     # Auto-detect geometry column if not specified
     if not geometry_column:
-        parquet_schema_str = str(parquet_metadata.schema)
-        for field in schema:
-            geo_type = detect_geo_logical_type(field, parquet_schema_str)
-            if geo_type:
-                geometry_column = field.name
-                break
+        geo_columns = detect_geometry_columns(safe_url)
+        if geo_columns:
+            geometry_column = next(iter(geo_columns.keys()))
 
     if not geometry_column:
         return result
 
-    # Use helper function to find bbox columns
-    geo_columns = {geometry_column: "Geometry"}  # Placeholder type
-    bbox_columns = _detect_bbox_columns(schema, geo_columns)
-    bbox_col_name = bbox_columns.get(geometry_column)
+    # Check for bbox column using DuckDB
+    has_bbox, bbox_col_name = has_bbox_column(safe_url)
 
-    if not bbox_col_name:
+    if not has_bbox or not bbox_col_name:
         return result
 
-    # Check first row group for stats using helper
-    if parquet_metadata.num_row_groups > 0:
-        rg = parquet_metadata.row_group(0)
-        bbox = _extract_rg_bbox(rg, bbox_col_name)
+    # Get row group stats for first row group
+    rg_stats = get_per_row_group_bbox_stats(safe_url, bbox_col_name)
 
-        if bbox:
-            result["has_stats"] = True
-            result["stats_source"] = "bbox_struct"
-            result["sample_bbox"] = [bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"]]
+    if rg_stats and len(rg_stats) > 0:
+        first_rg = rg_stats[0]
+        result["has_stats"] = True
+        result["stats_source"] = "bbox_struct"
+        result["sample_bbox"] = [
+            first_rg["xmin"],
+            first_rg["ymin"],
+            first_rg["xmax"],
+            first_rg["ymax"],
+        ]
 
     return result
 
@@ -470,39 +466,21 @@ def extract_bbox_from_row_group_stats(
     Returns:
         list: [xmin, ymin, xmax, ymax] or None if bbox cannot be calculated
     """
+    from geoparquet_io.core.duckdb_metadata import (
+        get_bbox_from_row_group_stats,
+        has_bbox_column,
+    )
+
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-        parquet_metadata = pf.metadata
+    # Check for bbox column using DuckDB
+    has_bbox, bbox_col_name = has_bbox_column(safe_url)
 
-    # Use helper function to find bbox columns
-    geo_columns = {geometry_column: "Geometry"}  # Placeholder type
-    bbox_columns = _detect_bbox_columns(schema, geo_columns)
-    bbox_col_name = bbox_columns.get(geometry_column)
-
-    if not bbox_col_name:
+    if not has_bbox or not bbox_col_name:
         return None
 
-    # Calculate overall bbox from all row groups using helper
-    row_group_stats = []
-    for rg_idx in range(parquet_metadata.num_row_groups):
-        rg = parquet_metadata.row_group(rg_idx)
-        bbox = _extract_rg_bbox(rg, bbox_col_name)
-        if bbox:
-            row_group_stats.append(bbox)
-
-    overall_bbox = _calculate_overall_bbox(row_group_stats)
-    if overall_bbox:
-        return [
-            overall_bbox["xmin"],
-            overall_bbox["ymin"],
-            overall_bbox["xmax"],
-            overall_bbox["ymax"],
-        ]
-
-    return None
+    # Get overall bbox from row group stats using DuckDB
+    return get_bbox_from_row_group_stats(safe_url, bbox_col_name)
 
 
 def format_parquet_metadata_enhanced(
@@ -520,53 +498,90 @@ def format_parquet_metadata_enhanced(
         row_groups_limit: Number of row groups to display (None for all)
         primary_geom_col: Primary geometry column name (for highlighting)
     """
+    from geoparquet_io.core.duckdb_metadata import (
+        detect_geometry_columns,
+        get_file_metadata,
+        get_row_group_metadata,
+        get_schema_info,
+    )
+
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        parquet_metadata = pf.metadata
-        schema = pf.schema_arrow
+    # Get file-level metadata using DuckDB
+    file_meta = get_file_metadata(safe_url)
+    schema_info = get_schema_info(safe_url)
+    row_group_meta = get_row_group_metadata(safe_url)
 
-    # Get Parquet schema string for better type detection
-    parquet_schema_str = str(parquet_metadata.schema)
+    # Detect geo columns using DuckDB
+    geo_columns = detect_geometry_columns(safe_url)
 
-    # Detect geo and bbox columns using helper functions
-    geo_columns = _detect_geo_columns(schema, parquet_schema_str)
-    bbox_columns = _detect_bbox_columns(schema, geo_columns)
+    num_rows = file_meta.get("num_rows", 0)
+    num_row_groups = file_meta.get("num_row_groups", 0)
+
+    # Count unique top-level columns (excluding struct children)
+    num_columns = len([c for c in schema_info if c.get("name") and "." not in c.get("name", "")])
+
+    # Build schema string from schema_info
+    schema_str = ", ".join(
+        f"{c['name']}: {c.get('type', 'unknown')}"
+        for c in schema_info
+        if c.get("name") and "." not in c.get("name", "")
+    )
+
+    # Group row_group_meta by row_group_id
+    rg_columns: dict[int, list] = {}
+    for col in row_group_meta:
+        rg_id = col.get("row_group_id", 0)
+        if rg_id not in rg_columns:
+            rg_columns[rg_id] = []
+        rg_columns[rg_id].append(col)
 
     if json_output:
         # JSON output
+        # DuckDB uses 'file_size_bytes' but we expose as 'serialized_size' for compatibility
+        serialized_size = file_meta.get("file_size_bytes", 0)
         metadata_dict = {
-            "num_rows": parquet_metadata.num_rows,
-            "num_row_groups": parquet_metadata.num_row_groups,
-            "num_columns": parquet_metadata.num_columns,
-            "serialized_size": parquet_metadata.serialized_size,
-            "schema": str(parquet_metadata.schema),
+            "num_rows": num_rows,
+            "num_row_groups": num_row_groups,
+            "num_columns": num_columns,
+            "serialized_size": serialized_size,
+            "schema": schema_str,
             "row_groups": [],
         }
 
         # Determine how many row groups to include
-        num_rg_to_show = parquet_metadata.num_row_groups
+        num_rg_to_show = num_row_groups
         if row_groups_limit is not None:
-            num_rg_to_show = min(row_groups_limit, parquet_metadata.num_row_groups)
+            num_rg_to_show = min(row_groups_limit, num_row_groups)
 
         # Add row group metadata
         for i in range(num_rg_to_show):
-            rg = parquet_metadata.row_group(i)
+            cols_in_rg = rg_columns.get(i, [])
+            total_size = sum(c.get("total_compressed_size", 0) or 0 for c in cols_in_rg)
             rg_dict = {
                 "id": i,
-                "num_rows": rg.num_rows,
-                "num_columns": rg.num_columns,
-                "total_byte_size": rg.total_byte_size,
+                "num_columns": len({c.get("path_in_schema", "") for c in cols_in_rg}),
+                "total_byte_size": total_size,
                 "columns": [],
             }
 
-            # Add column metadata for this row group
-            for j in range(rg.num_columns):
-                col = rg.column(j)
-                col_name = col.path_in_schema
+            for col in cols_in_rg:
+                col_name = col.get("path_in_schema", "")
                 is_geo = col_name in geo_columns
-                col_dict = _build_column_dict(col, is_geo, geo_columns.get(col_name))
+                col_dict = {
+                    "path_in_schema": col_name,
+                    "physical_type": col.get("type", ""),
+                    "total_compressed_size": col.get("total_compressed_size", 0),
+                    "total_uncompressed_size": col.get("total_uncompressed_size", 0),
+                    "compression": col.get("compression", ""),
+                    "is_geo": is_geo,
+                    "geo_type": geo_columns.get(col_name),
+                }
+                if col.get("stats_min") is not None:
+                    col_dict["statistics"] = {
+                        "min": str(col.get("stats_min")),
+                        "max": str(col.get("stats_max")),
+                    }
                 rg_dict["columns"].append(col_dict)
 
             metadata_dict["row_groups"].append(rg_dict)
@@ -579,36 +594,33 @@ def format_parquet_metadata_enhanced(
         console.print("[bold]Parquet File Metadata[/bold]")
         console.print("━" * 60)
 
-        console.print(f"Total Rows: [cyan]{parquet_metadata.num_rows:,}[/cyan]")
-        console.print(f"Row Groups: [cyan]{parquet_metadata.num_row_groups}[/cyan]")
-        console.print(f"Columns: [cyan]{parquet_metadata.num_columns}[/cyan]")
-        console.print(
-            f"Serialized Size: [cyan]{format_size(parquet_metadata.serialized_size)}[/cyan]"
-        )
+        console.print(f"Total Rows: [cyan]{num_rows:,}[/cyan]")
+        console.print(f"Row Groups: [cyan]{num_row_groups}[/cyan]")
+        console.print(f"Columns: [cyan]{num_columns}[/cyan]")
 
         console.print()
         console.print("[bold]Schema:[/bold]")
-        console.print(f"  {parquet_metadata.schema}")
+        console.print(f"  {schema_str}")
 
         # Determine how many row groups to show
-        num_rg_to_show = parquet_metadata.num_row_groups
+        num_rg_to_show = num_row_groups
         if row_groups_limit is not None:
-            num_rg_to_show = min(row_groups_limit, parquet_metadata.num_row_groups)
+            num_rg_to_show = min(row_groups_limit, num_row_groups)
 
         # Row groups
         console.print()
-        if row_groups_limit is not None and row_groups_limit < parquet_metadata.num_row_groups:
+        if row_groups_limit is not None and row_groups_limit < num_row_groups:
             console.print(
-                f"[bold]Row Groups (showing {num_rg_to_show} of {parquet_metadata.num_row_groups}):[/bold]"
+                f"[bold]Row Groups (showing {num_rg_to_show} of {num_row_groups}):[/bold]"
             )
         else:
-            console.print(f"[bold]Row Groups ({parquet_metadata.num_row_groups}):[/bold]")
+            console.print(f"[bold]Row Groups ({num_row_groups}):[/bold]")
 
         for i in range(num_rg_to_show):
-            rg = parquet_metadata.row_group(i)
+            cols_in_rg = rg_columns.get(i, [])
+            total_size = sum(c.get("total_compressed_size", 0) or 0 for c in cols_in_rg)
             console.print(f"\n  [cyan bold]Row Group {i}[/cyan bold]:")
-            console.print(f"    Rows: {rg.num_rows:,}")
-            console.print(f"    Total Size: {format_size(rg.total_byte_size)}")
+            console.print(f"    Total Size: {format_size(total_size)}")
 
             # Create a table for columns in this row group
             table = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
@@ -620,27 +632,29 @@ def format_parquet_metadata_enhanced(
             table.add_column("MinValue", style="magenta")
             table.add_column("MaxValue", style="magenta")
 
-            for j in range(rg.num_columns):
-                col = rg.column(j)
-                col_name = col.path_in_schema
+            for col in cols_in_rg:
+                col_name = col.get("path_in_schema", "")
                 is_geo = col_name in geo_columns
                 geo_type = geo_columns.get(col_name)
 
                 # Format column name and type
                 col_name_display = Text(f"🌍 {col_name}", style="cyan bold") if is_geo else col_name
                 type_display = (
-                    f"{col.physical_type}({geo_type})" if is_geo and geo_type else col.physical_type
+                    f"{col.get('type', '')}({geo_type})"
+                    if is_geo and geo_type
+                    else col.get("type", "")
                 )
 
-                # Get min/max values using helper
-                min_val, max_val = _get_column_minmax(col, is_geo, bbox_columns, rg)
+                # Get min/max values
+                min_val = str(col.get("stats_min", "-"))[:20] if col.get("stats_min") else "-"
+                max_val = str(col.get("stats_max", "-"))[:20] if col.get("stats_max") else "-"
 
                 table.add_row(
                     col_name_display,
                     type_display,
-                    format_size(col.total_compressed_size),
-                    format_size(col.total_uncompressed_size),
-                    col.compression,
+                    format_size(col.get("total_compressed_size", 0) or 0),
+                    format_size(col.get("total_uncompressed_size", 0) or 0),
+                    col.get("compression", ""),
                     min_val,
                     max_val,
                 )
@@ -648,13 +662,11 @@ def format_parquet_metadata_enhanced(
             console.print(table)
 
         # Show info about remaining row groups if limited
-        if row_groups_limit is not None and num_rg_to_show < parquet_metadata.num_row_groups:
-            remaining = parquet_metadata.num_row_groups - num_rg_to_show
+        if row_groups_limit is not None and num_rg_to_show < num_row_groups:
+            remaining = num_row_groups - num_rg_to_show
             console.print()
             console.print(f"  [dim]... and {remaining} more row group(s)[/dim]")
-            console.print(
-                f"  [dim]Use --row-groups {parquet_metadata.num_row_groups} to see all row groups[/dim]"
-            )
+            console.print(f"  [dim]Use --row-groups {num_row_groups} to see all row groups[/dim]")
 
         console.print()
 
@@ -673,49 +685,70 @@ def format_parquet_geo_metadata(
         json_output: Whether to output as JSON
         row_groups_limit: Number of row groups to read stats from
     """
+    from geoparquet_io.core.duckdb_metadata import (
+        detect_geometry_columns,
+        get_file_metadata,
+        get_per_row_group_bbox_stats,
+        get_schema_info,
+        has_bbox_column,
+        parse_geometry_logical_type,
+    )
+
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-        parquet_metadata = pf.metadata
+    # Get metadata using DuckDB
+    file_meta = get_file_metadata(safe_url)
+    schema_info = get_schema_info(safe_url)
+    num_row_groups = file_meta.get("num_row_groups", 0)
 
-    # Get Parquet schema string for better type detection
-    parquet_schema_str = str(parquet_metadata.schema)
+    # Detect geo columns using DuckDB
+    geo_columns = detect_geometry_columns(safe_url)
+    has_bbox, bbox_col_name = has_bbox_column(safe_url)
 
-    # Extract geospatial metadata from schema using helper functions
-    geo_columns = _detect_geo_columns(schema, parquet_schema_str)
-    bbox_columns = _detect_bbox_columns(schema, geo_columns)
-
-    # Build geo column info for each detected geo column
+    # Build geo column info from DuckDB schema
     geo_columns_info = {}
-    for field in schema:
-        if field.name in geo_columns:
-            geo_columns_info[field.name] = _build_geo_column_info(field, parquet_schema_str)
+    for col in schema_info:
+        col_name = col.get("name", "")
+        if col_name in geo_columns:
+            logical_type = col.get("logical_type", "")
+            parsed = parse_geometry_logical_type(logical_type) if logical_type else {}
+            geo_columns_info[col_name] = {
+                "logical_type": geo_columns.get(col_name),
+                "geometry_type": parsed.get("geometry_type") if parsed else None,
+                "coordinate_dimension": parsed.get("coordinate_dimension") if parsed else None,
+                "crs": parsed.get("crs") if parsed else None,
+                "edges": parsed.get("algorithm") if parsed else None,
+                "row_group_stats": [],
+            }
 
-    # Extract statistics from row groups
-    # Always read ALL row groups for overall bbox calculation
-    num_rg_to_check = parquet_metadata.num_row_groups
+    # Get bbox row group stats if bbox column exists
+    rg_bbox_stats = []
+    if has_bbox and bbox_col_name:
+        rg_bbox_stats = get_per_row_group_bbox_stats(safe_url, bbox_col_name)
+        # Add stats to each geo column
+        for col_name in geo_columns_info:
+            for rg_stat in rg_bbox_stats:
+                geo_columns_info[col_name]["row_group_stats"].append(
+                    {
+                        "row_group": rg_stat["row_group_id"],
+                        "xmin": rg_stat["xmin"],
+                        "ymin": rg_stat["ymin"],
+                        "xmax": rg_stat["xmax"],
+                        "ymax": rg_stat["ymax"],
+                    }
+                )
 
     # Determine how many row groups to show in output
-    num_rg_to_show = parquet_metadata.num_row_groups
+    num_rg_to_show = num_row_groups
     if row_groups_limit is not None:
-        num_rg_to_show = min(row_groups_limit, parquet_metadata.num_row_groups)
-
-    for col_name in geo_columns_info.keys():
-        for rg_idx in range(num_rg_to_check):
-            rg = parquet_metadata.row_group(rg_idx)
-            rg_stats = _extract_rg_stats(rg, col_name, bbox_columns)
-            rg_stats["row_group"] = rg_idx
-            if rg_stats:
-                geo_columns_info[col_name]["row_group_stats"].append(rg_stats)
+        num_rg_to_show = min(row_groups_limit, num_row_groups)
 
     if json_output:
         # JSON output
         output = {
             "geospatial_columns": geo_columns_info,
-            "row_groups_examined": num_rg_to_check,
-            "total_row_groups": parquet_metadata.num_row_groups,
+            "row_groups_examined": num_row_groups,
+            "total_row_groups": num_row_groups,
         }
         click.echo(json.dumps(output, indent=2))
     else:
@@ -736,17 +769,15 @@ def format_parquet_geo_metadata(
             )
         else:
             # Show message about row groups being read
-            if row_groups_limit is not None and row_groups_limit < parquet_metadata.num_row_groups:
+            if row_groups_limit is not None and row_groups_limit < num_row_groups:
                 console.print(
-                    f"\n[dim]Showing statistics for {num_rg_to_show} of {parquet_metadata.num_row_groups} row group(s)[/dim]"
+                    f"\n[dim]Showing statistics for {num_rg_to_show} of {num_row_groups} row group(s)[/dim]"
                 )
                 console.print(
-                    f"[dim](Overall bbox calculated from all {parquet_metadata.num_row_groups} row groups)[/dim]"
+                    f"[dim](Overall bbox calculated from all {num_row_groups} row groups)[/dim]"
                 )
             else:
-                console.print(
-                    f"\n[dim]Reading from {parquet_metadata.num_row_groups} row group(s)[/dim]"
-                )
+                console.print(f"\n[dim]Reading from {num_row_groups} row group(s)[/dim]")
 
             for col_name, col_info in geo_columns_info.items():
                 console.print(f"\n  [cyan bold]{col_name}[/cyan bold]:")
@@ -826,7 +857,7 @@ def format_parquet_geo_metadata(
                         remaining = len(col_info["row_group_stats"]) - num_rg_to_show
                         console.print(f"      [dim]... and {remaining} more row group(s)[/dim]")
                         console.print(
-                            f"      [dim]Use --row-groups {parquet_metadata.num_row_groups} to see all row groups[/dim]"
+                            f"      [dim]Use --row-groups {num_row_groups} to see all row groups[/dim]"
                         )
 
         console.print()
@@ -840,8 +871,10 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
         parquet_file: Path to the parquet file
         json_output: Whether to output as JSON
     """
-    metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-    geo_meta = parse_geo_metadata(metadata, verbose=False)
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+    geo_meta = get_geo_metadata(safe_url)
 
     if not geo_meta:
         if json_output:
@@ -996,11 +1029,13 @@ def format_all_metadata(
         json_output: Whether to output as JSON
         row_groups_limit: Number of row groups to display
     """
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
     if json_output:
         # For JSON, combine all metadata into one object
-        # Get primary geometry column for highlighting
-        metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = get_geo_metadata(safe_url)
         primary_col = geo_meta.get("primary_column") if geo_meta else None
 
         # We need to manually construct the combined JSON output
@@ -1013,9 +1048,7 @@ def format_all_metadata(
         click.echo(json.dumps(output, indent=2))
     else:
         # Terminal output - show all three sections
-        # Get primary geometry column for Parquet metadata highlighting
-        metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = get_geo_metadata(safe_url)
         primary_col = geo_meta.get("primary_column") if geo_meta else None
 
         # Section 1: Parquet File Metadata

@@ -11,23 +11,18 @@ import struct
 from typing import Any
 
 import duckdb
-import fsspec
 import pyarrow as pa
-import pyarrow.parquet as pq
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from geoparquet_io.core.common import (
     format_size,
-    get_parquet_metadata,
-    parse_geo_metadata,
+    is_remote_url,
     safe_file_url,
 )
 from geoparquet_io.core.metadata_utils import (
-    detect_geo_logical_type,
     extract_bbox_from_row_group_stats,
-    parse_geometry_type_from_schema,
 )
 
 
@@ -41,25 +36,24 @@ def extract_file_info(parquet_file: str) -> dict[str, Any]:
     Returns:
         dict: File info including size, rows, row_groups, compression
     """
-    safe_url = safe_file_url(parquet_file, verbose=False)
+    from geoparquet_io.core.duckdb_metadata import (
+        get_compression_info,
+        get_file_metadata,
+    )
 
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        num_rows = pf.metadata.num_rows
-        num_row_groups = pf.metadata.num_row_groups
+    # Get file metadata using DuckDB
+    file_meta = get_file_metadata(parquet_file)
+    num_rows = file_meta.get("num_rows", 0)
+    num_row_groups = file_meta.get("num_row_groups", 0)
 
-        # Get compression from first row group, first column
-        compression = None
-        if num_row_groups > 0:
-            row_group = pf.metadata.row_group(0)
-            if row_group.num_columns > 0:
-                column = row_group.column(0)
-                compression = column.compression
+    # Get compression from first column
+    compression_info = get_compression_info(parquet_file)
+    compression = None
+    if compression_info:
+        # Get compression from first column (any column will do)
+        compression = next(iter(compression_info.values()), None)
 
     # Get file size - handle both local and remote files
-    # Import here to avoid circular import
-    from geoparquet_io.core.common import is_remote_url
-
     if is_remote_url(parquet_file):
         # For remote files, approximate from metadata
         size_bytes = None
@@ -285,35 +279,41 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
             - edges: Edge interpretation (for Geography type)
             - warnings: List of mismatch warnings (if any)
     """
-    safe_url = safe_file_url(parquet_file, verbose=False)
+    from geoparquet_io.core.duckdb_metadata import (
+        detect_geometry_columns,
+        get_geo_metadata,
+        get_schema_info,
+        parse_geometry_logical_type,
+    )
 
-    # Read schema and metadata
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-        parquet_schema_str = str(pf.metadata.schema)
-
-    metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-    geo_meta = parse_geo_metadata(metadata, verbose=False)
+    # Get metadata using DuckDB
+    geo_meta = get_geo_metadata(parquet_file)
+    schema_info = get_schema_info(parquet_file)
+    geo_columns = detect_geometry_columns(parquet_file)
 
     # Detect Parquet native geo type
     parquet_type = "No Parquet geo logical type"
     parquet_geo_info = {}
     geometry_column = None
 
-    for field in schema:
-        geo_type = detect_geo_logical_type(field, parquet_schema_str)
-        if geo_type:
-            parquet_type = geo_type
-            geometry_column = field.name
+    # Find geometry column and parse its logical type
+    for col in schema_info:
+        col_name = col.get("name", "")
+        if col_name in geo_columns:
+            parquet_type = geo_columns[col_name]
+            geometry_column = col_name
 
-            # Parse additional details from Parquet schema
-            geom_details = parse_geometry_type_from_schema(field.name, parquet_schema_str)
-            if geom_details:
-                parquet_geo_info["geometry_type"] = geom_details.get("geometry_type")
-                parquet_geo_info["coordinate_dimension"] = geom_details.get("coordinate_dimension")
-                parquet_geo_info["crs"] = geom_details.get("crs")
-                parquet_geo_info["edges"] = geom_details.get("algorithm")
+            # Parse additional details from logical type
+            logical_type = col.get("logical_type", "")
+            if logical_type:
+                geom_details = parse_geometry_logical_type(logical_type)
+                if geom_details:
+                    parquet_geo_info["geometry_type"] = geom_details.get("geometry_type")
+                    parquet_geo_info["coordinate_dimension"] = geom_details.get(
+                        "coordinate_dimension"
+                    )
+                    parquet_geo_info["crs"] = geom_details.get("crs")
+                    parquet_geo_info["edges"] = geom_details.get("algorithm")
             break
 
     # Extract GeoParquet metadata
@@ -534,26 +534,33 @@ def get_preview_data(
     Returns:
         tuple: (PyArrow table with data, mode: "head" or "tail")
     """
+    from geoparquet_io.core.common import get_duckdb_connection, needs_httpfs
+    from geoparquet_io.core.duckdb_metadata import get_row_count
+
     safe_url = safe_file_url(parquet_file, verbose=False)
+    total_rows = get_row_count(parquet_file)
 
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        total_rows = pf.metadata.num_rows
+    # Create DuckDB connection
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
+    try:
         if tail:
             # Read from end
             start_row = max(0, total_rows - tail)
             num_rows = min(tail, total_rows)
-            table = pf.read_row_groups(list(range(pf.num_row_groups)), use_threads=True).slice(
-                start_row, num_rows
-            )
+            query = f"SELECT * FROM read_parquet('{safe_url}') OFFSET {start_row} LIMIT {num_rows}"
             mode = "tail"
         else:
             # Read from start (default if head is None, use 10)
             num_rows = head if head is not None else 10
             num_rows = min(num_rows, total_rows)
-            table = pf.read(use_threads=True).slice(0, num_rows)
+            query = f"SELECT * FROM read_parquet('{safe_url}') LIMIT {num_rows}"
             mode = "head"
+
+        # Execute query and convert to PyArrow table
+        table = con.execute(query).fetch_arrow_table()
+    finally:
+        con.close()
 
     return table, mode
 

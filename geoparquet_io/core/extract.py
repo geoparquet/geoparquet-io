@@ -11,8 +11,6 @@ import sys
 from pathlib import Path
 
 import click
-import fsspec
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
     check_bbox_structure,
@@ -21,8 +19,6 @@ from geoparquet_io.core.common import (
     get_duckdb_connection_for_s3,
     get_parquet_metadata,
     needs_httpfs,
-    open_with_fsspec,
-    parse_geo_metadata,
     resolve_single_file_for_metadata,
     safe_file_url,
     write_parquet_with_metadata,
@@ -30,10 +26,10 @@ from geoparquet_io.core.common import (
 
 
 def get_parquet_row_count(parquet_file: str) -> int:
-    """Get row count from parquet file metadata (O(1) - reads footer only)."""
-    with open_with_fsspec(parquet_file, "rb") as f:
-        pf = pq.ParquetFile(f)
-        return pf.metadata.num_rows
+    """Get row count from parquet file metadata using DuckDB (O(1) - reads footer only)."""
+    from geoparquet_io.core.duckdb_metadata import get_row_count
+
+    return get_row_count(parquet_file)
 
 
 # SQL keywords that could be dangerous in a WHERE clause
@@ -137,16 +133,21 @@ def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
 
 def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | None:
     """
-    Get CRS info from GeoParquet metadata or Arrow extension metadata.
+    Get CRS info from GeoParquet metadata or Parquet geo logical type.
 
     Returns CRS info dict/string or None if not found.
     """
-    import pyarrow.parquet as pq
+    from geoparquet_io.core.duckdb_metadata import (
+        get_geo_metadata,
+        get_schema_info,
+        parse_geometry_logical_type,
+    )
+
+    safe_url = safe_file_url(input_parquet, verbose=False)
 
     # First try GeoParquet file-level metadata
     try:
-        metadata, _ = get_parquet_metadata(input_parquet, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
+        geo_meta = get_geo_metadata(safe_url)
         if geo_meta:
             columns_meta = geo_meta.get("columns", {})
             if geometry_col in columns_meta:
@@ -154,25 +155,27 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
                 if crs_info:
                     return crs_info
     except Exception:
-        # CRS extraction is optional - fall back to Arrow metadata or return None
+        # CRS extraction is optional
         pass
 
-    # Fall back to Arrow extension metadata on geometry column
+    # Fall back to Parquet geo logical type (for GeoParquet 2.0 / parquet-geo)
     try:
-        safe_url = safe_file_url(input_parquet, verbose=False)
-        with fsspec.open(safe_url, "rb") as f:
-            pf = pq.ParquetFile(f)
-            schema = pf.schema_arrow
-            if geometry_col in schema.names:
-                field = schema.field(geometry_col)
-                if field.metadata:
-                    ext_meta = field.metadata.get(b"ARROW:extension:metadata")
-                    if ext_meta:
-                        ext_data = json.loads(ext_meta.decode("utf-8"))
-                        if "crs" in ext_data:
-                            return ext_data["crs"]
+        schema_info = get_schema_info(safe_url)
+        for col in schema_info:
+            name = col.get("name", "")
+            if name != geometry_col:
+                continue
+            logical_type = col.get("logical_type", "")
+            # DuckDB returns GeometryType(...) and GeographyType(...) from parquet_schema()
+            if logical_type and (
+                logical_type.startswith("GeometryType(")
+                or logical_type.startswith("GeographyType(")
+            ):
+                parsed = parse_geometry_logical_type(logical_type)
+                if parsed and "crs" in parsed:
+                    return parsed["crs"]
     except Exception:
-        # CRS extraction is optional - file may not have CRS metadata
+        # CRS extraction is optional
         pass
 
     return None

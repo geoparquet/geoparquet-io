@@ -184,8 +184,10 @@ def detect_geoparquet_file_type(parquet_file, verbose=False):
             - file_type: str - One of: "geoparquet_v1", "geoparquet_v2", "parquet_geo_only", "unknown"
             - bbox_recommended: bool - Whether bbox column is recommended for this file type
     """
-    # Import here to avoid circular import
-    from geoparquet_io.core.metadata_utils import detect_geo_logical_type
+    from geoparquet_io.core.duckdb_metadata import (
+        detect_geometry_columns,
+        get_geo_metadata,
+    )
 
     result = {
         "has_geo_metadata": False,
@@ -197,28 +199,17 @@ def detect_geoparquet_file_type(parquet_file, verbose=False):
 
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with open_with_fsspec(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        metadata = pf.schema_arrow.metadata
-        schema = pf.schema_arrow
-        parquet_schema_str = str(pf.metadata.schema)
-
-    # Check for geo metadata
-    if metadata and b"geo" in metadata:
+    # Check for geo metadata using DuckDB
+    geo_meta = get_geo_metadata(safe_url)
+    if geo_meta:
         result["has_geo_metadata"] = True
-        try:
-            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-            if isinstance(geo_meta, dict) and "version" in geo_meta:
-                result["geo_version"] = geo_meta["version"]
-        except (json.JSONDecodeError, KeyError):
-            pass
+        if isinstance(geo_meta, dict) and "version" in geo_meta:
+            result["geo_version"] = geo_meta["version"]
 
-    # Check for native Parquet geo types
-    for field in schema:
-        geo_type = detect_geo_logical_type(field, parquet_schema_str)
-        if geo_type:
-            result["has_native_geo_types"] = True
-            break
+    # Check for native Parquet geo types using DuckDB schema
+    geo_columns = detect_geometry_columns(safe_url)
+    if geo_columns:
+        result["has_native_geo_types"] = True
 
     # Determine file type
     if result["has_geo_metadata"]:
@@ -922,18 +913,64 @@ def get_remote_error_hint(error_msg, file_path=""):
 
 
 def get_parquet_metadata(parquet_file, verbose=False):
-    """Get Parquet file metadata."""
-    with open_with_fsspec(parquet_file, "rb") as f:
-        pf = pq.ParquetFile(f)
-        metadata = pf.schema_arrow.metadata
+    """
+    Get Parquet file metadata using DuckDB for kv_metadata and PyArrow for schema.
+
+    Returns:
+        tuple: (kv_metadata dict, PyArrow schema)
+
+    Note: Uses DuckDB for metadata extraction but returns PyArrow schema for
+    backward compatibility with code that expects schema.field() methods.
+    """
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    # Get key-value metadata (returns dict like {b'geo': b'...'})
+    kv_metadata = get_kv_metadata(safe_url)
+
+    # Get PyArrow schema for backward compatibility
+    # (some code uses schema.field(i).name patterns)
+    if is_remote_url(parquet_file):
+        # For remote files, use a DuckDB-based approach to read schema
+        from geoparquet_io.core.duckdb_metadata import get_schema_info
+
+        schema_info = get_schema_info(safe_url)
+        # Create a simple object that mimics PyArrow schema for basic usage
+        schema = _DuckDBSchemaWrapper(schema_info)
+    else:
+        pf = pq.ParquetFile(parquet_file)
         schema = pf.schema_arrow
 
-    if verbose and metadata:
+    if verbose and kv_metadata:
         click.echo("\nParquet metadata key-value pairs:")
-        for key in metadata:
-            click.echo(f"{key}: {metadata[key]}")
+        for key, value in kv_metadata.items():
+            key_str = key.decode("utf-8") if isinstance(key, bytes) else key
+            click.echo(f"{key_str}: {value}")
 
-    return metadata, schema
+    return kv_metadata, schema
+
+
+class _DuckDBSchemaWrapper:
+    """Wrapper to provide PyArrow-like interface for DuckDB schema info."""
+
+    def __init__(self, schema_info):
+        self._columns = [c for c in schema_info if c.get("name") and "." not in c.get("name", "")]
+
+    def __len__(self):
+        return len(self._columns)
+
+    def field(self, i):
+        return _DuckDBFieldWrapper(self._columns[i])
+
+
+class _DuckDBFieldWrapper:
+    """Wrapper to provide PyArrow-like interface for a DuckDB column."""
+
+    def __init__(self, col_info):
+        self.name = col_info.get("name", "")
 
 
 def parse_geo_metadata(metadata, verbose=False):
@@ -955,8 +992,13 @@ def parse_geo_metadata(metadata, verbose=False):
 
 def find_primary_geometry_column(parquet_file, verbose=False):
     """Find primary geometry column from GeoParquet metadata."""
-    metadata, _ = get_parquet_metadata(parquet_file, verbose)
-    geo_meta = parse_geo_metadata(metadata, verbose)
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+    geo_meta = get_geo_metadata(safe_url)
+
+    if verbose and geo_meta:
+        click.echo(f"\nGeo metadata: {json.dumps(geo_meta, indent=2)}")
 
     if not geo_meta:
         return "geometry"
@@ -1044,7 +1086,7 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
 
     Checks in order:
     1. GeoParquet metadata (columns.<geom_col>.crs)
-    2. Parquet native geo type (from schema string)
+    2. Parquet native geo type (from schema logical_type)
 
     Args:
         parquet_file: Path to the parquet file
@@ -1053,40 +1095,41 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
     Returns:
         dict: PROJJSON CRS dict, or None if no CRS found or CRS is default
     """
-    from geoparquet_io.core.metadata_utils import parse_geometry_type_from_schema
+    from geoparquet_io.core.duckdb_metadata import (
+        get_geo_metadata,
+        get_schema_info,
+        parse_geometry_logical_type,
+    )
 
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with open_with_fsspec(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-        parquet_schema_str = str(pf.metadata.schema)
-        metadata = schema.metadata
-
     # First, try GeoParquet metadata
-    if metadata and b"geo" in metadata:
-        try:
-            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-            primary_col = geo_meta.get("primary_column", "geometry")
-            columns = geo_meta.get("columns", {})
-            if primary_col in columns:
-                crs = columns[primary_col].get("crs")
-                if crs and not is_default_crs(crs):
-                    if verbose:
-                        click.echo(f"Found CRS in GeoParquet metadata: {_format_crs_display(crs)}")
-                    return crs
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    # Second, try Parquet native geo type
-    for field in schema:
-        geom_details = parse_geometry_type_from_schema(field.name, parquet_schema_str)
-        if geom_details and "crs" in geom_details:
-            crs = geom_details["crs"]
+    geo_meta = get_geo_metadata(safe_url)
+    if geo_meta:
+        primary_col = geo_meta.get("primary_column", "geometry")
+        columns = geo_meta.get("columns", {})
+        if primary_col in columns:
+            crs = columns[primary_col].get("crs")
             if crs and not is_default_crs(crs):
                 if verbose:
-                    click.echo(f"Found CRS in Parquet geo type: {_format_crs_display(crs)}")
+                    click.echo(f"Found CRS in GeoParquet metadata: {_format_crs_display(crs)}")
                 return crs
+
+    # Second, try Parquet native geo type from schema logical_type
+    # DuckDB returns GeometryType(...) and GeographyType(...) from parquet_schema()
+    schema_info = get_schema_info(safe_url)
+    for col in schema_info:
+        logical_type = col.get("logical_type", "")
+        if logical_type and (
+            logical_type.startswith("GeometryType(") or logical_type.startswith("GeographyType(")
+        ):
+            parsed = parse_geometry_logical_type(logical_type)
+            if parsed and "crs" in parsed:
+                crs = parsed["crs"]
+                if crs and not is_default_crs(crs):
+                    if verbose:
+                        click.echo(f"Found CRS in Parquet geo type: {_format_crs_display(crs)}")
+                    return crs
 
     return None
 
@@ -1929,54 +1972,81 @@ def format_size(size_bytes):
     return f"{size_bytes:.2f} TB"
 
 
-def _find_bbox_column_in_schema(schema, verbose):
-    """Find bbox column in schema by conventional names or structure."""
-    conventional_names = ["bbox", "bounds", "extent"]
-    for field in schema:
-        if field.name in conventional_names or (
-            isinstance(field.type, type(schema[0].type))
-            and str(field.type).startswith("struct<")
-            and all(f in str(field.type) for f in ["xmin", "ymin", "xmax", "ymax"])
-        ):
-            if verbose:
-                click.echo(f"Found bbox column: {field.name} with type {field.type}")
-            return field.name
+def _find_bbox_column_in_schema(schema_info, verbose):
+    """Find bbox column in schema by conventional names or structure.
+
+    Args:
+        schema_info: List of column dicts from get_schema_info()
+        verbose: Whether to print verbose output
+
+    Note:
+        DuckDB's parquet_schema() returns nested struct fields without parent prefix.
+        For a struct column 'bbox' with fields xmin/ymin/xmax/ymax:
+        - bbox appears with num_children=4
+        - Child fields appear as 'xmin', 'ymin', 'xmax', 'ymax' (not 'bbox.xmin')
+    """
+    # Check for columns ending with these suffixes (e.g., geometry_bbox, bbox)
+    conventional_suffixes = ["bbox", "bounds", "extent"]
+    required_fields = {"xmin", "ymin", "xmax", "ymax"}
+
+    for i, col in enumerate(schema_info):
+        name = col.get("name", "")
+        num_children = col.get("num_children", 0)
+
+        if not name:
+            continue
+
+        # Check if column name ends with conventional suffixes and has struct children
+        is_bbox_name = any(name.endswith(suffix) for suffix in conventional_suffixes)
+        if is_bbox_name and num_children >= 4:
+            # Get the next num_children entries as the struct's child fields
+            child_names = set()
+            for j in range(1, num_children + 1):
+                if i + j < len(schema_info):
+                    child_name = schema_info[i + j].get("name", "")
+                    child_names.add(child_name)
+
+            # Check if all required fields are present
+            if required_fields.issubset(child_names):
+                if verbose:
+                    click.echo(f"Found bbox column: {name} with children: {child_names}")
+                return name
+
     return None
 
 
-def _check_bbox_metadata_covering(metadata, has_bbox_column, verbose):
-    """Check if metadata contains proper bbox covering."""
-    if not (metadata and b"geo" in metadata and has_bbox_column):
+def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose):
+    """Check if geo metadata contains proper bbox covering.
+
+    Args:
+        geo_meta: Parsed geo metadata dict (from get_geo_metadata())
+        has_bbox_column: Whether a bbox column was found in schema
+        verbose: Whether to print verbose output
+    """
+    if not (geo_meta and has_bbox_column):
         return False
 
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        if verbose:
-            click.echo("\nParsed geo metadata:")
-            click.echo(json.dumps(geo_meta, indent=2))
+    if verbose:
+        click.echo("\nParsed geo metadata:")
+        click.echo(json.dumps(geo_meta, indent=2))
 
-        if isinstance(geo_meta, dict) and "columns" in geo_meta:
-            columns = geo_meta["columns"]
-            for _col_name, col_info in columns.items():
-                if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
-                    bbox_refs = col_info["covering"]["bbox"]
-                    # Check if the bbox covering has the required structure
-                    if (
-                        isinstance(bbox_refs, dict)
-                        and all(key in bbox_refs for key in ["xmin", "ymin", "xmax", "ymax"])
-                        and all(
-                            isinstance(ref, list) and len(ref) == 2 for ref in bbox_refs.values()
+    if isinstance(geo_meta, dict) and "columns" in geo_meta:
+        columns = geo_meta["columns"]
+        for _col_name, col_info in columns.items():
+            if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
+                bbox_refs = col_info["covering"]["bbox"]
+                # Check if the bbox covering has the required structure
+                if (
+                    isinstance(bbox_refs, dict)
+                    and all(key in bbox_refs for key in ["xmin", "ymin", "xmax", "ymax"])
+                    and all(isinstance(ref, list) and len(ref) == 2 for ref in bbox_refs.values())
+                ):
+                    referenced_bbox_column = bbox_refs["xmin"][0]
+                    if verbose:
+                        click.echo(
+                            f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
                         )
-                    ):
-                        referenced_bbox_column = bbox_refs["xmin"][0]
-                        if verbose:
-                            click.echo(
-                                f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
-                            )
-                        return True
-    except json.JSONDecodeError:
-        if verbose:
-            click.echo("Failed to parse geo metadata as JSON")
+                    return True
 
     return False
 
@@ -2006,22 +2076,28 @@ def check_bbox_structure(parquet_file, verbose=False):
             - status (str): "optimal", "suboptimal", or "poor"
             - message (str): Human readable description
     """
-    with open_with_fsspec(safe_file_url(parquet_file), "rb") as f:
-        pf = pq.ParquetFile(f)
-        metadata = pf.schema_arrow.metadata
-        schema = pf.schema_arrow
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    # Get schema info using DuckDB
+    schema_info = get_schema_info(safe_url)
 
     if verbose:
         click.echo("\nSchema fields:")
-        for field in schema:
-            click.echo(f"  {field.name}: {field.type}")
+        for col in schema_info:
+            name = col.get("name", "")
+            col_type = col.get("type", "")
+            if name:  # Skip empty names
+                click.echo(f"  {name}: {col_type}")
 
     # Find the bbox column in the schema
-    bbox_column_name = _find_bbox_column_in_schema(schema, verbose)
+    bbox_column_name = _find_bbox_column_in_schema(schema_info, verbose)
     has_bbox_column = bbox_column_name is not None
 
-    # Check metadata for bbox covering
-    has_bbox_metadata = _check_bbox_metadata_covering(metadata, has_bbox_column, verbose)
+    # Get geo metadata and check for bbox covering
+    geo_meta = get_geo_metadata(safe_url)
+    has_bbox_metadata = _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose)
 
     # Determine status and message
     status, message = _determine_bbox_status(has_bbox_column, bbox_column_name, has_bbox_metadata)
@@ -2212,18 +2288,16 @@ def add_computed_column(
 
     # Check if column already exists (skip in dry-run or when replacing)
     if not dry_run:
-        with open_with_fsspec(input_url, "rb") as f:
-            pf = pq.ParquetFile(f)
-            schema = pf.schema_arrow
+        from geoparquet_io.core.duckdb_metadata import get_column_names
 
         # Only check for column collision if not replacing
         if not replace_column:
-            for field in schema:
-                if field.name == column_name:
-                    raise click.ClickException(
-                        f"Column '{column_name}' already exists in the file. "
-                        f"Please choose a different name."
-                    )
+            column_names = get_column_names(input_url)
+            if column_name in column_names:
+                raise click.ClickException(
+                    f"Column '{column_name}' already exists in the file. "
+                    f"Please choose a different name."
+                )
 
         # Get metadata before processing
         metadata, _ = get_parquet_metadata(input_parquet, verbose)
@@ -2338,17 +2412,17 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
     Raises:
         click.ClickException: If column already exists or operation fails
     """
-    # Check if column already exists
-    with open_with_fsspec(safe_file_url(parquet_file), "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
+    from geoparquet_io.core.duckdb_metadata import get_column_names
 
-    for field in schema:
-        if field.name == bbox_column_name:
-            raise click.ClickException(
-                f"Column '{bbox_column_name}' already exists in the file. "
-                f"Please choose a different name."
-            )
+    # Check if column already exists using DuckDB
+    safe_url = safe_file_url(parquet_file, verbose=False)
+    column_names = get_column_names(safe_url)
+
+    if bbox_column_name in column_names:
+        raise click.ClickException(
+            f"Column '{bbox_column_name}' already exists in the file. "
+            f"Please choose a different name."
+        )
 
     # Get geometry column for SQL expression
     geom_col = find_primary_geometry_column(parquet_file, verbose)

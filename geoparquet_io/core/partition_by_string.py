@@ -2,8 +2,6 @@
 
 
 import click
-import fsspec
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import safe_file_url
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
@@ -21,22 +19,25 @@ def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = 
     Raises:
         click.UsageError: If the column doesn't exist
     """
+    from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
+
     safe_url = safe_file_url(parquet_file, verbose)
+    column_names = get_column_names(safe_url)
 
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-
-    if column_name not in schema.names:
-        available_columns = ", ".join(schema.names)
+    if column_name not in column_names:
+        available_columns = ", ".join(column_names)
         raise click.UsageError(
             f"Column '{column_name}' not found in the Parquet file.\n"
             f"Available columns: {available_columns}"
         )
 
     if verbose:
-        column_type = schema.field(column_name).type
-        click.echo(f"Found column '{column_name}' with type: {column_type}")
+        schema_info = get_schema_info(safe_url)
+        for col in schema_info:
+            if col.get("name") == column_name:
+                column_type = col.get("type", "unknown")
+                click.echo(f"Found column '{column_name}' with type: {column_type}")
+                break
 
 
 def partition_by_string(

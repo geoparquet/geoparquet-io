@@ -164,7 +164,9 @@ class TestS3FileReading:
         """Test DuckDB query on S3 URL."""
         from geoparquet_io.core.common import get_duckdb_connection
 
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=True, s3_anonymous=True)
+        # Set S3 region for this bucket (moved from us-west-2 to us-east-2)
+        con.execute("SET s3_region = 'us-east-2';")
         result = con.execute(f"SELECT COUNT(*) FROM '{self.S3_URL}'").fetchone()
         assert result[0] > 0  # Should have rows
 
