@@ -120,7 +120,7 @@ def partition_by_h3(
                 analyze_partition_strategy(
                     input_parquet=input_parquet,
                     column_name=h3_column_name,
-                    column_prefix_length=resolution,
+                    column_prefix_length=None,
                     verbose=True,
                 )
             except PartitionAnalysisError:
@@ -135,7 +135,7 @@ def partition_by_h3(
             preview_partition(
                 input_parquet=input_parquet,
                 column_name=h3_column_name,
-                column_prefix_length=resolution,
+                column_prefix_length=None,
                 limit=preview_limit,
                 verbose=verbose,
             )
@@ -149,12 +149,14 @@ def partition_by_h3(
     click.echo(f"Partitioning by H3 cells at resolution {resolution} (column: '{h3_column_name}')")
 
     try:
-        # Use common partition function with H3 resolution as prefix length
+        # Use common partition function with full H3 cell IDs
+        # Note: resolution is used when generating the H3 column, not as a prefix length
+        # Each H3 cell at the specified resolution becomes a separate partition
         num_partitions = partition_by_column(
             input_parquet=input_parquet,
             output_folder=output_folder,
             column_name=h3_column_name,
-            column_prefix_length=resolution,
+            column_prefix_length=None,
             hive=hive,
             overwrite=overwrite,
             verbose=verbose,
