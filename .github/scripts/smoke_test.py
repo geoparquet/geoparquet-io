@@ -53,8 +53,8 @@ def main():
         assert geo_meta_back['version'] == '1.0.0', "Version mismatch"
         assert geo_meta_back['primary_column'] == 'geometry', "Primary column mismatch"
         
-    print('✓ Basic read/write test passed')
-    print(f'✓ PyArrow version {pa.__version__} works correctly')
+    print('[PASS] Basic read/write test passed')
+    print(f'[PASS] PyArrow version {pa.__version__} works correctly')
 
 
 if __name__ == '__main__':
