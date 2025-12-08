@@ -55,47 +55,7 @@ jobs:
 
       - name: Run basic smoke test (read/write GeoParquet)
         run: |
-          python -c "
-          import tempfile
-          import os
-          import pyarrow as pa
-          import pyarrow.parquet as pq
-          from pathlib import Path
-          
-          # Create a simple test parquet file with geo metadata
-          table = pa.table({
-              'id': [1, 2, 3],
-              'geometry': [b'POINT(0 0)', b'POINT(1 1)', b'POINT(2 2)']
-          })
-          
-          # Add minimal GeoParquet metadata
-          geo_metadata = {
-              'version': '1.0.0',
-              'primary_column': 'geometry',
-              'columns': {
-                  'geometry': {
-                      'encoding': 'WKB',
-                      'geometry_types': ['Point']
-                  }
-              }
-          }
-          
-          import json
-          metadata = table.schema.metadata or {}
-          metadata[b'geo'] = json.dumps(geo_metadata).encode('utf-8')
-          table = table.replace_schema_metadata(metadata)
-          
-          # Write and read back
-          with tempfile.TemporaryDirectory() as tmpdir:
-              test_file = Path(tmpdir) / 'test.parquet'
-              pq.write_table(table, test_file)
-              
-              # Read back
-              result = pq.read_table(test_file)
-              assert len(result) == 3
-              assert b'geo' in result.schema.metadata
-              print('✓ Basic read/write test passed')
-          "
+          python .github/scripts/smoke_test.py
 
   test-pyarrow-conda:
     name: PyArrow ${{ matrix.pyarrow-version }} - Python ${{ matrix.python-version }} - ${{ matrix.os }} (conda)
@@ -141,44 +101,4 @@ jobs:
       - name: Run basic smoke test (read/write GeoParquet)
         shell: bash -el {0}
         run: |
-          python -c "
-          import tempfile
-          import os
-          import pyarrow as pa
-          import pyarrow.parquet as pq
-          from pathlib import Path
-          
-          # Create a simple test parquet file with geo metadata
-          table = pa.table({
-              'id': [1, 2, 3],
-              'geometry': [b'POINT(0 0)', b'POINT(1 1)', b'POINT(2 2)']
-          })
-          
-          # Add minimal GeoParquet metadata
-          geo_metadata = {
-              'version': '1.0.0',
-              'primary_column': 'geometry',
-              'columns': {
-                  'geometry': {
-                      'encoding': 'WKB',
-                      'geometry_types': ['Point']
-                  }
-              }
-          }
-          
-          import json
-          metadata = table.schema.metadata or {}
-          metadata[b'geo'] = json.dumps(geo_metadata).encode('utf-8')
-          table = table.replace_schema_metadata(metadata)
-          
-          # Write and read back
-          with tempfile.TemporaryDirectory() as tmpdir:
-              test_file = Path(tmpdir) / 'test.parquet'
-              pq.write_table(table, test_file)
-              
-              # Read back
-              result = pq.read_table(test_file)
-              assert len(result) == 3
-              assert b'geo' in result.schema.metadata
-              print('✓ Basic read/write test passed')
-          "
+          python .github/scripts/smoke_test.py
