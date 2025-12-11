@@ -880,7 +880,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=1.0.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.3.0" },
     { name = "psutil", specifier = ">=5.9.0" },
-    { name = "pyarrow", specifier = ">=12.0.0,<22.0.0" },
+    { name = "pyarrow", specifier = ">=12.0.0,<23.0.0" },
     { name = "pyogrio", marker = "extra == 'benchmark'", specifier = ">=0.7.0" },
     { name = "pystac", specifier = ">=1.9.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
