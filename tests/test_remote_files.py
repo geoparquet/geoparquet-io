@@ -283,14 +283,27 @@ class TestConvertRemoteParquet:
     @pytest.mark.network
     def test_convert_remote_parquet(self, tmp_path):
         """Test converting remote parquet file."""
+        import warnings
+
         from geoparquet_io.core.convert import convert_to_geoparquet
 
         output = tmp_path / "output.parquet"
         url = "https://github.com/opengeospatial/geoparquet/raw/refs/heads/main/examples/example.parquet"
 
-        convert_to_geoparquet(
-            input_file=url, output_file=str(output), skip_hilbert=True, verbose=False
-        )
+        try:
+            convert_to_geoparquet(
+                input_file=url, output_file=str(output), skip_hilbert=True, verbose=False
+            )
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Skip on transient network errors (SSL, connection, timeout)
+            if any(
+                term in error_msg
+                for term in ["ssl", "connection", "timeout", "network", "certificate"]
+            ):
+                warnings.warn(f"Skipping due to transient network error: {e}", stacklevel=2)
+                pytest.skip(f"Transient network error: {e}")
+            raise  # Re-raise non-network errors
 
         assert output.exists()
         assert output.stat().st_size > 0
