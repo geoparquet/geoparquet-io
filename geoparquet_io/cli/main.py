@@ -24,7 +24,6 @@ from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
 from geoparquet_io.core.inspect_utils import (
-    extract_columns_info,
     extract_file_info,
     extract_geo_info,
     format_json_output,
@@ -639,11 +638,13 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
                 skip_count = num_children
 
             if name:
-                columns_info.append({
-                    "name": name,
-                    "type": col.get("duckdb_type") or col_type or "struct",
-                    "is_geometry": name == primary_geom_col,
-                })
+                columns_info.append(
+                    {
+                        "name": name,
+                        "type": col.get("duckdb_type") or col_type or "struct",
+                        "is_geometry": name == primary_geom_col,
+                    }
+                )
 
         # Get preview data if requested
         preview_table = None

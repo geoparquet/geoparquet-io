@@ -115,7 +115,7 @@ def get_file_metadata(parquet_file: str, con=None) -> dict:
         """).fetchone()
 
         columns = [desc[0] for desc in connection.description]
-        return dict(zip(columns, result)) if result else {}
+        return dict(zip(columns, result, strict=True)) if result else {}
     finally:
         if should_close:
             connection.close()
@@ -136,7 +136,7 @@ def get_schema_info(parquet_file: str, con=None) -> list[dict]:
         """).fetchall()
 
         columns = [desc[0] for desc in connection.description]
-        return [dict(zip(columns, row)) for row in result]
+        return [dict(zip(columns, row, strict=True)) for row in result]
     finally:
         if should_close:
             connection.close()
@@ -164,7 +164,7 @@ def get_row_group_metadata(parquet_file: str, con=None) -> list[dict]:
         """).fetchall()
 
         columns = [desc[0] for desc in connection.description]
-        return [dict(zip(columns, row)) for row in result]
+        return [dict(zip(columns, row, strict=True)) for row in result]
     finally:
         if should_close:
             connection.close()
