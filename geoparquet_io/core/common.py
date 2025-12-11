@@ -10,12 +10,11 @@ from pathlib import Path
 
 import click
 import duckdb
-import fsspec
 import pyarrow.parquet as pq
 
-# Per-bucket cache for S3 access mode (anonymous vs authenticated)
-# This avoids repeated fallback attempts for the same bucket
-_s3_bucket_access_cache: dict[str, str] = {}  # bucket -> "anonymous" | "authenticated"
+# Per-bucket cache for S3 buckets that require authentication
+# Buckets not in this set are accessed without credentials (works for public buckets)
+_s3_buckets_needing_auth: set[str] = set()
 
 
 def _extract_bucket_name(path: str) -> str:
@@ -27,64 +26,16 @@ def _extract_bucket_name(path: str) -> str:
 
 def _clear_s3_cache():
     """Clear S3 access cache (useful for testing)."""
-    global _s3_bucket_access_cache
-    _s3_bucket_access_cache = {}
+    global _s3_buckets_needing_auth
+    _s3_buckets_needing_auth = set()
 
 
-def _is_s3_auth_rejection(exception: Exception) -> bool:
-    """Detect if exception indicates S3 rejected authenticated request (public bucket)."""
+def _needs_s3_auth(exception: Exception) -> bool:
+    """Detect if exception indicates S3 bucket requires authentication."""
     error_str = str(exception).lower()
-    # These indicate the bucket rejects signed requests (wants anonymous)
-    rejection_indicators = ["403", "forbidden", "access denied", "invalidaccesskeyid"]
-    return any(ind in error_str for ind in rejection_indicators)
-
-
-def open_with_fsspec(path: str, mode: str = "rb"):
-    """
-    Open a file with fsspec, auto-detecting anonymous access for S3.
-
-    For S3 paths, tries anonymous access first (for public buckets like Overture Maps),
-    then falls back to authenticated access. Results are cached per bucket.
-
-    Args:
-        path: File path or URL
-        mode: Open mode (default: "rb")
-
-    Returns:
-        fsspec file handle context manager
-    """
-    # Non-S3 paths: use fsspec directly
-    if not path.startswith(("s3://", "s3a://")):
-        return fsspec.open(path, mode)
-
-    bucket = _extract_bucket_name(path)
-    cached_mode = _s3_bucket_access_cache.get(bucket)
-
-    # Use cached mode if available
-    if cached_mode == "anonymous":
-        return fsspec.open(path, mode, anon=True)
-    elif cached_mode == "authenticated":
-        return fsspec.open(path, mode)
-
-    # Auto-detect: try anonymous first (handles public buckets like Overture)
-    try:
-        fs = fsspec.open(path, mode, anon=True)
-        # Test that we can actually access the file
-        with fs as f:
-            f.read(1)  # Read 1 byte to verify access
-        # Success - cache and return new handle
-        _s3_bucket_access_cache[bucket] = "anonymous"
-        return fsspec.open(path, mode, anon=True)
-    except Exception as e:
-        if not _is_s3_auth_rejection(e):
-            # Not an auth issue - could be file not found, etc.
-            # Still try authenticated before giving up
-            pass
-        # Fall through to authenticated
-
-    # Try authenticated
-    _s3_bucket_access_cache[bucket] = "authenticated"
-    return fsspec.open(path, mode)
+    # 403 without credentials means we need to authenticate
+    auth_indicators = ["403", "forbidden", "access denied", "unauthorized"]
+    return any(ind in error_str for ind in auth_indicators)
 
 
 # GeoParquet version configuration
@@ -184,8 +135,10 @@ def detect_geoparquet_file_type(parquet_file, verbose=False):
             - file_type: str - One of: "geoparquet_v1", "geoparquet_v2", "parquet_geo_only", "unknown"
             - bbox_recommended: bool - Whether bbox column is recommended for this file type
     """
-    # Import here to avoid circular import
-    from geoparquet_io.core.metadata_utils import detect_geo_logical_type
+    from geoparquet_io.core.duckdb_metadata import (
+        detect_geometry_columns,
+        get_geo_metadata,
+    )
 
     result = {
         "has_geo_metadata": False,
@@ -197,28 +150,17 @@ def detect_geoparquet_file_type(parquet_file, verbose=False):
 
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with open_with_fsspec(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        metadata = pf.schema_arrow.metadata
-        schema = pf.schema_arrow
-        parquet_schema_str = str(pf.metadata.schema)
-
-    # Check for geo metadata
-    if metadata and b"geo" in metadata:
+    # Check for geo metadata using DuckDB
+    geo_meta = get_geo_metadata(safe_url)
+    if geo_meta:
         result["has_geo_metadata"] = True
-        try:
-            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-            if isinstance(geo_meta, dict) and "version" in geo_meta:
-                result["geo_version"] = geo_meta["version"]
-        except (json.JSONDecodeError, KeyError):
-            pass
+        if isinstance(geo_meta, dict) and "version" in geo_meta:
+            result["geo_version"] = geo_meta["version"]
 
-    # Check for native Parquet geo types
-    for field in schema:
-        geo_type = detect_geo_logical_type(field, parquet_schema_str)
-        if geo_type:
-            result["has_native_geo_types"] = True
-            break
+    # Check for native Parquet geo types using DuckDB schema
+    geo_columns = detect_geometry_columns(safe_url)
+    if geo_columns:
+        result["has_native_geo_types"] = True
 
     # Determine file type
     if result["has_geo_metadata"]:
@@ -282,164 +224,6 @@ def has_glob_pattern(path: str) -> bool:
         bool: True if path contains glob characters (*, ?, [), False otherwise
     """
     return any(c in path for c in ("*", "?", "["))
-
-
-def expand_remote_glob(path: str, verbose: bool = False) -> list[str]:
-    """
-    Expand glob pattern for remote URLs using fsspec.
-
-    Args:
-        path: Remote URL with glob pattern (e.g., s3://bucket/path/*.parquet)
-        verbose: Whether to print verbose output
-
-    Returns:
-        list[str]: Sorted list of matching file paths with full URLs
-
-    Raises:
-        click.ClickException: If no files match the pattern
-    """
-    fs, _, _ = fsspec.get_fs_token_paths(path)
-    matches = fs.glob(path)
-    if not matches:
-        raise click.ClickException(f"No files found matching pattern: {path}")
-    # Reconstruct full URLs with protocol
-    protocol = path.split("://")[0]
-    return [f"{protocol}://{match}" for match in sorted(matches)]
-
-
-def _find_first_matching_remote_file(path: str, verbose: bool = False) -> str:
-    """
-    Find first matching file for a remote glob pattern without listing all matches.
-
-    For patterns like s3://bucket/partition=*/file.parquet, this stops
-    at the first match instead of listing all partitions.
-
-    IMPORTANT: Avoids calling fsspec.get_fs_token_paths() with glob patterns
-    as that triggers full glob expansion internally. Instead, extracts the
-    base path and uses fs.ls() to walk directories.
-    """
-    import fnmatch
-
-    protocol = path.split("://")[0]
-    path_without_protocol = path.split("://", 1)[1]
-    parts = path_without_protocol.split("/")
-
-    # Find the first part with a wildcard
-    base_parts = []
-    wildcard_idx = -1
-    for i, part in enumerate(parts):
-        if any(c in part for c in ("*", "?", "[")):
-            wildcard_idx = i
-            break
-        base_parts.append(part)
-
-    if wildcard_idx == -1:
-        # No wildcard found, return as-is
-        return path
-
-    # Build base path (without glob) to get filesystem
-    base_path = "/".join(base_parts)
-    base_url = f"{protocol}://{base_path}"
-
-    # Get filesystem using base path WITHOUT glob - this avoids the slow glob expansion
-    # Use cache-based S3 access mode detection
-    storage_options = {}
-    if protocol in ("s3", "s3a"):
-        bucket = _extract_bucket_name(path)
-        cached_mode = _s3_bucket_access_cache.get(bucket)
-        if cached_mode == "anonymous":
-            storage_options = {"anon": True}
-        elif cached_mode is None:
-            # Not cached yet - try anonymous first (will be cached by other functions)
-            storage_options = {"anon": True}
-    fs, _, _ = fsspec.get_fs_token_paths(base_url, storage_options=storage_options)
-
-    # Now walk directories to find first match
-    def find_first_match(current_path: str, pattern_parts: list, part_idx: int) -> str | None:
-        """Recursively find first matching file."""
-        if part_idx >= len(pattern_parts):
-            return None
-
-        pattern_part = pattern_parts[part_idx]
-        is_last_part = part_idx == len(pattern_parts) - 1
-
-        try:
-            items = fs.ls(current_path, detail=False)
-        except Exception:
-            return None
-
-        for item in sorted(items):
-            # Get just the filename/dirname part
-            item_name = item.split("/")[-1]
-
-            if fnmatch.fnmatch(item_name, pattern_part):
-                if is_last_part:
-                    # Found a match
-                    return f"{protocol}://{item}"
-                else:
-                    # Continue searching in subdirectory
-                    result = find_first_match(item, pattern_parts, part_idx + 1)
-                    if result:
-                        return result
-
-        return None
-
-    # Start searching from base path with remaining pattern parts
-    result = find_first_match(base_path, parts, wildcard_idx)
-
-    if result:
-        if verbose:
-            click.echo(f"Resolved glob pattern to first match for metadata: {result}")
-        return result
-
-    raise click.ClickException(f"No files found matching pattern: {path}")
-
-
-def resolve_single_file_for_metadata(path: str, verbose: bool = False) -> str:
-    """
-    Resolve a path to a single file for metadata reading.
-
-    For glob patterns (local or remote), expands the pattern and returns
-    the first matching file. This allows metadata operations (which use
-    fsspec.open() or direct file access) to work with glob patterns, while
-    DuckDB queries can still use the original glob pattern.
-
-    For non-glob patterns, returns the path unchanged.
-
-    Optimized for large partitioned datasets by finding the first match
-    without listing all files.
-
-    Args:
-        path: File path or URL, potentially with glob pattern
-        verbose: Whether to print verbose output
-
-    Returns:
-        str: Resolved file path (first match if glob, otherwise unchanged)
-
-    Examples:
-        >>> resolve_single_file_for_metadata("s3://bucket/path/*.parquet")
-        "s3://bucket/path/file1.parquet"
-        >>> resolve_single_file_for_metadata("/local/path/*.parquet")
-        "/local/path/file1.parquet"
-        >>> resolve_single_file_for_metadata("/local/file.parquet")
-        "/local/file.parquet"
-    """
-    if not has_glob_pattern(path):
-        return path
-
-    # Handle remote URLs - find first match only (optimization for large datasets)
-    if is_remote_url(path):
-        return _find_first_matching_remote_file(path, verbose)
-
-    # Handle local globs using standard library glob
-    import glob as glob_module
-
-    matches = sorted(glob_module.glob(path))
-    if not matches:
-        raise click.ClickException(f"No files found matching pattern: {path}")
-    if verbose:
-        click.echo(f"Resolved glob pattern to first match for metadata: {matches[0]}")
-    return matches[0]
 
 
 def upload_if_remote(local_path, remote_path, profile=None, is_directory=False, verbose=False):
@@ -720,27 +504,22 @@ def validate_output_path(output_path, verbose=False):
         raise click.ClickException(f"No write permission for: {output_dir}")
 
 
-def get_duckdb_connection(load_spatial=True, load_httpfs=None, s3_anonymous=False):
+def get_duckdb_connection(load_spatial=True, load_httpfs=None, use_s3_auth=False):
     """
     Create a DuckDB connection with necessary extensions loaded.
 
-    When load_httpfs=True, also loads the aws extension and configures
-    automatic credential discovery for S3 access. Credentials are discovered
-    via the AWS SDK in this order:
-    1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-    2. AWS profile (AWS_PROFILE env var or ~/.aws/credentials)
-    3. IAM role (EC2/ECS/EKS instance metadata)
+    By default, S3 access uses no credentials, which works for public buckets.
+    DuckDB automatically handles region detection for public S3 buckets.
 
-    When s3_anonymous=True, uses anonymous (unsigned) S3 access instead.
-    This is required for some public S3 buckets (like Overture Maps) that
-    don't accept authenticated requests.
+    When use_s3_auth=True, loads the aws extension and configures credential
+    discovery for private S3 buckets.
 
     Args:
         load_spatial: Whether to load spatial extension (default: True)
         load_httpfs: Whether to load httpfs extension for S3/Azure/GCS.
                     If None (default), auto-detects based on usage.
-        s3_anonymous: Whether to use anonymous S3 access (default: False).
-                     When True, no credentials are sent with S3 requests.
+        use_s3_auth: Whether to configure AWS credential chain for S3 (default: False).
+                    Only needed for private buckets.
 
     Returns:
         duckdb.DuckDBPyConnection: Configured connection with extensions loaded
@@ -757,29 +536,11 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None, s3_anonymous=Fals
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
 
-        if s3_anonymous:
-            # Use anonymous S3 access (no credentials)
-            # Required for public buckets like Overture Maps that reject authenticated requests
-            # Note: We don't set a specific region - DuckDB will auto-detect from bucket
-            con.execute("SET s3_url_style = 'vhost';")
-            con.execute("""
-                CREATE OR REPLACE SECRET (
-                    TYPE s3,
-                    PROVIDER config,
-                    KEY_ID '',
-                    SECRET ''
-                );
-            """)
-        else:
-            # Load aws extension for S3 authentication
-            # This works in conjunction with httpfs to provide authenticated S3 access
+        # Only configure AWS credentials if explicitly requested (for private buckets)
+        # Public buckets work without any secret - DuckDB handles them automatically
+        if use_s3_auth:
             con.execute("INSTALL aws;")
             con.execute("LOAD aws;")
-
-            # Configure automatic credential discovery using AWS SDK
-            # This respects AWS_PROFILE, ~/.aws/credentials, env vars, and IAM roles
-            # Use VALIDATION 'none' to allow creating secret without immediate credentials
-            # (credentials will be discovered at query time)
             con.execute("""
                 CREATE OR REPLACE SECRET (
                     TYPE s3,
@@ -796,10 +557,11 @@ def get_duckdb_connection_for_s3(
     load_spatial: bool = True,
 ) -> duckdb.DuckDBPyConnection:
     """
-    Get DuckDB connection with auto-detected S3 access mode for the given path.
+    Get DuckDB connection configured for S3 access.
 
-    For S3 paths, tries anonymous access first (for public buckets like Overture Maps),
-    then falls back to authenticated access. Results are cached per bucket.
+    For S3 paths, uses no credentials by default (works for public buckets).
+    If a bucket is known to require auth (from previous attempts), uses
+    credential chain. Results are cached per bucket.
 
     Args:
         path: S3 path to access (used to determine bucket and access mode)
@@ -813,30 +575,24 @@ def get_duckdb_connection_for_s3(
         return get_duckdb_connection(load_spatial=load_spatial, load_httpfs=needs_httpfs(path))
 
     bucket = _extract_bucket_name(path)
-    cached_mode = _s3_bucket_access_cache.get(bucket)
 
-    # Use cached mode if available
-    if cached_mode == "anonymous":
-        return get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, s3_anonymous=True)
-    elif cached_mode == "authenticated":
-        return get_duckdb_connection(
-            load_spatial=load_spatial, load_httpfs=True, s3_anonymous=False
-        )
+    # If we know this bucket needs auth, use credential chain
+    if bucket in _s3_buckets_needing_auth:
+        return get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, use_s3_auth=True)
 
-    # Auto-detect: try anonymous first
-    con = get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, s3_anonymous=True)
+    # Try without credentials first (works for public buckets)
+    con = get_duckdb_connection(load_spatial=load_spatial, load_httpfs=True, use_s3_auth=False)
     try:
-        # Lightweight test query - use glob-safe path (first file if glob pattern)
-        test_path = resolve_single_file_for_metadata(path, verbose=False)
-        con.execute(f"SELECT 1 FROM read_parquet('{test_path}') LIMIT 1").fetchone()
-        _s3_bucket_access_cache[bucket] = "anonymous"
+        # Lightweight test query - DuckDB handles glob patterns natively
+        con.execute(f"SELECT 1 FROM read_parquet('{path}') LIMIT 1").fetchone()
         return con
     except Exception as e:
         con.close()
-        if _is_s3_auth_rejection(e):
-            _s3_bucket_access_cache[bucket] = "authenticated"
+        if _needs_s3_auth(e):
+            # This bucket requires authentication - cache and retry
+            _s3_buckets_needing_auth.add(bucket)
             return get_duckdb_connection(
-                load_spatial=load_spatial, load_httpfs=True, s3_anonymous=False
+                load_spatial=load_spatial, load_httpfs=True, use_s3_auth=True
             )
         raise
 
@@ -922,18 +678,64 @@ def get_remote_error_hint(error_msg, file_path=""):
 
 
 def get_parquet_metadata(parquet_file, verbose=False):
-    """Get Parquet file metadata."""
-    with open_with_fsspec(parquet_file, "rb") as f:
-        pf = pq.ParquetFile(f)
-        metadata = pf.schema_arrow.metadata
+    """
+    Get Parquet file metadata using DuckDB for kv_metadata and PyArrow for schema.
+
+    Returns:
+        tuple: (kv_metadata dict, PyArrow schema)
+
+    Note: Uses DuckDB for metadata extraction but returns PyArrow schema for
+    backward compatibility with code that expects schema.field() methods.
+    """
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    # Get key-value metadata (returns dict like {b'geo': b'...'})
+    kv_metadata = get_kv_metadata(safe_url)
+
+    # Get PyArrow schema for backward compatibility
+    # (some code uses schema.field(i).name patterns)
+    if is_remote_url(parquet_file):
+        # For remote files, use a DuckDB-based approach to read schema
+        from geoparquet_io.core.duckdb_metadata import get_schema_info
+
+        schema_info = get_schema_info(safe_url)
+        # Create a simple object that mimics PyArrow schema for basic usage
+        schema = _DuckDBSchemaWrapper(schema_info)
+    else:
+        pf = pq.ParquetFile(parquet_file)
         schema = pf.schema_arrow
 
-    if verbose and metadata:
+    if verbose and kv_metadata:
         click.echo("\nParquet metadata key-value pairs:")
-        for key in metadata:
-            click.echo(f"{key}: {metadata[key]}")
+        for key, value in kv_metadata.items():
+            key_str = key.decode("utf-8") if isinstance(key, bytes) else key
+            click.echo(f"{key_str}: {value}")
 
-    return metadata, schema
+    return kv_metadata, schema
+
+
+class _DuckDBSchemaWrapper:
+    """Wrapper to provide PyArrow-like interface for DuckDB schema info."""
+
+    def __init__(self, schema_info):
+        self._columns = [c for c in schema_info if c.get("name") and "." not in c.get("name", "")]
+
+    def __len__(self):
+        return len(self._columns)
+
+    def field(self, i):
+        return _DuckDBFieldWrapper(self._columns[i])
+
+
+class _DuckDBFieldWrapper:
+    """Wrapper to provide PyArrow-like interface for a DuckDB column."""
+
+    def __init__(self, col_info):
+        self.name = col_info.get("name", "")
 
 
 def parse_geo_metadata(metadata, verbose=False):
@@ -955,8 +757,13 @@ def parse_geo_metadata(metadata, verbose=False):
 
 def find_primary_geometry_column(parquet_file, verbose=False):
     """Find primary geometry column from GeoParquet metadata."""
-    metadata, _ = get_parquet_metadata(parquet_file, verbose)
-    geo_meta = parse_geo_metadata(metadata, verbose)
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+    geo_meta = get_geo_metadata(safe_url)
+
+    if verbose and geo_meta:
+        click.echo(f"\nGeo metadata: {json.dumps(geo_meta, indent=2)}")
 
     if not geo_meta:
         return "geometry"
@@ -1044,7 +851,7 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
 
     Checks in order:
     1. GeoParquet metadata (columns.<geom_col>.crs)
-    2. Parquet native geo type (from schema string)
+    2. Parquet native geo type (from schema logical_type)
 
     Args:
         parquet_file: Path to the parquet file
@@ -1053,40 +860,41 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
     Returns:
         dict: PROJJSON CRS dict, or None if no CRS found or CRS is default
     """
-    from geoparquet_io.core.metadata_utils import parse_geometry_type_from_schema
+    from geoparquet_io.core.duckdb_metadata import (
+        get_geo_metadata,
+        get_schema_info,
+        parse_geometry_logical_type,
+    )
 
     safe_url = safe_file_url(parquet_file, verbose=False)
 
-    with open_with_fsspec(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-        parquet_schema_str = str(pf.metadata.schema)
-        metadata = schema.metadata
-
     # First, try GeoParquet metadata
-    if metadata and b"geo" in metadata:
-        try:
-            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-            primary_col = geo_meta.get("primary_column", "geometry")
-            columns = geo_meta.get("columns", {})
-            if primary_col in columns:
-                crs = columns[primary_col].get("crs")
-                if crs and not is_default_crs(crs):
-                    if verbose:
-                        click.echo(f"Found CRS in GeoParquet metadata: {_format_crs_display(crs)}")
-                    return crs
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    # Second, try Parquet native geo type
-    for field in schema:
-        geom_details = parse_geometry_type_from_schema(field.name, parquet_schema_str)
-        if geom_details and "crs" in geom_details:
-            crs = geom_details["crs"]
+    geo_meta = get_geo_metadata(safe_url)
+    if geo_meta:
+        primary_col = geo_meta.get("primary_column", "geometry")
+        columns = geo_meta.get("columns", {})
+        if primary_col in columns:
+            crs = columns[primary_col].get("crs")
             if crs and not is_default_crs(crs):
                 if verbose:
-                    click.echo(f"Found CRS in Parquet geo type: {_format_crs_display(crs)}")
+                    click.echo(f"Found CRS in GeoParquet metadata: {_format_crs_display(crs)}")
                 return crs
+
+    # Second, try Parquet native geo type from schema logical_type
+    # DuckDB returns GeometryType(...) and GeographyType(...) from parquet_schema()
+    schema_info = get_schema_info(safe_url)
+    for col in schema_info:
+        logical_type = col.get("logical_type", "")
+        if logical_type and (
+            logical_type.startswith("GeometryType(") or logical_type.startswith("GeographyType(")
+        ):
+            parsed = parse_geometry_logical_type(logical_type)
+            if parsed and "crs" in parsed:
+                crs = parsed["crs"]
+                if crs and not is_default_crs(crs):
+                    if verbose:
+                        click.echo(f"Found CRS in Parquet geo type: {_format_crs_display(crs)}")
+                    return crs
 
     return None
 
@@ -1929,54 +1737,81 @@ def format_size(size_bytes):
     return f"{size_bytes:.2f} TB"
 
 
-def _find_bbox_column_in_schema(schema, verbose):
-    """Find bbox column in schema by conventional names or structure."""
-    conventional_names = ["bbox", "bounds", "extent"]
-    for field in schema:
-        if field.name in conventional_names or (
-            isinstance(field.type, type(schema[0].type))
-            and str(field.type).startswith("struct<")
-            and all(f in str(field.type) for f in ["xmin", "ymin", "xmax", "ymax"])
-        ):
-            if verbose:
-                click.echo(f"Found bbox column: {field.name} with type {field.type}")
-            return field.name
+def _find_bbox_column_in_schema(schema_info, verbose):
+    """Find bbox column in schema by conventional names or structure.
+
+    Args:
+        schema_info: List of column dicts from get_schema_info()
+        verbose: Whether to print verbose output
+
+    Note:
+        DuckDB's parquet_schema() returns nested struct fields without parent prefix.
+        For a struct column 'bbox' with fields xmin/ymin/xmax/ymax:
+        - bbox appears with num_children=4
+        - Child fields appear as 'xmin', 'ymin', 'xmax', 'ymax' (not 'bbox.xmin')
+    """
+    # Check for columns ending with these suffixes (e.g., geometry_bbox, bbox)
+    conventional_suffixes = ["bbox", "bounds", "extent"]
+    required_fields = {"xmin", "ymin", "xmax", "ymax"}
+
+    for i, col in enumerate(schema_info):
+        name = col.get("name", "")
+        num_children = col.get("num_children", 0)
+
+        if not name:
+            continue
+
+        # Check if column name ends with conventional suffixes and has struct children
+        is_bbox_name = any(name.endswith(suffix) for suffix in conventional_suffixes)
+        if is_bbox_name and num_children >= 4:
+            # Get the next num_children entries as the struct's child fields
+            child_names = set()
+            for j in range(1, num_children + 1):
+                if i + j < len(schema_info):
+                    child_name = schema_info[i + j].get("name", "")
+                    child_names.add(child_name)
+
+            # Check if all required fields are present
+            if required_fields.issubset(child_names):
+                if verbose:
+                    click.echo(f"Found bbox column: {name} with children: {child_names}")
+                return name
+
     return None
 
 
-def _check_bbox_metadata_covering(metadata, has_bbox_column, verbose):
-    """Check if metadata contains proper bbox covering."""
-    if not (metadata and b"geo" in metadata and has_bbox_column):
+def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose):
+    """Check if geo metadata contains proper bbox covering.
+
+    Args:
+        geo_meta: Parsed geo metadata dict (from get_geo_metadata())
+        has_bbox_column: Whether a bbox column was found in schema
+        verbose: Whether to print verbose output
+    """
+    if not (geo_meta and has_bbox_column):
         return False
 
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        if verbose:
-            click.echo("\nParsed geo metadata:")
-            click.echo(json.dumps(geo_meta, indent=2))
+    if verbose:
+        click.echo("\nParsed geo metadata:")
+        click.echo(json.dumps(geo_meta, indent=2))
 
-        if isinstance(geo_meta, dict) and "columns" in geo_meta:
-            columns = geo_meta["columns"]
-            for _col_name, col_info in columns.items():
-                if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
-                    bbox_refs = col_info["covering"]["bbox"]
-                    # Check if the bbox covering has the required structure
-                    if (
-                        isinstance(bbox_refs, dict)
-                        and all(key in bbox_refs for key in ["xmin", "ymin", "xmax", "ymax"])
-                        and all(
-                            isinstance(ref, list) and len(ref) == 2 for ref in bbox_refs.values()
+    if isinstance(geo_meta, dict) and "columns" in geo_meta:
+        columns = geo_meta["columns"]
+        for _col_name, col_info in columns.items():
+            if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
+                bbox_refs = col_info["covering"]["bbox"]
+                # Check if the bbox covering has the required structure
+                if (
+                    isinstance(bbox_refs, dict)
+                    and all(key in bbox_refs for key in ["xmin", "ymin", "xmax", "ymax"])
+                    and all(isinstance(ref, list) and len(ref) == 2 for ref in bbox_refs.values())
+                ):
+                    referenced_bbox_column = bbox_refs["xmin"][0]
+                    if verbose:
+                        click.echo(
+                            f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
                         )
-                    ):
-                        referenced_bbox_column = bbox_refs["xmin"][0]
-                        if verbose:
-                            click.echo(
-                                f"Found bbox covering in metadata referencing column: {referenced_bbox_column}"
-                            )
-                        return True
-    except json.JSONDecodeError:
-        if verbose:
-            click.echo("Failed to parse geo metadata as JSON")
+                    return True
 
     return False
 
@@ -2006,22 +1841,28 @@ def check_bbox_structure(parquet_file, verbose=False):
             - status (str): "optimal", "suboptimal", or "poor"
             - message (str): Human readable description
     """
-    with open_with_fsspec(safe_file_url(parquet_file), "rb") as f:
-        pf = pq.ParquetFile(f)
-        metadata = pf.schema_arrow.metadata
-        schema = pf.schema_arrow
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
+
+    safe_url = safe_file_url(parquet_file, verbose=False)
+
+    # Get schema info using DuckDB
+    schema_info = get_schema_info(safe_url)
 
     if verbose:
         click.echo("\nSchema fields:")
-        for field in schema:
-            click.echo(f"  {field.name}: {field.type}")
+        for col in schema_info:
+            name = col.get("name", "")
+            col_type = col.get("type", "")
+            if name:  # Skip empty names
+                click.echo(f"  {name}: {col_type}")
 
     # Find the bbox column in the schema
-    bbox_column_name = _find_bbox_column_in_schema(schema, verbose)
+    bbox_column_name = _find_bbox_column_in_schema(schema_info, verbose)
     has_bbox_column = bbox_column_name is not None
 
-    # Check metadata for bbox covering
-    has_bbox_metadata = _check_bbox_metadata_covering(metadata, has_bbox_column, verbose)
+    # Get geo metadata and check for bbox covering
+    geo_meta = get_geo_metadata(safe_url)
+    has_bbox_metadata = _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose)
 
     # Determine status and message
     status, message = _determine_bbox_status(has_bbox_column, bbox_column_name, has_bbox_metadata)
@@ -2212,18 +2053,16 @@ def add_computed_column(
 
     # Check if column already exists (skip in dry-run or when replacing)
     if not dry_run:
-        with open_with_fsspec(input_url, "rb") as f:
-            pf = pq.ParquetFile(f)
-            schema = pf.schema_arrow
+        from geoparquet_io.core.duckdb_metadata import get_column_names
 
         # Only check for column collision if not replacing
         if not replace_column:
-            for field in schema:
-                if field.name == column_name:
-                    raise click.ClickException(
-                        f"Column '{column_name}' already exists in the file. "
-                        f"Please choose a different name."
-                    )
+            column_names = get_column_names(input_url)
+            if column_name in column_names:
+                raise click.ClickException(
+                    f"Column '{column_name}' already exists in the file. "
+                    f"Please choose a different name."
+                )
 
         # Get metadata before processing
         metadata, _ = get_parquet_metadata(input_parquet, verbose)
@@ -2338,17 +2177,17 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
     Raises:
         click.ClickException: If column already exists or operation fails
     """
-    # Check if column already exists
-    with open_with_fsspec(safe_file_url(parquet_file), "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
+    from geoparquet_io.core.duckdb_metadata import get_column_names
 
-    for field in schema:
-        if field.name == bbox_column_name:
-            raise click.ClickException(
-                f"Column '{bbox_column_name}' already exists in the file. "
-                f"Please choose a different name."
-            )
+    # Check if column already exists using DuckDB
+    safe_url = safe_file_url(parquet_file, verbose=False)
+    column_names = get_column_names(safe_url)
+
+    if bbox_column_name in column_names:
+        raise click.ClickException(
+            f"Column '{bbox_column_name}' already exists in the file. "
+            f"Please choose a different name."
+        )
 
     # Get geometry column for SQL expression
     geom_col = find_primary_geometry_column(parquet_file, verbose)

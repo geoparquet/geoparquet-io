@@ -2,17 +2,12 @@
 
 
 import click
-import fsspec
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
     check_bbox_structure,
     detect_geoparquet_file_type,
     find_primary_geometry_column,
     format_size,
-    get_parquet_metadata,
-    parse_geo_metadata,
-    safe_file_url,
 )
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 
@@ -29,22 +24,9 @@ def get_row_group_stats(parquet_file):
             - total_size: Total file size in bytes
             - avg_group_size: Average group size in bytes
     """
-    with fsspec.open(safe_file_url(parquet_file), "rb") as f:
-        metadata = pq.ParquetFile(f).metadata
+    from geoparquet_io.core.duckdb_metadata import get_row_group_stats_summary
 
-        total_rows = metadata.num_rows
-        num_groups = metadata.num_row_groups
-        avg_rows_per_group = total_rows / num_groups if num_groups > 0 else 0
-        total_size = sum(metadata.row_group(i).total_byte_size for i in range(num_groups))
-        avg_group_size = total_size / num_groups if num_groups > 0 else 0
-
-        return {
-            "num_groups": num_groups,
-            "total_rows": total_rows,
-            "avg_rows_per_group": avg_rows_per_group,
-            "total_size": total_size,
-            "avg_group_size": avg_group_size,
-        }
+    return get_row_group_stats_summary(parquet_file)
 
 
 def assess_row_group_size(avg_group_size_bytes, total_size_bytes):
@@ -118,17 +100,11 @@ def get_compression_info(parquet_file, column_name=None):
     Returns:
         dict: Mapping of column names to their compression algorithms
     """
-    with fsspec.open(safe_file_url(parquet_file), "rb") as f:
-        metadata = pq.ParquetFile(f).metadata
+    from geoparquet_io.core.duckdb_metadata import (
+        get_compression_info as duckdb_get_compression_info,
+    )
 
-        compression_info = {}
-        for i in range(metadata.num_columns):
-            col = metadata.schema.column(i)
-            if column_name is None or col.name == column_name:
-                compression = metadata.row_group(0).column(i).compression
-                compression_info[col.name] = compression
-
-        return compression_info
+    return duckdb_get_compression_info(parquet_file, column_name)
 
 
 def check_row_groups(parquet_file, verbose=False, return_results=False):
@@ -337,8 +313,9 @@ def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results):
 
 def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results):
     """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
-    metadata, _ = get_parquet_metadata(parquet_file)
-    geo_meta = parse_geo_metadata(metadata, False)
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+
+    geo_meta = get_geo_metadata(parquet_file)
     version = geo_meta.get("version", "0.0.0") if geo_meta else "0.0.0"
     bbox_info = check_bbox_structure(parquet_file, verbose)
 
