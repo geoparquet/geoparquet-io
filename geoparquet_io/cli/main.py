@@ -32,6 +32,7 @@ from geoparquet_io.core.inspect_utils import (
     get_column_statistics,
     get_preview_data,
 )
+from geoparquet_io.core.logging_config import configure_verbose, setup_cli_logging
 from geoparquet_io.core.partition_admin_hierarchical import (
     partition_by_admin_hierarchical as partition_admin_hierarchical_impl,
 )
@@ -54,6 +55,8 @@ def cli(ctx, timestamps):
     """Fast I/O and transformation tools for GeoParquet files."""
     ctx.ensure_object(dict)
     ctx.obj["timestamps"] = timestamps
+    # Setup logging for CLI output (default level INFO, verbose commands will set DEBUG)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 # Check commands group - use custom command class for default subcommand
@@ -77,15 +80,20 @@ class DefaultGroup(click.Group):
 
 
 @cli.group(cls=DefaultGroup)
-def check():
+@click.pass_context
+def check(ctx):
     """Check GeoParquet files for best practices.
 
     By default, runs all checks (compression, bbox, row groups, and spatial order).
     Use subcommands for specific checks.
 
     When run without a subcommand, all checks are performed. Options like --fix
-    can be used directly without specifying 'all'."""
-    pass
+    can be used directly without specifying 'all'.
+    """
+    # Ensure logging is set up (in case this group is invoked directly in tests)
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False) if ctx.obj else False
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 @check.command(name="all")
@@ -132,6 +140,8 @@ def check_all(
 
     from geoparquet_io.core.check_fixes import apply_all_fixes
     from geoparquet_io.core.common import is_remote_url, show_remote_read_message
+
+    configure_verbose(verbose)
 
     # Show single progress message for remote files
     show_remote_read_message(parquet_file, verbose=False)

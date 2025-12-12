@@ -119,6 +119,24 @@ class LibraryFormatter(logging.Formatter):
         )
 
 
+class DynamicStreamHandler(logging.StreamHandler):
+    """
+    A StreamHandler that dynamically uses sys.stdout at emit time.
+
+    This is needed for Click's CliRunner which substitutes sys.stdout
+    after handler creation.
+    """
+
+    def __init__(self):
+        # Initialize with None stream - we'll use sys.stdout dynamically
+        super().__init__(stream=None)
+
+    def emit(self, record):
+        # Use the current sys.stdout at emit time
+        self.stream = sys.stdout
+        super().emit(record)
+
+
 def setup_cli_logging(
     verbose: bool = False, show_timestamps: bool = False, use_colors: bool | None = None
 ) -> None:
@@ -133,7 +151,7 @@ def setup_cli_logging(
         show_timestamps: If True, include timestamps in output
         use_colors: If True, use ANSI colors. If None, auto-detect TTY.
     """
-    handler = logging.StreamHandler(sys.stdout)
+    handler = DynamicStreamHandler()
     handler.setFormatter(CLIFormatter(show_timestamps=show_timestamps, use_colors=use_colors))
 
     level = logging.DEBUG if verbose else logging.INFO
@@ -141,7 +159,9 @@ def setup_cli_logging(
     logger.setLevel(level)
     logger.handlers.clear()
     logger.addHandler(handler)
-    logger.propagate = False
+    # Keep propagate True for pytest log capture compatibility
+    # Our handler will still output to stdout
+    logger.propagate = True
 
 
 def get_logger(name: str | None = None) -> logging.Logger:

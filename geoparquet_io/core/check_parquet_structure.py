@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
 
-import click
-
 from geoparquet_io.core.common import (
     check_bbox_structure,
     detect_geoparquet_file_type,
     find_primary_geometry_column,
     format_size,
 )
+from geoparquet_io.core.logging_config import error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 
 
@@ -155,26 +154,40 @@ def check_row_groups(parquet_file, verbose=False, return_results=False):
     }
 
     # Print results
-    click.echo("\nRow Group Analysis:")
-    click.echo(f"Number of row groups: {stats['num_groups']}")
+    progress("\nRow Group Analysis:")
+    progress(f"Number of row groups: {stats['num_groups']}")
 
-    click.echo(
-        click.style(f"Average group size: {format_size(stats['avg_group_size'])}", fg=size_color)
-    )
-    click.echo(click.style(size_message, fg=size_color))
+    # Color-based output for size
+    size_msg = f"Average group size: {format_size(stats['avg_group_size'])}"
+    if size_color == "green":
+        success(size_msg)
+        success(size_message)
+    elif size_color == "yellow":
+        warn(size_msg)
+        warn(size_message)
+    else:
+        error(size_msg)
+        error(size_message)
 
-    click.echo(
-        click.style(f"Average rows per group: {stats['avg_rows_per_group']:,.0f}", fg=row_color)
-    )
-    click.echo(click.style(row_message, fg=row_color))
+    # Color-based output for rows
+    row_msg = f"Average rows per group: {stats['avg_rows_per_group']:,.0f}"
+    if row_color == "green":
+        success(row_msg)
+        success(row_message)
+    elif row_color == "yellow":
+        warn(row_msg)
+        warn(row_message)
+    else:
+        error(row_msg)
+        error(row_message)
 
-    click.echo(f"\nTotal file size: {format_size(stats['total_size'])}")
+    progress(f"\nTotal file size: {format_size(stats['total_size'])}")
 
     if size_status != "optimal" or row_status != "optimal":
-        click.echo("\nRow Group Guidelines:")
-        click.echo("- Optimal size: 64-256 MB per row group")
-        click.echo("- Optimal rows: 50,000-200,000 rows per group")
-        click.echo("- Small files (<64 MB): single row group is fine")
+        progress("\nRow Group Guidelines:")
+        progress("- Optimal size: 64-256 MB per row group")
+        progress("- Optimal rows: 50,000-200,000 rows per group")
+        progress("- Small files (<64 MB): single row group is fine")
 
     if return_results:
         return results
@@ -201,36 +214,22 @@ def _check_parquet_geo_only(parquet_file, file_type_info, verbose, return_result
     passed = not bbox_info["has_bbox_column"]
 
     # Print results
-    click.echo("\nParquet Geo Analysis:")
-    click.echo(click.style("✓ File uses native Parquet GEOMETRY/GEOGRAPHY types", fg="green"))
-    click.echo(
-        click.style("⚠️  No GeoParquet metadata (file uses parquet-geo-only format)", fg="yellow")
-    )
-    click.echo(
-        click.style(
-            "   Use 'gpio convert --geoparquet-version 2.0' to add GeoParquet 2.0 metadata",
-            fg="cyan",
-        )
-    )
+    progress("\nParquet Geo Analysis:")
+    success("✓ File uses native Parquet GEOMETRY/GEOGRAPHY types")
+    warn("⚠️  No GeoParquet metadata (file uses parquet-geo-only format)")
+    info("   Use 'gpio convert --geoparquet-version 2.0' to add GeoParquet 2.0 metadata")
 
     if bbox_info["has_bbox_column"]:
-        click.echo(
-            click.style(
-                f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found "
-                "(unnecessary - native geo types have row group stats)",
-                fg="yellow",
-            )
+        warn(
+            f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found "
+            "(unnecessary - native geo types have row group stats)"
         )
-        click.echo(click.style("   Use --fix to remove the bbox column", fg="cyan"))
+        info("   Use --fix to remove the bbox column")
     else:
-        click.echo(
-            click.style("✓ No bbox column (correct for native Parquet geo types)", fg="green")
-        )
+        success("✓ No bbox column (correct for native Parquet geo types)")
 
     if stats_info["has_stats"]:
-        click.echo(
-            click.style("✓ Row group statistics available for spatial filtering", fg="green")
-        )
+        success("✓ Row group statistics available for spatial filtering")
 
     if return_results:
         return {
@@ -268,31 +267,19 @@ def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results):
     passed = not bbox_info["has_bbox_column"]
 
     # Print results
-    click.echo("\nGeoParquet 2.0 Metadata:")
-    click.echo(click.style(f"✓ Version {file_type_info['geo_version']}", fg="green"))
-    click.echo(click.style("✓ Uses native Parquet GEOMETRY/GEOGRAPHY types", fg="green"))
+    progress("\nGeoParquet 2.0 Metadata:")
+    success(f"✓ Version {file_type_info['geo_version']}")
+    success("✓ Uses native Parquet GEOMETRY/GEOGRAPHY types")
 
     if bbox_info["has_bbox_column"]:
-        click.echo(
-            click.style(
-                f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found (not recommended for 2.0)",
-                fg="yellow",
-            )
-        )
-        click.echo(
-            click.style(
-                "   Native Parquet geo types provide row group stats for spatial filtering.",
-                fg="cyan",
-            )
-        )
-        click.echo(click.style("   Use --fix to remove the bbox column", fg="cyan"))
+        warn(f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found (not recommended for 2.0)")
+        info("   Native Parquet geo types provide row group stats for spatial filtering.")
+        info("   Use --fix to remove the bbox column")
     else:
-        click.echo(click.style("✓ No bbox column (correct for GeoParquet 2.0)", fg="green"))
+        success("✓ No bbox column (correct for GeoParquet 2.0)")
 
     if stats_info["has_stats"]:
-        click.echo(
-            click.style("✓ Row group statistics available for spatial filtering", fg="green")
-        )
+        success("✓ Row group statistics available for spatial filtering")
 
     if return_results:
         return {
@@ -341,34 +328,25 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results):
     passed = version >= "1.1.0" and not needs_bbox_column and not needs_bbox_metadata
 
     # Print results
-    click.echo("\nGeoParquet Metadata:")
-    version_color = "green" if version >= "1.1.0" else "yellow"
-    version_prefix = "✓" if version >= "1.1.0" else "⚠️"
-    version_suffix = "" if version >= "1.1.0" else " (upgrade to 1.1.0+ recommended)"
-
-    click.echo(click.style(f"{version_prefix} Version {version}{version_suffix}", fg=version_color))
+    progress("\nGeoParquet Metadata:")
+    if version >= "1.1.0":
+        success(f"✓ Version {version}")
+    else:
+        warn(f"⚠️ Version {version} (upgrade to 1.1.0+ recommended)")
 
     if bbox_info["has_bbox_column"]:
         if bbox_info["has_bbox_metadata"]:
-            click.echo(
-                click.style(
-                    f"✓ Found bbox column '{bbox_info['bbox_column_name']}' "
-                    "with proper metadata covering",
-                    fg="green",
-                )
+            success(
+                f"✓ Found bbox column '{bbox_info['bbox_column_name']}' "
+                "with proper metadata covering"
             )
         else:
-            click.echo(
-                click.style(
-                    f"⚠️  Found bbox column '{bbox_info['bbox_column_name']}' but missing "
-                    "bbox covering metadata (add to metadata to help inform clients)",
-                    fg="yellow",
-                )
+            warn(
+                f"⚠️  Found bbox column '{bbox_info['bbox_column_name']}' but missing "
+                "bbox covering metadata (add to metadata to help inform clients)"
             )
     else:
-        click.echo(
-            click.style("❌ No bbox column found (recommended for better performance)", fg="red")
-        )
+        error("❌ No bbox column found (recommended for better performance)")
 
     if return_results:
         return {
@@ -429,7 +407,7 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
         return _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results)
 
     # Unknown file type - no geo indicators found
-    click.echo(click.style("\n❌ No GeoParquet metadata found", fg="red"))
+    error("\n❌ No GeoParquet metadata found")
     if return_results:
         return {
             "passed": False,
@@ -459,7 +437,7 @@ def check_compression(parquet_file, verbose=False, return_results=False):
     """
     primary_col = find_primary_geometry_column(parquet_file, verbose)
     if not primary_col:
-        click.echo(click.style("\n❌ No geometry column found", fg="red"))
+        error("\n❌ No geometry column found")
         if return_results:
             return {
                 "passed": False,
@@ -490,18 +468,11 @@ def check_compression(parquet_file, verbose=False, return_results=False):
     }
 
     # Print results
-    click.echo("\nCompression Analysis:")
+    progress("\nCompression Analysis:")
     if compression == "ZSTD":
-        click.echo(
-            click.style(f"✓ ZSTD compression on geometry column '{primary_col}'", fg="green")
-        )
+        success(f"✓ ZSTD compression on geometry column '{primary_col}'")
     else:
-        click.echo(
-            click.style(
-                f"⚠️  {compression} compression on geometry column '{primary_col}' (ZSTD recommended)",
-                fg="yellow",
-            )
-        )
+        warn(f"⚠️  {compression} compression on geometry column '{primary_col}' (ZSTD recommended)")
 
     if return_results:
         return results
