@@ -4,8 +4,6 @@ import os
 import tempfile
 
 import click
-import fsspec
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.add_h3_column import add_h3_column
 from geoparquet_io.core.common import safe_file_url
@@ -62,12 +60,11 @@ def partition_by_h3(
 
     safe_url = safe_file_url(input_parquet, verbose)
 
-    # Check if H3 column exists
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
+    # Check if H3 column exists using DuckDB
+    from geoparquet_io.core.duckdb_metadata import get_column_names
 
-    column_exists = h3_column_name in schema.names
+    column_names = get_column_names(safe_url)
+    column_exists = h3_column_name in column_names
 
     # If column doesn't exist, add it
     if not column_exists:

@@ -164,7 +164,10 @@ class TestS3FileReading:
         """Test DuckDB query on S3 URL."""
         from geoparquet_io.core.common import get_duckdb_connection
 
+        # No special configuration needed - DuckDB handles public S3 buckets automatically
         con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
+        # Set S3 region for this specific bucket (was relocated from us-west-2 to us-east-2)
+        con.execute("SET s3_region = 'us-east-2';")
         result = con.execute(f"SELECT COUNT(*) FROM '{self.S3_URL}'").fetchone()
         assert result[0] > 0  # Should have rows
 
@@ -280,14 +283,27 @@ class TestConvertRemoteParquet:
     @pytest.mark.network
     def test_convert_remote_parquet(self, tmp_path):
         """Test converting remote parquet file."""
+        import warnings
+
         from geoparquet_io.core.convert import convert_to_geoparquet
 
         output = tmp_path / "output.parquet"
         url = "https://github.com/opengeospatial/geoparquet/raw/refs/heads/main/examples/example.parquet"
 
-        convert_to_geoparquet(
-            input_file=url, output_file=str(output), skip_hilbert=True, verbose=False
-        )
+        try:
+            convert_to_geoparquet(
+                input_file=url, output_file=str(output), skip_hilbert=True, verbose=False
+            )
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Skip on transient network errors (SSL, connection, timeout)
+            if any(
+                term in error_msg
+                for term in ["ssl", "connection", "timeout", "network", "certificate"]
+            ):
+                warnings.warn(f"Skipping due to transient network error: {e}", stacklevel=2)
+                pytest.skip(f"Transient network error: {e}")
+            raise  # Re-raise non-network errors
 
         assert output.exists()
         assert output.stat().st_size > 0

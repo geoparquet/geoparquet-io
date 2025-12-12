@@ -4,8 +4,6 @@ import os
 import tempfile
 
 import click
-import fsspec
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.add_kdtree_column import add_kdtree_column
 from geoparquet_io.core.common import safe_file_url
@@ -68,12 +66,12 @@ def partition_by_kdtree(
     safe_url = safe_file_url(input_parquet, verbose)
 
     # Check if KD-tree column exists and get row count for dataset size validation
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-        total_rows = pf.metadata.num_rows
+    from geoparquet_io.core.duckdb_metadata import get_column_names, get_row_count
 
-    column_exists = kdtree_column_name in schema.names
+    column_names = get_column_names(safe_url)
+    total_rows = get_row_count(safe_url)
+
+    column_exists = kdtree_column_name in column_names
 
     # Note: With approximate mode (default), large datasets are handled efficiently in O(n)
     # Only exact mode is expensive for very large datasets

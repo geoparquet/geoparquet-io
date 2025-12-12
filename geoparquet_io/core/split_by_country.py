@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 
-import json
-
 import click
-import fsspec
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import safe_file_url
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
@@ -12,38 +8,62 @@ from geoparquet_io.core.partition_common import partition_by_column, preview_par
 
 def check_country_code_column(parquet_file, column_name="admin:country_code"):
     """Check if the specified column exists and is populated."""
-    with pq.ParquetFile(parquet_file) as parquet:
-        schema = parquet.schema
+    from geoparquet_io.core.duckdb_metadata import get_column_names
 
-        # Check if column exists
-        if column_name not in schema.names:
-            raise click.UsageError(
-                f"Column '{column_name}' not found in the Parquet file. "
-                "Please add country codes first using the add_country_codes command."
-            )
+    safe_url = safe_file_url(parquet_file, verbose=False)
+    column_names = get_column_names(safe_url)
 
-        # Check if column has values
-        table = parquet.read([column_name])
-        if table.column(column_name).null_count == table.num_rows:
+    # Check if column exists
+    if column_name not in column_names:
+        raise click.UsageError(
+            f"Column '{column_name}' not found in the Parquet file. "
+            "Please add country codes first using the add_country_codes command."
+        )
+
+    # Check if column has values using DuckDB query
+    from geoparquet_io.core.common import get_duckdb_connection, needs_httpfs
+
+    con = get_duckdb_connection(load_spatial=False, load_httpfs=needs_httpfs(parquet_file))
+    try:
+        result = con.execute(f"""
+            SELECT COUNT(*) as total, COUNT("{column_name}") as non_null
+            FROM read_parquet('{safe_url}')
+        """).fetchone()
+        total, non_null = result
+        if non_null == 0:
             raise click.UsageError(
                 f"Column '{column_name}' exists but contains only NULL values. "
                 "Please populate country codes using the add_country_codes command."
             )
+    finally:
+        con.close()
 
 
 def check_crs(parquet_file, verbose=False):
     """Check if CRS is WGS84 or null, warn if not."""
-    with fsspec.open(parquet_file, "rb") as f:
-        metadata = pq.ParquetFile(f).schema_arrow.metadata
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 
-    if metadata and b"geo" in metadata:
-        try:
-            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+    safe_url = safe_file_url(parquet_file, verbose=False)
+    geo_meta = get_geo_metadata(safe_url)
 
-            # Check CRS in both metadata formats
-            if isinstance(geo_meta, dict):
-                for _col_name, col_meta in geo_meta.get("columns", {}).items():
-                    crs = col_meta.get("crs")
+    if geo_meta:
+        # Check CRS in both metadata formats
+        if isinstance(geo_meta, dict):
+            for _col_name, col_meta in geo_meta.get("columns", {}).items():
+                crs = col_meta.get("crs")
+                if crs and not _is_wgs84(crs):
+                    click.echo(
+                        click.style(
+                            "Warning: Input file uses a CRS other than WGS84. "
+                            "Results may be incorrect.",
+                            fg="yellow",
+                        )
+                    )
+                    return
+        elif isinstance(geo_meta, list):
+            for col in geo_meta:
+                if isinstance(col, dict):
+                    crs = col.get("crs")
                     if crs and not _is_wgs84(crs):
                         click.echo(
                             click.style(
@@ -53,23 +73,6 @@ def check_crs(parquet_file, verbose=False):
                             )
                         )
                         return
-            elif isinstance(geo_meta, list):
-                for col in geo_meta:
-                    if isinstance(col, dict):
-                        crs = col.get("crs")
-                        if crs and not _is_wgs84(crs):
-                            click.echo(
-                                click.style(
-                                    "Warning: Input file uses a CRS other than WGS84. "
-                                    "Results may be incorrect.",
-                                    fg="yellow",
-                                )
-                            )
-                            return
-
-        except json.JSONDecodeError:
-            if verbose:
-                click.echo("Failed to parse geo metadata")
 
 
 def _is_wgs84(crs):
