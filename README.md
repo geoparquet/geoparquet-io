@@ -61,7 +61,7 @@ Contributions are welcome! See [CONTRIBUTING.md](docs/contributing.md) for devel
 ## Links
 
 - **Documentation**: [https://geoparquet.org/geoparquet-io/](https://geoparquet.org/geoparquet-io/)
-- **PyPI**: [https://pypi.org/project/geoparquet-io/](https://pypi.org/project/geoparquet-io/) (coming soon)
+- **PyPI**: [https://pypi.org/project/geoparquet-io/](https://pypi.org/project/geoparquet-io/)
 - **Issues**: [https://github.com/cholmes/geoparquet-io/issues](https://github.com/cholmes/geoparquet-io/issues)
 
 ## License

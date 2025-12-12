@@ -2,6 +2,9 @@
 
 The `inspect` command provides quick, human-readable summaries of GeoParquet files.
 
+!!! tip "Need more detail?"
+    For comprehensive metadata analysis including row group details and full schema information, use [`gpio meta`](meta.md) instead.
+
 ## Basic Usage
 
 ```bash
@@ -107,4 +110,5 @@ gpio inspect data.parquet --json | jq '.file_info.rows'
 ## See Also
 
 - [CLI Reference: inspect](../cli/inspect.md)
-- [check command](check.md)
+- [Viewing Metadata](meta.md) - Deep dive into file structure
+- [Checking Best Practices](check.md) - Validate GeoParquet files

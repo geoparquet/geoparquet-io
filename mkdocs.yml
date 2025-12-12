@@ -29,6 +29,17 @@ theme:
 
 plugins:
   - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            heading_level: 3
+            members_order: source
+            docstring_style: google
 
 markdown_extensions:
   - admonition
@@ -46,9 +57,14 @@ nav:
   - Getting Started:
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quickstart.md
+  - Concepts:
+    - What is GeoParquet?: concepts/geoparquet-overview.md
+    - Best Practices: concepts/best-practices.md
   - User Guide:
     - Inspecting Files: guide/inspect.md
+    - Viewing Metadata: guide/meta.md
     - Converting Formats: guide/convert.md
+    - Extracting Data: guide/extract.md
     - Checking Best Practices: guide/check.md
     - Sorting Data: guide/sort.md
     - Adding Spatial Indices: guide/add.md
@@ -60,6 +76,8 @@ nav:
     - Overview: cli/overview.md
     - convert: cli/convert.md
     - inspect: cli/inspect.md
+    - meta: cli/meta.md
+    - extract: cli/extract.md
     - check: cli/check.md
     - sort: cli/sort.md
     - add: cli/add.md
@@ -73,5 +91,6 @@ nav:
   - Examples:
     - Basic Usage: examples/basic.md
     - Batch Processing: examples/batch.md
+  - Troubleshooting: troubleshooting.md
   - Contributing: contributing.md
   - Changelog: CHANGELOG.md

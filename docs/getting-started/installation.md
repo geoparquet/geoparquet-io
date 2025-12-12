@@ -36,7 +36,7 @@ pip install -e .
 
 ## Requirements
 
-- **Python**: 3.9 or higher
+- **Python**: 3.10 or higher
 - **PyArrow**: 12.0.0+
 - **DuckDB**: 1.1.3+
 
@@ -117,7 +117,7 @@ pip uninstall geoparquet-io
 geoparquet-io is tested on:
 
 - **Operating Systems**: Linux, macOS, Windows
-- **Python Versions**: 3.9, 3.10, 3.11, 3.12, 3.13
+- **Python Versions**: 3.10, 3.11, 3.12, 3.13
 - **Architectures**: x86_64, ARM64
 
 ## Troubleshooting
