@@ -48,9 +48,12 @@ __version__ = "0.6.1"
 
 @click.group()
 @click.version_option(version=__version__, prog_name="geoparquet-io")
-def cli():
+@click.option("--timestamps", is_flag=True, help="Show timestamps in output messages")
+@click.pass_context
+def cli(ctx, timestamps):
     """Fast I/O and transformation tools for GeoParquet files."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["timestamps"] = timestamps
 
 
 # Check commands group - use custom command class for default subcommand
