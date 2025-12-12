@@ -17,7 +17,16 @@ from geoparquet_io.core.common import (
 
 
 def add_bbox_metadata(parquet_file, verbose=False):
-    """Add bbox metadata to a GeoParquet file if needed."""
+    """
+    Add bbox covering metadata to a GeoParquet file.
+
+    Updates the GeoParquet metadata to include bbox covering information,
+    which enables spatial filtering optimizations in readers that support it.
+
+    Args:
+        parquet_file: Path to the parquet file (will be modified in place)
+        verbose: Print verbose output
+    """
     safe_url = safe_file_url(parquet_file, verbose)
 
     # Check current bbox structure
