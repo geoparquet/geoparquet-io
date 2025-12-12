@@ -8,7 +8,6 @@ including Parquet file metadata, Parquet geospatial metadata, and GeoParquet met
 import json
 from typing import Any
 
-import click
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -586,7 +585,7 @@ def format_parquet_metadata_enhanced(
 
             metadata_dict["row_groups"].append(rg_dict)
 
-        click.echo(json.dumps(metadata_dict, indent=2))
+        print(json.dumps(metadata_dict, indent=2))
     else:
         # Human-readable output
         console = Console()
@@ -750,7 +749,7 @@ def format_parquet_geo_metadata(
             "row_groups_examined": num_row_groups,
             "total_row_groups": num_row_groups,
         }
-        click.echo(json.dumps(output, indent=2))
+        print(json.dumps(output, indent=2))
     else:
         # Human-readable output
         console = Console()
@@ -878,7 +877,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
     if not geo_meta:
         if json_output:
-            click.echo(json.dumps(None, indent=2))
+            print(json.dumps(None, indent=2))
         else:
             console = Console()
             console.print()
@@ -890,7 +889,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
     if json_output:
         # Output the exact geo metadata as JSON
-        click.echo(json.dumps(geo_meta, indent=2))
+        print(json.dumps(geo_meta, indent=2))
     else:
         # Human-readable output
         console = Console()
@@ -1045,7 +1044,7 @@ def format_all_metadata(
             "parquet_geo_metadata": "See --parquet-geo flag for full output",
             "geoparquet_metadata": geo_meta,
         }
-        click.echo(json.dumps(output, indent=2))
+        print(json.dumps(output, indent=2))
     else:
         # Terminal output - show all three sections
         geo_meta = get_geo_metadata(safe_url)

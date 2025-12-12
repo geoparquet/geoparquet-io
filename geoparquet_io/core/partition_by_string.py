@@ -4,6 +4,7 @@
 import click
 
 from geoparquet_io.core.common import safe_file_url
+from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
 
 
@@ -36,7 +37,7 @@ def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = 
         for col in schema_info:
             if col.get("name") == column_name:
                 column_type = col.get("type", "unknown")
-                click.echo(f"Found column '{column_name}' with type: {column_type}")
+                debug(f"Found column '{column_name}' with type: {column_type}")
                 break
 
 
@@ -74,7 +75,7 @@ def partition_by_string(
     """
     # Validate column exists
     if verbose:
-        click.echo(f"Validating column '{column}'...")
+        debug(f"Validating column '{column}'...")
     validate_column_exists(input_parquet, column, verbose)
 
     # Validate chars parameter if provided
@@ -101,10 +102,10 @@ def partition_by_string(
             pass
         except Exception as e:
             # If analysis fails unexpectedly, show error but continue to preview
-            click.echo(click.style(f"\nAnalysis error: {e}", fg="yellow"))
+            warn(f"\nAnalysis error: {e}")
 
         # Then show partition preview
-        click.echo("\n" + "=" * 70)
+        progress("\n" + "=" * 70)
         preview_partition(
             input_parquet=input_parquet,
             column_name=column,
@@ -120,7 +121,7 @@ def partition_by_string(
     else:
         description = f"Partitioning by '{column}'"
 
-    click.echo(description)
+    progress(description)
 
     # Use common partition function
     num_partitions = partition_by_column(
@@ -138,7 +139,7 @@ def partition_by_string(
         geoparquet_version=geoparquet_version,
     )
 
-    click.echo(f"Successfully created {num_partitions} partition file(s)")
+    success(f"Successfully created {num_partitions} partition file(s)")
 
 
 if __name__ == "__main__":

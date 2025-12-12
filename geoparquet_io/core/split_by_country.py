@@ -3,6 +3,7 @@
 import click
 
 from geoparquet_io.core.common import safe_file_url
+from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
 
 
@@ -52,12 +53,8 @@ def check_crs(parquet_file, verbose=False):
             for _col_name, col_meta in geo_meta.get("columns", {}).items():
                 crs = col_meta.get("crs")
                 if crs and not _is_wgs84(crs):
-                    click.echo(
-                        click.style(
-                            "Warning: Input file uses a CRS other than WGS84. "
-                            "Results may be incorrect.",
-                            fg="yellow",
-                        )
+                    warn(
+                        "Warning: Input file uses a CRS other than WGS84. Results may be incorrect."
                     )
                     return
         elif isinstance(geo_meta, list):
@@ -65,12 +62,9 @@ def check_crs(parquet_file, verbose=False):
                 if isinstance(col, dict):
                     crs = col.get("crs")
                     if crs and not _is_wgs84(crs):
-                        click.echo(
-                            click.style(
-                                "Warning: Input file uses a CRS other than WGS84. "
-                                "Results may be incorrect.",
-                                fg="yellow",
-                            )
+                        warn(
+                            "Warning: Input file uses a CRS other than WGS84. "
+                            "Results may be incorrect."
                         )
                         return
 
@@ -138,7 +132,7 @@ def split_by_country(
 
     # Verify column exists and is populated
     if verbose:
-        click.echo(f"Checking column '{column}'...")
+        debug(f"Checking column '{column}'...")
     check_country_code_column(input_url, column)
 
     # Check CRS (only if not in preview mode)
@@ -165,10 +159,10 @@ def split_by_country(
             pass
         except Exception as e:
             # If analysis fails unexpectedly, show error but continue to preview
-            click.echo(click.style(f"\nAnalysis error: {e}", fg="yellow"))
+            warn(f"\nAnalysis error: {e}")
 
         # Then show partition preview
-        click.echo("\n" + "=" * 70)
+        progress("\n" + "=" * 70)
         preview_partition(
             input_parquet=input_parquet,
             column_name=column,
@@ -192,7 +186,7 @@ def split_by_country(
         filename_prefix=filename_prefix,
     )
 
-    click.echo(f"Successfully split file into {num_partitions} country file(s)")
+    success(f"Successfully split file into {num_partitions} country file(s)")
 
 
 if __name__ == "__main__":
