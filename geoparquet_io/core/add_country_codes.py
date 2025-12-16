@@ -11,6 +11,7 @@ from geoparquet_io.core.common import (
     safe_file_url,
     write_parquet_with_metadata,
 )
+from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 
 
 def find_country_code_column(con, countries_source, is_subquery=False):
@@ -102,33 +103,22 @@ def _handle_bbox_optimization(file_path, bbox_info, add_bbox_flag, file_label, v
     if bbox_info["status"] == "optimal":
         return bbox_info
 
-    click.echo(
-        click.style(
-            f"\nWarning: {file_label} could benefit from bbox optimization:\n"
-            + bbox_info["message"],
-            fg="yellow",
-        )
-    )
+    warn(f"\nWarning: {file_label} could benefit from bbox optimization:\n" + bbox_info["message"])
 
     if not add_bbox_flag:
-        click.echo(
-            click.style(
-                f"💡 Tip: Run this command with --add-bbox to automatically add bbox optimization to the {file_label.lower()}",
-                fg="cyan",
-            )
+        info(
+            f"💡 Tip: Run this command with --add-bbox to automatically add bbox optimization to the {file_label.lower()}"
         )
         return bbox_info
 
     if not bbox_info["has_bbox_column"]:
-        click.echo(f"Adding bbox column to {file_label.lower()}...")
+        progress(f"Adding bbox column to {file_label.lower()}...")
         from geoparquet_io.core.common import add_bbox
 
         add_bbox(file_path, "bbox", verbose)
-        click.echo(
-            click.style(f"✓ Added bbox column and metadata to {file_label.lower()}", fg="green")
-        )
+        success(f"✓ Added bbox column and metadata to {file_label.lower()}")
     elif not bbox_info["has_bbox_metadata"]:
-        click.echo(f"Adding bbox metadata to {file_label.lower()}...")
+        progress(f"Adding bbox metadata to {file_label.lower()}...")
         from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata
 
         add_bbox_metadata(file_path, verbose)
@@ -214,19 +204,14 @@ WHERE {bbox_col}.xmin <= {xmax:.6f}
 
 def _print_dry_run_bounds_info(input_bbox_col, input_url, input_geom_col):
     """Print dry-run info for bounds calculation step."""
-    click.echo(
-        click.style(
-            "-- Step 1: Calculate bounding box of input data to filter remote countries",
-            fg="cyan",
-        )
-    )
+    info("-- Step 1: Calculate bounding box of input data to filter remote countries")
     if input_bbox_col:
         bounds_sql = f"SELECT MIN({input_bbox_col}.xmin) as xmin, ... FROM '{input_url}';"
     else:
         bounds_sql = f"SELECT MIN(ST_XMin({input_geom_col})) as xmin, ... FROM '{input_url}';"
-    click.echo(bounds_sql)
-    click.echo()
-    click.echo(click.style("-- Calculating actual bounds...", fg="yellow"))
+    progress(bounds_sql)
+    progress("")
+    warn("-- Calculating actual bounds...")
 
 
 def _get_bounds_for_filtering(input_parquet, input_geom_col, dry_run, verbose):
@@ -235,14 +220,14 @@ def _get_bounds_for_filtering(input_parquet, input_geom_col, dry_run, verbose):
 
     if not bounds:
         if dry_run:
-            click.echo(click.style("-- Note: Could not calculate actual bounds", fg="yellow"))
+            warn("-- Note: Could not calculate actual bounds")
             return ("<xmin>", "<ymin>", "<xmax>", "<ymax>")
         raise click.ClickException("Could not calculate dataset bounds")
 
     if dry_run:
-        click.echo(click.style(f"-- Bounds calculated: {bounds}", fg="green"))
+        success(f"-- Bounds calculated: {bounds}")
     elif verbose:
-        click.echo(f"Input bbox: {bounds}")
+        debug(f"Input bbox: {bounds}")
     return bounds
 
 
@@ -251,23 +236,23 @@ def _create_filtered_countries_table(
 ):
     """Create the filtered countries temporary table."""
     if dry_run:
-        click.echo()
-        click.echo(click.style("-- Step 2: Create filtered countries table", fg="cyan"))
+        progress("")
+        info("-- Step 2: Create filtered countries table")
 
     create_table_sql = _build_filter_table_sql(
         countries_table, default_countries_url, countries_bbox_col, bounds
     )
 
     if dry_run:
-        click.echo(create_table_sql)
-        click.echo()
+        progress(create_table_sql)
+        progress("")
     else:
         if verbose:
-            click.echo("Creating temporary table with filtered countries...")
+            debug("Creating temporary table with filtered countries...")
         con.execute(create_table_sql)
         if verbose:
             count = con.execute(f"SELECT COUNT(*) FROM {countries_table}").fetchone()[0]
-            click.echo(f"Loaded {count} countries overlapping with input data")
+            debug(f"Loaded {count} countries overlapping with input data")
 
 
 def _print_dry_run_header(
@@ -280,27 +265,13 @@ def _print_dry_run_header(
     countries_bbox_col,
 ):
     """Print dry-run mode header information."""
-    click.echo(
-        click.style(
-            "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
-            fg="yellow",
-            bold=True,
-        )
-    )
-    click.echo(click.style(f"-- Input file: {input_url}", fg="cyan"))
-    click.echo(click.style(f"-- Countries file: {countries_url}", fg="cyan"))
-    click.echo(click.style(f"-- Output file: {output_parquet}", fg="cyan"))
-    click.echo(
-        click.style(
-            f"-- Geometry columns: {input_geom_col} (input), {countries_geom_col} (countries)",
-            fg="cyan",
-        )
-    )
-    click.echo(
-        click.style(
-            f"-- Bbox columns: {input_bbox_col or 'none'} (input), {countries_bbox_col or 'none'} (countries)\n",
-            fg="cyan",
-        )
+    warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
+    info(f"-- Input file: {input_url}")
+    info(f"-- Countries file: {countries_url}")
+    info(f"-- Output file: {output_parquet}")
+    info(f"-- Geometry columns: {input_geom_col} (input), {countries_geom_col} (countries)")
+    info(
+        f"-- Bbox columns: {input_bbox_col or 'none'} (input), {countries_bbox_col or 'none'} (countries)\n"
     )
 
 
@@ -327,10 +298,8 @@ def _determine_code_columns(
         country_code_col = "country"
         subdivision_code_col = "region"
         if verbose and not dry_run:
-            click.echo(f"Using country code column: {country_code_col} (default countries file)")
-            click.echo(
-                f"Using subdivision code column: {subdivision_code_col} (default countries file)"
-            )
+            debug(f"Using country code column: {country_code_col} (default countries file)")
+            debug(f"Using subdivision code column: {subdivision_code_col} (default countries file)")
         return country_code_col, subdivision_code_col
 
     if dry_run:
@@ -338,13 +307,13 @@ def _determine_code_columns(
 
     country_code_col = find_country_code_column(con, countries_url, is_subquery=False)
     if verbose:
-        click.echo(f"Using country code column: {country_code_col}")
+        debug(f"Using country code column: {country_code_col}")
 
     subdivision_code_col = find_subdivision_code_column(
         con, countries_source, is_subquery=(countries_source == countries_table)
     )
     if subdivision_code_col and verbose:
-        click.echo(f"Using subdivision code column: {subdivision_code_col}")
+        debug(f"Using subdivision code column: {subdivision_code_col}")
 
     return country_code_col, subdivision_code_col
 
@@ -360,14 +329,12 @@ def _print_dry_run_query(
 ):
     """Print the dry-run query output."""
     final_step = "3" if using_default else "1"
-    click.echo(click.style(f"-- Step {final_step}: Main spatial join query", fg="cyan"))
+    info(f"-- Step {final_step}: Main spatial join query")
 
     if input_bbox_col and countries_bbox_col:
-        click.echo(click.style("-- Using bbox columns for optimized spatial join", fg="cyan"))
+        info("-- Using bbox columns for optimized spatial join")
     else:
-        click.echo(
-            click.style("-- Using full geometry intersection (no bbox optimization)", fg="cyan")
-        )
+        info("-- Using full geometry intersection (no bbox optimization)")
 
     compression_str = (
         f"{compression}:{compression_level}"
@@ -379,12 +346,10 @@ def _print_dry_run_query(
     display_query = f"""COPY ({query.strip()})
 TO '{output_parquet}'
 (FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
-    click.echo(display_query)
+    progress(display_query)
 
-    click.echo(click.style(f"\n-- Note: Using {compression_str} compression", fg="cyan"))
-    click.echo(
-        click.style("-- Original metadata would also be preserved in the output file", fg="cyan")
-    )
+    info(f"\n-- Note: Using {compression_str} compression")
+    info("-- Original metadata would also be preserved in the output file")
 
 
 def _print_results_summary(con, output_parquet):
@@ -400,14 +365,14 @@ def _print_results_summary(con, output_parquet):
     """
     stats = con.execute(stats_query).fetchone()
 
-    click.echo("\nResults:")
-    click.echo(f"- Added country codes to {stats[1]:,} of {stats[0]:,} features")
+    progress("\nResults:")
+    progress(f"- Added country codes to {stats[1]:,} of {stats[0]:,} features")
     if stats[2] > 0:
-        click.echo(f"- Added subdivision codes to {stats[2]:,} of {stats[0]:,} features")
-    click.echo(f"- Found {stats[3]:,} unique countries")
+        progress(f"- Added subdivision codes to {stats[2]:,} of {stats[0]:,} features")
+    progress(f"- Found {stats[3]:,} unique countries")
     if stats[4] > 0:
-        click.echo(f"- Found {stats[4]:,} unique subdivisions")
-    click.echo(f"\nSuccessfully wrote output to: {output_parquet}")
+        progress(f"- Found {stats[4]:,} unique subdivisions")
+    success(f"\nSuccessfully wrote output to: {output_parquet}")
 
 
 def _setup_default_countries(
@@ -427,7 +392,7 @@ def _setup_default_countries(
         _print_dry_run_bounds_info(input_bbox_col, input_url, input_geom_col)
 
     if verbose and not dry_run:
-        click.echo("Calculating bounding box of input data to filter remote countries file...")
+        debug("Calculating bounding box of input data to filter remote countries file...")
 
     bounds = _get_bounds_for_filtering(input_parquet, input_geom_col, dry_run, verbose)
 
@@ -515,9 +480,9 @@ def _print_bbox_status(input_bbox_col, countries_bbox_col, verbose, dry_run):
     if dry_run:
         return
     if input_bbox_col and countries_bbox_col and verbose:
-        click.echo("Using bbox columns for initial filtering...")
+        debug("Using bbox columns for initial filtering...")
     elif not (input_bbox_col and countries_bbox_col):
-        click.echo("No bbox columns available, using full geometry intersection...")
+        progress("No bbox columns available, using full geometry intersection...")
 
 
 def add_country_codes(
@@ -541,16 +506,9 @@ def add_country_codes(
     )
 
     if using_default and not dry_run:
-        click.echo(
-            click.style(
-                "\nNo countries file specified, using default from Overture Maps", fg="cyan"
-            )
-        )
-        click.echo(
-            click.style(
-                "This will filter the remote file to only the area of your data, but may take longer than using a local file.",
-                fg="cyan",
-            )
+        info("\nNo countries file specified, using default from Overture Maps")
+        info(
+            "This will filter the remote file to only the area of your data, but may take longer than using a local file."
         )
 
     input_geom_col = find_primary_geometry_column(input_parquet, verbose)
@@ -572,15 +530,13 @@ def add_country_codes(
     metadata = None if dry_run else get_parquet_metadata(input_parquet, verbose)[0]
 
     if not dry_run and verbose:
-        click.echo(
-            f"Using geometry columns: {input_geom_col} (input), {countries_geom_col} (countries)"
-        )
+        debug(f"Using geometry columns: {input_geom_col} (input), {countries_geom_col} (countries)")
 
     con = _create_duckdb_connection(using_default)
 
     if not dry_run:
         total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
-        click.echo(f"Processing {total_count:,} input features...")
+        progress(f"Processing {total_count:,} input features...")
 
     countries_table = "filtered_countries"
     countries_source = _setup_countries_source(
@@ -626,7 +582,7 @@ def add_country_codes(
         return
 
     if verbose:
-        click.echo("Performing spatial join with country boundaries...")
+        debug("Performing spatial join with country boundaries...")
 
     write_parquet_with_metadata(
         con,

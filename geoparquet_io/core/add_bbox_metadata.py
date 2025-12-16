@@ -14,6 +14,7 @@ from geoparquet_io.core.common import (
     parse_geo_metadata,
     safe_file_url,
 )
+from geoparquet_io.core.logging_config import debug, error, success
 
 
 def add_bbox_metadata(parquet_file, verbose=False):
@@ -24,21 +25,13 @@ def add_bbox_metadata(parquet_file, verbose=False):
     bbox_info = check_bbox_structure(parquet_file, verbose)
 
     if bbox_info["has_bbox_metadata"]:
-        click.echo(
-            click.style(
-                f"✓ Bbox covering metadata already exists for column '{bbox_info['bbox_column_name']}'",
-                fg="green",
-            )
+        success(
+            f"✓ Bbox covering metadata already exists for column '{bbox_info['bbox_column_name']}'"
         )
         return
 
     if not bbox_info["has_bbox_column"]:
-        click.echo(
-            click.style(
-                "❌ No valid bbox column found in the file. Please add a bbox column first.",
-                fg="red",
-            )
-        )
+        error("❌ No valid bbox column found in the file. Please add a bbox column first.")
         return
 
     # Get existing metadata
@@ -69,8 +62,8 @@ def add_bbox_metadata(parquet_file, verbose=False):
     }
 
     if verbose:
-        click.echo("\nUpdated geo metadata:")
-        click.echo(json.dumps(geo_meta, indent=2))
+        debug("\nUpdated geo metadata:")
+        debug(json.dumps(geo_meta, indent=2))
 
     # Get original file properties
     row_group_stats = get_row_group_stats(parquet_file)
@@ -79,9 +72,9 @@ def add_bbox_metadata(parquet_file, verbose=False):
     compression = compression_info[primary_col]
 
     if verbose:
-        click.echo("\nPreserving file properties:")
-        click.echo(f"Row group size: {row_group_size:,.0f} rows")
-        click.echo(f"Compression: {compression}")
+        debug("\nPreserving file properties:")
+        debug(f"Row group size: {row_group_size:,.0f} rows")
+        debug(f"Compression: {compression}")
 
     # Create a temporary file for the new metadata
     temp_file = parquet_file + ".tmp"
@@ -114,12 +107,7 @@ def add_bbox_metadata(parquet_file, verbose=False):
         # Replace original file
         os.replace(temp_file, parquet_file)
 
-        click.echo(
-            click.style(
-                f"✓ Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'",
-                fg="green",
-            )
-        )
+        success(f"✓ Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
 
     except Exception as e:
         # Clean up temporary file if something goes wrong

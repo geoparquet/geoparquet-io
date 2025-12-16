@@ -7,6 +7,7 @@ import click
 
 from geoparquet_io.core.add_h3_column import add_h3_column
 from geoparquet_io.core.common import safe_file_url
+from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
 
 
@@ -48,6 +49,9 @@ def partition_by_h3(
         force: Force partitioning even if analysis detects issues
         skip_analysis: Skip partition strategy analysis (for performance)
     """
+    # Configure logging verbosity
+    configure_verbose(verbose)
+
     # Validate resolution
     if not 0 <= resolution <= 15:
         raise click.UsageError(f"H3 resolution must be between 0 and 15, got {resolution}")
@@ -69,7 +73,7 @@ def partition_by_h3(
     # If column doesn't exist, add it
     if not column_exists:
         if verbose:
-            click.echo(f"H3 column '{h3_column_name}' not found. Adding it now...")
+            debug(f"H3 column '{h3_column_name}' not found. Adding it now...")
 
         # Create temporary file for H3-enriched data
         temp_dir = tempfile.gettempdir()
@@ -93,7 +97,7 @@ def partition_by_h3(
             # Use the temp file as input for partitioning
             input_parquet = temp_file
             if verbose:
-                click.echo(f"H3 column added successfully at resolution {resolution}")
+                debug(f"H3 column added successfully at resolution {resolution}")
 
         except Exception as e:
             # Clean up temp file on error
@@ -102,7 +106,7 @@ def partition_by_h3(
             raise click.ClickException(f"Failed to add H3 column: {str(e)}") from e
 
     elif verbose:
-        click.echo(f"Using existing H3 column '{h3_column_name}'")
+        debug(f"Using existing H3 column '{h3_column_name}'")
 
     # If preview mode, show analysis and preview, then exit
     if preview:
@@ -125,10 +129,10 @@ def partition_by_h3(
                 pass
             except Exception as e:
                 # If analysis fails unexpectedly, show error but continue to preview
-                click.echo(click.style(f"\nAnalysis error: {e}", fg="yellow"))
+                warn(f"\nAnalysis error: {e}")
 
             # Then show partition preview
-            click.echo("\n" + "=" * 70)
+            progress("\n" + "=" * 70)
             preview_partition(
                 input_parquet=input_parquet,
                 column_name=h3_column_name,
@@ -143,7 +147,7 @@ def partition_by_h3(
         return
 
     # Build description for user feedback
-    click.echo(f"Partitioning by H3 cells at resolution {resolution} (column: '{h3_column_name}')")
+    progress(f"Partitioning by H3 cells at resolution {resolution} (column: '{h3_column_name}')")
 
     try:
         # Use common partition function with full H3 cell IDs
@@ -166,11 +170,11 @@ def partition_by_h3(
         )
 
         if verbose:
-            click.echo(f"\nSuccessfully created {num_partitions} partition(s) in {output_folder}")
+            success(f"\nSuccessfully created {num_partitions} partition(s) in {output_folder}")
 
     finally:
         # Clean up temp file if we created one
         if not column_exists and os.path.exists(input_parquet):
             if verbose:
-                click.echo("Cleaning up temporary H3-enriched file...")
+                debug("Cleaning up temporary H3-enriched file...")
             os.remove(input_parquet)

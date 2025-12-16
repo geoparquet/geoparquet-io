@@ -988,9 +988,13 @@ def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output
 
 # Sort commands group
 @cli.group()
-def sort():
+@click.pass_context
+def sort(ctx):
     """Commands for sorting GeoParquet files."""
-    pass
+    # Ensure logging is set up (in case this group is invoked directly in tests)
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False) if ctx.obj else False
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 @sort.command(name="hilbert")
@@ -1067,9 +1071,13 @@ def hilbert_order(
 
 
 @cli.group()
-def add():
+@click.pass_context
+def add(ctx):
     """Commands for enhancing GeoParquet files in various ways."""
-    pass
+    # Ensure logging is set up (in case this group is invoked directly in tests)
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False) if ctx.obj else False
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 @add.command(name="admin-divisions")
@@ -1516,9 +1524,13 @@ def add_kdtree(
 
 # Partition commands group
 @cli.group()
-def partition():
+@click.pass_context
+def partition(ctx):
     """Commands for partitioning GeoParquet files."""
-    pass
+    # Ensure logging is set up (in case this group is invoked directly in tests)
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False) if ctx.obj else False
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 @partition.command(name="admin")

@@ -3,6 +3,7 @@
 import click
 
 from geoparquet_io.core.common import add_computed_column, find_primary_geometry_column
+from geoparquet_io.core.logging_config import configure_verbose, success
 
 
 def add_h3_column(
@@ -42,6 +43,9 @@ def add_h3_column(
         row_group_rows: Exact number of rows per row group
         profile: AWS profile name (S3 only, optional)
     """
+    # Configure logging verbosity
+    configure_verbose(verbose)
+
     # Validate resolution
     if not 0 <= h3_resolution <= 15:
         raise click.BadParameter(f"H3 resolution must be between 0 and 15, got {h3_resolution}")
@@ -79,7 +83,7 @@ def add_h3_column(
     )
 
     if not dry_run:
-        click.echo(
+        success(
             f"Successfully added H3 column '{h3_column_name}' "
             f"(resolution {h3_resolution}) to: {output_parquet}"
         )

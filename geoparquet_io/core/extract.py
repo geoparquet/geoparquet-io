@@ -22,6 +22,7 @@ from geoparquet_io.core.common import (
     safe_file_url,
     write_parquet_with_metadata,
 )
+from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 
 
 def get_parquet_row_count(parquet_file: str) -> int:
@@ -261,7 +262,7 @@ def _warn_if_crs_mismatch(
             )
         msg += "\nIf you get 0 results, try using coordinates in the data's CRS."
 
-        click.echo(click.style(msg, fg="yellow"))
+        warn(msg)
 
 
 def parse_bbox(bbox_str: str) -> tuple[float, float, float, float]:
@@ -634,28 +635,22 @@ def _print_dry_run_output(
     compression_level: int | None,
 ) -> None:
     """Print dry run output."""
-    click.echo(
-        click.style(
-            "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
-            fg="yellow",
-            bold=True,
-        )
-    )
-    click.echo(click.style(f"-- Input: {input_parquet}", fg="cyan"))
-    click.echo(click.style(f"-- Output: {output_parquet}", fg="cyan"))
-    click.echo(click.style(f"-- Geometry column: {geometry_col}", fg="cyan"))
+    warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
+    info(f"-- Input: {input_parquet}")
+    info(f"-- Output: {output_parquet}")
+    info(f"-- Geometry column: {geometry_col}")
     if bbox_col:
-        click.echo(click.style(f"-- Bbox column: {bbox_col}", fg="cyan"))
-    click.echo(click.style(f"-- Selected columns: {len(selected_columns)}", fg="cyan"))
+        info(f"-- Bbox column: {bbox_col}")
+    info(f"-- Selected columns: {len(selected_columns)}")
     if bbox:
-        click.echo(click.style(f"-- Bbox filter: {bbox}", fg="cyan"))
+        info(f"-- Bbox filter: {bbox}")
     if geometry:
-        click.echo(click.style("-- Geometry filter: (provided)", fg="cyan"))
+        info("-- Geometry filter: (provided)")
     if where:
-        click.echo(click.style(f"-- WHERE clause: {where}", fg="cyan"))
+        info(f"-- WHERE clause: {where}")
     if limit:
-        click.echo(click.style(f"-- Limit: {limit}", fg="cyan"))
-    click.echo()
+        info(f"-- Limit: {limit}")
+    progress("")
 
     compression_desc = compression
     if compression in ["GZIP", "ZSTD", "BROTLI"] and compression_level:
@@ -666,9 +661,9 @@ def _print_dry_run_output(
 TO '{output_parquet}'
 (FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
 
-    click.echo(click.style("-- Main query:", fg="cyan"))
-    click.echo(display_query)
-    click.echo(click.style(f"\n-- Note: Using {compression_desc} compression", fg="cyan"))
+    info("-- Main query:")
+    progress(display_query)
+    info(f"\n-- Note: Using {compression_desc} compression")
 
 
 def _execute_extraction(
@@ -692,15 +687,15 @@ def _execute_extraction(
 ) -> None:
     """Execute the extraction query and write output."""
     if verbose:
-        click.echo(f"Input: {input_parquet}")
-        click.echo(f"Output: {output_parquet}")
-        click.echo(f"Selecting {len(selected_columns)} columns: {', '.join(selected_columns)}")
+        debug(f"Input: {input_parquet}")
+        debug(f"Output: {output_parquet}")
+        debug(f"Selecting {len(selected_columns)} columns: {', '.join(selected_columns)}")
         if spatial_filter:
-            click.echo("Applying spatial filter")
+            debug("Applying spatial filter")
         if where:
-            click.echo(f"Applying WHERE clause: {where}")
+            debug(f"Applying WHERE clause: {where}")
         if limit:
-            click.echo(f"Limiting to {limit:,} rows")
+            debug(f"Limiting to {limit:,} rows")
 
     # Use auto-detecting S3 connection for S3 paths
     if needs_httpfs(input_parquet):
@@ -718,7 +713,7 @@ def _execute_extraction(
             except Exception:
                 pass  # Total count is optional
 
-        click.echo("Extracting rows...")
+        progress("Extracting rows...")
 
         # Get metadata from input for preservation
         # DuckDB handles glob patterns natively
@@ -748,16 +743,11 @@ def _execute_extraction(
         extracted_count = get_parquet_row_count(output_parquet)
 
         if input_total_rows is not None:
-            click.echo(
-                click.style(
-                    f"Extracted {extracted_count:,} rows (out of {input_total_rows:,} total) to {output_parquet}",
-                    fg="green",
-                )
+            success(
+                f"Extracted {extracted_count:,} rows (out of {input_total_rows:,} total) to {output_parquet}"
             )
         else:
-            click.echo(
-                click.style(f"Extracted {extracted_count:,} rows to {output_parquet}", fg="green")
-            )
+            success(f"Extracted {extracted_count:,} rows to {output_parquet}")
 
     finally:
         con.close()

@@ -121,20 +121,32 @@ class LibraryFormatter(logging.Formatter):
 
 class DynamicStreamHandler(logging.StreamHandler):
     """
-    A StreamHandler that dynamically uses sys.stdout at emit time.
+    A StreamHandler that works correctly with Click's CliRunner.
 
-    This is needed for Click's CliRunner which substitutes sys.stdout
-    after handler creation.
+    Click's CliRunner substitutes sys.stdout with a wrapper. To ensure
+    output is captured by CliRunner, we use click.echo() when we detect
+    we're not writing to the real stdout.
     """
 
     def __init__(self):
-        # Initialize with None stream - we'll use sys.stdout dynamically
+        # Initialize with None stream - we'll handle output dynamically
         super().__init__(stream=None)
 
     def emit(self, record):
-        # Use the current sys.stdout at emit time
-        self.stream = sys.stdout
-        super().emit(record)
+        try:
+            msg = self.format(record)
+            # Check if we're in a CliRunner context (stdout is substituted)
+            # In that case, use click.echo for proper capture
+            if sys.stdout is not sys.__stdout__:
+                import click
+
+                click.echo(msg)
+            else:
+                # Normal case - write to stdout directly
+                self.stream = sys.stdout
+                super().emit(record)
+        except Exception:
+            self.handleError(record)
 
 
 def setup_cli_logging(

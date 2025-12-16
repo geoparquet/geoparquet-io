@@ -14,6 +14,8 @@ from abc import ABC, abstractmethod
 import click
 import duckdb
 
+from geoparquet_io.core.logging_config import debug
+
 
 class AdminDataset(ABC):
     """
@@ -234,14 +236,14 @@ class AdminDataset(ABC):
         if self.is_remote():
             # For remote sources, use direct remote access
             if self.verbose:
-                click.echo(f"Using remote dataset: {source}")
+                debug(f"Using remote dataset: {source}")
             return f"'{source}'"
         else:
             # For local sources, verify the file exists
             if not os.path.exists(source):
                 raise click.ClickException(f"Data source file not found: {source}")
             if self.verbose:
-                click.echo(f"Using local data source: {source}")
+                debug(f"Using local data source: {source}")
             return f"'{source}'"
 
 

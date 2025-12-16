@@ -7,7 +7,6 @@ This module extends the add_country_codes functionality to support
 multiple admin datasets with hierarchical level support.
 """
 
-import click
 import duckdb
 
 from geoparquet_io.core.admin_datasets import AdminDatasetFactory
@@ -18,6 +17,7 @@ from geoparquet_io.core.common import (
     safe_file_url,
     write_parquet_with_metadata,
 )
+from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 
 
 def _build_admin_subquery(
@@ -140,7 +140,7 @@ def _add_extent_filter(con, input_url, input_bbox_col, input_geom_col, admin_bbo
              {admin_bbox_col}.ymax >= {ymin})
         """
         if verbose:
-            click.echo(
+            debug(
                 f"Filtering admin boundaries to input extent: ({xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f})"
             )
         return extent_filter
@@ -150,19 +150,16 @@ def _add_extent_filter(con, input_url, input_bbox_col, input_geom_col, admin_bbo
 def _handle_bbox_optimization(input_parquet, input_bbox_info, add_bbox_flag, verbose):
     """Handle bbox optimization if needed."""
     if input_bbox_info["status"] != "optimal":
-        click.echo(
-            click.style(
-                "\nWarning: Input file could benefit from bbox optimization:\n"
-                + input_bbox_info["message"],
-                fg="yellow",
-            )
+        warn(
+            "\nWarning: Input file could benefit from bbox optimization:\n"
+            + input_bbox_info["message"]
         )
         if add_bbox_flag and not input_bbox_info["has_bbox_column"]:
-            click.echo("Adding bbox column to input file...")
+            progress("Adding bbox column to input file...")
             from geoparquet_io.core.common import add_bbox
 
             add_bbox(input_parquet, "bbox", verbose)
-            click.echo(click.style("✓ Added bbox column and metadata to input file", fg="green"))
+            success("✓ Added bbox column and metadata to input file")
             return check_bbox_structure(input_parquet, verbose)
     return input_bbox_info
 
@@ -177,27 +174,13 @@ def _print_dry_run_header(
     admin_bbox_col,
 ):
     """Print dry-run mode header."""
-    click.echo(
-        click.style(
-            "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
-            fg="yellow",
-            bold=True,
-        )
-    )
-    click.echo(click.style(f"-- Input file: {input_url}", fg="cyan"))
-    click.echo(click.style(f"-- Admin dataset: {admin_source}", fg="cyan"))
-    click.echo(click.style(f"-- Output file: {output_parquet}", fg="cyan"))
-    click.echo(
-        click.style(
-            f"-- Geometry columns: {input_geom_col} (input), {admin_geom_col} (admin)",
-            fg="cyan",
-        )
-    )
-    click.echo(
-        click.style(
-            f"-- Bbox columns: {input_bbox_col or 'none'} (input), {admin_bbox_col or 'none'} (admin)\n",
-            fg="cyan",
-        )
+    warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
+    info(f"-- Input file: {input_url}")
+    info(f"-- Admin dataset: {admin_source}")
+    info(f"-- Output file: {output_parquet}")
+    info(f"-- Geometry columns: {input_geom_col} (input), {admin_geom_col} (admin)")
+    info(
+        f"-- Bbox columns: {input_bbox_col or 'none'} (input), {admin_bbox_col or 'none'} (admin)\n"
     )
 
 
@@ -235,9 +218,9 @@ def _setup_dataset_and_columns(input_parquet, dataset_name, dataset_source, leve
     dataset = AdminDatasetFactory.create(dataset_name, dataset_source, verbose)
 
     if verbose:
-        click.echo(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
-        click.echo(f"Data source: {dataset.get_source()}")
-        click.echo(f"Adding admin levels: {', '.join(levels)}")
+        debug(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
+        debug(f"Data source: {dataset.get_source()}")
+        debug(f"Adding admin levels: {', '.join(levels)}")
 
     dataset.validate_levels(levels)
     partition_columns = dataset.get_partition_columns(levels)
@@ -293,7 +276,7 @@ def _build_admin_where_clauses_list(
     if subtype_filter:
         admin_where_clauses.append(subtype_filter)
         if verbose and not dry_run:
-            click.echo(f"Filtering admin boundaries: {subtype_filter}")
+            debug(f"Filtering admin boundaries: {subtype_filter}")
 
     extent_filter = _add_extent_filter(
         con, input_url, input_bbox_col, input_geom_col, admin_bbox_col, verbose and not dry_run
@@ -350,9 +333,9 @@ def _build_query_components(
     )
 
     if input_bbox_col and admin_bbox_col and verbose and not dry_run:
-        click.echo("Using bbox columns for initial filtering...")
+        debug("Using bbox columns for initial filtering...")
     elif not (input_bbox_col and admin_bbox_col) and not dry_run:
-        click.echo("No bbox columns available, using full geometry intersection...")
+        progress("No bbox columns available, using full geometry intersection...")
 
     query = _build_spatial_join_query(
         input_url,
@@ -394,13 +377,11 @@ def _handle_dry_run_mode(
         admin_bbox_col,
     )
 
-    click.echo(click.style("-- Main spatial join query", fg="cyan"))
+    info("-- Main spatial join query")
     if input_bbox_col and admin_bbox_col:
-        click.echo(click.style("-- Using bbox columns for optimized spatial join", fg="cyan"))
+        info("-- Using bbox columns for optimized spatial join")
     else:
-        click.echo(
-            click.style("-- Using full geometry intersection (no bbox optimization)", fg="cyan")
-        )
+        info("-- Using full geometry intersection (no bbox optimization)")
 
     if compression in ["GZIP", "ZSTD", "BROTLI"]:
         compression_str = f"{compression}:{compression_level}"
@@ -411,12 +392,10 @@ def _handle_dry_run_mode(
     display_query = f"""COPY ({query.strip()})
 TO '{output_parquet}'
 (FORMAT PARQUET, COMPRESSION '{duckdb_compression}');"""
-    click.echo(display_query)
+    progress(display_query)
 
-    click.echo(click.style(f"\n-- Note: Using {compression_str} compression", fg="cyan"))
-    click.echo(
-        click.style("-- Original metadata would also be preserved in the output file", fg="cyan")
-    )
+    info(f"\n-- Note: Using {compression_str} compression")
+    info("-- Original metadata would also be preserved in the output file")
     return True
 
 
@@ -477,9 +456,7 @@ def add_admin_divisions_multi(
         input_bbox_col = input_bbox_info["bbox_column_name"]
 
         if verbose:
-            click.echo(
-                f"Using geometry columns: {input_geom_col} (input), {admin_geom_col} (admin)"
-            )
+            debug(f"Using geometry columns: {input_geom_col} (input), {admin_geom_col} (admin)")
 
     # Create DuckDB connection
     con = _setup_duckdb_connection(dataset)
@@ -487,7 +464,7 @@ def add_admin_divisions_multi(
     # Get total input count (skip in dry-run)
     if not dry_run:
         total_count = con.execute(f"SELECT COUNT(*) FROM '{input_url}'").fetchone()[0]
-        click.echo(f"Processing {total_count:,} input features...")
+        progress(f"Processing {total_count:,} input features...")
 
     # Build query components
     query, admin_source = _build_query_components(
@@ -523,7 +500,7 @@ def add_admin_divisions_multi(
 
     # Execute the query using the common write method
     if verbose:
-        click.echo("Performing spatial join with admin boundaries...")
+        debug("Performing spatial join with admin boundaries...")
 
     write_parquet_with_metadata(
         con,
@@ -545,11 +522,11 @@ def add_admin_divisions_multi(
     )
     con.close()
 
-    click.echo("\nResults:")
-    click.echo(
+    progress("\nResults:")
+    progress(
         f"- Added admin division data to {features_with_admin:,} of {total_features:,} features"
     )
     for level, count in unique_counts:
-        click.echo(f"- Found {count:,} unique {level} values")
+        progress(f"- Found {count:,} unique {level} values")
 
-    click.echo(f"\nSuccessfully wrote output to: {output_parquet}")
+    success(f"\nSuccessfully wrote output to: {output_parquet}")
