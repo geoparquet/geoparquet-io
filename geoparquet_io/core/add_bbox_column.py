@@ -27,9 +27,10 @@ def add_bbox_column(
     Add a bbox struct column to a GeoParquet file.
 
     Checks for existing bbox columns before adding. If a bbox column already exists:
-    - With covering metadata: informs user and exits successfully (no action needed)
-    - Without metadata: suggests using 'gpio add bbox-metadata' command
-    - With --force: replaces the existing bbox column
+
+    - **With covering metadata**: Informs user and exits successfully (no action needed)
+    - **Without metadata**: Suggests using `gpio add bbox-metadata` command
+    - **With --force**: Replaces the existing bbox column
 
     Args:
         input_parquet: Path to the input parquet file (local or remote URL)

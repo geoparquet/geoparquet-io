@@ -756,7 +756,20 @@ def parse_geo_metadata(metadata, verbose=False):
 
 
 def find_primary_geometry_column(parquet_file, verbose=False):
-    """Find primary geometry column from GeoParquet metadata."""
+    """
+    Find the primary geometry column from GeoParquet metadata.
+
+    Looks up the geometry column name from GeoParquet metadata. Falls back
+    to 'geometry' if no metadata is present or if the primary column is
+    not specified.
+
+    Args:
+        parquet_file: Path to the parquet file (local or remote URL)
+        verbose: Print verbose output
+
+    Returns:
+        str: Name of the primary geometry column (defaults to 'geometry')
+    """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 
     safe_url = safe_file_url(parquet_file, verbose=False)

@@ -603,7 +603,7 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
         setup_aws_profile_if_needed,
         validate_profile_for_urls,
     )
-    from geoparquet_io.core.duckdb_metadata import get_schema_info
+    from geoparquet_io.core.duckdb_metadata import get_usable_columns
 
     # Validate mutually exclusive options
     if head and tail:
@@ -623,41 +623,19 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
         file_info = extract_file_info(parquet_file)
         geo_info = extract_geo_info(parquet_file)
 
-        # Get schema for column info using DuckDB (handles remote files natively)
-        schema_info = get_schema_info(parquet_file)
+        # Get usable columns using DESCRIBE (handles nested struct wrappers correctly)
+        usable_columns = get_usable_columns(parquet_file)
         primary_geom_col = geo_info.get("primary_column")
 
-        # Filter to top-level columns only:
-        # - Skip root element (duckdb_schema) which has type=None
-        # - Skip struct children by tracking which indices are children
-        columns_info = []
-        skip_count = 0  # Number of children to skip
-        for col in schema_info:
-            if skip_count > 0:
-                # This is a child of a struct, skip it
-                skip_count -= 1
-                continue
-
-            name = col.get("name", "")
-            col_type = col.get("type")
-            num_children = col.get("num_children")
-
-            # Skip root element (no type, has children)
-            if col_type is None and num_children and name == "duckdb_schema":
-                continue
-
-            # Track struct columns - their children follow immediately
-            if num_children:
-                skip_count = num_children
-
-            if name:
-                columns_info.append(
-                    {
-                        "name": name,
-                        "type": col.get("duckdb_type") or col_type or "struct",
-                        "is_geometry": name == primary_geom_col,
-                    }
-                )
+        # Build column info with geometry marking
+        columns_info = [
+            {
+                "name": col["name"],
+                "type": col["type"],
+                "is_geometry": col["name"] == primary_geom_col,
+            }
+            for col in usable_columns
+        ]
 
         # Get preview data if requested
         preview_table = None

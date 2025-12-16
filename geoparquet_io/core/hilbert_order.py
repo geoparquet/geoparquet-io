@@ -41,14 +41,26 @@ def hilbert_order(
     Reorder a GeoParquet file using Hilbert curve ordering.
 
     Takes an input GeoParquet file and creates a new file with rows ordered
-    by their position along a Hilbert space-filling curve. Applies best practices:
+    by their position along a Hilbert space-filling curve.
+
+    Applies best practices:
+
     - Configurable compression (default ZSTD)
     - Configurable row group sizes
-    - bbox covering metadata
+    - Bbox covering metadata
     - Preserves CRS from original file
     - Supports remote inputs/outputs (S3, GCS, Azure)
 
     Args:
+        input_parquet: Path to input GeoParquet file (local or remote URL)
+        output_parquet: Path to output file (local or remote URL)
+        geometry_column: Name of geometry column (default: 'geometry')
+        add_bbox_flag: Add bbox column before sorting if not present
+        verbose: Print verbose output
+        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+        compression_level: Compression level (varies by format)
+        row_group_size_mb: Target row group size in MB
+        row_group_rows: Exact number of rows per row group
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
     """
