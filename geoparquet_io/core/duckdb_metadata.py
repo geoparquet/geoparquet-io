@@ -149,6 +149,31 @@ def get_column_names(parquet_file: str, con=None) -> list[str]:
     return [col["name"] for col in schema if col.get("name") and "." not in col["name"]]
 
 
+def get_usable_columns(parquet_file: str, con=None) -> list[dict]:
+    """
+    Get user-facing columns as DuckDB exposes them.
+
+    Uses DESCRIBE SELECT * FROM read_parquet() which returns the actual
+    columns users can query. This handles quirky Parquet files that wrap
+    all data in a struct (e.g., a 'schema' struct containing all fields).
+
+    Returns list of dicts with 'name' and 'type' keys.
+    """
+    safe_url = _safe_url(parquet_file)
+    connection, should_close = _get_connection_for_file(parquet_file, con)
+
+    try:
+        result = connection.execute(f"""
+            DESCRIBE SELECT * FROM read_parquet('{safe_url}')
+        """).fetchall()
+
+        # DESCRIBE returns: (column_name, column_type, null, key, default, extra)
+        return [{"name": row[0], "type": row[1]} for row in result]
+    finally:
+        if should_close:
+            connection.close()
+
+
 def get_row_group_metadata(parquet_file: str, con=None) -> list[dict]:
     """
     Get per-row-group statistics using parquet_metadata().
