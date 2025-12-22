@@ -40,12 +40,11 @@ class ReprojectResult:
     feature_count: int
 
 
-def _detect_source_crs(input_url: str, geom_col: str, verbose: bool) -> str:
+def _detect_source_crs(input_url: str, verbose: bool) -> str:
     """Detect source CRS from GeoParquet metadata.
 
     Args:
         input_url: Safe URL to input file
-        geom_col: Name of geometry column
         verbose: Whether to print verbose output
 
     Returns:
@@ -115,7 +114,9 @@ def reproject_impl(
         ReprojectResult with information about the operation
 
     Raises:
-        click.ClickException: If input file doesn't exist or other errors occur
+        ValueError: If CRS parsing fails or invalid parameters provided
+        FileNotFoundError: If input file doesn't exist
+        RuntimeError: If reprojection operation fails
     """
 
     def log(msg: str) -> None:
@@ -145,7 +146,7 @@ def reproject_impl(
         log(f"Geometry column: {geom_col}")
 
         # Detect source CRS from metadata
-        detected_crs = _detect_source_crs(input_url, geom_col, verbose)
+        detected_crs = _detect_source_crs(input_url, verbose)
 
         # Use override if provided, otherwise use detected
         if source_crs is not None:

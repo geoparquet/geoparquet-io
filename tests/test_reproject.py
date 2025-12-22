@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import reproject
+from geoparquet_io.core.common import parse_crs_string_to_projjson
 from geoparquet_io.core.reproject import reproject_impl
 
 
@@ -540,3 +541,329 @@ class TestWithExistingTestFiles:
         assert -180 <= xmax <= 180, f"xmax {xmax} not in lon range"
         assert -90 <= ymin <= 90, f"ymin {ymin} not in lat range"
         assert -90 <= ymax <= 90, f"ymax {ymax} not in lat range"
+
+
+class TestFullProjjsonMetadata:
+    """Tests verifying full PROJJSON is written to output metadata.
+
+    These tests ensure the complete CRS definition is written, not just a
+    minimal id reference. Full PROJJSON includes type, name, datum, and
+    coordinate system information.
+    """
+
+    def test_default_crs_not_written(self, create_geoparquet, tmp_path):
+        """Test that EPSG:4326 (default CRS) is correctly omitted from metadata.
+
+        Per GeoParquet spec, missing CRS implies WGS84/EPSG:4326, so we
+        intentionally don't write it to avoid redundancy.
+        """
+        input_file = create_geoparquet(
+            "input_utm_for_default.parquet",
+            "POINT(551000 4180000)",
+            crs_epsg=32610,
+        )
+
+        output_file = tmp_path / "output_4326_default.parquet"
+        reproject_impl(
+            input_parquet=str(input_file),
+            output_parquet=str(output_file),
+            target_crs="EPSG:4326",
+        )
+
+        # Read the geo metadata from output
+        pf = pq.ParquetFile(output_file)
+        geo_meta = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+
+        # CRS should NOT be present for EPSG:4326 (default)
+        geom_meta = geo_meta["columns"]["geometry"]
+        assert "crs" not in geom_meta, (
+            "EPSG:4326 is the default CRS and should not be written to metadata. "
+            f"Found: {geom_meta.get('crs')}"
+        )
+
+    def test_output_contains_full_projjson_for_geographic_crs(self, create_geoparquet, tmp_path):
+        """Test that reprojecting to a geographic CRS writes full PROJJSON.
+
+        EPSG:4269 (NAD83) is a non-default geographic CRS that should be written.
+        """
+        input_file = create_geoparquet(
+            "input_for_4269.parquet",
+            "POINT(551000 4180000)",
+            crs_epsg=32610,
+        )
+
+        output_file = tmp_path / "output_4269_projjson.parquet"
+        reproject_impl(
+            input_parquet=str(input_file),
+            output_parquet=str(output_file),
+            target_crs="EPSG:4269",  # NAD83 - a non-default geographic CRS
+        )
+
+        # Read the geo metadata from output
+        pf = pq.ParquetFile(output_file)
+        geo_meta = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+
+        # Get CRS from geometry column metadata
+        crs = geo_meta["columns"]["geometry"]["crs"]
+
+        # Verify full PROJJSON structure, not just id
+        assert "type" in crs, "CRS should contain 'type' field (full PROJJSON)"
+        assert crs["type"] == "GeographicCRS", f"Expected GeographicCRS, got {crs['type']}"
+        assert "name" in crs, "CRS should contain 'name' field"
+        assert "NAD83" in crs["name"], f"Expected NAD83 in name, got {crs['name']}"
+        assert "coordinate_system" in crs, "CRS should contain 'coordinate_system' field"
+        assert "id" in crs, "CRS should contain 'id' field"
+        assert crs["id"]["authority"] == "EPSG"
+        assert crs["id"]["code"] == 4269
+
+    def test_output_contains_full_projjson_for_utm(self, create_geoparquet, tmp_path):
+        """Test that reprojecting to UTM writes full PROJJSON with ProjectedCRS."""
+        input_file = create_geoparquet(
+            "input_4326_for_utm_projjson.parquet",
+            "POINT(-122.4 37.8)",
+            crs_epsg=4326,
+        )
+
+        output_file = tmp_path / "output_utm_projjson.parquet"
+        reproject_impl(
+            input_parquet=str(input_file),
+            output_parquet=str(output_file),
+            target_crs="EPSG:32610",
+        )
+
+        # Read the geo metadata from output
+        pf = pq.ParquetFile(output_file)
+        geo_meta = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+
+        crs = geo_meta["columns"]["geometry"]["crs"]
+
+        # Verify full PROJJSON structure for projected CRS
+        assert "type" in crs, "CRS should contain 'type' field"
+        assert crs["type"] == "ProjectedCRS", f"Expected ProjectedCRS, got {crs['type']}"
+        assert "name" in crs, "CRS should contain 'name' field"
+        assert "UTM" in crs["name"] or "zone 10" in crs["name"].lower(), (
+            f"Expected UTM in name, got {crs['name']}"
+        )
+        assert "coordinate_system" in crs, "CRS should contain 'coordinate_system' field"
+        assert "conversion" in crs, "ProjectedCRS should contain 'conversion' field"
+        assert "base_crs" in crs, "ProjectedCRS should contain 'base_crs' field"
+        assert crs["id"]["authority"] == "EPSG"
+        assert crs["id"]["code"] == 32610
+
+    def test_output_contains_coordinate_system_axes(self, create_geoparquet, tmp_path):
+        """Test that coordinate_system includes proper axis definitions."""
+        input_file = create_geoparquet(
+            "input_for_axes.parquet",
+            "POINT(-122.4 37.8)",
+            crs_epsg=4326,
+        )
+
+        output_file = tmp_path / "output_for_axes.parquet"
+        reproject_impl(
+            input_parquet=str(input_file),
+            output_parquet=str(output_file),
+            target_crs="EPSG:32610",  # UTM Zone 10N
+        )
+
+        pf = pq.ParquetFile(output_file)
+        geo_meta = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+        crs = geo_meta["columns"]["geometry"]["crs"]
+
+        # Verify coordinate_system has axis definitions
+        cs = crs["coordinate_system"]
+        assert "axis" in cs, "coordinate_system should contain 'axis' field"
+        assert isinstance(cs["axis"], list), "axis should be a list"
+        assert len(cs["axis"]) >= 2, "Should have at least 2 axes"
+
+        # Each axis should have name, direction, and unit
+        for axis in cs["axis"]:
+            assert "name" in axis, "Each axis should have 'name'"
+            assert "direction" in axis, "Each axis should have 'direction'"
+            assert "unit" in axis, "Each axis should have 'unit'"
+
+    def test_output_contains_datum_info(self, create_geoparquet, tmp_path):
+        """Test that CRS includes datum or datum_ensemble information."""
+        input_file = create_geoparquet(
+            "input_for_datum.parquet",
+            "POINT(-122.4 37.8)",
+            crs_epsg=4326,
+        )
+
+        output_file = tmp_path / "output_for_datum.parquet"
+        reproject_impl(
+            input_parquet=str(input_file),
+            output_parquet=str(output_file),
+            target_crs="EPSG:32610",  # UTM Zone 10N
+        )
+
+        pf = pq.ParquetFile(output_file)
+        geo_meta = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+        crs = geo_meta["columns"]["geometry"]["crs"]
+
+        # ProjectedCRS has base_crs which contains datum info
+        # Check in base_crs for geographic CRS datum info
+        base_crs = crs.get("base_crs", crs)  # For projected CRS, check base
+        has_datum = "datum" in base_crs or "datum_ensemble" in base_crs
+        assert has_datum, "CRS or its base_crs should contain 'datum' or 'datum_ensemble' field"
+
+        # Get datum from whichever has it
+        if "datum_ensemble" in base_crs:
+            datum = base_crs["datum_ensemble"]
+            assert "name" in datum, "datum_ensemble should have 'name'"
+            assert "ellipsoid" in datum, "datum_ensemble should have 'ellipsoid'"
+            ellipsoid = datum["ellipsoid"]
+            assert "semi_major_axis" in ellipsoid, "ellipsoid should have 'semi_major_axis'"
+        elif "datum" in base_crs:
+            datum = base_crs["datum"]
+            assert "name" in datum, "datum should have 'name'"
+
+    def test_projjson_for_5070(self, create_geoparquet, tmp_path):
+        """Test full PROJJSON for EPSG:5070 (NAD83 Conus Albers)."""
+        input_file = create_geoparquet(
+            "input_for_5070.parquet",
+            "POINT(-122.4 37.8)",
+            crs_epsg=4326,
+        )
+
+        output_file = tmp_path / "output_5070.parquet"
+        reproject_impl(
+            input_parquet=str(input_file),
+            output_parquet=str(output_file),
+            target_crs="EPSG:5070",
+        )
+
+        pf = pq.ParquetFile(output_file)
+        geo_meta = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+        crs = geo_meta["columns"]["geometry"]["crs"]
+
+        # EPSG:5070 is a ProjectedCRS using Albers Equal Area
+        assert crs["type"] == "ProjectedCRS"
+        assert crs["id"]["authority"] == "EPSG"
+        assert crs["id"]["code"] == 5070
+        assert "Albers" in crs["name"] or "NAD83" in crs["name"], (
+            f"Expected Albers or NAD83 in name, got {crs['name']}"
+        )
+        assert "conversion" in crs, "Should have conversion info for projected CRS"
+        assert "base_crs" in crs, "Should have base_crs for projected CRS"
+
+    def test_projjson_not_minimal_fallback(self, create_geoparquet, tmp_path):
+        """Verify the PROJJSON is NOT the minimal fallback format.
+
+        The minimal fallback is just {"id": {"authority": "EPSG", "code": ...}}.
+        Full PROJJSON should have many more fields.
+        """
+        input_file = create_geoparquet(
+            "input_not_minimal.parquet",
+            "POINT(-122.4 37.8)",
+            crs_epsg=4326,
+        )
+
+        output_file = tmp_path / "output_not_minimal.parquet"
+        reproject_impl(
+            input_parquet=str(input_file),
+            output_parquet=str(output_file),
+            target_crs="EPSG:32610",  # UTM Zone 10N - a non-default CRS
+        )
+
+        pf = pq.ParquetFile(output_file)
+        geo_meta = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+        crs = geo_meta["columns"]["geometry"]["crs"]
+
+        # Minimal fallback would only have {"id": {...}}
+        # Full PROJJSON has many keys
+        assert len(crs.keys()) > 2, (
+            f"CRS appears to be minimal fallback with only {list(crs.keys())}. "
+            "Expected full PROJJSON with type, name, coordinate_system, etc."
+        )
+
+        # These fields are required in full PROJJSON
+        required_fields = ["type", "name", "coordinate_system", "id"]
+        for field in required_fields:
+            assert field in crs, f"Missing required PROJJSON field: {field}"
+
+
+class TestParseCrsStringToProjjson:
+    """Unit tests for parse_crs_string_to_projjson function."""
+
+    def test_epsg_4326_returns_full_projjson(self):
+        """Test that EPSG:4326 returns full PROJJSON, not minimal id."""
+        result = parse_crs_string_to_projjson("EPSG:4326")
+
+        assert "type" in result
+        assert result["type"] == "GeographicCRS"
+        assert "name" in result
+        assert "WGS 84" in result["name"]
+        assert "coordinate_system" in result
+        assert "id" in result
+        assert result["id"]["authority"] == "EPSG"
+        assert result["id"]["code"] == 4326
+
+    def test_utm_zone_returns_projected_crs(self):
+        """Test that UTM zones return ProjectedCRS type."""
+        result = parse_crs_string_to_projjson("EPSG:32610")
+
+        assert result["type"] == "ProjectedCRS"
+        assert "UTM" in result["name"]
+        assert "base_crs" in result
+        assert "conversion" in result
+        assert result["id"]["code"] == 32610
+
+    def test_nad83_conus_albers_returns_full_projjson(self):
+        """Test that EPSG:5070 (NAD83 Conus Albers) returns full PROJJSON."""
+        result = parse_crs_string_to_projjson("EPSG:5070")
+
+        assert result["type"] == "ProjectedCRS"
+        assert result["id"]["authority"] == "EPSG"
+        assert result["id"]["code"] == 5070
+        assert "conversion" in result
+        assert "base_crs" in result
+
+    def test_result_has_coordinate_system_with_axes(self):
+        """Test that result includes coordinate_system with axis info."""
+        result = parse_crs_string_to_projjson("EPSG:4326")
+
+        cs = result["coordinate_system"]
+        assert "axis" in cs
+        assert len(cs["axis"]) >= 2
+
+        for axis in cs["axis"]:
+            assert "name" in axis
+            assert "direction" in axis
+            assert "unit" in axis
+
+    def test_result_has_datum_info(self):
+        """Test that result includes datum or datum_ensemble."""
+        result = parse_crs_string_to_projjson("EPSG:4326")
+
+        # WGS84 uses datum_ensemble
+        has_datum = "datum" in result or "datum_ensemble" in result
+        assert has_datum
+
+    def test_result_is_not_minimal_dict(self):
+        """Test that result is NOT the minimal {"id": {...}} fallback."""
+        result = parse_crs_string_to_projjson("EPSG:4326")
+
+        # Minimal fallback has just 1 key ("id")
+        # Full PROJJSON has many more keys
+        assert len(result.keys()) > 3, (
+            f"Result appears to be minimal fallback with only {list(result.keys())}"
+        )
+
+    def test_lowercase_epsg_works(self):
+        """Test that lowercase 'epsg:4326' works."""
+        result = parse_crs_string_to_projjson("epsg:4326")
+
+        assert "type" in result
+        assert result["id"]["authority"] == "EPSG"
+        assert result["id"]["code"] == 4326
+
+    def test_invalid_crs_returns_fallback(self):
+        """Test that invalid CRS returns minimal fallback dict."""
+        result = parse_crs_string_to_projjson("EPSG:99999999")
+
+        # Should return minimal fallback
+        assert "id" in result
+        assert result["id"]["authority"] == "EPSG"
+        assert result["id"]["code"] == 99999999
+        # And NOT have the full structure
+        assert "type" not in result

@@ -612,23 +612,26 @@ def reproject(
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_file, output_file)
 
-    result = reproject_impl(
-        input_parquet=input_file,
-        output_parquet=output_file,
-        target_crs=dst_crs,
-        source_crs=src_crs,
-        overwrite=overwrite,
-        compression=compression,
-        compression_level=compression_level,
-        verbose=verbose,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-    )
+    try:
+        result = reproject_impl(
+            input_parquet=input_file,
+            output_parquet=output_file,
+            target_crs=dst_crs,
+            source_crs=src_crs,
+            overwrite=overwrite,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
 
-    click.echo(f"\nReprojected {result.feature_count:,} features")
-    click.echo(f"  Source CRS: {result.source_crs}")
-    click.echo(f"  Destination CRS: {result.target_crs}")
-    click.echo(f"  Output: {result.output_path}")
+        click.echo(f"\nReprojected {result.feature_count:,} features")
+        click.echo(f"  Source CRS: {result.source_crs}")
+        click.echo(f"  Destination CRS: {result.target_crs}")
+        click.echo(f"  Output: {result.output_path}")
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 # Inspect command
