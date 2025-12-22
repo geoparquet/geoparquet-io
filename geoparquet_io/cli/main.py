@@ -184,7 +184,9 @@ class MultiFileCheckRunner:
         else:
             # Determine if it's a warning or failure
             issues = result.get("issues", [])
-            has_error = any("❌" in str(i) or result.get("failed") for i in issues)
+            has_error_flag = bool(result.get("failed", False))
+            has_error_issues = any("❌" in str(i) for i in issues)
+            has_error = has_error_flag or has_error_issues
             if (
                 has_error
                 or result.get("size_status") == "poor"

@@ -251,6 +251,16 @@ def is_partition_path(path: str) -> bool:
     if not is_remote_url(path) and os.path.isdir(path):
         return True
 
+    # Check for hive-style partitioning in remote URLs (key=value in path components)
+    if is_remote_url(path):
+        # Extract path portion after scheme and host
+        # e.g., s3://bucket/prefix/country=US/data.parquet -> prefix/country=US/data.parquet
+        path_parts = path.split("/")
+        # Check if any path component contains = (hive-style partition)
+        for part in path_parts[3:]:  # Skip scheme://host/bucket parts
+            if "=" in part and not part.endswith(".parquet"):
+                return True
+
     return False
 
 
