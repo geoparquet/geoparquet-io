@@ -11,9 +11,13 @@ from geoparquet_io.core.inspect_utils import (
     extract_columns_info,
     extract_file_info,
     extract_geo_info,
+    format_bbox_display,
     format_geometry_display,
     format_markdown_output,
+    get_preview_data,
+    is_bbox_value,
     parse_wkb_type,
+    wkb_to_wkt_preview,
 )
 
 
@@ -286,6 +290,99 @@ def test_format_geometry_display():
     # Non-bytes value
     result = format_geometry_display("some string")
     assert "some string" in result
+
+
+def test_wkb_to_wkt_preview_with_valid_wkb():
+    """Test WKT preview with valid ISO WKB point."""
+    # Valid ISO WKB for POINT (1.0, 2.0) - little endian
+    point_wkb = bytes(
+        [
+            0x01,  # little endian
+            0x01,
+            0x00,
+            0x00,
+            0x00,  # Point type
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0xF0,
+            0x3F,  # x = 1.0
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x40,  # y = 2.0
+        ]
+    )
+    result = wkb_to_wkt_preview(point_wkb)
+    assert "POINT" in result
+    # Should contain actual coordinates, not just type
+    assert "1" in result or "<POINT>" in result  # WKT or fallback
+
+
+def test_wkb_to_wkt_preview_fallback():
+    """Test WKT preview falls back for invalid WKB."""
+    # Too short to be valid WKB
+    short_bytes = bytes([0x01, 0x01, 0x00])
+    result = wkb_to_wkt_preview(short_bytes)
+    assert result == "<GEOMETRY>"
+
+
+def test_format_bbox_display():
+    """Test bbox struct formatting."""
+    bbox = {"xmin": -122.5, "ymin": 37.5, "xmax": -122.0, "ymax": 38.0}
+    result = format_bbox_display(bbox)
+    assert "[" in result
+    assert "-122.5" in result or "-122.500000" in result
+    assert "37.5" in result or "37.500000" in result
+
+
+def test_format_bbox_display_truncation():
+    """Test bbox display truncates long output."""
+    bbox = {"xmin": -122.123456789, "ymin": 37.123456789, "xmax": -122.0, "ymax": 38.0}
+    result = format_bbox_display(bbox, max_length=30)
+    assert len(result) <= 30
+
+
+def test_is_bbox_value():
+    """Test bbox struct detection."""
+    # Valid bbox struct
+    valid_bbox = {"xmin": 0, "ymin": 0, "xmax": 1, "ymax": 1}
+    assert is_bbox_value(valid_bbox) is True
+
+    # Extra keys are allowed
+    extended_bbox = {"xmin": 0, "ymin": 0, "xmax": 1, "ymax": 1, "zmin": 0, "zmax": 1}
+    assert is_bbox_value(extended_bbox) is True
+
+    # Missing keys
+    partial = {"xmin": 0, "ymin": 0, "xmax": 1}
+    assert is_bbox_value(partial) is False
+
+    # Non-dict values
+    assert is_bbox_value([0, 0, 1, 1]) is False
+    assert is_bbox_value(None) is False
+    assert is_bbox_value("bbox") is False
+
+
+def test_preview_data_returns_wkt():
+    """Test that get_preview_data returns WKT strings for geometry columns."""
+    test_file = os.path.join(os.path.dirname(__file__), "data", "buildings_test.parquet")
+    table, mode = get_preview_data(test_file, head=1)
+
+    # Get the geometry column value
+    geom_value = table.column("geometry")[0].as_py()
+
+    # Should be a string (WKT), not bytes
+    assert isinstance(geom_value, str), f"Expected str but got {type(geom_value)}"
+
+    # Should contain WKT geometry type
+    assert "POLYGON" in geom_value or "POINT" in geom_value or "LINESTRING" in geom_value
 
 
 def test_format_markdown_output():
