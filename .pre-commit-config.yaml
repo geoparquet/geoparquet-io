@@ -32,3 +32,21 @@ repos:
     hooks:
     - id: xenon
       args: ['--max-absolute=E', '--max-modules=D', '--max-average=C']
+
+    # enforce logger usage over click.echo in core/
+  - repo: local
+    hooks:
+    - id: no-click-echo
+      name: no-click-echo
+      description: Use logger instead of click.echo in core/
+      entry: bash
+      args:
+        - -c
+        - |
+          if grep -rn "click\.echo" geoparquet_io/core/ --include="*.py" | grep -v "logging_config.py"; then
+            echo "ERROR: Use logger instead of click.echo in core/. See CLAUDE.md Logging section."
+            exit 1
+          fi
+      language: system
+      pass_filenames: false
+      types: [python]

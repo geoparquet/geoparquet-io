@@ -43,10 +43,42 @@ from geoparquet_io.core.partition_by_kdtree import partition_by_kdtree as partit
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
+from geoparquet_io.core.reproject import reproject_impl
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
 __version__ = "0.6.1"
+
+
+class OptionalIntCommand(click.Command):
+    """Custom Command that supports options with optional integer values.
+
+    Options listed in optional_int_options can be used as flags (defaulting to 10)
+    or with an explicit integer value. For example:
+        --head           -> uses default value of 10
+        --head 5         -> uses value 5
+        (no --head)      -> uses None
+    """
+
+    # Options that support optional integer values and their defaults
+    optional_int_options = {"--head": 10, "--tail": 10}
+
+    def make_context(self, info_name, args, parent=None, **extra):
+        """Preprocess args to insert default values for optional int options."""
+        args = list(args)  # Make a mutable copy
+        for opt, default_val in self.optional_int_options.items():
+            if opt in args:
+                idx = args.index(opt)
+                # Check if next arg exists and looks like an integer
+                if idx + 1 < len(args):
+                    next_arg = args[idx + 1]
+                    # If next arg starts with - (another option) or doesn't look like int
+                    if next_arg.startswith("-") or not next_arg.lstrip("-").isdigit():
+                        args.insert(idx + 1, str(default_val))
+                else:
+                    # Option at end of args
+                    args.insert(idx + 1, str(default_val))
+        return super().make_context(info_name, args, parent=parent, **extra)
 
 
 @click.group()
@@ -913,11 +945,92 @@ def convert(
     )
 
 
-# Inspect command
+# Reproject command
 @cli.command()
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--dst-crs",
+    "-d",
+    default="EPSG:4326",
+    show_default=True,
+    help="Destination CRS (e.g., 'EPSG:4326', 'EPSG:32610')",
+)
+@click.option(
+    "--src-crs",
+    "-s",
+    default=None,
+    help="Override source CRS (e.g., 'EPSG:4326'). If not provided, detected from file metadata.",
+)
+@overwrite_option
+@verbose_option
+@profile_option
+@compression_options
+@geoparquet_version_option
+def reproject(
+    input_file,
+    output_file,
+    dst_crs,
+    src_crs,
+    overwrite,
+    verbose,
+    profile,
+    compression,
+    compression_level,
+    geoparquet_version,
+):
+    """
+    Reproject a GeoParquet file to a different CRS.
+
+    Uses DuckDB's ST_Transform for fast, streaming reprojection.
+    Automatically detects source CRS from GeoParquet metadata unless --src-crs is provided.
+
+    If OUTPUT_FILE is not provided, creates <input>_<crs>.parquet.
+    Use --overwrite to modify the input file in place.
+
+    \b
+    Examples:
+        gpio reproject input.parquet output.parquet
+        gpio reproject input.parquet -d EPSG:32610
+        gpio reproject input.parquet --overwrite -d EPSG:4326
+        gpio reproject input.parquet output.parquet --dst-crs EPSG:3857
+        gpio reproject input.parquet output.parquet -s EPSG:4326 -d EPSG:32610
+    """
+    from geoparquet_io.core.common import validate_profile_for_urls
+
+    # Configure verbose logging
+    configure_verbose(verbose)
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, input_file, output_file)
+
+    try:
+        result = reproject_impl(
+            input_parquet=input_file,
+            output_parquet=output_file,
+            target_crs=dst_crs,
+            source_crs=src_crs,
+            overwrite=overwrite,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+
+        click.echo(f"\nReprojected {result.feature_count:,} features")
+        click.echo(f"  Source CRS: {result.source_crs}")
+        click.echo(f"  Destination CRS: {result.target_crs}")
+        click.echo(f"  Output: {result.output_path}")
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+# Inspect command - uses OptionalIntCommand for --head/--tail optional values
+@cli.command(cls=OptionalIntCommand)
 @click.argument("parquet_file")
-@click.option("--head", type=int, default=None, help="Show first N rows")
-@click.option("--tail", type=int, default=None, help="Show last N rows")
+@click.option("--head", type=int, default=None, help="Show first N rows (default: 10)")
+@click.option("--tail", type=int, default=None, help="Show last N rows (default: 10)")
 @click.option(
     "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
 )
@@ -949,8 +1062,16 @@ def inspect(
         gpio inspect data.parquet
 
         \b
-        # Preview first 10 rows
-        gpio inspect data.parquet --head 10
+        # Preview first 10 rows (default when no value given)
+        gpio inspect data.parquet --head
+
+        \b
+        # Preview first 20 rows
+        gpio inspect data.parquet --head 20
+
+        \b
+        # Preview last 10 rows (default when no value given)
+        gpio inspect data.parquet --tail
 
         \b
         # Preview last 5 rows

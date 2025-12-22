@@ -447,27 +447,107 @@ def parse_wkb_type(wkb_bytes: bytes) -> str:
         return "GEOMETRY"
 
 
-def format_geometry_display(value: Any) -> str:
+def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 60) -> str:
+    """
+    Convert WKB bytes to WKT and truncate for preview display.
+
+    Handles both standard ISO WKB format and DuckDB's internal GEOMETRY format.
+
+    Args:
+        wkb_bytes: WKB binary data (ISO WKB or DuckDB GEOMETRY format)
+        max_length: Maximum length of WKT string to return
+
+    Returns:
+        str: Truncated WKT string or fallback geometry type
+    """
+    if not wkb_bytes or len(wkb_bytes) < 5:
+        return "<GEOMETRY>"
+
+    try:
+        with duckdb.connect() as con:
+            con.execute("LOAD spatial;")
+
+            # Check if this is DuckDB's internal GEOMETRY format (starts with 0x02)
+            # vs standard ISO WKB (starts with 0x00 or 0x01 for byte order)
+            if wkb_bytes[0] == 0x02:
+                # DuckDB internal GEOMETRY format - cast directly
+                result = con.execute("SELECT ST_AsText(?::GEOMETRY)", [wkb_bytes]).fetchone()
+            else:
+                # Standard ISO WKB format
+                result = con.execute(
+                    "SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes]
+                ).fetchone()
+
+        if result and result[0]:
+            wkt = result[0]
+            if len(wkt) > max_length:
+                return wkt[: max_length - 3] + "..."
+            return wkt
+        else:
+            # Fall back to geometry type
+            return f"<{parse_wkb_type(wkb_bytes)}>"
+    except Exception:
+        # Fall back to geometry type on any error
+        return f"<{parse_wkb_type(wkb_bytes)}>"
+
+
+def format_geometry_display(value: Any, max_length: int = 60) -> str:
     """
     Format a geometry value for display.
 
     Args:
         value: Geometry value (WKB bytes or other)
+        max_length: Maximum length for WKT preview
 
     Returns:
-        str: Formatted geometry display string
+        str: Formatted geometry display string (WKT preview or fallback)
     """
     if value is None:
         return "NULL"
 
     if isinstance(value, bytes):
-        geom_type = parse_wkb_type(value)
-        return f"<{geom_type}>"
+        return wkb_to_wkt_preview(value, max_length)
 
     return str(value)
 
 
-def format_value_for_display(value: Any, column_type: str, is_geometry: bool) -> str:
+def format_bbox_display(value: dict, max_length: int = 60) -> str:
+    """
+    Format a bbox struct value for display.
+
+    Args:
+        value: Dict with xmin, ymin, xmax, ymax keys
+        max_length: Maximum length of output string
+
+    Returns:
+        str: Formatted bbox string like [xmin, ymin, xmax, ymax]
+    """
+    if not isinstance(value, dict):
+        return str(value)
+    try:
+        xmin = value.get("xmin", 0)
+        ymin = value.get("ymin", 0)
+        xmax = value.get("xmax", 0)
+        ymax = value.get("ymax", 0)
+        formatted = f"[{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]"
+        if len(formatted) > max_length:
+            return formatted[: max_length - 3] + "..."
+        return formatted
+    except (TypeError, ValueError, AttributeError):
+        return str(value)
+
+
+def is_bbox_value(value: Any) -> bool:
+    """Check if a value is a bbox struct (dict with xmin, ymin, xmax, ymax)."""
+    if not isinstance(value, dict):
+        return False
+    bbox_keys = {"xmin", "ymin", "xmax", "ymax"}
+    return bbox_keys.issubset(value.keys())
+
+
+def format_value_for_display(
+    value: Any, column_type: str, is_geometry: bool, max_length: int = 60
+) -> str:
     """
     Format a cell value for terminal display.
 
@@ -475,6 +555,7 @@ def format_value_for_display(value: Any, column_type: str, is_geometry: bool) ->
         value: Cell value
         column_type: Column type string
         is_geometry: Whether this is a geometry column
+        max_length: Maximum length for geometry WKT preview
 
     Returns:
         str: Formatted display string
@@ -483,7 +564,11 @@ def format_value_for_display(value: Any, column_type: str, is_geometry: bool) ->
         return "NULL"
 
     if is_geometry:
-        return format_geometry_display(value)
+        return format_geometry_display(value, max_length)
+
+    # Format bbox struct columns nicely
+    if is_bbox_value(value):
+        return format_bbox_display(value, max_length)
 
     # Truncate long strings
     value_str = str(value)
@@ -526,6 +611,8 @@ def get_preview_data(
     """
     Read preview data from a Parquet file.
 
+    Geometry columns are automatically converted to WKT strings for display.
+
     Args:
         parquet_file: Path to the parquet file
         head: Number of rows from start (mutually exclusive with tail)
@@ -535,7 +622,11 @@ def get_preview_data(
         tuple: (PyArrow table with data, mode: "head" or "tail")
     """
     from geoparquet_io.core.common import get_duckdb_connection, needs_httpfs
-    from geoparquet_io.core.duckdb_metadata import get_row_count
+    from geoparquet_io.core.duckdb_metadata import (
+        detect_geometry_columns,
+        get_geo_metadata,
+        get_row_count,
+    )
 
     safe_url = safe_file_url(parquet_file, verbose=False)
     total_rows = get_row_count(parquet_file)
@@ -544,17 +635,48 @@ def get_preview_data(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
     try:
+        # Detect geometry columns from native Parquet types
+        geo_columns = set(detect_geometry_columns(parquet_file).keys())
+
+        # Also detect geometry columns from GeoParquet metadata
+        geo_meta = get_geo_metadata(parquet_file)
+        if geo_meta:
+            columns_meta = geo_meta.get("columns", {})
+            geo_columns.update(columns_meta.keys())
+
+        # Get all column names from the parquet file
+        schema_result = con.execute(
+            f"SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet('{safe_url}'))"
+        ).fetchall()
+        all_columns = [row[0] for row in schema_result]
+
+        # Build column list, converting geometry columns to WKT
+        column_expressions = []
+        for col in all_columns:
+            # Escape double quotes in column names for SQL identifiers
+            escaped_col = col.replace('"', '""')
+            if col in geo_columns:
+                # Convert geometry to WKT for display
+                column_expressions.append(f'ST_AsText("{escaped_col}") AS "{escaped_col}"')
+            else:
+                column_expressions.append(f'"{escaped_col}"')
+
+        select_clause = ", ".join(column_expressions)
+
         if tail:
             # Read from end
             start_row = max(0, total_rows - tail)
             num_rows = min(tail, total_rows)
-            query = f"SELECT * FROM read_parquet('{safe_url}') OFFSET {start_row} LIMIT {num_rows}"
+            query = (
+                f"SELECT {select_clause} FROM read_parquet('{safe_url}') "
+                f"OFFSET {start_row} LIMIT {num_rows}"
+            )
             mode = "tail"
         else:
             # Read from start (default if head is None, use 10)
             num_rows = head if head is not None else 10
             num_rows = min(num_rows, total_rows)
-            query = f"SELECT * FROM read_parquet('{safe_url}') LIMIT {num_rows}"
+            query = f"SELECT {select_clause} FROM read_parquet('{safe_url}') LIMIT {num_rows}"
             mode = "head"
 
         # Execute query and convert to PyArrow table
