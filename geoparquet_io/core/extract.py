@@ -620,7 +620,7 @@ def build_extract_query(
     read_expr = build_read_parquet_expr(
         input_path,
         allow_schema_diff=allow_schema_diff,
-        hive_input=hive_input if hive_input else None,
+        hive_input=hive_input,
         verbose=False,
     )
     query = f"SELECT {col_list} FROM {read_expr}"

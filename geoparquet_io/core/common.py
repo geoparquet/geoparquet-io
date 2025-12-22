@@ -251,6 +251,16 @@ def is_partition_path(path: str) -> bool:
     if not is_remote_url(path) and os.path.isdir(path):
         return True
 
+    # Check for hive-style partitioning in remote URLs (key=value in path components)
+    if is_remote_url(path):
+        # Extract path portion after scheme and host
+        # e.g., s3://bucket/prefix/country=US/data.parquet -> prefix/country=US/data.parquet
+        path_parts = path.split("/")
+        # Check if any path component contains = (hive-style partition)
+        for part in path_parts[3:]:  # Skip scheme://host/bucket parts
+            if "=" in part and not part.endswith(".parquet"):
+                return True
+
     return False
 
 
@@ -303,8 +313,15 @@ def resolve_partition_path(path: str, hive_partitioning: bool | None = None) -> 
             resolved = os.path.join(path, "**", "*.parquet")
 
     # If path contains hive-style markers and hive_partitioning not explicitly set
-    if hive_partitioning is None and "=" in resolved:
-        options["hive_partitioning"] = True
+    # Check path components (directories) for hive-style key=value patterns
+    # Exclude glob patterns and the final filename from the check
+    if hive_partitioning is None:
+        path_parts = resolved.replace("\\", "/").split("/")
+        # Check directory components (not filename or glob patterns like ** or *.parquet)
+        dir_parts = [p for p in path_parts[:-1] if p and p not in ("**", "*")]
+        has_hive_dirs = any("=" in part for part in dir_parts)
+        if has_hive_dirs:
+            options["hive_partitioning"] = True
     elif hive_partitioning is not None:
         options["hive_partitioning"] = hive_partitioning
 
@@ -1335,16 +1352,17 @@ def add_crs_to_geoparquet_metadata(
 
 def parse_crs_string_to_projjson(crs_string, con=None):
     """
-    Convert a CRS string (like "EPSG:5070") to PROJJSON dict.
+    Convert a CRS string (like "EPSG:5070") to full PROJJSON dict.
 
-    Uses DuckDB's spatial extension to look up the CRS definition.
+    Uses pyproj to generate the complete PROJJSON definition including
+    all CRS parameters, not just the authority/code.
 
     Args:
         crs_string: CRS string like "EPSG:5070" or "EPSG:4326"
-        con: DuckDB connection (optional, will create one if not provided)
+        con: DuckDB connection (optional, unused but kept for API compatibility)
 
     Returns:
-        dict: PROJJSON dict, or simple id dict if lookup fails
+        dict: Full PROJJSON dict, or simple id dict if lookup fails
     """
     identifier = _extract_crs_identifier(crs_string)
     if not identifier:
@@ -1352,36 +1370,15 @@ def parse_crs_string_to_projjson(crs_string, con=None):
 
     authority, code = identifier
 
-    # Try to get full PROJJSON from DuckDB
-    if con is None:
-        con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        should_close = True
-    else:
-        should_close = False
-
     try:
-        # Create a simple point and get its CRS via ST_Transform metadata
-        # This is a workaround since DuckDB doesn't have direct CRS lookup
-        result = con.execute(f"""
-            SELECT ST_AsText(ST_Transform(
-                ST_Point(0, 0)::GEOMETRY,
-                'EPSG:4326',
-                '{authority}:{code}'
-            ))
-        """).fetchone()
+        from pyproj import CRS
 
-        # If transform succeeds, return simple PROJJSON with id
-        if result:
-            return {"id": {"authority": authority, "code": code}}
+        # Create CRS from authority:code and get full PROJJSON
+        crs = CRS.from_authority(authority, code)
+        return crs.to_json_dict()
     except Exception:
-        pass
-    finally:
-        if should_close:
-            con.close()
-
-    # Fallback to simple id dict
-    return {"id": {"authority": authority, "code": code}}
+        # Fallback to simple id dict if pyproj fails
+        return {"id": {"authority": authority, "code": code}}
 
 
 def _parse_existing_geo_metadata(original_metadata):
