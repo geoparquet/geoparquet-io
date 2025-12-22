@@ -134,7 +134,6 @@ class DynamicStreamHandler(logging.StreamHandler):
 
     def emit(self, record):
         try:
-            msg = self.format(record)
             # Always write to the current sys.stdout so that any environment
             # that replaces stdout (e.g., Click's CliRunner, pytest capture)
             # will receive the log output.
