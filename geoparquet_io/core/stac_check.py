@@ -9,6 +9,8 @@ from pathlib import Path
 import click
 import pystac.validation
 
+from geoparquet_io.core.logging_config import debug, error, progress, success, warn
+
 
 def _load_stac_json(stac_path: str) -> dict:
     """Load STAC JSON file."""
@@ -31,7 +33,7 @@ def _validate_stac_spec(stac_dict: dict, results: dict, verbose: bool) -> None:
     try:
         pystac.validation.validate_dict(stac_dict)
         if verbose:
-            click.echo(f"✓ Valid STAC {stac_type} (version {stac_version})")
+            success(f"✓ Valid STAC {stac_type} (version {stac_version})")
     except ImportError as e:
         results["warnings"].append(
             f"STAC validation unavailable: {e}. Install jsonschema for full validation."
@@ -171,24 +173,24 @@ def validate_stac_file(stac_path: str, verbose: bool = False) -> dict:
 def _print_validation_results(results: dict, verbose: bool) -> None:
     """Print validation results to console."""
     if results["valid"]:
-        click.echo(click.style("✓ STAC validation passed", fg="green"))
+        success("✓ STAC validation passed")
     else:
-        click.echo(click.style("✗ STAC validation failed", fg="red"))
+        error("✗ STAC validation failed")
 
     if results["errors"]:
-        click.echo("\nErrors:")
-        for error in results["errors"]:
-            click.echo(click.style(f"  ✗ {error}", fg="red"))
+        progress("\nErrors:")
+        for error_msg in results["errors"]:
+            error(f"  ✗ {error_msg}")
 
     if results["warnings"]:
-        click.echo("\nWarnings:")
+        progress("\nWarnings:")
         for warning in results["warnings"]:
-            click.echo(click.style(f"  ⚠️  {warning}", fg="yellow"))
+            warn(f"  ⚠️  {warning}")
 
     if verbose and results["info"]:
-        click.echo("\nInfo:")
+        progress("\nInfo:")
         for key, value in results["info"].items():
-            click.echo(f"  {key}: {value}")
+            debug(f"  {key}: {value}")
 
 
 def _should_raise_error(results: dict) -> bool:
@@ -210,7 +212,7 @@ def check_stac(stac_path: str, verbose: bool = False):
         verbose: Print verbose output
     """
     if verbose:
-        click.echo(f"Validating STAC file: {stac_path}\n")
+        debug(f"Validating STAC file: {stac_path}\n")
 
     results = validate_stac_file(stac_path, verbose)
     _print_validation_results(results, verbose)

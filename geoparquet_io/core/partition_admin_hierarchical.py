@@ -21,6 +21,7 @@ from geoparquet_io.core.common import (
     safe_file_url,
     write_parquet_with_metadata,
 )
+from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition_common import (
     sanitize_filename,
 )
@@ -97,7 +98,7 @@ def _build_admin_where_clause(
     if subtype_filter:
         admin_where_clauses.append(subtype_filter)
         if verbose:
-            click.echo(f"  → Filtering admin boundaries: {subtype_filter}")
+            debug(f"  → Filtering admin boundaries: {subtype_filter}")
 
     # Add bbox extent filter
     if admin_bbox_col:
@@ -131,7 +132,7 @@ def _build_admin_where_clause(
             """
             admin_where_clauses.append(extent_filter)
             if verbose:
-                click.echo(
+                debug(
                     f"  → Filtering admin boundaries to input extent: ({xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f})"
                 )
 
@@ -153,15 +154,15 @@ def _setup_admin_dataset(dataset_name, verbose, levels):
     dataset = AdminDatasetFactory.create(dataset_name, source_path=None, verbose=verbose)
 
     if verbose:
-        click.echo(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
-        click.echo(f"Remote source: {dataset.get_source()}")
-        click.echo(f"Hierarchical levels: {' → '.join(levels)}")
+        debug(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
+        debug(f"Remote source: {dataset.get_source()}")
+        debug(f"Hierarchical levels: {' → '.join(levels)}")
 
     dataset.validate_levels(levels)
     boundary_columns = dataset.get_partition_columns(levels)
 
     if verbose:
-        click.echo(f"Boundary dataset columns: {', '.join(boundary_columns)}")
+        debug(f"Boundary dataset columns: {', '.join(boundary_columns)}")
 
     return dataset, boundary_columns
 
@@ -247,7 +248,7 @@ def _verify_enrichment_results(con, enriched_table, output_column_names):
     stats = con.execute(stats_query).fetchone()
     total_count, with_admin_count = stats
 
-    click.echo(f"  ✓ Matched {with_admin_count:,} of {total_count:,} features to admin boundaries")
+    success(f"  ✓ Matched {with_admin_count:,} of {total_count:,} features to admin boundaries")
 
     if with_admin_count == 0:
         raise click.ClickException(
@@ -359,11 +360,11 @@ def _create_partition_file(
     # Skip if exists and not overwriting
     if os.path.exists(output_file) and not overwrite:
         if verbose:
-            click.echo(f"  ⊘ Skipping existing: {'/'.join(folder_parts)}")
+            debug(f"  ⊘ Skipping existing: {'/'.join(folder_parts)}")
         return False
 
     if verbose:
-        click.echo(f"  → Creating: {'/'.join(folder_parts)}")
+        debug(f"  → Creating: {'/'.join(folder_parts)}")
 
     # Build WHERE clause
     where_conditions = [
@@ -448,7 +449,7 @@ def partition_by_admin_hierarchical(
     dataset.configure_s3(con)
 
     # STEP 1: Spatial join to create enriched data with admin columns
-    click.echo("\n📍 Step 1/2: Performing spatial join with admin boundaries...")
+    progress("\n📍 Step 1/2: Performing spatial join with admin boundaries...")
 
     enriched_table = "_enriched_with_admin"
     admin_source = dataset.prepare_data_source(con)
@@ -468,9 +469,9 @@ def partition_by_admin_hierarchical(
 
     # Build efficient spatial join query
     if input_bbox_col and admin_bbox_col and verbose:
-        click.echo("  → Using bbox columns for optimized spatial join")
+        debug("  → Using bbox columns for optimized spatial join")
     elif not (input_bbox_col and admin_bbox_col) and verbose:
-        click.echo("  → Using full geometry intersection (no bbox optimization)")
+        debug("  → Using full geometry intersection (no bbox optimization)")
 
     # Perform enrichment join
     _perform_enrichment_join(
@@ -495,7 +496,7 @@ def partition_by_admin_hierarchical(
         raise
 
     # STEP 2: Partition the enriched data
-    click.echo(f"\n📁 Step 2/2: Partitioning by {' → '.join(levels)}...")
+    progress(f"\n📁 Step 2/2: Partitioning by {' → '.join(levels)}...")
 
     # Preview mode
     if preview:
@@ -520,7 +521,7 @@ def partition_by_admin_hierarchical(
     combinations = _get_partition_combinations(con, enriched_table, output_column_names)
 
     if verbose:
-        click.echo(f"  → Creating {len(combinations)} partition(s)...")
+        debug(f"  → Creating {len(combinations)} partition(s)...")
 
     # Get original columns (exclude temporary admin columns)
     original_cols = _get_original_columns(con, input_url)
@@ -545,7 +546,7 @@ def partition_by_admin_hierarchical(
 
     con.close()
 
-    click.echo(f"\n✓ Created {partition_count} partition(s) in {output_folder}")
+    success(f"\n✓ Created {partition_count} partition(s) in {output_folder}")
 
     return partition_count
 
@@ -573,17 +574,17 @@ def _get_preview_partitions(con, table_name, partition_columns, level_names):
 
 def _display_preview_header(level_names, all_partitions, total_records, limit):
     """Display preview header and stats."""
-    click.echo(f"\n📊 Partition Preview ({' → '.join(level_names)}):")
-    click.echo(f"  Total partitions: {len(all_partitions)}")
-    click.echo(f"  Total records: {total_records:,}")
-    click.echo(f"\n  Top {min(limit, len(all_partitions))} partitions by size:")
+    progress(f"\n📊 Partition Preview ({' → '.join(level_names)}):")
+    progress(f"  Total partitions: {len(all_partitions)}")
+    progress(f"  Total records: {total_records:,}")
+    progress(f"\n  Top {min(limit, len(all_partitions))} partitions by size:")
 
     header_parts = [f"{name:<25}" for name in level_names]
     header_parts.append(f"{'Records':>15}")
     header_parts.append(f"{'%':>8}")
     header = "  ".join(header_parts)
-    click.echo(f"\n  {header}")
-    click.echo(f"  {'-' * len(header)}")
+    progress(f"\n  {header}")
+    progress(f"  {'-' * len(header)}")
     return header
 
 
@@ -600,7 +601,7 @@ def _display_preview_rows(all_partitions, limit, total_records):
         row_parts = [f"{str(val):<25}" for val in values]
         row_parts.append(f"{count:>15,}")
         row_parts.append(f"{percentage:>7.1f}%")
-        click.echo(f"  {'  '.join(row_parts)}")
+        progress(f"  {'  '.join(row_parts)}")
 
 
 def _display_preview_summary(all_partitions, limit, total_records, header):
@@ -609,11 +610,11 @@ def _display_preview_summary(all_partitions, limit, total_records, header):
         remaining = len(all_partitions) - limit
         remaining_records = sum(row[-1] for row in all_partitions[limit:])
         remaining_pct = (remaining_records / total_records) * 100
-        click.echo(f"  {'-' * len(header)}")
-        click.echo(
+        progress(f"  {'-' * len(header)}")
+        progress(
             f"  ... and {remaining} more partition(s) with {remaining_records:,} records ({remaining_pct:.1f}%)"
         )
-        click.echo("\n  Use --preview-limit to show more partitions")
+        progress("\n  Use --preview-limit to show more partitions")
 
 
 def _preview_hierarchical_partitions(
@@ -628,7 +629,7 @@ def _preview_hierarchical_partitions(
     all_partitions = _get_preview_partitions(con, table_name, partition_columns, level_names)
 
     if len(all_partitions) == 0:
-        click.echo("\n⚠️  No partitions would be created (no features with admin boundaries)")
+        warn("\n⚠️  No partitions would be created (no features with admin boundaries)")
         return
 
     total_records = sum(row[-1] for row in all_partitions)

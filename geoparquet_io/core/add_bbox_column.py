@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
-import click
-
 from geoparquet_io.core.common import (
     add_computed_column,
     check_bbox_structure,
     detect_geoparquet_file_type,
     find_primary_geometry_column,
 )
+from geoparquet_io.core.logging_config import progress, success, warn
 
 
 def add_bbox_column(
@@ -54,13 +53,10 @@ def add_bbox_column(
     if not dry_run:
         file_type_info = detect_geoparquet_file_type(input_parquet, verbose)
         if file_type_info["file_type"] == "parquet_geo_only":
-            click.echo(
-                click.style(
-                    "Note: Input file uses native Parquet geometry types without GeoParquet metadata. "
-                    "Bbox column is not required for spatial statistics as native geo types provide "
-                    "row group statistics. Proceeding with bbox addition anyway.",
-                    fg="yellow",
-                )
+            warn(
+                "Note: Input file uses native Parquet geometry types without GeoParquet metadata. "
+                "Bbox column is not required for spatial statistics as native geo types provide "
+                "row group statistics. Proceeding with bbox addition anyway."
             )
 
     # Check for existing bbox column (skip in dry-run mode)
@@ -72,43 +68,33 @@ def add_bbox_column(
         if bbox_info["status"] == "optimal":
             if force:
                 if bbox_column_name == existing_bbox_col:
-                    click.echo(f"Replacing existing bbox column '{existing_bbox_col}'...")
+                    progress(f"Replacing existing bbox column '{existing_bbox_col}'...")
                     replace_column = existing_bbox_col
                 else:
-                    click.echo(
-                        click.style(
-                            f"Warning: Adding '{bbox_column_name}' alongside existing "
-                            f"'{existing_bbox_col}'. File will have 2 bbox columns.",
-                            fg="yellow",
-                        )
+                    warn(
+                        f"Warning: Adding '{bbox_column_name}' alongside existing "
+                        f"'{existing_bbox_col}'. File will have 2 bbox columns."
                     )
             else:
-                click.echo(
+                progress(
                     f"File already has bbox column '{existing_bbox_col}' with covering metadata."
                 )
-                click.echo("Use --force to replace the existing bbox column.")
+                progress("Use --force to replace the existing bbox column.")
                 return
 
         elif bbox_info["status"] == "suboptimal":
             if force:
                 if bbox_column_name == existing_bbox_col:
-                    click.echo(f"Replacing existing bbox column '{existing_bbox_col}'...")
+                    progress(f"Replacing existing bbox column '{existing_bbox_col}'...")
                     replace_column = existing_bbox_col
                 else:
-                    click.echo(
-                        click.style(
-                            f"Warning: Adding '{bbox_column_name}' alongside existing "
-                            f"'{existing_bbox_col}'. File will have 2 bbox columns.",
-                            fg="yellow",
-                        )
+                    warn(
+                        f"Warning: Adding '{bbox_column_name}' alongside existing "
+                        f"'{existing_bbox_col}'. File will have 2 bbox columns."
                     )
             else:
-                click.echo(
-                    f"File has bbox column '{existing_bbox_col}' but lacks covering metadata."
-                )
-                click.echo(
-                    "Run 'gpio add bbox-metadata' to add metadata, or use --force to replace."
-                )
+                progress(f"File has bbox column '{existing_bbox_col}' but lacks covering metadata.")
+                progress("Run 'gpio add bbox-metadata' to add metadata, or use --force to replace.")
                 return
 
     # Get geometry column for the SQL expression
@@ -144,7 +130,7 @@ def add_bbox_column(
     )
 
     if not dry_run:
-        click.echo(f"Successfully added bbox column '{bbox_column_name}' to: {output_parquet}")
+        success(f"Successfully added bbox column '{bbox_column_name}' to: {output_parquet}")
 
 
 if __name__ == "__main__":

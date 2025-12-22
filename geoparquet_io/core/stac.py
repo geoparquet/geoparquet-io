@@ -18,6 +18,7 @@ from geoparquet_io.core.common import (
     is_remote_url,
     parse_geo_metadata,
 )
+from geoparquet_io.core.logging_config import debug, warn
 
 
 def _detect_stac_file(file_path: Path) -> str | None:
@@ -123,7 +124,7 @@ def detect_pmtiles(base_path: str, verbose: bool = False) -> str | None:
     elif len(pmtiles_files) == 1:
         # Exactly one - perfect!
         if verbose:
-            click.echo(f"Found PMTiles overview: {pmtiles_files[0].name}")
+            debug(f"Found PMTiles overview: {pmtiles_files[0].name}")
         return str(pmtiles_files[0])
     else:
         # Multiple found - error
@@ -255,14 +256,11 @@ def _add_pmtiles_asset(
             ),
         )
         if verbose:
-            click.echo(f"Added PMTiles asset: {pmtiles_filename}")
+            debug(f"Added PMTiles asset: {pmtiles_filename}")
     elif show_warning:
-        click.echo(
-            click.style(
-                "⚠️  No PMTiles overview found. Consider creating one for map visualization.\n"
-                "   See: https://github.com/felt/tippecanoe",
-                fg="yellow",
-            )
+        warn(
+            "⚠️  No PMTiles overview found. Consider creating one for map visualization.\n"
+            "   See: https://github.com/felt/tippecanoe"
         )
 
 
@@ -348,17 +346,14 @@ def generate_stac_item(
         )
 
     if verbose:
-        click.echo(f"Generating STAC Item for {parquet_file}")
+        debug(f"Generating STAC Item for {parquet_file}")
 
     # Check for PMTiles immediately (before processing)
     pmtiles_path = detect_pmtiles(parquet_file, verbose=False)
     if not pmtiles_path:
-        click.echo(
-            click.style(
-                "⚠️  No PMTiles overview found. Consider creating one for map visualization.\n"
-                "   See: https://github.com/felt/tippecanoe",
-                fg="yellow",
-            )
+        warn(
+            "⚠️  No PMTiles overview found. Consider creating one for map visualization.\n"
+            "   See: https://github.com/felt/tippecanoe"
         )
 
     # Get metadata
@@ -511,17 +506,14 @@ def generate_stac_collection(
         )
 
     if verbose:
-        click.echo(f"Generating STAC Collection for {partition_dir}")
+        debug(f"Generating STAC Collection for {partition_dir}")
 
     # Check for PMTiles immediately (before processing)
     pmtiles_path = detect_pmtiles(partition_dir, verbose=False)
     if not pmtiles_path:
-        click.echo(
-            click.style(
-                "⚠️  No PMTiles overview found. Consider creating one for map visualization.\n"
-                "   See: https://github.com/felt/tippecanoe",
-                fg="yellow",
-            )
+        warn(
+            "⚠️  No PMTiles overview found. Consider creating one for map visualization.\n"
+            "   See: https://github.com/felt/tippecanoe"
         )
 
     # Find all .parquet files in partition_dir
@@ -530,7 +522,7 @@ def generate_stac_collection(
         raise click.ClickException(f"No parquet files found in {partition_dir}")
 
     if verbose:
-        click.echo(f"Found {len(all_files)} partition files")
+        debug(f"Found {len(all_files)} partition files")
 
     # Generate items for each partition
     items, overall_bounds = _generate_collection_items(all_files, bucket_prefix, public_url)
@@ -571,7 +563,7 @@ def generate_stac_collection(
     _add_collection_pmtiles(collection, partition_dir, bucket_prefix, public_url, verbose)
 
     if verbose:
-        click.echo(f"Generated collection with {len(items)} items")
+        debug(f"Generated collection with {len(items)} items")
 
     return collection.to_dict(), items
 
@@ -639,7 +631,7 @@ def _add_collection_pmtiles(
             ),
         )
         if verbose:
-            click.echo(f"Added PMTiles asset to collection: {pmtiles_filename}")
+            debug(f"Added PMTiles asset to collection: {pmtiles_filename}")
 
 
 def write_stac_json(stac_dict: dict, output_path: str, verbose: bool = False):
@@ -655,4 +647,4 @@ def write_stac_json(stac_dict: dict, output_path: str, verbose: bool = False):
         json.dump(stac_dict, f, indent=2)
 
     if verbose:
-        click.echo(f"Wrote STAC JSON to {output_path}")
+        debug(f"Wrote STAC JSON to {output_path}")

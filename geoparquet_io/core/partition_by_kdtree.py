@@ -7,6 +7,14 @@ import click
 
 from geoparquet_io.core.add_kdtree_column import add_kdtree_column
 from geoparquet_io.core.common import safe_file_url
+from geoparquet_io.core.logging_config import (
+    configure_verbose,
+    debug,
+    info,
+    progress,
+    success,
+    warn,
+)
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
 
 
@@ -53,6 +61,9 @@ def partition_by_kdtree(
         skip_analysis: Skip partition strategy analysis (for performance)
         sample_size: Number of points to sample for computing boundaries. None for exact mode (default: 100,000)
     """
+    # Configure logging verbosity
+    configure_verbose(verbose)
+
     # Validate iterations
     if not 1 <= iterations <= 20:
         raise click.UsageError(f"Iterations must be between 1 and 20, got {iterations}")
@@ -77,18 +88,13 @@ def partition_by_kdtree(
     # Only exact mode is expensive for very large datasets
 
     if not column_exists and verbose and total_rows > 10_000_000:
-        click.echo(
-            click.style(
-                f"Processing {total_rows:,} rows - this may take several minutes...",
-                fg="cyan",
-            )
-        )
+        info(f"Processing {total_rows:,} rows - this may take several minutes...")
 
     # If column doesn't exist, add it
     partition_count = 2**iterations
     if not column_exists:
         if verbose:
-            click.echo(
+            debug(
                 f"Adding KD-tree column '{kdtree_column_name}' with {partition_count} partitions..."
             )
 
@@ -124,7 +130,7 @@ def partition_by_kdtree(
             raise click.ClickException(f"Failed to add KD-tree column: {str(e)}") from e
 
     elif verbose:
-        click.echo(f"Using existing KD-tree column '{kdtree_column_name}'")
+        debug(f"Using existing KD-tree column '{kdtree_column_name}'")
 
     # If preview mode, show analysis and preview, then exit
     if preview:
@@ -147,10 +153,10 @@ def partition_by_kdtree(
                 pass
             except Exception as e:
                 # If analysis fails unexpectedly, show error but continue to preview
-                click.echo(click.style(f"\nAnalysis error: {e}", fg="yellow"))
+                warn(f"\nAnalysis error: {e}")
 
             # Then show partition preview
-            click.echo("\n" + "=" * 70)
+            progress("\n" + "=" * 70)
             preview_partition(
                 input_parquet=input_parquet,
                 column_name=kdtree_column_name,
@@ -165,9 +171,7 @@ def partition_by_kdtree(
         return
 
     # Build description for user feedback
-    click.echo(
-        f"Partitioning into {partition_count} KD-tree cells (column: '{kdtree_column_name}')"
-    )
+    progress(f"Partitioning into {partition_count} KD-tree cells (column: '{kdtree_column_name}')")
 
     try:
         # Use common partition function - partition by full column value (not prefix)
@@ -189,11 +193,11 @@ def partition_by_kdtree(
         )
 
         if verbose:
-            click.echo(f"\nCreated {num_partitions} partition(s) in {output_folder}")
+            success(f"\nCreated {num_partitions} partition(s) in {output_folder}")
 
     finally:
         # Clean up temp file if we created one
         if not column_exists and os.path.exists(input_parquet):
             if verbose:
-                click.echo("Cleaning up temporary KD-tree-enriched file...")
+                debug("Cleaning up temporary KD-tree-enriched file...")
             os.remove(input_parquet)

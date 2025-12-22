@@ -32,6 +32,7 @@ from geoparquet_io.core.inspect_utils import (
     get_column_statistics,
     get_preview_data,
 )
+from geoparquet_io.core.logging_config import configure_verbose, setup_cli_logging
 from geoparquet_io.core.partition_admin_hierarchical import (
     partition_by_admin_hierarchical as partition_admin_hierarchical_impl,
 )
@@ -48,9 +49,14 @@ __version__ = "0.6.1"
 
 @click.group()
 @click.version_option(version=__version__, prog_name="geoparquet-io")
-def cli():
+@click.option("--timestamps", is_flag=True, help="Show timestamps in output messages")
+@click.pass_context
+def cli(ctx, timestamps):
     """Fast I/O and transformation tools for GeoParquet files."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["timestamps"] = timestamps
+    # Setup logging for CLI output (default level INFO, verbose commands will set DEBUG)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 # Check commands group - use custom command class for default subcommand
@@ -74,15 +80,20 @@ class DefaultGroup(click.Group):
 
 
 @cli.group(cls=DefaultGroup)
-def check():
+@click.pass_context
+def check(ctx):
     """Check GeoParquet files for best practices.
 
     By default, runs all checks (compression, bbox, row groups, and spatial order).
     Use subcommands for specific checks.
 
     When run without a subcommand, all checks are performed. Options like --fix
-    can be used directly without specifying 'all'."""
-    pass
+    can be used directly without specifying 'all'.
+    """
+    # Ensure logging is set up (in case this group is invoked directly in tests)
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 @check.command(name="all")
@@ -129,6 +140,8 @@ def check_all(
 
     from geoparquet_io.core.check_fixes import apply_all_fixes
     from geoparquet_io.core.common import is_remote_url, show_remote_read_message
+
+    configure_verbose(verbose)
 
     # Show single progress message for remote files
     show_remote_read_message(parquet_file, verbose=False)
@@ -953,9 +966,13 @@ def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output
 
 # Sort commands group
 @cli.group()
-def sort():
+@click.pass_context
+def sort(ctx):
     """Commands for sorting GeoParquet files."""
-    pass
+    # Ensure logging is set up (in case this group is invoked directly in tests)
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 @sort.command(name="hilbert")
@@ -1032,9 +1049,13 @@ def hilbert_order(
 
 
 @cli.group()
-def add():
+@click.pass_context
+def add(ctx):
     """Commands for enhancing GeoParquet files in various ways."""
-    pass
+    # Ensure logging is set up (in case this group is invoked directly in tests)
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 @add.command(name="admin-divisions")
@@ -1481,9 +1502,13 @@ def add_kdtree(
 
 # Partition commands group
 @cli.group()
-def partition():
+@click.pass_context
+def partition(ctx):
     """Commands for partitioning GeoParquet files."""
-    pass
+    # Ensure logging is set up (in case this group is invoked directly in tests)
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
 @partition.command(name="admin")

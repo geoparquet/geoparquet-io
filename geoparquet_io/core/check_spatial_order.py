@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import click
 
 from geoparquet_io.core.common import (
     find_primary_geometry_column,
@@ -8,6 +7,7 @@ from geoparquet_io.core.common import (
     needs_httpfs,
     safe_file_url,
 )
+from geoparquet_io.core.logging_config import debug, progress
 
 
 def check_spatial_order(
@@ -36,7 +36,7 @@ def check_spatial_order(
     # Get geometry column name
     geometry_column = find_primary_geometry_column(parquet_file, verbose)
     if verbose:
-        click.echo(f"Using geometry column: {geometry_column}")
+        debug(f"Using geometry column: {geometry_column}")
 
     # Create DuckDB connection with httpfs if needed
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
@@ -44,12 +44,12 @@ def check_spatial_order(
     # First get total rows
     total_rows = con.execute(f"SELECT COUNT(*) FROM '{safe_url}'").fetchone()[0]
     if verbose:
-        click.echo(f"Total rows in file: {total_rows:,}")
+        debug(f"Total rows in file: {total_rows:,}")
 
     # Limit rows if needed
     if total_rows > limit_rows:
         if verbose:
-            click.echo(f"Limiting analysis to first {limit_rows:,} rows")
+            debug(f"Limiting analysis to first {limit_rows:,} rows")
         row_limit = f"LIMIT {limit_rows}"
     else:
         row_limit = ""
@@ -70,13 +70,13 @@ def check_spatial_order(
     """
 
     if verbose:
-        click.echo("Calculating average distance between consecutive features...")
+        progress("Calculating average distance between consecutive features...")
 
     consecutive_result = con.execute(consecutive_query).fetchone()
     consecutive_avg = consecutive_result[0] if consecutive_result else None
 
     if verbose:
-        click.echo(f"Average distance between consecutive features: {consecutive_avg}")
+        debug(f"Average distance between consecutive features: {consecutive_avg}")
 
     # Get random pairs
     random_query = f"""
@@ -100,27 +100,27 @@ def check_spatial_order(
     """
 
     if verbose:
-        click.echo(f"Calculating average distance between {random_sample_size} random pairs...")
+        progress(f"Calculating average distance between {random_sample_size} random pairs...")
 
     random_result = con.execute(random_query).fetchone()
     random_avg = random_result[0] if random_result else None
 
     if verbose:
-        click.echo(f"Average distance between random features: {random_avg}")
+        debug(f"Average distance between random features: {random_avg}")
 
     # Calculate ratio
     ratio = consecutive_avg / random_avg if consecutive_avg and random_avg else None
 
     if not verbose:  # Only print results if not being called from check_all
-        click.echo("\nResults:")
-        click.echo(f"Average distance between consecutive features: {consecutive_avg}")
-        click.echo(f"Average distance between random features: {random_avg}")
-        click.echo(f"Ratio (consecutive / random): {ratio}")
+        progress("\nResults:")
+        debug(f"Average distance between consecutive features: {consecutive_avg}")
+        debug(f"Average distance between random features: {random_avg}")
+        progress(f"Ratio (consecutive / random): {ratio}")
 
         if ratio is not None and ratio < 0.5:
-            click.echo("=> Data seems strongly spatially clustered.")
+            progress("=> Data seems strongly spatially clustered.")
         elif ratio is not None:
-            click.echo("=> Data might not be strongly clustered (or is partially clustered).")
+            progress("=> Data might not be strongly clustered (or is partially clustered).")
 
     if return_results:
         passed = ratio is not None and ratio < 0.5

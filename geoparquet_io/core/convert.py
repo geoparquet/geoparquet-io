@@ -24,12 +24,13 @@ from geoparquet_io.core.common import (
     validate_profile_for_urls,
     write_parquet_with_metadata,
 )
+from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 
 
 def _detect_geometry_column(con, input_file, verbose, is_parquet=False):
     """Detect geometry column name from input file."""
     if verbose:
-        click.echo("Detecting geometry column from input...")
+        debug("Detecting geometry column from input...")
 
     # For parquet files, read directly; for other formats use ST_Read
     if is_parquet:
@@ -43,7 +44,7 @@ def _detect_geometry_column(con, input_file, verbose, is_parquet=False):
         col_name = col_info[0].lower()
         if col_name in ["geom", "geometry", "wkb_geometry", "shape"]:
             if verbose:
-                click.echo(f"Detected geometry column: {col_info[0]}")
+                debug(f"Detected geometry column: {col_info[0]}")
             return col_info[0]
 
     raise click.ClickException(
@@ -55,7 +56,7 @@ def _detect_geometry_column(con, input_file, verbose, is_parquet=False):
 def _calculate_bounds(con, input_file, geom_column, verbose, is_parquet=False):
     """Calculate dataset bounds from input file."""
     if verbose:
-        click.echo("Calculating dataset bounds...")
+        debug("Calculating dataset bounds...")
 
     # For parquet files, read directly; for other formats use ST_Read
     if is_parquet:
@@ -78,7 +79,7 @@ def _calculate_bounds(con, input_file, geom_column, verbose, is_parquet=False):
 
     if verbose:
         xmin, ymin, xmax, ymax = bounds_result
-        click.echo(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
+        debug(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
 
     return bounds_result
 
@@ -197,14 +198,14 @@ def _auto_detect_geometry(con, csv_read, col_names_lower, verbose):
     wkt_col = _try_detect_wkt_column(con, csv_read, col_names_lower)
     if wkt_col:
         if verbose:
-            click.echo(f"Auto-detected WKT column: {wkt_col}")
+            debug(f"Auto-detected WKT column: {wkt_col}")
         return {"type": "wkt", "wkt_column": wkt_col, "csv_read": csv_read}
 
     # Try lat/lon
     found_lat, found_lon = _try_detect_latlon_columns(col_names_lower)
     if found_lat and found_lon:
         if verbose:
-            click.echo(f"Auto-detected lat/lon columns: {found_lat}, {found_lon}")
+            debug(f"Auto-detected lat/lon columns: {found_lat}, {found_lon}")
         return {
             "type": "latlon",
             "lat_column": found_lat,
@@ -224,8 +225,8 @@ def _detect_csv_geometry_column(
 
     if verbose:
         delim_msg = delimiter if delimiter else "auto-detected"
-        click.echo(f"Reading CSV/TSV with delimiter: {delim_msg}")
-        click.echo(f"Detected columns: {', '.join([col[0] for col in columns])}")
+        debug(f"Reading CSV/TSV with delimiter: {delim_msg}")
+        debug(f"Detected columns: {', '.join([col[0] for col in columns])}")
 
     # Try explicit columns first
     geom_info = _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, csv_read)
@@ -250,7 +251,7 @@ def _detect_csv_geometry_column(
 def _validate_latlon_ranges(con, csv_read, lat_col, lon_col, verbose):
     """Validate lat/lon columns have valid numeric ranges."""
     if verbose:
-        click.echo(f"Validating lat/lon ranges for columns: {lat_col}, {lon_col}")
+        debug(f"Validating lat/lon ranges for columns: {lat_col}, {lon_col}")
 
     query = f"""
         SELECT
@@ -267,12 +268,7 @@ def _validate_latlon_ranges(con, csv_read, lat_col, lon_col, verbose):
         min_lat, max_lat, min_lon, max_lon, null_count = result
 
         if null_count > 0:
-            click.echo(
-                click.style(
-                    f"⚠️  Warning: {null_count} rows have NULL lat/lon values and will be skipped",
-                    fg="yellow",
-                )
-            )
+            warn(f"⚠️  Warning: {null_count} rows have NULL lat/lon values and will be skipped")
 
         if min_lat < -90 or max_lat > 90:
             raise click.ClickException(
@@ -287,7 +283,7 @@ def _validate_latlon_ranges(con, csv_read, lat_col, lon_col, verbose):
             )
 
         if verbose:
-            click.echo(
+            debug(
                 f"Lat/lon ranges validated: lat=[{min_lat:.6f}, {max_lat:.6f}], "
                 f"lon=[{min_lon:.6f}, {max_lon:.6f}]"
             )
@@ -306,12 +302,7 @@ def _check_null_wkt_rows(con, csv_read, wkt_col):
     ).fetchone()[0]
 
     if null_count > 0:
-        click.echo(
-            click.style(
-                f"⚠️  Warning: {null_count} rows have NULL WKT values and will be skipped",
-                fg="yellow",
-            )
-        )
+        warn(f"⚠️  Warning: {null_count} rows have NULL WKT values and will be skipped")
 
 
 def _check_invalid_wkt_rows(con, csv_read, wkt_col):
@@ -323,12 +314,7 @@ def _check_invalid_wkt_rows(con, csv_read, wkt_col):
         ).fetchone()[0]
 
         if invalid_count > 0:
-            click.echo(
-                click.style(
-                    f"⚠️  Warning: {invalid_count} rows have invalid WKT and will be skipped",
-                    fg="yellow",
-                )
-            )
+            warn(f"⚠️  Warning: {invalid_count} rows have invalid WKT and will be skipped")
     except Exception:
         pass  # DuckDB version might not support TRY_CAST
 
@@ -358,13 +344,10 @@ def _warn_if_projected_crs(con, csv_read, wkt_col):
         if result and result[0] is not None:
             max_x, max_y = result
             if max_x > 180 or max_y > 90:
-                click.echo(
-                    click.style(
-                        f"⚠️  Large coordinate values detected (max X: {max_x:.2f}, max Y: {max_y:.2f}). "
-                        f"Data may be in projected CRS, not WGS84. "
-                        f"Verify CRS or use --crs flag if needed.",
-                        fg="yellow",
-                    )
+                warn(
+                    f"⚠️  Large coordinate values detected (max X: {max_x:.2f}, max Y: {max_y:.2f}). "
+                    f"Data may be in projected CRS, not WGS84. "
+                    f"Verify CRS or use --crs flag if needed."
                 )
     except Exception:
         pass
@@ -373,7 +356,7 @@ def _warn_if_projected_crs(con, csv_read, wkt_col):
 def _validate_wkt_and_check_crs(con, csv_read, wkt_col, skip_invalid, verbose):
     """Validate WKT column and warn if coordinates suggest non-WGS84 CRS."""
     if verbose:
-        click.echo(f"Validating WKT column: {wkt_col}")
+        debug(f"Validating WKT column: {wkt_col}")
 
     _check_null_wkt_rows(con, csv_read, wkt_col)
 
@@ -497,7 +480,7 @@ def _get_geom_expr_and_where(geom_info, skip_invalid):
 def _calculate_csv_bounds(con, geom_info, skip_invalid, verbose):
     """Calculate dataset bounds from CSV geometry."""
     if verbose:
-        click.echo("Calculating dataset bounds from CSV...")
+        debug("Calculating dataset bounds from CSV...")
 
     csv_read = geom_info["csv_read"]
     geom_expr, where_clause = _get_geom_expr_and_where(geom_info, skip_invalid)
@@ -527,7 +510,7 @@ def _calculate_csv_bounds(con, geom_info, skip_invalid, verbose):
 
     if verbose:
         xmin, ymin, xmax, ymax = bounds_result
-        click.echo(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
+        debug(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
 
     return bounds_result
 
@@ -624,24 +607,22 @@ def _convert_csv_path(
 
     # Validate geometry
     if geom_info["type"] == "wkt":
-        click.echo(f"Using WKT column: {geom_info['wkt_column']}")
+        progress(f"Using WKT column: {geom_info['wkt_column']}")
         _validate_wkt_and_check_crs(
             con, geom_info["csv_read"], geom_info["wkt_column"], skip_invalid, verbose
         )
     else:  # latlon
-        click.echo(f"Using lat/lon columns: {geom_info['lat_column']}, {geom_info['lon_column']}")
+        progress(f"Using lat/lon columns: {geom_info['lat_column']}, {geom_info['lon_column']}")
         _validate_latlon_ranges(
             con, geom_info["csv_read"], geom_info["lat_column"], geom_info["lon_column"], verbose
         )
 
-    click.echo(f"Assuming CRS: {crs}")
+    progress(f"Assuming CRS: {crs}")
 
     # Skip Hilbert if using skip_invalid
     effective_skip_hilbert = skip_hilbert or skip_invalid
     if skip_invalid and not skip_hilbert:
-        click.echo(
-            click.style("Note: Skipping Hilbert ordering due to --skip-invalid flag", fg="yellow")
-        )
+        warn("Note: Skipping Hilbert ordering due to --skip-invalid flag")
 
     # Calculate bounds if needed
     bounds = (
@@ -659,7 +640,7 @@ def _convert_csv_path(
             msg = "Reading CSV and creating geometries..."
             if not effective_skip_hilbert:
                 msg = "Reading CSV, creating geometries, and applying Hilbert ordering..."
-        click.echo(msg)
+        debug(msg)
 
     return _build_csv_conversion_query(
         geom_info, effective_skip_hilbert, bounds, skip_invalid, skip_bbox=skip_bbox
@@ -684,7 +665,7 @@ def _convert_spatial_path(
         if bbox_info["has_bbox_column"]:
             existing_bbox_col = bbox_info["bbox_column_name"]
             # Always inform user when removing bbox (not needed for native geo types)
-            click.echo(
+            progress(
                 f"Removing bbox column '{existing_bbox_col}' (not needed for native geo types)"
             )
 
@@ -703,7 +684,7 @@ def _convert_spatial_path(
             msg = "Reading input and adding bbox column..."
             if not skip_hilbert:
                 msg = "Pass 1: Reading input, adding bbox, and applying Hilbert ordering..."
-        click.echo(msg)
+        debug(msg)
 
     return _build_conversion_query(
         input_file,
@@ -763,6 +744,9 @@ def convert_to_geoparquet(
     Raises:
         click.ClickException: If input file not found or conversion fails
     """
+    # Configure logging verbosity
+    configure_verbose(verbose)
+
     start_time = time.time()
 
     # Validate profile is only used with S3
@@ -780,7 +764,7 @@ def convert_to_geoparquet(
     # Validate output directory exists and is writable (for local files)
     validate_output_path(output_file, verbose)
 
-    click.echo(f"Converting {input_file}...")
+    progress(f"Converting {input_file}...")
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
 
@@ -804,7 +788,7 @@ def convert_to_geoparquet(
         # User explicitly specified a CRS for CSV, convert to PROJJSON
         effective_crs = parse_crs_string_to_projjson(crs, con)
         if verbose:
-            click.echo(f"Using user-specified CRS: {crs}")
+            debug(f"Using user-specified CRS: {crs}")
     elif is_csv:
         # CSV with default CRS - effective_crs stays None (use default)
         pass
@@ -814,7 +798,7 @@ def convert_to_geoparquet(
         if detected_crs and not is_default_crs(detected_crs):
             effective_crs = detected_crs
             if verbose:
-                click.echo(f"Preserving input CRS: {_format_crs_display(detected_crs)}")
+                debug(f"Preserving input CRS: {_format_crs_display(detected_crs)}")
     else:
         # Spatial files (GPKG, GeoJSON, Shapefile) - CRS must be present
         detected_crs = detect_crs_from_spatial_file(input_url, con, verbose=verbose)
@@ -826,11 +810,11 @@ def convert_to_geoparquet(
         # Only set effective_crs if it's non-default (skip writing default CRS)
         if is_default_crs(detected_crs):
             if verbose:
-                click.echo("Input has default CRS (WGS84), not writing explicit CRS")
+                debug("Input has default CRS (WGS84), not writing explicit CRS")
         else:
             effective_crs = detected_crs
             if verbose:
-                click.echo(f"Detected input CRS: {_format_crs_display(detected_crs)}")
+                debug(f"Detected input CRS: {_format_crs_display(detected_crs)}")
 
     try:
         if is_csv:
@@ -879,12 +863,12 @@ def convert_to_geoparquet(
         else:
             file_size = os.path.getsize(output_file)
 
-        click.echo(f"Done in {elapsed:.1f}s")
+        progress(f"Done in {elapsed:.1f}s")
         if file_size is not None:
-            click.echo(f"Output: {output_file} ({format_size(file_size)})")
+            progress(f"Output: {output_file} ({format_size(file_size)})")
         else:
-            click.echo(f"Output: {output_file}")
-        click.echo(click.style("✓ Output passes GeoParquet validation", fg="green"))
+            progress(f"Output: {output_file}")
+        success("✓ Output passes GeoParquet validation")
 
     except duckdb.IOException as e:
         con.close()

@@ -21,6 +21,7 @@ from geoparquet_io.core.common import (
     write_parquet_with_metadata,
 )
 from geoparquet_io.core.hilbert_order import hilbert_order
+from geoparquet_io.core.logging_config import debug, info, progress
 
 
 def fix_compression(
@@ -39,7 +40,7 @@ def fix_compression(
         dict with fix summary
     """
     if verbose:
-        click.echo("Applying ZSTD compression...")
+        debug("Applying ZSTD compression...")
 
     # Setup AWS profile if needed
     setup_aws_profile_if_needed(profile, parquet_file, output_file)
@@ -96,7 +97,7 @@ def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
         dict with fix summary
     """
     if verbose:
-        click.echo("Adding bbox column...")
+        debug("Adding bbox column...")
 
     add_bbox_column(
         input_parquet=parquet_file,
@@ -126,7 +127,7 @@ def fix_bbox_metadata(parquet_file, output_file, verbose=False, profile=None):
         dict with fix summary
     """
     if verbose:
-        click.echo("Adding bbox covering metadata...")
+        debug("Adding bbox covering metadata...")
 
     # If output is different from input, copy first
     if parquet_file != output_file:
@@ -155,7 +156,7 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
         dict with fix summary
     """
     # Always inform user when removing bbox column
-    click.echo(f"Removing bbox column '{bbox_column_name}' (not needed for native geo types)")
+    info(f"Removing bbox column '{bbox_column_name}' (not needed for native geo types)")
 
     # Setup AWS profile if needed
     setup_aws_profile_if_needed(profile, parquet_file, output_file)
@@ -252,7 +253,7 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
         dict with fix summary
     """
     if verbose:
-        click.echo("Applying Hilbert spatial ordering (this may take a while)...")
+        debug("Applying Hilbert spatial ordering (this may take a while)...")
 
     hilbert_order(
         input_parquet=parquet_file,
@@ -282,7 +283,7 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
         dict with fix summary
     """
     if verbose:
-        click.echo("Optimizing row groups...")
+        debug("Optimizing row groups...")
 
     # Setup AWS profile if needed
     setup_aws_profile_if_needed(profile, parquet_file, output_file)
@@ -369,9 +370,9 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
         dict with summary of all fixes applied
     """
     if verbose:
-        click.echo("\n" + "=" * 60)
-        click.echo("Starting fix process...")
-        click.echo("=" * 60)
+        progress("\n" + "=" * 60)
+        progress("Starting fix process...")
+        progress("=" * 60)
 
     fixes_applied = []
     current_file = parquet_file
@@ -380,7 +381,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
     # Determine the GeoParquet version to preserve
     geoparquet_version = get_geoparquet_version_from_check_results(check_results)
     if verbose and geoparquet_version:
-        click.echo(f"Preserving GeoParquet version: {geoparquet_version}")
+        debug(f"Preserving GeoParquet version: {geoparquet_version}")
 
     try:
         # Handle bbox based on file type
@@ -402,7 +403,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
             temp_files.append(temp_file)
 
             if verbose:
-                click.echo("\n[1/4] Adding bbox column...")
+                progress("\n[1/4] Adding bbox column...")
 
             fix_bbox_column(current_file, temp_file, verbose, profile)
             current_file = temp_file
@@ -425,7 +426,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
                 current_file = temp_file
 
             if verbose:
-                click.echo("\n[2/4] Adding bbox covering metadata...")
+                progress("\n[2/4] Adding bbox covering metadata...")
 
             fix_bbox_metadata(current_file, current_file, verbose, profile)
             fixes_applied.append("Added bbox covering metadata")
@@ -437,8 +438,8 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
             temp_files.append(temp_file)
 
             if verbose:
-                click.echo("\n[3/4] Applying Hilbert spatial ordering...")
-                click.echo("(This operation may take several minutes on large files)")
+                progress("\n[3/4] Applying Hilbert spatial ordering...")
+                progress("(This operation may take several minutes on large files)")
 
             fix_spatial_ordering(current_file, temp_file, verbose, profile)
             current_file = temp_file
@@ -453,7 +454,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
 
         if needs_compression_fix or needs_row_group_fix:
             if verbose:
-                click.echo("\n[4/4] Optimizing compression and row groups...")
+                progress("\n[4/4] Optimizing compression and row groups...")
 
             # This is the final step, write to the actual output
             fix_compression(current_file, output_file, verbose, profile, geoparquet_version)
@@ -466,7 +467,7 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
         elif current_file != output_file:
             # No compression/row group fixes needed, just move to output
             if verbose:
-                click.echo("\nMoving to final output location...")
+                debug("\nMoving to final output location...")
             shutil.move(current_file, output_file)
 
         # Clean up temp files (except the one we moved to output)
@@ -475,9 +476,9 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
                 os.remove(temp_file)
 
         if verbose:
-            click.echo("\n" + "=" * 60)
-            click.echo("Fix process completed successfully")
-            click.echo("=" * 60)
+            progress("\n" + "=" * 60)
+            progress("Fix process completed successfully")
+            progress("=" * 60)
 
         return {
             "fixes_applied": fixes_applied,

@@ -16,6 +16,7 @@ from geoparquet_io.core.common import (
     upload_if_remote,
     write_parquet_with_metadata,
 )
+from geoparquet_io.core.logging_config import debug, error, info, progress, warn
 
 
 class PartitionAnalysisError(Exception):
@@ -204,7 +205,7 @@ def analyze_partition_strategy(
         column_expr = f'"{column_name}"'
 
     if verbose:
-        click.echo("\n📊 Analyzing partition strategy...")
+        debug("\n📊 Analyzing partition strategy...")
 
     # Calculate comprehensive statistics in one query
     stats_query = f"""
@@ -412,45 +413,45 @@ def _display_partition_analysis(
     if column_prefix_length is not None:
         partition_desc = f"first {column_prefix_length} character(s) of {partition_desc}"
 
-    click.echo(f"\nAnalyzing partition strategy for {partition_desc}...")
-    click.echo(f"  Partitions: {analysis['partition_count']:,}")
-    click.echo(f"  Total rows: {analysis['total_rows']:,}")
+    progress(f"\nAnalyzing partition strategy for {partition_desc}...")
+    progress(f"  Partitions: {analysis['partition_count']:,}")
+    progress(f"  Total rows: {analysis['total_rows']:,}")
 
     # Row distribution
     stats = analysis["row_stats"]
-    click.echo(
+    progress(
         f"  Rows per partition: min={stats['min']:,}, max={stats['max']:,}, avg={stats['avg']:,}"
     )
 
     # Size estimates
     size = analysis["size_stats"]
     if size["avg_mb"] >= 0.01:
-        click.echo(
+        progress(
             f"  Estimated size per partition: min={size['min_mb']:.2f}MB, max={size['max_mb']:.2f}MB, avg={size['avg_mb']:.2f}MB"
         )
 
     # Balance metrics
-    click.echo(
+    progress(
         f"  Imbalance: {analysis['imbalance_ratio']:.1f}x (largest/median), {analysis['largest_partition_pct']:.1f}% in largest"
     )
 
     # Recommendations
     if analysis.get("recommendations"):
-        click.echo("\nRecommendations:")
+        progress("\nRecommendations:")
         for rec in analysis["recommendations"]:
-            click.echo(click.style(f"  💡 {rec}", fg="cyan"))
+            info(f"  💡 {rec}")
 
     # Warnings
     if analysis["warnings"]:
-        click.echo("\nWarnings:")
+        progress("\nWarnings:")
         for warning in analysis["warnings"]:
-            click.echo(click.style(f"  {warning}", fg="yellow"))
+            warn(f"  {warning}")
 
     # Errors
     if analysis["errors"]:
-        click.echo("\nErrors:")
-        for error in analysis["errors"]:
-            click.echo(click.style(f"  {error}", fg="red"))
+        progress("\nErrors:")
+        for error_msg in analysis["errors"]:
+            error(f"  {error_msg}")
 
 
 def preview_partition(
@@ -512,30 +513,30 @@ def preview_partition(
     total_records = sum(row[1] for row in all_partitions)
 
     # Display preview
-    click.echo(f"\nPartition Preview for {partition_description}:")
-    click.echo(f"Total partitions: {len(all_partitions)}")
-    click.echo(f"Total records: {total_records:,}")
-    click.echo("\nPartitions (sorted by record count):")
-    click.echo(f"{'Partition Value':<30} {'Records':>15} {'Percentage':>12}")
-    click.echo("-" * 60)
+    progress(f"\nPartition Preview for {partition_description}:")
+    progress(f"Total partitions: {len(all_partitions)}")
+    progress(f"Total records: {total_records:,}")
+    progress("\nPartitions (sorted by record count):")
+    progress(f"{'Partition Value':<30} {'Records':>15} {'Percentage':>12}")
+    progress("-" * 60)
 
     # Show up to 'limit' partitions
     for i, (partition_value, count) in enumerate(all_partitions):
         if i >= limit:
             break
         percentage = (count / total_records) * 100
-        click.echo(f"{str(partition_value):<30} {count:>15,} {percentage:>11.2f}%")
+        progress(f"{str(partition_value):<30} {count:>15,} {percentage:>11.2f}%")
 
     # Show summary if there are more partitions
     if len(all_partitions) > limit:
         remaining_count = len(all_partitions) - limit
         remaining_records = sum(row[1] for row in all_partitions[limit:])
         remaining_pct = (remaining_records / total_records) * 100
-        click.echo("-" * 60)
-        click.echo(
+        progress("-" * 60)
+        progress(
             f"... and {remaining_count} more partition(s) with {remaining_records:,} records ({remaining_pct:.2f}%)"
         )
-        click.echo("\nUse --preview-limit to show more partitions")
+        progress("\nUse --preview-limit to show more partitions")
 
     return {
         "total_partitions": len(all_partitions),
@@ -562,13 +563,7 @@ def _run_partition_analysis(
         if not force:
             raise click.ClickException(str(e)) from e
         if verbose:
-            click.echo(
-                click.style(
-                    "\n⚠️  Forcing partition creation despite analysis warnings/errors...",
-                    fg="yellow",
-                    bold=True,
-                )
-            )
+            warn("\n⚠️  Forcing partition creation despite analysis warnings/errors...")
 
 
 def _build_column_expression(column_name, column_prefix_length):
@@ -597,7 +592,7 @@ def _get_unique_partition_values(con, input_url, column_expr, column_name, verbo
         raise click.ClickException(f"No non-NULL values found in column '{column_name}'")
 
     if verbose:
-        click.echo(f"Found {len(partition_values)} unique partition values")
+        debug(f"Found {len(partition_values)} unique partition values")
 
     return partition_values
 
@@ -660,11 +655,11 @@ def _process_partition_value(
 
     if os.path.exists(output_filename) and not overwrite:
         if verbose:
-            click.echo(f"Output file for {partition_value} already exists, skipping...")
+            debug(f"Output file for {partition_value} already exists, skipping...")
         return False
 
     if verbose:
-        click.echo(f"Processing partition: {partition_value}...")
+        debug(f"Processing partition: {partition_value}...")
 
     # Build WHERE clause
     if column_prefix_length is not None:
@@ -695,7 +690,7 @@ def _process_partition_value(
     )
 
     if verbose:
-        click.echo(f"Wrote {output_filename}")
+        debug(f"Wrote {output_filename}")
 
     return True
 
@@ -761,7 +756,7 @@ def partition_by_column(
         # Create output directory
         os.makedirs(actual_output, exist_ok=True)
         if verbose:
-            click.echo(f"Created output directory: {actual_output}")
+            debug(f"Created output directory: {actual_output}")
 
         # Create DuckDB connection with httpfs if needed
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
@@ -773,7 +768,7 @@ def partition_by_column(
 
         # Get unique partition values
         if verbose:
-            click.echo(f"Finding unique values for {partition_description}...")
+            debug(f"Finding unique values for {partition_description}...")
 
         partition_values = _get_unique_partition_values(
             con, input_url, column_expr, column_name, verbose
@@ -805,7 +800,7 @@ def partition_by_column(
         # Upload to remote if needed
         if is_remote:
             if verbose:
-                click.echo(f"\nUploading {partition_count} partition files to {output_folder}...")
+                debug(f"\nUploading {partition_count} partition files to {output_folder}...")
 
             upload_if_remote(
                 actual_output, output_folder, profile=profile, is_directory=True, verbose=verbose

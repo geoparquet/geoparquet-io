@@ -21,6 +21,8 @@ import click
 import duckdb
 import psutil
 
+from geoparquet_io.core.logging_config import progress
+
 # Converter registry with detection functions
 CONVERTERS = {
     "duckdb": {
@@ -532,26 +534,26 @@ def _print_setup_info(
     missing: list[str],
 ) -> None:
     """Print benchmark setup information."""
-    click.echo(f"Benchmarking: {input_path.name}")
-    click.echo(f"Converters: {', '.join(run_converters)}")
-    click.echo(f"Iterations: {iterations}")
+    progress(f"Benchmarking: {input_path.name}")
+    progress(f"Converters: {', '.join(run_converters)}")
+    progress(f"Iterations: {iterations}")
     if warmup:
-        click.echo("Warmup: enabled")
+        progress("Warmup: enabled")
 
     if missing:
-        click.echo("\nNot installed (optional):")
+        progress("\nNot installed (optional):")
         for m in missing:
-            click.echo(f"  {m}: {CONVERTERS[m]['install']}")
+            progress(f"  {m}: {CONVERTERS[m]['install']}")
 
-    click.echo("\nTo install all benchmark dependencies:")
-    click.echo("  uv pip install geoparquet-io[benchmark]")
-    click.echo("  # or: pip install geoparquet-io[benchmark]")
-    click.echo("")
+    progress("\nTo install all benchmark dependencies:")
+    progress("  uv pip install geoparquet-io[benchmark]")
+    progress("  # or: pip install geoparquet-io[benchmark]")
+    progress("")
 
 
 def _run_warmup(run_converters: list[str], input_path: Path, output_dir: Path) -> None:
     """Run warmup iterations for all converters."""
-    click.echo("Running warmup...")
+    progress("Running warmup...")
     for converter in run_converters:
         output_path = output_dir / f"warmup_{converter}.parquet"
         try:
@@ -616,13 +618,13 @@ def _format_and_display_results(
         output = format_table_output(stats, file_info, run_converters)
 
     if not quiet:
-        click.echo(output)
+        progress(output)
 
     if output_json:
         json_output = format_json_output(stats, file_info, environment, all_results, config)
         Path(output_json).write_text(json_output)
         if not quiet:
-            click.echo(f"\nResults saved to: {output_json}")
+            progress(f"\nResults saved to: {output_json}")
 
 
 def run_benchmark(

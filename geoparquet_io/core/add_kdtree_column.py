@@ -8,6 +8,7 @@ from geoparquet_io.core.common import (
     needs_httpfs,
     safe_file_url,
 )
+from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 
 
 def _find_optimal_iterations(total_rows, target_rows, verbose=False):
@@ -109,7 +110,7 @@ def _build_sampling_query(
 
     # Phase 2: Build iterative query that applies boundaries
     if verbose:
-        click.echo("Step 2/2: Building query to apply boundaries to full dataset...")
+        debug("Step 2/2: Building query to apply boundaries to full dataset...")
     # Build series of CTEs, one per iteration
     cte_parts = []
 
@@ -127,7 +128,7 @@ def _build_sampling_query(
     # CTEs 1..iterations: For each iteration, append '0' or '1' based on boundary
     for i in range(1, iterations + 1):
         if verbose:
-            click.echo(f"  Iteration {i}/{iterations}...")
+            debug(f"  Iteration {i}/{iterations}...")
         prev_cte = f"iter_{i - 1}" if i > 1 else "data_with_coords"
         current_cte = f"iter_{i}"
 
@@ -170,7 +171,7 @@ def _build_sampling_query(
 
     # Final SELECT
     if verbose:
-        click.echo("  Query built, executing on full dataset...")
+        debug("  Query built, executing on full dataset...")
     final_cte = f"iter_{iterations}"
     cte_sql = ",\n".join(cte_parts)
 
@@ -266,7 +267,7 @@ def add_kdtree_column(
         if verbose or not dry_run:
             avg_rows = total_count / partition_count
             avg_mb = file_size_mb / partition_count
-            click.echo(
+            info(
                 f"Auto-selected {partition_count} partitions (avg ~{avg_rows:,.0f} rows, ~{avg_mb:,.1f} MB/partition, target: {target_desc})"
             )
 
@@ -294,7 +295,7 @@ def add_kdtree_column(
         # Only print if we haven't already printed in auto mode
         partition_count = 2**iterations
         mode_str = "exact" if sample_size is None else f"approx (sample: {sample_size:,})"
-        click.echo(
+        progress(
             f"Processing {total_count:,} features with {partition_count} partitions ({mode_str})..."
         )
 
@@ -302,8 +303,8 @@ def add_kdtree_column(
     if sample_size is None:
         # Exact mode: use full recursive CTE (slower but deterministic)
         if verbose:
-            click.echo(f"Computing KD-tree partitions (exact mode: {iterations} iterations)...")
-            click.echo("  This will process the full dataset recursively...")
+            debug(f"Computing KD-tree partitions (exact mode: {iterations} iterations)...")
+            debug("  This will process the full dataset recursively...")
         # https://duckdb.org/2024/09/09/spatial-extension.html
         query = f"""
             WITH RECURSIVE kdtree(iteration, x, y, partition_id, row_id) AS (
@@ -352,9 +353,7 @@ def add_kdtree_column(
     else:
         # Approximate mode: compute boundaries on sample, apply to full dataset (faster)
         if verbose:
-            click.echo(
-                f"Step 1/2: Computing split boundaries from {sample_size:,} sample points..."
-            )
+            debug(f"Step 1/2: Computing split boundaries from {sample_size:,} sample points...")
         query = _build_sampling_query(
             input_url, geom_col, kdtree_column_name, iterations, sample_size, con, verbose
         )
@@ -372,19 +371,13 @@ def add_kdtree_column(
     }
 
     if dry_run:
-        click.echo(
-            click.style(
-                "\n=== DRY RUN MODE - SQL Commands that would be executed ===\n",
-                fg="yellow",
-                bold=True,
-            )
-        )
-        click.echo(click.style(f"-- Input: {input_url}", fg="cyan"))
-        click.echo(click.style(f"-- Output: {output_parquet}", fg="cyan"))
-        click.echo(click.style(f"-- Column: {kdtree_column_name}", fg="cyan"))
-        click.echo(click.style(f"-- Partitions: {partition_count}", fg="cyan"))
-        click.echo()
-        click.echo(query)
+        warn("\n=== DRY RUN MODE - SQL Commands that would be executed ===\n")
+        info(f"-- Input: {input_url}")
+        info(f"-- Output: {output_parquet}")
+        info(f"-- Column: {kdtree_column_name}")
+        info(f"-- Partitions: {partition_count}")
+        progress("")
+        progress(query)
         return
 
     # Get metadata before processing
@@ -394,7 +387,7 @@ def add_kdtree_column(
 
     # Execute the query and write output
     if verbose:
-        click.echo("Writing output file...")
+        debug("Writing output file...")
     write_parquet_with_metadata(
         con,
         query,
@@ -413,7 +406,7 @@ def add_kdtree_column(
     con.close()
 
     if not dry_run:
-        click.echo(
+        success(
             f"Added KD-tree column '{kdtree_column_name}' ({partition_count} partitions) to: {output_parquet}"
         )
 
