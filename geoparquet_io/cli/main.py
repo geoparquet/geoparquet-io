@@ -98,6 +98,106 @@ def check(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
+class MultiFileCheckRunner:
+    """Helper for running checks on multiple files with progress tracking and summary."""
+
+    def __init__(self, files: list[str], verbose: bool = False, max_issues_shown: int = 3):
+        self.files = files
+        self.verbose = verbose
+        self.max_issues_shown = max_issues_shown
+        self.passed = 0
+        self.warnings = 0
+        self.failed = 0
+        self.issues: list[tuple[str, str, str]] = []  # (file, level, message)
+        self.current_index = 0
+        self.is_multi_file = len(files) > 1
+
+    def _update_progress(self):
+        """Print progress line (overwrites previous line in non-verbose mode)."""
+        if not self.is_multi_file or self.verbose:
+            return
+        total = len(self.files)
+        msg = f"Checking files... {self.current_index}/{total} ({self.passed} passed)"
+        if self.warnings:
+            msg += f", {self.warnings} warnings"
+        if self.failed:
+            msg += f", {self.failed} failed"
+        click.echo(f"\r{msg}", nl=False)
+
+    def _record_issue(self, file_path: str, level: str, message: str):
+        """Record an issue and print it if under the limit."""
+        self.issues.append((file_path, level, message))
+        if not self.verbose and len(self.issues) <= self.max_issues_shown:
+            # Clear progress line and print issue
+            click.echo("\r" + " " * 80 + "\r", nl=False)
+            color = "yellow" if level == "warning" else "red"
+            filename = Path(file_path).name
+            click.echo(click.style(f"  {level.upper()}: {filename} - {message}", fg=color))
+
+    def start_file(self, file_path: str):
+        """Called before checking each file."""
+        self.current_index += 1
+        self._update_progress()
+        if self.verbose and self.is_multi_file:
+            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
+            click.echo(
+                click.style(f"File {self.current_index}/{len(self.files)}: {file_path}", fg="cyan")
+            )
+            click.echo(click.style(f"{'=' * 60}", fg="bright_black"))
+
+    def record_result(self, file_path: str, result: dict):
+        """Record the result of checking a file."""
+        if result.get("passed", True):
+            self.passed += 1
+        else:
+            # Determine if it's a warning or failure
+            issues = result.get("issues", [])
+            has_error = any("❌" in str(i) or result.get("failed") for i in issues)
+            if (
+                has_error
+                or result.get("size_status") == "poor"
+                or result.get("row_status") == "poor"
+            ):
+                self.failed += 1
+                for issue in issues:
+                    self._record_issue(file_path, "error", issue)
+            else:
+                self.warnings += 1
+                for issue in issues:
+                    self._record_issue(file_path, "warning", issue)
+        self._update_progress()
+
+    def print_summary(self):
+        """Print final summary after all files are checked."""
+        if not self.is_multi_file:
+            return
+
+        # Clear progress line
+        if not self.verbose:
+            click.echo("\r" + " " * 80 + "\r", nl=False)
+
+        # Show remaining issues hint
+        extra_issues = len(self.issues) - self.max_issues_shown
+        if extra_issues > 0 and not self.verbose:
+            click.echo(
+                click.style(
+                    f"  ... and {extra_issues} more issues (use --verbose to see all)", fg="cyan"
+                )
+            )
+
+        total = len(self.files)
+        summary_parts = []
+        if self.passed:
+            summary_parts.append(click.style(f"{self.passed} passed", fg="green"))
+        if self.warnings:
+            summary_parts.append(click.style(f"{self.warnings} warnings", fg="yellow"))
+        if self.failed:
+            summary_parts.append(click.style(f"{self.failed} failed", fg="red"))
+
+        summary = ", ".join(summary_parts) if summary_parts else "0 checked"
+        click.echo(f"Summary: {summary} ({total} files checked)")
+
+
 @check.command(name="all")
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
@@ -156,7 +256,6 @@ def check_all(
 
     if notice:
         click.echo(click.style(f"📁 {notice}", fg="cyan"))
-        click.echo()
 
     if not files_to_check:
         click.echo(click.style("No parquet files found", fg="red"))
@@ -168,28 +267,40 @@ def check_all(
         click.echo("Use 'gpio extract' to consolidate partitions first, then run check --fix")
         fix = False
 
-    # Process each file
-    for i, file_path in enumerate(files_to_check):
-        if len(files_to_check) > 1:
-            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
-            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
-            click.echo(click.style(f"{'=' * 60}", fg="bright_black"))
+    # Create runner for multi-file progress tracking
+    runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
 
-        # Show single progress message for remote files
-        show_remote_read_message(file_path, verbose=False)
-        if is_remote_url(file_path):
-            click.echo()  # Add blank line after remote message
+    # Process each file
+    for file_path in files_to_check:
+        runner.start_file(file_path)
+
+        # Show single progress message for remote files (only in verbose mode for multi-file)
+        if runner.verbose or not runner.is_multi_file:
+            show_remote_read_message(file_path, verbose=False)
+            if is_remote_url(file_path):
+                click.echo()  # Add blank line after remote message
 
         # Run all checks and collect results
-        structure_results = check_structure_impl(file_path, verbose, return_results=True)
+        # In non-verbose multi-file mode, suppress detailed output
+        show_output = runner.verbose or not runner.is_multi_file
+        quiet = not show_output
+        structure_results = check_structure_impl(
+            file_path, verbose and show_output, return_results=True, quiet=quiet
+        )
 
-        click.echo("\nSpatial Order Analysis:")
+        if show_output:
+            click.echo("\nSpatial Order Analysis:")
         spatial_result = check_spatial_impl(
-            file_path, random_sample_size, limit_rows, verbose, return_results=True
+            file_path,
+            random_sample_size,
+            limit_rows,
+            verbose and show_output,
+            return_results=True,
+            quiet=quiet,
         )
         ratio = spatial_result["ratio"]
 
-        if ratio is not None:
+        if show_output and ratio is not None:
             if ratio < 0.5:
                 click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
             else:
@@ -200,6 +311,19 @@ def check_all(
                         fg="yellow",
                     )
                 )
+
+        # Aggregate results for runner tracking
+        all_check_results = {**structure_results, "spatial": spatial_result}
+        combined_passed = all(
+            r.get("passed", True) for r in all_check_results.values() if isinstance(r, dict)
+        )
+        combined_issues = []
+        for r in all_check_results.values():
+            if isinstance(r, dict):
+                combined_issues.extend(r.get("issues", []))
+        runner.record_result(
+            file_path, {"passed": combined_passed, "issues": combined_issues, **structure_results}
+        )
 
         # If --fix flag is set, apply fixes (only for single files)
         if fix:
@@ -283,6 +407,9 @@ def check_all(
                 handle_fix_error(e, no_backup, output_path, file_path, backup_path)
                 raise
 
+    # Print summary for multi-file checks
+    runner.print_summary()
+
 
 @check.command(name="spatial")
 @click.argument("parquet_file")
@@ -337,7 +464,6 @@ def check_spatial(
 
     if notice:
         click.echo(click.style(f"📁 {notice}", fg="cyan"))
-        click.echo()
 
     if not files_to_check:
         click.echo(click.style("No parquet files found", fg="red"))
@@ -348,17 +474,25 @@ def check_spatial(
         click.echo(click.style("⚠️  --fix is only available for single files", fg="yellow"))
         fix = False
 
-    for i, file_path in enumerate(files_to_check):
-        if len(files_to_check) > 1:
-            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
-            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
+    # Create runner for multi-file progress tracking
+    runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
 
+    for file_path in files_to_check:
+        runner.start_file(file_path)
+
+        show_output = runner.verbose or not runner.is_multi_file
+        quiet = not show_output
         result = check_spatial_impl(
-            file_path, random_sample_size, limit_rows, verbose, return_results=True
+            file_path,
+            random_sample_size,
+            limit_rows,
+            verbose and show_output,
+            return_results=True,
+            quiet=quiet,
         )
         ratio = result["ratio"]
 
-        if ratio is not None:
+        if show_output and ratio is not None:
             if ratio < 0.5:
                 click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
             else:
@@ -369,6 +503,9 @@ def check_spatial(
                         fg="yellow",
                     )
                 )
+
+        # Record result for summary
+        runner.record_result(file_path, result)
 
         if fix:
             if not result.get("fix_available", False):
@@ -386,6 +523,9 @@ def check_spatial(
             click.echo(f"Optimized file: {output_path}")
             if backup_path:
                 click.echo(f"Backup: {backup_path}")
+
+    # Print summary for multi-file checks
+    runner.print_summary()
 
 
 @check.command(name="compression")
@@ -430,7 +570,6 @@ def check_compression_cmd(
 
     if notice:
         click.echo(click.style(f"📁 {notice}", fg="cyan"))
-        click.echo()
 
     if not files_to_check:
         click.echo(click.style("No parquet files found", fg="red"))
@@ -441,12 +580,20 @@ def check_compression_cmd(
         click.echo(click.style("⚠️  --fix is only available for single files", fg="yellow"))
         fix = False
 
-    for i, file_path in enumerate(files_to_check):
-        if len(files_to_check) > 1:
-            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
-            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
+    # Create runner for multi-file progress tracking
+    runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
 
-        result = check_compression(file_path, verbose, return_results=True)
+    for file_path in files_to_check:
+        runner.start_file(file_path)
+
+        show_output = runner.verbose or not runner.is_multi_file
+        quiet = not show_output
+        result = check_compression(
+            file_path, verbose and show_output, return_results=True, quiet=quiet
+        )
+
+        # Record result for summary
+        runner.record_result(file_path, result)
 
         if fix:
             if not result.get("fix_available", False):
@@ -462,6 +609,9 @@ def check_compression_cmd(
             click.echo(f"Optimized file: {output_path}")
             if backup_path:
                 click.echo(f"Backup: {backup_path}")
+
+    # Print summary for multi-file checks
+    runner.print_summary()
 
 
 @check.command(name="bbox")
@@ -511,7 +661,6 @@ def check_bbox_cmd(
 
     if notice:
         click.echo(click.style(f"📁 {notice}", fg="cyan"))
-        click.echo()
 
     if not files_to_check:
         click.echo(click.style("No parquet files found", fg="red"))
@@ -522,12 +671,20 @@ def check_bbox_cmd(
         click.echo(click.style("⚠️  --fix is only available for single files", fg="yellow"))
         fix = False
 
-    for i, file_path in enumerate(files_to_check):
-        if len(files_to_check) > 1:
-            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
-            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
+    # Create runner for multi-file progress tracking
+    runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
 
-        result = check_metadata_and_bbox(file_path, verbose, return_results=True)
+    for file_path in files_to_check:
+        runner.start_file(file_path)
+
+        show_output = runner.verbose or not runner.is_multi_file
+        quiet = not show_output
+        result = check_metadata_and_bbox(
+            file_path, verbose and show_output, return_results=True, quiet=quiet
+        )
+
+        # Record result for summary
+        runner.record_result(file_path, result)
 
         if fix:
             if not result.get("fix_available", False):
@@ -585,6 +742,9 @@ def check_bbox_cmd(
                 if backup_path:
                     click.echo(f"Backup: {backup_path}")
 
+    # Print summary for multi-file checks
+    runner.print_summary()
+
 
 @check.command(name="row-group")
 @click.argument("parquet_file")
@@ -628,7 +788,6 @@ def check_row_group_cmd(
 
     if notice:
         click.echo(click.style(f"📁 {notice}", fg="cyan"))
-        click.echo()
 
     if not files_to_check:
         click.echo(click.style("No parquet files found", fg="red"))
@@ -639,12 +798,20 @@ def check_row_group_cmd(
         click.echo(click.style("⚠️  --fix is only available for single files", fg="yellow"))
         fix = False
 
-    for i, file_path in enumerate(files_to_check):
-        if len(files_to_check) > 1:
-            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
-            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
+    # Create runner for multi-file progress tracking
+    runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
 
-        result = check_row_groups(file_path, verbose, return_results=True)
+    for file_path in files_to_check:
+        runner.start_file(file_path)
+
+        show_output = runner.verbose or not runner.is_multi_file
+        quiet = not show_output
+        result = check_row_groups(
+            file_path, verbose and show_output, return_results=True, quiet=quiet
+        )
+
+        # Record result for summary
+        runner.record_result(file_path, result)
 
         if fix:
             if not result.get("fix_available", False):
@@ -660,6 +827,9 @@ def check_row_group_cmd(
             click.echo(f"Optimized file: {output_path}")
             if backup_path:
                 click.echo(f"Backup: {backup_path}")
+
+    # Print summary for multi-file checks
+    runner.print_summary()
 
 
 # Convert command

@@ -60,9 +60,14 @@ def assess_row_group_size(avg_group_size_bytes, total_size_bytes):
         )
 
 
-def assess_row_count(avg_rows):
+def assess_row_count(avg_rows, total_size_bytes=None, num_groups=None):
     """
     Assess if average row count per group is optimal.
+
+    Args:
+        avg_rows: Average rows per row group
+        total_size_bytes: Total file size in bytes (optional, for small file leniency)
+        num_groups: Number of row groups (optional, for single group leniency)
 
     Returns:
         tuple: (status, message, color) where status is one of:
@@ -70,24 +75,30 @@ def assess_row_count(avg_rows):
             - "suboptimal"
             - "poor"
     """
+    # For small files with a single row group, any row count is fine
+    if total_size_bytes is not None and num_groups is not None:
+        total_size_mb = total_size_bytes / (1024 * 1024)
+        if total_size_mb < 64 and num_groups == 1:
+            return "optimal", "Row count is appropriate for small file", "green"
+
     if avg_rows < 2000:
         return (
             "poor",
-            "Row count per group is very low. Target 50,000-200,000 rows per group",
+            "Row count per group is very low. Target 10,000-200,000 rows per group",
             "red",
         )
     elif avg_rows > 1000000:
         return (
             "poor",
-            "Row count per group is very high. Target 50,000-200,000 rows per group",
+            "Row count per group is very high. Target 10,000-200,000 rows per group",
             "red",
         )
-    elif 50000 <= avg_rows <= 200000:
+    elif 10000 <= avg_rows <= 200000:
         return "optimal", "Row count per group is optimal", "green"
     else:
         return (
             "suboptimal",
-            "Row count per group is outside recommended range (50,000-200,000)",
+            "Row count per group is outside recommended range (10,000-200,000)",
             "yellow",
         )
 
@@ -106,13 +117,14 @@ def get_compression_info(parquet_file, column_name=None):
     return duckdb_get_compression_info(parquet_file, column_name)
 
 
-def check_row_groups(parquet_file, verbose=False, return_results=False):
+def check_row_groups(parquet_file, verbose=False, return_results=False, quiet=False):
     """Check row group optimization and print results.
 
     Args:
         parquet_file: Path to parquet file
         verbose: Print additional information
         return_results: If True, return structured results dict instead of only printing
+        quiet: If True, suppress all output (for multi-file batch mode)
 
     Returns:
         dict if return_results=True, containing:
@@ -128,7 +140,9 @@ def check_row_groups(parquet_file, verbose=False, return_results=False):
     size_status, size_message, size_color = assess_row_group_size(
         stats["avg_group_size"], stats["total_size"]
     )
-    row_status, row_message, row_color = assess_row_count(stats["avg_rows_per_group"])
+    row_status, row_message, row_color = assess_row_count(
+        stats["avg_rows_per_group"], stats["total_size"], stats["num_groups"]
+    )
 
     # Build results dict
     passed = size_status == "optimal" and row_status == "optimal"
@@ -141,7 +155,7 @@ def check_row_groups(parquet_file, verbose=False, return_results=False):
 
     if row_status != "optimal":
         issues.append(row_message)
-        recommendations.append("Target 50,000-200,000 rows per group")
+        recommendations.append("Target 10,000-200,000 rows per group")
 
     results = {
         "passed": passed,
@@ -153,47 +167,48 @@ def check_row_groups(parquet_file, verbose=False, return_results=False):
         "fix_available": not passed,
     }
 
-    # Print results
-    progress("\nRow Group Analysis:")
-    progress(f"Number of row groups: {stats['num_groups']}")
+    # Print results (skip if quiet mode)
+    if not quiet:
+        progress("\nRow Group Analysis:")
+        progress(f"Number of row groups: {stats['num_groups']}")
 
-    # Color-based output for size
-    size_msg = f"Average group size: {format_size(stats['avg_group_size'])}"
-    if size_color == "green":
-        success(size_msg)
-        success(size_message)
-    elif size_color == "yellow":
-        warn(size_msg)
-        warn(size_message)
-    else:
-        error(size_msg)
-        error(size_message)
+        # Color-based output for size
+        size_msg = f"Average group size: {format_size(stats['avg_group_size'])}"
+        if size_color == "green":
+            success(size_msg)
+            success(size_message)
+        elif size_color == "yellow":
+            warn(size_msg)
+            warn(size_message)
+        else:
+            error(size_msg)
+            error(size_message)
 
-    # Color-based output for rows
-    row_msg = f"Average rows per group: {stats['avg_rows_per_group']:,.0f}"
-    if row_color == "green":
-        success(row_msg)
-        success(row_message)
-    elif row_color == "yellow":
-        warn(row_msg)
-        warn(row_message)
-    else:
-        error(row_msg)
-        error(row_message)
+        # Color-based output for rows
+        row_msg = f"Average rows per group: {stats['avg_rows_per_group']:,.0f}"
+        if row_color == "green":
+            success(row_msg)
+            success(row_message)
+        elif row_color == "yellow":
+            warn(row_msg)
+            warn(row_message)
+        else:
+            error(row_msg)
+            error(row_message)
 
-    progress(f"\nTotal file size: {format_size(stats['total_size'])}")
+        progress(f"\nTotal file size: {format_size(stats['total_size'])}")
 
-    if size_status != "optimal" or row_status != "optimal":
-        progress("\nRow Group Guidelines:")
-        progress("- Optimal size: 64-256 MB per row group")
-        progress("- Optimal rows: 50,000-200,000 rows per group")
-        progress("- Small files (<64 MB): single row group is fine")
+        if size_status != "optimal" or row_status != "optimal":
+            progress("\nRow Group Guidelines:")
+            progress("- Optimal size: 64-256 MB per row group")
+            progress("- Optimal rows: 10,000-200,000 rows per group")
+            progress("- Small files (<64 MB): single row group is fine")
 
     if return_results:
         return results
 
 
-def _check_parquet_geo_only(parquet_file, file_type_info, verbose, return_results):
+def _check_parquet_geo_only(parquet_file, file_type_info, verbose, return_results, quiet=False):
     """Check parquet-geo-only file (no geo metadata is expected)."""
     bbox_info = check_bbox_structure(parquet_file, verbose)
     stats_info = has_parquet_geo_row_group_stats(parquet_file)
@@ -213,23 +228,24 @@ def _check_parquet_geo_only(parquet_file, file_type_info, verbose, return_result
 
     passed = not bbox_info["has_bbox_column"]
 
-    # Print results
-    progress("\nParquet Geo Analysis:")
-    success("✓ File uses native Parquet GEOMETRY/GEOGRAPHY types")
-    warn("⚠️  No GeoParquet metadata (file uses parquet-geo-only format)")
-    info("   Use 'gpio convert --geoparquet-version 2.0' to add GeoParquet 2.0 metadata")
+    # Print results (skip if quiet mode)
+    if not quiet:
+        progress("\nParquet Geo Analysis:")
+        success("✓ File uses native Parquet GEOMETRY/GEOGRAPHY types")
+        warn("⚠️  No GeoParquet metadata (file uses parquet-geo-only format)")
+        info("   Use 'gpio convert --geoparquet-version 2.0' to add GeoParquet 2.0 metadata")
 
-    if bbox_info["has_bbox_column"]:
-        warn(
-            f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found "
-            "(unnecessary - native geo types have row group stats)"
-        )
-        info("   Use --fix to remove the bbox column")
-    else:
-        success("✓ No bbox column (correct for native Parquet geo types)")
+        if bbox_info["has_bbox_column"]:
+            warn(
+                f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found "
+                "(unnecessary - native geo types have row group stats)"
+            )
+            info("   Use --fix to remove the bbox column")
+        else:
+            success("✓ No bbox column (correct for native Parquet geo types)")
 
-    if stats_info["has_stats"]:
-        success("✓ Row group statistics available for spatial filtering")
+        if stats_info["has_stats"]:
+            success("✓ Row group statistics available for spatial filtering")
 
     if return_results:
         return {
@@ -247,7 +263,7 @@ def _check_parquet_geo_only(parquet_file, file_type_info, verbose, return_result
         }
 
 
-def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results):
+def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results, quiet=False):
     """Check GeoParquet 2.0 file (bbox not recommended)."""
     bbox_info = check_bbox_structure(parquet_file, verbose)
     stats_info = has_parquet_geo_row_group_stats(parquet_file)
@@ -266,20 +282,23 @@ def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results):
 
     passed = not bbox_info["has_bbox_column"]
 
-    # Print results
-    progress("\nGeoParquet 2.0 Metadata:")
-    success(f"✓ Version {file_type_info['geo_version']}")
-    success("✓ Uses native Parquet GEOMETRY/GEOGRAPHY types")
+    # Print results (skip if quiet mode)
+    if not quiet:
+        progress("\nGeoParquet 2.0 Metadata:")
+        success(f"✓ Version {file_type_info['geo_version']}")
+        success("✓ Uses native Parquet GEOMETRY/GEOGRAPHY types")
 
-    if bbox_info["has_bbox_column"]:
-        warn(f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found (not recommended for 2.0)")
-        info("   Native Parquet geo types provide row group stats for spatial filtering.")
-        info("   Use --fix to remove the bbox column")
-    else:
-        success("✓ No bbox column (correct for GeoParquet 2.0)")
+        if bbox_info["has_bbox_column"]:
+            warn(
+                f"⚠️  Bbox column '{bbox_info['bbox_column_name']}' found (not recommended for 2.0)"
+            )
+            info("   Native Parquet geo types provide row group stats for spatial filtering.")
+            info("   Use --fix to remove the bbox column")
+        else:
+            success("✓ No bbox column (correct for GeoParquet 2.0)")
 
-    if stats_info["has_stats"]:
-        success("✓ Row group statistics available for spatial filtering")
+        if stats_info["has_stats"]:
+            success("✓ Row group statistics available for spatial filtering")
 
     if return_results:
         return {
@@ -298,7 +317,7 @@ def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results):
         }
 
 
-def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results):
+def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, quiet=False):
     """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 
@@ -327,26 +346,27 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results):
 
     passed = version >= "1.1.0" and not needs_bbox_column and not needs_bbox_metadata
 
-    # Print results
-    progress("\nGeoParquet Metadata:")
-    if version >= "1.1.0":
-        success(f"✓ Version {version}")
-    else:
-        warn(f"⚠️ Version {version} (upgrade to 1.1.0+ recommended)")
-
-    if bbox_info["has_bbox_column"]:
-        if bbox_info["has_bbox_metadata"]:
-            success(
-                f"✓ Found bbox column '{bbox_info['bbox_column_name']}' "
-                "with proper metadata covering"
-            )
+    # Print results (skip if quiet mode)
+    if not quiet:
+        progress("\nGeoParquet Metadata:")
+        if version >= "1.1.0":
+            success(f"✓ Version {version}")
         else:
-            warn(
-                f"⚠️  Found bbox column '{bbox_info['bbox_column_name']}' but missing "
-                "bbox covering metadata (add to metadata to help inform clients)"
-            )
-    else:
-        error("❌ No bbox column found (recommended for better performance)")
+            warn(f"⚠️ Version {version} (upgrade to 1.1.0+ recommended)")
+
+        if bbox_info["has_bbox_column"]:
+            if bbox_info["has_bbox_metadata"]:
+                success(
+                    f"✓ Found bbox column '{bbox_info['bbox_column_name']}' "
+                    "with proper metadata covering"
+                )
+            else:
+                warn(
+                    f"⚠️  Found bbox column '{bbox_info['bbox_column_name']}' but missing "
+                    "bbox covering metadata (add to metadata to help inform clients)"
+                )
+        else:
+            error("❌ No bbox column found (recommended for better performance)")
 
     if return_results:
         return {
@@ -365,7 +385,7 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results):
         }
 
 
-def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
+def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False, quiet=False):
     """Check GeoParquet metadata version and bbox structure (version-aware).
 
     Handles three file types differently:
@@ -377,6 +397,7 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
         parquet_file: Path to parquet file
         verbose: Print additional information
         return_results: If True, return structured results dict
+        quiet: If True, suppress all output (for multi-file batch mode)
 
     Returns:
         dict if return_results=True, containing:
@@ -396,18 +417,19 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
 
     # Handle parquet-geo-only case (no geo metadata is intentional)
     if file_type_info["file_type"] == "parquet_geo_only":
-        return _check_parquet_geo_only(parquet_file, file_type_info, verbose, return_results)
+        return _check_parquet_geo_only(parquet_file, file_type_info, verbose, return_results, quiet)
 
     # Handle GeoParquet 2.0 case
     if file_type_info["file_type"] == "geoparquet_v2":
-        return _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results)
+        return _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results, quiet)
 
     # Handle GeoParquet 1.x case
     if file_type_info["file_type"] == "geoparquet_v1":
-        return _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results)
+        return _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, quiet)
 
     # Unknown file type - no geo indicators found
-    error("\n❌ No GeoParquet metadata found")
+    if not quiet:
+        error("\n❌ No GeoParquet metadata found")
     if return_results:
         return {
             "passed": False,
@@ -419,13 +441,14 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False):
         }
 
 
-def check_compression(parquet_file, verbose=False, return_results=False):
+def check_compression(parquet_file, verbose=False, return_results=False, quiet=False):
     """Check compression settings for geometry column.
 
     Args:
         parquet_file: Path to parquet file
         verbose: Print additional information
         return_results: If True, return structured results dict
+        quiet: If True, suppress all output (for multi-file batch mode)
 
     Returns:
         dict if return_results=True, containing:
@@ -437,7 +460,8 @@ def check_compression(parquet_file, verbose=False, return_results=False):
     """
     primary_col = find_primary_geometry_column(parquet_file, verbose)
     if not primary_col:
-        error("\n❌ No geometry column found")
+        if not quiet:
+            error("\n❌ No geometry column found")
         if return_results:
             return {
                 "passed": False,
@@ -467,31 +491,35 @@ def check_compression(parquet_file, verbose=False, return_results=False):
         "fix_available": not passed,
     }
 
-    # Print results
-    progress("\nCompression Analysis:")
-    if compression == "ZSTD":
-        success(f"✓ ZSTD compression on geometry column '{primary_col}'")
-    else:
-        warn(f"⚠️  {compression} compression on geometry column '{primary_col}' (ZSTD recommended)")
+    # Print results (skip if quiet mode)
+    if not quiet:
+        progress("\nCompression Analysis:")
+        if compression == "ZSTD":
+            success(f"✓ ZSTD compression on geometry column '{primary_col}'")
+        else:
+            warn(
+                f"⚠️  {compression} compression on geometry column '{primary_col}' (ZSTD recommended)"
+            )
 
     if return_results:
         return results
 
 
-def check_all(parquet_file, verbose=False, return_results=False):
+def check_all(parquet_file, verbose=False, return_results=False, quiet=False):
     """Run all structure checks.
 
     Args:
         parquet_file: Path to parquet file
         verbose: Print additional information
         return_results: If True, return aggregated results dict
+        quiet: If True, suppress all output (for multi-file batch mode)
 
     Returns:
         dict if return_results=True, containing results from all checks
     """
-    row_groups_result = check_row_groups(parquet_file, verbose, return_results=True)
-    bbox_result = check_metadata_and_bbox(parquet_file, verbose, return_results=True)
-    compression_result = check_compression(parquet_file, verbose, return_results=True)
+    row_groups_result = check_row_groups(parquet_file, verbose, return_results=True, quiet=quiet)
+    bbox_result = check_metadata_and_bbox(parquet_file, verbose, return_results=True, quiet=quiet)
+    compression_result = check_compression(parquet_file, verbose, return_results=True, quiet=quiet)
 
     if return_results:
         return {

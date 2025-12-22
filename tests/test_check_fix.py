@@ -131,13 +131,17 @@ class TestCheckFixRowGroups:
     """Tests for check row-group --fix command."""
 
     def test_fix_row_groups_single_large_group(self, places_test_file, temp_output_dir):
-        """Test optimizing a file with a single large row group."""
-        # Create file with suboptimal row groups
+        """Test that small files with single row group are considered optimal.
+
+        Small files (<64 MB) with a single row group don't need row group optimization,
+        so the fix should not create a new file.
+        """
+        # Create file with single row group
         poor_file = os.path.join(temp_output_dir, "poor_groups.parquet")
         table = pq.read_table(places_test_file)
-        pq.write_table(table, poor_file, row_group_size=10000)  # Too many rows per group
+        pq.write_table(table, poor_file, row_group_size=10000)
 
-        # Apply fix
+        # Apply fix - should report no fix needed for small file
         runner = CliRunner()
         fixed_file = os.path.join(temp_output_dir, "fixed.parquet")
         result = runner.invoke(
@@ -146,7 +150,8 @@ class TestCheckFixRowGroups:
         )
 
         assert result.exit_code == 0
-        assert os.path.exists(fixed_file)
+        # Small file with single row group is optimal - no fix created
+        assert "No fix needed" in result.output or "optimal" in result.output.lower()
 
 
 class TestCheckFixSpatial:

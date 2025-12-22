@@ -233,17 +233,18 @@ def check_partition_options(func):
     Add options for check commands on partitioned data.
 
     Adds:
-    - --check-all: Check every file in partition
-    - --check-sample: Check first N files
+    - --all-files: Check every file in partition
+    - --sample-files: Check first N files
     """
     func = click.option(
-        "--check-all",
+        "--all-files",
         "check_all_files",  # Use different param name to avoid conflict with function names
         is_flag=True,
         help="For partitioned data: check every file in the partition.",
     )(func)
     func = click.option(
-        "--check-sample",
+        "--sample-files",
+        "check_sample",  # Keep param name for backwards compatibility
         type=int,
         default=None,
         help="For partitioned data: check first N files (default: check first file only).",

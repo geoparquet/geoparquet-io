@@ -214,7 +214,7 @@ def get_files_to_check(
     # Default: check first file only
     first_file = partition_info["first_file"]
     if first_file:
-        notice = f"Checking first file (of {file_count} total). Use --check-all or --check-sample N for more."
+        notice = f"Checking first file (of {file_count} total). Use --all-files or --sample-files N for more."
         return [first_file], notice
 
     return [], "No parquet files found in partition"
