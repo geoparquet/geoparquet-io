@@ -203,6 +203,12 @@ def fields_5070_file(test_data_dir):
 
 
 @pytest.fixture
+def unsorted_test_file(test_data_dir):
+    """Return path to the unsorted.parquet test file (poor spatial ordering)."""
+    return str(test_data_dir / "unsorted.parquet")
+
+
+@pytest.fixture
 def country_partition_dir():
     """Return path to the country partition test directory.
 
