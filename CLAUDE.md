@@ -408,6 +408,29 @@ return handlers[format]()
 
 ## Testing Guidelines
 
+### Test Coverage Requirements
+
+**CRITICAL: All new code must have tests. This is mandatory, not optional.**
+
+- **Overall project threshold**: 75% minimum (enforced by pytest)
+- **New code requirement**: 80% or higher coverage for new features/changes
+- **Every commit with code changes must include corresponding tests**
+
+When writing new code:
+1. Write tests alongside implementation, not as an afterthought
+2. Test both happy paths and error cases
+3. Run `pytest` before committing to verify coverage threshold is met
+
+```bash
+# Check coverage for a specific file
+pytest --cov=geoparquet_io/core/mymodule --cov-report=term-missing tests/test_mymodule.py
+
+# Check overall coverage
+pytest --cov=geoparquet_io --cov-report=term-missing
+```
+
+If coverage falls below 75%, pytest will fail. Fix this by adding missing tests before committing.
+
 ### Test Structure
 ```
 tests/

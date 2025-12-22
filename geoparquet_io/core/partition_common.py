@@ -687,6 +687,7 @@ def _process_partition_value(
         compression_level=15,
         verbose=False,
         geoparquet_version=geoparquet_version,
+        recalculate_bounds=True,
     )
 
     if verbose:

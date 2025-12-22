@@ -32,8 +32,22 @@ def _get_connection_for_file(parquet_file: str, existing_con=None):
 
 
 def _safe_url(parquet_file: str) -> str:
-    """Get safe URL for DuckDB queries."""
-    from geoparquet_io.core.common import safe_file_url
+    """Get safe URL for DuckDB queries.
+
+    For partitioned datasets (directories or glob patterns), returns
+    path to the first file for metadata operations that require a single file.
+    """
+    from geoparquet_io.core.common import (
+        get_first_parquet_file,
+        is_partition_path,
+        safe_file_url,
+    )
+
+    # For partitions, use first file for metadata operations
+    if is_partition_path(parquet_file):
+        first_file = get_first_parquet_file(parquet_file)
+        if first_file:
+            parquet_file = first_file
 
     return safe_file_url(parquet_file, verbose=False)
 

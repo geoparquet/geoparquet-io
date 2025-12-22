@@ -228,6 +228,177 @@ def has_glob_pattern(path: str) -> bool:
     return any(c in path for c in ("*", "?", "["))
 
 
+def is_partition_path(path: str) -> bool:
+    """
+    Check if path represents a partitioned dataset.
+
+    Detects:
+    - Local directories containing parquet files
+    - Paths with glob patterns (*, ?, [)
+    - Hive-style paths (key=value in path) for remote URLs
+
+    Args:
+        path: File path or URL to check
+
+    Returns:
+        bool: True if path appears to be a partitioned dataset
+    """
+    # Check for glob patterns
+    if has_glob_pattern(path):
+        return True
+
+    # Check if local path is a directory
+    if not is_remote_url(path) and os.path.isdir(path):
+        return True
+
+    # Check for hive-style partitioning in remote URLs (key=value in path components)
+    if is_remote_url(path):
+        # Extract path portion after scheme and host
+        # e.g., s3://bucket/prefix/country=US/data.parquet -> prefix/country=US/data.parquet
+        path_parts = path.split("/")
+        # Check if any path component contains = (hive-style partition)
+        for part in path_parts[3:]:  # Skip scheme://host/bucket parts
+            if "=" in part and not part.endswith(".parquet"):
+                return True
+
+    return False
+
+
+def resolve_partition_path(path: str, hive_partitioning: bool | None = None) -> tuple[str, dict]:
+    """
+    Resolve a partition path to a format DuckDB can read.
+
+    For directories, converts to glob pattern. Returns the resolved path
+    and read_parquet options dict.
+
+    Args:
+        path: File path or URL (may be directory or glob pattern)
+        hive_partitioning: Explicitly enable/disable hive partitioning.
+                          If None, auto-detect from path structure.
+
+    Returns:
+        tuple: (resolved_path, read_options_dict)
+            - resolved_path: Path/glob pattern for DuckDB
+            - read_options_dict: Options for read_parquet (hive_partitioning, etc.)
+    """
+    options = {}
+    resolved = path
+
+    # Handle local directories
+    if not is_remote_url(path) and os.path.isdir(path):
+        try:
+            items = os.listdir(path)
+            subdirs = [d for d in items if os.path.isdir(os.path.join(path, d))]
+            has_parquet_files = any(
+                f.endswith(".parquet") for f in items if not os.path.isdir(os.path.join(path, f))
+            )
+            has_hive_subdirs = any("=" in d for d in subdirs)
+
+            if has_hive_subdirs:
+                # Hive-style partitioning with key=value directories
+                resolved = os.path.join(path, "**", "*.parquet")
+                options["hive_partitioning"] = True
+            elif subdirs and not has_parquet_files:
+                # Directory has subdirectories but no parquet files at top level
+                # Use recursive glob to find parquet files in subdirectories
+                resolved = os.path.join(path, "**", "*.parquet")
+            elif has_parquet_files:
+                # Flat directory with parquet files at top level
+                resolved = os.path.join(path, "*.parquet")
+            else:
+                # Fallback - try recursive
+                resolved = os.path.join(path, "**", "*.parquet")
+        except OSError:
+            # If we can't read the directory, use recursive glob
+            resolved = os.path.join(path, "**", "*.parquet")
+
+    # If path contains hive-style markers and hive_partitioning not explicitly set
+    # Check path components (directories) for hive-style key=value patterns
+    # Exclude glob patterns and the final filename from the check
+    if hive_partitioning is None:
+        path_parts = resolved.replace("\\", "/").split("/")
+        # Check directory components (not filename or glob patterns like ** or *.parquet)
+        dir_parts = [p for p in path_parts[:-1] if p and p not in ("**", "*")]
+        has_hive_dirs = any("=" in part for part in dir_parts)
+        if has_hive_dirs:
+            options["hive_partitioning"] = True
+    elif hive_partitioning is not None:
+        options["hive_partitioning"] = hive_partitioning
+
+    return resolved, options
+
+
+def get_first_parquet_file(partition_path: str) -> str | None:
+    """
+    Get the first parquet file from a partitioned dataset.
+
+    Used for metadata inspection when only need to check one file.
+
+    Args:
+        partition_path: Directory path or glob pattern
+
+    Returns:
+        str: Path to first parquet file, or None if none found
+    """
+    import glob as glob_module
+
+    if is_remote_url(partition_path):
+        # For remote, can't easily enumerate - return original path
+        # Caller should handle this case
+        return partition_path
+
+    if os.path.isdir(partition_path):
+        # Walk directory to find first parquet file
+        for root, _dirs, files in os.walk(partition_path):
+            for f in sorted(files):  # Sort for consistent ordering
+                if f.endswith(".parquet"):
+                    return os.path.join(root, f)
+        return None
+
+    if has_glob_pattern(partition_path):
+        # Use glob to find first match
+        matches = glob_module.glob(partition_path, recursive=True)
+        parquet_matches = [m for m in sorted(matches) if m.endswith(".parquet")]
+        return parquet_matches[0] if parquet_matches else None
+
+    # Single file
+    return partition_path
+
+
+def get_all_parquet_files(partition_path: str) -> list[str]:
+    """
+    Get all parquet files from a partitioned dataset.
+
+    Args:
+        partition_path: Directory path or glob pattern
+
+    Returns:
+        list: List of paths to all parquet files, sorted for consistent ordering
+    """
+    import glob as glob_module
+
+    if is_remote_url(partition_path):
+        # For remote, can't easily enumerate - return as single item
+        return [partition_path]
+
+    if os.path.isdir(partition_path):
+        # Walk directory to find all parquet files
+        parquet_files = []
+        for root, _dirs, files in os.walk(partition_path):
+            for f in files:
+                if f.endswith(".parquet"):
+                    parquet_files.append(os.path.join(root, f))
+        return sorted(parquet_files)
+
+    if has_glob_pattern(partition_path):
+        # Use glob to find all matches
+        matches = glob_module.glob(partition_path, recursive=True)
+        return sorted([m for m in matches if m.endswith(".parquet")])
+
+    # Single file
+    return [partition_path] if os.path.exists(partition_path) else []
+
+
 def upload_if_remote(local_path, remote_path, profile=None, is_directory=False, verbose=False):
     """
     Upload local file/dir to remote path if remote_path is a remote URL.
@@ -618,7 +789,10 @@ def safe_file_url(file_path, verbose=False):
         # Remote URL - URL encode if HTTP/HTTPS
         if file_path.startswith(("http://", "https://")):
             parsed = urllib.parse.urlparse(file_path)
-            encoded_path = urllib.parse.quote(parsed.path)
+            # Preserve glob wildcards and hive-style partition markers for DuckDB
+            # These characters must not be encoded: * ? [ ] = , /
+            duckdb_safe_chars = "/*?[]=,"
+            encoded_path = urllib.parse.quote(parsed.path, safe=duckdb_safe_chars)
             safe_url = parsed._replace(path=encoded_path).geturl()
         else:
             safe_url = file_path
@@ -681,6 +855,9 @@ def get_parquet_metadata(parquet_file, verbose=False):
     """
     Get Parquet file metadata using DuckDB for kv_metadata and PyArrow for schema.
 
+    For partitioned datasets (directories or glob patterns), reads metadata
+    from the first file.
+
     Returns:
         tuple: (kv_metadata dict, PyArrow schema)
 
@@ -691,14 +868,21 @@ def get_parquet_metadata(parquet_file, verbose=False):
 
     from geoparquet_io.core.duckdb_metadata import get_kv_metadata
 
-    safe_url = safe_file_url(parquet_file, verbose=False)
+    # For partitions, use first file for metadata
+    file_to_check = parquet_file
+    if is_partition_path(parquet_file):
+        first_file = get_first_parquet_file(parquet_file)
+        if first_file:
+            file_to_check = first_file
+
+    safe_url = safe_file_url(file_to_check, verbose=False)
 
     # Get key-value metadata (returns dict like {b'geo': b'...'})
     kv_metadata = get_kv_metadata(safe_url)
 
     # Get PyArrow schema for backward compatibility
     # (some code uses schema.field(i).name patterns)
-    if is_remote_url(parquet_file):
+    if is_remote_url(file_to_check):
         # For remote files, use a DuckDB-based approach to read schema
         from geoparquet_io.core.duckdb_metadata import get_schema_info
 
@@ -706,7 +890,7 @@ def get_parquet_metadata(parquet_file, verbose=False):
         # Create a simple object that mimics PyArrow schema for basic usage
         schema = _DuckDBSchemaWrapper(schema_info)
     else:
-        pf = pq.ParquetFile(parquet_file)
+        pf = pq.ParquetFile(file_to_check)
         schema = pf.schema_arrow
 
     if verbose and kv_metadata:
@@ -789,6 +973,55 @@ def find_primary_geometry_column(parquet_file, verbose=False):
                 return col.get("name", "geometry")
 
     return "geometry"
+
+
+def calculate_file_bounds(file_path, geom_column=None, verbose=False):
+    """
+    Calculate the bounding box of all geometries in a parquet file.
+
+    Uses DuckDB's spatial extension to compute the extent of all geometries.
+
+    Args:
+        file_path: Path to the parquet file (local or remote URL)
+        geom_column: Name of geometry column (auto-detected if None)
+        verbose: Print verbose output
+
+    Returns:
+        tuple: (xmin, ymin, xmax, ymax) or None if calculation fails
+    """
+    if geom_column is None:
+        geom_column = find_primary_geometry_column(file_path, verbose=False)
+
+    safe_url = safe_file_url(file_path, verbose=False)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_path))
+
+    try:
+        # Quote column name to handle special characters, uppercase, etc.
+        quoted_geom = geom_column.replace('"', '""')
+        bounds_query = f"""
+            SELECT
+                MIN(ST_XMin("{quoted_geom}")) as xmin,
+                MIN(ST_YMin("{quoted_geom}")) as ymin,
+                MAX(ST_XMax("{quoted_geom}")) as xmax,
+                MAX(ST_YMax("{quoted_geom}")) as ymax
+            FROM read_parquet('{safe_url}')
+        """
+        result = con.execute(bounds_query).fetchone()
+
+        if result and all(v is not None for v in result):
+            if verbose:
+                debug(
+                    f"Calculated bounds: ({result[0]:.6f}, {result[1]:.6f}, "
+                    f"{result[2]:.6f}, {result[3]:.6f})"
+                )
+            return result
+        return None
+    except Exception as e:
+        if verbose:
+            debug(f"Failed to calculate bounds: {e}")
+        return None
+    finally:
+        con.close()
 
 
 # CRS handling functions for GeoParquet 2.0 and parquet-geo-only
@@ -1483,6 +1716,7 @@ def rewrite_with_metadata(
     verbose=False,
     metadata_version="1.1.0",
     input_crs=None,
+    recalculate_bounds=False,
 ):
     """
     Rewrite a parquet file with updated metadata and compression settings.
@@ -1498,6 +1732,7 @@ def rewrite_with_metadata(
         verbose: Whether to print verbose output
         metadata_version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
         input_crs: PROJJSON dict with CRS to include in geo metadata (optional)
+        recalculate_bounds: If True, recalculate bounds from actual geometry data (default: False)
     """
     if verbose:
         debug("Updating metadata and optimizing file structure...")
@@ -1542,6 +1777,19 @@ def rewrite_with_metadata(
         geo_meta["columns"][geom_col]["crs"] = input_crs
         if verbose:
             debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
+
+    # Recalculate bounds from actual geometry data if requested
+    if recalculate_bounds:
+        bounds = calculate_file_bounds(output_file, geom_col, verbose=verbose)
+        if bounds:
+            if geom_col not in geo_meta.get("columns", {}):
+                geo_meta["columns"][geom_col] = {}
+            geo_meta["columns"][geom_col]["bbox"] = list(bounds)
+            if verbose:
+                debug(
+                    f"Updated bounds to: [{bounds[0]:.6f}, {bounds[1]:.6f}, "
+                    f"{bounds[2]:.6f}, {bounds[3]:.6f}]"
+                )
 
     new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
@@ -1596,6 +1844,7 @@ def write_parquet_with_metadata(
     profile=None,
     geoparquet_version=None,
     input_crs=None,
+    recalculate_bounds=False,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
@@ -1621,6 +1870,7 @@ def write_parquet_with_metadata(
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         input_crs: PROJJSON dict with CRS from input file (for 2.0/parquet-geo-only)
+        recalculate_bounds: If True, recalculate bounds from actual geometry data (default: False)
 
     Returns:
         None
@@ -1698,6 +1948,7 @@ def write_parquet_with_metadata(
                 verbose,
                 metadata_version=version_config["metadata_version"],
                 input_crs=input_crs,
+                recalculate_bounds=recalculate_bounds,
             )
 
         # Upload to remote if needed

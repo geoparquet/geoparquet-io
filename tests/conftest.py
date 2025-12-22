@@ -17,6 +17,7 @@ import pytest
 TEST_DATA_DIR = Path(__file__).parent / "data"
 PLACES_TEST_FILE = TEST_DATA_DIR / "places_test.parquet"
 BUILDINGS_TEST_FILE = TEST_DATA_DIR / "buildings_test.parquet"
+COUNTRY_PARTITION_DIR = TEST_DATA_DIR / "country_partition"
 
 
 @pytest.fixture
@@ -199,3 +200,25 @@ def csv_points_wkt(test_data_dir):
 def fields_5070_file(test_data_dir):
     """Return path to the Parquet Geo Only test file (EPSG:5070, SNAPPY)."""
     return str(test_data_dir / "fields_pgo_5070_snappy.parquet")
+
+
+@pytest.fixture
+def unsorted_test_file(test_data_dir):
+    """Return path to the unsorted.parquet test file (poor spatial ordering)."""
+    return str(test_data_dir / "unsorted.parquet")
+
+
+@pytest.fixture
+def country_partition_dir():
+    """Return path to the country partition test directory.
+
+    This directory contains 4 parquet files representing a flat partition:
+    - El_Salvador.parquet
+    - Guatemala.parquet
+    - Honduras.parquet
+    - Nicaragua.parquet
+
+    All files have the same schema and GeoParquet 1.1.0 metadata.
+    Total: ~5000 rows across 4 files.
+    """
+    return str(COUNTRY_PARTITION_DIR)
