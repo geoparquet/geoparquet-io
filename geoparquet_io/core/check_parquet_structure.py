@@ -151,7 +151,7 @@ def check_row_groups(parquet_file, verbose=False, return_results=False, quiet=Fa
 
     if size_status != "optimal":
         issues.append(size_message)
-        recommendations.append("Rewrite with optimal row group size (128-256 MB)")
+        recommendations.append("Rewrite with optimal row group size (64-256 MB)")
 
     if row_status != "optimal":
         issues.append(row_message)

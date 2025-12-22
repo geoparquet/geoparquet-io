@@ -1109,7 +1109,7 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
         )
 
     return {
-        "file_count": len(files),
+        "file_count": len(per_file_info),
         "total_rows": total_rows,
         "total_size_bytes": total_size_bytes if total_size_bytes > 0 else None,
         "total_size_human": format_size(total_size_bytes) if total_size_bytes > 0 else "N/A",

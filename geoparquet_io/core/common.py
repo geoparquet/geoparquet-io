@@ -313,8 +313,15 @@ def resolve_partition_path(path: str, hive_partitioning: bool | None = None) -> 
             resolved = os.path.join(path, "**", "*.parquet")
 
     # If path contains hive-style markers and hive_partitioning not explicitly set
-    if hive_partitioning is None and "=" in resolved:
-        options["hive_partitioning"] = True
+    # Check path components (directories) for hive-style key=value patterns
+    # Exclude glob patterns and the final filename from the check
+    if hive_partitioning is None:
+        path_parts = resolved.replace("\\", "/").split("/")
+        # Check directory components (not filename or glob patterns like ** or *.parquet)
+        dir_parts = [p for p in path_parts[:-1] if p and p not in ("**", "*")]
+        has_hive_dirs = any("=" in part for part in dir_parts)
+        if has_hive_dirs:
+            options["hive_partitioning"] = True
     elif hive_partitioning is not None:
         options["hive_partitioning"] = hive_partitioning
 
