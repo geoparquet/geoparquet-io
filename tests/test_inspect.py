@@ -52,6 +52,16 @@ def test_inspect_head(runner, test_file):
     )  # May show fewer if file has < 5 rows
 
 
+def test_inspect_head_default(runner, test_file):
+    """Test inspect with --head flag without value uses default of 10."""
+    result = runner.invoke(cli, ["inspect", test_file, "--head"])
+
+    assert result.exit_code == 0
+    assert "Preview (first" in result.output
+    # Should default to 10 rows (or fewer if file is smaller)
+    assert "10 rows" in result.output or "rows)" in result.output
+
+
 def test_inspect_tail(runner, test_file):
     """Test inspect with --tail flag."""
     result = runner.invoke(cli, ["inspect", test_file, "--tail", "3"])
@@ -59,6 +69,40 @@ def test_inspect_tail(runner, test_file):
     assert result.exit_code == 0
     assert "Preview (last" in result.output
     assert "3 rows" in result.output or "rows)" in result.output
+
+
+def test_inspect_tail_default(runner, test_file):
+    """Test inspect with --tail flag without value uses default of 10."""
+    result = runner.invoke(cli, ["inspect", test_file, "--tail"])
+
+    assert result.exit_code == 0
+    assert "Preview (last" in result.output
+    # Should default to 10 rows (or fewer if file is smaller)
+    assert "10 rows" in result.output or "rows)" in result.output
+
+
+def test_inspect_head_default_with_other_option(runner, test_file):
+    """Test --head without value followed by another option uses default."""
+    result = runner.invoke(cli, ["inspect", test_file, "--head", "--stats"])
+
+    assert result.exit_code == 0
+    assert "Preview (first" in result.output
+    # Should default to 10 rows
+    assert "10 rows" in result.output or "rows)" in result.output
+    # Should also show stats
+    assert "Statistics:" in result.output
+
+
+def test_inspect_tail_default_with_other_option(runner, test_file):
+    """Test --tail without value followed by another option uses default."""
+    result = runner.invoke(cli, ["inspect", test_file, "--tail", "--stats"])
+
+    assert result.exit_code == 0
+    assert "Preview (last" in result.output
+    # Should default to 10 rows
+    assert "10 rows" in result.output or "rows)" in result.output
+    # Should also show stats
+    assert "Statistics:" in result.output
 
 
 def test_inspect_head_tail_exclusive(runner, test_file):

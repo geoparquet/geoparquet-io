@@ -23,8 +23,14 @@ Shows:
 ## Preview Data
 
 ```bash
-# First 10 rows
-gpio inspect data.parquet --head 10
+# First 10 rows (default when no value given)
+gpio inspect data.parquet --head
+
+# First 20 rows
+gpio inspect data.parquet --head 20
+
+# Last 10 rows (default when no value given)
+gpio inspect data.parquet --tail
 
 # Last 5 rows
 gpio inspect data.parquet --tail 5
@@ -37,7 +43,7 @@ gpio inspect data.parquet --tail 5
 gpio inspect data.parquet --stats
 
 # Combine with preview
-gpio inspect data.parquet --head 5 --stats
+gpio inspect data.parquet --head --stats
 ```
 
 ## GeoParquet Metadata

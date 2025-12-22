@@ -47,6 +47,37 @@ from geoparquet_io.core.upload import upload as upload_impl
 __version__ = "0.6.1"
 
 
+class OptionalIntCommand(click.Command):
+    """Custom Command that supports options with optional integer values.
+
+    Options listed in optional_int_options can be used as flags (defaulting to 10)
+    or with an explicit integer value. For example:
+        --head           -> uses default value of 10
+        --head 5         -> uses value 5
+        (no --head)      -> uses None
+    """
+
+    # Options that support optional integer values and their defaults
+    optional_int_options = {"--head": 10, "--tail": 10}
+
+    def make_context(self, info_name, args, parent=None, **extra):
+        """Preprocess args to insert default values for optional int options."""
+        args = list(args)  # Make a mutable copy
+        for opt, default_val in self.optional_int_options.items():
+            if opt in args:
+                idx = args.index(opt)
+                # Check if next arg exists and looks like an integer
+                if idx + 1 < len(args):
+                    next_arg = args[idx + 1]
+                    # If next arg starts with - (another option) or doesn't look like int
+                    if next_arg.startswith("-") or not next_arg.lstrip("-").isdigit():
+                        args.insert(idx + 1, str(default_val))
+                else:
+                    # Option at end of args
+                    args.insert(idx + 1, str(default_val))
+        return super().make_context(info_name, args, parent=parent, **extra)
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="geoparquet-io")
 @click.option("--timestamps", is_flag=True, help="Show timestamps in output messages")
@@ -552,11 +583,11 @@ def convert(
     )
 
 
-# Inspect command
-@cli.command()
+# Inspect command - uses OptionalIntCommand for --head/--tail optional values
+@cli.command(cls=OptionalIntCommand)
 @click.argument("parquet_file")
-@click.option("--head", type=int, default=None, help="Show first N rows")
-@click.option("--tail", type=int, default=None, help="Show last N rows")
+@click.option("--head", type=int, default=None, help="Show first N rows (default: 10)")
+@click.option("--tail", type=int, default=None, help="Show last N rows (default: 10)")
 @click.option(
     "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
 )
@@ -580,8 +611,16 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
         gpio inspect data.parquet
 
         \b
-        # Preview first 10 rows
-        gpio inspect data.parquet --head 10
+        # Preview first 10 rows (default when no value given)
+        gpio inspect data.parquet --head
+
+        \b
+        # Preview first 20 rows
+        gpio inspect data.parquet --head 20
+
+        \b
+        # Preview last 10 rows (default when no value given)
+        gpio inspect data.parquet --tail
 
         \b
         # Preview last 5 rows
