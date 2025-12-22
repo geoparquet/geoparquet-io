@@ -464,20 +464,19 @@ def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 60) -> str:
         return "<GEOMETRY>"
 
     try:
-        con = duckdb.connect()
-        con.execute("LOAD spatial;")
+        with duckdb.connect() as con:
+            con.execute("LOAD spatial;")
 
-        # Check if this is DuckDB's internal GEOMETRY format (starts with 0x02)
-        # vs standard ISO WKB (starts with 0x00 or 0x01 for byte order)
-        if wkb_bytes[0] == 0x02:
-            # DuckDB internal GEOMETRY format - cast directly
-            result = con.execute("SELECT ST_AsText(?::GEOMETRY)", [wkb_bytes]).fetchone()
-        else:
-            # Standard ISO WKB format
-            result = con.execute(
-                "SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes]
-            ).fetchone()
-        con.close()
+            # Check if this is DuckDB's internal GEOMETRY format (starts with 0x02)
+            # vs standard ISO WKB (starts with 0x00 or 0x01 for byte order)
+            if wkb_bytes[0] == 0x02:
+                # DuckDB internal GEOMETRY format - cast directly
+                result = con.execute("SELECT ST_AsText(?::GEOMETRY)", [wkb_bytes]).fetchone()
+            else:
+                # Standard ISO WKB format
+                result = con.execute(
+                    "SELECT ST_AsText(ST_GeomFromWKB(?::BLOB))", [wkb_bytes]
+                ).fetchone()
 
         if result and result[0]:
             wkt = result[0]
@@ -523,6 +522,8 @@ def format_bbox_display(value: dict, max_length: int = 60) -> str:
     Returns:
         str: Formatted bbox string like [xmin, ymin, xmax, ymax]
     """
+    if not isinstance(value, dict):
+        return str(value)
     try:
         xmin = value.get("xmin", 0)
         ymin = value.get("ymin", 0)
@@ -532,7 +533,7 @@ def format_bbox_display(value: dict, max_length: int = 60) -> str:
         if len(formatted) > max_length:
             return formatted[: max_length - 3] + "..."
         return formatted
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
         return str(value)
 
 
@@ -652,11 +653,13 @@ def get_preview_data(
         # Build column list, converting geometry columns to WKT
         column_expressions = []
         for col in all_columns:
+            # Escape double quotes in column names for SQL identifiers
+            escaped_col = col.replace('"', '""')
             if col in geo_columns:
                 # Convert geometry to WKT for display
-                column_expressions.append(f'ST_AsText("{col}") AS "{col}"')
+                column_expressions.append(f'ST_AsText("{escaped_col}") AS "{escaped_col}"')
             else:
-                column_expressions.append(f'"{col}"')
+                column_expressions.append(f'"{escaped_col}"')
 
         select_clause = ", ".join(column_expressions)
 

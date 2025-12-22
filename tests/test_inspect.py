@@ -323,7 +323,9 @@ def test_wkb_to_wkt_preview_with_valid_wkb():
     result = wkb_to_wkt_preview(point_wkb)
     assert "POINT" in result
     # Should contain actual coordinates, not just type
-    assert "1" in result or "<POINT>" in result  # WKT or fallback
+    # Verify it's actual WKT, not the fallback format
+    assert "<POINT>" not in result, "Expected WKT output, got fallback"
+    assert "1" in result  # Should contain the x-coordinate
 
 
 def test_wkb_to_wkt_preview_fallback():
