@@ -996,12 +996,14 @@ def calculate_file_bounds(file_path, geom_column=None, verbose=False):
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_path))
 
     try:
+        # Quote column name to handle special characters, uppercase, etc.
+        quoted_geom = geom_column.replace('"', '""')
         bounds_query = f"""
             SELECT
-                MIN(ST_XMin({geom_column})) as xmin,
-                MIN(ST_YMin({geom_column})) as ymin,
-                MAX(ST_XMax({geom_column})) as xmax,
-                MAX(ST_YMax({geom_column})) as ymax
+                MIN(ST_XMin("{quoted_geom}")) as xmin,
+                MIN(ST_YMin("{quoted_geom}")) as ymin,
+                MAX(ST_XMax("{quoted_geom}")) as xmax,
+                MAX(ST_YMax("{quoted_geom}")) as ymax
             FROM read_parquet('{safe_url}')
         """
         result = con.execute(bounds_query).fetchone()
