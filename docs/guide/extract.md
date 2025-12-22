@@ -290,6 +290,62 @@ gpio extract s3://my-bucket/data.parquet output.parquet \
   --bbox 0,0,10,10
 ```
 
+## Working with Partitioned Input Data
+
+The `extract` command can read from partitioned GeoParquet datasets, including directories containing multiple parquet files and hive-style partitions.
+
+### Reading from Directories
+
+```bash
+# Read all parquet files in a directory
+gpio extract partitions/ merged.parquet
+
+# Read from glob pattern
+gpio extract "data/*.parquet" merged.parquet
+
+# Read nested directories
+gpio extract "data/**/*.parquet" merged.parquet
+```
+
+### Hive-Style Partitions
+
+Files organized with `key=value` directory structures are automatically detected:
+
+```bash
+# Read hive-style partitions (auto-detected)
+gpio extract country_partitions/ merged.parquet
+
+# Explicitly enable hive partitioning (adds partition columns to data)
+gpio extract partitions/ merged.parquet --hive-input
+```
+
+### Schema Merging
+
+When combining files with different schemas, use `--allow-schema-diff`:
+
+```bash
+# Merge files with different columns (fills NULL for missing columns)
+gpio extract partitions/ merged.parquet --allow-schema-diff
+```
+
+### Applying Filters to Partitioned Data
+
+All filters work with partitioned input:
+
+```bash
+# Spatial filter across partitioned dataset
+gpio extract partitions/ filtered.parquet --bbox -122.5,37.5,-122.0,38.0
+
+# WHERE filter across partitions
+gpio extract "data/*.parquet" filtered.parquet --where "population > 10000"
+
+# Combined filters with schema merging
+gpio extract partitions/ subset.parquet \
+  --bbox 0,0,10,10 \
+  --where "status = 'active'" \
+  --allow-schema-diff
+```
+
 ## Dry Run and Debugging
 
 Preview the SQL query that will be executed:

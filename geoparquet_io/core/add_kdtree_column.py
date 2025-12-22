@@ -9,6 +9,7 @@ from geoparquet_io.core.common import (
     safe_file_url,
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.partition_reader import require_single_file
 
 
 def _find_optimal_iterations(total_rows, target_rows, verbose=False):
@@ -230,6 +231,9 @@ def add_kdtree_column(
         auto_target_rows: If set, auto-compute iterations to target this many rows per partition
         profile: AWS profile name (S3 only, optional)
     """
+    # Check for partition input (not supported)
+    require_single_file(input_parquet, "add kdtree")
+
     # Get total row count for auto mode or validation
     input_url = safe_file_url(input_parquet, verbose)
 

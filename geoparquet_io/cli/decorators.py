@@ -203,3 +203,49 @@ def partition_options(func):
     )(func)
     func = prefix_option(func)
     return func
+
+
+def partition_input_options(func):
+    """
+    Add options for reading partitioned input data.
+
+    Adds:
+    - --allow-schema-diff: Combine files with different schemas (fills NULL for missing columns)
+    - --hive-input: Explicitly enable hive partitioning on input
+    """
+    func = click.option(
+        "--allow-schema-diff",
+        is_flag=True,
+        help="Combine files with different schemas (fills NULL for missing columns). "
+        "Default: strict schema matching (all files must have same schema).",
+    )(func)
+    func = click.option(
+        "--hive-input",
+        is_flag=True,
+        help="Enable hive-style partitioning when reading input (adds partition columns to data). "
+        "Auto-detected for directories with key=value subdirectories.",
+    )(func)
+    return func
+
+
+def check_partition_options(func):
+    """
+    Add options for check commands on partitioned data.
+
+    Adds:
+    - --check-all: Check every file in partition
+    - --check-sample: Check first N files
+    """
+    func = click.option(
+        "--check-all",
+        "check_all_files",  # Use different param name to avoid conflict with function names
+        is_flag=True,
+        help="For partitioned data: check every file in the partition.",
+    )(func)
+    func = click.option(
+        "--check-sample",
+        type=int,
+        default=None,
+        help="For partitioned data: check first N files (default: check first file only).",
+    )(func)
+    return func

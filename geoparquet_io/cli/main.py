@@ -3,11 +3,13 @@ from pathlib import Path
 import click
 
 from geoparquet_io.cli.decorators import (
+    check_partition_options,
     compression_options,
     dry_run_option,
     geoparquet_version_option,
     output_format_options,
     overwrite_option,
+    partition_input_options,
     partition_options,
     profile_option,
     show_sql_option,
@@ -123,6 +125,7 @@ def check(ctx):
     show_default=True,
     help="Max rows for spatial order check",
 )
+@check_partition_options
 @profile_option
 def check_all(
     parquet_file,
@@ -133,6 +136,8 @@ def check_all(
     overwrite,
     random_sample_size,
     limit_rows,
+    check_all_files,
+    check_sample,
     profile,
 ):
     """Check compression, bbox, row groups, and spatial order."""
@@ -140,114 +145,143 @@ def check_all(
 
     from geoparquet_io.core.check_fixes import apply_all_fixes
     from geoparquet_io.core.common import is_remote_url, show_remote_read_message
+    from geoparquet_io.core.partition_reader import get_files_to_check
 
     configure_verbose(verbose)
 
-    # Show single progress message for remote files
-    show_remote_read_message(parquet_file, verbose=False)
-    if is_remote_url(parquet_file):
-        click.echo()  # Add blank line after remote message
-
-    # Run all checks and collect results
-    structure_results = check_structure_impl(parquet_file, verbose, return_results=True)
-
-    click.echo("\nSpatial Order Analysis:")
-    spatial_result = check_spatial_impl(
-        parquet_file, random_sample_size, limit_rows, verbose, return_results=True
+    # Get files to check based on partition options
+    files_to_check, notice = get_files_to_check(
+        parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
     )
-    ratio = spatial_result["ratio"]
 
-    if ratio is not None:
-        if ratio < 0.5:
-            click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
-        else:
-            click.echo(
-                click.style(
-                    "⚠️  Data may not be optimally spatially ordered\n"
-                    "Consider running 'gpio sort hilbert' to improve spatial locality",
-                    fg="yellow",
+    if notice:
+        click.echo(click.style(f"📁 {notice}", fg="cyan"))
+        click.echo()
+
+    if not files_to_check:
+        click.echo(click.style("No parquet files found", fg="red"))
+        return
+
+    # For partitions, disable fix mode (requires single file)
+    if len(files_to_check) > 1 and fix:
+        click.echo(click.style("⚠️  --fix is only available for single files", fg="yellow"))
+        click.echo("Use 'gpio extract' to consolidate partitions first, then run check --fix")
+        fix = False
+
+    # Process each file
+    for i, file_path in enumerate(files_to_check):
+        if len(files_to_check) > 1:
+            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
+            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
+            click.echo(click.style(f"{'=' * 60}", fg="bright_black"))
+
+        # Show single progress message for remote files
+        show_remote_read_message(file_path, verbose=False)
+        if is_remote_url(file_path):
+            click.echo()  # Add blank line after remote message
+
+        # Run all checks and collect results
+        structure_results = check_structure_impl(file_path, verbose, return_results=True)
+
+        click.echo("\nSpatial Order Analysis:")
+        spatial_result = check_spatial_impl(
+            file_path, random_sample_size, limit_rows, verbose, return_results=True
+        )
+        ratio = spatial_result["ratio"]
+
+        if ratio is not None:
+            if ratio < 0.5:
+                click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
+            else:
+                click.echo(
+                    click.style(
+                        "⚠️  Data may not be optimally spatially ordered\n"
+                        "Consider running 'gpio sort hilbert' to improve spatial locality",
+                        fg="yellow",
+                    )
                 )
+
+        # If --fix flag is set, apply fixes (only for single files)
+        if fix:
+            from geoparquet_io.cli.fix_helpers import (
+                create_backup_if_needed,
+                handle_fix_error,
+                validate_remote_file_modification,
+                verify_fixes,
             )
 
-    # If --fix flag is set, apply fixes
-    if fix:
-        from geoparquet_io.cli.fix_helpers import (
-            create_backup_if_needed,
-            handle_fix_error,
-            validate_remote_file_modification,
-            verify_fixes,
-        )
+            # Aggregate all results
+            all_results = {**structure_results, "spatial": spatial_result}
 
-        # Aggregate all results
-        all_results = {**structure_results, "spatial": spatial_result}
-
-        # Check if any fixes are needed
-        needs_fixes = any(
-            result.get("fix_available", False)
-            for result in all_results.values()
-            if isinstance(result, dict)
-        )
-
-        if not needs_fixes:
-            click.echo(click.style("\n✓ No fixes needed - file is already optimal!", fg="green"))
-            return
-
-        # Handle remote files
-        is_remote = validate_remote_file_modification(parquet_file, fix_output, overwrite)
-
-        # Determine output path
-        output_path = fix_output or parquet_file
-        backup_path = f"{parquet_file}.bak"
-
-        # Confirm overwrite without backup for local files
-        if no_backup and not fix_output and output_path == parquet_file and not is_remote:
-            click.confirm(
-                "This will overwrite the original file without backup. Continue?",
-                abort=True,
+            # Check if any fixes are needed
+            needs_fixes = any(
+                result.get("fix_available", False)
+                for result in all_results.values()
+                if isinstance(result, dict)
             )
 
-        # Create backup if needed (only for local files)
-        backup_path = create_backup_if_needed(
-            parquet_file, output_path, no_backup, is_remote, verbose
-        )
+            if not needs_fixes:
+                click.echo(
+                    click.style("\n✓ No fixes needed - file is already optimal!", fg="green")
+                )
+                return
 
-        # Apply fixes
-        click.echo("\n" + "=" * 60)
-        click.echo("Applying fixes...")
-        click.echo("=" * 60)
+            # Handle remote files
+            is_remote = validate_remote_file_modification(file_path, fix_output, overwrite)
 
-        try:
-            fixes_summary = apply_all_fixes(
-                parquet_file, output_path, all_results, verbose, profile
+            # Determine output path
+            output_path = fix_output or file_path
+            backup_path = f"{file_path}.bak"
+
+            # Confirm overwrite without backup for local files
+            if no_backup and not fix_output and output_path == file_path and not is_remote:
+                click.confirm(
+                    "This will overwrite the original file without backup. Continue?",
+                    abort=True,
+                )
+
+            # Create backup if needed (only for local files)
+            backup_path = create_backup_if_needed(
+                file_path, output_path, no_backup, is_remote, verbose
             )
 
+            # Apply fixes
             click.echo("\n" + "=" * 60)
-            click.echo("Fixes applied:")
-            for fix in fixes_summary["fixes_applied"]:
-                click.echo(click.style(f"  ✓ {fix}", fg="green"))
+            click.echo("Applying fixes...")
             click.echo("=" * 60)
 
-            # Re-run checks to verify
-            verify_fixes(
-                output_path,
-                check_structure_impl,
-                check_spatial_impl,
-                random_sample_size,
-                limit_rows,
-            )
+            try:
+                fixes_summary = apply_all_fixes(
+                    file_path, output_path, all_results, verbose, profile
+                )
 
-            click.echo(f"\nOptimized file: {output_path}")
-            if (
-                not no_backup
-                and output_path == parquet_file
-                and backup_path
-                and os.path.exists(backup_path)
-            ):
-                click.echo(f"Backup: {backup_path}")
+                click.echo("\n" + "=" * 60)
+                click.echo("Fixes applied:")
+                for applied_fix in fixes_summary["fixes_applied"]:
+                    click.echo(click.style(f"  ✓ {applied_fix}", fg="green"))
+                click.echo("=" * 60)
 
-        except Exception as e:
-            handle_fix_error(e, no_backup, output_path, parquet_file, backup_path)
-            raise
+                # Re-run checks to verify
+                verify_fixes(
+                    output_path,
+                    check_structure_impl,
+                    check_spatial_impl,
+                    random_sample_size,
+                    limit_rows,
+                )
+
+                click.echo(f"\nOptimized file: {output_path}")
+                if (
+                    not no_backup
+                    and output_path == file_path
+                    and backup_path
+                    and os.path.exists(backup_path)
+                ):
+                    click.echo(f"Backup: {backup_path}")
+
+            except Exception as e:
+                handle_fix_error(e, no_backup, output_path, file_path, backup_path)
+                raise
 
 
 @check.command(name="spatial")
@@ -276,45 +310,82 @@ def check_all(
     is_flag=True,
     help="Skip .bak backup when fixing",
 )
+@check_partition_options
 @profile_option
 def check_spatial(
-    parquet_file, random_sample_size, limit_rows, verbose, fix, fix_output, no_backup, profile
+    parquet_file,
+    random_sample_size,
+    limit_rows,
+    verbose,
+    fix,
+    fix_output,
+    no_backup,
+    check_all_files,
+    check_sample,
+    profile,
 ):
     """Check spatial ordering."""
-
     from geoparquet_io.core.check_fixes import fix_spatial_ordering
+    from geoparquet_io.core.partition_reader import get_files_to_check
 
-    result = check_spatial_impl(
-        parquet_file, random_sample_size, limit_rows, verbose, return_results=True
+    configure_verbose(verbose)
+
+    # Get files to check based on partition options
+    files_to_check, notice = get_files_to_check(
+        parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
     )
-    ratio = result["ratio"]
 
-    if ratio is not None:
-        if ratio < 0.5:
-            click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
-        else:
-            click.echo(
-                click.style(
-                    "⚠️  Data may not be optimally spatially ordered\n"
-                    "Consider running 'gpio sort hilbert' to improve spatial locality",
-                    fg="yellow",
+    if notice:
+        click.echo(click.style(f"📁 {notice}", fg="cyan"))
+        click.echo()
+
+    if not files_to_check:
+        click.echo(click.style("No parquet files found", fg="red"))
+        return
+
+    # For partitions, disable fix mode
+    if len(files_to_check) > 1 and fix:
+        click.echo(click.style("⚠️  --fix is only available for single files", fg="yellow"))
+        fix = False
+
+    for i, file_path in enumerate(files_to_check):
+        if len(files_to_check) > 1:
+            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
+            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
+
+        result = check_spatial_impl(
+            file_path, random_sample_size, limit_rows, verbose, return_results=True
+        )
+        ratio = result["ratio"]
+
+        if ratio is not None:
+            if ratio < 0.5:
+                click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
+            else:
+                click.echo(
+                    click.style(
+                        "⚠️  Data may not be optimally spatially ordered\n"
+                        "Consider running 'gpio sort hilbert' to improve spatial locality",
+                        fg="yellow",
+                    )
                 )
+
+        if fix:
+            if not result.get("fix_available", False):
+                click.echo(
+                    click.style("\n✓ No fix needed - already spatially ordered!", fg="green")
+                )
+                return
+
+            click.echo("\nApplying Hilbert spatial ordering...")
+            output_path, backup_path = handle_fix_common(
+                file_path, fix_output, no_backup, fix_spatial_ordering, verbose, False, profile
             )
 
-    if fix:
-        if not result.get("fix_available", False):
-            click.echo(click.style("\n✓ No fix needed - already spatially ordered!", fg="green"))
-            return
-
-        click.echo("\nApplying Hilbert spatial ordering...")
-        output_path, backup_path = handle_fix_common(
-            parquet_file, fix_output, no_backup, fix_spatial_ordering, verbose, False, profile
-        )
-
-        click.echo(click.style("\n✓ Spatial ordering applied successfully!", fg="green"))
-        click.echo(f"Optimized file: {output_path}")
-        if backup_path:
-            click.echo(f"Backup: {backup_path}")
+            click.echo(click.style("\n✓ Spatial ordering applied successfully!", fg="green"))
+            click.echo(f"Optimized file: {output_path}")
+            if backup_path:
+                click.echo(f"Backup: {backup_path}")
 
 
 @check.command(name="compression")
@@ -332,28 +403,65 @@ def check_spatial(
     help="Skip .bak backup when fixing",
 )
 @overwrite_option
+@check_partition_options
 @profile_option
-def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite, profile):
+def check_compression_cmd(
+    parquet_file,
+    verbose,
+    fix,
+    fix_output,
+    no_backup,
+    overwrite,
+    check_all_files,
+    check_sample,
+    profile,
+):
     """Check geometry column compression."""
     from geoparquet_io.core.check_fixes import fix_compression
     from geoparquet_io.core.check_parquet_structure import check_compression
+    from geoparquet_io.core.partition_reader import get_files_to_check
 
-    result = check_compression(parquet_file, verbose, return_results=True)
+    configure_verbose(verbose)
 
-    if fix:
-        if not result.get("fix_available", False):
-            click.echo(click.style("\n✓ No fix needed - already using ZSTD!", fg="green"))
-            return
+    # Get files to check based on partition options
+    files_to_check, notice = get_files_to_check(
+        parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
+    )
 
-        click.echo("\nRe-compressing with ZSTD...")
-        output_path, backup_path = handle_fix_common(
-            parquet_file, fix_output, no_backup, fix_compression, verbose, overwrite, profile
-        )
+    if notice:
+        click.echo(click.style(f"📁 {notice}", fg="cyan"))
+        click.echo()
 
-        click.echo(click.style("\n✓ Compression optimized successfully!", fg="green"))
-        click.echo(f"Optimized file: {output_path}")
-        if backup_path:
-            click.echo(f"Backup: {backup_path}")
+    if not files_to_check:
+        click.echo(click.style("No parquet files found", fg="red"))
+        return
+
+    # For partitions, disable fix mode
+    if len(files_to_check) > 1 and fix:
+        click.echo(click.style("⚠️  --fix is only available for single files", fg="yellow"))
+        fix = False
+
+    for i, file_path in enumerate(files_to_check):
+        if len(files_to_check) > 1:
+            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
+            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
+
+        result = check_compression(file_path, verbose, return_results=True)
+
+        if fix:
+            if not result.get("fix_available", False):
+                click.echo(click.style("\n✓ No fix needed - already using ZSTD!", fg="green"))
+                return
+
+            click.echo("\nRe-compressing with ZSTD...")
+            output_path, backup_path = handle_fix_common(
+                file_path, fix_output, no_backup, fix_compression, verbose, overwrite, profile
+            )
+
+            click.echo(click.style("\n✓ Compression optimized successfully!", fg="green"))
+            click.echo(f"Optimized file: {output_path}")
+            if backup_path:
+                click.echo(f"Backup: {backup_path}")
 
 
 @check.command(name="bbox")
@@ -371,8 +479,19 @@ def check_compression_cmd(parquet_file, verbose, fix, fix_output, no_backup, ove
     help="Skip .bak backup when fixing",
 )
 @overwrite_option
+@check_partition_options
 @profile_option
-def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite, profile):
+def check_bbox_cmd(
+    parquet_file,
+    verbose,
+    fix,
+    fix_output,
+    no_backup,
+    overwrite,
+    check_all_files,
+    check_sample,
+    profile,
+):
     """Check bbox column and metadata (version-aware).
 
     For GeoParquet 1.x: bbox column is recommended for spatial filtering.
@@ -381,55 +500,90 @@ def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite,
     """
     from geoparquet_io.core.check_fixes import fix_bbox_all, fix_bbox_removal
     from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+    from geoparquet_io.core.partition_reader import get_files_to_check
 
-    result = check_metadata_and_bbox(parquet_file, verbose, return_results=True)
+    configure_verbose(verbose)
 
-    if fix:
-        if not result.get("fix_available", False):
-            click.echo(click.style("\n✓ No fix needed - bbox is optimal!", fg="green"))
-            return
+    # Get files to check based on partition options
+    files_to_check, notice = get_files_to_check(
+        parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
+    )
 
-        # Check if this is a removal (v2/parquet-geo-only) or addition (v1.x)
-        if result.get("needs_bbox_removal", False):
-            # V2 or parquet-geo-only: remove bbox column
-            bbox_column_name = result.get("bbox_column_name")
+    if notice:
+        click.echo(click.style(f"📁 {notice}", fg="cyan"))
+        click.echo()
 
-            def bbox_fix_func(input_path, output_path, verbose_flag, profile_name):
-                return fix_bbox_removal(
-                    input_path, output_path, bbox_column_name, verbose_flag, profile_name
+    if not files_to_check:
+        click.echo(click.style("No parquet files found", fg="red"))
+        return
+
+    # For partitions, disable fix mode
+    if len(files_to_check) > 1 and fix:
+        click.echo(click.style("⚠️  --fix is only available for single files", fg="yellow"))
+        fix = False
+
+    for i, file_path in enumerate(files_to_check):
+        if len(files_to_check) > 1:
+            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
+            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
+
+        result = check_metadata_and_bbox(file_path, verbose, return_results=True)
+
+        if fix:
+            if not result.get("fix_available", False):
+                click.echo(click.style("\n✓ No fix needed - bbox is optimal!", fg="green"))
+                return
+
+            # Check if this is a removal (v2/parquet-geo-only) or addition (v1.x)
+            if result.get("needs_bbox_removal", False):
+                # V2 or parquet-geo-only: remove bbox column
+                bbox_column_name = result.get("bbox_column_name")
+
+                def bbox_fix_func(
+                    input_path, output_path, verbose_flag, profile_name, _col=bbox_column_name
+                ):
+                    return fix_bbox_removal(
+                        input_path, output_path, _col, verbose_flag, profile_name
+                    )
+
+                output_path, backup_path = handle_fix_common(
+                    file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
                 )
 
-            output_path, backup_path = handle_fix_common(
-                parquet_file, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
-            )
+                click.echo(click.style("\n✓ Bbox column removed successfully!", fg="green"))
+                click.echo(f"Optimized file: {output_path}")
+                if backup_path:
+                    click.echo(f"Backup: {backup_path}")
+            else:
+                # V1.x: add bbox column/metadata (existing logic)
+                needs_column = result.get("needs_bbox_column", False)
+                needs_metadata = result.get("needs_bbox_metadata", False)
 
-            click.echo(click.style("\n✓ Bbox column removed successfully!", fg="green"))
-            click.echo(f"Optimized file: {output_path}")
-            if backup_path:
-                click.echo(f"Backup: {backup_path}")
-        else:
-            # V1.x: add bbox column/metadata (existing logic)
-            needs_column = result.get("needs_bbox_column", False)
-            needs_metadata = result.get("needs_bbox_metadata", False)
-
-            def bbox_fix_func(input_path, output_path, verbose_flag, profile_name):
-                return fix_bbox_all(
+                def bbox_fix_func(
                     input_path,
                     output_path,
-                    needs_column,
-                    needs_metadata,
                     verbose_flag,
                     profile_name,
+                    _needs_col=needs_column,
+                    _needs_meta=needs_metadata,
+                ):
+                    return fix_bbox_all(
+                        input_path,
+                        output_path,
+                        _needs_col,
+                        _needs_meta,
+                        verbose_flag,
+                        profile_name,
+                    )
+
+                output_path, backup_path = handle_fix_common(
+                    file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
                 )
 
-            output_path, backup_path = handle_fix_common(
-                parquet_file, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
-            )
-
-            click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
-            click.echo(f"Optimized file: {output_path}")
-            if backup_path:
-                click.echo(f"Backup: {backup_path}")
+                click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
+                click.echo(f"Optimized file: {output_path}")
+                if backup_path:
+                    click.echo(f"Backup: {backup_path}")
 
 
 @check.command(name="row-group")
@@ -447,28 +601,65 @@ def check_bbox_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite,
     help="Skip .bak backup when fixing",
 )
 @overwrite_option
+@check_partition_options
 @profile_option
-def check_row_group_cmd(parquet_file, verbose, fix, fix_output, no_backup, overwrite, profile):
+def check_row_group_cmd(
+    parquet_file,
+    verbose,
+    fix,
+    fix_output,
+    no_backup,
+    overwrite,
+    check_all_files,
+    check_sample,
+    profile,
+):
     """Check row group size."""
     from geoparquet_io.core.check_fixes import fix_row_groups
     from geoparquet_io.core.check_parquet_structure import check_row_groups
+    from geoparquet_io.core.partition_reader import get_files_to_check
 
-    result = check_row_groups(parquet_file, verbose, return_results=True)
+    configure_verbose(verbose)
 
-    if fix:
-        if not result.get("fix_available", False):
-            click.echo(click.style("\n✓ No fix needed - row groups are optimal!", fg="green"))
-            return
+    # Get files to check based on partition options
+    files_to_check, notice = get_files_to_check(
+        parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
+    )
 
-        click.echo("\nOptimizing row groups...")
-        output_path, backup_path = handle_fix_common(
-            parquet_file, fix_output, no_backup, fix_row_groups, verbose, overwrite, profile
-        )
+    if notice:
+        click.echo(click.style(f"📁 {notice}", fg="cyan"))
+        click.echo()
 
-        click.echo(click.style("\n✓ Row groups optimized successfully!", fg="green"))
-        click.echo(f"Optimized file: {output_path}")
-        if backup_path:
-            click.echo(f"Backup: {backup_path}")
+    if not files_to_check:
+        click.echo(click.style("No parquet files found", fg="red"))
+        return
+
+    # For partitions, disable fix mode
+    if len(files_to_check) > 1 and fix:
+        click.echo(click.style("⚠️  --fix is only available for single files", fg="yellow"))
+        fix = False
+
+    for i, file_path in enumerate(files_to_check):
+        if len(files_to_check) > 1:
+            click.echo(click.style(f"\n{'=' * 60}", fg="bright_black"))
+            click.echo(click.style(f"File {i + 1}/{len(files_to_check)}: {file_path}", fg="cyan"))
+
+        result = check_row_groups(file_path, verbose, return_results=True)
+
+        if fix:
+            if not result.get("fix_available", False):
+                click.echo(click.style("\n✓ No fix needed - row groups are optimal!", fg="green"))
+                return
+
+            click.echo("\nOptimizing row groups...")
+            output_path, backup_path = handle_fix_common(
+                file_path, fix_output, no_backup, fix_row_groups, verbose, overwrite, profile
+            )
+
+            click.echo(click.style("\n✓ Row groups optimized successfully!", fg="green"))
+            click.echo(f"Optimized file: {output_path}")
+            if backup_path:
+                click.echo(f"Backup: {backup_path}")
 
 
 # Convert command
@@ -564,8 +755,16 @@ def convert(
 @click.option(
     "--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files"
 )
+@click.option(
+    "--check-all",
+    "check_all_files",
+    is_flag=True,
+    help="For partitioned data: aggregate info from all files (bounds, row counts, etc.)",
+)
 @profile_option
-def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profile):
+def inspect(
+    parquet_file, head, tail, stats, json_output, markdown_output, check_all_files, profile
+):
     """
     Inspect a GeoParquet file and show metadata summary.
 
@@ -598,12 +797,23 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
         \b
         # Markdown output for README files
         gpio inspect data.parquet --markdown
+
+        \b
+        # Aggregate info from all files in partition
+        gpio inspect partitions/ --check-all
     """
     from geoparquet_io.core.common import (
         setup_aws_profile_if_needed,
         validate_profile_for_urls,
     )
     from geoparquet_io.core.duckdb_metadata import get_usable_columns
+    from geoparquet_io.core.inspect_utils import (
+        extract_partition_summary,
+        format_partition_json_output,
+        format_partition_markdown_output,
+        format_partition_terminal_output,
+    )
+    from geoparquet_io.core.partition_reader import get_partition_info
 
     # Validate mutually exclusive options
     if head and tail:
@@ -612,6 +822,14 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
     if json_output and markdown_output:
         raise click.UsageError("--json and --markdown are mutually exclusive")
 
+    # Check for partition and handle --check-all
+    if check_all_files:
+        # Validate --check-all is not used with preview/stats options
+        if head or tail:
+            raise click.UsageError("--check-all cannot be used with --head or --tail")
+        if stats:
+            raise click.UsageError("--check-all cannot be used with --stats")
+
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, parquet_file)
 
@@ -619,12 +837,67 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
     setup_aws_profile_if_needed(profile, parquet_file)
 
     try:
+        # Check if this is a partition
+        partition_info = get_partition_info(parquet_file, verbose=False)
+
+        if partition_info["is_partition"] and check_all_files:
+            # Partition mode with --check-all: aggregate all files
+            all_files = partition_info["all_files"]
+
+            if not all_files:
+                raise click.ClickException("No parquet files found in partition")
+
+            # Get partition summary
+            partition_summary = extract_partition_summary(all_files, verbose=False)
+
+            # Get geo info and columns from first file for column schema
+            first_file = partition_info["first_file"]
+            geo_info = extract_geo_info(first_file)
+            usable_columns = get_usable_columns(first_file)
+            primary_geom_col = geo_info.get("primary_column")
+
+            columns_info = [
+                {
+                    "name": col["name"],
+                    "type": col["type"],
+                    "is_geometry": col["name"] == primary_geom_col,
+                }
+                for col in usable_columns
+            ]
+
+            # Output
+            if json_output:
+                output = format_partition_json_output(partition_summary, geo_info, columns_info)
+                click.echo(output)
+            elif markdown_output:
+                output = format_partition_markdown_output(partition_summary, geo_info, columns_info)
+                click.echo(output)
+            else:
+                format_partition_terminal_output(partition_summary, geo_info, columns_info)
+
+            return
+
+        # Single file mode (or partition without --check-all - inspect first file)
+        file_to_inspect = parquet_file
+        if partition_info["is_partition"]:
+            # Partition without --check-all: inspect first file with notice
+            file_to_inspect = partition_info["first_file"]
+            file_count = partition_info["file_count"]
+            click.echo(
+                click.style(
+                    f"Inspecting first file (of {file_count} total). "
+                    "Use --check-all to aggregate all files.",
+                    fg="cyan",
+                )
+            )
+            click.echo()
+
         # Extract metadata
-        file_info = extract_file_info(parquet_file)
-        geo_info = extract_geo_info(parquet_file)
+        file_info = extract_file_info(file_to_inspect)
+        geo_info = extract_geo_info(file_to_inspect)
 
         # Get usable columns using DESCRIBE (handles nested struct wrappers correctly)
-        usable_columns = get_usable_columns(parquet_file)
+        usable_columns = get_usable_columns(file_to_inspect)
         primary_geom_col = geo_info.get("primary_column")
 
         # Build column info with geometry marking
@@ -641,12 +914,12 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
         preview_table = None
         preview_mode = None
         if head or tail:
-            preview_table, preview_mode = get_preview_data(parquet_file, head=head, tail=tail)
+            preview_table, preview_mode = get_preview_data(file_to_inspect, head=head, tail=tail)
 
         # Get statistics if requested
         statistics = None
         if stats:
-            statistics = get_column_statistics(parquet_file, columns_info)
+            statistics = get_column_statistics(file_to_inspect, columns_info)
 
         # Output
         if json_output:
@@ -710,6 +983,7 @@ def inspect(parquet_file, head, tail, stats, json_output, markdown_output, profi
 )
 @output_format_options
 @geoparquet_version_option
+@partition_input_options
 @dry_run_option
 @show_sql_option
 @verbose_option
@@ -730,6 +1004,8 @@ def extract(
     row_group_size,
     row_group_size_mb,
     geoparquet_version,
+    allow_schema_diff,
+    hive_input,
     dry_run,
     show_sql,
     verbose,
@@ -847,6 +1123,8 @@ def extract(
             row_group_rows=row_group_size,
             profile=profile,
             geoparquet_version=geoparquet_version,
+            allow_schema_diff=allow_schema_diff,
+            hive_input=hive_input,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e

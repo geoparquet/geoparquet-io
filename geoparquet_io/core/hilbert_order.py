@@ -22,6 +22,7 @@ from geoparquet_io.core.common import (
     write_parquet_with_metadata,
 )
 from geoparquet_io.core.logging_config import debug, info, success, warn
+from geoparquet_io.core.partition_reader import require_single_file
 
 
 def hilbert_order(
@@ -64,6 +65,9 @@ def hilbert_order(
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
     """
+    # Check for partition input (not supported)
+    require_single_file(input_parquet, "sort hilbert")
+
     # Check input file bbox structure
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
 

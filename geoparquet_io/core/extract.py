@@ -472,18 +472,27 @@ def get_schema_columns(input_parquet: str) -> list[str]:
     Get list of column names from parquet file schema.
 
     Args:
-        input_parquet: Path to parquet file (or glob pattern - uses first file)
+        input_parquet: Path to parquet file (or glob pattern/directory - uses first file)
 
     Returns:
         list: Column names
     """
+    from geoparquet_io.core.common import get_first_parquet_file, is_partition_path
+
+    # For partitions, use first file for schema
+    file_to_check = input_parquet
+    if is_partition_path(input_parquet):
+        first_file = get_first_parquet_file(input_parquet)
+        if first_file:
+            file_to_check = first_file
+
     # Use auto-detecting S3 connection for S3 paths
-    if needs_httpfs(input_parquet):
-        con = get_duckdb_connection_for_s3(input_parquet, load_spatial=True)
+    if needs_httpfs(file_to_check):
+        con = get_duckdb_connection_for_s3(file_to_check, load_spatial=True)
     else:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        safe_url = safe_file_url(input_parquet, verbose=False)
+        safe_url = safe_file_url(file_to_check, verbose=False)
         result = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{safe_url}')").fetchall()
         return [row[0] for row in result]
     finally:
@@ -600,10 +609,21 @@ def build_extract_query(
     spatial_filter: str | None,
     where_clause: str | None,
     limit: int | None = None,
+    allow_schema_diff: bool = False,
+    hive_input: bool = False,
 ) -> str:
     """Build the complete extraction query."""
+    from geoparquet_io.core.partition_reader import build_read_parquet_expr
+
     col_list = ", ".join(f'"{c}"' for c in columns)
-    query = f"SELECT {col_list} FROM read_parquet('{input_path}')"
+    # Use partition reader to build read_parquet expression with proper options
+    read_expr = build_read_parquet_expr(
+        input_path,
+        allow_schema_diff=allow_schema_diff,
+        hive_input=hive_input if hive_input else None,
+        verbose=False,
+    )
+    query = f"SELECT {col_list} FROM {read_expr}"
 
     conditions = []
     if spatial_filter:
@@ -773,6 +793,8 @@ def extract(
     row_group_rows: int | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
+    allow_schema_diff: bool = False,
+    hive_input: bool = False,
 ) -> None:
     """
     Extract columns and rows from GeoParquet files.
@@ -802,6 +824,8 @@ def extract(
         row_group_rows,
         profile,
         geoparquet_version,
+        allow_schema_diff,
+        hive_input,
     )
 
 
@@ -825,6 +849,8 @@ def _extract_impl(
     row_group_rows: int | None,
     profile: str | None,
     geoparquet_version: str | None,
+    allow_schema_diff: bool = False,
+    hive_input: bool = False,
 ) -> None:
     """Internal implementation of extract with auto-detecting S3 access."""
     # Parse column lists
@@ -879,9 +905,17 @@ def _extract_impl(
     # Build spatial filter
     spatial_filter = build_spatial_filter(bbox_tuple, geometry_wkt, bbox_info, geometry_col)
 
-    # Build the query - use original input_parquet to preserve glob pattern for DuckDB
+    # Build the query - pass original input_parquet, partition reader handles path resolution
+    query = build_extract_query(
+        input_parquet,
+        selected_columns,
+        spatial_filter,
+        where,
+        limit,
+        allow_schema_diff=allow_schema_diff,
+        hive_input=hive_input,
+    )
     safe_url = safe_file_url(input_parquet, verbose)
-    query = build_extract_query(safe_url, selected_columns, spatial_filter, where, limit)
 
     if dry_run:
         _print_dry_run_output(
