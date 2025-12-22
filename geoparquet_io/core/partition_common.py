@@ -450,8 +450,8 @@ def _display_partition_analysis(
     # Errors
     if analysis["errors"]:
         progress("\nErrors:")
-        for err in analysis["errors"]:
-            error(f"  {err}")
+        for error_msg in analysis["errors"]:
+            error(f"  {error_msg}")
 
 
 def preview_partition(

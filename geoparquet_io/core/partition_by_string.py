@@ -4,7 +4,7 @@
 import click
 
 from geoparquet_io.core.common import safe_file_url
-from geoparquet_io.core.logging_config import debug, progress, success, warn
+from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
 
 
@@ -73,6 +73,9 @@ def partition_by_string(
         force: Force partitioning even if analysis detects issues
         skip_analysis: Skip partition strategy analysis (for performance)
     """
+    # Configure logging verbosity
+    configure_verbose(verbose)
+
     # Validate column exists
     if verbose:
         debug(f"Validating column '{column}'...")

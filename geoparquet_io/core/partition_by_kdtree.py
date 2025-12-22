@@ -7,7 +7,7 @@ import click
 
 from geoparquet_io.core.add_kdtree_column import add_kdtree_column
 from geoparquet_io.core.common import safe_file_url
-from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.logging_config import configure_verbose, debug, info, progress, success, warn
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
 
 
@@ -54,6 +54,9 @@ def partition_by_kdtree(
         skip_analysis: Skip partition strategy analysis (for performance)
         sample_size: Number of points to sample for computing boundaries. None for exact mode (default: 100,000)
     """
+    # Configure logging verbosity
+    configure_verbose(verbose)
+
     # Validate iterations
     if not 1 <= iterations <= 20:
         raise click.UsageError(f"Iterations must be between 1 and 20, got {iterations}")

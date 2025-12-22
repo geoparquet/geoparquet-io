@@ -92,7 +92,7 @@ def check(ctx):
     """
     # Ensure logging is set up (in case this group is invoked directly in tests)
     ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False) if ctx.obj else False
+    timestamps = ctx.obj.get("timestamps", False)
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
@@ -971,7 +971,7 @@ def sort(ctx):
     """Commands for sorting GeoParquet files."""
     # Ensure logging is set up (in case this group is invoked directly in tests)
     ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False) if ctx.obj else False
+    timestamps = ctx.obj.get("timestamps", False)
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
@@ -1054,7 +1054,7 @@ def add(ctx):
     """Commands for enhancing GeoParquet files in various ways."""
     # Ensure logging is set up (in case this group is invoked directly in tests)
     ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False) if ctx.obj else False
+    timestamps = ctx.obj.get("timestamps", False)
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
@@ -1507,7 +1507,7 @@ def partition(ctx):
     """Commands for partitioning GeoParquet files."""
     # Ensure logging is set up (in case this group is invoked directly in tests)
     ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False) if ctx.obj else False
+    timestamps = ctx.obj.get("timestamps", False)
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 

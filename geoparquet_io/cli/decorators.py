@@ -82,20 +82,6 @@ def verbose_option(func):
     return click.option("--verbose", "-v", is_flag=True, help="Print verbose output")(func)
 
 
-def timestamps_option(func):
-    """
-    Add --timestamps option to a command.
-
-    When enabled, prepends timestamps to all output messages.
-    Useful for debugging and log analysis.
-    """
-    return click.option(
-        "--timestamps",
-        is_flag=True,
-        help="Show timestamps in output messages",
-    )(func)
-
-
 def show_sql_option(func):
     """
     Add --show-sql option to a command.

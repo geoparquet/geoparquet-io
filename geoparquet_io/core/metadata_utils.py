@@ -585,6 +585,8 @@ def format_parquet_metadata_enhanced(
 
             metadata_dict["row_groups"].append(rg_dict)
 
+        # Use print() directly for JSON output to bypass the logging system entirely.
+        # JSON output should be machine-readable and not include log formatting.
         print(json.dumps(metadata_dict, indent=2))
     else:
         # Human-readable output

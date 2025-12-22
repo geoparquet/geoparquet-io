@@ -135,16 +135,11 @@ class DynamicStreamHandler(logging.StreamHandler):
     def emit(self, record):
         try:
             msg = self.format(record)
-            # Check if we're in a CliRunner context (stdout is substituted)
-            # In that case, use click.echo for proper capture
-            if sys.stdout is not sys.__stdout__:
-                import click
-
-                click.echo(msg)
-            else:
-                # Normal case - write to stdout directly
-                self.stream = sys.stdout
-                super().emit(record)
+            # Always write to the current sys.stdout so that any environment
+            # that replaces stdout (e.g., Click's CliRunner, pytest capture)
+            # will receive the log output.
+            self.stream = sys.stdout
+            super().emit(record)
         except Exception:
             self.handleError(record)
 

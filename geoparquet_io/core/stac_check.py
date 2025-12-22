@@ -179,8 +179,8 @@ def _print_validation_results(results: dict, verbose: bool) -> None:
 
     if results["errors"]:
         progress("\nErrors:")
-        for err in results["errors"]:
-            error(f"  ✗ {err}")
+        for error_msg in results["errors"]:
+            error(f"  ✗ {error_msg}")
 
     if results["warnings"]:
         progress("\nWarnings:")
