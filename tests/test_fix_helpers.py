@@ -229,8 +229,8 @@ class TestHandleFixError:
         shutil.copy2(places_test_file, backup_path)
 
         # Modify the test file to simulate a failed fix
-        with open(test_file, "w") as f:
-            f.write("corrupted")
+        with open(test_file, "wb") as f:
+            f.write(b"corrupted")
 
         # Call handle_fix_error
         handle_fix_error(

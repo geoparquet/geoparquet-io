@@ -289,11 +289,21 @@ class TestLibraryFormatter:
         """Test LibraryFormatter initialization."""
         formatter = LibraryFormatter()
         assert formatter is not None
-        # Verify format string contains expected elements
-        assert "asctime" in formatter._fmt
-        assert "name" in formatter._fmt
-        assert "levelname" in formatter._fmt
-        assert "message" in formatter._fmt
+        # Verify formatter works by formatting a test record
+        record = logging.LogRecord(
+            name="geoparquet_io.test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Init test",
+            args=(),
+            exc_info=None,
+        )
+        result = formatter.format(record)
+        # Verify expected elements are in formatted output
+        assert "geoparquet_io.test" in result
+        assert "INFO" in result
+        assert "Init test" in result
 
     def test_format(self):
         """Test LibraryFormatter formats correctly."""

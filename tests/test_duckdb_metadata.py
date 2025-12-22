@@ -39,11 +39,12 @@ class TestGetGeoMetadata:
         assert isinstance(result, dict)
         assert "version" in result or "columns" in result
 
-    def test_returns_none_for_non_geoparquet(self, buildings_test_file):
-        """Test get_geo_metadata with file that may not have geo metadata."""
+    def test_returns_dict_for_buildings_file(self, buildings_test_file):
+        """Test get_geo_metadata with buildings test file."""
         result = get_geo_metadata(buildings_test_file)
-        # May or may not have geo metadata
-        assert result is None or isinstance(result, dict)
+        # Buildings file has geo metadata
+        assert isinstance(result, dict)
+        assert "version" in result or "columns" in result
 
 
 class TestGetRowGroupStatsSummary:

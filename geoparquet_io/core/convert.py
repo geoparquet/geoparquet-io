@@ -14,6 +14,7 @@ from geoparquet_io.core.common import (
     get_duckdb_connection,
     get_remote_error_hint,
     is_default_crs,
+    is_partition_path,
     is_remote_url,
     needs_httpfs,
     parse_crs_string_to_projjson,
@@ -25,6 +26,7 @@ from geoparquet_io.core.common import (
     write_parquet_with_metadata,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.partition_reader import require_single_file
 
 
 def _detect_geometry_column(con, input_file, verbose, is_parquet=False):
@@ -771,6 +773,10 @@ def convert_to_geoparquet(
     # Check input file type
     is_csv = _is_csv_file(input_file)
     is_parquet = _is_parquet_file(input_file)
+
+    # Check for partitioned parquet input (not supported)
+    if is_parquet and is_partition_path(input_file):
+        require_single_file(input_file, "convert")
 
     # Determine effective CRS for output
     # --crs parameter is ONLY valid for CSV/TSV files
