@@ -457,30 +457,40 @@ class TestBuildExtractQuery:
 
     def test_simple_query(self):
         """Test simple query with no filters."""
-        result = build_extract_query("input.parquet", ["id", "name", "geometry"], None, None)
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        input_path = str(PLACES_PARQUET)
+        result = build_extract_query(input_path, ["id", "name", "geometry"], None, None)
         assert 'SELECT "id", "name", "geometry"' in result
-        assert "FROM read_parquet('input.parquet')" in result
+        assert f"FROM read_parquet('{input_path}')" in result
         assert "WHERE" not in result
 
     def test_with_spatial_filter(self):
         """Test query with spatial filter."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        input_path = str(PLACES_PARQUET)
         spatial_filter = '"bbox".xmax >= -1'
-        result = build_extract_query("input.parquet", ["id", "geometry"], spatial_filter, None)
+        result = build_extract_query(input_path, ["id", "geometry"], spatial_filter, None)
         assert "WHERE" in result
         assert spatial_filter in result
 
     def test_with_where_clause(self):
         """Test query with WHERE clause."""
-        result = build_extract_query("input.parquet", ["id", "geometry"], None, "id > 100")
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        input_path = str(PLACES_PARQUET)
+        result = build_extract_query(input_path, ["id", "geometry"], None, "id > 100")
         assert "WHERE" in result
         assert "id > 100" in result
 
     def test_with_both_filters(self):
         """Test query with both spatial and WHERE filters."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        input_path = str(PLACES_PARQUET)
         spatial_filter = '"bbox".xmax >= -1'
-        result = build_extract_query(
-            "input.parquet", ["id", "geometry"], spatial_filter, "id > 100"
-        )
+        result = build_extract_query(input_path, ["id", "geometry"], spatial_filter, "id > 100")
         assert "WHERE" in result
         assert spatial_filter in result
         assert "id > 100" in result

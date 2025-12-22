@@ -7,6 +7,7 @@ from geoparquet_io.core.common import (
     find_primary_geometry_column,
 )
 from geoparquet_io.core.logging_config import progress, success, warn
+from geoparquet_io.core.partition_reader import require_single_file
 
 
 def add_bbox_column(
@@ -49,6 +50,9 @@ def add_bbox_column(
     Note:
         Bbox covering metadata is automatically added when the file is written.
     """
+    # Check for partition input (not supported)
+    require_single_file(input_parquet, "add bbox")
+
     # Check for parquet-geo-only input and warn user (skip in dry-run mode)
     if not dry_run:
         file_type_info = detect_geoparquet_file_type(input_parquet, verbose)

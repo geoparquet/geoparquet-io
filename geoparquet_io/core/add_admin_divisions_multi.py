@@ -18,6 +18,7 @@ from geoparquet_io.core.common import (
     write_parquet_with_metadata,
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.partition_reader import require_single_file
 
 
 def _build_admin_subquery(
@@ -433,6 +434,9 @@ def add_admin_divisions_multi(
         row_group_rows: Exact number of rows per row group
         profile: AWS profile name (S3 only, optional)
     """
+    # Check for partition input (not supported)
+    require_single_file(input_parquet, "add admin-divisions")
+
     # Setup dataset and columns
     (
         dataset,

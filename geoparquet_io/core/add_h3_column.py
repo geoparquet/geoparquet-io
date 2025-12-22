@@ -4,6 +4,7 @@ import click
 
 from geoparquet_io.core.common import add_computed_column, find_primary_geometry_column
 from geoparquet_io.core.logging_config import configure_verbose, success
+from geoparquet_io.core.partition_reader import require_single_file
 
 
 def add_h3_column(
@@ -45,6 +46,9 @@ def add_h3_column(
     """
     # Configure logging verbosity
     configure_verbose(verbose)
+
+    # Check for partition input (not supported)
+    require_single_file(input_parquet, "add h3")
 
     # Validate resolution
     if not 0 <= h3_resolution <= 15:

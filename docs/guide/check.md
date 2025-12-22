@@ -80,6 +80,25 @@ gpio check all myfile.parquet --verbose
 gpio check spatial myfile.parquet --random-sample-size 200 --limit-rows 1000000
 ```
 
+## Checking Partitioned Data
+
+When checking a directory containing partitioned data, you can control how many files are checked:
+
+```bash
+# By default, checks only the first file
+gpio check all partitions/
+# Output: Checking first file (of 4 total). Use --check-all or --check-sample N for more.
+
+# Check all files in the partition
+gpio check all partitions/ --check-all
+
+# Check a sample of files (first N files)
+gpio check all partitions/ --check-sample 3
+```
+
+!!! note "--fix not available for partitions"
+    The `--fix` option only works with single files. To fix issues in partitioned data, first consolidate with `gpio extract`, apply fixes, then re-partition if needed.
+
 ## See Also
 
 - [CLI Reference: check](../cli/check.md)

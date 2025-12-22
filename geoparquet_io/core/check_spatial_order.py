@@ -11,7 +11,7 @@ from geoparquet_io.core.logging_config import debug, progress
 
 
 def check_spatial_order(
-    parquet_file, random_sample_size, limit_rows, verbose, return_results=False
+    parquet_file, random_sample_size, limit_rows, verbose, return_results=False, quiet=False
 ):
     """Check if a GeoParquet file is spatially ordered.
 
@@ -21,6 +21,7 @@ def check_spatial_order(
         limit_rows: Max number of rows to analyze
         verbose: Print additional information
         return_results: If True, return structured results dict
+        quiet: If True, suppress all output (for multi-file batch mode)
 
     Returns:
         ratio (float) if return_results=False, or dict if return_results=True containing:
@@ -111,7 +112,7 @@ def check_spatial_order(
     # Calculate ratio
     ratio = consecutive_avg / random_avg if consecutive_avg and random_avg else None
 
-    if not verbose:  # Only print results if not being called from check_all
+    if not verbose and not quiet:  # Only print results if not being called from check_all
         progress("\nResults:")
         debug(f"Average distance between consecutive features: {consecutive_avg}")
         debug(f"Average distance between random features: {random_avg}")

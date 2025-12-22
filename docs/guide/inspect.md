@@ -113,6 +113,40 @@ gpio inspect data.parquet --json
 gpio inspect data.parquet --json | jq '.file_info.rows'
 ```
 
+## Inspecting Partitioned Data
+
+When inspecting a directory containing partitioned data, you can aggregate information across all files:
+
+```bash
+# By default, inspects first file with a notice
+gpio inspect partitions/
+# Output: Inspecting first file (of 4 total). Use --check-all to aggregate all files.
+
+# Aggregate info from all files in partition
+gpio inspect partitions/ --check-all
+```
+
+The `--check-all` option shows:
+
+- Total file count and combined row count
+- Total size across all files
+- Combined bounding box (union of all file bounds)
+- Schema consistency check
+- Compression types used
+- GeoParquet versions found
+- Per-file breakdown (filename, rows, size)
+
+```bash
+# JSON output for scripted processing
+gpio inspect partitions/ --check-all --json
+
+# Markdown output for documentation
+gpio inspect partitions/ --check-all --markdown
+```
+
+!!! note "Preview options not available with --check-all"
+    The `--head`, `--tail`, and `--stats` options cannot be combined with `--check-all` since they apply to individual files.
+
 ## See Also
 
 - [CLI Reference: inspect](../cli/inspect.md)

@@ -1016,6 +1016,340 @@ def format_json_output(
     return json.dumps(output, indent=2)
 
 
+def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[str, Any]:
+    """
+    Extract aggregated summary from all files in a partition.
+
+    Args:
+        files: List of parquet file paths
+        verbose: Print debug messages
+
+    Returns:
+        dict: Aggregated info including:
+            - file_count: Number of files
+            - total_rows: Sum of rows across all files
+            - total_size_bytes: Sum of file sizes
+            - total_size_human: Human-readable total size
+            - combined_bbox: Union of all bboxes
+            - schema_consistent: Whether schemas match
+            - compressions: Set of compression types used
+            - geoparquet_versions: Set of versions found
+            - per_file_info: List of per-file details
+    """
+    from geoparquet_io.core.logging_config import debug
+
+    total_rows = 0
+    total_size_bytes = 0
+    combined_bbox = None  # [xmin, ymin, xmax, ymax]
+    compressions = set()
+    geoparquet_versions = set()
+    per_file_info = []
+    schema_columns = None
+    schema_consistent = True
+
+    for file_path in files:
+        if verbose:
+            debug(f"Processing file: {file_path}")
+
+        # Get file info
+        try:
+            file_info = extract_file_info(file_path)
+            geo_info = extract_geo_info(file_path)
+        except Exception as e:
+            if verbose:
+                debug(f"Error processing {file_path}: {e}")
+            continue
+
+        # Accumulate totals
+        total_rows += file_info.get("rows", 0)
+        if file_info.get("size_bytes"):
+            total_size_bytes += file_info["size_bytes"]
+
+        # Track compression
+        if file_info.get("compression"):
+            compressions.add(file_info["compression"])
+
+        # Track GeoParquet version
+        if geo_info.get("version"):
+            geoparquet_versions.add(geo_info["version"])
+
+        # Merge bbox
+        bbox = geo_info.get("bbox")
+        if bbox and len(bbox) >= 4:
+            if combined_bbox is None:
+                combined_bbox = list(bbox[:4])
+            else:
+                combined_bbox[0] = min(combined_bbox[0], bbox[0])  # xmin
+                combined_bbox[1] = min(combined_bbox[1], bbox[1])  # ymin
+                combined_bbox[2] = max(combined_bbox[2], bbox[2])  # xmax
+                combined_bbox[3] = max(combined_bbox[3], bbox[3])  # ymax
+
+        # Check schema consistency
+        from geoparquet_io.core.duckdb_metadata import get_usable_columns
+
+        try:
+            columns = get_usable_columns(file_path)
+            col_names = tuple(c["name"] for c in columns)
+            if schema_columns is None:
+                schema_columns = col_names
+            elif schema_columns != col_names:
+                schema_consistent = False
+        except Exception:
+            pass
+
+        # Store per-file info
+        per_file_info.append(
+            {
+                "file": file_path,
+                "file_name": os.path.basename(file_path),
+                "rows": file_info.get("rows", 0),
+                "size_bytes": file_info.get("size_bytes"),
+                "size_human": file_info.get("size_human", "N/A"),
+            }
+        )
+
+    return {
+        "file_count": len(per_file_info),
+        "total_rows": total_rows,
+        "total_size_bytes": total_size_bytes if total_size_bytes > 0 else None,
+        "total_size_human": format_size(total_size_bytes) if total_size_bytes > 0 else "N/A",
+        "combined_bbox": combined_bbox,
+        "schema_consistent": schema_consistent,
+        "compressions": sorted(compressions) if compressions else [],
+        "geoparquet_versions": sorted(geoparquet_versions) if geoparquet_versions else [],
+        "per_file_info": per_file_info,
+    }
+
+
+def format_partition_terminal_output(
+    partition_summary: dict[str, Any],
+    geo_info: dict[str, Any],
+    columns_info: list[dict[str, Any]],
+) -> None:
+    """
+    Format and print partition summary terminal output using Rich.
+
+    Args:
+        partition_summary: Aggregated partition info from extract_partition_summary
+        geo_info: Geo info from first file
+        columns_info: Column info from first file
+    """
+    console = Console()
+
+    console.print()
+    console.print("[bold]Partition Summary[/bold]")
+    console.print("━" * 60)
+
+    # File count and totals
+    console.print(f"Files: [cyan]{partition_summary['file_count']} parquet files[/cyan]")
+    console.print(f"Total rows: [cyan]{partition_summary['total_rows']:,}[/cyan]")
+    console.print(f"Total size: [cyan]{partition_summary['total_size_human']}[/cyan]")
+
+    # Combined bbox
+    if partition_summary["combined_bbox"]:
+        bbox = partition_summary["combined_bbox"]
+        console.print(
+            f"Combined bounds: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, "
+            f"{bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
+        )
+
+    console.print()
+
+    # Schema consistency
+    if partition_summary["schema_consistent"]:
+        console.print("Schema: [green]Consistent across all files[/green]")
+    else:
+        console.print("Schema: [yellow]Varies between files[/yellow]")
+
+    # Compression
+    compressions = partition_summary.get("compressions", [])
+    if compressions:
+        if len(compressions) == 1:
+            console.print(f"Compression: [cyan]{compressions[0]} (all files)[/cyan]")
+        else:
+            console.print(f"Compression: [yellow]{', '.join(compressions)} (mixed)[/yellow]")
+
+    # GeoParquet version
+    versions = partition_summary.get("geoparquet_versions", [])
+    if versions:
+        if len(versions) == 1:
+            console.print(f"GeoParquet: [cyan]{versions[0]} (all files)[/cyan]")
+        else:
+            console.print(f"GeoParquet: [yellow]{', '.join(versions)} (mixed)[/yellow]")
+    elif geo_info.get("parquet_type") in ("Geometry", "Geography"):
+        console.print("GeoParquet: [dim]No GeoParquet metadata (Parquet geo type)[/dim]")
+
+    console.print()
+
+    # Per-file breakdown
+    console.print("Per-file breakdown:")
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("File", style="white")
+    table.add_column("Rows", style="cyan", justify="right")
+    table.add_column("Size", style="blue", justify="right")
+
+    for file_info in partition_summary["per_file_info"]:
+        table.add_row(
+            file_info["file_name"],
+            f"{file_info['rows']:,}",
+            file_info["size_human"],
+        )
+
+    console.print(table)
+    console.print()
+
+    # Columns table (from first file)
+    num_cols = len(columns_info)
+    console.print(f"Columns ({num_cols}):")
+
+    col_table = Table(show_header=True, header_style="bold")
+    col_table.add_column("Name", style="white")
+    col_table.add_column("Type", style="blue")
+
+    for col in columns_info:
+        name = col["name"]
+        if col["is_geometry"]:
+            name = f"{name} 🌍"
+            name_display = Text(name, style="cyan bold")
+        else:
+            name_display = name
+
+        col_table.add_row(name_display, col["type"])
+
+    console.print(col_table)
+    console.print()
+
+
+def format_partition_json_output(
+    partition_summary: dict[str, Any],
+    geo_info: dict[str, Any],
+    columns_info: list[dict[str, Any]],
+) -> str:
+    """
+    Format partition summary as JSON.
+
+    Args:
+        partition_summary: Aggregated partition info
+        geo_info: Geo info from first file
+        columns_info: Column info from first file
+
+    Returns:
+        str: JSON string
+    """
+    output = {
+        "partition": True,
+        "file_count": partition_summary["file_count"],
+        "total_rows": partition_summary["total_rows"],
+        "total_size_bytes": partition_summary["total_size_bytes"],
+        "total_size_human": partition_summary["total_size_human"],
+        "combined_bbox": partition_summary["combined_bbox"],
+        "schema_consistent": partition_summary["schema_consistent"],
+        "compressions": partition_summary["compressions"],
+        "geoparquet_versions": partition_summary["geoparquet_versions"],
+        "parquet_type": geo_info.get("parquet_type"),
+        "crs": _format_crs_for_display(geo_info.get("crs"), include_default=False),
+        "columns": [
+            {
+                "name": col["name"],
+                "type": col["type"],
+                "is_geometry": col["is_geometry"],
+            }
+            for col in columns_info
+        ],
+        "files": partition_summary["per_file_info"],
+    }
+
+    return json.dumps(output, indent=2)
+
+
+def format_partition_markdown_output(
+    partition_summary: dict[str, Any],
+    geo_info: dict[str, Any],
+    columns_info: list[dict[str, Any]],
+) -> str:
+    """
+    Format partition summary as Markdown.
+
+    Args:
+        partition_summary: Aggregated partition info
+        geo_info: Geo info from first file
+        columns_info: Column info from first file
+
+    Returns:
+        str: Markdown string
+    """
+    lines = []
+
+    lines.append("## Partition Summary")
+    lines.append("")
+
+    lines.append(f"- **Files:** {partition_summary['file_count']} parquet files")
+    lines.append(f"- **Total rows:** {partition_summary['total_rows']:,}")
+    lines.append(f"- **Total size:** {partition_summary['total_size_human']}")
+
+    if partition_summary["combined_bbox"]:
+        bbox = partition_summary["combined_bbox"]
+        lines.append(
+            f"- **Combined bounds:** [{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}]"
+        )
+
+    lines.append("")
+
+    # Schema consistency
+    if partition_summary["schema_consistent"]:
+        lines.append("- **Schema:** Consistent across all files")
+    else:
+        lines.append("- **Schema:** ⚠️ Varies between files")
+
+    # Compression
+    compressions = partition_summary.get("compressions", [])
+    if compressions:
+        if len(compressions) == 1:
+            lines.append(f"- **Compression:** {compressions[0]} (all files)")
+        else:
+            lines.append(f"- **Compression:** {', '.join(compressions)} (mixed)")
+
+    # GeoParquet version
+    versions = partition_summary.get("geoparquet_versions", [])
+    if versions:
+        if len(versions) == 1:
+            lines.append(f"- **GeoParquet:** {versions[0]} (all files)")
+        else:
+            lines.append(f"- **GeoParquet:** {', '.join(versions)} (mixed)")
+
+    lines.append("")
+
+    # Per-file breakdown
+    lines.append("### Per-file breakdown")
+    lines.append("")
+    lines.append("| File | Rows | Size |")
+    lines.append("|------|------|------|")
+
+    for file_info in partition_summary["per_file_info"]:
+        lines.append(
+            f"| {file_info['file_name']} | {file_info['rows']:,} | {file_info['size_human']} |"
+        )
+
+    lines.append("")
+
+    # Columns table
+    num_cols = len(columns_info)
+    lines.append(f"### Columns ({num_cols})")
+    lines.append("")
+    lines.append("| Name | Type |")
+    lines.append("|------|------|")
+
+    for col in columns_info:
+        name = col["name"]
+        if col["is_geometry"]:
+            name = f"{name} 🌍"
+        lines.append(f"| {name} | {col['type']} |")
+
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def format_markdown_output(
     file_info: dict[str, Any],
     geo_info: dict[str, Any],
