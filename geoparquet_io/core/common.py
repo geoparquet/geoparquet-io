@@ -958,6 +958,53 @@ def find_primary_geometry_column(parquet_file, verbose=False):
     return "geometry"
 
 
+def calculate_file_bounds(file_path, geom_column=None, verbose=False):
+    """
+    Calculate the bounding box of all geometries in a parquet file.
+
+    Uses DuckDB's spatial extension to compute the extent of all geometries.
+
+    Args:
+        file_path: Path to the parquet file (local or remote URL)
+        geom_column: Name of geometry column (auto-detected if None)
+        verbose: Print verbose output
+
+    Returns:
+        tuple: (xmin, ymin, xmax, ymax) or None if calculation fails
+    """
+    if geom_column is None:
+        geom_column = find_primary_geometry_column(file_path, verbose=False)
+
+    safe_url = safe_file_url(file_path, verbose=False)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_path))
+
+    try:
+        bounds_query = f"""
+            SELECT
+                MIN(ST_XMin({geom_column})) as xmin,
+                MIN(ST_YMin({geom_column})) as ymin,
+                MAX(ST_XMax({geom_column})) as xmax,
+                MAX(ST_YMax({geom_column})) as ymax
+            FROM read_parquet('{safe_url}')
+        """
+        result = con.execute(bounds_query).fetchone()
+
+        if result and all(v is not None for v in result):
+            if verbose:
+                debug(
+                    f"Calculated bounds: ({result[0]:.6f}, {result[1]:.6f}, "
+                    f"{result[2]:.6f}, {result[3]:.6f})"
+                )
+            return result
+        return None
+    except Exception as e:
+        if verbose:
+            debug(f"Failed to calculate bounds: {e}")
+        return None
+    finally:
+        con.close()
+
+
 # CRS handling functions for GeoParquet 2.0 and parquet-geo-only
 
 
@@ -1670,6 +1717,7 @@ def rewrite_with_metadata(
     verbose=False,
     metadata_version="1.1.0",
     input_crs=None,
+    recalculate_bounds=False,
 ):
     """
     Rewrite a parquet file with updated metadata and compression settings.
@@ -1685,6 +1733,7 @@ def rewrite_with_metadata(
         verbose: Whether to print verbose output
         metadata_version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
         input_crs: PROJJSON dict with CRS to include in geo metadata (optional)
+        recalculate_bounds: If True, recalculate bounds from actual geometry data (default: False)
     """
     if verbose:
         debug("Updating metadata and optimizing file structure...")
@@ -1729,6 +1778,19 @@ def rewrite_with_metadata(
         geo_meta["columns"][geom_col]["crs"] = input_crs
         if verbose:
             debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
+
+    # Recalculate bounds from actual geometry data if requested
+    if recalculate_bounds:
+        bounds = calculate_file_bounds(output_file, geom_col, verbose=verbose)
+        if bounds:
+            if geom_col not in geo_meta.get("columns", {}):
+                geo_meta["columns"][geom_col] = {}
+            geo_meta["columns"][geom_col]["bbox"] = list(bounds)
+            if verbose:
+                debug(
+                    f"Updated bounds to: [{bounds[0]:.6f}, {bounds[1]:.6f}, "
+                    f"{bounds[2]:.6f}, {bounds[3]:.6f}]"
+                )
 
     new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
@@ -1783,6 +1845,7 @@ def write_parquet_with_metadata(
     profile=None,
     geoparquet_version=None,
     input_crs=None,
+    recalculate_bounds=False,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
@@ -1808,6 +1871,7 @@ def write_parquet_with_metadata(
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         input_crs: PROJJSON dict with CRS from input file (for 2.0/parquet-geo-only)
+        recalculate_bounds: If True, recalculate bounds from actual geometry data (default: False)
 
     Returns:
         None
@@ -1885,6 +1949,7 @@ def write_parquet_with_metadata(
                 verbose,
                 metadata_version=version_config["metadata_version"],
                 input_crs=input_crs,
+                recalculate_bounds=recalculate_bounds,
             )
 
         # Upload to remote if needed
