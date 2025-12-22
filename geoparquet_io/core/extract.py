@@ -87,14 +87,14 @@ def validate_where_clause(where_clause: str) -> None:
         )
 
 
-def _looks_like_latlong_bbox(bbox: tuple[float, float, float, float]) -> bool:
+def looks_like_latlong_bbox(bbox: tuple[float, float, float, float]) -> bool:
     """Check if bbox values look like lat/long coordinates."""
     xmin, ymin, xmax, ymax = bbox
     # Lat/long: x (lon) is -180 to 180, y (lat) is -90 to 90
     return -180 <= xmin <= 180 and -180 <= xmax <= 180 and -90 <= ymin <= 90 and -90 <= ymax <= 90
 
 
-def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
+def is_geographic_crs(crs_info: dict | str | None) -> bool | None:
     """
     Check if CRS is geographic (lat/long) vs projected.
 
@@ -241,11 +241,11 @@ def _warn_if_crs_mismatch(
     geometry_col: str,
 ) -> None:
     """Warn if bbox looks like lat/long but data is in a projected CRS."""
-    if not _looks_like_latlong_bbox(bbox):
+    if not looks_like_latlong_bbox(bbox):
         return  # User's bbox doesn't look like lat/long, no warning needed
 
     crs_info = _get_crs_from_file(input_parquet, geometry_col)
-    is_geographic = _is_geographic_crs(crs_info)
+    is_geographic = is_geographic_crs(crs_info)
 
     if is_geographic is False:  # Definitely projected
         crs_name = _get_crs_display_name(crs_info)

@@ -326,7 +326,7 @@ class TestLibraryFormatter:
 class TestDynamicStreamHandler:
     """Tests for DynamicStreamHandler class."""
 
-    def test_emit_success(self):
+    def test_emit_success(self, capsys):
         """Test emit writes to stdout."""
         handler = DynamicStreamHandler()
         handler.setFormatter(CLIFormatter(use_colors=False))
@@ -339,8 +339,12 @@ class TestDynamicStreamHandler:
             args=(),
             exc_info=None,
         )
-        # Should not raise
         handler.emit(record)
+
+        # Verify output was written to stdout
+        captured = capsys.readouterr()
+        assert captured.out, "Expected output to stdout but got nothing"
+        assert "Test emit" in captured.out
 
     def test_emit_exception_handling(self):
         """Test emit handles exceptions (lines 142-143)."""

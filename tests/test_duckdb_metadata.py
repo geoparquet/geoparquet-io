@@ -145,14 +145,15 @@ class TestHasBboxColumn:
     def test_places_has_bbox(self, places_test_file):
         """Test that places file has bbox column."""
         has_bbox, bbox_name = has_bbox_column(places_test_file)
-        assert isinstance(has_bbox, bool)
-        if has_bbox:
-            assert bbox_name is not None
+        assert has_bbox is True
+        assert bbox_name is not None
+        assert isinstance(bbox_name, str)
 
     def test_buildings_no_bbox(self, buildings_test_file):
         """Test that buildings file doesn't have bbox column."""
         has_bbox, bbox_name = has_bbox_column(buildings_test_file)
-        assert isinstance(has_bbox, bool)
+        assert has_bbox is False
+        assert bbox_name is None
 
 
 class TestGetPerRowGroupBboxStats:

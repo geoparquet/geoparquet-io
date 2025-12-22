@@ -1,4 +1,9 @@
-"""Tests for core/check_parquet_structure.py module."""
+"""Tests for core/check_parquet_structure.py module.
+
+Fixtures used in this module:
+    - places_test_file: Provided by conftest.py
+    - buildings_test_file: Provided by conftest.py
+"""
 
 from geoparquet_io.core.check_parquet_structure import (
     assess_row_count,
@@ -68,8 +73,8 @@ class TestAssessRowGroupSize:
 class TestAssessRowCount:
     """Tests for assess_row_count function."""
 
-    def test_optimal_for_50k_to_200k(self):
-        """Test optimal status for 50,000-200,000 rows."""
+    def test_optimal_for_10k_to_200k(self):
+        """Test optimal status for 10,000-200,000 rows."""
         status, message, color = assess_row_count(100000)
         assert status == "optimal"
         assert color == "green"
@@ -100,65 +105,149 @@ class TestAssessRowCount:
         assert status == "suboptimal"
         assert color == "yellow"
 
+    def test_optimal_for_small_file_single_group(self):
+        """Test small file leniency: any row count is optimal for small single-group files."""
+        # Small file under 64MB with single row group
+        total_size = 50 * 1024 * 1024  # 50 MB
+        low_row_count = 100  # Normally would be "poor"
+        status, message, color = assess_row_count(
+            low_row_count, total_size_bytes=total_size, num_groups=1
+        )
+        assert status == "optimal"
+        assert color == "green"
+        assert "appropriate for small file" in message
+
 
 class TestGetRowGroupStats:
     """Tests for get_row_group_stats function."""
 
     def test_returns_stats_dict(self, places_test_file):
-        """Test that get_row_group_stats returns expected dict."""
+        """Test that get_row_group_stats returns expected dict with valid values."""
+        import numbers
+
         stats = get_row_group_stats(places_test_file)
         assert isinstance(stats, dict)
         assert "num_groups" in stats
         assert "total_rows" in stats
         assert "avg_rows_per_group" in stats
 
+        # Validate types and ranges
+        assert isinstance(stats["num_groups"], int)
+        assert stats["num_groups"] >= 1
+
+        assert isinstance(stats["total_rows"], int)
+        assert stats["total_rows"] >= 0
+
+        assert isinstance(stats["avg_rows_per_group"], numbers.Number)
+        assert stats["avg_rows_per_group"] >= 0
+
+        # Sanity checks
+        assert stats["total_rows"] >= stats["num_groups"]
+        if stats["num_groups"] > 0:
+            expected_avg = stats["total_rows"] / stats["num_groups"]
+            assert abs(stats["avg_rows_per_group"] - expected_avg) < 0.01
+
 
 class TestGetCompressionInfo:
     """Tests for get_compression_info function."""
 
+    # Known Parquet compression codecs
+    VALID_CODECS = {"ZSTD", "SNAPPY", "GZIP", "LZ4", "BROTLI", "UNCOMPRESSED", "LZO"}
+
     def test_returns_compression_dict(self, places_test_file):
-        """Test that get_compression_info returns expected dict."""
+        """Test that get_compression_info returns expected dict with valid codecs."""
         info = get_compression_info(places_test_file)
         assert isinstance(info, dict)
         # Should contain at least one column
         assert len(info) > 0
 
+        # Validate all compression values are strings and known codecs
+        for col_name, codec in info.items():
+            assert isinstance(codec, str), f"Codec for {col_name} should be a string"
+            assert codec in self.VALID_CODECS, f"Unknown codec '{codec}' for column {col_name}"
+
     def test_with_specific_column(self, places_test_file):
-        """Test get_compression_info with specific column."""
+        """Test get_compression_info with specific column returns valid codec."""
         info = get_compression_info(places_test_file, "geometry")
         assert isinstance(info, dict)
         assert "geometry" in info
+
+        # Validate geometry column codec
+        geometry_codec = info["geometry"]
+        assert isinstance(geometry_codec, str)
+        assert geometry_codec in self.VALID_CODECS
 
 
 class TestCheckCompression:
     """Tests for check_compression function."""
 
+    # Known Parquet compression codecs
+    VALID_CODECS = {"ZSTD", "SNAPPY", "GZIP", "LZ4", "BROTLI", "UNCOMPRESSED", "LZO"}
+
     def test_returns_results(self, places_test_file):
-        """Test check_compression with return_results=True."""
+        """Test check_compression with return_results=True returns valid structure."""
         result = check_compression(places_test_file, verbose=False, return_results=True)
         assert isinstance(result, dict)
         assert "current_compression" in result
         assert "passed" in result
 
-    def test_with_verbose(self, places_test_file):
-        """Test check_compression with verbose flag."""
-        # Should not raise
-        check_compression(places_test_file, verbose=True, return_results=False)
+        # Validate value types
+        assert isinstance(result["passed"], bool)
+        assert isinstance(result["current_compression"], str)
+        assert len(result["current_compression"]) > 0
+
+        # Check if geometry_column is present and not None (if available)
+        if "geometry_column" in result:
+            assert result["geometry_column"] is not None
+
+    def test_with_verbose(self, places_test_file, caplog):
+        """Test check_compression with verbose flag produces output."""
+        import logging
+
+        with caplog.at_level(logging.DEBUG):
+            check_compression(places_test_file, verbose=True, return_results=False)
+
+        # Verify log output was captured
+        assert len(caplog.records) > 0, "Expected log output when verbose=True"
+        combined = " ".join(record.message.lower() for record in caplog.records)
+        # Check for compression-related text
+        assert any(
+            phrase in combined
+            for phrase in ["compression", "zstd", "snappy", "gzip", "uncompressed"]
+        )
 
 
 class TestCheckRowGroups:
     """Tests for check_row_groups function."""
 
     def test_returns_results(self, places_test_file):
-        """Test check_row_groups with return_results=True."""
+        """Test check_row_groups with return_results=True returns valid structure."""
         result = check_row_groups(places_test_file, verbose=False, return_results=True)
         assert isinstance(result, dict)
         assert "passed" in result
 
-    def test_with_verbose(self, places_test_file):
-        """Test check_row_groups with verbose flag."""
-        # Should not raise
-        check_row_groups(places_test_file, verbose=True, return_results=False)
+        # Validate passed is a bool
+        assert isinstance(result["passed"], bool)
+
+        # Check for expected keys if present
+        if "num_row_groups" in result:
+            assert isinstance(result["num_row_groups"], int)
+            assert result["num_row_groups"] >= 1
+        if "avg_rows_per_group" in result:
+            assert result["avg_rows_per_group"] >= 0
+
+    def test_with_verbose(self, places_test_file, caplog):
+        """Test check_row_groups with verbose flag produces output."""
+        import logging
+
+        with caplog.at_level(logging.DEBUG):
+            check_row_groups(places_test_file, verbose=True, return_results=False)
+
+        # Verify log output was captured
+        assert len(caplog.records) > 0, "Expected log output when verbose=True"
+        combined = " ".join(record.message.lower() for record in caplog.records)
+        # Check for row-group-related text
+        assert any(phrase in combined for phrase in ["row", "group", "rows", "size"])
 
 
 class TestCheckMetadataAndBbox:
