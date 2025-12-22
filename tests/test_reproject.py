@@ -394,8 +394,8 @@ class TestReprojectCLI:
         assert output_file.exists()
         assert "Reprojected" in result.output
 
-    def test_cli_with_target_crs(self, create_geoparquet, tmp_path):
-        """Test CLI with custom target CRS."""
+    def test_cli_with_dst_crs(self, create_geoparquet, tmp_path):
+        """Test CLI with custom destination CRS."""
         input_file = create_geoparquet(
             "cli_input2.parquet",
             "POINT(-122.4 37.8)",
@@ -405,11 +405,33 @@ class TestReprojectCLI:
 
         runner = CliRunner()
         result = runner.invoke(
-            reproject, [str(input_file), str(output_file), "--target-crs", "EPSG:32610"]
+            reproject, [str(input_file), str(output_file), "--dst-crs", "EPSG:32610"]
         )
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         assert output_file.exists()
+        assert "EPSG:32610" in result.output
+
+    def test_cli_with_src_crs_override(self, create_geoparquet, tmp_path):
+        """Test CLI with source CRS override."""
+        # Create file with EPSG:4326 metadata
+        input_file = create_geoparquet(
+            "cli_input3.parquet",
+            "POINT(-122.4 37.8)",
+            crs_epsg=4326,
+        )
+        output_file = tmp_path / "cli_output3.parquet"
+
+        runner = CliRunner()
+        # Override source CRS (same as actual, just testing the flag works)
+        result = runner.invoke(
+            reproject, [str(input_file), str(output_file), "-s", "EPSG:4326", "-d", "EPSG:32610"]
+        )
+
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        assert output_file.exists()
+        # Source CRS should be the overridden value
+        assert "EPSG:4326" in result.output
         assert "EPSG:32610" in result.output
 
 

@@ -86,6 +86,7 @@ def reproject_impl(
     input_parquet: str,
     output_parquet: str | None = None,
     target_crs: str = "EPSG:4326",
+    source_crs: str | None = None,
     overwrite: bool = False,
     compression: str = "ZSTD",
     compression_level: int | None = None,
@@ -101,6 +102,7 @@ def reproject_impl(
         input_parquet: Path to input GeoParquet file (local or remote URL)
         output_parquet: Path to output file. If None, generates name from input.
         target_crs: Target CRS (default: EPSG:4326)
+        source_crs: Override source CRS. If None, detected from metadata.
         overwrite: If True and output_parquet is None, overwrite input file
         compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
         compression_level: Compression level (varies by format)
@@ -142,9 +144,18 @@ def reproject_impl(
         geom_col = find_primary_geometry_column(input_parquet, verbose=verbose)
         log(f"Geometry column: {geom_col}")
 
-        # Detect source CRS
-        source_crs = _detect_source_crs(input_url, geom_col, verbose)
-        log(f"Source CRS: {source_crs}")
+        # Detect source CRS from metadata
+        detected_crs = _detect_source_crs(input_url, geom_col, verbose)
+
+        # Use override if provided, otherwise use detected
+        if source_crs is not None:
+            info(f"Detected CRS: {detected_crs}")
+            info(f"Overriding with source CRS: {source_crs}")
+            effective_source_crs = source_crs
+        else:
+            effective_source_crs = detected_crs
+            log(f"Source CRS: {effective_source_crs}")
+
         log(f"Target CRS: {target_crs}")
 
         # Get feature count
@@ -168,7 +179,7 @@ def reproject_impl(
                 * EXCLUDE ({exclude_clause}),
                 ST_Transform(
                     {geom_col},
-                    '{source_crs}',
+                    '{effective_source_crs}',
                     '{target_crs}',
                     always_xy := true
                 ) AS {geom_col}
@@ -252,11 +263,11 @@ def reproject_impl(
                     )
 
         if verbose:
-            success(f"Reprojected {count:,} features from {source_crs} to {target_crs}")
+            success(f"Reprojected {count:,} features from {effective_source_crs} to {target_crs}")
 
         return ReprojectResult(
             output_path=out_path,
-            source_crs=source_crs,
+            source_crs=effective_source_crs,
             target_crs=target_crs,
             feature_count=count,
         )
