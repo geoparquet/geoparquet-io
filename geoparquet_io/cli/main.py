@@ -41,6 +41,7 @@ from geoparquet_io.core.partition_by_kdtree import partition_by_kdtree as partit
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
+from geoparquet_io.core.reproject import reproject_impl
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
@@ -581,6 +582,87 @@ def convert(
         profile=profile,
         geoparquet_version=geoparquet_version,
     )
+
+
+# Reproject command
+@cli.command()
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--dst-crs",
+    "-d",
+    default="EPSG:4326",
+    show_default=True,
+    help="Destination CRS (e.g., 'EPSG:4326', 'EPSG:32610')",
+)
+@click.option(
+    "--src-crs",
+    "-s",
+    default=None,
+    help="Override source CRS (e.g., 'EPSG:4326'). If not provided, detected from file metadata.",
+)
+@overwrite_option
+@verbose_option
+@profile_option
+@compression_options
+@geoparquet_version_option
+def reproject(
+    input_file,
+    output_file,
+    dst_crs,
+    src_crs,
+    overwrite,
+    verbose,
+    profile,
+    compression,
+    compression_level,
+    geoparquet_version,
+):
+    """
+    Reproject a GeoParquet file to a different CRS.
+
+    Uses DuckDB's ST_Transform for fast, streaming reprojection.
+    Automatically detects source CRS from GeoParquet metadata unless --src-crs is provided.
+
+    If OUTPUT_FILE is not provided, creates <input>_<crs>.parquet.
+    Use --overwrite to modify the input file in place.
+
+    \b
+    Examples:
+        gpio reproject input.parquet output.parquet
+        gpio reproject input.parquet -d EPSG:32610
+        gpio reproject input.parquet --overwrite -d EPSG:4326
+        gpio reproject input.parquet output.parquet --dst-crs EPSG:3857
+        gpio reproject input.parquet output.parquet -s EPSG:4326 -d EPSG:32610
+    """
+    from geoparquet_io.core.common import validate_profile_for_urls
+
+    # Configure verbose logging
+    configure_verbose(verbose)
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, input_file, output_file)
+
+    try:
+        result = reproject_impl(
+            input_parquet=input_file,
+            output_parquet=output_file,
+            target_crs=dst_crs,
+            source_crs=src_crs,
+            overwrite=overwrite,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+
+        click.echo(f"\nReprojected {result.feature_count:,} features")
+        click.echo(f"  Source CRS: {result.source_crs}")
+        click.echo(f"  Destination CRS: {result.target_crs}")
+        click.echo(f"  Output: {result.output_path}")
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 # Inspect command - uses OptionalIntCommand for --head/--tail optional values
