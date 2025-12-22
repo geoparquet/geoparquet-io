@@ -90,12 +90,12 @@ class TestAssessRowCount:
 
     def test_suboptimal_for_between_ranges(self):
         """Test suboptimal status for row counts between optimal and poor."""
-        # 2000 < rows < 50000
-        status, message, color = assess_row_count(10000)
+        # 2000 < rows < 10000 (below optimal range)
+        status, message, color = assess_row_count(5000)
         assert status == "suboptimal"
         assert color == "yellow"
 
-        # 200000 < rows < 1000000
+        # 200000 < rows < 1000000 (above optimal range)
         status, message, color = assess_row_count(500000)
         assert status == "suboptimal"
         assert color == "yellow"
