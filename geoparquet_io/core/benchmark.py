@@ -10,6 +10,7 @@ import json
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import tracemalloc
@@ -576,17 +577,20 @@ def _run_all_benchmarks(
 
     for converter in run_converters:
         if not quiet:
-            click.echo(f"  {CONVERTERS[converter]['name']}...", nl=False)
+            sys.stdout.write(f"  {CONVERTERS[converter]['name']}...")
+            sys.stdout.flush()
 
         for iteration in range(1, iterations + 1):
             result = run_single_benchmark(converter, input_path, output_dir, iteration)
             all_results.append(result)
 
             if not quiet:
-                click.echo(" ." if result["success"] else " X", nl=False)
+                sys.stdout.write(" ." if result["success"] else " X")
+                sys.stdout.flush()
 
         if not quiet:
-            click.echo("")
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
     return all_results
 

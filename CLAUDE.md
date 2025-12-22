@@ -161,6 +161,48 @@ metadata = schema.metadata  # Dict with b"geo" key for GeoParquet
 ### Click (CLI framework)
 - All CLI commands use Click decorators
 - Command groups: `cli`, `check`, `add`, `sort`, `partition`
+- **IMPORTANT: Do NOT use `click.echo()` for output** - use the logger instead (see Logging section below)
+
+---
+
+## Logging
+
+**CRITICAL: Never use `click.echo()` in `core/` modules. Always use the logging helpers.**
+
+`click.echo()` is allowed in `cli/` for direct CLI output, but `core/` modules must use the logger for testability and library compatibility.
+
+This project uses a centralized logging system in `core/logging_config.py` that provides colored CLI output while maintaining compatibility with library usage and testing.
+
+### Import and Usage
+```python
+from geoparquet_io.core.logging_config import success, warn, error, info, debug, progress
+
+success("Operation completed")  # Green - for completed operations
+warn("Something to note")       # Yellow - for warnings
+error("Something went wrong")   # Red - for errors
+info("Informational message")   # Cyan - for tips/context
+debug("Debug details")          # Only shown when verbose=True
+progress("Processing...")       # Plain text - for status updates
+```
+
+### Why Not click.echo()?
+
+1. **Testability**: Logger output is captured by pytest; click.echo requires special handling
+2. **Library usage**: When gpio is used as a library, users can configure logging handlers
+3. **Consistency**: Single source of truth for all output formatting
+4. **Verbosity control**: Debug messages are automatically hidden unless `--verbose` is passed
+
+### Setting Up Verbose Mode in Core Functions
+```python
+from geoparquet_io.core.logging_config import configure_verbose, debug
+
+def my_function(input_file: str, verbose: bool = False):
+    configure_verbose(verbose)  # Call at start of function
+    debug("This only shows with --verbose")
+```
+
+### Pre-Commit Enforcement
+A pre-commit hook enforces this rule. If you add `click.echo()` in `core/`, the commit will fail.
 
 ### fsspec (File system abstraction)
 - Handles local and remote file access uniformly
@@ -487,8 +529,9 @@ gpio extract input.parquet output.parquet --show-sql --verbose
 
 ### Adding Debug Output
 ```python
-if verbose:
-    click.echo(f"Debug: variable = {variable}")
+from geoparquet_io.core.logging_config import debug
+
+debug(f"variable = {variable}")  # Only shown when verbose=True
 ```
 
 ---
