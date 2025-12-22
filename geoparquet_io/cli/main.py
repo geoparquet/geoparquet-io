@@ -42,6 +42,7 @@ from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
 from geoparquet_io.core.reproject import reproject_impl
+from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
@@ -1164,6 +1165,78 @@ def hilbert_order(
             row_group_size,
             profile,
             geoparquet_version,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@sort.command(name="column")
+@click.argument("input_parquet")
+@click.argument("output_parquet", type=click.Path())
+@click.argument("columns")
+@click.option(
+    "--descending",
+    is_flag=True,
+    help="Sort in descending order (default: ascending)",
+)
+@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
+@output_format_options
+@geoparquet_version_option
+@verbose_option
+def sort_column(
+    input_parquet,
+    output_parquet,
+    columns,
+    descending,
+    profile,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    geoparquet_version,
+    verbose,
+):
+    """
+    Sort a GeoParquet file by specified column(s).
+
+    COLUMNS is a comma-separated list of column names to sort by.
+
+    Examples:
+
+        gpio sort column input.parquet output.parquet name
+
+        gpio sort column input.parquet output.parquet name,date --descending
+
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    """
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_io.core.common import parse_size_string
+
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}") from e
+
+    try:
+        sort_by_column_impl(
+            input_parquet,
+            output_parquet,
+            columns=columns,
+            descending=descending,
+            verbose=verbose,
+            compression=compression.upper(),
+            compression_level=compression_level,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e

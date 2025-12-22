@@ -3,13 +3,14 @@
 import click
 
 from geoparquet_io.core.common import add_computed_column, find_primary_geometry_column
+from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
 from geoparquet_io.core.logging_config import configure_verbose, success
 
 
 def add_h3_column(
     input_parquet,
     output_parquet,
-    h3_column_name="h3_cell",
+    h3_column_name=DEFAULT_H3_COLUMN_NAME,
     h3_resolution=9,
     dry_run=False,
     verbose=False,

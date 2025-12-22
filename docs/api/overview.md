@@ -20,6 +20,7 @@ The API is organized into modules under `geoparquet_io.core`:
 ### Spatial Operations
 
 - `hilbert_order` - Sort by Hilbert curve
+- `sort_by_column` - Sort by any column(s)
 - `add_bbox_metadata` - Update bbox metadata
 
 ### Partitioning

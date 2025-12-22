@@ -1,6 +1,11 @@
 # Sorting Data
 
-The `sort` command spatially reorders GeoParquet files for optimal performance.
+The `sort` command reorders GeoParquet files for optimal performance and query efficiency.
+
+## Sorting Methods
+
+- **Hilbert curve** - Optimal spatial ordering using Hilbert space-filling curve
+- **Column** - Sort by any column(s) for non-spatial ordering needs
 
 ## Hilbert Curve Ordering
 
@@ -53,6 +58,28 @@ gpio sort hilbert input.parquet output.parquet --row-group-size 100000
 gpio sort hilbert input.parquet output.parquet --row-group-size-mb 256MB
 gpio sort hilbert input.parquet output.parquet --row-group-size-mb 1GB
 ```
+
+## Column Ordering
+
+Sort by any column(s) for non-spatial ordering needs:
+
+```bash
+# Sort by a single column
+gpio sort column input.parquet output.parquet name
+
+# Sort by multiple columns (comma-separated)
+gpio sort column input.parquet output.parquet country,city
+
+# Sort in descending order
+gpio sort column input.parquet output.parquet date --descending
+```
+
+Column sorting:
+
+- Accepts one or more column names (comma-separated)
+- Validates that columns exist before sorting
+- Preserves all original columns and metadata
+- Useful for time-series data or alphabetical ordering
 
 ## Output Format
 

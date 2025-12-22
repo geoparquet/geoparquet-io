@@ -7,6 +7,7 @@ import click
 
 from geoparquet_io.core.add_h3_column import add_h3_column
 from geoparquet_io.core.common import safe_file_url
+from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
 
@@ -14,7 +15,7 @@ from geoparquet_io.core.partition_common import partition_by_column, preview_par
 def partition_by_h3(
     input_parquet: str,
     output_folder: str,
-    h3_column_name: str = "h3_cell",
+    h3_column_name: str = DEFAULT_H3_COLUMN_NAME,
     resolution: int = 9,
     hive: bool = False,
     overwrite: bool = False,
