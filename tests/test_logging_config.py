@@ -1,12 +1,15 @@
 """Tests for the logging configuration module."""
 
 import logging
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from geoparquet_io.core.logging_config import (
     COLORS,
     CLIFormatter,
+    DynamicStreamHandler,
+    LibraryFormatter,
     configure_verbose,
     debug,
     error,
@@ -277,3 +280,100 @@ class TestGetLogger:
         """get_logger(name) should return a child logger."""
         logger = get_logger("geoparquet_io.core.convert")
         assert logger.name == "geoparquet_io.core.convert"
+
+
+class TestLibraryFormatter:
+    """Tests for LibraryFormatter class (lines 115-119)."""
+
+    def test_init(self):
+        """Test LibraryFormatter initialization."""
+        formatter = LibraryFormatter()
+        assert formatter is not None
+        # Verify format string contains expected elements
+        assert "asctime" in formatter._fmt
+        assert "name" in formatter._fmt
+        assert "levelname" in formatter._fmt
+        assert "message" in formatter._fmt
+
+    def test_format(self):
+        """Test LibraryFormatter formats correctly."""
+        formatter = LibraryFormatter()
+        record = logging.LogRecord(
+            name="geoparquet_io.test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Test message",
+            args=(),
+            exc_info=None,
+        )
+        result = formatter.format(record)
+        assert "geoparquet_io.test" in result
+        assert "INFO" in result
+        assert "Test message" in result
+
+
+class TestDynamicStreamHandler:
+    """Tests for DynamicStreamHandler class."""
+
+    def test_emit_success(self):
+        """Test emit writes to stdout."""
+        handler = DynamicStreamHandler()
+        handler.setFormatter(CLIFormatter(use_colors=False))
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Test emit",
+            args=(),
+            exc_info=None,
+        )
+        # Should not raise
+        handler.emit(record)
+
+    def test_emit_exception_handling(self):
+        """Test emit handles exceptions (lines 142-143)."""
+        handler = DynamicStreamHandler()
+        handler.setFormatter(CLIFormatter(use_colors=False))
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Test emit",
+            args=(),
+            exc_info=None,
+        )
+
+        # Mock handleError to verify it's called on exception
+        handler.handleError = MagicMock()
+
+        # Patch the parent class emit to raise an exception
+        with patch("logging.StreamHandler.emit", side_effect=Exception("Write failed")):
+            handler.emit(record)
+
+        # handleError should have been called
+        handler.handleError.assert_called_once()
+
+
+class TestCLIFormatterPlainMessage:
+    """Additional tests for CLIFormatter plain message path (line 103)."""
+
+    def test_plain_info_message_without_markers(self):
+        """Test formatting a plain INFO message with no markers (hits line 103)."""
+        formatter = CLIFormatter(show_timestamps=False, use_colors=True)
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Plain message with no markers",
+            args=(),
+            exc_info=None,
+        )
+        result = formatter.format(record)
+        # Plain INFO message without markers should return as-is (no color codes)
+        assert result == "Plain message with no markers"
+        # Should NOT have any ANSI color codes since no markers matched
+        assert "\033[" not in result

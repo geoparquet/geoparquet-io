@@ -82,7 +82,7 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-fail-under=75"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "network: marks tests requiring network access (deselect with '-m \"not network\"')",
@@ -132,3 +132,20 @@ min_confidence = 80
 paths = ["geoparquet_io", "tests"]
 sort_by_size = true
 verbose = false
+
+[tool.coverage.run]
+source = ["geoparquet_io"]
+branch = false
+omit = [
+    "geoparquet_io/__init__.py",
+]
+
+[tool.coverage.report]
+fail_under = 75
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

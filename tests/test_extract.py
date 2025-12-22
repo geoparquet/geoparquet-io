@@ -16,6 +16,8 @@ import duckdb
 import pytest
 
 from geoparquet_io.core.extract import (
+    _is_geographic_crs,
+    _looks_like_latlong_bbox,
     build_column_selection,
     build_extract_query,
     build_spatial_filter,
@@ -35,6 +37,59 @@ BUILDINGS_PARQUET = TEST_DATA_DIR / "buildings_test.parquet"
 
 # Remote test file (Danish fiboa dataset)
 REMOTE_PARQUET_URL = "https://data.source.coop/fiboa/data/dk/dk-2024.parquet"
+
+
+class TestLooksLikeLatLongBbox:
+    """Tests for _looks_like_latlong_bbox function."""
+
+    def test_valid_latlong_bbox(self):
+        """Test valid lat/long bbox returns True."""
+        assert _looks_like_latlong_bbox((-122.5, 37.5, -122.0, 38.0)) is True
+        assert _looks_like_latlong_bbox((-180.0, -90.0, 180.0, 90.0)) is True
+        assert _looks_like_latlong_bbox((0.0, 0.0, 0.0, 0.0)) is True
+
+    def test_out_of_range_bbox(self):
+        """Test out of range bbox returns False."""
+        assert _looks_like_latlong_bbox((500000, 500000, 600000, 600000)) is False
+        assert _looks_like_latlong_bbox((-200, 0, 200, 50)) is False
+
+
+class TestIsGeographicCrs:
+    """Tests for _is_geographic_crs function."""
+
+    def test_none_returns_none(self):
+        """Test None CRS returns None."""
+        assert _is_geographic_crs(None) is None
+
+    def test_string_geographic_crs(self):
+        """Test string CRS codes for geographic."""
+        assert _is_geographic_crs("EPSG:4326") is True
+        assert _is_geographic_crs("OGC:CRS84") is True
+        assert _is_geographic_crs("crs84") is True
+
+    def test_string_unknown_crs(self):
+        """Test unknown string CRS returns None."""
+        assert _is_geographic_crs("EPSG:3857") is None
+
+    def test_dict_geographic_crs(self):
+        """Test dict CRS for geographic type."""
+        geo_crs = {"type": "GeographicCRS", "name": "WGS 84"}
+        assert _is_geographic_crs(geo_crs) is True
+
+    def test_dict_projected_crs(self):
+        """Test dict CRS for projected type."""
+        proj_crs = {"type": "ProjectedCRS", "name": "Web Mercator"}
+        assert _is_geographic_crs(proj_crs) is False
+
+    def test_dict_with_epsg_code(self):
+        """Test dict CRS with EPSG code."""
+        crs_with_code = {"id": {"code": 4326, "authority": "EPSG"}}
+        assert _is_geographic_crs(crs_with_code) is True
+
+    def test_dict_without_type(self):
+        """Test dict CRS without type returns None."""
+        unknown_crs = {"name": "Unknown"}
+        assert _is_geographic_crs(unknown_crs) is None
 
 
 class TestParseBbox:

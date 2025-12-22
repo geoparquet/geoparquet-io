@@ -328,6 +328,52 @@ class TestAddCommands:
         assert h3_meta["column"] == "h3_cell"
         assert h3_meta["resolution"] == 13
 
+    def test_add_h3_invalid_resolution_too_low(self, buildings_test_file, temp_output_file):
+        """Test adding H3 with invalid resolution (too low)."""
+        runner = CliRunner()
+        result = runner.invoke(
+            add, ["h3", buildings_test_file, temp_output_file, "--resolution", "-1"]
+        )
+        # Should fail with error about invalid resolution
+        assert result.exit_code != 0
+
+    def test_add_h3_invalid_resolution_too_high(self, buildings_test_file, temp_output_file):
+        """Test adding H3 with invalid resolution (too high)."""
+        runner = CliRunner()
+        result = runner.invoke(
+            add, ["h3", buildings_test_file, temp_output_file, "--resolution", "16"]
+        )
+        # Should fail with error about invalid resolution
+        assert result.exit_code != 0
+
+    def test_add_h3_core_function_invalid_resolution(self, buildings_test_file, temp_output_file):
+        """Test core add_h3_column function with invalid resolution (covers line 51)."""
+        import click
+
+        from geoparquet_io.core.add_h3_column import add_h3_column
+
+        # Test resolution too high (bypassing CLI validation)
+        with pytest.raises(click.BadParameter) as exc_info:
+            add_h3_column(
+                input_parquet=buildings_test_file,
+                output_parquet=temp_output_file,
+                h3_resolution=16,
+                h3_column_name="h3_cell",
+                verbose=False,
+            )
+        assert "H3 resolution must be between 0 and 15" in str(exc_info.value)
+
+        # Test resolution too low
+        with pytest.raises(click.BadParameter) as exc_info:
+            add_h3_column(
+                input_parquet=buildings_test_file,
+                output_parquet=temp_output_file,
+                h3_resolution=-1,
+                h3_column_name="h3_cell",
+                verbose=False,
+            )
+        assert "H3 resolution must be between 0 and 15" in str(exc_info.value)
+
     # Note: add admin-divisions tests are skipped because they require a countries file
     # and network access. These should be tested separately with appropriate test data.
     @pytest.mark.skip(reason="Requires countries file and network access")
