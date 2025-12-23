@@ -1344,6 +1344,75 @@ def _check_row_group_bbox_statistics(parquet_file: str, geom_col: str) -> Valida
         )
 
 
+def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> ValidationCheck:
+    """Check that geometry column has native Parquet GeospatialStatistics (geo_bbox)."""
+    from geoparquet_io.core.common import get_duckdb_connection, is_remote_url, safe_file_url
+
+    try:
+        # For remote files, skip (may be slow)
+        if is_remote_url(parquet_file):
+            return ValidationCheck(
+                name=f"native_geo_stats_{geom_col}",
+                status=CheckStatus.SKIPPED,
+                message="geospatial statistics check skipped for remote files",
+                category="parquet_geo_types",
+            )
+
+        safe_url = safe_file_url(parquet_file, verbose=False)
+        con = get_duckdb_connection(load_spatial=True)
+
+        try:
+            # Check for geo_bbox in parquet_metadata for the geometry column
+            result = con.execute(f"""
+                SELECT geo_bbox, geo_types
+                FROM parquet_metadata('{safe_url}')
+                WHERE path_in_schema = '{geom_col}'
+                LIMIT 1
+            """).fetchone()
+
+            if result is None:
+                return ValidationCheck(
+                    name=f"native_geo_stats_{geom_col}",
+                    status=CheckStatus.WARNING,
+                    message=f'geometry column "{geom_col}" not found in parquet metadata',
+                    category="parquet_geo_types",
+                )
+
+            geo_bbox, geo_types = result
+
+            # Check if geo_bbox has valid values
+            if geo_bbox and geo_bbox.get("xmin") is not None:
+                bbox_str = (
+                    f"[{geo_bbox['xmin']:.2f}, {geo_bbox['ymin']:.2f}, "
+                    f"{geo_bbox['xmax']:.2f}, {geo_bbox['ymax']:.2f}]"
+                )
+                return ValidationCheck(
+                    name=f"native_geo_stats_{geom_col}",
+                    status=CheckStatus.PASSED,
+                    message=f"geometry column has geospatial statistics: {bbox_str}",
+                    category="parquet_geo_types",
+                )
+            else:
+                return ValidationCheck(
+                    name=f"native_geo_stats_{geom_col}",
+                    status=CheckStatus.WARNING,
+                    message=f'geometry column "{geom_col}" missing geospatial statistics',
+                    details="GeospatialStatistics (geo_bbox) enables efficient spatial filtering. "
+                    "Re-write with a tool that generates native geo statistics.",
+                    category="parquet_geo_types",
+                )
+        finally:
+            con.close()
+
+    except Exception as e:
+        return ValidationCheck(
+            name=f"native_geo_stats_{geom_col}",
+            status=CheckStatus.SKIPPED,
+            message=f"could not check geospatial statistics: {e}",
+            category="parquet_geo_types",
+        )
+
+
 # =============================================================================
 # GeoParquet 2.0 Checks
 # =============================================================================
@@ -1813,7 +1882,7 @@ def _run_parquet_geo_only_checks(
         checks.append(_check_native_geo_type_present(schema_info, geom_col))
         checks.append(_check_native_crs_format(schema_info, geom_col))
         checks.append(_check_geography_edges_valid(schema_info, geom_col))
-        checks.append(_check_row_group_bbox_statistics(parquet_file, geom_col))
+        checks.append(_check_native_geo_statistics(parquet_file, geom_col))
 
         # Parquet-geo-only specific CRS check
         checks.append(_check_parquet_geo_only_crs(schema_info, geom_col))
