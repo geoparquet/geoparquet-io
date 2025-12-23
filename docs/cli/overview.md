@@ -15,6 +15,7 @@ gpio [OPTIONS] COMMAND [ARGS]...
 - **[convert](convert.md)** - Convert vector formats to optimized GeoParquet
 - **[inspect](inspect.md)** - Examine file metadata and preview data
 - **[check](check.md)** - Validate files and fix issues automatically
+- **[validate](validate.md)** - Validate against GeoParquet specification
 - **[sort](sort.md)** - Spatially sort using Hilbert curves
 - **[add](add.md)** - Enhance files with spatial indices
 - **[partition](partition.md)** - Split files into optimized partitions
@@ -90,6 +91,7 @@ Analysis commands take a single input:
 ```bash
 gpio inspect myfile.parquet
 gpio check all myfile.parquet
+gpio validate myfile.parquet
 ```
 
 ### Partition Commands

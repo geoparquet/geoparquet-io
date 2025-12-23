@@ -1,0 +1,44 @@
+# validate Command
+
+For detailed usage and examples, see the [Validate User Guide](../guide/validate.md).
+
+## Quick Reference
+
+```bash
+gpio validate --help
+```
+
+This will show all available options.
+
+## Basic Usage
+
+```bash
+# Validate a GeoParquet file
+gpio validate myfile.parquet
+
+# JSON output for machine processing
+gpio validate myfile.parquet --json
+
+# Skip data validation for faster checks
+gpio validate myfile.parquet --skip-data-validation
+
+# Validate against specific version
+gpio validate myfile.parquet --geoparquet-version 1.1.0
+```
+
+## Options
+
+| Option | Description |
+|--------|-------------|
+| `--geoparquet-version` | Target version to validate against (auto-detected if not specified) |
+| `--json` | Output results as JSON |
+| `--skip-data-validation` | Skip geometry data validation checks |
+| `--sample-size` | Number of rows to sample for data validation (default: 1000, 0 for all) |
+| `--verbose` | Show detailed output |
+| `--profile` | AWS profile for S3 files |
+
+## Exit Codes
+
+- `0` - All checks passed
+- `1` - One or more checks failed
+- `2` - Warnings only (no failures)

@@ -2913,5 +2913,122 @@ def upload(
         raise click.ClickException(str(e)) from e
 
 
+@cli.command()
+@click.argument("parquet_file")
+@click.option(
+    "--geoparquet-version",
+    type=click.Choice(["1.0", "1.1", "2.0"]),
+    default=None,
+    help="Validate against specific GeoParquet version (default: auto-detect)",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output as JSON for machine parsing",
+)
+@click.option(
+    "--skip-data-validation",
+    is_flag=True,
+    help="Skip validation of actual data values against metadata claims",
+)
+@click.option(
+    "--sample-size",
+    type=int,
+    default=1000,
+    show_default=True,
+    help="Number of rows to sample for data validation (0 = all rows)",
+)
+@verbose_option
+@profile_option
+def validate(
+    parquet_file,
+    geoparquet_version,
+    json_output,
+    skip_data_validation,
+    sample_size,
+    verbose,
+    profile,
+):
+    """
+    Validate a GeoParquet file against specification requirements.
+
+    Checks file structure, metadata, and optionally data consistency against
+    the GeoParquet specification. Automatically detects the file version unless
+    --geoparquet-version is specified.
+
+    Supports GeoParquet 1.0, 1.1, 2.0, and Parquet native geo types.
+
+    \b
+    Exit codes:
+      0 - All checks passed
+      1 - One or more checks failed
+      2 - Warnings only (all required checks passed)
+
+    \b
+    Examples:
+      # Basic validation (auto-detect version)
+      gpio validate data.parquet
+
+      \b
+      # Validate against specific version
+      gpio validate data.parquet --geoparquet-version 1.1
+
+      \b
+      # JSON output for CI/CD
+      gpio validate data.parquet --json
+
+      \b
+      # Skip data validation for faster check
+      gpio validate data.parquet --skip-data-validation
+    """
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_profile_for_urls,
+    )
+    from geoparquet_io.core.validate import (
+        format_json_output as format_json,
+    )
+    from geoparquet_io.core.validate import (
+        format_terminal_output as format_terminal,
+    )
+    from geoparquet_io.core.validate import (
+        validate_geoparquet,
+    )
+
+    configure_verbose(verbose)
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, parquet_file)
+    setup_aws_profile_if_needed(profile, parquet_file)
+
+    try:
+        result = validate_geoparquet(
+            parquet_file,
+            target_version=geoparquet_version,
+            validate_data=not skip_data_validation,
+            sample_size=sample_size,
+            verbose=verbose,
+        )
+
+        if json_output:
+            click.echo(format_json(result))
+        else:
+            format_terminal(result)
+
+        # Exit codes
+        if result.failed_count > 0:
+            raise SystemExit(1)
+        elif result.warning_count > 0:
+            raise SystemExit(2)
+        else:
+            raise SystemExit(0)
+
+    except SystemExit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
 if __name__ == "__main__":
     cli()
