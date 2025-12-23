@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import uuid
 
 import click
 
@@ -9,7 +10,11 @@ from geoparquet_io.core.add_h3_column import add_h3_column
 from geoparquet_io.core.common import safe_file_url
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
-from geoparquet_io.core.partition_common import partition_by_column, preview_partition
+from geoparquet_io.core.partition_common import (
+    calculate_partition_stats,
+    partition_by_column,
+    preview_partition,
+)
 
 
 def _ensure_h3_column(input_parquet, h3_column_name, resolution, verbose):
@@ -32,7 +37,7 @@ def _ensure_h3_column(input_parquet, h3_column_name, resolution, verbose):
         debug(f"H3 column '{h3_column_name}' not found. Adding it now...")
 
     temp_file = os.path.join(
-        tempfile.gettempdir(), f"h3_enriched_{os.path.basename(input_parquet)}"
+        tempfile.gettempdir(), f"h3_enriched_{uuid.uuid4().hex}_{os.path.basename(input_parquet)}"
     )
 
     try:
@@ -84,19 +89,6 @@ def _run_preview(input_parquet, h3_column_name, preview_limit, verbose):
         limit=preview_limit,
         verbose=verbose,
     )
-
-
-def _calculate_partition_stats(output_folder, num_partitions):
-    """Calculate total and average size of created partitions."""
-    total_size_bytes = sum(
-        os.path.getsize(os.path.join(root, f))
-        for root, _, files in os.walk(output_folder)
-        for f in files
-        if f.endswith(".parquet")
-    )
-    total_size_mb = total_size_bytes / (1024 * 1024)
-    avg_size_mb = total_size_mb / num_partitions if num_partitions > 0 else 0
-    return total_size_mb, avg_size_mb
 
 
 def partition_by_h3(
@@ -156,7 +148,7 @@ def partition_by_h3(
             geoparquet_version=geoparquet_version,
         )
 
-        total_size_mb, avg_size_mb = _calculate_partition_stats(output_folder, num_partitions)
+        total_size_mb, avg_size_mb = calculate_partition_stats(output_folder, num_partitions)
         success(
             f"\nCreated {num_partitions} partition(s) in {output_folder} "
             f"(total: {total_size_mb:.2f} MB, avg: {avg_size_mb:.2f} MB)"

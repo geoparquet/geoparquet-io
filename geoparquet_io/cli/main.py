@@ -1564,9 +1564,9 @@ def sort(ctx):
 @click.option(
     "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
 )
-@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @geoparquet_version_option
+@profile_option
 @verbose_option
 def hilbert_order(
     input_parquet,
@@ -1811,9 +1811,9 @@ def add(ctx):
 @click.option(
     "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
 )
-@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @geoparquet_version_option
+@profile_option
 @dry_run_option
 @verbose_option
 def add_country_codes(
@@ -1921,9 +1921,9 @@ def add_country_codes(
     is_flag=True,
     help="Replace existing bbox column instead of skipping",
 )
-@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @geoparquet_version_option
+@profile_option
 @dry_run_option
 @verbose_option
 def add_bbox(
@@ -2031,9 +2031,9 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
     type=click.IntRange(0, 15),
     help="H3 resolution level (0-15). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9",
 )
-@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @geoparquet_version_option
+@profile_option
 @dry_run_option
 @verbose_option
 def add_h3(
@@ -2123,9 +2123,9 @@ def add_h3(
     is_flag=True,
     help="Use exact median computation on full dataset (slower but deterministic). Mutually exclusive with --approx.",
 )
-@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @geoparquet_version_option
+@profile_option
 @dry_run_option
 @click.option(
     "--force",
@@ -3211,7 +3211,7 @@ def benchmark(
 @cli.command()
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.argument("destination", type=str)
-@click.option("--profile", help="AWS profile name (S3 only)")
+@profile_option
 @click.option("--pattern", help="Glob pattern for filtering files (e.g., '*.parquet', '**/*.json')")
 @click.option(
     "--max-files", default=4, show_default=True, help="Max parallel file uploads for directories"

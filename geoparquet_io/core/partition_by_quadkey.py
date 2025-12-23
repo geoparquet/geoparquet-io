@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import uuid
 
 import click
 
@@ -13,7 +14,11 @@ from geoparquet_io.core.constants import (
     DEFAULT_QUADKEY_RESOLUTION,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
-from geoparquet_io.core.partition_common import partition_by_column, preview_partition
+from geoparquet_io.core.partition_common import (
+    calculate_partition_stats,
+    partition_by_column,
+    preview_partition,
+)
 
 
 def _validate_resolutions(resolution, partition_resolution):
@@ -53,7 +58,8 @@ def _ensure_quadkey_column(
         debug(f"Quadkey column '{quadkey_column_name}' not found. Adding it now...")
 
     temp_file = os.path.join(
-        tempfile.gettempdir(), f"quadkey_enriched_{os.path.basename(input_parquet)}"
+        tempfile.gettempdir(),
+        f"quadkey_enriched_{uuid.uuid4().hex}_{os.path.basename(input_parquet)}",
     )
 
     try:
@@ -109,19 +115,6 @@ def _run_quadkey_preview(
         limit=preview_limit,
         verbose=verbose,
     )
-
-
-def _calculate_partition_stats(output_folder, num_partitions):
-    """Calculate total and average size of created partitions."""
-    total_size_bytes = sum(
-        os.path.getsize(os.path.join(root, f))
-        for root, _, files in os.walk(output_folder)
-        for f in files
-        if f.endswith(".parquet")
-    )
-    total_size_mb = total_size_bytes / (1024 * 1024)
-    avg_size_mb = total_size_mb / num_partitions if num_partitions > 0 else 0
-    return total_size_mb, avg_size_mb
 
 
 def partition_by_quadkey(
@@ -186,7 +179,7 @@ def partition_by_quadkey(
             geoparquet_version=geoparquet_version,
         )
 
-        total_size_mb, avg_size_mb = _calculate_partition_stats(output_folder, num_partitions)
+        total_size_mb, avg_size_mb = calculate_partition_stats(output_folder, num_partitions)
         success(
             f"\nCreated {num_partitions} partition(s) in {output_folder} "
             f"(total: {total_size_mb:.2f} MB, avg: {avg_size_mb:.2f} MB)"

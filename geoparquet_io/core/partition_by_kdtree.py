@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import uuid
 
 import click
 
@@ -100,7 +101,9 @@ def partition_by_kdtree(
 
         # Create temporary file for KD-tree-enriched data
         temp_dir = tempfile.gettempdir()
-        temp_file = os.path.join(temp_dir, f"kdtree_enriched_{os.path.basename(input_parquet)}")
+        temp_file = os.path.join(
+            temp_dir, f"kdtree_enriched_{uuid.uuid4()}_{os.path.basename(input_parquet)}"
+        )
 
         try:
             # Add KD-tree column at the specified iterations

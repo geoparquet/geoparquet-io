@@ -126,13 +126,14 @@ def sort_by_column(
         success(f"Sorted by {', '.join(column_list)} to: {output_parquet}")
 
     except duckdb.IOException as e:
-        con.close()
         if is_remote_url(input_parquet):
             hints = get_remote_error_hint(str(e), input_parquet)
             raise click.ClickException(
                 f"Failed to read remote file.\n\n{hints}\n\nOriginal error: {str(e)}"
             ) from e
         raise
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import uuid
 
 import click
 
@@ -93,7 +94,9 @@ def sort_by_quadkey(
 
         # Create temporary file for quadkey-enriched data
         temp_dir = tempfile.gettempdir()
-        temp_file = os.path.join(temp_dir, f"quadkey_enriched_{os.path.basename(input_parquet)}")
+        temp_file = os.path.join(
+            temp_dir, f"quadkey_enriched_{uuid.uuid4().hex}_{os.path.basename(input_parquet)}"
+        )
 
         try:
             add_quadkey_column(

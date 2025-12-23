@@ -8,10 +8,8 @@ import pytest
 from click import UsageError
 from click.testing import CliRunner
 
-from geoparquet_io.core.partition_by_quadkey import (
-    _calculate_partition_stats,
-    _validate_resolutions,
-)
+from geoparquet_io.core.partition_by_quadkey import _validate_resolutions
+from geoparquet_io.core.partition_common import calculate_partition_stats
 
 
 class TestValidateResolutions:
@@ -41,11 +39,11 @@ class TestValidateResolutions:
 
 
 class TestCalculatePartitionStats:
-    """Tests for _calculate_partition_stats function."""
+    """Tests for calculate_partition_stats function."""
 
     def test_empty_folder(self, tmp_path):
         """Test with empty folder."""
-        total_mb, avg_mb = _calculate_partition_stats(str(tmp_path), 0)
+        total_mb, avg_mb = calculate_partition_stats(str(tmp_path), 0)
         assert total_mb == 0
         assert avg_mb == 0
 
@@ -56,7 +54,7 @@ class TestCalculatePartitionStats:
             f = tmp_path / f"file_{i}.parquet"
             f.write_bytes(b"x" * 1024)  # 1KB each
 
-        total_mb, avg_mb = _calculate_partition_stats(str(tmp_path), 3)
+        total_mb, avg_mb = calculate_partition_stats(str(tmp_path), 3)
         assert total_mb > 0
         assert avg_mb > 0
 
