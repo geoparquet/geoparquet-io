@@ -1518,29 +1518,6 @@ def _check_v2_edges_consistency(
     )
 
 
-def _check_bbox_column_not_recommended(parquet_file: str) -> ValidationCheck:
-    """Check if bbox column exists - not recommended for native geo types."""
-    from geoparquet_io.core.duckdb_metadata import has_bbox_column
-
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-
-    if has_bbox:
-        return ValidationCheck(
-            name="bbox_column_not_recommended",
-            status=CheckStatus.WARNING,
-            message=f'bbox column "{bbox_col_name}" found (not needed with native geo types)',
-            details="Native Parquet geo types provide row group statistics for spatial filtering",
-            category="parquet_geo_types",
-        )
-
-    return ValidationCheck(
-        name="bbox_column_not_recommended",
-        status=CheckStatus.PASSED,
-        message="no bbox column (correct for native geo types)",
-        category="parquet_geo_types",
-    )
-
-
 # =============================================================================
 # Parquet-geo-only Checks
 # =============================================================================
@@ -1560,7 +1537,7 @@ def _check_parquet_geo_only_crs(schema_info: list, geom_col: str) -> ValidationC
                     name=f"parquet_geo_only_crs_{geom_col}",
                     status=CheckStatus.PASSED,
                     message="no CRS specified (defaults to OGC:CRS84)",
-                    category="parquet_geo_only",
+                    category="parquet_geo_types",
                 )
 
             crs = parsed.get("crs")
@@ -1571,7 +1548,7 @@ def _check_parquet_geo_only_crs(schema_info: list, geom_col: str) -> ValidationC
                     name=f"parquet_geo_only_crs_{geom_col}",
                     status=CheckStatus.PASSED,
                     message="no CRS specified (defaults to OGC:CRS84)",
-                    category="parquet_geo_only",
+                    category="parquet_geo_types",
                 )
 
             # Check if CRS is geographic (WGS84, EPSG:4326, OGC:CRS84)
@@ -1580,7 +1557,7 @@ def _check_parquet_geo_only_crs(schema_info: list, geom_col: str) -> ValidationC
                     name=f"parquet_geo_only_crs_{geom_col}",
                     status=CheckStatus.PASSED,
                     message="CRS is geographic (widely supported)",
-                    category="parquet_geo_only",
+                    category="parquet_geo_types",
                 )
 
             # Check if CRS uses Parquet spec format
@@ -1589,7 +1566,7 @@ def _check_parquet_geo_only_crs(schema_info: list, geom_col: str) -> ValidationC
                     name=f"parquet_geo_only_crs_{geom_col}",
                     status=CheckStatus.PASSED,
                     message="CRS uses valid PROJJSON format",
-                    category="parquet_geo_only",
+                    category="parquet_geo_types",
                 )
 
             if isinstance(crs, str) and crs.startswith("srid:"):
@@ -1597,7 +1574,7 @@ def _check_parquet_geo_only_crs(schema_info: list, geom_col: str) -> ValidationC
                     name=f"parquet_geo_only_crs_{geom_col}",
                     status=CheckStatus.PASSED,
                     message=f"CRS uses valid srid format: {crs}",
-                    category="parquet_geo_only",
+                    category="parquet_geo_types",
                 )
 
             # Other CRS format - warning
@@ -1607,14 +1584,14 @@ def _check_parquet_geo_only_crs(schema_info: list, geom_col: str) -> ValidationC
                 message="CRS format may not be widely recognized by geospatial tools",
                 details=f"CRS: {_crs_summary(crs)}. "
                 "Use 'gpio convert --geoparquet-version 2.0' to add standardized metadata.",
-                category="parquet_geo_only",
+                category="parquet_geo_types",
             )
 
     return ValidationCheck(
         name=f"parquet_geo_only_crs_{geom_col}",
         status=CheckStatus.SKIPPED,
         message=f'column "{geom_col}" not found',
-        category="parquet_geo_only",
+        category="parquet_geo_types",
     )
 
 
@@ -1836,8 +1813,7 @@ def _run_parquet_geo_only_checks(
         checks.append(_check_native_geo_type_present(schema_info, geom_col))
         checks.append(_check_native_crs_format(schema_info, geom_col))
         checks.append(_check_geography_edges_valid(schema_info, geom_col))
-        # For native geo types, bbox column is not recommended (native types provide stats)
-        checks.append(_check_bbox_column_not_recommended(parquet_file))
+        checks.append(_check_row_group_bbox_statistics(parquet_file, geom_col))
 
         # Parquet-geo-only specific CRS check
         checks.append(_check_parquet_geo_only_crs(schema_info, geom_col))
@@ -1952,8 +1928,6 @@ def _run_geoparquet_checks(
             checks.append(_check_native_geo_type_present(schema_info, col_name))
             checks.append(_check_native_crs_format(schema_info, col_name))
             checks.append(_check_geography_edges_valid(schema_info, col_name))
-            # For native geo types, bbox column is not recommended (native types provide stats)
-            checks.append(_check_bbox_column_not_recommended(parquet_file))
 
         # GeoParquet 2.0 specific checks
         for col_name in columns.keys():
@@ -2003,7 +1977,6 @@ def format_terminal_output(result: ValidationResult) -> None:
         "geoparquet_1_1": "GeoParquet 1.1",
         "parquet_geo_types": "Parquet Native Geo Types",
         "geoparquet_2_0": "GeoParquet 2.0 Requirements",
-        "parquet_geo_only": "Parquet Geo (No Metadata)",
         "core": "Core",
     }
 
@@ -2017,7 +1990,6 @@ def format_terminal_output(result: ValidationResult) -> None:
         "geoparquet_1_1",
         "parquet_geo_types",
         "geoparquet_2_0",
-        "parquet_geo_only",
     ]
 
     # Sort categories by the defined order, with unknown categories at the end

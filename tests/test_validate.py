@@ -453,9 +453,9 @@ class TestValidateGeoparquet:
         result = validate_geoparquet(parquet_geo_only_file)
         assert result.detected_version == "parquet-geo-only"
         assert result.is_valid is True
-        # Should have parquet_geo_only checks
+        # Should have parquet_geo_types checks (native geo types)
         categories = {c.category for c in result.checks}
-        assert "parquet_geo_only" in categories
+        assert "parquet_geo_types" in categories
 
     def test_validate_with_skip_data_validation(self, geoparquet_v1_file):
         """Test validation with data validation disabled."""
