@@ -3383,6 +3383,8 @@ def validate(
         elif result.warning_count > 0:
             raise click.exceptions.Exit(2)
         # Exit 0 is implicit when no exception is raised
+    except click.exceptions.Exit:
+        raise
     except Exception as e:
         raise click.ClickException(str(e)) from e
 

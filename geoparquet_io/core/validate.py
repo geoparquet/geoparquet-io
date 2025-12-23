@@ -1280,6 +1280,89 @@ def _check_geography_coordinate_bounds(
 
 
 # =============================================================================
+# Row Group Statistics Checks
+# =============================================================================
+
+
+def _check_row_group_bbox_statistics(parquet_file: str, geom_col: str) -> ValidationCheck:
+    """Check that geometry column has row group statistics for spatial filtering."""
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.common import is_remote_url
+
+    try:
+        # For remote files, we may not be able to access row group metadata efficiently
+        if is_remote_url(parquet_file):
+            return ValidationCheck(
+                name=f"row_group_bbox_stats_{geom_col}",
+                status=CheckStatus.SKIPPED,
+                message="row group statistics check skipped for remote files",
+                category="parquet_geo_types",
+            )
+
+        pf = pq.ParquetFile(parquet_file)
+        metadata = pf.metadata
+
+        if metadata.num_row_groups == 0:
+            return ValidationCheck(
+                name=f"row_group_bbox_stats_{geom_col}",
+                status=CheckStatus.SKIPPED,
+                message="no row groups to check",
+                category="parquet_geo_types",
+            )
+
+        # Find the geometry column index
+        schema = pf.schema_arrow
+        geom_col_idx = None
+        for i, field in enumerate(schema):
+            if field.name == geom_col:
+                geom_col_idx = i
+                break
+
+        if geom_col_idx is None:
+            return ValidationCheck(
+                name=f"row_group_bbox_stats_{geom_col}",
+                status=CheckStatus.FAILED,
+                message=f'geometry column "{geom_col}" not found in schema',
+                category="parquet_geo_types",
+            )
+
+        # Check first row group for statistics
+        rg_metadata = metadata.row_group(0)
+        col_metadata = rg_metadata.column(geom_col_idx)
+
+        if col_metadata.is_stats_set:
+            # Check if min/max are available (indicates bbox stats)
+            if col_metadata.statistics is not None:
+                stats = col_metadata.statistics
+                has_min = stats.has_min_max
+                if has_min:
+                    return ValidationCheck(
+                        name=f"row_group_bbox_stats_{geom_col}",
+                        status=CheckStatus.PASSED,
+                        message=f'column "{geom_col}" has row group statistics for spatial filtering',
+                        category="parquet_geo_types",
+                    )
+
+        return ValidationCheck(
+            name=f"row_group_bbox_stats_{geom_col}",
+            status=CheckStatus.WARNING,
+            message=f'column "{geom_col}" missing row group bbox statistics',
+            details="Row group statistics enable efficient spatial filtering. "
+            "Re-write the file with a tool that generates geometry statistics.",
+            category="parquet_geo_types",
+        )
+
+    except Exception as e:
+        return ValidationCheck(
+            name=f"row_group_bbox_stats_{geom_col}",
+            status=CheckStatus.SKIPPED,
+            message=f"could not check row group statistics: {e}",
+            category="parquet_geo_types",
+        )
+
+
+# =============================================================================
 # GeoParquet 2.0 Checks
 # =============================================================================
 
@@ -1764,6 +1847,7 @@ def _run_parquet_geo_only_checks(
         checks.append(_check_native_geo_type_present(schema_info, geom_col))
         checks.append(_check_native_crs_format(schema_info, geom_col))
         checks.append(_check_geography_edges_valid(schema_info, geom_col))
+        checks.append(_check_row_group_bbox_statistics(parquet_file, geom_col))
 
         # Parquet-geo-only specific CRS check
         checks.append(_check_parquet_geo_only_crs(schema_info, geom_col))
@@ -1871,8 +1955,16 @@ def _run_geoparquet_checks(
 
         checks.append(_check_file_extension(parquet_file))
 
-    # GeoParquet 2.0 checks
+    # GeoParquet 2.0 checks - run Parquet native geo type checks first
     if file_type_info["file_type"] == "geoparquet_v2":
+        # Parquet native geo type checks (run first for 2.0)
+        for col_name in columns.keys():
+            checks.append(_check_native_geo_type_present(schema_info, col_name))
+            checks.append(_check_native_crs_format(schema_info, col_name))
+            checks.append(_check_geography_edges_valid(schema_info, col_name))
+            checks.append(_check_row_group_bbox_statistics(parquet_file, col_name))
+
+        # GeoParquet 2.0 specific checks
         for col_name in columns.keys():
             checks.append(_check_v2_uses_native_types(schema_info, col_name))
             checks.append(_check_v2_crs_in_parquet_type(geo_meta, schema_info, col_name))
@@ -1913,20 +2005,40 @@ def format_terminal_output(result: ValidationResult) -> None:
             categories[cat] = []
         categories[cat].append(check)
 
-    # Display category labels
+    # Category labels and display order
     category_labels = {
         "core_metadata": "Core Metadata",
         "column_metadata": "Column Validation",
         "parquet_schema": "Parquet Schema",
         "data_validation": "Data Validation",
         "geoparquet_1_1": "GeoParquet 1.1 Covering",
-        "geoparquet_2_0": "GeoParquet 2.0 Requirements",
         "parquet_geo_types": "Parquet Native Geo Types",
+        "geoparquet_2_0": "GeoParquet 2.0 Requirements",
         "parquet_geo_only": "Parquet Geo (No Metadata)",
         "core": "Core",
     }
 
-    for category, checks in categories.items():
+    # Display in a specific order so Parquet Native Geo Types appears before GeoParquet 2.0
+    category_order = [
+        "core",
+        "core_metadata",
+        "column_metadata",
+        "parquet_schema",
+        "data_validation",
+        "geoparquet_1_1",
+        "parquet_geo_types",
+        "geoparquet_2_0",
+        "parquet_geo_only",
+    ]
+
+    # Sort categories by the defined order, with unknown categories at the end
+    sorted_categories = sorted(
+        categories.keys(),
+        key=lambda c: category_order.index(c) if c in category_order else len(category_order),
+    )
+
+    for category in sorted_categories:
+        checks = categories[category]
         label = category_labels.get(category, category.replace("_", " ").title())
         console.print(f"[bold]{label}:[/bold]")
 

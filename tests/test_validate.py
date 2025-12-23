@@ -575,14 +575,16 @@ class TestValidateCLI:
         """Test validate on parquet-geo-only file."""
         runner = CliRunner()
         result = runner.invoke(validate, [parquet_geo_only_file])
-        assert result.exit_code == 0
+        # Exit code 0 (pass) or 2 (warnings only, e.g. missing row group stats)
+        assert result.exit_code in [0, 2]
         assert "parquet-geo-only" in result.output.lower()
 
     def test_validate_geoparquet_v2(self, geoparquet_v2_file):
         """Test validate on GeoParquet 2.0 file."""
         runner = CliRunner()
         result = runner.invoke(validate, [geoparquet_v2_file])
-        assert result.exit_code == 0
+        # Exit code 0 (pass) or 2 (warnings only, e.g. missing row group stats)
+        assert result.exit_code in [0, 2]
         assert "2.0" in result.output
 
     def test_validate_help(self):
@@ -611,8 +613,8 @@ class TestExitCodes:
         """Test exit code with parquet-geo-only file."""
         runner = CliRunner()
         result = runner.invoke(validate, [parquet_geo_only_file])
-        # Should be 0 (pass) if CRS is geographic
-        assert result.exit_code == 0
+        # Should be 0 (pass) or 2 (warnings only, e.g. missing row group stats)
+        assert result.exit_code in [0, 2]
 
 
 # =============================================================================
