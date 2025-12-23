@@ -3278,9 +3278,9 @@ def upload(
 @click.argument("parquet_file")
 @click.option(
     "--geoparquet-version",
-    type=click.Choice(["1.0", "1.1", "2.0"]),
+    type=click.Choice(["1.0", "1.1", "2.0", "parquet-geo-only"]),
     default=None,
-    help="Validate against specific GeoParquet version (default: auto-detect)",
+    help="Validate against specific GeoParquet version or parquet-geo-only (default: auto-detect)",
 )
 @click.option(
     "--json",
