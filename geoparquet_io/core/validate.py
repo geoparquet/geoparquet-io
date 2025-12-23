@@ -1413,6 +1413,90 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
         )
 
 
+def _check_native_geo_types_match(
+    parquet_file: str, geom_col: str, sample_size: int, con
+) -> ValidationCheck:
+    """Check that declared geo_types match actual geometry types in the data."""
+    from geoparquet_io.core.common import safe_file_url
+
+    try:
+        safe_url = safe_file_url(parquet_file, verbose=False)
+
+        # Get declared geo_types from parquet metadata
+        meta_result = con.execute(f"""
+            SELECT DISTINCT unnest(geo_types) as geo_type
+            FROM parquet_metadata('{safe_url}')
+            WHERE path_in_schema = '{geom_col}'
+              AND geo_types IS NOT NULL
+        """).fetchall()
+
+        declared_types = {row[0].lower() for row in meta_result if row[0]}
+
+        # Empty list means "not known" - this is valid per spec
+        if not declared_types:
+            return ValidationCheck(
+                name=f"native_geo_types_match_{geom_col}",
+                status=CheckStatus.PASSED,
+                message="geo_types is empty (types not declared)",
+                category="parquet_geo_types",
+            )
+
+        # Sample actual geometry types from the data
+        if sample_size == 0:
+            # Check all rows
+            actual_result = con.execute(f"""
+                SELECT DISTINCT ST_GeometryType("{geom_col}") as geom_type
+                FROM read_parquet('{safe_url}')
+                WHERE "{geom_col}" IS NOT NULL
+            """).fetchall()
+        else:
+            # Sample rows
+            actual_result = con.execute(f"""
+                SELECT DISTINCT ST_GeometryType("{geom_col}") as geom_type
+                FROM (
+                    SELECT "{geom_col}"
+                    FROM read_parquet('{safe_url}')
+                    WHERE "{geom_col}" IS NOT NULL
+                    LIMIT {sample_size}
+                )
+            """).fetchall()
+
+        actual_types = {row[0].lower() for row in actual_result if row[0]}
+
+        # Check if actual types are a subset of declared types
+        undeclared = actual_types - declared_types
+        if undeclared:
+            undeclared_list = ", ".join(sorted(undeclared))
+            declared_list = ", ".join(sorted(declared_types))
+            return ValidationCheck(
+                name=f"native_geo_types_match_{geom_col}",
+                status=CheckStatus.FAILED,
+                message=f"data contains undeclared geometry types: {undeclared_list}",
+                details=f"Declared: [{declared_list}]. Found: [{', '.join(sorted(actual_types))}]",
+                category="parquet_geo_types",
+            )
+
+        # All actual types are in declared types
+        # Capitalize types for display (polygon -> Polygon)
+        display_types = [t.title() for t in sorted(declared_types)]
+        types_list = ", ".join(display_types)
+        checked_msg = f"{sample_size} sampled" if sample_size > 0 else "all"
+        return ValidationCheck(
+            name=f"native_geo_types_match_{geom_col}",
+            status=CheckStatus.PASSED,
+            message=f"geo_types [{types_list}] matches data ({checked_msg})",
+            category="parquet_geo_types",
+        )
+
+    except Exception as e:
+        return ValidationCheck(
+            name=f"native_geo_types_match_{geom_col}",
+            status=CheckStatus.SKIPPED,
+            message=f"could not check geo_types: {e}",
+            category="parquet_geo_types",
+        )
+
+
 # =============================================================================
 # GeoParquet 2.0 Checks
 # =============================================================================
@@ -1889,6 +1973,7 @@ def _run_parquet_geo_only_checks(
 
         # Data validation if requested
         if validate_data and con:
+            checks.append(_check_native_geo_types_match(parquet_file, geom_col, sample_size, con))
             checks.append(
                 _check_geography_coordinate_bounds(
                     parquet_file, geom_col, schema_info, con, sample_size

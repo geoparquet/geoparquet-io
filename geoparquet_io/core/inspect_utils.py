@@ -281,6 +281,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
     """
     from geoparquet_io.core.duckdb_metadata import (
         detect_geometry_columns,
+        get_aggregated_native_geo_stats,
         get_geo_metadata,
         get_schema_info,
         parse_geometry_logical_type,
@@ -357,11 +358,25 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
     # Keep as raw PROJJSON - display functions will handle default formatting
     effective_crs = geoparquet_info.get("crs") or parquet_geo_info.get("crs")
 
-    # Determine effective bbox
-    # Priority: GeoParquet metadata bbox, then calculate from row group stats
+    # Determine effective bbox and geometry_types
+    # Priority: GeoParquet metadata, then native geo stats, then bbox column stats
     effective_bbox = geoparquet_info.get("bbox")
-    if not effective_bbox and parquet_type != "No Parquet geo logical type":
-        # Try to calculate bbox from row group statistics (bbox struct column)
+    effective_geometry_types = geoparquet_info.get("geometry_types")
+
+    # Try native Parquet GeospatialStatistics for files with native geo types
+    if parquet_type != "No Parquet geo logical type":
+        native_stats = get_aggregated_native_geo_stats(parquet_file, primary_column)
+
+        # Use native bbox if GeoParquet bbox not available
+        if not effective_bbox and native_stats.get("bbox"):
+            effective_bbox = native_stats["bbox"]
+
+        # Use native geometry_types if GeoParquet geometry_types not available
+        if not effective_geometry_types and native_stats.get("geometry_types"):
+            effective_geometry_types = native_stats["geometry_types"]
+
+    # Last resort: try bbox struct column stats (for GeoParquet 1.x with covering)
+    if not effective_bbox:
         effective_bbox = extract_bbox_from_row_group_stats(parquet_file, primary_column)
 
     # Detect mismatches
@@ -376,7 +391,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
         "crs": effective_crs,
         "bbox": effective_bbox,
         "primary_column": primary_column,
-        "geometry_types": geoparquet_info.get("geometry_types"),
+        "geometry_types": effective_geometry_types,
         "edges": geoparquet_info.get("edges") or parquet_geo_info.get("edges"),
         "warnings": warnings,
     }
@@ -837,7 +852,13 @@ def format_terminal_output(
         console.print("[dim]No GeoParquet metadata (using Parquet geo type)[/dim]")
         crs_display = _format_crs_for_display(geo_info["crs"])
         console.print(f"CRS: [cyan]{crs_display}[/cyan]")
-        # Display bbox calculated from row group stats
+
+        # Geometry types from native Parquet geo stats
+        if geo_info.get("geometry_types"):
+            geom_types = ", ".join(geo_info["geometry_types"])
+            console.print(f"Geometry Types: [cyan]{geom_types}[/cyan]")
+
+        # Display bbox from native geo stats
         if geo_info["bbox"]:
             bbox = geo_info["bbox"]
             if len(bbox) == 4:
