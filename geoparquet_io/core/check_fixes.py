@@ -356,6 +356,132 @@ def get_geoparquet_version_from_check_results(check_results):
         return None
 
 
+def _apply_bbox_column_fix(bbox_result, current_file, temp_files, verbose, profile):
+    """Handle bbox column addition or removal.
+
+    Returns:
+        tuple: (new_current_file, fixes_applied_list)
+    """
+    fixes = []
+
+    # Remove bbox column if needed (v2/parquet-geo-only)
+    if bbox_result.get("needs_bbox_removal", False):
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+        temp_files.append(temp_file)
+        bbox_column_name = bbox_result.get("bbox_column_name")
+        fix_bbox_removal(current_file, temp_file, bbox_column_name, verbose, profile)
+        fixes.append(f"Removed bbox column '{bbox_column_name}'")
+        return temp_file, fixes
+
+    # Add bbox column if needed (v1.x)
+    if bbox_result.get("needs_bbox_column", False):
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+        temp_files.append(temp_file)
+        if verbose:
+            progress("\n[1/4] Adding bbox column...")
+        fix_bbox_column(current_file, temp_file, verbose, profile)
+        fixes.append("Added bbox column")
+        return temp_file, fixes
+
+    return current_file, fixes
+
+
+def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, temp_files, verbose, profile):
+    """Handle bbox metadata addition.
+
+    Returns:
+        tuple: (new_current_file, fixes_applied_list)
+    """
+    # Skip for v2/parquet-geo-only files
+    if bbox_result.get("needs_bbox_removal", False):
+        return current_file, []
+
+    needs_metadata = bbox_result.get("needs_bbox_metadata", False)
+    added_column_needs_metadata = bbox_result.get(
+        "needs_bbox_column", False
+    ) and not bbox_result.get("has_bbox_metadata", False)
+
+    if not needs_metadata and not added_column_needs_metadata:
+        return current_file, []
+
+    # For metadata, we modify in-place; copy first if unchanged
+    if current_file == parquet_file:
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+        temp_files.append(temp_file)
+        shutil.copy2(current_file, temp_file)
+        current_file = temp_file
+
+    if verbose:
+        progress("\n[2/4] Adding bbox covering metadata...")
+
+    fix_bbox_metadata(current_file, current_file, verbose, profile)
+    return current_file, ["Added bbox covering metadata"]
+
+
+def _apply_spatial_ordering_fix(check_results, current_file, temp_files, verbose, profile):
+    """Handle Hilbert spatial ordering.
+
+    Returns:
+        tuple: (new_current_file, fixes_applied_list)
+    """
+    spatial_result = check_results.get("spatial", {})
+    if not spatial_result or not spatial_result.get("fix_available", False):
+        return current_file, []
+
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+    temp_files.append(temp_file)
+
+    if verbose:
+        progress("\n[3/4] Applying Hilbert spatial ordering...")
+        progress("(This operation may take several minutes on large files)")
+
+    fix_spatial_ordering(current_file, temp_file, verbose, profile)
+    return temp_file, ["Applied Hilbert spatial ordering"]
+
+
+def _apply_compression_fix(check_results, current_file, output_file, gp_version, verbose, profile):
+    """Handle compression and row group optimization.
+
+    Returns:
+        list: fixes_applied
+    """
+    compression_result = check_results.get("compression", {})
+    row_groups_result = check_results.get("row_groups", {})
+
+    needs_compression = compression_result.get("fix_available", False)
+    needs_row_groups = row_groups_result.get("fix_available", False)
+
+    if not needs_compression and not needs_row_groups:
+        # No compression/row group fixes needed, move to output
+        if current_file != output_file:
+            if verbose:
+                debug("\nMoving to final output location...")
+            shutil.move(current_file, output_file)
+        return []
+
+    if verbose:
+        progress("\n[4/4] Optimizing compression and row groups...")
+
+    fix_compression(current_file, output_file, verbose, profile, gp_version)
+
+    fixes = []
+    if needs_compression:
+        fixes.append("Optimized compression (ZSTD)")
+    if needs_row_groups:
+        fixes.append("Optimized row groups (100k rows/group)")
+    return fixes
+
+
+def _cleanup_temp_files(temp_files, output_file):
+    """Clean up temporary files, excluding the output file."""
+    for temp_file in temp_files:
+        if os.path.exists(temp_file) and temp_file != output_file:
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
+
+
 def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, profile=None):
     """Orchestrate all fixes based on check results.
 
@@ -378,102 +504,38 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
     current_file = parquet_file
     temp_files = []
 
-    # Determine the GeoParquet version to preserve
     geoparquet_version = get_geoparquet_version_from_check_results(check_results)
     if verbose and geoparquet_version:
         debug(f"Preserving GeoParquet version: {geoparquet_version}")
 
     try:
-        # Handle bbox based on file type
         bbox_result = check_results.get("bbox", {})
 
-        # Step 1: Remove bbox column if needed (v2/parquet-geo-only)
-        if bbox_result.get("needs_bbox_removal", False):
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
-            temp_files.append(temp_file)
+        # Step 1: Handle bbox column (add or remove)
+        current_file, fixes = _apply_bbox_column_fix(
+            bbox_result, current_file, temp_files, verbose, profile
+        )
+        fixes_applied.extend(fixes)
 
-            bbox_column_name = bbox_result.get("bbox_column_name")
-            fix_bbox_removal(current_file, temp_file, bbox_column_name, verbose, profile)
-            current_file = temp_file
-            fixes_applied.append(f"Removed bbox column '{bbox_column_name}'")
+        # Step 2: Handle bbox metadata
+        current_file, fixes = _apply_bbox_metadata_fix(
+            bbox_result, current_file, parquet_file, temp_files, verbose, profile
+        )
+        fixes_applied.extend(fixes)
 
-        # Step 1 (alt): Add bbox column if needed (v1.x)
-        elif bbox_result.get("needs_bbox_column", False):
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
-            temp_files.append(temp_file)
+        # Step 3: Apply Hilbert sorting
+        current_file, fixes = _apply_spatial_ordering_fix(
+            check_results, current_file, temp_files, verbose, profile
+        )
+        fixes_applied.extend(fixes)
 
-            if verbose:
-                progress("\n[1/4] Adding bbox column...")
+        # Step 4: Fix compression + row groups
+        fixes = _apply_compression_fix(
+            check_results, current_file, output_file, geoparquet_version, verbose, profile
+        )
+        fixes_applied.extend(fixes)
 
-            fix_bbox_column(current_file, temp_file, verbose, profile)
-            current_file = temp_file
-            fixes_applied.append("Added bbox column")
-
-        # Step 2: Add bbox metadata if needed (v1.x only, skip for v2/parquet-geo-only)
-        if not bbox_result.get("needs_bbox_removal", False) and (
-            bbox_result.get("needs_bbox_metadata", False)
-            or (
-                bbox_result.get("needs_bbox_column", False)
-                and not bbox_result.get("has_bbox_metadata", False)
-            )
-        ):
-            # For metadata, we can modify in-place
-            if current_file == parquet_file:
-                # Need to copy first if we haven't made changes yet
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
-                temp_files.append(temp_file)
-                shutil.copy2(current_file, temp_file)
-                current_file = temp_file
-
-            if verbose:
-                progress("\n[2/4] Adding bbox covering metadata...")
-
-            fix_bbox_metadata(current_file, current_file, verbose, profile)
-            fixes_applied.append("Added bbox covering metadata")
-
-        # Step 3: Apply Hilbert sorting if needed
-        spatial_result = check_results.get("spatial", {})
-        if spatial_result and spatial_result.get("fix_available", False):
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
-            temp_files.append(temp_file)
-
-            if verbose:
-                progress("\n[3/4] Applying Hilbert spatial ordering...")
-                progress("(This operation may take several minutes on large files)")
-
-            fix_spatial_ordering(current_file, temp_file, verbose, profile)
-            current_file = temp_file
-            fixes_applied.append("Applied Hilbert spatial ordering")
-
-        # Step 4: Fix compression + row groups (combined in final write)
-        compression_result = check_results.get("compression", {})
-        row_groups_result = check_results.get("row_groups", {})
-
-        needs_compression_fix = compression_result.get("fix_available", False)
-        needs_row_group_fix = row_groups_result.get("fix_available", False)
-
-        if needs_compression_fix or needs_row_group_fix:
-            if verbose:
-                progress("\n[4/4] Optimizing compression and row groups...")
-
-            # This is the final step, write to the actual output
-            fix_compression(current_file, output_file, verbose, profile, geoparquet_version)
-
-            if needs_compression_fix:
-                fixes_applied.append("Optimized compression (ZSTD)")
-            if needs_row_group_fix:
-                fixes_applied.append("Optimized row groups (100k rows/group)")
-
-        elif current_file != output_file:
-            # No compression/row group fixes needed, just move to output
-            if verbose:
-                debug("\nMoving to final output location...")
-            shutil.move(current_file, output_file)
-
-        # Clean up temp files (except the one we moved to output)
-        for temp_file in temp_files:
-            if os.path.exists(temp_file) and temp_file != output_file:
-                os.remove(temp_file)
+        _cleanup_temp_files(temp_files, output_file)
 
         if verbose:
             progress("\n" + "=" * 60)
@@ -487,12 +549,5 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
         }
 
     except Exception as e:
-        # Clean up all temp files on error
-        for temp_file in temp_files:
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except Exception:
-                    pass
-
+        _cleanup_temp_files(temp_files, output_file=None)
         raise click.ClickException(f"Failed to apply fixes: {str(e)}") from e
