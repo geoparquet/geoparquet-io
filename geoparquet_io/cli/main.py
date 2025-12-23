@@ -20,6 +20,7 @@ from geoparquet_io.core.add_bbox_column import add_bbox_column as add_bbox_colum
 from geoparquet_io.core.add_bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
 from geoparquet_io.core.add_h3_column import add_h3_column as add_h3_column_impl
 from geoparquet_io.core.add_kdtree_column import add_kdtree_column as add_kdtree_column_impl
+from geoparquet_io.core.add_quadkey_column import add_quadkey_column as add_quadkey_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.convert import convert_to_geoparquet
@@ -40,11 +41,15 @@ from geoparquet_io.core.partition_admin_hierarchical import (
 )
 from geoparquet_io.core.partition_by_h3 import partition_by_h3 as partition_by_h3_impl
 from geoparquet_io.core.partition_by_kdtree import partition_by_kdtree as partition_by_kdtree_impl
+from geoparquet_io.core.partition_by_quadkey import (
+    partition_by_quadkey as partition_by_quadkey_impl,
+)
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
 from geoparquet_io.core.reproject import reproject_impl
 from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
+from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_impl
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
@@ -1692,6 +1697,93 @@ def sort_column(
         raise click.ClickException(str(e)) from e
 
 
+@sort.command(name="quadkey")
+@click.argument("input_parquet")
+@click.argument("output_parquet", type=click.Path())
+@click.option(
+    "--quadkey-name",
+    default="quadkey",
+    help="Name of the quadkey column to sort by (default: quadkey)",
+)
+@click.option(
+    "--resolution",
+    default=13,
+    type=click.IntRange(0, 23),
+    help="Resolution when auto-adding quadkey column (0-23). Default: 13",
+)
+@click.option(
+    "--use-centroid",
+    is_flag=True,
+    help="Use geometry centroid when auto-adding quadkey column",
+)
+@click.option(
+    "--remove-quadkey-column",
+    is_flag=True,
+    help="Exclude quadkey column from output after sorting",
+)
+@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
+@output_format_options
+@geoparquet_version_option
+@verbose_option
+def sort_quadkey(
+    input_parquet,
+    output_parquet,
+    quadkey_name,
+    resolution,
+    use_centroid,
+    remove_quadkey_column,
+    profile,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    geoparquet_version,
+    verbose,
+):
+    """
+    Sort a GeoParquet file by quadkey spatial index.
+
+    If the quadkey column doesn't exist and using the default column name,
+    it will be auto-added at the specified resolution. If using --quadkey-name
+    and the column is missing, an error is raised.
+
+    Use --remove-quadkey-column to exclude the quadkey column from output
+    after sorting (useful when you only want the sorted order).
+
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    """
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_io.core.common import parse_size_string
+
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}") from e
+
+    sort_by_quadkey_impl(
+        input_parquet,
+        output_parquet,
+        quadkey_column_name=quadkey_name,
+        resolution=resolution,
+        use_centroid=use_centroid,
+        remove_quadkey_column=remove_quadkey_column,
+        verbose=verbose,
+        compression=compression.upper(),
+        compression_level=compression_level,
+        row_group_size_mb=row_group_mb,
+        row_group_rows=row_group_size,
+        profile=profile,
+        geoparquet_version=geoparquet_version,
+    )
+
+
 @cli.group()
 @click.pass_context
 def add(ctx):
@@ -2144,6 +2236,88 @@ def add_kdtree(
     )
 
 
+@add.command(name="quadkey")
+@click.argument("input_parquet")
+@click.argument("output_parquet")
+@click.option(
+    "--quadkey-name",
+    default="quadkey",
+    help="Name for the quadkey column (default: quadkey)",
+)
+@click.option(
+    "--resolution",
+    default=13,
+    type=click.IntRange(0, 23),
+    help="Quadkey zoom level (0-23). Higher = more precision. Default: 13",
+)
+@click.option(
+    "--use-centroid",
+    is_flag=True,
+    help="Use geometry centroid instead of bbox midpoint for quadkey calculation",
+)
+@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
+@output_format_options
+@geoparquet_version_option
+@dry_run_option
+@verbose_option
+def add_quadkey(
+    input_parquet,
+    output_parquet,
+    quadkey_name,
+    resolution,
+    use_centroid,
+    profile,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    geoparquet_version,
+    dry_run,
+    verbose,
+):
+    """Add a quadkey column to a GeoParquet file.
+
+    Computes quadkey tile IDs based on geometry location. By default, uses the
+    bbox column midpoint if available, otherwise falls back to geometry centroid.
+
+    Quadkeys are a way of encoding tile coordinates (x, y, zoom) into a single
+    string, providing a compact spatial index that is particularly useful for
+    mapping applications and tile-based systems.
+
+    Supports both local and remote (S3, GCS, Azure) inputs and outputs.
+    """
+    # Validate mutually exclusive options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse size string if provided
+    from geoparquet_io.core.common import parse_size_string
+
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}") from e
+
+    add_quadkey_column_impl(
+        input_parquet,
+        output_parquet,
+        quadkey_column_name=quadkey_name,
+        resolution=resolution,
+        use_centroid=use_centroid,
+        dry_run=dry_run,
+        verbose=verbose,
+        compression=compression.upper(),
+        compression_level=compression_level,
+        row_group_size_mb=row_group_mb,
+        row_group_rows=row_group_size,
+        profile=profile,
+        geoparquet_version=geoparquet_version,
+    )
+
+
 # Partition commands group
 @cli.group()
 @click.pass_context
@@ -2561,6 +2735,120 @@ def partition_kdtree(
         prefix,
         profile,
         geoparquet_version,
+    )
+
+
+@partition.command(name="quadkey")
+@click.argument("input_parquet")
+@click.argument("output_folder", required=False)
+@click.option(
+    "--quadkey-column",
+    default="quadkey",
+    help="Name of quadkey column to partition by (default: quadkey)",
+)
+@click.option(
+    "--resolution",
+    type=click.IntRange(0, 23),
+    default=13,
+    help="Resolution for auto-adding quadkey column (0-23, default: 13)",
+)
+@click.option(
+    "--partition-resolution",
+    type=click.IntRange(0, 23),
+    default=9,
+    help="Resolution for partitioning as prefix length (0-23, default: 9)",
+)
+@click.option(
+    "--use-centroid",
+    is_flag=True,
+    help="Use geometry centroid when auto-adding quadkey column",
+)
+@click.option(
+    "--keep-quadkey-column",
+    is_flag=True,
+    help="Keep the quadkey column in output files (default: excluded for non-Hive, included for Hive)",
+)
+@partition_options
+@verbose_option
+@profile_option
+@geoparquet_version_option
+def partition_quadkey(
+    input_parquet,
+    output_folder,
+    quadkey_column,
+    resolution,
+    partition_resolution,
+    use_centroid,
+    keep_quadkey_column,
+    hive,
+    overwrite,
+    preview,
+    preview_limit,
+    force,
+    skip_analysis,
+    prefix,
+    verbose,
+    profile,
+    geoparquet_version,
+):
+    """Partition a GeoParquet file by quadkey cells.
+
+    Creates separate GeoParquet files based on quadkey prefixes at the specified
+    partition resolution. If the quadkey column doesn't exist, it will be automatically
+    added at the specified resolution before partitioning.
+
+    The column is created at --resolution (default 13), but partitions are created using
+    the first --partition-resolution characters (default 9) of each quadkey. This allows
+    for coarser partitioning while retaining full precision in the column.
+
+    By default, the quadkey column is excluded from output files (since it's redundant
+    with the partition path) unless using Hive-style partitioning. Use --keep-quadkey-column
+    to explicitly keep the column in all cases.
+
+    Use --preview to see what partitions would be created without actually creating files.
+
+    Examples:
+
+        # Preview partitions
+        gpio partition quadkey input.parquet --preview
+
+        # Partition by quadkey cells (column excluded from output by default)
+        gpio partition quadkey input.parquet output/
+
+        # Partition with quadkey column kept in output files
+        gpio partition quadkey input.parquet output/ --keep-quadkey-column
+
+        # Partition at higher resolution (zoom 12)
+        gpio partition quadkey input.parquet output/ --partition-resolution 12
+
+        # Use Hive-style partitioning (quadkey column included by default)
+        gpio partition quadkey input.parquet output/ --hive
+    """
+    # If preview mode, output_folder is not required
+    if not preview and not output_folder:
+        raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
+
+    # Convert flag to None if not explicitly set, so implementation can determine default
+    keep_quadkey_col = True if keep_quadkey_column else None
+
+    partition_by_quadkey_impl(
+        input_parquet,
+        output_folder,
+        quadkey_column_name=quadkey_column,
+        resolution=resolution,
+        partition_resolution=partition_resolution,
+        use_centroid=use_centroid,
+        hive=hive,
+        overwrite=overwrite,
+        preview=preview,
+        preview_limit=preview_limit,
+        verbose=verbose,
+        keep_quadkey_column=keep_quadkey_col,
+        force=force,
+        skip_analysis=skip_analysis,
+        filename_prefix=prefix,
+        profile=profile,
+        geoparquet_version=geoparquet_version,
     )
 
 

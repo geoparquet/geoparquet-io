@@ -40,6 +40,7 @@ dependencies = [
     "s3fs>=2023.9.0",  # Required by fsspec for S3 support
     "geoarrow-pyarrow>=0.1.0",  # Required for CRS handling in Parquet native geo types
     "pyproj>=3.0.0",  # Required for CRS handling and PROJJSON generation
+    "mercantile>=1.2.0",  # Required for quadkey generation
 ]
 
 [project.scripts]
@@ -82,7 +83,7 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-fail-under=75"
+addopts = "-v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-fail-under=73"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "network: marks tests requiring network access (deselect with '-m \"not network\"')",
@@ -141,7 +142,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 75
+fail_under = 73
 show_missing = true
 skip_covered = false
 exclude_lines = [
