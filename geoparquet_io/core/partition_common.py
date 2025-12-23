@@ -47,6 +47,27 @@ def sanitize_filename(value: str) -> str:
     return sanitized
 
 
+def calculate_partition_stats(output_folder: str, num_partitions: int) -> tuple[float, float]:
+    """Calculate total and average size of created partitions.
+
+    Args:
+        output_folder: Path to the folder containing partition files.
+        num_partitions: Number of partitions created.
+
+    Returns:
+        Tuple of (total_size_mb, avg_size_mb).
+    """
+    total_size_bytes = sum(
+        os.path.getsize(os.path.join(root, f))
+        for root, _, files in os.walk(output_folder)
+        for f in files
+        if f.endswith(".parquet")
+    )
+    total_size_mb = total_size_bytes / (1024 * 1024)
+    avg_size_mb = total_size_mb / num_partitions if num_partitions > 0 else 0
+    return total_size_mb, avg_size_mb
+
+
 def _calculate_size_estimates(file_size_bytes, total_rows, min_rows, max_rows, avg_rows):
     """Calculate partition size estimates based on file size and row distribution."""
     if file_size_bytes > 0 and total_rows > 0:
