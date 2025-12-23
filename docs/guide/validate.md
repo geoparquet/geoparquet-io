@@ -10,7 +10,7 @@ gpio validate myfile.parquet
 
 The command auto-detects the file type and runs appropriate checks:
 
-```
+```text
 GeoParquet Validation Report
 ================================
 
@@ -68,7 +68,7 @@ gpio validate parquet_geo_only.parquet
 
 Output includes recommendations:
 
-```
+```text
 Detected: parquet-geo-only
 
 Parquet Geo (No Metadata):
@@ -144,7 +144,7 @@ gpio validate myfile.parquet --sample-size 0
 Validate against a specific version instead of auto-detecting:
 
 ```bash
-gpio validate myfile.parquet --geoparquet-version 1.1.0
+gpio validate myfile.parquet --geoparquet-version 1.1
 ```
 
 ### JSON Output
@@ -222,7 +222,7 @@ If a `covering` is defined:
 
 ### File Extension
 
-```
+```text
 ⚠ file extension is ".geoparquet" (recommend ".parquet")
 ```
 

@@ -23,7 +23,7 @@ gpio validate myfile.parquet --json
 gpio validate myfile.parquet --skip-data-validation
 
 # Validate against specific version
-gpio validate myfile.parquet --geoparquet-version 1.1.0
+gpio validate myfile.parquet --geoparquet-version 1.1
 ```
 
 ## Options

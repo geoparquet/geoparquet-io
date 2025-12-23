@@ -3016,16 +3016,12 @@ def validate(
         else:
             format_terminal(result)
 
-        # Exit codes
+        # Exit codes: 0=passed, 1=failed, 2=warnings only
         if result.failed_count > 0:
-            raise SystemExit(1)
+            raise click.exceptions.Exit(1)
         elif result.warning_count > 0:
-            raise SystemExit(2)
-        else:
-            raise SystemExit(0)
-
-    except SystemExit:
-        raise
+            raise click.exceptions.Exit(2)
+        # Exit 0 is implicit when no exception is raised
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
