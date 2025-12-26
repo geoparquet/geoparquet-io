@@ -1413,6 +1413,106 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
         )
 
 
+def _check_native_geo_stats_contains_data(
+    parquet_file: str, geom_col: str, con, sample_size: int
+) -> ValidationCheck:
+    """Check that sampled geometries fall within declared geospatial statistics (geo_bbox)."""
+    from geoparquet_io.core.common import is_remote_url, safe_file_url
+
+    try:
+        # For remote files, skip (may be slow)
+        if is_remote_url(parquet_file):
+            return ValidationCheck(
+                name=f"native_geo_stats_contains_data_{geom_col}",
+                status=CheckStatus.SKIPPED,
+                message="geospatial statistics data check skipped for remote files",
+                category="parquet_geo_types",
+            )
+
+        safe_url = safe_file_url(parquet_file, verbose=False)
+
+        # Get geo_bbox from parquet metadata
+        meta_result = con.execute(f"""
+            SELECT geo_bbox
+            FROM parquet_metadata('{safe_url}')
+            WHERE path_in_schema = '{geom_col}'
+            LIMIT 1
+        """).fetchone()
+
+        if meta_result is None or meta_result[0] is None:
+            return ValidationCheck(
+                name=f"native_geo_stats_contains_data_{geom_col}",
+                status=CheckStatus.SKIPPED,
+                message="no geospatial statistics to validate against",
+                category="parquet_geo_types",
+            )
+
+        geo_bbox = meta_result[0]
+        if geo_bbox.get("xmin") is None:
+            return ValidationCheck(
+                name=f"native_geo_stats_contains_data_{geom_col}",
+                status=CheckStatus.SKIPPED,
+                message="geospatial statistics has no bbox values",
+                category="parquet_geo_types",
+            )
+
+        xmin = geo_bbox["xmin"]
+        ymin = geo_bbox["ymin"]
+        xmax = geo_bbox["xmax"]
+        ymax = geo_bbox["ymax"]
+
+        limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
+
+        # Check if sampled geometries fall within the geo_bbox
+        query = f"""
+            SELECT COUNT(*) as total,
+                   COUNT(CASE WHEN
+                       ST_XMin("{geom_col}") >= {xmin} AND
+                       ST_YMin("{geom_col}") >= {ymin} AND
+                       ST_XMax("{geom_col}") <= {xmax} AND
+                       ST_YMax("{geom_col}") <= {ymax}
+                   THEN 1 END) as within_bbox
+            FROM (
+                SELECT "{geom_col}"
+                FROM read_parquet('{safe_url}')
+                WHERE "{geom_col}" IS NOT NULL
+                {limit_clause}
+            )
+        """
+        result = con.execute(query).fetchone()
+
+        if result:
+            total, within = result
+            if total == within:
+                return ValidationCheck(
+                    name=f"native_geo_stats_contains_data_{geom_col}",
+                    status=CheckStatus.PASSED,
+                    message=f"all geometries fall within geospatial statistics ({total} checked)",
+                    category="parquet_geo_types",
+                )
+            return ValidationCheck(
+                name=f"native_geo_stats_contains_data_{geom_col}",
+                status=CheckStatus.FAILED,
+                message=f"{total - within} of {total} geometries fall outside geospatial statistics",
+                category="parquet_geo_types",
+            )
+
+    except Exception as e:
+        return ValidationCheck(
+            name=f"native_geo_stats_contains_data_{geom_col}",
+            status=CheckStatus.SKIPPED,
+            message=f"could not validate geospatial statistics: {e}",
+            category="parquet_geo_types",
+        )
+
+    return ValidationCheck(
+        name=f"native_geo_stats_contains_data_{geom_col}",
+        status=CheckStatus.SKIPPED,
+        message="no data to validate",
+        category="parquet_geo_types",
+    )
+
+
 def _check_native_geo_types_match(
     parquet_file: str, geom_col: str, sample_size: int, con
 ) -> ValidationCheck:
@@ -1676,9 +1776,14 @@ def _check_v2_edges_consistency(
 # =============================================================================
 
 
-def _check_parquet_geo_only_crs(schema_info: list, geom_col: str) -> ValidationCheck:
+def _check_parquet_geo_only_crs(
+    schema_info: list, geom_col: str, parquet_file: str
+) -> ValidationCheck:
     """Check CRS for parquet-geo-only files (no GeoParquet metadata)."""
-    from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
+    from geoparquet_io.core.duckdb_metadata import (
+        parse_geometry_logical_type,
+        resolve_crs_reference,
+    )
 
     for col in schema_info:
         if col.get("name") == geom_col:
@@ -1693,16 +1798,33 @@ def _check_parquet_geo_only_crs(schema_info: list, geom_col: str) -> ValidationC
                     category="parquet_geo_types",
                 )
 
-            crs = parsed.get("crs")
+            raw_crs = parsed.get("crs")
 
             # No CRS = default OGC:CRS84 = pass
-            if crs is None:
+            if raw_crs is None:
                 return ValidationCheck(
                     name=f"parquet_geo_only_crs_{geom_col}",
                     status=CheckStatus.PASSED,
                     message="no CRS specified (defaults to OGC:CRS84)",
                     category="parquet_geo_types",
                 )
+
+            # Check if CRS uses reference format - warn about compatibility
+            # Both projjson: and srid: formats are not widely recognized
+            if isinstance(raw_crs, str) and (
+                raw_crs.startswith("projjson:") or raw_crs.startswith("srid:")
+            ):
+                return ValidationCheck(
+                    name=f"parquet_geo_only_crs_{geom_col}",
+                    status=CheckStatus.WARNING,
+                    message=f'column "{geom_col}" CRS format may not be widely recognized',
+                    details=f"CRS: {raw_crs}. "
+                    "Use 'gpio convert --geoparquet-version 2.0' to standardize.",
+                    category="parquet_geo_types",
+                )
+
+            # Resolve CRS reference if needed for further checks
+            crs = resolve_crs_reference(parquet_file, raw_crs)
 
             # Check if CRS is geographic (WGS84, EPSG:4326, OGC:CRS84)
             if _is_geographic_crs(crs):
@@ -1713,20 +1835,12 @@ def _check_parquet_geo_only_crs(schema_info: list, geom_col: str) -> ValidationC
                     category="parquet_geo_types",
                 )
 
-            # Check if CRS uses Parquet spec format
+            # Check if CRS uses Parquet spec format (inline PROJJSON)
             if isinstance(crs, dict) and ("$schema" in crs or "type" in crs):
                 return ValidationCheck(
                     name=f"parquet_geo_only_crs_{geom_col}",
                     status=CheckStatus.PASSED,
                     message="CRS uses valid PROJJSON format",
-                    category="parquet_geo_types",
-                )
-
-            if isinstance(crs, str) and crs.startswith("srid:"):
-                return ValidationCheck(
-                    name=f"parquet_geo_only_crs_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message=f"CRS uses valid srid format: {crs}",
                     category="parquet_geo_types",
                 )
 
@@ -1866,14 +1980,24 @@ def validate_geoparquet(
     # Auto-detect file type
     file_type_info = detect_geoparquet_file_type(parquet_file, verbose)
 
-    # Determine detected version
-    detected_version = _determine_version(file_type_info, target_version)
+    # Determine detected version (always from file, not target)
+    detected_version = _determine_version(file_type_info)
 
     result = ValidationResult(
         file_path=parquet_file,
         detected_version=detected_version,
         target_version=target_version,
     )
+
+    # Check if target version matches detected version (if target specified)
+    # Skip version check for parquet-geo-only - it tests Parquet geo types regardless of metadata
+    if target_version != "parquet-geo-only":
+        version_check = _check_version_matches(detected_version, target_version, file_type_info)
+        if version_check:
+            result.checks.append(version_check)
+            # If version mismatch, return early without running other checks
+            if version_check.status == CheckStatus.FAILED:
+                return result
 
     # Get metadata
     kv_metadata = get_kv_metadata(safe_url)
@@ -1932,11 +2056,8 @@ def validate_geoparquet(
     return result
 
 
-def _determine_version(file_type_info: dict, target_version: str | None) -> str:
-    """Determine which version string to report."""
-    if target_version:
-        return target_version
-
+def _determine_version(file_type_info: dict) -> str:
+    """Determine the detected version string from file type info."""
     file_type = file_type_info.get("file_type", "unknown")
     geo_version = file_type_info.get("geo_version")
 
@@ -1950,6 +2071,74 @@ def _determine_version(file_type_info: dict, target_version: str | None) -> str:
         return "unknown"
 
 
+def _versions_match(detected: str, target: str, file_type_info: dict) -> bool:
+    """Check if detected version matches target version (strict matching)."""
+    file_type = file_type_info.get("file_type", "unknown")
+
+    # parquet-geo-only only matches parquet-geo-only
+    if target == "parquet-geo-only":
+        return file_type == "parquet_geo_only"
+
+    # parquet-geo-only files don't match any GeoParquet version
+    if file_type == "parquet_geo_only":
+        return False
+
+    # 1.0 matches 1.0.x files only
+    if target == "1.0":
+        return file_type == "geoparquet_v1" and detected.startswith("1.0")
+
+    # 1.1 matches 1.1.x files only
+    if target == "1.1":
+        return file_type == "geoparquet_v1" and detected.startswith("1.1")
+
+    # 2.0 only matches 2.0+ files
+    if target == "2.0":
+        return file_type == "geoparquet_v2"
+
+    # Exact match fallback
+    return detected == target
+
+
+def _check_version_matches(
+    detected_version: str,
+    target_version: str | None,
+    file_type_info: dict,
+) -> ValidationCheck | None:
+    """Check if detected version matches target version. Returns None if no target."""
+    if not target_version:
+        return None
+
+    # Determine if versions match
+    matches = _versions_match(detected_version, target_version, file_type_info)
+
+    if matches:
+        return ValidationCheck(
+            name="version_match",
+            status=CheckStatus.PASSED,
+            message=f"file version matches requested {target_version}",
+            category="version_check",
+        )
+    else:
+        # Special message for parquet-geo-only files validated against GeoParquet versions
+        file_type = file_type_info.get("file_type", "unknown")
+        if file_type == "parquet_geo_only" and target_version in ["1.0", "1.1", "2.0"]:
+            message = (
+                "This file contains valid Parquet geo types, but does not implement "
+                f"GeoParquet {target_version} metadata"
+            )
+        else:
+            message = f"file is {detected_version}, not {target_version}"
+
+        return ValidationCheck(
+            name="version_match",
+            status=CheckStatus.FAILED,
+            message=message,
+            details=f"Run 'gpio validate' without --geoparquet-version to validate "
+            f"as {detected_version}",
+            category="version_check",
+        )
+
+
 def _run_parquet_geo_only_checks(
     parquet_file: str,
     schema_info: list,
@@ -1961,19 +2150,35 @@ def _run_parquet_geo_only_checks(
     """Run checks for parquet-geo-only files (native types, no GeoParquet metadata)."""
     checks = []
 
+    # If no geometry columns with native geo types were detected, fail
+    if not geo_columns:
+        checks.append(
+            ValidationCheck(
+                name="native_geo_type_present",
+                status=CheckStatus.FAILED,
+                message="no columns with Parquet GEOMETRY/GEOGRAPHY logical type found",
+                details="This file does not contain Parquet native geo types. "
+                "Use 'gpio convert --geoparquet-version 2.0' to add them.",
+                category="parquet_geo_types",
+            )
+        )
+        return checks
+
     for geom_col in geo_columns.keys():
         # Parquet native geo type checks
         checks.append(_check_native_geo_type_present(schema_info, geom_col))
-        checks.append(_check_native_crs_format(schema_info, geom_col))
         checks.append(_check_geography_edges_valid(schema_info, geom_col))
         checks.append(_check_native_geo_statistics(parquet_file, geom_col))
 
-        # Parquet-geo-only specific CRS check
-        checks.append(_check_parquet_geo_only_crs(schema_info, geom_col))
+        # Parquet-geo-only specific CRS check (more detailed than _check_native_crs_format)
+        checks.append(_check_parquet_geo_only_crs(schema_info, geom_col, parquet_file))
 
         # Data validation if requested
         if validate_data and con:
             checks.append(_check_native_geo_types_match(parquet_file, geom_col, sample_size, con))
+            checks.append(
+                _check_native_geo_stats_contains_data(parquet_file, geom_col, con, sample_size)
+            )
             checks.append(
                 _check_geography_coordinate_bounds(
                     parquet_file, geom_col, schema_info, con, sample_size
@@ -2060,8 +2265,9 @@ def _run_geoparquet_checks(
     # Version-specific checks
     geo_version = file_type_info.get("geo_version", "1.0.0")
 
-    # GeoParquet 1.1+ checks
-    if geo_version >= "1.1.0":
+    # GeoParquet 1.1 checks - covering was removed in 2.0, so only run for 1.x
+    is_v1_1 = geo_version >= "1.1.0" and geo_version < "2.0.0"
+    if is_v1_1:
         for col_name, col_meta in columns.items():
             checks.append(_check_covering_is_object(col_meta, col_name))
 
@@ -2073,6 +2279,8 @@ def _run_geoparquet_checks(
                 checks.append(_check_covering_bbox_structure(col_meta, col_name, schema_info))
                 checks.append(_check_covering_bbox_field_types(col_meta, col_name, schema_info))
 
+    # File extension check applies to 1.1+
+    if geo_version >= "1.1.0":
         checks.append(_check_file_extension(parquet_file))
 
     # GeoParquet 2.0 checks - run Parquet native geo type checks first
@@ -2082,6 +2290,21 @@ def _run_geoparquet_checks(
             checks.append(_check_native_geo_type_present(schema_info, col_name))
             checks.append(_check_native_crs_format(schema_info, col_name))
             checks.append(_check_geography_edges_valid(schema_info, col_name))
+            checks.append(_check_native_geo_statistics(parquet_file, col_name))
+
+            # Data validation checks for native geo types
+            if validate_data and con:
+                checks.append(
+                    _check_native_geo_types_match(parquet_file, col_name, sample_size, con)
+                )
+                checks.append(
+                    _check_native_geo_stats_contains_data(parquet_file, col_name, con, sample_size)
+                )
+                checks.append(
+                    _check_geography_coordinate_bounds(
+                        parquet_file, col_name, schema_info, con, sample_size
+                    )
+                )
 
         # GeoParquet 2.0 specific checks
         for col_name in columns.keys():
@@ -2124,6 +2347,7 @@ def format_terminal_output(result: ValidationResult) -> None:
 
     # Category labels and display order
     category_labels = {
+        "version_check": "Version Check",
         "core_metadata": "Core Metadata",
         "column_metadata": "Column Validation",
         "parquet_schema": "Parquet Schema",
@@ -2134,17 +2358,31 @@ def format_terminal_output(result: ValidationResult) -> None:
         "core": "Core",
     }
 
-    # Display in a specific order so Parquet Native Geo Types appears before GeoParquet 2.0
-    category_order = [
-        "core",
-        "core_metadata",
-        "column_metadata",
-        "parquet_schema",
-        "data_validation",
-        "geoparquet_1_1",
-        "parquet_geo_types",
-        "geoparquet_2_0",
-    ]
+    # Display in a specific order
+    # For 2.0 files, show Parquet Native Geo Types first (after Detected and version check)
+    if result.detected_version and result.detected_version.startswith("2."):
+        category_order = [
+            "version_check",
+            "parquet_geo_types",
+            "core_metadata",
+            "column_metadata",
+            "parquet_schema",
+            "data_validation",
+            "geoparquet_1_1",
+            "geoparquet_2_0",
+        ]
+    else:
+        category_order = [
+            "version_check",
+            "core",
+            "core_metadata",
+            "column_metadata",
+            "parquet_schema",
+            "data_validation",
+            "geoparquet_1_1",
+            "parquet_geo_types",
+            "geoparquet_2_0",
+        ]
 
     # Sort categories by the defined order, with unknown categories at the end
     sorted_categories = sorted(

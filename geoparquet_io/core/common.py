@@ -1110,6 +1110,7 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
         get_geo_metadata,
         get_schema_info,
         parse_geometry_logical_type,
+        resolve_crs_reference,
     )
 
     safe_url = safe_file_url(parquet_file, verbose=False)
@@ -1136,7 +1137,9 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
         ):
             parsed = parse_geometry_logical_type(logical_type)
             if parsed and "crs" in parsed:
-                crs = parsed["crs"]
+                raw_crs = parsed["crs"]
+                # Resolve CRS references (projjson:key_name, srid:XXXX) to PROJJSON
+                crs = resolve_crs_reference(parquet_file, raw_crs)
                 if crs and not is_default_crs(crs):
                     if verbose:
                         debug(f"Found CRS in Parquet geo type: {_format_crs_display(crs)}")

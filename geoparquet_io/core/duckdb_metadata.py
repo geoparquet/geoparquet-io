@@ -246,18 +246,34 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
     result: dict[str, Any] = {"geo_type": geo_type}
 
     # Parse CRS if present (handle nested JSON with brace counting)
-    # DuckDB returns crs=<null> for files without CRS, or crs={...} for PROJJSON
+    # DuckDB returns:
+    # - crs=<null> for files without CRS
+    # - crs={...} for inline PROJJSON
+    # - crs=projjson:key_name for reference to metadata field
     crs_start = params.find("crs=")
     if crs_start != -1:
         crs_start += 4  # Skip "crs="
+        crs_value = params[crs_start:]
+
         # Check for <null> - DuckDB's way of indicating no CRS
-        if params[crs_start:].startswith("<null>"):
+        if crs_value.startswith("<null>"):
             pass  # No CRS specified, leave result without "crs" key
-        elif crs_start < len(params) and params[crs_start] == "{":
-            # Find matching closing brace
+        elif crs_value.startswith("projjson:") or crs_value.startswith("srid:"):
+            # Reference to metadata field: projjson:key_name
+            # Or SRID reference: srid:XXXX (interpreted as EPSG:XXXX)
+            # Extract the reference (up to next comma or end of string)
+            end_pos = crs_value.find(",")
+            if end_pos == -1:
+                end_pos = crs_value.find(")")
+            if end_pos == -1:
+                end_pos = len(crs_value)
+            # Store the full reference string for later resolution
+            result["crs"] = crs_value[:end_pos].strip()
+        elif crs_value.startswith("{"):
+            # Find matching closing brace for inline PROJJSON
             brace_count = 0
-            end_pos = crs_start
-            for i, char in enumerate(params[crs_start:], start=crs_start):
+            end_pos = 0
+            for i, char in enumerate(crs_value):
                 if char == "{":
                     brace_count += 1
                 elif char == "}":
@@ -266,8 +282,8 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
                         end_pos = i + 1
                         break
 
-            if end_pos > crs_start:
-                crs_json_str = params[crs_start:end_pos]
+            if end_pos > 0:
+                crs_json_str = crs_value[:end_pos]
                 try:
                     result["crs"] = json.loads(crs_json_str)
                 except json.JSONDecodeError:
@@ -329,6 +345,67 @@ def is_geometry_column(logical_type: str) -> bool:
         return False
     # DuckDB returns GeometryType(...) and GeographyType(...) from parquet_schema()
     return logical_type.startswith("GeometryType(") or logical_type.startswith("GeographyType(")
+
+
+def resolve_crs_reference(parquet_file: str, crs_value: Any) -> Any:
+    """
+    Resolve a CRS value, looking up references from file metadata if needed.
+
+    The Parquet geo spec allows CRS to be specified as:
+    - Inline PROJJSON (dict)
+    - Reference to metadata field: "projjson:key_name"
+    - SRID reference: "srid:XXXX" (interpreted as EPSG:XXXX)
+
+    Args:
+        parquet_file: Path to the parquet file
+        crs_value: The CRS value from parse_geometry_logical_type, either:
+            - A dict (already resolved PROJJSON)
+            - A string like "projjson:key_name" (reference to metadata field)
+            - A string like "srid:5070" (interpreted as EPSG:5070)
+            - None
+
+    Returns:
+        Resolved CRS as dict (PROJJSON) or None if not found/applicable
+    """
+    if crs_value is None:
+        return None
+
+    # If already a dict (inline PROJJSON), return as-is
+    if isinstance(crs_value, dict):
+        return crs_value
+
+    # Handle projjson:key_name reference to file metadata
+    if isinstance(crs_value, str) and crs_value.startswith("projjson:"):
+        key_name = crs_value[9:]  # Skip "projjson:"
+        try:
+            import pyarrow.parquet as pq
+
+            pf = pq.ParquetFile(parquet_file)
+            file_metadata = pf.metadata.metadata
+            if file_metadata:
+                # Keys are bytes in PyArrow metadata
+                key_bytes = key_name.encode("utf-8")
+                if key_bytes in file_metadata:
+                    projjson_str = file_metadata[key_bytes].decode("utf-8")
+                    return json.loads(projjson_str)
+        except Exception:
+            pass  # Fall through to return the reference string
+        return crs_value  # Return the reference string if resolution failed
+
+    # Handle srid:XXXX format - convert to PROJJSON using pyproj
+    if isinstance(crs_value, str) and crs_value.startswith("srid:"):
+        srid = crs_value[5:]  # Skip "srid:"
+        try:
+            from pyproj import CRS
+
+            crs = CRS.from_authority("EPSG", int(srid))
+            return crs.to_json_dict()
+        except Exception:
+            pass  # Fall through to return the original value
+        return crs_value  # Return the srid string if resolution failed
+
+    # Return as-is for other string values
+    return crs_value
 
 
 def detect_geometry_columns(parquet_file: str, con=None) -> dict[str, str]:

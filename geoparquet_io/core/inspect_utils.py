@@ -285,6 +285,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
         get_geo_metadata,
         get_schema_info,
         parse_geometry_logical_type,
+        resolve_crs_reference,
     )
 
     # Get metadata using DuckDB
@@ -313,7 +314,9 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
                     parquet_geo_info["coordinate_dimension"] = geom_details.get(
                         "coordinate_dimension"
                     )
-                    parquet_geo_info["crs"] = geom_details.get("crs")
+                    # Resolve CRS reference if needed (e.g., "projjson:key_name")
+                    raw_crs = geom_details.get("crs")
+                    parquet_geo_info["crs"] = resolve_crs_reference(parquet_file, raw_crs)
                     parquet_geo_info["edges"] = geom_details.get("algorithm")
             break
 
