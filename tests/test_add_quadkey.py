@@ -8,10 +8,10 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.core.add_quadkey_column import (
-    _get_crs_display_name,
     _is_geographic_crs,
     _lat_lon_to_quadkey,
 )
+from geoparquet_io.core.common import get_crs_display_name
 
 
 class TestLatLonToQuadkey:
@@ -100,31 +100,31 @@ class TestValidateCrsForQuadkey:
 
 
 class TestGetCrsDisplayName:
-    """Tests for _get_crs_display_name function."""
+    """Tests for get_crs_display_name function (shared from common.py)."""
 
     def test_none_crs(self):
         """Test with None CRS."""
-        assert _get_crs_display_name(None) == "unknown"
+        assert get_crs_display_name(None) == "None (OGC:CRS84)"
 
     def test_string_crs(self):
         """Test with string CRS."""
-        assert _get_crs_display_name("EPSG:4326") == "EPSG:4326"
+        assert get_crs_display_name("EPSG:4326") == "EPSG:4326"
 
     def test_dict_with_name_and_code(self):
         """Test dict with name and code."""
         crs_dict = {"name": "WGS 84", "id": {"authority": "EPSG", "code": 4326}}
-        result = _get_crs_display_name(crs_dict)
+        result = get_crs_display_name(crs_dict)
         assert "WGS 84" in result
         assert "4326" in result
 
     def test_dict_with_only_code(self):
         """Test dict with only code."""
         crs_dict = {"id": {"authority": "EPSG", "code": 4326}}
-        assert _get_crs_display_name(crs_dict) == "EPSG:4326"
+        assert get_crs_display_name(crs_dict) == "EPSG:4326"
 
     def test_empty_dict(self):
         """Test with empty dict."""
-        assert _get_crs_display_name({}) == "unknown"
+        assert get_crs_display_name({}) == "PROJJSON object"
 
 
 class TestAddQuadkeyCommand:

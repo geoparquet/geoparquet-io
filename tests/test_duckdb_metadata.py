@@ -13,6 +13,8 @@ from geoparquet_io.core.duckdb_metadata import (
     get_schema_info,
     has_bbox_column,
     is_geometry_column,
+    parse_geometry_logical_type,
+    resolve_crs_reference,
 )
 
 
@@ -180,3 +182,128 @@ class TestGetBboxFromRowGroupStats:
                 # xmin <= xmax and ymin <= ymax
                 assert result[0] <= result[2]
                 assert result[1] <= result[3]
+
+
+class TestParseGeometryLogicalType:
+    """Tests for parse_geometry_logical_type function."""
+
+    def test_geometry_type_with_inline_crs(self):
+        """Test parsing GeometryType with inline PROJJSON CRS."""
+        logical_type = (
+            'GeometryType(crs={"type": "ProjectedCRS", "id": {"authority": "EPSG", "code": 5070}})'
+        )
+        result = parse_geometry_logical_type(logical_type)
+
+        assert result is not None
+        assert result["geo_type"] == "Geometry"
+        assert isinstance(result.get("crs"), dict)
+        assert result["crs"]["id"]["code"] == 5070
+
+    def test_geometry_type_with_projjson_reference(self):
+        """Test parsing GeometryType with projjson: reference."""
+        logical_type = "GeometryType(crs=projjson:projjson_epsg_5070)"
+        result = parse_geometry_logical_type(logical_type)
+
+        assert result is not None
+        assert result["geo_type"] == "Geometry"
+        # Should store the reference string for later resolution
+        assert result.get("crs") == "projjson:projjson_epsg_5070"
+
+    def test_geometry_type_with_srid(self):
+        """Test parsing GeometryType with srid: format."""
+        logical_type = "GeometryType(crs=srid:5070)"
+        result = parse_geometry_logical_type(logical_type)
+
+        assert result is not None
+        assert result["geo_type"] == "Geometry"
+        # Should store the srid string for later resolution
+        assert result.get("crs") == "srid:5070"
+
+    def test_geometry_type_with_null_crs(self):
+        """Test parsing GeometryType with null CRS."""
+        logical_type = "GeometryType(crs=<null>)"
+        result = parse_geometry_logical_type(logical_type)
+
+        assert result is not None
+        assert result["geo_type"] == "Geometry"
+        # Should not have crs key when null
+        assert "crs" not in result
+
+    def test_geography_type_with_algorithm(self):
+        """Test parsing GeographyType with algorithm."""
+        logical_type = "GeographyType(algorithm=spherical)"
+        result = parse_geometry_logical_type(logical_type)
+
+        assert result is not None
+        assert result["geo_type"] == "Geography"
+        assert result.get("algorithm") == "spherical"
+
+
+class TestResolveCrsReference:
+    """Tests for resolve_crs_reference function."""
+
+    def test_resolve_none_returns_none(self):
+        """Test that None CRS returns None."""
+        result = resolve_crs_reference("any_file.parquet", None)
+        assert result is None
+
+    def test_resolve_inline_projjson_unchanged(self):
+        """Test that inline PROJJSON dict is returned unchanged."""
+        inline_crs = {"type": "ProjectedCRS", "id": {"authority": "EPSG", "code": 5070}}
+        result = resolve_crs_reference("any_file.parquet", inline_crs)
+        assert result == inline_crs
+
+    def test_resolve_srid_format(self):
+        """Test resolving srid:XXXX format to PROJJSON."""
+        result = resolve_crs_reference("any_file.parquet", "srid:5070")
+
+        # Should return a full PROJJSON dict
+        assert isinstance(result, dict)
+        # Should have CRS structure
+        assert "type" in result or "$schema" in result
+        # Should be EPSG:5070
+        assert result.get("id", {}).get("code") == 5070
+
+    def test_resolve_projjson_reference(self, crs_projjson_file):
+        """Test resolving projjson:key_name format from file metadata."""
+        result = resolve_crs_reference(crs_projjson_file, "projjson:projjson_epsg_5070")
+
+        # Should return a full PROJJSON dict
+        assert isinstance(result, dict)
+        # Should have CRS structure
+        assert "type" in result or "$schema" in result
+        # Should be EPSG:5070
+        assert result.get("id", {}).get("code") == 5070
+
+    def test_resolve_unknown_format_passthrough(self):
+        """Test that unknown format strings are returned as-is."""
+        result = resolve_crs_reference("any_file.parquet", "unknown:format")
+        assert result == "unknown:format"
+
+
+class TestExtractCrsFromParquet:
+    """Tests for extract_crs_from_parquet with CRS reference formats."""
+
+    def test_extract_crs_from_projjson_reference(self, crs_projjson_file):
+        """Test extracting CRS from file with projjson: reference."""
+        from geoparquet_io.core.common import extract_crs_from_parquet
+
+        crs = extract_crs_from_parquet(crs_projjson_file)
+
+        # Should return resolved PROJJSON, not the reference string
+        assert isinstance(crs, dict)
+        assert "type" in crs or "$schema" in crs
+        # Should be EPSG:5070
+        assert crs.get("id", {}).get("code") == 5070
+
+    def test_extract_crs_from_srid_format(self, crs_srid_file):
+        """Test extracting CRS from file with srid: format."""
+        from geoparquet_io.core.common import extract_crs_from_parquet
+
+        crs = extract_crs_from_parquet(crs_srid_file)
+
+        # Should return resolved PROJJSON, not the srid string
+        assert isinstance(crs, dict)
+        assert "type" in crs or "$schema" in crs
+        # Should be EPSG:5070
+        assert crs.get("id", {}).get("code") == 5070

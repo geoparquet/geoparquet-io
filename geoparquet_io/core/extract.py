@@ -15,6 +15,7 @@ import click
 from geoparquet_io.core.common import (
     check_bbox_structure,
     find_primary_geometry_column,
+    get_crs_display_name,
     get_duckdb_connection,
     get_duckdb_connection_for_s3,
     get_parquet_metadata,
@@ -203,38 +204,6 @@ def _get_data_bounds(input_parquet: str, geometry_col: str) -> tuple | None:
     return None
 
 
-def _get_crs_display_name(crs_info: dict | str | None) -> str:
-    """Get human-readable CRS name."""
-    if crs_info is None:
-        return "unknown"
-
-    if isinstance(crs_info, str):
-        return crs_info
-
-    if isinstance(crs_info, dict):
-        # Try to get name
-        name = crs_info.get("name")
-        if name:
-            # Also add EPSG code if available
-            crs_id = crs_info.get("id", {})
-            if isinstance(crs_id, dict):
-                authority = crs_id.get("authority", "EPSG")
-                code = crs_id.get("code")
-                if code:
-                    return f"{name} ({authority}:{code})"
-            return name
-
-        # Fall back to EPSG code
-        crs_id = crs_info.get("id", {})
-        if isinstance(crs_id, dict):
-            authority = crs_id.get("authority", "EPSG")
-            code = crs_id.get("code")
-            if code:
-                return f"{authority}:{code}"
-
-    return "unknown"
-
-
 def _warn_if_crs_mismatch(
     bbox: tuple[float, float, float, float],
     input_parquet: str,
@@ -248,7 +217,7 @@ def _warn_if_crs_mismatch(
     is_geographic = is_geographic_crs(crs_info)
 
     if is_geographic is False:  # Definitely projected
-        crs_name = _get_crs_display_name(crs_info)
+        crs_name = get_crs_display_name(crs_info)
         data_bounds = _get_data_bounds(input_parquet, geometry_col)
 
         msg = (

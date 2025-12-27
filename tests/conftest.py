@@ -222,3 +222,24 @@ def country_partition_dir():
     Total: ~5000 rows across 4 files.
     """
     return str(COUNTRY_PARTITION_DIR)
+
+
+# CRS reference format test files
+@pytest.fixture
+def crs_projjson_file(test_data_dir):
+    """Return path to parquet file with projjson: CRS reference format.
+
+    This file has a GEOMETRY column with CRS specified as 'projjson:projjson_epsg_5070',
+    referencing a PROJJSON stored in file-level metadata.
+    """
+    return str(test_data_dir / "crs-projjson.parquet")
+
+
+@pytest.fixture
+def crs_srid_file(test_data_dir):
+    """Return path to parquet file with srid: CRS format.
+
+    This file has a GEOMETRY column with CRS specified as 'srid:5070',
+    indicating EPSG:5070.
+    """
+    return str(test_data_dir / "crs-srid.parquet")

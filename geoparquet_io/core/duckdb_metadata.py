@@ -246,18 +246,34 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
     result: dict[str, Any] = {"geo_type": geo_type}
 
     # Parse CRS if present (handle nested JSON with brace counting)
-    # DuckDB returns crs=<null> for files without CRS, or crs={...} for PROJJSON
+    # DuckDB returns:
+    # - crs=<null> for files without CRS
+    # - crs={...} for inline PROJJSON
+    # - crs=projjson:key_name for reference to metadata field
     crs_start = params.find("crs=")
     if crs_start != -1:
         crs_start += 4  # Skip "crs="
+        crs_value = params[crs_start:]
+
         # Check for <null> - DuckDB's way of indicating no CRS
-        if params[crs_start:].startswith("<null>"):
+        if crs_value.startswith("<null>"):
             pass  # No CRS specified, leave result without "crs" key
-        elif crs_start < len(params) and params[crs_start] == "{":
-            # Find matching closing brace
+        elif crs_value.startswith("projjson:") or crs_value.startswith("srid:"):
+            # Reference to metadata field: projjson:key_name
+            # Or SRID reference: srid:XXXX (interpreted as EPSG:XXXX)
+            # Extract the reference (up to next comma or end of string)
+            end_pos = crs_value.find(",")
+            if end_pos == -1:
+                end_pos = crs_value.find(")")
+            if end_pos == -1:
+                end_pos = len(crs_value)
+            # Store the full reference string for later resolution
+            result["crs"] = crs_value[:end_pos].strip()
+        elif crs_value.startswith("{"):
+            # Find matching closing brace for inline PROJJSON
             brace_count = 0
-            end_pos = crs_start
-            for i, char in enumerate(params[crs_start:], start=crs_start):
+            end_pos = 0
+            for i, char in enumerate(crs_value):
                 if char == "{":
                     brace_count += 1
                 elif char == "}":
@@ -266,8 +282,8 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
                         end_pos = i + 1
                         break
 
-            if end_pos > crs_start:
-                crs_json_str = params[crs_start:end_pos]
+            if end_pos > 0:
+                crs_json_str = crs_value[:end_pos]
                 try:
                     result["crs"] = json.loads(crs_json_str)
                 except json.JSONDecodeError:
@@ -329,6 +345,67 @@ def is_geometry_column(logical_type: str) -> bool:
         return False
     # DuckDB returns GeometryType(...) and GeographyType(...) from parquet_schema()
     return logical_type.startswith("GeometryType(") or logical_type.startswith("GeographyType(")
+
+
+def resolve_crs_reference(parquet_file: str, crs_value: Any) -> Any:
+    """
+    Resolve a CRS value, looking up references from file metadata if needed.
+
+    The Parquet geo spec allows CRS to be specified as:
+    - Inline PROJJSON (dict)
+    - Reference to metadata field: "projjson:key_name"
+    - SRID reference: "srid:XXXX" (interpreted as EPSG:XXXX)
+
+    Args:
+        parquet_file: Path to the parquet file
+        crs_value: The CRS value from parse_geometry_logical_type, either:
+            - A dict (already resolved PROJJSON)
+            - A string like "projjson:key_name" (reference to metadata field)
+            - A string like "srid:5070" (interpreted as EPSG:5070)
+            - None
+
+    Returns:
+        Resolved CRS as dict (PROJJSON) or None if not found/applicable
+    """
+    if crs_value is None:
+        return None
+
+    # If already a dict (inline PROJJSON), return as-is
+    if isinstance(crs_value, dict):
+        return crs_value
+
+    # Handle projjson:key_name reference to file metadata
+    if isinstance(crs_value, str) and crs_value.startswith("projjson:"):
+        key_name = crs_value[9:]  # Skip "projjson:"
+        try:
+            import pyarrow.parquet as pq
+
+            pf = pq.ParquetFile(parquet_file)
+            file_metadata = pf.metadata.metadata
+            if file_metadata:
+                # Keys are bytes in PyArrow metadata
+                key_bytes = key_name.encode("utf-8")
+                if key_bytes in file_metadata:
+                    projjson_str = file_metadata[key_bytes].decode("utf-8")
+                    return json.loads(projjson_str)
+        except Exception:
+            pass  # Fall through to return the reference string
+        return crs_value  # Return the reference string if resolution failed
+
+    # Handle srid:XXXX format - convert to PROJJSON using pyproj
+    if isinstance(crs_value, str) and crs_value.startswith("srid:"):
+        srid = crs_value[5:]  # Skip "srid:"
+        try:
+            from pyproj import CRS
+
+            crs = CRS.from_authority("EPSG", int(srid))
+            return crs.to_json_dict()
+        except Exception:
+            pass  # Fall through to return the original value
+        return crs_value  # Return the srid string if resolution failed
+
+    # Return as-is for other string values
+    return crs_value
 
 
 def detect_geometry_columns(parquet_file: str, con=None) -> dict[str, str]:
@@ -595,3 +672,236 @@ def find_primary_geometry_column_duckdb(parquet_file: str, con=None) -> str:
                 return col.get("name", "geometry")
 
     return "geometry"
+
+
+def get_native_geo_statistics(parquet_file: str, geometry_column: str, con=None) -> dict | None:
+    """
+    Get native Parquet GeospatialStatistics for a geometry column.
+
+    This retrieves the geo_bbox and geo_types from the Parquet column metadata,
+    which is part of the native Parquet geospatial support (not GeoParquet metadata).
+
+    Args:
+        parquet_file: Path to the parquet file
+        geometry_column: Name of the geometry column
+        con: Optional existing DuckDB connection
+
+    Returns:
+        dict with 'bbox' (list of 4 floats) and 'geometry_types' (list of strings),
+        or None if not available
+    """
+    safe_url = _safe_url(parquet_file)
+    connection, should_close = _get_connection_for_file(parquet_file, con)
+
+    try:
+        result = connection.execute(f"""
+            SELECT geo_bbox, geo_types
+            FROM parquet_metadata('{safe_url}')
+            WHERE path_in_schema = '{geometry_column}'
+            LIMIT 1
+        """).fetchone()
+
+        if result is None:
+            return None
+
+        geo_bbox, geo_types = result
+
+        # Build the result dict
+        stats = {}
+
+        # Process geo_bbox - aggregate across all row groups
+        if geo_bbox and geo_bbox.get("xmin") is not None:
+            # For single row group, just use the values
+            stats["bbox"] = [
+                geo_bbox["xmin"],
+                geo_bbox["ymin"],
+                geo_bbox["xmax"],
+                geo_bbox["ymax"],
+            ]
+
+            # Include Z bounds if present
+            if geo_bbox.get("zmin") is not None:
+                stats["bbox"].extend([geo_bbox["zmin"], geo_bbox["zmax"]])
+
+        # Process geo_types - format nicely
+        if geo_types:
+            stats["geometry_types"] = _format_geo_types(geo_types)
+
+        return stats if stats else None
+
+    except Exception:
+        return None
+    finally:
+        if should_close:
+            connection.close()
+
+
+def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con=None) -> dict:
+    """
+    Get aggregated native Parquet GeospatialStatistics across all row groups.
+
+    Returns overall bbox and combined geometry types for the entire file.
+
+    Args:
+        parquet_file: Path to the parquet file
+        geometry_column: Name of the geometry column
+        con: Optional existing DuckDB connection
+
+    Returns:
+        dict with 'bbox' (list of 4+ floats) and 'geometry_types' (list of strings)
+    """
+    safe_url = _safe_url(parquet_file)
+    connection, should_close = _get_connection_for_file(parquet_file, con)
+
+    try:
+        # Aggregate bbox across all row groups
+        result = connection.execute(f"""
+            SELECT
+                MIN(geo_bbox.xmin) as xmin,
+                MIN(geo_bbox.ymin) as ymin,
+                MAX(geo_bbox.xmax) as xmax,
+                MAX(geo_bbox.ymax) as ymax,
+                MIN(geo_bbox.zmin) as zmin,
+                MAX(geo_bbox.zmax) as zmax
+            FROM parquet_metadata('{safe_url}')
+            WHERE path_in_schema = '{geometry_column}'
+              AND geo_bbox IS NOT NULL
+        """).fetchone()
+
+        stats = {}
+
+        if result and result[0] is not None:
+            xmin, ymin, xmax, ymax, zmin, zmax = result
+            stats["bbox"] = [xmin, ymin, xmax, ymax]
+            if zmin is not None:
+                stats["bbox"].extend([zmin, zmax])
+
+        # Get unique geometry types across all row groups
+        types_result = connection.execute(f"""
+            SELECT DISTINCT unnest(geo_types) as geo_type
+            FROM parquet_metadata('{safe_url}')
+            WHERE path_in_schema = '{geometry_column}'
+              AND geo_types IS NOT NULL
+        """).fetchall()
+
+        if types_result:
+            raw_types = [row[0] for row in types_result if row[0]]
+            stats["geometry_types"] = _format_geo_types(raw_types)
+
+        return stats
+
+    except Exception:
+        return {}
+    finally:
+        if should_close:
+            connection.close()
+
+
+def _format_geo_types(geo_types: list) -> list[str]:
+    """
+    Format geo_types from parquet_metadata into human-readable strings.
+
+    DuckDB may return strings like 'polygon' or WKB integer codes.
+    This normalizes them to standard names like 'Polygon', 'Point Z', etc.
+    """
+    # WKB type code to name mapping (from Parquet geo spec)
+    WKB_TYPE_CODES = {
+        # XY
+        1: "Point",
+        2: "LineString",
+        3: "Polygon",
+        4: "MultiPoint",
+        5: "MultiLineString",
+        6: "MultiPolygon",
+        7: "GeometryCollection",
+        # XYZ (add 1000)
+        1001: "Point Z",
+        1002: "LineString Z",
+        1003: "Polygon Z",
+        1004: "MultiPoint Z",
+        1005: "MultiLineString Z",
+        1006: "MultiPolygon Z",
+        1007: "GeometryCollection Z",
+        # XYM (add 2000)
+        2001: "Point M",
+        2002: "LineString M",
+        2003: "Polygon M",
+        2004: "MultiPoint M",
+        2005: "MultiLineString M",
+        2006: "MultiPolygon M",
+        2007: "GeometryCollection M",
+        # XYZM (add 3000)
+        3001: "Point ZM",
+        3002: "LineString ZM",
+        3003: "Polygon ZM",
+        3004: "MultiPoint ZM",
+        3005: "MultiLineString ZM",
+        3006: "MultiPolygon ZM",
+        3007: "GeometryCollection ZM",
+    }
+
+    formatted = []
+    for t in geo_types:
+        if isinstance(t, int):
+            # WKB integer code
+            formatted.append(WKB_TYPE_CODES.get(t, f"Unknown({t})"))
+        elif isinstance(t, str):
+            # DuckDB returns lowercase strings like 'polygon'
+            # Capitalize properly
+            t_lower = t.lower()
+            if t_lower == "point":
+                formatted.append("Point")
+            elif t_lower == "linestring":
+                formatted.append("LineString")
+            elif t_lower == "polygon":
+                formatted.append("Polygon")
+            elif t_lower == "multipoint":
+                formatted.append("MultiPoint")
+            elif t_lower == "multilinestring":
+                formatted.append("MultiLineString")
+            elif t_lower == "multipolygon":
+                formatted.append("MultiPolygon")
+            elif t_lower == "geometrycollection":
+                formatted.append("GeometryCollection")
+            elif t_lower.endswith(" zm") or t_lower.endswith("zm"):
+                # Handle ZM variants (check first - most specific)
+                if t_lower.endswith(" zm"):
+                    base = t_lower[:-3]  # Strip " zm"
+                else:
+                    base = t_lower[:-2]  # Strip "zm"
+                formatted.append(_capitalize_geom_type(base) + " ZM")
+            elif t_lower.endswith(" z") or t_lower.endswith("z"):
+                # Handle Z variants
+                if t_lower.endswith(" z"):
+                    base = t_lower[:-2]  # Strip " z"
+                else:
+                    base = t_lower[:-1]  # Strip "z"
+                formatted.append(_capitalize_geom_type(base) + " Z")
+            elif t_lower.endswith(" m") or t_lower.endswith("m"):
+                # Handle M variants
+                if t_lower.endswith(" m"):
+                    base = t_lower[:-2]  # Strip " m"
+                else:
+                    base = t_lower[:-1]  # Strip "m"
+                formatted.append(_capitalize_geom_type(base) + " M")
+            else:
+                # Fallback: just capitalize
+                formatted.append(t.title())
+        else:
+            formatted.append(str(t))
+
+    return sorted(set(formatted))
+
+
+def _capitalize_geom_type(name: str) -> str:
+    """Capitalize geometry type name properly."""
+    name_map = {
+        "point": "Point",
+        "linestring": "LineString",
+        "polygon": "Polygon",
+        "multipoint": "MultiPoint",
+        "multilinestring": "MultiLineString",
+        "multipolygon": "MultiPolygon",
+        "geometrycollection": "GeometryCollection",
+    }
+    return name_map.get(name.lower().strip(), name.title())

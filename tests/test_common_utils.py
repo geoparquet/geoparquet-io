@@ -7,11 +7,13 @@ from geoparquet_io.core.common import (
     detect_geoparquet_file_type,
     find_primary_geometry_column,
     format_size,
+    get_crs_display_name,
     get_duckdb_connection,
     get_parquet_metadata,
     has_glob_pattern,
     is_azure_url,
     is_gcs_url,
+    is_geographic_crs,
     is_remote_url,
     is_s3_url,
     needs_httpfs,
@@ -381,3 +383,84 @@ class TestGetDuckdbConnection:
         result = con.execute("SELECT 1").fetchone()
         assert result[0] == 1
         con.close()
+
+
+class TestGetCrsDisplayName:
+    """Tests for get_crs_display_name function."""
+
+    def test_none_returns_default(self):
+        """Test that None CRS returns default (OGC:CRS84)."""
+        assert get_crs_display_name(None) == "None (OGC:CRS84)"
+
+    def test_string_crs(self):
+        """Test string CRS is returned as-is."""
+        assert get_crs_display_name("EPSG:4326") == "EPSG:4326"
+        assert get_crs_display_name("srid:4326") == "srid:4326"
+
+    def test_projjson_with_name_and_code(self):
+        """Test PROJJSON dict with name and code."""
+        crs = {"name": "WGS 84", "id": {"authority": "EPSG", "code": 4326}}
+        assert get_crs_display_name(crs) == "WGS 84 (EPSG:4326)"
+
+    def test_projjson_with_code_only(self):
+        """Test PROJJSON dict with code but no name."""
+        crs = {"id": {"authority": "EPSG", "code": 4326}}
+        assert get_crs_display_name(crs) == "EPSG:4326"
+
+    def test_projjson_with_name_only(self):
+        """Test PROJJSON dict with name but no code."""
+        crs = {"name": "WGS 84"}
+        assert get_crs_display_name(crs) == "WGS 84"
+
+    def test_projjson_empty(self):
+        """Test PROJJSON dict with no name or id."""
+        crs = {"type": "GeographicCRS"}
+        assert get_crs_display_name(crs) == "PROJJSON object"
+
+
+class TestIsGeographicCrs:
+    """Tests for is_geographic_crs function."""
+
+    def test_none_is_geographic(self):
+        """Test that None CRS is treated as geographic (default is OGC:CRS84)."""
+        assert is_geographic_crs(None) is True
+
+    def test_epsg_4326_is_geographic(self):
+        """Test that EPSG:4326 is detected as geographic."""
+        crs = {"id": {"authority": "EPSG", "code": 4326}}
+        assert is_geographic_crs(crs) is True
+
+    def test_geographic_crs_type(self):
+        """Test PROJJSON with GeographicCRS type."""
+        crs = {"type": "GeographicCRS", "name": "WGS 84"}
+        assert is_geographic_crs(crs) is True
+
+    def test_projected_crs_type(self):
+        """Test PROJJSON with ProjectedCRS type."""
+        crs = {"type": "ProjectedCRS", "name": "UTM Zone 10N"}
+        assert is_geographic_crs(crs) is False
+
+    def test_string_epsg_4326(self):
+        """Test string EPSG:4326 is geographic."""
+        assert is_geographic_crs("EPSG:4326") is True
+        assert is_geographic_crs("epsg:4326") is True
+
+    def test_string_crs84(self):
+        """Test string CRS84 is geographic."""
+        assert is_geographic_crs("OGC:CRS84") is True
+        assert is_geographic_crs("CRS84") is True
+
+    def test_string_utm_is_projected(self):
+        """Test string UTM is detected as projected."""
+        assert is_geographic_crs("UTM Zone 10N") is False
+        assert is_geographic_crs("EPSG:32610") is False  # UTM 10N
+
+    def test_name_with_wgs84(self):
+        """Test CRS with WGS84 in name is geographic."""
+        crs = {"name": "WGS 84"}
+        assert is_geographic_crs(crs) is True
+
+    def test_name_with_utm_is_projected(self):
+        """Test CRS with UTM in name is projected."""
+        crs = {"name": "WGS 84 / UTM zone 10N"}
+        assert is_geographic_crs(crs) is False

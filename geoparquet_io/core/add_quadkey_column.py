@@ -6,6 +6,7 @@ import mercantile
 from geoparquet_io.core.common import (
     check_bbox_structure,
     find_primary_geometry_column,
+    get_crs_display_name,
     get_duckdb_connection,
     get_parquet_metadata,
     needs_httpfs,
@@ -56,27 +57,6 @@ def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
     return None
 
 
-def _get_crs_display_name(crs_info: dict | str | None) -> str:
-    """Get a display name for the CRS."""
-    if crs_info is None:
-        return "unknown"
-
-    if isinstance(crs_info, str):
-        return crs_info
-
-    if isinstance(crs_info, dict):
-        name = crs_info.get("name", "")
-        crs_id = crs_info.get("id", {})
-        if isinstance(crs_id, dict):
-            authority = crs_id.get("authority", "EPSG")
-            code = crs_id.get("code")
-            if code:
-                return f"{name} ({authority}:{code})" if name else f"{authority}:{code}"
-        return name if name else "unknown"
-
-    return "unknown"
-
-
 def _validate_crs_for_quadkey(input_parquet: str, geom_col: str, verbose: bool) -> None:
     """
     Validate that the file's CRS is geographic (WGS84/CRS84).
@@ -110,7 +90,7 @@ def _validate_crs_for_quadkey(input_parquet: str, geom_col: str, verbose: bool) 
     is_geographic = _is_geographic_crs(crs_info)
 
     if is_geographic is False:
-        crs_name = _get_crs_display_name(crs_info)
+        crs_name = get_crs_display_name(crs_info)
         raise click.ClickException(
             f"Quadkeys require geographic coordinates (lat/lon), but this file uses "
             f"a projected CRS: {crs_name}\n\n"
