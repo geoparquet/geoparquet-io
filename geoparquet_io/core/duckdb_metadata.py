@@ -863,18 +863,27 @@ def _format_geo_types(geo_types: list) -> list[str]:
                 formatted.append("MultiPolygon")
             elif t_lower == "geometrycollection":
                 formatted.append("GeometryCollection")
-            elif " z" in t_lower or t_lower.endswith("z"):
-                # Handle Z variants
-                base = t_lower.replace(" z", "").replace("z", "")
-                formatted.append(_capitalize_geom_type(base) + " Z")
-            elif " m" in t_lower or t_lower.endswith("m"):
-                # Handle M variants
-                base = t_lower.replace(" m", "").replace("m", "")
-                formatted.append(_capitalize_geom_type(base) + " M")
-            elif " zm" in t_lower or t_lower.endswith("zm"):
-                # Handle ZM variants
-                base = t_lower.replace(" zm", "").replace("zm", "")
+            elif t_lower.endswith(" zm") or t_lower.endswith("zm"):
+                # Handle ZM variants (check first - most specific)
+                if t_lower.endswith(" zm"):
+                    base = t_lower[:-3]  # Strip " zm"
+                else:
+                    base = t_lower[:-2]  # Strip "zm"
                 formatted.append(_capitalize_geom_type(base) + " ZM")
+            elif t_lower.endswith(" z") or t_lower.endswith("z"):
+                # Handle Z variants
+                if t_lower.endswith(" z"):
+                    base = t_lower[:-2]  # Strip " z"
+                else:
+                    base = t_lower[:-1]  # Strip "z"
+                formatted.append(_capitalize_geom_type(base) + " Z")
+            elif t_lower.endswith(" m") or t_lower.endswith("m"):
+                # Handle M variants
+                if t_lower.endswith(" m"):
+                    base = t_lower[:-2]  # Strip " m"
+                else:
+                    base = t_lower[:-1]  # Strip "m"
+                formatted.append(_capitalize_geom_type(base) + " M")
             else:
                 # Fallback: just capitalize
                 formatted.append(t.title())

@@ -479,6 +479,39 @@ class TestValidateGeoparquet:
         categories = {c.category for c in result.checks}
         assert "geoparquet_1_1" in categories
 
+    def test_validate_with_target_version_1_0(self, geoparquet_v1_file):
+        """Test validation with target_version='1.0' to validate against GeoParquet 1.0."""
+        result = validate_geoparquet(geoparquet_v1_file, target_version="1.0")
+        assert result.target_version == "1.0"
+        assert result.is_valid is True
+        # 1.0 validation should not include 1.1 or 2.0 specific checks
+        categories = {c.category for c in result.checks}
+        assert "geoparquet_1_1" not in categories
+        assert "geoparquet_2_0" not in categories
+
+    def test_validate_with_target_version_2_0(self, geoparquet_v2_file):
+        """Test validation with target_version='2.0' to validate against GeoParquet 2.0."""
+        result = validate_geoparquet(geoparquet_v2_file, target_version="2.0")
+        assert result.target_version == "2.0"
+        assert result.is_valid is True
+        # 2.0 validation should include 2.0 specific checks
+        categories = {c.category for c in result.checks}
+        assert "geoparquet_2_0" in categories
+
+    def test_validate_v1_file_against_v2_target(self, geoparquet_v1_file):
+        """Test validating a 1.0 file against 2.0 target version fails appropriately."""
+        result = validate_geoparquet(geoparquet_v1_file, target_version="2.0")
+        assert result.target_version == "2.0"
+        assert result.detected_version == "1.0.0"
+        # When detected version != target version, validation fails with version_check
+        assert result.is_valid is False
+        categories = {c.category for c in result.checks}
+        assert "version_check" in categories
+        # Should have failed version_match check
+        version_checks = [c for c in result.checks if c.category == "version_check"]
+        failed_checks = [c for c in version_checks if c.status == CheckStatus.FAILED]
+        assert len(failed_checks) > 0
+
 
 class TestValidateSampleSize:
     """Test sample size parameter."""
@@ -594,6 +627,35 @@ class TestValidateCLI:
         assert result.exit_code == 0
         assert "Validate a GeoParquet file" in result.output
 
+    def test_validate_with_geoparquet_version_1_0(self, geoparquet_v1_file):
+        """Test validate with --geoparquet-version 1.0."""
+        runner = CliRunner()
+        result = runner.invoke(validate, [geoparquet_v1_file, "--geoparquet-version", "1.0"])
+        assert result.exit_code == 0
+        assert "1.0" in result.output
+
+    def test_validate_with_geoparquet_version_2_0(self, geoparquet_v2_file):
+        """Test validate with --geoparquet-version 2.0."""
+        runner = CliRunner()
+        result = runner.invoke(validate, [geoparquet_v2_file, "--geoparquet-version", "2.0"])
+        # Exit code 0 (pass) or 2 (warnings only)
+        assert result.exit_code in [0, 2]
+        assert "2.0" in result.output
+
+    def test_validate_with_invalid_geoparquet_version(self, geoparquet_v1_file):
+        """Test validate with invalid --geoparquet-version value."""
+        runner = CliRunner()
+        result = runner.invoke(validate, [geoparquet_v1_file, "--geoparquet-version", "99.0"])
+        # Should fail with error for invalid version
+        assert result.exit_code != 0
+
+    def test_validate_v1_file_with_v2_version_flag(self, geoparquet_v1_file):
+        """Test validating a 1.0 file with --geoparquet-version 2.0 returns exit code 1."""
+        runner = CliRunner()
+        result = runner.invoke(validate, [geoparquet_v1_file, "--geoparquet-version", "2.0"])
+        # Should fail because 1.0 file doesn't meet 2.0 requirements
+        assert result.exit_code == 1
+
 
 # =============================================================================
 # Test Exit Codes
@@ -615,6 +677,19 @@ class TestExitCodes:
         result = runner.invoke(validate, [parquet_geo_only_file])
         # Should be 0 (pass) or 2 (warnings only, e.g. missing row group stats)
         assert result.exit_code in [0, 2]
+
+    def test_exit_code_1_on_invalid_file(self, tmp_path):
+        """Test that CLI returns exit code 1 for an invalid (non-parquet) file.
+
+        Creates a file with arbitrary non-parquet bytes and verifies the CLI
+        returns exit code 1 indicating validation failure.
+        """
+        invalid_file = tmp_path / "not_a_parquet.parquet"
+        invalid_file.write_bytes(b"this is not a valid parquet file")
+
+        runner = CliRunner()
+        result = runner.invoke(validate, [str(invalid_file)])
+        assert result.exit_code == 1
 
 
 # =============================================================================

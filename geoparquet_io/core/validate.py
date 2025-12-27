@@ -621,14 +621,23 @@ def _check_geometry_types_match_data(
                 total_count += row[1]
 
         # Normalize type names (DuckDB returns like "POINT", we want "Point")
+        # Explicit mapping from uppercase DuckDB names to expected GeoParquet names
+        geom_type_mapping = {
+            "POINT": "Point",
+            "LINESTRING": "LineString",
+            "POLYGON": "Polygon",
+            "MULTIPOINT": "MultiPoint",
+            "MULTILINESTRING": "MultiLineString",
+            "MULTIPOLYGON": "MultiPolygon",
+            "GEOMETRYCOLLECTION": "GeometryCollection",
+        }
         normalized_found = set()
         for t in found_types.keys():
-            # Handle DuckDB's format (e.g., "POINT", "MULTIPOLYGON")
-            normalized = t.replace("ST_", "").title().replace(" ", "")
-            # Handle multi-word types
-            if normalized.startswith("Multi"):
-                normalized = "Multi" + normalized[5:]
-            normalized_found.add(normalized)
+            if t:
+                # Strip ST_ prefix if present, then map via explicit mapping
+                clean_type = t.replace("ST_", "").upper()
+                normalized = geom_type_mapping.get(clean_type, t)
+                normalized_found.add(normalized)
 
         declared_set = set(declared_types) if declared_types else set()
 
@@ -690,6 +699,80 @@ def _check_orientation_matches_data(
     )
 
 
+def _build_bbox_query(
+    safe_url: str, geom_col: str, col_type: str, bbox: tuple, limit_clause: str
+) -> str:
+    """Build SQL query to check if geometries fall within bbox.
+
+    Args:
+        safe_url: URL-safe file path
+        geom_col: Name of geometry column
+        col_type: DuckDB column type (to determine if GEOMETRY or binary)
+        bbox: Tuple of (xmin, ymin, xmax, ymax)
+        limit_clause: SQL LIMIT clause or empty string
+
+    Returns:
+        SQL query string that returns (total, within_bbox) counts
+    """
+    xmin, ymin, xmax, ymax = bbox
+
+    # Use geometry column directly if native type, otherwise convert from WKB
+    if "GEOMETRY" in col_type.upper():
+        geom_expr = geom_col
+    else:
+        geom_expr = f"ST_GeomFromWKB({geom_col})"
+
+    return f"""
+        SELECT COUNT(*) as total,
+               COUNT(CASE WHEN
+                   ST_XMin({geom_expr}) >= {xmin} AND
+                   ST_YMin({geom_expr}) >= {ymin} AND
+                   ST_XMax({geom_expr}) <= {xmax} AND
+                   ST_YMax({geom_expr}) <= {ymax}
+               THEN 1 END) as within_bbox
+        FROM (
+            SELECT {geom_col}
+            FROM read_parquet('{safe_url}')
+            WHERE {geom_col} IS NOT NULL
+            {limit_clause}
+        )
+    """
+
+
+def _interpret_bbox_result(result: tuple | None, geom_col: str) -> ValidationCheck:
+    """Interpret bbox check result and return appropriate ValidationCheck.
+
+    Args:
+        result: Tuple of (total, within_bbox) or None
+        geom_col: Name of geometry column for check naming
+
+    Returns:
+        ValidationCheck with PASSED, FAILED, or SKIPPED status
+    """
+    if result:
+        total, within = result
+        if total == within:
+            return ValidationCheck(
+                name=f"bbox_contains_data_{geom_col}",
+                status=CheckStatus.PASSED,
+                message=f"all geometries fall within declared bbox ({total} checked)",
+                category="data_validation",
+            )
+        return ValidationCheck(
+            name=f"bbox_contains_data_{geom_col}",
+            status=CheckStatus.FAILED,
+            message=f"{total - within} of {total} geometries fall outside declared bbox",
+            category="data_validation",
+        )
+
+    return ValidationCheck(
+        name=f"bbox_contains_data_{geom_col}",
+        status=CheckStatus.SKIPPED,
+        message="no data to validate",
+        category="data_validation",
+    )
+
+
 def _check_bbox_contains_data(
     parquet_file: str, geom_col: str, bbox: list | None, con, sample_size: int
 ) -> ValidationCheck:
@@ -708,64 +791,15 @@ def _check_bbox_contains_data(
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 
     try:
-        xmin, ymin, xmax, ymax = bbox[:4]
-
         # Check if DuckDB already has it as a GEOMETRY type
         type_query = f"DESCRIBE SELECT {geom_col} FROM read_parquet('{safe_url}')"
         type_result = con.execute(type_query).fetchone()
         col_type = type_result[1] if type_result else ""
 
-        if "GEOMETRY" in col_type.upper():
-            # Column is already geometry, use directly
-            query = f"""
-                SELECT COUNT(*) as total,
-                       COUNT(CASE WHEN
-                           ST_XMin({geom_col}) >= {xmin} AND
-                           ST_YMin({geom_col}) >= {ymin} AND
-                           ST_XMax({geom_col}) <= {xmax} AND
-                           ST_YMax({geom_col}) <= {ymax}
-                       THEN 1 END) as within_bbox
-                FROM (
-                    SELECT {geom_col}
-                    FROM read_parquet('{safe_url}')
-                    WHERE {geom_col} IS NOT NULL
-                    {limit_clause}
-                )
-            """
-        else:
-            # Check if any geometries fall outside the declared bbox
-            query = f"""
-                SELECT COUNT(*) as total,
-                       COUNT(CASE WHEN
-                           ST_XMin(ST_GeomFromWKB({geom_col})) >= {xmin} AND
-                           ST_YMin(ST_GeomFromWKB({geom_col})) >= {ymin} AND
-                           ST_XMax(ST_GeomFromWKB({geom_col})) <= {xmax} AND
-                           ST_YMax(ST_GeomFromWKB({geom_col})) <= {ymax}
-                       THEN 1 END) as within_bbox
-                FROM (
-                    SELECT {geom_col}
-                    FROM read_parquet('{safe_url}')
-                    WHERE {geom_col} IS NOT NULL
-                    {limit_clause}
-                )
-            """
+        query = _build_bbox_query(safe_url, geom_col, col_type, tuple(bbox[:4]), limit_clause)
         result = con.execute(query).fetchone()
+        return _interpret_bbox_result(result, geom_col)
 
-        if result:
-            total, within = result
-            if total == within:
-                return ValidationCheck(
-                    name=f"bbox_contains_data_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message=f"all geometries fall within declared bbox ({total} checked)",
-                    category="data_validation",
-                )
-            return ValidationCheck(
-                name=f"bbox_contains_data_{geom_col}",
-                status=CheckStatus.FAILED,
-                message=f"{total - within} of {total} geometries fall outside declared bbox",
-                category="data_validation",
-            )
     except Exception as e:
         return ValidationCheck(
             name=f"bbox_contains_data_{geom_col}",
@@ -773,13 +807,6 @@ def _check_bbox_contains_data(
             message=f"failed to validate bbox: {e}",
             category="data_validation",
         )
-
-    return ValidationCheck(
-        name=f"bbox_contains_data_{geom_col}",
-        status=CheckStatus.SKIPPED,
-        message="no data to validate",
-        category="data_validation",
-    )
 
 
 # =============================================================================
@@ -1363,6 +1390,34 @@ def _check_row_group_bbox_statistics(parquet_file: str, geom_col: str) -> Valida
         )
 
 
+def _is_bbox_valid(geo_bbox: dict) -> bool:
+    """Check if bbox values are reasonable (not garbage from parsing errors).
+
+    On some platforms (e.g., Windows with certain DuckDB versions), native geo
+    statistics can be read incorrectly, resulting in extreme values like 10^300.
+    This function validates that bbox values are within a reasonable range.
+    """
+    if not geo_bbox:
+        return False
+
+    # Maximum reasonable coordinate value (covers all projected CRS systems)
+    # Even the most extreme projected CRS values are well under 10^8
+    MAX_COORD = 1e15
+
+    for key in ("xmin", "ymin", "xmax", "ymax"):
+        val = geo_bbox.get(key)
+        if val is None:
+            continue
+        try:
+            # Check for extreme values that indicate parsing errors
+            if abs(float(val)) > MAX_COORD:
+                return False
+        except (TypeError, ValueError):
+            return False
+
+    return True
+
+
 def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> ValidationCheck:
     """Check that geometry column has native Parquet GeospatialStatistics (geo_bbox)."""
     from geoparquet_io.core.common import get_duckdb_connection, is_remote_url, safe_file_url
@@ -1401,6 +1456,16 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
 
             # Check if geo_bbox has valid values
             if geo_bbox and geo_bbox.get("xmin") is not None:
+                # Validate that bbox values are reasonable (not garbage from parsing errors)
+                if not _is_bbox_valid(geo_bbox):
+                    return ValidationCheck(
+                        name=f"native_geo_stats_{geom_col}",
+                        status=CheckStatus.SKIPPED,
+                        message="geospatial statistics values appear invalid (possible parsing error)",
+                        details="The bbox values read from native geo stats are out of range. "
+                        "This may be a platform-specific issue with reading Parquet geo metadata.",
+                        category="parquet_geo_types",
+                    )
                 bbox_str = (
                     f"[{geo_bbox['xmin']:.2f}, {geo_bbox['ymin']:.2f}, "
                     f"{geo_bbox['xmax']:.2f}, {geo_bbox['ymax']:.2f}]"
@@ -1472,6 +1537,17 @@ def _check_native_geo_stats_contains_data(
                 name=f"native_geo_stats_contains_data_{geom_col}",
                 status=CheckStatus.SKIPPED,
                 message="geospatial statistics has no bbox values",
+                category="parquet_geo_types",
+            )
+
+        # Validate that bbox values are reasonable (not garbage from parsing errors)
+        if not _is_bbox_valid(geo_bbox):
+            return ValidationCheck(
+                name=f"native_geo_stats_contains_data_{geom_col}",
+                status=CheckStatus.SKIPPED,
+                message="geospatial statistics values appear invalid (possible parsing error)",
+                details="The bbox values read from native geo stats are out of range. "
+                "This may be a platform-specific issue with reading Parquet geo metadata.",
                 category="parquet_geo_types",
             )
 
@@ -2630,17 +2706,14 @@ def format_terminal_output(result: ValidationResult) -> None:
     """Format validation result for terminal with gpq-style checkmarks."""
     console = Console()
 
-    console.print()
     console.print("[bold]GeoParquet Validation Report[/bold]")
     console.print("=" * 32)
-    console.print()
 
     # Show detected version
     if result.detected_version:
         console.print(f"Detected: [cyan]{result.detected_version}[/cyan]")
     if result.target_version:
         console.print(f"Validating against: [cyan]{result.target_version}[/cyan]")
-    console.print()
 
     # Group checks by category
     categories: dict[str, list[ValidationCheck]] = {}
@@ -2706,15 +2779,13 @@ def format_terminal_output(result: ValidationResult) -> None:
             console.print(f"  {symbol} [{color}]{check.message}[/{color}]")
             if check.details:
                 console.print(f"      [dim]{check.details}[/dim]")
-        console.print()
 
     # Summary
     console.print(
-        f"Summary: [green]{result.passed_count} passed[/green], "
+        f"\nSummary: [green]{result.passed_count} passed[/green], "
         f"[yellow]{result.warning_count} warnings[/yellow], "
         f"[red]{result.failed_count} failed[/red]"
     )
-    console.print()
 
 
 def _get_check_symbol(status: CheckStatus) -> str:
