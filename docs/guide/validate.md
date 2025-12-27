@@ -270,6 +270,97 @@ gpio validate https://example.com/data.parquet
 
 Use `validate` to verify spec compliance, use `check` to optimize for performance.
 
+## Troubleshooting
+
+### Common Validation Failures
+
+#### "file must include a 'geo' metadata key"
+
+The file doesn't have GeoParquet metadata. It may be:
+- A plain Parquet file with geometry stored as WKB bytes
+- A Parquet file with native geo types but no metadata (parquet-geo-only)
+
+**Fix:** Use `gpio convert` to add GeoParquet metadata:
+
+```bash
+gpio convert input.parquet output.parquet --geoparquet-version 1.1
+```
+
+#### "coordinates outside valid range for CRS"
+
+Geometry coordinates don't match the declared CRS bounds. Common causes:
+- Geographic coordinates (lat/lon) in a file declared as projected CRS
+- Projected coordinates in a file declared as geographic CRS
+- Incorrect CRS assignment when the file was created
+
+**Fix:** Use `gpio reproject` to transform coordinates, or `gpio convert` with `--target-crs` to correct the CRS declaration:
+
+```bash
+# Transform coordinates to a new CRS
+gpio reproject input.parquet output.parquet --target-crs EPSG:4326
+
+# Or inspect the file to understand the current state
+gpio inspect input.parquet --verbose
+```
+
+#### "found undeclared geometry types"
+
+The data contains geometry types not listed in `geometry_types` metadata. For example, the file declares `["Polygon"]` but contains `MultiPolygon` geometries.
+
+**Fix:** Use `gpio convert` to regenerate metadata with correct types:
+
+```bash
+gpio convert input.parquet output.parquet
+```
+
+#### "CRS format may not be widely recognized"
+
+For parquet-geo-only files, the CRS may be stored in a format that some tools don't understand.
+
+**Fix:** Add GeoParquet 2.0 metadata for better compatibility:
+
+```bash
+gpio convert input.parquet output.parquet --geoparquet-version 2.0
+```
+
+#### "GeoParquet 2.0 requires native Parquet GEOMETRY/GEOGRAPHY type"
+
+Validating against 2.0 but the file uses WKB bytes instead of native types.
+
+**Fix:** Convert to GeoParquet 2.0 format:
+
+```bash
+gpio convert input.parquet output.parquet --geoparquet-version 2.0
+```
+
+### Warnings vs Failures
+
+- **Failures (✗)**: The file doesn't comply with the specification
+- **Warnings (⚠)**: The file is valid but may have compatibility issues
+- **Skipped (○)**: Check wasn't applicable (e.g., no bbox to validate)
+
+Files with only warnings are still valid GeoParquet files but may benefit from optimization.
+
+### Version Mismatch
+
+If you specify `--geoparquet-version` and the file is a different version, validation fails immediately:
+
+```bash
+gpio validate v1_file.parquet --geoparquet-version 2.0
+# Fails: "file is 1.0.0, not 2.0"
+```
+
+**Fix:** Either omit `--geoparquet-version` to validate against the detected version, or convert the file first:
+
+```bash
+# Validate as-is
+gpio validate v1_file.parquet
+
+# Or convert then validate
+gpio convert v1_file.parquet v2_file.parquet --geoparquet-version 2.0
+gpio validate v2_file.parquet --geoparquet-version 2.0
+```
+
 ## See Also
 
 - [CLI Reference: validate](../cli/validate.md)

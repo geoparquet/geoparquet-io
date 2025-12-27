@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import validate
+from geoparquet_io.core.common import is_geographic_crs
 from geoparquet_io.core.validate import (
     CheckStatus,
     ValidationCheck,
@@ -28,7 +29,6 @@ from geoparquet_io.core.validate import (
     _check_primary_column_present,
     _check_version_present,
     _crs_equals,
-    _is_geographic_crs,
     format_json_output,
     validate_geoparquet,
 )
@@ -406,22 +406,22 @@ class TestHelperFunctions:
 
     def test_is_geographic_crs_none(self):
         """Test None CRS is geographic (default)."""
-        assert _is_geographic_crs(None) is True
+        assert is_geographic_crs(None) is True
 
     def test_is_geographic_crs_4326(self):
         """Test EPSG:4326 is geographic."""
         crs = {"id": {"authority": "EPSG", "code": 4326}}
-        assert _is_geographic_crs(crs) is True
+        assert is_geographic_crs(crs) is True
 
     def test_is_geographic_crs_wgs84_name(self):
         """Test WGS 84 name is geographic."""
         crs = {"name": "WGS 84"}
-        assert _is_geographic_crs(crs) is True
+        assert is_geographic_crs(crs) is True
 
     def test_is_geographic_crs_projected(self):
         """Test projected CRS is not geographic."""
         crs = {"id": {"authority": "EPSG", "code": 3857}, "name": "Web Mercator"}
-        assert _is_geographic_crs(crs) is False
+        assert is_geographic_crs(crs) is False
 
 
 # =============================================================================

@@ -13,6 +13,8 @@ from typing import Any
 
 from rich.console import Console
 
+from geoparquet_io.core.common import get_crs_display_name, is_geographic_crs
+
 
 class CheckStatus(Enum):
     """Status of a validation check."""
@@ -1818,7 +1820,7 @@ def _check_v2_crs_consistency(geo_meta: dict, schema_info: list, geom_col: str) 
         name=f"v2_crs_consistency_{geom_col}",
         status=CheckStatus.FAILED,
         message="CRS in geo metadata must match CRS in Parquet schema",
-        details=f"Metadata: {_crs_summary(metadata_crs)}, Schema: {_crs_summary(schema_crs)}",
+        details=f"Metadata: {get_crs_display_name(metadata_crs)}, Schema: {get_crs_display_name(schema_crs)}",
         category="geoparquet_2_0",
     )
 
@@ -1926,7 +1928,7 @@ def _check_parquet_geo_only_crs(
             crs = resolve_crs_reference(parquet_file, raw_crs)
 
             # Check if CRS is geographic (WGS84, EPSG:4326, OGC:CRS84)
-            if _is_geographic_crs(crs):
+            if is_geographic_crs(crs):
                 return ValidationCheck(
                     name=f"parquet_geo_only_crs_{geom_col}",
                     status=CheckStatus.PASSED,
@@ -1948,7 +1950,7 @@ def _check_parquet_geo_only_crs(
                 name=f"parquet_geo_only_crs_{geom_col}",
                 status=CheckStatus.WARNING,
                 message="CRS format may not be widely recognized by geospatial tools",
-                details=f"CRS: {_crs_summary(crs)}. "
+                details=f"CRS: {get_crs_display_name(crs)}. "
                 "Use 'gpio convert --geoparquet-version 2.0' to add standardized metadata.",
                 category="parquet_geo_types",
             )
@@ -1966,87 +1968,232 @@ def _check_parquet_geo_only_crs(
 # =============================================================================
 
 
+def _extract_epsg_from_dict(crs: dict) -> int | None:
+    """Extract EPSG code from PROJJSON dict."""
+    crs_id = crs.get("id", {})
+    if not isinstance(crs_id, dict):
+        return None
+    if crs_id.get("authority", "").upper() != "EPSG":
+        return None
+    try:
+        return int(crs_id.get("code", 0))
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_epsg_from_string(crs: str) -> int | None:
+    """Extract EPSG code from string CRS."""
+    try:
+        if crs.startswith("srid:"):
+            return int(crs.split(":")[1])
+        if crs.upper().startswith("EPSG:"):
+            return int(crs.split(":")[1])
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
+def _extract_epsg_code(crs: Any) -> int | None:
+    """Extract EPSG code from CRS in various formats."""
+    if crs is None:
+        return None
+    if isinstance(crs, dict):
+        return _extract_epsg_from_dict(crs)
+    if isinstance(crs, str):
+        return _extract_epsg_from_string(crs)
+    return None
+
+
+def _is_ogc_crs84(crs: Any) -> bool:
+    """Check if CRS is OGC:CRS84."""
+    if crs is None:
+        return True  # Default is CRS84
+
+    if isinstance(crs, dict):
+        crs_id = crs.get("id", {})
+        if isinstance(crs_id, dict):
+            authority = crs_id.get("authority", "").upper()
+            code = str(crs_id.get("code", "")).upper()
+            return authority == "OGC" and code == "CRS84"
+
+    return False
+
+
+def _get_bounds_from_pyproj(epsg_code: int) -> tuple[float, float, float, float] | None:
+    """Get CRS bounds from pyproj."""
+    try:
+        from pyproj import CRS as PyprojCRS
+
+        pyproj_crs = PyprojCRS.from_epsg(epsg_code)
+        area = pyproj_crs.area_of_use
+        if not area:
+            return None
+
+        if pyproj_crs.is_geographic:
+            return (area.west, area.south, area.east, area.north)
+
+        # For projected CRS, transform geographic bounds to projected coordinates
+        return _transform_bounds_to_projected(pyproj_crs, area)
+    except Exception:
+        return None
+
+
+def _transform_bounds_to_projected(
+    pyproj_crs: Any, area: Any
+) -> tuple[float, float, float, float] | None:
+    """Transform geographic bounds to projected CRS coordinates."""
+    try:
+        from pyproj import CRS as PyprojCRS
+        from pyproj import Transformer
+
+        transformer = Transformer.from_crs(PyprojCRS.from_epsg(4326), pyproj_crs, always_xy=True)
+        corners = [
+            (area.west, area.south),
+            (area.west, area.north),
+            (area.east, area.south),
+            (area.east, area.north),
+        ]
+        transformed = [transformer.transform(x, y) for x, y in corners]
+        xs = [p[0] for p in transformed if p[0] != float("inf")]
+        ys = [p[1] for p in transformed if p[1] != float("inf")]
+        if xs and ys:
+            return (min(xs), min(ys), max(xs), max(ys))
+    except Exception:
+        pass
+    return None
+
+
+# Standard geographic bounds
+_GEOGRAPHIC_BOUNDS = (-180.0, -90.0, 180.0, 90.0)
+
+
 def _get_crs_bounds(crs: Any) -> tuple[float, float, float, float] | None:
     """
     Get the valid coordinate bounds for a CRS.
 
     Returns (xmin, ymin, xmax, ymax) or None if bounds cannot be determined.
     """
-    # Default CRS (None) is OGC:CRS84 - geographic
-    if crs is None:
-        return (-180.0, -90.0, 180.0, 90.0)
+    # Default CRS (None) or OGC:CRS84 - geographic
+    if crs is None or _is_ogc_crs84(crs):
+        return _GEOGRAPHIC_BOUNDS
 
-    # Try to extract EPSG code
-    epsg_code = None
+    epsg_code = _extract_epsg_code(crs)
 
-    if isinstance(crs, dict):
-        crs_id = crs.get("id", {})
-        if isinstance(crs_id, dict):
-            authority = crs_id.get("authority", "").upper()
-            code = crs_id.get("code")
-            if authority == "EPSG" and code:
-                epsg_code = int(code) if isinstance(code, (int, str)) else None
-            elif authority == "OGC" and str(code).upper() == "CRS84":
-                return (-180.0, -90.0, 180.0, 90.0)
-
-    elif isinstance(crs, str):
-        # Handle srid:XXXX format
-        if crs.startswith("srid:"):
-            try:
-                epsg_code = int(crs.split(":")[1])
-            except (ValueError, IndexError):
-                pass
-        # Handle EPSG:XXXX format
-        elif crs.upper().startswith("EPSG:"):
-            try:
-                epsg_code = int(crs.split(":")[1])
-            except (ValueError, IndexError):
-                pass
-
-    # Common geographic CRS - strict lat/lon bounds
+    # EPSG:4326 - standard geographic bounds
     if epsg_code == 4326:
-        return (-180.0, -90.0, 180.0, 90.0)
+        return _GEOGRAPHIC_BOUNDS
 
-    # Try to get bounds from pyproj if available
+    # Try to get bounds from pyproj
     if epsg_code:
-        try:
-            from pyproj import CRS as PyprojCRS
-
-            pyproj_crs = PyprojCRS.from_epsg(epsg_code)
-            area = pyproj_crs.area_of_use
-            if area:
-                # area_of_use returns bounds in geographic coordinates
-                # We need to transform these to the CRS coordinates
-                # For now, just use a reasonable multiplier for projected CRS
-                if pyproj_crs.is_geographic:
-                    return (area.west, area.south, area.east, area.north)
-                else:
-                    # For projected CRS, get the bounds in projected coordinates
-                    # by transforming the geographic bounds
-                    from pyproj import Transformer
-
-                    transformer = Transformer.from_crs(
-                        PyprojCRS.from_epsg(4326), pyproj_crs, always_xy=True
-                    )
-                    # Transform the four corners and get the envelope
-                    corners = [
-                        (area.west, area.south),
-                        (area.west, area.north),
-                        (area.east, area.south),
-                        (area.east, area.north),
-                    ]
-                    try:
-                        transformed = [transformer.transform(x, y) for x, y in corners]
-                        xs = [p[0] for p in transformed if p[0] != float("inf")]
-                        ys = [p[1] for p in transformed if p[1] != float("inf")]
-                        if xs and ys:
-                            return (min(xs), min(ys), max(xs), max(ys))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        return _get_bounds_from_pyproj(epsg_code)
 
     return None
+
+
+def _check_geographic_bounds(
+    actual: tuple[float, float, float, float],
+    expected: tuple[float, float, float, float],
+) -> list[str]:
+    """Check if actual bounds are within expected geographic bounds (strict)."""
+    actual_xmin, actual_xmax, actual_ymin, actual_ymax = actual
+    expected_xmin, expected_ymin, expected_xmax, expected_ymax = expected
+
+    issues = []
+    if actual_xmin < expected_xmin:
+        issues.append(f"min_x={actual_xmin:.4f} < {expected_xmin}")
+    if actual_xmax > expected_xmax:
+        issues.append(f"max_x={actual_xmax:.4f} > {expected_xmax}")
+    if actual_ymin < expected_ymin:
+        issues.append(f"min_y={actual_ymin:.4f} < {expected_ymin}")
+    if actual_ymax > expected_ymax:
+        issues.append(f"max_y={actual_ymax:.4f} > {expected_ymax}")
+    return issues
+
+
+def _check_projected_bounds(
+    actual: tuple[float, float, float, float],
+    expected: tuple[float, float, float, float],
+    tolerance: float = 1.5,
+) -> list[str]:
+    """Check if actual bounds are reasonably within expected projected bounds."""
+    actual_xmin, actual_xmax, actual_ymin, actual_ymax = actual
+    expected_xmin, expected_ymin, expected_xmax, expected_ymax = expected
+
+    x_range = expected_xmax - expected_xmin
+    y_range = expected_ymax - expected_ymin
+
+    issues = []
+    if actual_xmin < expected_xmin - (x_range * tolerance):
+        issues.append(
+            f"min_x={actual_xmin:.1f} far below expected "
+            f"({expected_xmin:.1f} - {expected_xmax:.1f})"
+        )
+    if actual_xmax > expected_xmax + (x_range * tolerance):
+        issues.append(
+            f"max_x={actual_xmax:.1f} far above expected "
+            f"({expected_xmin:.1f} - {expected_xmax:.1f})"
+        )
+    if actual_ymin < expected_ymin - (y_range * tolerance):
+        issues.append(
+            f"min_y={actual_ymin:.1f} far below expected "
+            f"({expected_ymin:.1f} - {expected_ymax:.1f})"
+        )
+    if actual_ymax > expected_ymax + (y_range * tolerance):
+        issues.append(
+            f"max_y={actual_ymax:.1f} far above expected "
+            f"({expected_ymin:.1f} - {expected_ymax:.1f})"
+        )
+    return issues
+
+
+def _detect_geographic_in_projected(
+    actual: tuple[float, float, float, float],
+) -> str | None:
+    """Detect if coordinates look like geographic coords in a projected CRS."""
+    actual_xmin, actual_xmax, actual_ymin, actual_ymax = actual
+
+    if -180 <= actual_xmin <= 180 and -180 <= actual_xmax <= 180:
+        if -90 <= actual_ymin <= 90 and -90 <= actual_ymax <= 90:
+            return (
+                f"coordinates look geographic ({actual_xmin:.2f},{actual_ymin:.2f} - "
+                f"{actual_xmax:.2f},{actual_ymax:.2f}) but CRS is projected"
+            )
+    return None
+
+
+def _get_geometry_bounds(
+    con, safe_url: str, geom_col: str, limit_clause: str
+) -> tuple[float, float, float, float, int] | None:
+    """Query actual coordinate bounds from geometry data."""
+    # Check if DuckDB already has it as a GEOMETRY type
+    type_query = f"DESCRIBE SELECT \"{geom_col}\" FROM read_parquet('{safe_url}')"
+    type_result = con.execute(type_query).fetchone()
+    col_type = type_result[1] if type_result else ""
+
+    geom_expr = (
+        f'"{geom_col}"' if "GEOMETRY" in col_type.upper() else f'ST_GeomFromWKB("{geom_col}")'
+    )
+
+    query = f"""
+        SELECT
+            MIN(ST_XMin({geom_expr})) as min_x,
+            MAX(ST_XMax({geom_expr})) as max_x,
+            MIN(ST_YMin({geom_expr})) as min_y,
+            MAX(ST_YMax({geom_expr})) as max_y,
+            COUNT(*) as total
+        FROM (
+            SELECT "{geom_col}"
+            FROM read_parquet('{safe_url}')
+            WHERE "{geom_col}" IS NOT NULL
+            {limit_clause}
+        )
+    """
+    result = con.execute(query).fetchone()
+
+    if result is None or result[0] is None:
+        return None
+
+    return result[0], result[1], result[2], result[3], result[4]
 
 
 def _check_coordinates_valid_for_crs(
@@ -2061,144 +2208,65 @@ def _check_coordinates_valid_for_crs(
 
     safe_url = safe_file_url(parquet_file, verbose=False)
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
+    check_name = f"coordinates_valid_for_crs_{geom_col}"
 
     # Get expected bounds for the CRS
     crs_bounds = _get_crs_bounds(crs)
-
     if crs_bounds is None:
         return ValidationCheck(
-            name=f"coordinates_valid_for_crs_{geom_col}",
+            name=check_name,
             status=CheckStatus.SKIPPED,
             message="could not determine valid bounds for CRS",
-            details=f"CRS: {_crs_summary(crs)}",
+            details=f"CRS: {get_crs_display_name(crs)}",
             category="data_validation",
         )
 
-    expected_xmin, expected_ymin, expected_xmax, expected_ymax = crs_bounds
-
     try:
-        # Check if DuckDB already has it as a GEOMETRY type
-        type_query = f"DESCRIBE SELECT \"{geom_col}\" FROM read_parquet('{safe_url}')"
-        type_result = con.execute(type_query).fetchone()
-        col_type = type_result[1] if type_result else ""
-
-        if "GEOMETRY" in col_type.upper():
-            geom_expr = f'"{geom_col}"'
-        else:
-            geom_expr = f'ST_GeomFromWKB("{geom_col}")'
-
-        # Get actual coordinate bounds from the data
-        query = f"""
-            SELECT
-                MIN(ST_XMin({geom_expr})) as min_x,
-                MAX(ST_XMax({geom_expr})) as max_x,
-                MIN(ST_YMin({geom_expr})) as min_y,
-                MAX(ST_YMax({geom_expr})) as max_y,
-                COUNT(*) as total
-            FROM (
-                SELECT "{geom_col}"
-                FROM read_parquet('{safe_url}')
-                WHERE "{geom_col}" IS NOT NULL
-                {limit_clause}
-            )
-        """
-        result = con.execute(query).fetchone()
-
-        if result is None or result[0] is None:
+        bounds_result = _get_geometry_bounds(con, safe_url, geom_col, limit_clause)
+        if bounds_result is None:
             return ValidationCheck(
-                name=f"coordinates_valid_for_crs_{geom_col}",
+                name=check_name,
                 status=CheckStatus.SKIPPED,
                 message="no geometry data to validate",
                 category="data_validation",
             )
 
-        actual_xmin, actual_xmax, actual_ymin, actual_ymax, total = result
+        actual_xmin, actual_xmax, actual_ymin, actual_ymax, total = bounds_result
+        actual = (actual_xmin, actual_xmax, actual_ymin, actual_ymax)
+        is_geo = is_geographic_crs(crs)
 
-        # Check for issues
-        issues = []
-
-        # For geographic CRS (4326, CRS84), be strict about bounds
-        is_geographic = _is_geographic_crs(crs)
-
-        if is_geographic:
-            # Strict bounds check for geographic CRS
-            if actual_xmin < expected_xmin:
-                issues.append(f"min_x={actual_xmin:.4f} < {expected_xmin}")
-            if actual_xmax > expected_xmax:
-                issues.append(f"max_x={actual_xmax:.4f} > {expected_xmax}")
-            if actual_ymin < expected_ymin:
-                issues.append(f"min_y={actual_ymin:.4f} < {expected_ymin}")
-            if actual_ymax > expected_ymax:
-                issues.append(f"max_y={actual_ymax:.4f} > {expected_ymax}")
+        # Check bounds based on CRS type
+        if is_geo:
+            issues = _check_geographic_bounds(actual, crs_bounds)
         else:
-            # For projected CRS, check if coordinates are wildly outside expected range
-            # Use a tolerance factor (coordinates can be slightly outside area of use)
-            tolerance = 1.5  # 50% tolerance for projected CRS
-
-            x_range = expected_xmax - expected_xmin
-            y_range = expected_ymax - expected_ymin
-
-            # Check if coordinates are several orders of magnitude off
-            if actual_xmin < expected_xmin - (x_range * tolerance):
-                issues.append(
-                    f"min_x={actual_xmin:.1f} far below expected "
-                    f"({expected_xmin:.1f} - {expected_xmax:.1f})"
-                )
-            if actual_xmax > expected_xmax + (x_range * tolerance):
-                issues.append(
-                    f"max_x={actual_xmax:.1f} far above expected "
-                    f"({expected_xmin:.1f} - {expected_xmax:.1f})"
-                )
-            if actual_ymin < expected_ymin - (y_range * tolerance):
-                issues.append(
-                    f"min_y={actual_ymin:.1f} far below expected "
-                    f"({expected_ymin:.1f} - {expected_ymax:.1f})"
-                )
-            if actual_ymax > expected_ymax + (y_range * tolerance):
-                issues.append(
-                    f"max_y={actual_ymax:.1f} far above expected "
-                    f"({expected_ymin:.1f} - {expected_ymax:.1f})"
-                )
-
-            # Also check for obvious geographic coordinates in projected CRS
-            # (coordinates between -180 and 180 are suspicious for projected)
-            if -180 <= actual_xmin <= 180 and -180 <= actual_xmax <= 180:
-                if -90 <= actual_ymin <= 90 and -90 <= actual_ymax <= 90:
-                    # This looks like unprojected geographic coordinates!
-                    issues.append(
-                        f"coordinates look geographic ({actual_xmin:.2f},{actual_ymin:.2f} - "
-                        f"{actual_xmax:.2f},{actual_ymax:.2f}) but CRS is projected"
-                    )
+            issues = _check_projected_bounds(actual, crs_bounds)
+            # Also check for geographic coords in projected CRS
+            geo_warning = _detect_geographic_in_projected(actual)
+            if geo_warning:
+                issues.append(geo_warning)
 
         if issues:
             return ValidationCheck(
-                name=f"coordinates_valid_for_crs_{geom_col}",
+                name=check_name,
                 status=CheckStatus.FAILED,
                 message=f"coordinates outside valid range for CRS ({total} checked)",
                 details="; ".join(issues),
                 category="data_validation",
             )
 
-        # Passed - format message based on CRS type
-        crs_name = _crs_summary(crs)
-        if is_geographic:
-            return ValidationCheck(
-                name=f"coordinates_valid_for_crs_{geom_col}",
-                status=CheckStatus.PASSED,
-                message=f"coordinates within valid bounds for {crs_name} ({total} checked)",
-                category="data_validation",
-            )
-        else:
-            return ValidationCheck(
-                name=f"coordinates_valid_for_crs_{geom_col}",
-                status=CheckStatus.PASSED,
-                message=f"coordinates appear valid for {crs_name} ({total} checked)",
-                category="data_validation",
-            )
+        # Passed
+        crs_name = get_crs_display_name(crs)
+        msg = "coordinates within valid bounds" if is_geo else "coordinates appear valid"
+        return ValidationCheck(
+            name=check_name,
+            status=CheckStatus.PASSED,
+            message=f"{msg} for {crs_name} ({total} checked)",
+            category="data_validation",
+        )
 
     except Exception as e:
         return ValidationCheck(
-            name=f"coordinates_valid_for_crs_{geom_col}",
+            name=check_name,
             status=CheckStatus.FAILED,
             message=f"failed to validate coordinates: {e}",
             category="data_validation",
@@ -2244,66 +2312,6 @@ def _crs_equals(crs1: Any, crs2: Any) -> bool:
 
     # Direct comparison for strings
     return crs1 == crs2
-
-
-def _crs_summary(crs: Any) -> str:
-    """Get a short summary of a CRS for display."""
-    if crs is None:
-        return "None (OGC:CRS84)"
-
-    if isinstance(crs, dict):
-        if "id" in crs and isinstance(crs["id"], dict):
-            authority = crs["id"].get("authority", "")
-            code = crs["id"].get("code", "")
-            return f"{authority}:{code}"
-        if "name" in crs:
-            return crs["name"]
-        return "PROJJSON object"
-
-    return str(crs)
-
-
-def _is_geographic_crs(crs: Any) -> bool:
-    """Check if CRS is a geographic CRS (WGS84, EPSG:4326, OGC:CRS84)."""
-    if crs is None:
-        return True  # Default is OGC:CRS84
-
-    if isinstance(crs, dict):
-        # Check PROJJSON type field first - most reliable
-        crs_type = crs.get("type", "").lower()
-        if crs_type == "geographiccrs":
-            return True
-        if crs_type == "projectedcrs":
-            return False
-
-        # Check for EPSG:4326
-        crs_id = crs.get("id", {})
-        if isinstance(crs_id, dict):
-            authority = crs_id.get("authority", "").upper()
-            code = crs_id.get("code")
-            if authority == "EPSG" and code == 4326:
-                return True
-            if authority == "OGC" and str(code).upper() == "CRS84":
-                return True
-
-        # Check name for common geographic CRS names
-        # But exclude projected CRS (UTM, zone, etc.)
-        name = crs.get("name", "").upper()
-        projected_indicators = ["UTM", "ZONE", "MERCATOR", "ALBERS", "LAMBERT", "STATE PLANE"]
-        if any(indicator in name for indicator in projected_indicators):
-            return False
-        if any(x in name for x in ["WGS 84", "WGS84", "CRS84", "4326"]):
-            return True
-
-    if isinstance(crs, str):
-        crs_upper = crs.upper()
-        # Check for projected indicators in string CRS as well
-        projected_indicators = ["UTM", "ZONE", "MERCATOR", "ALBERS", "LAMBERT"]
-        if any(indicator in crs_upper for indicator in projected_indicators):
-            return False
-        return any(x in crs_upper for x in ["4326", "CRS84", "WGS84"])
-
-    return False
 
 
 # =============================================================================
