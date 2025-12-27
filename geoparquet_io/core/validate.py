@@ -1228,20 +1228,34 @@ def _check_geography_edges_valid(schema_info: list, geom_col: str) -> Validation
     )
 
 
+def _is_geography_column(schema_info: list, geom_col: str) -> bool:
+    """Check if a geometry column is a GEOGRAPHY type."""
+    for col in schema_info:
+        if col.get("name") == geom_col:
+            logical_type = col.get("logical_type", "")
+            return "GeographyType" in logical_type
+    return False
+
+
+def _validate_geography_bounds(min_x, max_x, min_y, max_y) -> list[str]:
+    """Check coordinate bounds and return list of issues found."""
+    issues = []
+    if min_x is not None and min_x < -180:
+        issues.append(f"min_x={min_x} < -180")
+    if max_x is not None and max_x > 180:
+        issues.append(f"max_x={max_x} > 180")
+    if min_y is not None and min_y < -90:
+        issues.append(f"min_y={min_y} < -90")
+    if max_y is not None and max_y > 90:
+        issues.append(f"max_y={max_y} > 90")
+    return issues
+
+
 def _check_geography_coordinate_bounds(
     parquet_file: str, geom_col: str, schema_info: list, con, sample_size: int
 ) -> ValidationCheck:
     """Check PGO-7: for GEOGRAPHY, X bounded [-180, 180], Y bounded [-90, 90]."""
-    # First check if this is a GEOGRAPHY column
-    is_geography = False
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            logical_type = col.get("logical_type", "")
-            if "GeographyType" in logical_type:
-                is_geography = True
-            break
-
-    if not is_geography:
+    if not _is_geography_column(schema_info, geom_col):
         return ValidationCheck(
             name=f"geography_coordinate_bounds_{geom_col}",
             status=CheckStatus.SKIPPED,
@@ -1255,60 +1269,33 @@ def _check_geography_coordinate_bounds(
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 
     try:
-        # Check if DuckDB already has it as a GEOMETRY type
-        type_query = f"DESCRIBE SELECT \"{geom_col}\" FROM read_parquet('{safe_url}')"
-        type_result = con.execute(type_query).fetchone()
-        col_type = type_result[1] if type_result else ""
-
-        # If column is already GEOMETRY type, use it directly; otherwise use ST_GeomFromWKB
-        if "GEOMETRY" in col_type.upper():
-            geom_expr = f'"{geom_col}"'
-        else:
-            geom_expr = f'ST_GeomFromWKB("{geom_col}")'
-
-        query = f"""
-            SELECT
-                MIN(ST_XMin({geom_expr})) as min_x,
-                MAX(ST_XMax({geom_expr})) as max_x,
-                MIN(ST_YMin({geom_expr})) as min_y,
-                MAX(ST_YMax({geom_expr})) as max_y
-            FROM (
-                SELECT "{geom_col}"
-                FROM read_parquet('{safe_url}')
-                WHERE "{geom_col}" IS NOT NULL
-                {limit_clause}
-            )
-        """
-        result = con.execute(query).fetchone()
-
-        if result:
-            min_x, max_x, min_y, max_y = result
-            issues = []
-
-            if min_x is not None and min_x < -180:
-                issues.append(f"min_x={min_x} < -180")
-            if max_x is not None and max_x > 180:
-                issues.append(f"max_x={max_x} > 180")
-            if min_y is not None and min_y < -90:
-                issues.append(f"min_y={min_y} < -90")
-            if max_y is not None and max_y > 90:
-                issues.append(f"max_y={max_y} > 90")
-
-            if issues:
-                return ValidationCheck(
-                    name=f"geography_coordinate_bounds_{geom_col}",
-                    status=CheckStatus.FAILED,
-                    message="GEOGRAPHY coordinates exceed valid bounds",
-                    details=", ".join(issues),
-                    category="parquet_geo_types",
-                )
-
+        result = _execute_bounds_query(con, safe_url, geom_col, limit_clause)
+        if not result:
             return ValidationCheck(
                 name=f"geography_coordinate_bounds_{geom_col}",
-                status=CheckStatus.PASSED,
-                message="GEOGRAPHY coordinates within valid bounds [-180,180] x [-90,90]",
+                status=CheckStatus.SKIPPED,
+                message="no data to validate",
                 category="parquet_geo_types",
             )
+
+        min_x, max_x, min_y, max_y = result
+        issues = _validate_geography_bounds(min_x, max_x, min_y, max_y)
+
+        if issues:
+            return ValidationCheck(
+                name=f"geography_coordinate_bounds_{geom_col}",
+                status=CheckStatus.FAILED,
+                message="GEOGRAPHY coordinates exceed valid bounds",
+                details=", ".join(issues),
+                category="parquet_geo_types",
+            )
+
+        return ValidationCheck(
+            name=f"geography_coordinate_bounds_{geom_col}",
+            status=CheckStatus.PASSED,
+            message="GEOGRAPHY coordinates within valid bounds [-180,180] x [-90,90]",
+            category="parquet_geo_types",
+        )
     except Exception as e:
         return ValidationCheck(
             name=f"geography_coordinate_bounds_{geom_col}",
@@ -1317,12 +1304,32 @@ def _check_geography_coordinate_bounds(
             category="parquet_geo_types",
         )
 
-    return ValidationCheck(
-        name=f"geography_coordinate_bounds_{geom_col}",
-        status=CheckStatus.SKIPPED,
-        message="no data to validate",
-        category="parquet_geo_types",
-    )
+
+def _execute_bounds_query(con, safe_url: str, geom_col: str, limit_clause: str):
+    """Execute query to get coordinate bounds for a geometry column."""
+    type_query = f"DESCRIBE SELECT \"{geom_col}\" FROM read_parquet('{safe_url}')"
+    type_result = con.execute(type_query).fetchone()
+    col_type = type_result[1] if type_result else ""
+
+    if "GEOMETRY" in col_type.upper():
+        geom_expr = f'"{geom_col}"'
+    else:
+        geom_expr = f'ST_GeomFromWKB("{geom_col}")'
+
+    query = f"""
+        SELECT
+            MIN(ST_XMin({geom_expr})) as min_x,
+            MAX(ST_XMax({geom_expr})) as max_x,
+            MIN(ST_YMin({geom_expr})) as min_y,
+            MAX(ST_YMax({geom_expr})) as max_y
+        FROM (
+            SELECT "{geom_col}"
+            FROM read_parquet('{safe_url}')
+            WHERE "{geom_col}" IS NOT NULL
+            {limit_clause}
+        )
+    """
+    return con.execute(query).fetchone()
 
 
 # =============================================================================
@@ -1433,9 +1440,8 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
             )
 
         safe_url = safe_file_url(parquet_file, verbose=False)
-        con = get_duckdb_connection(load_spatial=True)
 
-        try:
+        with get_duckdb_connection(load_spatial=True) as con:
             # Check for geo_bbox in parquet_metadata for the geometry column
             result = con.execute(f"""
                 SELECT geo_bbox, geo_types
@@ -1485,8 +1491,6 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
                     "Re-write with a tool that generates native geo statistics.",
                     category="parquet_geo_types",
                 )
-        finally:
-            con.close()
 
     except Exception as e:
         return ValidationCheck(
@@ -2375,10 +2379,9 @@ def validate_geoparquet(
 
     # Get DuckDB connection for data validation
     con = None
-    if validate_data:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
-
     try:
+        if validate_data:
+            con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
         # If target_version is parquet-geo-only, only run Parquet native geo type checks
         if target_version == "parquet-geo-only":
             result.checks.extend(
