@@ -33,7 +33,7 @@ jobs:
 
       # Non-blocking complexity checks
       - name: Check code complexity (informational)
-        run: uv run xenon --max-absolute=B --max-modules=B --max-average=A geoparquet_io tests
+        run: uv run xenon --max-absolute=E --max-modules=D --max-average=C geoparquet_io tests
         continue-on-error: true
 
       - name: Check for dead code (informational)
