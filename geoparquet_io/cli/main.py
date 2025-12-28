@@ -53,7 +53,7 @@ from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_i
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 
 class OptionalIntCommand(click.Command):
