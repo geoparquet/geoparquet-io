@@ -3295,7 +3295,7 @@ def upload(
 )
 @click.option(
     "--sample-size",
-    type=int,
+    type=click.IntRange(0, None),
     default=1000,
     show_default=True,
     help="Number of rows to sample for data validation (0 = all rows)",

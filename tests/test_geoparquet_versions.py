@@ -13,6 +13,7 @@ Tests verify:
 import os
 
 import duckdb
+import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
@@ -68,42 +69,27 @@ class TestGeoParquetVersionConstants:
 class TestWriteGeoParquetV1:
     """Test writing GeoParquet 1.0 and 1.1."""
 
-    def test_convert_default_version(self, geojson_input, temp_output_file):
-        """Test default version is 1.1."""
+    @pytest.mark.parametrize(
+        "version,expected_version",
+        [
+            (None, "1.1.0"),  # default
+            ("1.1", "1.1.0"),  # explicit 1.1
+            ("1.0", "1.0.0"),  # explicit 1.0
+        ],
+        ids=["default", "explicit-1.1", "explicit-1.0"],
+    )
+    def test_convert_version(self, geojson_input, temp_output_file, version, expected_version):
+        """Test conversion to various v1.x versions."""
         convert_to_geoparquet(
             geojson_input,
             temp_output_file,
             skip_hilbert=True,
             verbose=False,
+            geoparquet_version=version,
         )
 
         assert os.path.exists(temp_output_file)
-        assert get_geoparquet_version(temp_output_file) == "1.1.0"
-
-    def test_convert_explicit_1_1(self, geojson_input, temp_output_file):
-        """Test explicit version 1.1."""
-        convert_to_geoparquet(
-            geojson_input,
-            temp_output_file,
-            skip_hilbert=True,
-            verbose=False,
-            geoparquet_version="1.1",
-        )
-
-        assert get_geoparquet_version(temp_output_file) == "1.1.0"
-        assert has_geoparquet_metadata(temp_output_file)
-
-    def test_convert_1_0(self, geojson_input, temp_output_file):
-        """Test version 1.0."""
-        convert_to_geoparquet(
-            geojson_input,
-            temp_output_file,
-            skip_hilbert=True,
-            verbose=False,
-            geoparquet_version="1.0",
-        )
-
-        assert get_geoparquet_version(temp_output_file) == "1.0.0"
+        assert get_geoparquet_version(temp_output_file) == expected_version
         assert has_geoparquet_metadata(temp_output_file)
 
     def test_geometry_encoding_wkb(self, geojson_input, temp_output_file):
@@ -1219,6 +1205,7 @@ class TestAddBboxGeoParquetVersion:
         assert get_geoparquet_version(temp_output_file) == "1.0.0"
 
 
+@pytest.mark.slow
 class TestPartitionGeoParquetVersion:
     """Test --geoparquet-version option on partition commands."""
 

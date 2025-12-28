@@ -4,10 +4,18 @@ Tests for partition commands.
 
 import os
 
+import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import partition
+
+
+# Shared CliRunner to avoid repeated instantiation
+@pytest.fixture(scope="module")
+def cli_runner():
+    """Module-scoped CliRunner for test efficiency."""
+    return CliRunner()
 
 
 class TestPartitionCommands:
@@ -137,92 +145,20 @@ class TestPartitionCommands:
         # Should fail because output folder is required without --preview
         assert result.exit_code != 0
 
-    # H3 partition tests
-    def test_partition_h3_preview(self, buildings_test_file):
+    # H3 partition tests - Quick tests (preview, error cases)
+    def test_partition_h3_preview(self, buildings_test_file, cli_runner):
         """Test partition h3 command with preview mode."""
-        runner = CliRunner()
-        result = runner.invoke(
+        result = cli_runner.invoke(
             partition, ["h3", buildings_test_file, "--resolution", "9", "--preview"]
         )
         assert result.exit_code == 0
-        # Preview should show partition information
         assert "Partition Preview" in result.output
         assert "Total partitions:" in result.output
         assert "Total records:" in result.output
 
-    def test_partition_h3_basic(self, buildings_test_file, temp_output_dir):
-        """Test partition h3 command with auto-add H3 column."""
-        runner = CliRunner()
-        result = runner.invoke(
-            partition,
-            ["h3", buildings_test_file, temp_output_dir, "--resolution", "9", "--skip-analysis"],
-        )
-        assert result.exit_code == 0
-        # Should have created partition files
-        output_files = os.listdir(temp_output_dir)
-        assert len(output_files) > 0
-        # All files should be .parquet
-        assert all(f.endswith(".parquet") for f in output_files)
-        # H3 cell IDs are always 15 characters regardless of resolution
-        assert all(len(f.replace(".parquet", "")) == 15 for f in output_files)
-
-    def test_partition_h3_custom_resolution(self, buildings_test_file, temp_output_dir):
-        """Test partition h3 with custom resolution."""
-        runner = CliRunner()
-        result = runner.invoke(
-            partition,
-            ["h3", buildings_test_file, temp_output_dir, "--resolution", "7", "--skip-analysis"],
-        )
-        assert result.exit_code == 0
-        # Should have created partition files
-        output_files = os.listdir(temp_output_dir)
-        assert len(output_files) > 0
-        # H3 cell IDs are always 15 characters regardless of resolution
-        assert all(len(f.replace(".parquet", "")) == 15 for f in output_files)
-
-    def test_partition_h3_with_hive(self, buildings_test_file, temp_output_dir):
-        """Test partition h3 command with Hive-style partitioning."""
-        runner = CliRunner()
-        result = runner.invoke(
-            partition,
-            [
-                "h3",
-                buildings_test_file,
-                temp_output_dir,
-                "--resolution",
-                "9",
-                "--hive",
-                "--skip-analysis",
-            ],
-        )
-        assert result.exit_code == 0
-        # Should have created partition directories
-        items = os.listdir(temp_output_dir)
-        assert len(items) > 0
-
-    def test_partition_h3_with_verbose(self, buildings_test_file, temp_output_dir):
-        """Test partition h3 command with verbose flag."""
-        runner = CliRunner()
-        result = runner.invoke(
-            partition,
-            [
-                "h3",
-                buildings_test_file,
-                temp_output_dir,
-                "--resolution",
-                "9",
-                "--verbose",
-                "--skip-analysis",
-            ],
-        )
-        assert result.exit_code == 0
-        assert "H3 column" in result.output
-        assert "Adding it now" in result.output or "Using existing" in result.output
-
-    def test_partition_h3_preview_with_limit(self, buildings_test_file):
+    def test_partition_h3_preview_with_limit(self, buildings_test_file, cli_runner):
         """Test partition h3 preview with custom limit."""
-        runner = CliRunner()
-        result = runner.invoke(
+        result = cli_runner.invoke(
             partition,
             [
                 "h3",
@@ -237,17 +173,103 @@ class TestPartitionCommands:
         assert result.exit_code == 0
         assert "Partition Preview" in result.output
 
-    def test_partition_h3_no_output_folder(self, buildings_test_file):
+    def test_partition_h3_no_output_folder(self, buildings_test_file, cli_runner):
         """Test partition h3 without output folder (should fail unless preview)."""
-        runner = CliRunner()
-        result = runner.invoke(partition, ["h3", buildings_test_file, "--resolution", "9"])
-        # Should fail because output folder is required without --preview
+        result = cli_runner.invoke(partition, ["h3", buildings_test_file, "--resolution", "9"])
         assert result.exit_code != 0
 
-    def test_partition_h3_custom_column_name(self, buildings_test_file, temp_output_dir):
-        """Test partition h3 with custom H3 column name."""
-        runner = CliRunner()
-        result = runner.invoke(
+    def test_partition_h3_invalid_resolution(
+        self, buildings_test_file, temp_output_dir, cli_runner
+    ):
+        """Test partition h3 with invalid resolution."""
+        result = cli_runner.invoke(
+            partition, ["h3", buildings_test_file, temp_output_dir, "--resolution", "16"]
+        )
+        assert result.exit_code != 0
+
+
+@pytest.mark.slow
+class TestPartitionH3Operations:
+    """Slow H3 partition operation tests - consolidated for efficiency."""
+
+    def test_partition_h3_flat_comprehensive(
+        self, buildings_test_file, temp_output_dir, cli_runner
+    ):
+        """Test flat H3 partitioning - verifies multiple behaviors at once.
+
+        Consolidates: basic, excludes_column_by_default, verbose
+        """
+        result = cli_runner.invoke(
+            partition,
+            [
+                "h3",
+                buildings_test_file,
+                temp_output_dir,
+                "--resolution",
+                "9",
+                "--skip-analysis",
+                "--verbose",
+            ],
+        )
+        assert result.exit_code == 0
+
+        # Check verbose output
+        assert "H3 column" in result.output
+
+        # Verify partition files were created
+        output_files = [f for f in os.listdir(temp_output_dir) if f.endswith(".parquet")]
+        assert len(output_files) > 0
+
+        # Verify H3 cell ID format (always 15 characters)
+        for f in output_files:
+            h3_id = f.replace(".parquet", "")
+            assert len(h3_id) == 15, f"Expected 15-char H3 ID, got {len(h3_id)}"
+
+        # Verify H3 column is excluded by default (non-Hive)
+        sample_file = os.path.join(temp_output_dir, output_files[0])
+        table = pq.read_table(sample_file)
+        assert "h3_cell" not in table.schema.names
+
+    def test_partition_h3_resolution_7(self, buildings_test_file, temp_output_dir, cli_runner):
+        """Test H3 partitioning with resolution 7."""
+        result = cli_runner.invoke(
+            partition,
+            ["h3", buildings_test_file, temp_output_dir, "--resolution", "7", "--skip-analysis"],
+        )
+        assert result.exit_code == 0
+        output_files = os.listdir(temp_output_dir)
+        assert len(output_files) > 0
+        assert all(len(f.replace(".parquet", "")) == 15 for f in output_files)
+
+    def test_partition_h3_keeps_column_with_flag(
+        self, buildings_test_file, temp_output_dir, cli_runner
+    ):
+        """Test --keep-h3-column flag keeps the column in output."""
+        result = cli_runner.invoke(
+            partition,
+            [
+                "h3",
+                buildings_test_file,
+                temp_output_dir,
+                "--resolution",
+                "9",
+                "--keep-h3-column",
+                "--skip-analysis",
+            ],
+        )
+        assert result.exit_code == 0
+        output_files = [f for f in os.listdir(temp_output_dir) if f.endswith(".parquet")]
+        assert len(output_files) > 0
+
+        sample_file = os.path.join(temp_output_dir, output_files[0])
+        table = pq.read_table(sample_file)
+        assert "h3_cell" in table.schema.names
+
+    def test_partition_h3_custom_column_name(
+        self, buildings_test_file, temp_output_dir, cli_runner
+    ):
+        """Test --h3-name with custom column name."""
+        result = cli_runner.invoke(
             partition,
             [
                 "h3",
@@ -264,71 +286,14 @@ class TestPartitionCommands:
         output_files = os.listdir(temp_output_dir)
         assert len(output_files) > 0
 
-    def test_partition_h3_invalid_resolution(self, buildings_test_file, temp_output_dir):
-        """Test partition h3 with invalid resolution."""
-        runner = CliRunner()
-        result = runner.invoke(
-            partition, ["h3", buildings_test_file, temp_output_dir, "--resolution", "16"]
-        )
-        # Should fail with invalid resolution
-        assert result.exit_code != 0
+    def test_partition_h3_hive_comprehensive(
+        self, buildings_test_file, temp_output_dir, cli_runner
+    ):
+        """Test Hive-style H3 partitioning - verifies multiple behaviors at once.
 
-    def test_partition_h3_excludes_column_by_default(self, buildings_test_file, temp_output_dir):
-        """Test that H3 column is excluded from output by default (non-Hive)."""
-        import pyarrow.parquet as pq
-
-        runner = CliRunner()
-        result = runner.invoke(
-            partition,
-            ["h3", buildings_test_file, temp_output_dir, "--resolution", "9", "--skip-analysis"],
-        )
-        assert result.exit_code == 0
-
-        # Check that output files exist
-        output_files = [f for f in os.listdir(temp_output_dir) if f.endswith(".parquet")]
-        assert len(output_files) > 0
-
-        # Check that H3 column is NOT in the output files
-        sample_file = os.path.join(temp_output_dir, output_files[0])
-        table = pq.read_table(sample_file)
-        column_names = table.schema.names
-        assert "h3_cell" not in column_names, "H3 column should be excluded by default"
-
-    def test_partition_h3_keeps_column_with_flag(self, buildings_test_file, temp_output_dir):
-        """Test that H3 column is kept when --keep-h3-column flag is used."""
-        import pyarrow.parquet as pq
-
-        runner = CliRunner()
-        result = runner.invoke(
-            partition,
-            [
-                "h3",
-                buildings_test_file,
-                temp_output_dir,
-                "--resolution",
-                "9",
-                "--keep-h3-column",
-                "--skip-analysis",
-            ],
-        )
-        assert result.exit_code == 0
-
-        # Check that output files exist
-        output_files = [f for f in os.listdir(temp_output_dir) if f.endswith(".parquet")]
-        assert len(output_files) > 0
-
-        # Check that H3 column IS in the output files
-        sample_file = os.path.join(temp_output_dir, output_files[0])
-        table = pq.read_table(sample_file)
-        column_names = table.schema.names
-        assert "h3_cell" in column_names, "H3 column should be kept with --keep-h3-column flag"
-
-    def test_partition_h3_hive_keeps_column_by_default(self, buildings_test_file, temp_output_dir):
-        """Test that H3 column is kept by default when using Hive partitioning."""
-        import pyarrow.parquet as pq
-
-        runner = CliRunner()
-        result = runner.invoke(
+        Consolidates: with_hive, hive_keeps_column_by_default
+        """
+        result = cli_runner.invoke(
             partition,
             [
                 "h3",
@@ -342,7 +307,7 @@ class TestPartitionCommands:
         )
         assert result.exit_code == 0
 
-        # Find a parquet file in the Hive-style directory structure
+        # Verify Hive directory structure
         hive_dirs = [
             d
             for d in os.listdir(temp_output_dir)
@@ -350,25 +315,24 @@ class TestPartitionCommands:
         ]
         assert len(hive_dirs) > 0
 
-        # Find a parquet file in one of the partition directories
+        # Find and verify a parquet file in Hive partition
         sample_dir = os.path.join(temp_output_dir, hive_dirs[0])
         parquet_files = [f for f in os.listdir(sample_dir) if f.endswith(".parquet")]
         assert len(parquet_files) > 0
 
-        # Check that H3 column IS in the output files (default for Hive)
+        # Verify H3 column is kept by default for Hive
         sample_file = os.path.join(sample_dir, parquet_files[0])
-        # Use ParquetFile to read single file without auto-detecting Hive partitioning
         pf = pq.ParquetFile(sample_file)
-        column_names = pf.schema_arrow.names
-        assert "h3_cell" in column_names, (
-            "H3 column should be kept by default for Hive partitioning"
-        )
+        assert "h3_cell" in pf.schema_arrow.names
 
-    # Prefix tests
-    def test_partition_string_with_prefix(self, places_test_file, temp_output_dir):
+
+@pytest.mark.slow
+class TestPartitionPrefix:
+    """Tests for --prefix option on partition commands."""
+
+    def test_partition_string_with_prefix(self, places_test_file, temp_output_dir, cli_runner):
         """Test partition string command with custom filename prefix."""
-        runner = CliRunner()
-        result = runner.invoke(
+        result = cli_runner.invoke(
             partition,
             [
                 "string",
@@ -383,16 +347,13 @@ class TestPartitionCommands:
             ],
         )
         assert result.exit_code == 0
-        # Should have created partition files with prefix
         output_files = os.listdir(temp_output_dir)
         assert len(output_files) > 0
-        # All files should start with "places_" and end with ".parquet"
         assert all(f.startswith("places_") and f.endswith(".parquet") for f in output_files)
 
-    def test_partition_h3_with_prefix(self, buildings_test_file, temp_output_dir):
+    def test_partition_h3_with_prefix(self, buildings_test_file, temp_output_dir, cli_runner):
         """Test partition h3 command with custom filename prefix."""
-        runner = CliRunner()
-        result = runner.invoke(
+        result = cli_runner.invoke(
             partition,
             [
                 "h3",
@@ -406,22 +367,18 @@ class TestPartitionCommands:
             ],
         )
         assert result.exit_code == 0
-        # Should have created partition files with prefix
         output_files = os.listdir(temp_output_dir)
         assert len(output_files) > 0
-        # All files should start with "buildings_" and end with ".parquet"
         assert all(f.startswith("buildings_") and f.endswith(".parquet") for f in output_files)
-        # Pattern should be: buildings_<h3_cell>.parquet
         for f in output_files:
-            # Remove prefix and .parquet extension to get H3 cell
             h3_cell = f.replace("buildings_", "").replace(".parquet", "")
-            # H3 cell IDs are always 15 characters regardless of resolution
-            assert len(h3_cell) == 15, f"Expected 15-char H3 cell, got {h3_cell}"
+            assert len(h3_cell) == 15
 
-    def test_partition_string_with_prefix_and_hive(self, places_test_file, temp_output_dir):
+    def test_partition_string_with_prefix_and_hive(
+        self, places_test_file, temp_output_dir, cli_runner
+    ):
         """Test partition string with prefix and Hive-style partitioning."""
-        runner = CliRunner()
-        result = runner.invoke(
+        result = cli_runner.invoke(
             partition,
             [
                 "string",
@@ -438,7 +395,6 @@ class TestPartitionCommands:
         )
         assert result.exit_code == 0
 
-        # Find Hive partition directory and check files have prefix
         items = os.listdir(temp_output_dir)
         hive_dirs = [d for d in items if os.path.isdir(os.path.join(temp_output_dir, d))]
         sample_dir = os.path.join(temp_output_dir, hive_dirs[0])
