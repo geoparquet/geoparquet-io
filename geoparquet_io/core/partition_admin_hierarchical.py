@@ -391,7 +391,6 @@ def _create_partition_file(
         verbose=False,
         profile=profile,
         geoparquet_version=geoparquet_version,
-        recalculate_bounds=True,
     )
 
     return True
