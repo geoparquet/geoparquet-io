@@ -1780,8 +1780,9 @@ def _detect_geometry_from_query(
                     if verbose:
                         debug(f"Detected geometry column from schema: {col}")
                     return col
-    except Exception:
-        pass
+    except (duckdb.Error, RuntimeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not detect geometry column from query schema: {e}")
 
     # Default
     return "geometry"
@@ -1878,6 +1879,219 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
     return None
 
 
+# WKB geometry type codes to GeoParquet names
+_GEOMETRY_TYPE_CODES = {
+    0: "Unknown",
+    1: "Point",
+    2: "LineString",
+    3: "Polygon",
+    4: "MultiPoint",
+    5: "MultiLineString",
+    6: "MultiPolygon",
+    7: "GeometryCollection",
+}
+
+
+def _process_geometry_column_for_version(
+    table,
+    geometry_column: str,
+    geoparquet_version: str | None,
+    input_crs: dict | None,
+    verbose: bool,
+):
+    """
+    Process geometry column based on GeoParquet version.
+
+    Handles different GeoParquet versions:
+    - v1.x: Plain binary WKB (no extension type), CRS only in metadata
+    - v2.0/parquet-geo-only: geoarrow extension type with CRS in schema
+
+    Args:
+        table: PyArrow Table to modify
+        geometry_column: Name of the geometry column
+        geoparquet_version: GeoParquet version
+        input_crs: PROJJSON dict with CRS
+        verbose: Whether to print verbose output
+
+    Returns:
+        pa.Table: Table with geometry column processed
+    """
+    import geoarrow.pyarrow as ga
+
+    try:
+        geom_col = table.column(geometry_column)
+
+        if geoparquet_version in ("2.0", "parquet-geo-only"):
+            # For v2.0/parquet-geo-only: use geoarrow extension type with CRS
+            wkb_arr = ga.as_wkb(geom_col)
+
+            # Apply CRS to schema type if non-default
+            if input_crs and not is_default_crs(input_crs):
+                if verbose:
+                    debug(f"Applying CRS to geometry schema type: {_format_crs_display(input_crs)}")
+                new_type = wkb_arr.type.with_crs(input_crs)
+                wkb_arr = _rebuild_array_with_type(wkb_arr, new_type)
+
+            # Replace geometry column in table
+            col_index = table.schema.get_field_index(geometry_column)
+            table = table.set_column(col_index, geometry_column, wkb_arr)
+        else:
+            # For v1.x: keep as plain binary WKB (no geoarrow extension type)
+            # CRS goes only in metadata, not in schema
+            if verbose:
+                debug("v1.x: keeping geometry as plain binary WKB (CRS in metadata only)")
+
+    except (TypeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not process geometry column: {e}")
+        # Continue without conversion - geometry is already WKB
+
+    return table
+
+
+def _compute_geometry_types(table, geometry_column: str, verbose: bool) -> list[str]:
+    """
+    Compute geometry types from a geometry column using geoarrow.
+
+    Args:
+        table: PyArrow Table containing the geometry column
+        geometry_column: Name of the geometry column
+        verbose: Whether to print verbose output
+
+    Returns:
+        list: List of GeoParquet geometry type names (e.g., ["Point", "Polygon"])
+    """
+    import geoarrow.pyarrow as ga
+
+    # Skip for empty tables (geoarrow crashes on empty arrays)
+    if table.num_rows == 0:
+        return []
+
+    try:
+        geom_col = table.column(geometry_column)
+        wkb_arr = ga.as_wkb(geom_col)
+        types_struct = ga.unique_geometry_types(wkb_arr)
+
+        # Extract geometry type codes from struct array
+        type_codes = types_struct.field("geometry_type").to_pylist()
+
+        # Map codes to GeoParquet standard names (avoid duplicates)
+        type_names = []
+        for code in type_codes:
+            name = _GEOMETRY_TYPE_CODES.get(code, "Unknown")
+            if name not in type_names:
+                type_names.append(name)
+
+        if verbose:
+            debug(f"Computed geometry_types from data: {type_names}")
+        return type_names
+
+    except (TypeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not compute geometry_types: {e}")
+        # Return empty list as fallback (allowed by spec - means any type)
+        return []
+
+
+def _compute_bbox_from_data(table, geometry_column: str, verbose: bool) -> list[float] | None:
+    """
+    Compute bounding box from geometry column data.
+
+    Args:
+        table: PyArrow Table containing the geometry column
+        geometry_column: Name of the geometry column
+        verbose: Whether to print verbose output
+
+    Returns:
+        list: [xmin, ymin, xmax, ymax] or None if computation fails
+    """
+    import geoarrow.pyarrow as ga
+    import pyarrow.compute as pc
+
+    # Skip for empty tables
+    if table.num_rows == 0:
+        return None
+
+    try:
+        geom_col = table.column(geometry_column)
+        wkb_arr = ga.as_wkb(geom_col)
+        box_arr = ga.box(wkb_arr)
+
+        # Combine chunks and get storage (underlying struct array)
+        combined = box_arr.combine_chunks()
+        storage = combined.storage
+
+        # Extract struct fields and compute min/max
+        xmin = pc.min(pc.struct_field(storage, "xmin")).as_py()
+        ymin = pc.min(pc.struct_field(storage, "ymin")).as_py()
+        xmax = pc.max(pc.struct_field(storage, "xmax")).as_py()
+        ymax = pc.max(pc.struct_field(storage, "ymax")).as_py()
+
+        if all(v is not None for v in [xmin, ymin, xmax, ymax]):
+            if verbose:
+                debug(f"Computed bbox from data: [{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]")
+            return [xmin, ymin, xmax, ymax]
+
+    except (TypeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not compute bbox: {e}")
+
+    return None
+
+
+def _assemble_and_apply_geo_metadata(
+    table,
+    geometry_column: str,
+    geo_meta: dict,
+    input_crs: dict | None,
+    metadata_version: str,
+    verbose: bool,
+):
+    """
+    Assemble final geo metadata and apply it to the table.
+
+    Adds CRS to geo metadata if provided and applies the complete
+    metadata to the table schema.
+
+    Args:
+        table: PyArrow Table to modify
+        geometry_column: Name of the geometry column
+        geo_meta: Geo metadata dict to finalize
+        input_crs: PROJJSON dict with CRS (optional)
+        metadata_version: GeoParquet metadata version string
+        verbose: Whether to print verbose output
+
+    Returns:
+        pa.Table: Table with geo metadata applied
+    """
+    # Add CRS to geo metadata if provided (for v1.x and v2.0)
+    if input_crs and not is_default_crs(input_crs):
+        if geometry_column not in geo_meta.get("columns", {}):
+            geo_meta["columns"][geometry_column] = {}
+        geo_meta["columns"][geometry_column]["crs"] = input_crs
+        if verbose:
+            debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
+
+    # Apply metadata to table
+    existing_metadata = dict(table.schema.metadata) if table.schema.metadata else {}
+    new_metadata = {}
+
+    # Copy non-geo metadata from existing
+    for k, v in existing_metadata.items():
+        key_str = k.decode("utf-8") if isinstance(k, bytes) else k
+        if not key_str.startswith("geo"):
+            new_metadata[k] = v
+
+    # Add geo metadata
+    new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+    table = table.replace_schema_metadata(new_metadata)
+
+    if verbose:
+        debug(f"Applied geo metadata with version {metadata_version}")
+
+    return table
+
+
 def _apply_geoparquet_metadata(
     table,
     geometry_column: str,
@@ -1907,8 +2121,6 @@ def _apply_geoparquet_metadata(
     Returns:
         pa.Table: Table with GeoParquet metadata applied
     """
-    import geoarrow.pyarrow as ga
-
     version_config = GEOPARQUET_VERSIONS.get(
         geoparquet_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
     )
@@ -1925,170 +2137,85 @@ def _apply_geoparquet_metadata(
         return table
 
     # Step 1: Handle geometry column based on version
-    # - v1.x: Plain binary WKB (no extension type), CRS only in metadata
-    # - v2.0: geoarrow extension type with CRS in both schema and metadata
-    # - parquet-geo-only: geoarrow extension type with CRS in schema only
-    try:
-        geom_col = table.column(geometry_column)
-
-        if geoparquet_version in ("2.0", "parquet-geo-only"):
-            # For v2.0/parquet-geo-only: use geoarrow extension type with CRS
-            wkb_arr = ga.as_wkb(geom_col)
-
-            # Apply CRS to schema type if non-default
-            if input_crs and not is_default_crs(input_crs):
-                if verbose:
-                    debug(f"Applying CRS to geometry schema type: {_format_crs_display(input_crs)}")
-                new_type = wkb_arr.type.with_crs(input_crs)
-                wkb_arr = _rebuild_array_with_type(wkb_arr, new_type)
-
-            # Replace geometry column in table
-            col_index = table.schema.get_field_index(geometry_column)
-            table = table.set_column(col_index, geometry_column, wkb_arr)
-        else:
-            # For v1.x: keep as plain binary WKB (no geoarrow extension type)
-            # CRS goes only in metadata, not in schema
-            # The geometry is already WKB from the ST_AsWKB query
-            if verbose:
-                debug("v1.x: keeping geometry as plain binary WKB (CRS in metadata only)")
-            # No need to convert - geometry is already binary WKB from DuckDB
-
-    except Exception as e:
-        if verbose:
-            debug(f"Could not process geometry column: {e}")
-        # Continue without conversion - geometry is already WKB
+    table = _process_geometry_column_for_version(
+        table, geometry_column, geoparquet_version, input_crs, verbose
+    )
 
     # Step 2: Build and apply geo metadata (unless parquet-geo-only)
-    if should_add_geo_metadata:
-        # Detect bbox column from table schema
-        bbox_column = _detect_bbox_column_from_table(table, verbose)
-        bbox_info = {
-            "has_bbox_column": bbox_column is not None,
-            "bbox_column_name": bbox_column,
-        }
+    if not should_add_geo_metadata:
+        return table
 
-        # Create geo metadata using existing helper
-        geo_meta = create_geo_metadata(
-            original_metadata,
-            geometry_column,
-            bbox_info,
-            custom_metadata,
-            verbose,
-            version=metadata_version,
-        )
+    # Detect bbox column from table schema
+    bbox_column = _detect_bbox_column_from_table(table, verbose)
+    bbox_info = {
+        "has_bbox_column": bbox_column is not None,
+        "bbox_column_name": bbox_column,
+    }
 
-        # Ensure geometry_types is set (required by GeoParquet spec)
-        col_meta = geo_meta.get("columns", {}).get(geometry_column, {})
-        if "geometry_types" not in col_meta:
-            # Compute geometry_types from the data using geoarrow
-            # Skip for empty tables (geoarrow crashes on empty arrays)
-            if table.num_rows == 0:
-                col_meta["geometry_types"] = []
-                geo_meta["columns"][geometry_column] = col_meta
-            else:
-                try:
-                    geom_col = table.column(geometry_column)
-                    # Convert to WKB geoarrow type for geometry type detection
-                    wkb_arr = ga.as_wkb(geom_col)
-                    types_struct = ga.unique_geometry_types(wkb_arr)
+    # Create geo metadata using existing helper
+    geo_meta = create_geo_metadata(
+        original_metadata,
+        geometry_column,
+        bbox_info,
+        custom_metadata,
+        verbose,
+        version=metadata_version,
+    )
 
-                    # WKB geometry type codes to GeoParquet names
-                    geometry_type_codes = {
-                        0: "Unknown",
-                        1: "Point",
-                        2: "LineString",
-                        3: "Polygon",
-                        4: "MultiPoint",
-                        5: "MultiLineString",
-                        6: "MultiPolygon",
-                        7: "GeometryCollection",
-                    }
+    # Ensure geometry_types is set (required by GeoParquet spec)
+    col_meta = geo_meta.get("columns", {}).get(geometry_column, {})
+    if "geometry_types" not in col_meta:
+        col_meta["geometry_types"] = _compute_geometry_types(table, geometry_column, verbose)
+        geo_meta["columns"][geometry_column] = col_meta
 
-                    # Extract geometry type codes from struct array
-                    type_codes = types_struct.field("geometry_type").to_pylist()
+    # Compute file-level bbox from geometry data
+    computed_bbox = _compute_bbox_from_data(table, geometry_column, verbose)
+    if computed_bbox:
+        col_meta["bbox"] = computed_bbox
+        geo_meta["columns"][geometry_column] = col_meta
 
-                    # Map codes to GeoParquet standard names
-                    type_names = []
-                    for code in type_codes:
-                        name = geometry_type_codes.get(code, "Unknown")
-                        if name not in type_names:  # Avoid duplicates
-                            type_names.append(name)
+    # Assemble and apply final metadata
+    return _assemble_and_apply_geo_metadata(
+        table, geometry_column, geo_meta, input_crs, metadata_version, verbose
+    )
 
-                    col_meta["geometry_types"] = type_names
-                    geo_meta["columns"][geometry_column] = col_meta
-                    if verbose:
-                        debug(f"Computed geometry_types from data: {type_names}")
-                except Exception as e:
-                    if verbose:
-                        debug(f"Could not compute geometry_types: {e}")
-                    # Set empty list as fallback (allowed by spec - means any type)
-                    col_meta["geometry_types"] = []
-                    geo_meta["columns"][geometry_column] = col_meta
 
-        # Compute file-level bbox from geometry data
-        # Always recompute to ensure it matches actual data (important for partitions)
-        # Skip for empty tables (geoarrow crashes on empty arrays)
-        if table.num_rows > 0:
-            try:
-                import pyarrow.compute as pc
+def _estimate_row_size(table) -> int:
+    """
+    Estimate bytes per row from PyArrow table memory usage.
 
-                geom_col = table.column(geometry_column)
-                wkb_arr = ga.as_wkb(geom_col)
-                # Get box (xmin, ymin, xmax, ymax) for all geometries
-                box_arr = ga.box(wkb_arr)
+    Uses table.get_total_buffer_size() if available (PyArrow >= 0.17),
+    falls back to table.nbytes, and uses a default of 100 bytes if
+    neither is available or returns 0.
 
-                # Combine chunks and get storage (underlying struct array)
-                combined = box_arr.combine_chunks()
-                storage = combined.storage
+    Args:
+        table: PyArrow Table
 
-                # Extract struct fields using pc.struct_field
-                xmin_arr = pc.struct_field(storage, "xmin")
-                ymin_arr = pc.struct_field(storage, "ymin")
-                xmax_arr = pc.struct_field(storage, "xmax")
-                ymax_arr = pc.struct_field(storage, "ymax")
+    Returns:
+        int: Estimated bytes per row (minimum 1)
+    """
+    default_row_size = 100
+    num_rows = max(1, table.num_rows)
 
-                xmin = pc.min(xmin_arr).as_py()
-                ymin = pc.min(ymin_arr).as_py()
-                xmax = pc.max(xmax_arr).as_py()
-                ymax = pc.max(ymax_arr).as_py()
+    # Try get_total_buffer_size() first (more accurate, includes all buffers)
+    if hasattr(table, "get_total_buffer_size"):
+        try:
+            total_bytes = table.get_total_buffer_size()
+            if total_bytes > 0:
+                return max(1, total_bytes // num_rows)
+        except Exception:
+            pass
 
-                if all(v is not None for v in [xmin, ymin, xmax, ymax]):
-                    col_meta["bbox"] = [xmin, ymin, xmax, ymax]
-                    geo_meta["columns"][geometry_column] = col_meta
-                    if verbose:
-                        debug(
-                            f"Computed bbox from data: [{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]"
-                        )
-            except Exception as e:
-                if verbose:
-                    debug(f"Could not compute bbox: {e}")
+    # Fall back to nbytes property
+    if hasattr(table, "nbytes"):
+        try:
+            total_bytes = table.nbytes
+            if total_bytes > 0:
+                return max(1, total_bytes // num_rows)
+        except Exception:
+            pass
 
-        # Add CRS to geo metadata if provided (for v1.x and v2.0)
-        if input_crs and not is_default_crs(input_crs):
-            if geometry_column not in geo_meta.get("columns", {}):
-                geo_meta["columns"][geometry_column] = {}
-            geo_meta["columns"][geometry_column]["crs"] = input_crs
-            if verbose:
-                debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
-
-        # Apply metadata to table
-        existing_metadata = dict(table.schema.metadata) if table.schema.metadata else {}
-        new_metadata = {}
-
-        # Copy non-geo metadata from existing
-        for k, v in existing_metadata.items():
-            key_str = k.decode("utf-8") if isinstance(k, bytes) else k
-            if not key_str.startswith("geo"):
-                new_metadata[k] = v
-
-        # Add geo metadata
-        new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-        table = table.replace_schema_metadata(new_metadata)
-
-        if verbose:
-            debug(f"Applied geo metadata with version {metadata_version}")
-
-    return table
+    return default_row_size
 
 
 def _write_table_with_settings(
@@ -2123,11 +2250,10 @@ def _write_table_with_settings(
     # Calculate row group size
     rows_per_group = row_group_rows
     if not rows_per_group and row_group_size_mb and table.num_rows > 0:
-        # Estimate bytes per row from table
-        # Use a rough estimate based on table schema
-        estimated_row_size = 100  # Default estimate per row
+        # Estimate bytes per row from actual table memory usage
+        estimated_row_size = _estimate_row_size(table)
         target_bytes = row_group_size_mb * 1024 * 1024
-        rows_per_group = max(1, int(target_bytes / estimated_row_size))
+        rows_per_group = max(1, int(target_bytes // estimated_row_size))
         rows_per_group = min(rows_per_group, table.num_rows)
 
     # Use central configuration for write settings
