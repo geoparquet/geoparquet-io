@@ -1110,6 +1110,7 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
         get_geo_metadata,
         get_schema_info,
         parse_geometry_logical_type,
+        resolve_crs_reference,
     )
 
     safe_url = safe_file_url(parquet_file, verbose=False)
@@ -1136,7 +1137,9 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
         ):
             parsed = parse_geometry_logical_type(logical_type)
             if parsed and "crs" in parsed:
-                crs = parsed["crs"]
+                raw_crs = parsed["crs"]
+                # Resolve CRS references (projjson:key_name, srid:XXXX) to PROJJSON
+                crs = resolve_crs_reference(parquet_file, raw_crs)
                 if crs and not is_default_crs(crs):
                     if verbose:
                         debug(f"Found CRS in Parquet geo type: {_format_crs_display(crs)}")
@@ -1204,6 +1207,87 @@ def _format_crs_display(crs):
     if identifier:
         return f"{identifier[0]}:{identifier[1]}"
     return str(crs)[:50] + "..." if len(str(crs)) > 50 else str(crs)
+
+
+def get_crs_display_name(crs_info: dict | str | None) -> str:
+    """
+    Get human-readable CRS name with authority code.
+
+    Handles PROJJSON dicts, string CRS identifiers, and None.
+
+    Returns:
+        Human-readable string like "WGS 84 (EPSG:4326)" or "EPSG:4326" or "unknown"
+    """
+    if crs_info is None:
+        return "None (OGC:CRS84)"
+
+    if isinstance(crs_info, str):
+        return crs_info
+
+    if isinstance(crs_info, dict):
+        name = crs_info.get("name", "")
+        crs_id = crs_info.get("id", {})
+        if isinstance(crs_id, dict):
+            authority = crs_id.get("authority", "EPSG")
+            code = crs_id.get("code")
+            if code:
+                return f"{name} ({authority}:{code})" if name else f"{authority}:{code}"
+        if name:
+            return name
+        # Fallback for PROJJSON without id or name
+        return "PROJJSON object"
+
+    return "unknown"
+
+
+def is_geographic_crs(crs: dict | str | None) -> bool:
+    """
+    Check if CRS is geographic (lat/lon) vs projected.
+
+    Handles PROJJSON dicts, string identifiers, and None.
+    None is treated as OGC:CRS84 (geographic).
+
+    Returns:
+        True if CRS is geographic, False if projected
+    """
+    if crs is None:
+        return True  # Default is OGC:CRS84
+
+    if isinstance(crs, dict):
+        # Check PROJJSON type field first - most reliable
+        crs_type = crs.get("type", "").lower()
+        if crs_type == "geographiccrs":
+            return True
+        if crs_type == "projectedcrs":
+            return False
+
+        # Check for EPSG:4326 or OGC:CRS84
+        crs_id = crs.get("id", {})
+        if isinstance(crs_id, dict):
+            authority = crs_id.get("authority", "").upper()
+            code = crs_id.get("code")
+            if authority == "EPSG" and code == 4326:
+                return True
+            if authority == "OGC" and str(code).upper() == "CRS84":
+                return True
+
+        # Check name for common patterns
+        name = crs.get("name", "").upper()
+        projected_indicators = ["UTM", "ZONE", "MERCATOR", "ALBERS", "LAMBERT", "STATE PLANE"]
+        if any(indicator in name for indicator in projected_indicators):
+            return False
+        if any(x in name for x in ["WGS 84", "WGS84", "CRS84", "4326"]):
+            return True
+
+    if isinstance(crs, str):
+        crs_upper = crs.upper()
+        # Check for projected indicators in string CRS
+        projected_indicators = ["UTM", "ZONE", "MERCATOR", "ALBERS", "LAMBERT"]
+        if any(indicator in crs_upper for indicator in projected_indicators):
+            return False
+        return any(x in crs_upper for x in ["4326", "CRS84", "WGS84"])
+
+    return False
 
 
 def apply_crs_to_parquet(
