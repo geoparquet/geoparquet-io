@@ -12,6 +12,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 ## Features
 
 - **Fast**: Built on PyArrow and DuckDB for high-performance operations
+- **Pipeable**: Chain commands with Unix pipes using Arrow IPC streaming - no intermediate files
 - **Comprehensive**: Sort, extract, partition, enhance, validate, and upload GeoParquet files
 - **Cloud-Native**: Read from and write to S3, GCS, Azure, and HTTPS sources
 - **Spatial Indexing**: Add bbox, H3 hexagonal cells, KD-tree partitions, and admin divisions
@@ -50,6 +51,9 @@ gpio partition admin buildings.parquet output_dir/ --dataset gaul --levels conti
 gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet --profile my-aws
 gpio partition h3 gs://bucket/data.parquet gs://bucket/partitions/ --resolution 9
 gpio sort hilbert https://example.com/data.parquet s3://bucket/sorted.parquet
+
+# Chain commands with Unix pipes - no intermediate files needed
+gpio extract --bbox "-122.5,37.5,-122.0,38.0" input.parquet | gpio add bbox - | gpio sort hilbert - output.parquet
 ```
 
 For more examples and detailed usage, see the [Quick Start Tutorial](https://geoparquet.org/geoparquet-io/getting-started/quickstart/) and [User Guide](https://geoparquet.org/geoparquet-io/guide/inspect/).

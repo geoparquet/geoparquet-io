@@ -114,6 +114,25 @@ gpio partition h3 points.parquet output_dir/ --resolution 7
 gpio partition kdtree large_file.parquet output_dir/
 ```
 
+### 7. Chain Commands with Pipes
+
+gpio commands can be chained together using Unix pipes. This eliminates intermediate files and provides significant performance improvements:
+
+```bash
+# Extract, add bbox, and sort in one pipeline
+gpio extract --limit 10000 input.parquet | gpio add bbox - | gpio sort hilbert - output.parquet
+
+# Spatial filter, add indices, then partition
+gpio extract --bbox "-122.5,37.5,-122.0,38.0" input.parquet | \
+  gpio add quadkey - | \
+  gpio partition string --column quadkey --chars 4 - output_dir/
+
+# Add multiple indices in sequence
+gpio add bbox input.parquet | gpio add h3 --resolution 9 - | gpio add quadkey - output.parquet
+```
+
+Use `-` as input to read from stdin. Output is auto-detected when piped. See the [Piping Guide](../guide/piping.md) for details.
+
 ## Common Patterns
 
 ### Convert and Validate
@@ -150,9 +169,8 @@ For existing GeoParquet files:
 # 1. Check current state
 gpio check all input.parquet
 
-# 2. Optimize
-gpio add bbox input.parquet temp.parquet
-gpio sort hilbert temp.parquet optimized.parquet
+# 2. Optimize (using pipes - no intermediate files)
+gpio add bbox input.parquet | gpio sort hilbert - optimized.parquet
 
 # 3. Verify improvements
 gpio check all optimized.parquet

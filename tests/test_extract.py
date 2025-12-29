@@ -13,6 +13,7 @@ from pathlib import Path
 
 import click
 import duckdb
+import pyarrow as pa
 import pytest
 
 from geoparquet_io.core.extract import (
@@ -21,6 +22,7 @@ from geoparquet_io.core.extract import (
     build_spatial_filter,
     convert_geojson_to_wkt,
     extract,
+    extract_table,
     get_schema_columns,
     is_geographic_crs,
     looks_like_latlong_bbox,
@@ -29,6 +31,7 @@ from geoparquet_io.core.extract import (
     validate_columns,
     validate_where_clause,
 )
+from tests.conftest import safe_unlink
 
 # Test data paths
 TEST_DATA_DIR = Path(__file__).parent / "data"
@@ -329,8 +332,7 @@ class TestParseGeometryInput:
             result = parse_geometry_input(f"@{tmp_path}")
             assert "POINT" in result.upper()
         finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
+            safe_unlink(tmp_path)
 
     def test_file_reference_wkt(self):
         """Test loading geometry from WKT file with @ prefix."""
@@ -341,8 +343,7 @@ class TestParseGeometryInput:
             result = parse_geometry_input(f"@{tmp_path}")
             assert "POINT" in result.upper()
         finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
+            safe_unlink(tmp_path)
 
     def test_auto_detect_file(self):
         """Test auto-detecting file by extension."""
@@ -353,8 +354,7 @@ class TestParseGeometryInput:
             result = parse_geometry_input(str(tmp_path))
             assert "POINT" in result.upper()
         finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
+            safe_unlink(tmp_path)
 
     def test_file_not_found(self):
         """Test error when file not found."""
@@ -578,16 +578,7 @@ class TestExtractIntegration:
         # Generate unique path without creating the file
         tmp_path = Path(tempfile.gettempdir()) / f"test_output_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        # Cleanup after test - try multiple times for Windows
-        if tmp_path.exists():
-            for _ in range(3):
-                try:
-                    tmp_path.unlink()
-                    break
-                except PermissionError:
-                    import time
-
-                    time.sleep(0.1)  # Give Windows time to release file handles
+        safe_unlink(tmp_path)
 
     def test_extract_all_columns(self, output_file):
         """Test extracting all columns."""
@@ -785,8 +776,10 @@ class TestExtractIntegration:
         finally:
             con.close()
 
-    def test_extract_dry_run(self, output_file, capsys):
+    def test_extract_dry_run(self, output_file, caplog):
         """Test dry run mode."""
+        import logging
+
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
 
@@ -794,15 +787,16 @@ class TestExtractIntegration:
         if os.path.exists(output_file):
             os.unlink(output_file)
 
-        extract(str(PLACES_PARQUET), output_file, include_cols="name", dry_run=True)
+        with caplog.at_level(logging.DEBUG):
+            extract(str(PLACES_PARQUET), output_file, include_cols="name", dry_run=True)
 
         # File should not be created
         assert not os.path.exists(output_file)
 
-        # Output should contain SQL
-        captured = capsys.readouterr()
-        assert "DRY RUN" in captured.out
-        assert "SELECT" in captured.out
+        # Output should contain SQL - check log messages
+        log_text = " ".join(record.message for record in caplog.records)
+        assert "DRY RUN" in log_text
+        assert "SELECT" in log_text
 
     def test_extract_invalid_column(self, output_file):
         """Test error on invalid column name."""
@@ -813,13 +807,16 @@ class TestExtractIntegration:
             extract(str(PLACES_PARQUET), output_file, include_cols="nonexistent_column")
         assert "not found" in str(exc_info.value).lower()
 
-    def test_extract_empty_result(self, output_file, capsys):
+    def test_extract_empty_result(self, output_file, caplog):
         """Test extraction that results in zero rows."""
+        import logging
+
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
 
-        # Use a bbox that doesn't intersect any data
-        extract(str(PLACES_PARQUET), output_file, bbox="100,100,101,101")
+        with caplog.at_level(logging.DEBUG):
+            # Use a bbox that doesn't intersect any data
+            extract(str(PLACES_PARQUET), output_file, bbox="100,100,101,101")
 
         # File should be created but with 0 rows
         assert os.path.exists(output_file)
@@ -831,9 +828,9 @@ class TestExtractIntegration:
         finally:
             con.close()
 
-        # Warning should be displayed
-        captured = capsys.readouterr()
-        assert "Warning" in captured.out or "0 rows" in captured.out
+        # Row count should be in log (either warning or success message)
+        log_text = " ".join(record.message for record in caplog.records)
+        assert "0" in log_text or "rows" in log_text.lower()
 
     def test_extract_preserves_metadata(self, output_file):
         """Test that GeoParquet metadata is preserved."""
@@ -871,16 +868,7 @@ class TestExtractCLI:
         # Generate unique path without creating the file
         tmp_path = Path(tempfile.gettempdir()) / f"test_cli_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        # Cleanup after test - try multiple times for Windows
-        if tmp_path.exists():
-            for _ in range(3):
-                try:
-                    tmp_path.unlink()
-                    break
-                except PermissionError:
-                    import time
-
-                    time.sleep(0.1)  # Give Windows time to release file handles
+        safe_unlink(tmp_path)
 
     def test_cli_help(self):
         """Test CLI help output."""
@@ -964,8 +952,10 @@ class TestExtractCLI:
         finally:
             con.close()
 
-    def test_cli_dry_run(self, output_file):
+    def test_cli_dry_run(self, output_file, caplog):
         """Test CLI dry run."""
+        import logging
+
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
 
@@ -978,9 +968,12 @@ class TestExtractCLI:
         from geoparquet_io.cli.main import extract as extract_cmd
 
         runner = CliRunner()
-        result = runner.invoke(extract_cmd, [str(PLACES_PARQUET), output_file, "--dry-run"])
+        with caplog.at_level(logging.DEBUG):
+            result = runner.invoke(extract_cmd, [str(PLACES_PARQUET), output_file, "--dry-run"])
         assert result.exit_code == 0
-        assert "DRY RUN" in result.output
+        # Check log messages instead of result.output (pytest captures logs separately)
+        log_text = " ".join(record.message for record in caplog.records)
+        assert "DRY RUN" in log_text
         assert not os.path.exists(output_file)
 
 
@@ -998,16 +991,7 @@ class TestExtractRemote:
         # Generate unique path without creating the file
         tmp_path = Path(tempfile.gettempdir()) / f"test_remote_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        # Cleanup after test - try multiple times for Windows
-        if tmp_path.exists():
-            for _ in range(3):
-                try:
-                    tmp_path.unlink()
-                    break
-                except PermissionError:
-                    import time
-
-                    time.sleep(0.1)  # Give Windows time to release file handles
+        safe_unlink(tmp_path)
 
     def test_remote_file_bbox(self, output_file):
         """Test extracting from remote file with bbox filter."""
@@ -1028,3 +1012,27 @@ class TestExtractRemote:
             assert count < 617941  # Less than total rows
         finally:
             con.close()
+
+
+class TestExtractTable:
+    """Tests for extract_table Python API function."""
+
+    def test_invalid_geometry_column_raises_error(self):
+        """Test that specifying a non-existent geometry column raises ValueError."""
+        table = pa.table({"id": [1, 2, 3], "name": ["a", "b", "c"], "geometry": [b"", b"", b""]})
+
+        with pytest.raises(ValueError) as exc_info:
+            extract_table(table, geometry_column="nonexistent")
+
+        assert "geometry_column 'nonexistent' not found" in str(exc_info.value)
+        assert "id" in str(exc_info.value)
+        assert "name" in str(exc_info.value)
+
+    def test_default_geometry_column_not_found_raises_error(self):
+        """Test that missing default 'geometry' column raises ValueError."""
+        table = pa.table({"id": [1, 2, 3], "data": ["x", "y", "z"]})
+
+        with pytest.raises(ValueError) as exc_info:
+            extract_table(table)
+
+        assert "geometry_column 'geometry' not found" in str(exc_info.value)

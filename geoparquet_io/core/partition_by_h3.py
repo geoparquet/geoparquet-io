@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import os
 import tempfile
 import uuid
@@ -15,6 +17,7 @@ from geoparquet_io.core.partition_common import (
     partition_by_column,
     preview_partition,
 )
+from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
 
 
 def _ensure_h3_column(input_parquet, h3_column_name, resolution, verbose):
@@ -101,14 +104,36 @@ def partition_by_h3(
     preview: bool = False,
     preview_limit: int = 15,
     verbose: bool = False,
-    keep_h3_column: bool = None,
+    keep_h3_column: bool | None = None,
     force: bool = False,
     skip_analysis: bool = False,
-    filename_prefix: str = None,
-    profile: str = None,
-    geoparquet_version: str = None,
-):
-    """Partition a GeoParquet file by H3 cells at specified resolution."""
+    filename_prefix: str | None = None,
+    profile: str | None = None,
+    geoparquet_version: str | None = None,
+) -> None:
+    """
+    Partition a GeoParquet file by H3 cells at specified resolution.
+
+    Supports Arrow IPC streaming for input:
+    - Input "-" reads from stdin (output is always a directory)
+
+    Args:
+        input_parquet: Input GeoParquet file (local, remote URL, or "-" for stdin)
+        output_folder: Output directory (always writes to directory, no stdout support)
+        h3_column_name: Name of the H3 column (default: 'h3_cell')
+        resolution: H3 resolution level (0-15). Default: 9
+        hive: Use Hive-style partitioning (column=value directories)
+        overwrite: Overwrite existing output directory
+        preview: Preview partition distribution without writing
+        preview_limit: Max number of partitions to show in preview
+        verbose: Print verbose output
+        keep_h3_column: Keep H3 column in output partitions
+        force: Force operation even if analysis suggests issues
+        skip_analysis: Skip partition analysis
+        filename_prefix: Prefix for output filenames
+        profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version to write
+    """
     configure_verbose(verbose)
 
     if not 0 <= resolution <= 15:
@@ -117,44 +142,59 @@ def partition_by_h3(
     if keep_h3_column is None:
         keep_h3_column = hive
 
-    working_parquet, column_existed, temp_file = _ensure_h3_column(
-        input_parquet, h3_column_name, resolution, verbose
-    )
+    # Handle stdin input
+    stdin_temp_file = None
+    actual_input = input_parquet
 
-    if preview:
-        try:
-            _run_preview(working_parquet, h3_column_name, preview_limit, verbose)
-        finally:
-            if temp_file and os.path.exists(temp_file):
-                os.remove(temp_file)
-        return
-
-    progress(f"Partitioning by H3 cells at resolution {resolution} (column: '{h3_column_name}')")
+    if is_stdin(input_parquet):
+        stdin_temp_file = read_stdin_to_temp_file(verbose)
+        actual_input = stdin_temp_file
 
     try:
-        num_partitions = partition_by_column(
-            input_parquet=working_parquet,
-            output_folder=output_folder,
-            column_name=h3_column_name,
-            column_prefix_length=None,
-            hive=hive,
-            overwrite=overwrite,
-            verbose=verbose,
-            keep_partition_column=keep_h3_column,
-            force=force,
-            skip_analysis=skip_analysis,
-            filename_prefix=filename_prefix,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
+        working_parquet, column_existed, temp_file = _ensure_h3_column(
+            actual_input, h3_column_name, resolution, verbose
         )
 
-        total_size_mb, avg_size_mb = calculate_partition_stats(output_folder, num_partitions)
-        success(
-            f"\nCreated {num_partitions} partition(s) in {output_folder} "
-            f"(total: {total_size_mb:.2f} MB, avg: {avg_size_mb:.2f} MB)"
+        if preview:
+            try:
+                _run_preview(working_parquet, h3_column_name, preview_limit, verbose)
+            finally:
+                if temp_file and os.path.exists(temp_file):
+                    os.remove(temp_file)
+            return
+
+        progress(
+            f"Partitioning by H3 cells at resolution {resolution} (column: '{h3_column_name}')"
         )
+
+        try:
+            num_partitions = partition_by_column(
+                input_parquet=working_parquet,
+                output_folder=output_folder,
+                column_name=h3_column_name,
+                column_prefix_length=None,
+                hive=hive,
+                overwrite=overwrite,
+                verbose=verbose,
+                keep_partition_column=keep_h3_column,
+                force=force,
+                skip_analysis=skip_analysis,
+                filename_prefix=filename_prefix,
+                profile=profile,
+                geoparquet_version=geoparquet_version,
+            )
+
+            total_size_mb, avg_size_mb = calculate_partition_stats(output_folder, num_partitions)
+            success(
+                f"\nCreated {num_partitions} partition(s) in {output_folder} "
+                f"(total: {total_size_mb:.2f} MB, avg: {avg_size_mb:.2f} MB)"
+            )
+        finally:
+            if temp_file and os.path.exists(temp_file):
+                if verbose:
+                    debug("Cleaning up temporary H3-enriched file...")
+                os.remove(temp_file)
     finally:
-        if temp_file and os.path.exists(temp_file):
-            if verbose:
-                debug("Cleaning up temporary H3-enriched file...")
-            os.remove(temp_file)
+        # Clean up stdin temp file
+        if stdin_temp_file and os.path.exists(stdin_temp_file):
+            os.remove(stdin_temp_file)

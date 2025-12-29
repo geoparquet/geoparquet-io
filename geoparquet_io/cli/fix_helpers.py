@@ -174,3 +174,138 @@ def handle_fix_common(
     fix_func(parquet_file, output_path, verbose, profile)
 
     return output_path, created_backup
+
+
+def display_spatial_result(ratio, show_output):
+    """Display spatial order check result."""
+    if not show_output or ratio is None:
+        return
+
+    if ratio < 0.5:
+        click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
+    else:
+        click.echo(
+            click.style(
+                "⚠️  Data may not be optimally spatially ordered\n"
+                "Consider running 'gpio sort hilbert' to improve spatial locality",
+                fg="yellow",
+            )
+        )
+
+
+def aggregate_check_results(structure_results, spatial_result):
+    """Aggregate check results for runner tracking.
+
+    Returns:
+        tuple: (combined_passed, combined_issues, all_check_results)
+    """
+    all_check_results = {**structure_results, "spatial": spatial_result}
+    combined_passed = all(
+        r.get("passed", True) for r in all_check_results.values() if isinstance(r, dict)
+    )
+    combined_issues = []
+    for r in all_check_results.values():
+        if isinstance(r, dict):
+            combined_issues.extend(r.get("issues", []))
+    return combined_passed, combined_issues, all_check_results
+
+
+def apply_check_all_fixes(
+    file_path,
+    all_results,
+    fix_output,
+    no_backup,
+    overwrite,
+    verbose,
+    profile,
+    check_structure_impl,
+    check_spatial_impl,
+    random_sample_size,
+    limit_rows,
+):
+    """Apply all fixes for check_all command.
+
+    Extracts the fix logic from check_all to reduce complexity.
+
+    Args:
+        file_path: Path to the file to fix
+        all_results: Combined results from all checks
+        fix_output: Custom output path or None
+        no_backup: Skip backup creation
+        overwrite: Allow overwriting remote files
+        verbose: Print verbose output
+        profile: AWS profile for S3
+        check_structure_impl: Function to run structure checks
+        check_spatial_impl: Function to run spatial checks
+        random_sample_size: Sample size for spatial check
+        limit_rows: Row limit for spatial check
+
+    Returns:
+        True if fixes were applied, False if no fixes needed
+    """
+    from geoparquet_io.core.check_fixes import apply_all_fixes
+
+    # Check if any fixes are needed
+    needs_fixes = any(
+        result.get("fix_available", False)
+        for result in all_results.values()
+        if isinstance(result, dict)
+    )
+
+    if not needs_fixes:
+        click.echo(click.style("\n✓ No fixes needed - file is already optimal!", fg="green"))
+        return False
+
+    # Handle remote files
+    is_remote = validate_remote_file_modification(file_path, fix_output, overwrite)
+
+    # Determine output path
+    output_path = fix_output or file_path
+
+    # Confirm overwrite without backup for local files
+    if no_backup and not fix_output and output_path == file_path and not is_remote:
+        click.confirm(
+            "This will overwrite the original file without backup. Continue?",
+            abort=True,
+        )
+
+    # Create backup if needed (only for local files)
+    backup_path = create_backup_if_needed(file_path, output_path, no_backup, is_remote, verbose)
+
+    # Apply fixes
+    click.echo("\n" + "=" * 60)
+    click.echo("Applying fixes...")
+    click.echo("=" * 60)
+
+    try:
+        fixes_summary = apply_all_fixes(file_path, output_path, all_results, verbose, profile)
+
+        click.echo("\n" + "=" * 60)
+        click.echo("Fixes applied:")
+        for applied_fix in fixes_summary["fixes_applied"]:
+            click.echo(click.style(f"  ✓ {applied_fix}", fg="green"))
+        click.echo("=" * 60)
+
+        # Re-run checks to verify
+        verify_fixes(
+            output_path,
+            check_structure_impl,
+            check_spatial_impl,
+            random_sample_size,
+            limit_rows,
+        )
+
+        click.echo(f"\nOptimized file: {output_path}")
+        if (
+            not no_backup
+            and output_path == file_path
+            and backup_path
+            and os.path.exists(backup_path)
+        ):
+            click.echo(f"Backup: {backup_path}")
+
+    except Exception as e:
+        handle_fix_error(e, no_backup, output_path, file_path, backup_path)
+        raise
+
+    return True

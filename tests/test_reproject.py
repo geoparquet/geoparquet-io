@@ -13,6 +13,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import reproject
 from geoparquet_io.core.common import parse_crs_string_to_projjson
 from geoparquet_io.core.reproject import reproject_impl
+from tests.conftest import safe_unlink
 
 
 @pytest.fixture
@@ -372,8 +373,7 @@ class TestAutoOutputFilename:
         assert result.output_path.exists()
 
         # Clean up
-        if result.output_path.exists():
-            result.output_path.unlink()
+        safe_unlink(result.output_path)
 
 
 class TestReprojectCLI:

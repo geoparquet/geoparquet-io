@@ -281,9 +281,6 @@ def check_all(
     profile,
 ):
     """Check compression, bbox, row groups, and spatial order."""
-    import os
-
-    from geoparquet_io.core.check_fixes import apply_all_fixes
     from geoparquet_io.core.common import is_remote_url, show_remote_read_message
     from geoparquet_io.core.partition_reader import get_files_to_check
 
@@ -340,112 +337,41 @@ def check_all(
         )
         ratio = spatial_result["ratio"]
 
-        if show_output and ratio is not None:
-            if ratio < 0.5:
-                click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
-            else:
-                click.echo(
-                    click.style(
-                        "⚠️  Data may not be optimally spatially ordered\n"
-                        "Consider running 'gpio sort hilbert' to improve spatial locality",
-                        fg="yellow",
-                    )
-                )
+        from geoparquet_io.cli.fix_helpers import (
+            aggregate_check_results,
+            display_spatial_result,
+        )
+
+        display_spatial_result(ratio, show_output)
 
         # Aggregate results for runner tracking
-        all_check_results = {**structure_results, "spatial": spatial_result}
-        combined_passed = all(
-            r.get("passed", True) for r in all_check_results.values() if isinstance(r, dict)
+        combined_passed, combined_issues, _ = aggregate_check_results(
+            structure_results, spatial_result
         )
-        combined_issues = []
-        for r in all_check_results.values():
-            if isinstance(r, dict):
-                combined_issues.extend(r.get("issues", []))
         runner.record_result(
             file_path, {"passed": combined_passed, "issues": combined_issues, **structure_results}
         )
 
         # If --fix flag is set, apply fixes (only for single files)
         if fix:
-            from geoparquet_io.cli.fix_helpers import (
-                create_backup_if_needed,
-                handle_fix_error,
-                validate_remote_file_modification,
-                verify_fixes,
-            )
+            from geoparquet_io.cli.fix_helpers import apply_check_all_fixes
 
-            # Aggregate all results
             all_results = {**structure_results, "spatial": spatial_result}
-
-            # Check if any fixes are needed
-            needs_fixes = any(
-                result.get("fix_available", False)
-                for result in all_results.values()
-                if isinstance(result, dict)
+            applied = apply_check_all_fixes(
+                file_path=file_path,
+                all_results=all_results,
+                fix_output=fix_output,
+                no_backup=no_backup,
+                overwrite=overwrite,
+                verbose=verbose,
+                profile=profile,
+                check_structure_impl=check_structure_impl,
+                check_spatial_impl=check_spatial_impl,
+                random_sample_size=random_sample_size,
+                limit_rows=limit_rows,
             )
-
-            if not needs_fixes:
-                click.echo(
-                    click.style("\n✓ No fixes needed - file is already optimal!", fg="green")
-                )
+            if not applied:
                 return
-
-            # Handle remote files
-            is_remote = validate_remote_file_modification(file_path, fix_output, overwrite)
-
-            # Determine output path
-            output_path = fix_output or file_path
-            backup_path = f"{file_path}.bak"
-
-            # Confirm overwrite without backup for local files
-            if no_backup and not fix_output and output_path == file_path and not is_remote:
-                click.confirm(
-                    "This will overwrite the original file without backup. Continue?",
-                    abort=True,
-                )
-
-            # Create backup if needed (only for local files)
-            backup_path = create_backup_if_needed(
-                file_path, output_path, no_backup, is_remote, verbose
-            )
-
-            # Apply fixes
-            click.echo("\n" + "=" * 60)
-            click.echo("Applying fixes...")
-            click.echo("=" * 60)
-
-            try:
-                fixes_summary = apply_all_fixes(
-                    file_path, output_path, all_results, verbose, profile
-                )
-
-                click.echo("\n" + "=" * 60)
-                click.echo("Fixes applied:")
-                for applied_fix in fixes_summary["fixes_applied"]:
-                    click.echo(click.style(f"  ✓ {applied_fix}", fg="green"))
-                click.echo("=" * 60)
-
-                # Re-run checks to verify
-                verify_fixes(
-                    output_path,
-                    check_structure_impl,
-                    check_spatial_impl,
-                    random_sample_size,
-                    limit_rows,
-                )
-
-                click.echo(f"\nOptimized file: {output_path}")
-                if (
-                    not no_backup
-                    and output_path == file_path
-                    and backup_path
-                    and os.path.exists(backup_path)
-                ):
-                    click.echo(f"Backup: {backup_path}")
-
-            except Exception as e:
-                handle_fix_error(e, no_backup, output_path, file_path, backup_path)
-                raise
 
     # Print summary for multi-file checks
     runner.print_summary()
@@ -1243,7 +1169,7 @@ def inspect(
 # Extract command
 @cli.command()
 @click.argument("input_file")
-@click.argument("output_file", type=click.Path())
+@click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
     "--include-cols",
     help="Comma-separated columns to include (geometry and bbox auto-added unless in --exclude-cols)",
@@ -1554,7 +1480,7 @@ def sort(ctx):
 
 @sort.command(name="hilbert")
 @click.argument("input_parquet")
-@click.argument("output_parquet", type=click.Path())
+@click.argument("output_parquet", type=click.Path(), required=False, default=None)
 @click.option(
     "--geometry-column",
     "-g",
@@ -1914,7 +1840,7 @@ def add_country_codes(
 
 @add.command(name="bbox")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
 @click.option(
     "--force",
@@ -2238,7 +2164,7 @@ def add_kdtree(
 
 @add.command(name="quadkey")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option(
     "--quadkey-name",
     default="quadkey",

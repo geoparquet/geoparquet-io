@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
+import os
+import tempfile
+
 import click
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
     find_primary_geometry_column,
@@ -8,8 +15,22 @@ from geoparquet_io.core.common import (
     needs_httpfs,
     safe_file_url,
 )
-from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.logging_config import (
+    configure_verbose,
+    debug,
+    info,
+    progress,
+    success,
+    warn,
+)
 from geoparquet_io.core.partition_reader import require_single_file
+from geoparquet_io.core.stream_io import write_output
+from geoparquet_io.core.streaming import (
+    find_geometry_column_from_table,
+    is_stdin,
+    read_stdin_to_temp_file,
+    should_stream_output,
+)
 
 
 def _find_optimal_iterations(total_rows, target_rows, verbose=False):
@@ -186,25 +207,91 @@ def _build_sampling_query(
     return full_query
 
 
+def add_kdtree_table(
+    table: pa.Table,
+    kdtree_column_name: str = "kdtree_cell",
+    iterations: int = 9,
+    sample_size: int = 100000,
+    geometry_column: str | None = None,
+) -> pa.Table:
+    """
+    Add a KD-tree cell ID column to an Arrow Table.
+
+    This is the table-centric version for the Python API.
+
+    Args:
+        table: Input PyArrow Table
+        kdtree_column_name: Name for the KD-tree column (default: 'kdtree_cell')
+        iterations: Number of recursive splits (1-20). Determines partition count: 2^iterations.
+        sample_size: Number of points to sample for computing boundaries
+        geometry_column: Geometry column name (auto-detected if None)
+
+    Returns:
+        New table with KD-tree column added
+    """
+    # Find geometry column
+    geom_col = geometry_column or find_geometry_column_from_table(table)
+    if not geom_col:
+        geom_col = "geometry"
+
+    # Validate iterations
+    if not 1 <= iterations <= 20:
+        raise ValueError(f"Iterations must be between 1 and 20, got {iterations}")
+
+    # Write table to temp file for processing (kdtree needs file access)
+    temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
+    os.close(temp_fd)
+
+    try:
+        pq.write_table(table, temp_path)
+
+        # Process using file-based mode
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+        try:
+            input_url = safe_file_url(temp_path, verbose=False)
+
+            # Build query using sampling approach
+            query = _build_sampling_query(
+                input_url, geom_col, kdtree_column_name, iterations, sample_size, con, verbose=False
+            )
+
+            result = con.execute(query).fetch_arrow_table()
+
+            # Preserve metadata
+            if table.schema.metadata:
+                result = result.replace_schema_metadata(table.schema.metadata)
+
+            return result
+        finally:
+            con.close()
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
 def add_kdtree_column(
-    input_parquet,
-    output_parquet,
-    kdtree_column_name="kdtree_cell",
-    iterations=9,
-    dry_run=False,
-    verbose=False,
-    compression="ZSTD",
-    compression_level=None,
-    row_group_size_mb=None,
-    row_group_rows=None,
-    force=False,
-    sample_size=100000,
-    auto_target_rows=None,
-    profile=None,
-    geoparquet_version=None,
-):
+    input_parquet: str,
+    output_parquet: str | None = None,
+    kdtree_column_name: str = "kdtree_cell",
+    iterations: int = 9,
+    dry_run: bool = False,
+    verbose: bool = False,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
+    row_group_size_mb: float | None = None,
+    row_group_rows: int | None = None,
+    force: bool = False,
+    sample_size: int = 100000,
+    auto_target_rows: int | None = None,
+    profile: str | None = None,
+    geoparquet_version: str | None = None,
+) -> None:
     """
     Add a KD-tree cell ID column to a GeoParquet file.
+
+    Supports Arrow IPC streaming:
+    - Input "-" reads from stdin
+    - Output "-" or None (with piped stdout) streams to stdout
 
     Creates balanced spatial partitions using recursive splits alternating
     between X and Y dimensions at medians.
@@ -215,8 +302,8 @@ def add_kdtree_column(
     Performance Note: Approximate mode is O(n), exact mode is O(n × iterations).
 
     Args:
-        input_parquet: Path to the input parquet file (local or remote URL)
-        output_parquet: Path to the output parquet file (local or remote URL)
+        input_parquet: Path to the input parquet file (local, remote URL, or "-" for stdin)
+        output_parquet: Path to output file, "-" for stdout, or None for auto-detect
         kdtree_column_name: Name for the KD-tree column (default: 'kdtree_cell')
         iterations: Number of recursive splits (1-20). Determines partition count: 2^iterations.
                    If None, will be auto-computed based on auto_target_rows.
@@ -230,7 +317,31 @@ def add_kdtree_column(
         sample_size: Number of points to sample for computing boundaries. None for exact mode (default: 100000)
         auto_target_rows: If set, auto-compute iterations to target this many rows per partition
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
     """
+    configure_verbose(verbose)
+
+    # Check for streaming mode (stdin input or stdout output)
+    is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
+
+    if is_streaming and not dry_run:
+        _add_kdtree_streaming(
+            input_parquet,
+            output_parquet,
+            kdtree_column_name,
+            iterations,
+            verbose,
+            compression,
+            compression_level,
+            row_group_size_mb,
+            row_group_rows,
+            sample_size,
+            profile,
+            geoparquet_version,
+        )
+        return
+
+    # File-based mode
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add kdtree")
 
@@ -413,6 +524,88 @@ def add_kdtree_column(
         success(
             f"Added KD-tree column '{kdtree_column_name}' ({partition_count} partitions) to: {output_parquet}"
         )
+
+
+def _add_kdtree_streaming(
+    input_path: str,
+    output_path: str | None,
+    kdtree_column_name: str,
+    iterations: int,
+    verbose: bool,
+    compression: str,
+    compression_level: int | None,
+    row_group_size_mb: float | None,
+    row_group_rows: int | None,
+    sample_size: int,
+    profile: str | None,
+    geoparquet_version: str | None,
+) -> None:
+    """Handle streaming input/output for add_kdtree."""
+    # Suppress verbose when streaming to stdout
+    if should_stream_output(output_path):
+        verbose = False
+
+    temp_input_file = None
+    try:
+        # If reading from stdin, write to temp file first
+        if is_stdin(input_path):
+            temp_input_file = read_stdin_to_temp_file(verbose)
+            working_file = temp_input_file
+        else:
+            working_file = input_path
+
+        # Process the file
+        input_url = safe_file_url(working_file, verbose)
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_file))
+
+        try:
+            # Find geometry column
+            geom_col = find_primary_geometry_column(working_file, verbose)
+
+            # Validate iterations
+            if not 1 <= iterations <= 20:
+                raise click.BadParameter(f"Iterations must be between 1 and 20, got {iterations}")
+
+            if verbose:
+                debug(f"Computing KD-tree partitions ({iterations} iterations)...")
+
+            # Build query using sampling approach
+            query = _build_sampling_query(
+                input_url, geom_col, kdtree_column_name, iterations, sample_size, con, verbose
+            )
+
+            # Get metadata from input
+            from geoparquet_io.core.common import get_parquet_metadata
+
+            metadata, _ = get_parquet_metadata(working_file, verbose=False)
+
+            # Write output
+            write_output(
+                con,
+                query,
+                output_path,
+                original_metadata=metadata,
+                geometry_column=geom_col,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                verbose=verbose,
+                profile=profile,
+                geoparquet_version=geoparquet_version,
+            )
+        finally:
+            con.close()
+
+        if not should_stream_output(output_path):
+            partition_count = 2**iterations
+            success(
+                f"Added KD-tree column '{kdtree_column_name}' ({partition_count} partitions) to: {output_path}"
+            )
+    finally:
+        # Clean up temp file
+        if temp_input_file and os.path.exists(temp_input_file):
+            os.remove(temp_input_file)
 
 
 if __name__ == "__main__":

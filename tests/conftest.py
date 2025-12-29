@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -67,6 +68,61 @@ def duckdb_connection():
         yield con
     finally:
         con.close()
+
+
+# Windows-safe cleanup helpers
+
+
+def safe_unlink(file_path, retries=5, delay=0.1):
+    """
+    Safely unlink a file with retries for Windows compatibility.
+
+    On Windows, file handles may not be released immediately, causing
+    PermissionError. This function retries the unlink operation.
+
+    Args:
+        file_path: Path to the file (str or Path)
+        retries: Number of retry attempts
+        delay: Delay between retries in seconds
+    """
+    path = Path(file_path) if not isinstance(file_path, Path) else file_path
+    if not path.exists():
+        return
+
+    for attempt in range(retries):
+        try:
+            path.unlink()
+            return
+        except (PermissionError, FileNotFoundError):
+            if attempt < retries - 1:
+                time.sleep(delay)
+            # Ignore final failure - cleanup is best effort
+
+
+def safe_rmtree(dir_path, retries=5, delay=0.1):
+    """
+    Safely remove a directory tree with retries for Windows compatibility.
+
+    On Windows, file handles may not be released immediately, causing
+    PermissionError or OSError. This function retries the rmtree operation.
+
+    Args:
+        dir_path: Path to the directory (str or Path)
+        retries: Number of retry attempts
+        delay: Delay between retries in seconds
+    """
+    path = Path(dir_path) if not isinstance(dir_path, Path) else dir_path
+    if not path.exists():
+        return
+
+    for attempt in range(retries):
+        try:
+            shutil.rmtree(path)
+            return
+        except (PermissionError, OSError):
+            if attempt < retries - 1:
+                time.sleep(delay)
+            # Ignore final failure - cleanup is best effort
 
 
 # Helper functions for GeoParquet version testing
