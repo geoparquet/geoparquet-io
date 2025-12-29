@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import os
 import tempfile
 import uuid
 
 import click
+import pyarrow.parquet as pq
 
 from geoparquet_io.core.add_quadkey_column import add_quadkey_column
 from geoparquet_io.core.common import safe_file_url
@@ -19,6 +22,30 @@ from geoparquet_io.core.partition_common import (
     partition_by_column,
     preview_partition,
 )
+from geoparquet_io.core.streaming import is_stdin, read_arrow_stream
+
+
+def _read_stdin_to_temp_file(verbose: bool) -> str:
+    """
+    Read Arrow IPC stream from stdin and write to a temporary parquet file.
+
+    Returns the path to the temporary file. The caller is responsible for cleanup.
+    """
+    if verbose:
+        debug("Reading Arrow IPC stream from stdin...")
+
+    table = read_arrow_stream()
+
+    # Write to temp file
+    temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
+    os.close(temp_fd)
+
+    pq.write_table(table, temp_path)
+
+    if verbose:
+        debug(f"Wrote {table.num_rows} rows to temporary file: {temp_path}")
+
+    return temp_path
 
 
 def _validate_resolutions(resolution, partition_resolution):
@@ -129,63 +156,85 @@ def partition_by_quadkey(
     preview: bool = False,
     preview_limit: int = 15,
     verbose: bool = False,
-    keep_quadkey_column: bool = None,
+    keep_quadkey_column: bool | None = None,
     force: bool = False,
     skip_analysis: bool = False,
-    filename_prefix: str = None,
-    profile: str = None,
-    geoparquet_version: str = None,
-):
-    """Partition a GeoParquet file by quadkey cells."""
+    filename_prefix: str | None = None,
+    profile: str | None = None,
+    geoparquet_version: str | None = None,
+) -> None:
+    """
+    Partition a GeoParquet file by quadkey cells.
+
+    Supports Arrow IPC streaming for input:
+    - Input "-" reads from stdin (output is always a directory)
+    """
     configure_verbose(verbose)
     _validate_resolutions(resolution, partition_resolution)
 
     if keep_quadkey_column is None:
         keep_quadkey_column = hive
 
-    working_parquet, temp_file = _ensure_quadkey_column(
-        input_parquet, quadkey_column_name, resolution, use_centroid, verbose, profile
-    )
+    # Handle stdin input
+    stdin_temp_file = None
+    actual_input = input_parquet
 
-    if preview:
+    if is_stdin(input_parquet):
+        stdin_temp_file = _read_stdin_to_temp_file(verbose)
+        actual_input = stdin_temp_file
+
+    try:
+        working_parquet, temp_file = _ensure_quadkey_column(
+            actual_input, quadkey_column_name, resolution, use_centroid, verbose, profile
+        )
+
+        if preview:
+            try:
+                _run_quadkey_preview(
+                    working_parquet,
+                    quadkey_column_name,
+                    partition_resolution,
+                    preview_limit,
+                    verbose,
+                )
+            finally:
+                if temp_file and os.path.exists(temp_file):
+                    os.remove(temp_file)
+            return
+
+        progress(
+            f"Partitioning by quadkey at resolution {partition_resolution} "
+            f"(column: '{quadkey_column_name}')"
+        )
+
         try:
-            _run_quadkey_preview(
-                working_parquet, quadkey_column_name, partition_resolution, preview_limit, verbose
+            num_partitions = partition_by_column(
+                input_parquet=working_parquet,
+                output_folder=output_folder,
+                column_name=quadkey_column_name,
+                column_prefix_length=partition_resolution,
+                hive=hive,
+                overwrite=overwrite,
+                verbose=verbose,
+                keep_partition_column=keep_quadkey_column,
+                force=force,
+                skip_analysis=skip_analysis,
+                filename_prefix=filename_prefix,
+                profile=profile,
+                geoparquet_version=geoparquet_version,
+            )
+
+            total_size_mb, avg_size_mb = calculate_partition_stats(output_folder, num_partitions)
+            success(
+                f"\nCreated {num_partitions} partition(s) in {output_folder} "
+                f"(total: {total_size_mb:.2f} MB, avg: {avg_size_mb:.2f} MB)"
             )
         finally:
             if temp_file and os.path.exists(temp_file):
+                if verbose:
+                    debug("Cleaning up temporary quadkey-enriched file...")
                 os.remove(temp_file)
-        return
-
-    progress(
-        f"Partitioning by quadkey at resolution {partition_resolution} "
-        f"(column: '{quadkey_column_name}')"
-    )
-
-    try:
-        num_partitions = partition_by_column(
-            input_parquet=working_parquet,
-            output_folder=output_folder,
-            column_name=quadkey_column_name,
-            column_prefix_length=partition_resolution,
-            hive=hive,
-            overwrite=overwrite,
-            verbose=verbose,
-            keep_partition_column=keep_quadkey_column,
-            force=force,
-            skip_analysis=skip_analysis,
-            filename_prefix=filename_prefix,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-        )
-
-        total_size_mb, avg_size_mb = calculate_partition_stats(output_folder, num_partitions)
-        success(
-            f"\nCreated {num_partitions} partition(s) in {output_folder} "
-            f"(total: {total_size_mb:.2f} MB, avg: {avg_size_mb:.2f} MB)"
-        )
     finally:
-        if temp_file and os.path.exists(temp_file):
-            if verbose:
-                debug("Cleaning up temporary quadkey-enriched file...")
-            os.remove(temp_file)
+        # Clean up stdin temp file
+        if stdin_temp_file and os.path.exists(stdin_temp_file):
+            os.remove(stdin_temp_file)

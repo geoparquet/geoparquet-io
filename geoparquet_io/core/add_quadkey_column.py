@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import click
 import mercantile
 import pyarrow as pa
@@ -66,18 +68,27 @@ def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
     return None
 
 
-def _validate_crs_for_quadkey(input_parquet: str, geom_col: str, verbose: bool) -> None:
+def _validate_crs_from_geo_metadata(
+    geo_meta: dict | None,
+    geom_col: str,
+    verbose: bool,
+    source_description: str = "data",
+) -> None:
     """
-    Validate that the file's CRS is geographic (WGS84/CRS84).
+    Validate CRS from geo metadata dictionary.
 
-    Quadkeys require lat/lon coordinates. Raises ClickException if CRS is projected.
+    Common helper used by file-based, streaming, and table-based paths.
+
+    Args:
+        geo_meta: Parsed geo metadata dict (from GeoParquet schema)
+        geom_col: Name of the geometry column
+        verbose: Whether to print debug output
+        source_description: Description for error messages (e.g., "file", "stream", "table")
+
+    Raises:
+        click.ClickException: If CRS is detected as projected
     """
-    safe_url = safe_file_url(input_parquet, verbose=False)
-
-    # Get CRS from GeoParquet metadata
-    geo_meta = get_geo_metadata(safe_url)
     if not geo_meta:
-        # No metadata - assume WGS84 (common default)
         if verbose:
             debug("No GeoParquet metadata found, assuming WGS84 coordinates")
         return
@@ -101,15 +112,53 @@ def _validate_crs_for_quadkey(input_parquet: str, geom_col: str, verbose: bool) 
     if is_geographic is False:
         crs_name = get_crs_display_name(crs_info)
         raise click.ClickException(
-            f"Quadkeys require geographic coordinates (lat/lon), but this file uses "
-            f"a projected CRS: {crs_name}\n\n"
-            f"To fix this, reproject to WGS84 first:\n"
-            f"  gpio reproject {input_parquet} reprojected.parquet --dst-crs EPSG:4326\n\n"
-            f"Then run the quadkey command on the reprojected file."
+            f"Quadkeys require geographic coordinates (lat/lon), but this {source_description} "
+            f"uses a projected CRS: {crs_name}\n\n"
+            f"Reproject to WGS84 first using:\n"
+            f"  gpio reproject <input> <output> --dst-crs EPSG:4326"
         )
 
     if verbose and is_geographic:
         debug("CRS validated as geographic (lat/lon coordinates)")
+
+
+def _validate_crs_for_quadkey(input_parquet: str, geom_col: str, verbose: bool) -> None:
+    """
+    Validate that the file's CRS is geographic (WGS84/CRS84).
+
+    Quadkeys require lat/lon coordinates. Raises ClickException if CRS is projected.
+    """
+    safe_url = safe_file_url(input_parquet, verbose=False)
+
+    # Get CRS from GeoParquet metadata
+    geo_meta = get_geo_metadata(safe_url)
+    _validate_crs_from_geo_metadata(geo_meta, geom_col, verbose, source_description="file")
+
+
+def _parse_geo_metadata_from_schema(metadata: dict | None) -> dict | None:
+    """
+    Parse geo metadata from schema metadata bytes dict.
+
+    Args:
+        metadata: Schema metadata dict (with bytes keys/values)
+
+    Returns:
+        Parsed geo metadata dict, or None if not found
+    """
+    if not metadata:
+        return None
+
+    # Try both bytes and string keys (depends on how metadata was accessed)
+    geo_bytes = metadata.get(b"geo") or metadata.get("geo")
+    if not geo_bytes:
+        return None
+
+    try:
+        if isinstance(geo_bytes, bytes):
+            return json.loads(geo_bytes.decode("utf-8"))
+        return json.loads(geo_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 def _lat_lon_to_quadkey(lat: float, lon: float, level: int) -> str:
@@ -139,11 +188,24 @@ def add_quadkey_table(
 
     Returns:
         New table with quadkey column added
+
+    Raises:
+        ValueError: If resolution is not an integer between 0 and 23
+        click.ClickException: If CRS is detected as projected (quadkeys require lat/lon)
     """
+    # Validate resolution before any DuckDB operations
+    resolution = int(resolution)
+    if resolution < 0 or resolution > 23:
+        raise ValueError(f"resolution must be between 0 and 23 inclusive, got {resolution}")
+
     # Find geometry column
     geom_col = geometry_column or find_geometry_column_from_table(table)
     if not geom_col:
         geom_col = "geometry"
+
+    # Validate CRS is geographic (quadkeys require lat/lon)
+    geo_meta = _parse_geo_metadata_from_schema(table.schema.metadata)
+    _validate_crs_from_geo_metadata(geo_meta, geom_col, verbose=False, source_description="table")
 
     # Check if bbox column exists
     use_bbox = False
@@ -155,9 +217,8 @@ def add_quadkey_table(
                 bbox_col = name
                 break
 
-    # Register table and execute query
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-    try:
+    # Register table and execute query using context manager for safe cleanup
+    with get_duckdb_connection(load_spatial=True, load_httpfs=False) as con:
         # Register Python UDF
         con.create_function(
             "lat_lon_to_quadkey",
@@ -216,8 +277,6 @@ def add_quadkey_table(
             result = result.replace_schema_metadata(table.schema.metadata)
 
         return result
-    finally:
-        con.close()
 
 
 def add_quadkey_column(
@@ -342,6 +401,10 @@ def _add_quadkey_streaming(
                 break
         if not geom_col:
             geom_col = "geometry"
+
+        # Validate CRS is geographic (quadkeys require lat/lon)
+        geo_meta = _parse_geo_metadata_from_schema(metadata)
+        _validate_crs_from_geo_metadata(geo_meta, geom_col, verbose, source_description="stream")
 
         # Check for bbox column
         bbox_col = None

@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.common import write_geoparquet_table
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -114,7 +116,7 @@ class Table:
         compression_level: int | None = None,
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
-        geoparquet_version: str | None = None,  # noqa: ARG002
+        geoparquet_version: str | None = None,
     ) -> None:
         """
         Write the table to a GeoParquet file.
@@ -125,26 +127,21 @@ class Table:
             compression_level: Compression level
             row_group_size_mb: Target row group size in MB
             row_group_rows: Exact rows per row group
-            geoparquet_version: GeoParquet version (ignored, preserves existing)
+            geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, or None to preserve)
         """
-        # Calculate row group size if specified in MB
-        row_group_size = row_group_rows
-        if row_group_size_mb and not row_group_rows:
-            # Estimate bytes per row from table size
-            row_group_size = max(1, int(row_group_size_mb * 1024 * 1024 / 100))
-
-        # Build compression options
-        compression_upper = compression.upper() if compression else "ZSTD"
-        if compression_upper == "UNCOMPRESSED":
-            compression_upper = None
-
-        # Write directly with PyArrow - geometry is already WKB
-        pq.write_table(
+        # Use write_geoparquet_table for proper metadata preservation
+        # It handles compression normalization, row group size estimation,
+        # and GeoParquet metadata (bbox, version, geo metadata) correctly
+        write_geoparquet_table(
             self._table,
-            str(path),
-            compression=compression_upper,
+            output_file=str(path),
+            geometry_column=self._geometry_column,
+            compression=compression,
             compression_level=compression_level,
-            row_group_size=row_group_size,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            geoparquet_version=geoparquet_version,
+            verbose=False,
         )
 
     def add_bbox(self, column_name: str = "bbox") -> Table:
@@ -239,6 +236,138 @@ class Table:
             bbox=bbox,
             where=where,
             limit=limit,
+            geometry_column=self._geometry_column,
+        )
+        return Table(result, self._geometry_column)
+
+    def add_h3(
+        self,
+        column_name: str = "h3_cell",
+        resolution: int = 9,
+    ) -> Table:
+        """
+        Add an H3 cell column based on geometry location.
+
+        Args:
+            column_name: Name for the H3 column (default: 'h3_cell')
+            resolution: H3 resolution level 0-15 (default: 9)
+
+        Returns:
+            New Table with H3 column added
+        """
+        from geoparquet_io.core.add_h3_column import add_h3_table
+
+        result = add_h3_table(
+            self._table,
+            h3_column_name=column_name,
+            h3_resolution=resolution,
+        )
+        return Table(result, self._geometry_column)
+
+    def add_kdtree(
+        self,
+        column_name: str = "kdtree_cell",
+        iterations: int = 9,
+        sample_size: int = 100000,
+    ) -> Table:
+        """
+        Add a KD-tree cell column based on geometry location.
+
+        Args:
+            column_name: Name for the KD-tree column (default: 'kdtree_cell')
+            iterations: Number of recursive splits 1-20 (default: 9)
+            sample_size: Number of points to sample for boundaries (default: 100000)
+
+        Returns:
+            New Table with KD-tree column added
+        """
+        from geoparquet_io.core.add_kdtree_column import add_kdtree_table
+
+        result = add_kdtree_table(
+            self._table,
+            kdtree_column_name=column_name,
+            iterations=iterations,
+            sample_size=sample_size,
+        )
+        return Table(result, self._geometry_column)
+
+    def sort_column(
+        self,
+        column_name: str,
+        descending: bool = False,
+    ) -> Table:
+        """
+        Sort rows by the specified column.
+
+        Args:
+            column_name: Column name to sort by
+            descending: Sort in descending order (default: False)
+
+        Returns:
+            New Table with rows sorted by the column
+        """
+        from geoparquet_io.core.sort_by_column import sort_by_column_table
+
+        result = sort_by_column_table(
+            self._table,
+            column_name=column_name,
+            descending=descending,
+        )
+        return Table(result, self._geometry_column)
+
+    def sort_quadkey(
+        self,
+        column_name: str = "quadkey",
+        resolution: int = 13,
+        use_centroid: bool = False,
+        remove_column: bool = False,
+    ) -> Table:
+        """
+        Sort rows by quadkey column.
+
+        If the quadkey column doesn't exist, it will be auto-added.
+
+        Args:
+            column_name: Name of the quadkey column (default: 'quadkey')
+            resolution: Quadkey resolution for auto-adding (0-23, default: 13)
+            use_centroid: Use geometry centroid when auto-adding
+            remove_column: Remove the quadkey column after sorting
+
+        Returns:
+            New Table with rows sorted by quadkey
+        """
+        from geoparquet_io.core.sort_quadkey import sort_by_quadkey_table
+
+        result = sort_by_quadkey_table(
+            self._table,
+            quadkey_column_name=column_name,
+            resolution=resolution,
+            use_centroid=use_centroid,
+            remove_quadkey_column=remove_column,
+        )
+        return Table(result, self._geometry_column)
+
+    def reproject(
+        self,
+        target_crs: str = "EPSG:4326",
+        source_crs: str | None = None,
+    ) -> Table:
+        """
+        Reproject geometry to a different coordinate reference system.
+
+        Args:
+            target_crs: Target CRS (default: EPSG:4326)
+            source_crs: Source CRS. If None, detected from metadata.
+
+        Returns:
+            New Table with reprojected geometry
+        """
+        from geoparquet_io.core.reproject import reproject_table
+
+        result = reproject_table(
+            self._table,
+            target_crs=target_crs,
+            source_crs=source_crs,
             geometry_column=self._geometry_column,
         )
         return Table(result, self._geometry_column)

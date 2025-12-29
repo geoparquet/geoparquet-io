@@ -27,8 +27,8 @@ def _build_bbox_sql(geometry_column: str, bbox_column_name: str = "bbox") -> str
         xmin := ST_XMin("{geometry_column}"),
         ymin := ST_YMin("{geometry_column}"),
         xmax := ST_XMax("{geometry_column}"),
-        ymax := ST_YMax("{geometry_column})
-    ) AS "{bbox_column_name}\""""
+        ymax := ST_YMax("{geometry_column}")
+    ) AS "{bbox_column_name}" """
 
 
 def add_bbox_table(

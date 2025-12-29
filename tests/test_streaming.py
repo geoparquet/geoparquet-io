@@ -310,3 +310,220 @@ class TestGeometryColumnDetection:
         """Test None when no geometry column found."""
         table = pa.table({"id": [1], "name": ["test"]})
         assert find_geometry_column_from_table(table) is None
+
+
+class TestStreamIO:
+    """Tests for stream_io.py high-level abstractions."""
+
+    @pytest.fixture
+    def sample_geo_table(self):
+        """Create a table with WKB geometry."""
+        # Simple WKB POINT(1 2)
+        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+        return pa.table({"id": [1, 2], "geometry": [wkb, wkb], "name": ["a", "b"]})
+
+    @pytest.fixture
+    def geo_metadata(self):
+        """Sample GeoParquet metadata."""
+        return {
+            b"geo": json.dumps(
+                {
+                    "version": "1.1.0",
+                    "primary_column": "geometry",
+                    "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+                }
+            ).encode("utf-8")
+        }
+
+    def test_wrap_query_with_wkb_conversion(self):
+        """Test WKB wrapping of queries."""
+        from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
+
+        query = "SELECT * FROM data"
+        result = _wrap_query_with_wkb_conversion(query, "geometry")
+        assert "ST_AsWKB(geometry)" in result
+        assert "__stream_source" in result
+
+    def test_wrap_query_with_wkb_conversion_no_geom(self):
+        """Test that None geometry skips wrapping."""
+        from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
+
+        query = "SELECT * FROM data"
+        result = _wrap_query_with_wkb_conversion(query, None)
+        assert result == query
+
+    def test_open_input_with_file(self, tmp_path, sample_geo_table, geo_metadata):
+        """Test open_input with a file path."""
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.stream_io import open_input
+
+        # Write test file
+        test_file = tmp_path / "test.parquet"
+        table_with_meta = sample_geo_table.replace_schema_metadata(geo_metadata)
+        pq.write_table(table_with_meta, str(test_file))
+
+        with open_input(str(test_file)) as (source, metadata, is_stream, con):
+            assert is_stream is False
+            assert "read_parquet" in source
+            assert metadata is not None
+            assert con is not None
+
+    def test_open_input_with_stdin(self, sample_geo_table, geo_metadata, monkeypatch):
+        """Test open_input with stdin."""
+        from geoparquet_io.core.stream_io import open_input
+
+        # Create Arrow IPC buffer
+        table_with_meta = sample_geo_table.replace_schema_metadata(geo_metadata)
+        ipc_buffer = io.BytesIO()
+        writer = ipc.RecordBatchStreamWriter(ipc_buffer, table_with_meta.schema)
+        writer.write_table(table_with_meta)
+        writer.close()
+        ipc_buffer.seek(0)
+
+        # Mock stdin
+        mock_stdin = mock.MagicMock()
+        mock_stdin.isatty.return_value = False
+        mock_stdin.buffer = ipc_buffer
+
+        monkeypatch.setattr(sys, "stdin", mock_stdin)
+
+        with open_input("-") as (source, metadata, is_stream, con):
+            assert is_stream is True
+            # Source should be a view name for stream input
+            assert "input_stream" in source
+            assert metadata is not None
+            assert con is not None
+
+    def test_write_output_to_file(self, tmp_path, sample_geo_table, geo_metadata):
+        """Test write_output to a file."""
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.common import get_duckdb_connection
+        from geoparquet_io.core.stream_io import write_output
+
+        # Write input file first (so DuckDB sees geometry as proper type)
+        input_file = tmp_path / "input.parquet"
+        table_with_meta = sample_geo_table.replace_schema_metadata(geo_metadata)
+        pq.write_table(table_with_meta, str(input_file))
+
+        # Create connection and query from file
+        con = get_duckdb_connection(load_spatial=True)
+
+        output_file = tmp_path / "output.parquet"
+
+        result = write_output(
+            con,
+            f"SELECT * FROM read_parquet('{input_file}')",
+            str(output_file),
+            original_metadata=geo_metadata,
+            verbose=False,
+        )
+
+        # File output returns None
+        assert result is None
+        assert output_file.exists()
+
+        con.close()
+
+    def test_write_output_to_stream(self, tmp_path, sample_geo_table, geo_metadata, monkeypatch):
+        """Test write_output to stdout stream."""
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.common import get_duckdb_connection
+        from geoparquet_io.core.stream_io import write_output
+
+        # Write input file first (so DuckDB sees geometry as proper type)
+        input_file = tmp_path / "input.parquet"
+        table_with_meta = sample_geo_table.replace_schema_metadata(geo_metadata)
+        pq.write_table(table_with_meta, str(input_file))
+
+        # Create connection
+        con = get_duckdb_connection(load_spatial=True)
+
+        # Mock stdout
+        output_buffer = io.BytesIO()
+        mock_stdout = mock.MagicMock()
+        mock_stdout.buffer = output_buffer
+        mock_stdout.isatty.return_value = False
+
+        monkeypatch.setattr(sys, "stdout", mock_stdout)
+
+        result = write_output(
+            con,
+            f"SELECT * FROM read_parquet('{input_file}')",
+            "-",  # Explicit stdout marker
+            original_metadata=geo_metadata,
+            verbose=False,
+        )
+
+        # Stream output returns the table
+        assert result is not None
+        assert isinstance(result, pa.Table)
+
+        # Verify output is valid Arrow IPC
+        output_buffer.seek(0)
+        reader = ipc.RecordBatchStreamReader(output_buffer)
+        read_table = reader.read_all()
+        assert read_table.num_rows == 2
+
+        con.close()
+
+    def test_execute_transform_file_to_file(self, tmp_path, sample_geo_table, geo_metadata):
+        """Test execute_transform with file input and file output."""
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.stream_io import execute_transform
+
+        # Write input file
+        input_file = tmp_path / "input.parquet"
+        table_with_meta = sample_geo_table.replace_schema_metadata(geo_metadata)
+        pq.write_table(table_with_meta, str(input_file))
+
+        output_file = tmp_path / "output.parquet"
+
+        def transform_fn(source, con):
+            return f"SELECT id, name FROM {source}"
+
+        result = execute_transform(
+            str(input_file),
+            str(output_file),
+            transform_fn,
+            verbose=False,
+        )
+
+        assert result is None  # File output
+        assert output_file.exists()
+
+        # Verify output content
+        out_table = pq.read_table(str(output_file))
+        assert "id" in out_table.column_names
+        assert "name" in out_table.column_names
+
+    def test_execute_transform_dry_run(self, tmp_path, sample_geo_table, geo_metadata):
+        """Test execute_transform with dry_run=True."""
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.stream_io import execute_transform
+
+        # Write input file
+        input_file = tmp_path / "input.parquet"
+        table_with_meta = sample_geo_table.replace_schema_metadata(geo_metadata)
+        pq.write_table(table_with_meta, str(input_file))
+
+        output_file = tmp_path / "output.parquet"
+
+        def transform_fn(source, con):
+            return f"SELECT * FROM {source}"
+
+        result = execute_transform(
+            str(input_file),
+            str(output_file),
+            transform_fn,
+            dry_run=True,
+            verbose=False,
+        )
+
+        assert result is None
+        # Output file should NOT be created in dry_run
+        assert not output_file.exists()

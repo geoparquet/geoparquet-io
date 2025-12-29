@@ -2506,6 +2506,120 @@ def write_parquet_with_metadata(
     )
 
 
+def write_geoparquet_table(
+    table,
+    output_file: str,
+    geometry_column: str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
+    row_group_size_mb: float | None = None,
+    row_group_rows: int | None = None,
+    geoparquet_version: str | None = None,
+    verbose: bool = False,
+    profile: str | None = None,
+) -> None:
+    """
+    Write a PyArrow Table to a GeoParquet file with proper metadata.
+
+    This is the table-centric version for writing GeoParquet files.
+    It applies proper GeoParquet metadata and handles compression settings.
+
+    Args:
+        table: PyArrow Table to write
+        output_file: Path to output file (local path or remote URL)
+        geometry_column: Name of geometry column (auto-detected if None)
+        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+        compression_level: Compression level (varies by format)
+        row_group_size_mb: Target row group size in MB
+        row_group_rows: Exact number of rows per row group
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0)
+        verbose: Whether to print verbose output
+        profile: AWS profile name (S3 only, optional)
+    """
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, output_file)
+
+    # Auto-detect geometry column if not provided
+    if geometry_column is None:
+        # Try to detect from table metadata
+        metadata = table.schema.metadata or {}
+        if b"geo" in metadata:
+            try:
+                geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+                geometry_column = geo_meta.get("primary_column", "geometry")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                geometry_column = "geometry"
+        else:
+            # Check for common geometry column names
+            for name in ["geometry", "geom", "wkb_geometry"]:
+                if name in table.column_names:
+                    geometry_column = name
+                    break
+            if geometry_column is None:
+                geometry_column = "geometry"
+
+    # Check if geometry column exists
+    has_geometry = geometry_column in table.column_names
+
+    # Extract original metadata for preservation
+    original_metadata = table.schema.metadata
+
+    # Extract CRS from original metadata if available
+    input_crs = None
+    if original_metadata and b"geo" in original_metadata:
+        try:
+            geo_meta = json.loads(original_metadata[b"geo"].decode("utf-8"))
+            columns = geo_meta.get("columns", {})
+            if geometry_column in columns:
+                input_crs = columns[geometry_column].get("crs")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+    # Normalize compression
+    compression_upper = compression.upper() if compression else "ZSTD"
+    if compression_upper == "UNCOMPRESSED":
+        compression_upper = None
+
+    with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
+        actual_output,
+        is_remote,
+    ):
+        # Apply GeoParquet metadata only if geometry column exists
+        if has_geometry:
+            table = _apply_geoparquet_metadata(
+                table,
+                geometry_column=geometry_column,
+                geoparquet_version=geoparquet_version,
+                original_metadata=original_metadata,
+                input_crs=input_crs,
+                custom_metadata=None,
+                verbose=verbose,
+            )
+
+        # Write to disk with proper settings
+        _write_table_with_settings(
+            table,
+            actual_output,
+            compression=compression_upper or "UNCOMPRESSED",
+            compression_level=compression_level,
+            row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
+            geoparquet_version=geoparquet_version,
+            geometry_column=geometry_column,
+            verbose=verbose,
+        )
+
+        # Upload to remote if needed
+        if is_remote:
+            upload_if_remote(
+                actual_output,
+                output_file,
+                profile=profile,
+                is_directory=False,
+                verbose=verbose,
+            )
+
+
 def format_size(size_bytes):
     """Convert bytes to human readable string."""
     for unit in ["B", "KB", "MB", "GB"]:
