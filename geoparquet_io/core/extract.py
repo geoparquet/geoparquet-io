@@ -3,7 +3,12 @@ Extract columns and rows from GeoParquet files.
 
 Supports column selection, spatial filtering (bbox, geometry),
 SQL filtering, and multiple input files via glob patterns.
+
+Also supports Arrow IPC streaming for Unix-style piping:
+    gpio extract --bbox ... input.parquet | gpio add bbox - output.parquet
 """
+
+from __future__ import annotations
 
 import json
 import re
@@ -11,6 +16,7 @@ import sys
 from pathlib import Path
 
 import click
+import pyarrow as pa
 
 from geoparquet_io.core.common import (
     check_bbox_structure,
@@ -24,6 +30,12 @@ from geoparquet_io.core.common import (
     write_parquet_with_metadata,
 )
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.stream_io import open_input, write_output
+from geoparquet_io.core.streaming import (
+    find_geometry_column_from_table,
+    is_stdin,
+    should_stream_output,
+)
 
 
 def get_parquet_row_count(parquet_file: str) -> int:
@@ -609,6 +621,243 @@ def build_extract_query(
     return query
 
 
+def _build_query_for_source(
+    source_ref: str,
+    columns: list[str],
+    spatial_filter: str | None,
+    where_clause: str | None,
+    limit: int | None = None,
+) -> str:
+    """Build extraction query for a DuckDB source reference (table or read_parquet)."""
+    col_list = ", ".join(f'"{c}"' for c in columns)
+    query = f"SELECT {col_list} FROM {source_ref}"
+
+    conditions = []
+    if spatial_filter:
+        conditions.append(f"({spatial_filter})")
+    if where_clause:
+        conditions.append(f"({where_clause})")
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    if limit is not None:
+        query += f" LIMIT {limit}"
+
+    return query
+
+
+def _get_table_column_info(
+    table: pa.Table,
+) -> tuple[list[str], str | None, dict]:
+    """Get column information from an Arrow table."""
+    all_columns = table.column_names
+    geometry_col = find_geometry_column_from_table(table)
+
+    # Check for bbox column
+    bbox_col = None
+    for name in ["bbox", "bounds", "bounding_box"]:
+        if name in all_columns:
+            bbox_col = name
+            break
+
+    bbox_info = {
+        "has_bbox_column": bbox_col is not None,
+        "bbox_column_name": bbox_col,
+    }
+
+    return all_columns, geometry_col, bbox_info
+
+
+def extract_table(
+    table: pa.Table,
+    columns: list[str] | None = None,
+    exclude_columns: list[str] | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    where: str | None = None,
+    limit: int | None = None,
+    geometry_column: str | None = None,
+) -> pa.Table:
+    """
+    Extract columns and rows from an Arrow Table.
+
+    This is the table-centric version for the Python API.
+
+    Args:
+        table: Input PyArrow Table
+        columns: Columns to include (None = all)
+        exclude_columns: Columns to exclude
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax)
+        where: SQL WHERE clause
+        limit: Maximum rows to return
+        geometry_column: Geometry column name (auto-detected if None)
+
+    Returns:
+        Filtered PyArrow Table
+    """
+    all_columns, geom_col, bbox_info = _get_table_column_info(table)
+
+    if geometry_column:
+        geom_col = geometry_column
+    if not geom_col:
+        geom_col = "geometry"
+
+    # Build column selection
+    selected_columns = build_column_selection(
+        all_columns,
+        columns,
+        exclude_columns,
+        geom_col,
+        bbox_info.get("bbox_column_name"),
+    )
+
+    # Build spatial filter
+    spatial_filter = build_spatial_filter(bbox, None, bbox_info, geom_col) if bbox else None
+
+    # Validate WHERE clause if provided
+    if where:
+        validate_where_clause(where)
+
+    # Register table and execute query
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    try:
+        con.register("__input_table", table)
+
+        # Check if geometry column is BLOB (needs conversion)
+        columns_info = con.execute("DESCRIBE __input_table").fetchall()
+        geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
+
+        if geom_is_blob and geom_col in table.column_names:
+            # Create view with geometry conversion
+            other_cols = [c for c in table.column_names if c != geom_col]
+            col_defs = other_cols + [f'ST_GeomFromWKB("{geom_col}") AS "{geom_col}"']
+            view_query = (
+                f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
+            )
+            con.execute(view_query)
+            source_ref = "__input_view"
+            needs_wkb_conversion = True
+        else:
+            source_ref = "__input_table"
+            needs_wkb_conversion = False
+
+        # Build query, but if geometry was converted, we need to convert back to WKB
+        if needs_wkb_conversion and geom_col in selected_columns:
+            # Replace geometry column with WKB conversion in column list
+            cols_with_wkb = [
+                f'ST_AsWKB("{geom_col}") AS "{geom_col}"' if c == geom_col else f'"{c}"'
+                for c in selected_columns
+            ]
+            col_list = ", ".join(cols_with_wkb)
+
+            conditions = []
+            if spatial_filter:
+                conditions.append(f"({spatial_filter})")
+            if where:
+                conditions.append(f"({where})")
+
+            query = f"SELECT {col_list} FROM {source_ref}"
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            if limit is not None:
+                query += f" LIMIT {limit}"
+        else:
+            query = _build_query_for_source(
+                source_ref, selected_columns, spatial_filter, where, limit
+            )
+        result = con.execute(query).fetch_arrow_table()
+
+        # Preserve metadata
+        if table.schema.metadata:
+            result = result.replace_schema_metadata(table.schema.metadata)
+
+        return result
+    finally:
+        con.close()
+
+
+def _extract_streaming(
+    input_path: str,
+    output_path: str | None,
+    include_cols: list[str] | None,
+    exclude_cols: list[str] | None,
+    bbox_tuple: tuple[float, float, float, float] | None,
+    geometry_wkt: str | None,
+    where: str | None,
+    limit: int | None,
+    verbose: bool,
+    compression: str,
+    compression_level: int | None,
+    row_group_size_mb: float | None,
+    row_group_rows: int | None,
+    profile: str | None,
+    geoparquet_version: str | None,
+) -> None:
+    """Handle extraction with streaming input/output."""
+    # Suppress verbose when streaming to stdout
+    if should_stream_output(output_path):
+        verbose = False
+
+    with open_input(input_path, verbose=verbose) as (source, metadata, is_stream, con):
+        # Get column names from query result (works with both table names and read_parquet)
+        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
+        all_columns = [col[0] for col in sample]
+
+        # Find geometry column
+        from geoparquet_io.core.streaming import find_geometry_column_from_metadata
+
+        geom_col = find_geometry_column_from_metadata(metadata)
+        if not geom_col:
+            for name in ["geometry", "geom", "the_geom"]:
+                if name in all_columns:
+                    geom_col = name
+                    break
+        if not geom_col:
+            geom_col = "geometry"
+
+        # Check for bbox column
+        bbox_col = None
+        for name in ["bbox", "bounds"]:
+            if name in all_columns:
+                bbox_col = name
+                break
+
+        bbox_info = {"has_bbox_column": bbox_col is not None, "bbox_column_name": bbox_col}
+
+        # Build column selection
+        selected_columns = build_column_selection(
+            all_columns, include_cols, exclude_cols, geom_col, bbox_col
+        )
+
+        # Build spatial filter
+        spatial_filter = build_spatial_filter(bbox_tuple, geometry_wkt, bbox_info, geom_col)
+
+        # Build query
+        query = _build_query_for_source(source, selected_columns, spatial_filter, where, limit)
+
+        if verbose:
+            debug(f"Streaming extraction query: {query}")
+
+        # Write output
+        write_output(
+            con,
+            query,
+            output_path,
+            original_metadata=metadata,
+            geometry_column=geom_col,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            verbose=verbose,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+
+        if not should_stream_output(output_path):
+            success(f"Extracted data to {output_path}")
+
+
 def _print_dry_run_output(
     input_parquet: str,
     output_parquet: str,
@@ -744,7 +993,7 @@ def _execute_extraction(
 
 def extract(
     input_parquet: str,
-    output_parquet: str,
+    output_parquet: str | None = None,
     include_cols: str | None = None,
     exclude_cols: str | None = None,
     bbox: str | None = None,
@@ -770,6 +1019,10 @@ def extract(
 
     Supports column selection, spatial filtering (bbox, geometry),
     SQL filtering, and multiple input files via glob patterns.
+
+    Also supports Arrow IPC streaming:
+    - Input "-" reads from stdin
+    - Output "-" or None (with piped stdout) streams to stdout
 
     S3 access mode (anonymous vs authenticated) is auto-detected per bucket.
     """
@@ -800,7 +1053,7 @@ def extract(
 
 def _extract_impl(
     input_parquet: str,
-    output_parquet: str,
+    output_parquet: str | None,
     include_cols: str | None,
     exclude_cols: str | None,
     bbox: str | None,
@@ -826,7 +1079,37 @@ def _extract_impl(
     include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
     exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
 
-    # Get schema info early so we can validate column overlap
+    # Check for streaming mode (stdin input or stdout output)
+    is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
+
+    if is_streaming and not dry_run:
+        # Parse bbox and geometry if provided
+        bbox_tuple = parse_bbox(bbox) if bbox else None
+        geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
+
+        # Validate WHERE clause
+        if where:
+            validate_where_clause(where)
+
+        return _extract_streaming(
+            input_parquet,
+            output_parquet,
+            include_list,
+            exclude_list,
+            bbox_tuple,
+            geometry_wkt,
+            where,
+            limit,
+            verbose,
+            compression,
+            compression_level,
+            row_group_size_mb,
+            row_group_rows,
+            profile,
+            geoparquet_version,
+        )
+
+    # File-based mode - get schema info early for validation
     # DuckDB handles glob patterns natively for all metadata operations
     all_columns = get_schema_columns(input_parquet)
     geometry_col = find_primary_geometry_column(input_parquet, verbose)

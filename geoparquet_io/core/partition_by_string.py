@@ -1,11 +1,41 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
 
 import click
 
 from geoparquet_io.core.common import safe_file_url
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.partition_common import partition_by_column, preview_partition
+from geoparquet_io.core.streaming import is_stdin, read_arrow_stream
+
+
+def _read_stdin_to_temp_file(verbose: bool) -> str:
+    """
+    Read Arrow IPC stream from stdin and write to a temporary parquet file.
+
+    Returns the path to the temporary file. The caller is responsible for cleanup.
+    """
+    import os
+    import tempfile
+
+    import pyarrow.parquet as pq
+
+    if verbose:
+        debug("Reading Arrow IPC stream from stdin...")
+
+    table = read_arrow_stream()
+
+    # Write to temp file
+    temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
+    os.close(temp_fd)
+
+    pq.write_table(table, temp_path)
+
+    if verbose:
+        debug(f"Wrote {table.num_rows} rows to temporary file: {temp_path}")
+
+    return temp_path
 
 
 def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = False):
@@ -53,16 +83,19 @@ def partition_by_string(
     verbose: bool = False,
     force: bool = False,
     skip_analysis: bool = False,
-    filename_prefix: str = None,
+    filename_prefix: str | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
 ):
     """
     Partition a GeoParquet file by string column values or prefixes.
 
+    Supports Arrow IPC streaming for input:
+    - Input "-" reads from stdin (output is always a directory)
+
     Args:
-        input_parquet: Input GeoParquet file
-        output_folder: Output directory
+        input_parquet: Input GeoParquet file (local, remote URL, or "-" for stdin)
+        output_folder: Output directory (always writes to directory, no stdout support)
         column: Column name to partition by (required)
         chars: Optional number of characters to use (prefix length)
         hive: Use Hive-style partitioning
@@ -72,9 +105,16 @@ def partition_by_string(
         verbose: Verbose output
         force: Force partitioning even if analysis detects issues
         skip_analysis: Skip partition strategy analysis (for performance)
+        filename_prefix: Optional prefix for partition filenames
+        profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version to write
     """
     # Configure logging verbosity
     configure_verbose(verbose)
+
+    # Handle stdin input - read stream to temp file first
+    if is_stdin(input_parquet):
+        input_parquet = _read_stdin_to_temp_file(verbose)
 
     # Validate column exists
     if verbose:

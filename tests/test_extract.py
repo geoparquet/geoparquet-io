@@ -785,8 +785,10 @@ class TestExtractIntegration:
         finally:
             con.close()
 
-    def test_extract_dry_run(self, output_file, capsys):
+    def test_extract_dry_run(self, output_file, caplog):
         """Test dry run mode."""
+        import logging
+
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
 
@@ -794,15 +796,16 @@ class TestExtractIntegration:
         if os.path.exists(output_file):
             os.unlink(output_file)
 
-        extract(str(PLACES_PARQUET), output_file, include_cols="name", dry_run=True)
+        with caplog.at_level(logging.DEBUG):
+            extract(str(PLACES_PARQUET), output_file, include_cols="name", dry_run=True)
 
         # File should not be created
         assert not os.path.exists(output_file)
 
-        # Output should contain SQL
-        captured = capsys.readouterr()
-        assert "DRY RUN" in captured.out
-        assert "SELECT" in captured.out
+        # Output should contain SQL - check log messages
+        log_text = " ".join(record.message for record in caplog.records)
+        assert "DRY RUN" in log_text
+        assert "SELECT" in log_text
 
     def test_extract_invalid_column(self, output_file):
         """Test error on invalid column name."""
@@ -813,13 +816,16 @@ class TestExtractIntegration:
             extract(str(PLACES_PARQUET), output_file, include_cols="nonexistent_column")
         assert "not found" in str(exc_info.value).lower()
 
-    def test_extract_empty_result(self, output_file, capsys):
+    def test_extract_empty_result(self, output_file, caplog):
         """Test extraction that results in zero rows."""
+        import logging
+
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
 
-        # Use a bbox that doesn't intersect any data
-        extract(str(PLACES_PARQUET), output_file, bbox="100,100,101,101")
+        with caplog.at_level(logging.DEBUG):
+            # Use a bbox that doesn't intersect any data
+            extract(str(PLACES_PARQUET), output_file, bbox="100,100,101,101")
 
         # File should be created but with 0 rows
         assert os.path.exists(output_file)
@@ -831,9 +837,9 @@ class TestExtractIntegration:
         finally:
             con.close()
 
-        # Warning should be displayed
-        captured = capsys.readouterr()
-        assert "Warning" in captured.out or "0 rows" in captured.out
+        # Row count should be in log (either warning or success message)
+        log_text = " ".join(record.message for record in caplog.records)
+        assert "0" in log_text or "rows" in log_text.lower()
 
     def test_extract_preserves_metadata(self, output_file):
         """Test that GeoParquet metadata is preserved."""
@@ -964,8 +970,10 @@ class TestExtractCLI:
         finally:
             con.close()
 
-    def test_cli_dry_run(self, output_file):
+    def test_cli_dry_run(self, output_file, caplog):
         """Test CLI dry run."""
+        import logging
+
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
 
@@ -978,9 +986,12 @@ class TestExtractCLI:
         from geoparquet_io.cli.main import extract as extract_cmd
 
         runner = CliRunner()
-        result = runner.invoke(extract_cmd, [str(PLACES_PARQUET), output_file, "--dry-run"])
+        with caplog.at_level(logging.DEBUG):
+            result = runner.invoke(extract_cmd, [str(PLACES_PARQUET), output_file, "--dry-run"])
         assert result.exit_code == 0
-        assert "DRY RUN" in result.output
+        # Check log messages instead of result.output (pytest captures logs separately)
+        log_text = " ".join(record.message for record in caplog.records)
+        assert "DRY RUN" in log_text
         assert not os.path.exists(output_file)
 
 

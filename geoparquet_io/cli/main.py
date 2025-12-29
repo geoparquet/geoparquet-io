@@ -1243,7 +1243,7 @@ def inspect(
 # Extract command
 @cli.command()
 @click.argument("input_file")
-@click.argument("output_file", type=click.Path())
+@click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
     "--include-cols",
     help="Comma-separated columns to include (geometry and bbox auto-added unless in --exclude-cols)",
@@ -1554,7 +1554,7 @@ def sort(ctx):
 
 @sort.command(name="hilbert")
 @click.argument("input_parquet")
-@click.argument("output_parquet", type=click.Path())
+@click.argument("output_parquet", type=click.Path(), required=False, default=None)
 @click.option(
     "--geometry-column",
     "-g",
@@ -1914,7 +1914,7 @@ def add_country_codes(
 
 @add.command(name="bbox")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
 @click.option(
     "--force",
@@ -2238,7 +2238,7 @@ def add_kdtree(
 
 @add.command(name="quadkey")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option(
     "--quadkey-name",
     default="quadkey",
