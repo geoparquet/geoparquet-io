@@ -69,6 +69,32 @@ def _build_results_dict(ratio, consecutive_avg, random_avg):
     }
 
 
+def _get_row_limit_clause(con, safe_url, limit_rows, verbose):
+    """Determine row limit clause based on total rows."""
+    total_rows = con.execute(f"SELECT COUNT(*) FROM '{safe_url}'").fetchone()[0]
+    if verbose:
+        debug(f"Total rows in file: {total_rows:,}")
+
+    if total_rows > limit_rows:
+        if verbose:
+            debug(f"Limiting analysis to first {limit_rows:,} rows")
+        return f"LIMIT {limit_rows}"
+    return ""
+
+
+def _print_standalone_results(ratio, consecutive_avg, random_avg):
+    """Print results when running as standalone command (not from check_all)."""
+    progress("\nResults:")
+    debug(f"Average distance between consecutive features: {consecutive_avg}")
+    debug(f"Average distance between random features: {random_avg}")
+    progress(f"Ratio (consecutive / random): {ratio}")
+
+    if ratio is not None and ratio < 0.5:
+        progress("=> Data seems strongly spatially clustered.")
+    elif ratio is not None:
+        progress("=> Data might not be strongly clustered (or is partially clustered).")
+
+
 def check_spatial_order(
     parquet_file, random_sample_size, limit_rows, verbose, return_results=False, quiet=False
 ):
@@ -92,107 +118,22 @@ def check_spatial_order(
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
     try:
-        # First get total rows
-        total_rows = con.execute(f"SELECT COUNT(*) FROM '{safe_url}'").fetchone()[0]
-        if verbose:
-            debug(f"Total rows in file: {total_rows:,}")
+        row_limit = _get_row_limit_clause(con, safe_url, limit_rows, verbose)
 
-        # Limit rows if needed
-        if total_rows > limit_rows:
-            if verbose:
-                debug(f"Limiting analysis to first {limit_rows:,} rows")
-            row_limit = f"LIMIT {limit_rows}"
-        else:
-            row_limit = ""
-
-        # Get consecutive pairs
-        consecutive_query = f"""
-        WITH numbered AS (
-            SELECT
-                ROW_NUMBER() OVER () as id,
-                {geometry_column} as geom
-            FROM '{safe_url}'
-            {row_limit}
+        consecutive_avg = _calculate_consecutive_avg(
+            con, safe_url, geometry_column, row_limit, verbose
         )
-        SELECT
-            AVG(ST_Distance(a.geom, b.geom)) as avg_dist
-        FROM numbered a
-        JOIN numbered b ON b.id = a.id + 1;
-        """
-
-        if verbose:
-            progress("Calculating average distance between consecutive features...")
-
-        consecutive_result = con.execute(consecutive_query).fetchone()
-        consecutive_avg = consecutive_result[0] if consecutive_result else None
-
-        if verbose:
-            debug(f"Average distance between consecutive features: {consecutive_avg}")
-
-        # Get random pairs
-        random_query = f"""
-        WITH sample AS (
-            SELECT
-                {geometry_column} as geom
-            FROM '{safe_url}'
-            {row_limit}
-        ),
-        random_pairs AS (
-            SELECT
-                a.geom as geom1,
-                b.geom as geom2
-            FROM
-                (SELECT geom FROM sample ORDER BY random() LIMIT {random_sample_size}) a,
-                (SELECT geom FROM sample ORDER BY random() LIMIT {random_sample_size}) b
-            WHERE a.geom != b.geom
+        random_avg = _calculate_random_avg(
+            con, safe_url, geometry_column, row_limit, random_sample_size, verbose
         )
-        SELECT AVG(ST_Distance(geom1, geom2)) as avg_dist
-        FROM random_pairs;
-        """
 
-        if verbose:
-            progress(f"Calculating average distance between {random_sample_size} random pairs...")
-
-        random_result = con.execute(random_query).fetchone()
-        random_avg = random_result[0] if random_result else None
-
-        if verbose:
-            debug(f"Average distance between random features: {random_avg}")
-
-        # Calculate ratio
         ratio = consecutive_avg / random_avg if consecutive_avg and random_avg else None
 
-        if not verbose and not quiet:  # Only print results if not being called from check_all
-            progress("\nResults:")
-            debug(f"Average distance between consecutive features: {consecutive_avg}")
-            debug(f"Average distance between random features: {random_avg}")
-            progress(f"Ratio (consecutive / random): {ratio}")
-
-            if ratio is not None and ratio < 0.5:
-                progress("=> Data seems strongly spatially clustered.")
-            elif ratio is not None:
-                progress("=> Data might not be strongly clustered (or is partially clustered).")
+        if not verbose and not quiet:
+            _print_standalone_results(ratio, consecutive_avg, random_avg)
 
         if return_results:
-            passed = ratio is not None and ratio < 0.5
-            issues = []
-            recommendations = []
-
-            if ratio is not None and ratio >= 0.5:
-                issues.append(f"Poor spatial ordering (ratio: {ratio:.2f})")
-                recommendations.append(
-                    "Apply Hilbert spatial ordering for better query performance"
-                )
-
-            return {
-                "passed": passed,
-                "ratio": ratio,
-                "consecutive_avg": consecutive_avg,
-                "random_avg": random_avg,
-                "issues": issues,
-                "recommendations": recommendations,
-                "fix_available": not passed,
-            }
+            return _build_results_dict(ratio, consecutive_avg, random_avg)
 
         return ratio
     finally:

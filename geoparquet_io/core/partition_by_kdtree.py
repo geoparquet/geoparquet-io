@@ -22,6 +22,93 @@ from geoparquet_io.core.partition_common import partition_by_column, preview_par
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
 
 
+def _cleanup_temp_file(temp_file: str | None, verbose: bool = False) -> None:
+    """Clean up a temporary file if it exists."""
+    if temp_file and os.path.exists(temp_file):
+        if verbose:
+            debug("Cleaning up temporary file...")
+        os.remove(temp_file)
+
+
+def _add_kdtree_column_to_temp(
+    input_file: str,
+    kdtree_column_name: str,
+    iterations: int,
+    verbose: bool,
+    force: bool,
+    sample_size: int,
+    auto_target_rows: tuple | None,
+) -> str:
+    """Add KD-tree column to input and return path to temp file.
+
+    Raises:
+        click.ClickException: If column addition fails
+    """
+    partition_count = 2**iterations
+    if verbose:
+        debug(f"Adding KD-tree column '{kdtree_column_name}' with {partition_count} partitions...")
+
+    temp_dir = tempfile.gettempdir()
+    temp_file = os.path.join(
+        temp_dir, f"kdtree_enriched_{uuid.uuid4()}_{os.path.basename(input_file)}"
+    )
+
+    try:
+        add_kdtree_column(
+            input_parquet=input_file,
+            output_parquet=temp_file,
+            kdtree_column_name=kdtree_column_name,
+            iterations=iterations,
+            dry_run=False,
+            verbose=verbose,
+            compression="ZSTD",
+            compression_level=15,
+            row_group_size_mb=None,
+            row_group_rows=None,
+            force=force,
+            sample_size=sample_size,
+            auto_target_rows=auto_target_rows,
+        )
+        return temp_file
+    except Exception as e:
+        _cleanup_temp_file(temp_file)
+        raise click.ClickException(f"Failed to add KD-tree column: {str(e)}") from e
+
+
+def _show_partition_preview(
+    working_input: str,
+    kdtree_column_name: str,
+    preview_limit: int,
+    verbose: bool,
+) -> None:
+    """Show partition analysis and preview."""
+    try:
+        from geoparquet_io.core.partition_common import (
+            PartitionAnalysisError,
+            analyze_partition_strategy,
+        )
+
+        analyze_partition_strategy(
+            input_parquet=working_input,
+            column_name=kdtree_column_name,
+            column_prefix_length=None,
+            verbose=True,
+        )
+    except PartitionAnalysisError:
+        pass
+    except Exception as e:
+        warn(f"\nAnalysis error: {e}")
+
+    progress("\n" + "=" * 70)
+    preview_partition(
+        input_parquet=working_input,
+        column_name=kdtree_column_name,
+        column_prefix_length=None,
+        limit=preview_limit,
+        verbose=verbose,
+    )
+
+
 def partition_by_kdtree(
     input_parquet: str,
     output_folder: str,
@@ -111,74 +198,25 @@ def partition_by_kdtree(
         temp_file = None
 
         if not column_exists:
-            if verbose:
-                debug(
-                    f"Adding KD-tree column '{kdtree_column_name}' with {partition_count} partitions..."
-                )
-
-            # Create temporary file for KD-tree-enriched data
-            temp_dir = tempfile.gettempdir()
-            temp_file = os.path.join(
-                temp_dir, f"kdtree_enriched_{uuid.uuid4()}_{os.path.basename(actual_input)}"
+            temp_file = _add_kdtree_column_to_temp(
+                input_file=actual_input,
+                kdtree_column_name=kdtree_column_name,
+                iterations=iterations,
+                verbose=verbose,
+                force=force,
+                sample_size=sample_size,
+                auto_target_rows=auto_target_rows,
             )
-
-            try:
-                add_kdtree_column(
-                    input_parquet=actual_input,
-                    output_parquet=temp_file,
-                    kdtree_column_name=kdtree_column_name,
-                    iterations=iterations,
-                    dry_run=False,
-                    verbose=verbose,
-                    compression="ZSTD",
-                    compression_level=15,
-                    row_group_size_mb=None,
-                    row_group_rows=None,
-                    force=force,
-                    sample_size=sample_size,
-                    auto_target_rows=auto_target_rows,
-                )
-                working_input = temp_file
-
-            except Exception as e:
-                if temp_file and os.path.exists(temp_file):
-                    os.remove(temp_file)
-                raise click.ClickException(f"Failed to add KD-tree column: {str(e)}") from e
-
+            working_input = temp_file
         elif verbose:
             debug(f"Using existing KD-tree column '{kdtree_column_name}'")
 
         # If preview mode, show analysis and preview, then exit
         if preview:
             try:
-                try:
-                    from geoparquet_io.core.partition_common import (
-                        PartitionAnalysisError,
-                        analyze_partition_strategy,
-                    )
-
-                    analyze_partition_strategy(
-                        input_parquet=working_input,
-                        column_name=kdtree_column_name,
-                        column_prefix_length=None,
-                        verbose=True,
-                    )
-                except PartitionAnalysisError:
-                    pass
-                except Exception as e:
-                    warn(f"\nAnalysis error: {e}")
-
-                progress("\n" + "=" * 70)
-                preview_partition(
-                    input_parquet=working_input,
-                    column_name=kdtree_column_name,
-                    column_prefix_length=None,
-                    limit=preview_limit,
-                    verbose=verbose,
-                )
+                _show_partition_preview(working_input, kdtree_column_name, preview_limit, verbose)
             finally:
-                if temp_file and os.path.exists(temp_file):
-                    os.remove(temp_file)
+                _cleanup_temp_file(temp_file)
             return
 
         # Build description for user feedback
@@ -207,11 +245,7 @@ def partition_by_kdtree(
                 success(f"\nCreated {num_partitions} partition(s) in {output_folder}")
 
         finally:
-            if temp_file and os.path.exists(temp_file):
-                if verbose:
-                    debug("Cleaning up temporary KD-tree-enriched file...")
-                os.remove(temp_file)
+            _cleanup_temp_file(temp_file, verbose)
     finally:
         # Clean up stdin temp file
-        if stdin_temp_file and os.path.exists(stdin_temp_file):
-            os.remove(stdin_temp_file)
+        _cleanup_temp_file(stdin_temp_file)
