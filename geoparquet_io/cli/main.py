@@ -1548,7 +1548,7 @@ def hilbert_order(
             geoparquet_version,
         )
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click.ClickException(str(e)) from None
 
 
 @sort.command(name="column")
@@ -1722,7 +1722,7 @@ def add(ctx):
 
 @add.command(name="admin-divisions")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option(
     "--dataset",
     type=click.Choice(["gaul", "overture"], case_sensitive=False),
@@ -1792,6 +1792,20 @@ def add_country_codes(
     **Note:** Requires internet connection to fetch remote boundaries datasets.
     Input data must have valid geometries in WGS84 or compatible CRS.
     """
+    from geoparquet_io.core.streaming import is_stdin, should_stream_output
+
+    # Check for streaming mode - not supported yet for admin-divisions
+    if is_stdin(input_parquet) or should_stream_output(output_parquet):
+        raise click.ClickException(
+            "Streaming (stdin/stdout) is not yet supported for 'gpio add admin-divisions'.\n"
+            "Please use file paths instead:\n"
+            "  gpio add admin-divisions input.parquet output.parquet"
+        )
+
+    # Require output_parquet for non-streaming mode
+    if output_parquet is None:
+        raise click.UsageError("Missing argument 'OUTPUT_PARQUET'.")
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -1908,20 +1922,25 @@ def add_bbox(
         except ValueError as e:
             raise click.UsageError(f"Invalid row group size: {e}") from e
 
-    add_bbox_column_impl(
-        input_parquet,
-        output_parquet,
-        bbox_name,
-        dry_run,
-        verbose,
-        compression.upper(),
-        compression_level,
-        row_group_mb,
-        row_group_size,
-        profile,
-        force,
-        geoparquet_version,
-    )
+    from geoparquet_io.core.streaming import StreamingError
+
+    try:
+        add_bbox_column_impl(
+            input_parquet,
+            output_parquet,
+            bbox_name,
+            dry_run,
+            verbose,
+            compression.upper(),
+            compression_level,
+            row_group_mb,
+            row_group_size,
+            profile,
+            force,
+            geoparquet_version,
+        )
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
 
 
 @add.command(name="bbox-metadata")
@@ -1949,7 +1968,7 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
 
 @add.command(name="h3")
 @click.argument("input_parquet")
-@click.argument("output_parquet")
+@click.argument("output_parquet", required=False, default=None)
 @click.option("--h3-name", default="h3_cell", help="Name for the H3 column (default: h3_cell)")
 @click.option(
     "--resolution",
@@ -2002,20 +2021,25 @@ def add_h3(
         except ValueError as e:
             raise click.UsageError(f"Invalid row group size: {e}") from e
 
-    add_h3_column_impl(
-        input_parquet,
-        output_parquet,
-        h3_name,
-        resolution,
-        dry_run,
-        verbose,
-        compression.upper(),
-        compression_level,
-        row_group_mb,
-        row_group_size,
-        profile,
-        geoparquet_version,
-    )
+    from geoparquet_io.core.streaming import StreamingError
+
+    try:
+        add_h3_column_impl(
+            input_parquet,
+            output_parquet,
+            h3_name,
+            resolution,
+            dry_run,
+            verbose,
+            compression.upper(),
+            compression_level,
+            row_group_mb,
+            row_group_size,
+            profile,
+            geoparquet_version,
+        )
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
 
 
 @add.command(name="kdtree")
@@ -2227,21 +2251,26 @@ def add_quadkey(
         except ValueError as e:
             raise click.UsageError(f"Invalid row group size: {e}") from e
 
-    add_quadkey_column_impl(
-        input_parquet,
-        output_parquet,
-        quadkey_column_name=quadkey_name,
-        resolution=resolution,
-        use_centroid=use_centroid,
-        dry_run=dry_run,
-        verbose=verbose,
-        compression=compression.upper(),
-        compression_level=compression_level,
-        row_group_size_mb=row_group_mb,
-        row_group_rows=row_group_size,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-    )
+    from geoparquet_io.core.streaming import StreamingError
+
+    try:
+        add_quadkey_column_impl(
+            input_parquet,
+            output_parquet,
+            quadkey_column_name=quadkey_name,
+            resolution=resolution,
+            use_centroid=use_centroid,
+            dry_run=dry_run,
+            verbose=verbose,
+            compression=compression.upper(),
+            compression_level=compression_level,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
 
 
 # Partition commands group
@@ -2399,26 +2428,31 @@ def partition_string(
         # Use Hive-style partitioning
         gpio partition string input.parquet output/ --column region --hive
     """
+    from geoparquet_io.core.streaming import StreamingError
+
     # If preview mode, output_folder is not required
     if not preview and not output_folder:
         raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
-    partition_by_string_impl(
-        input_parquet,
-        output_folder,
-        column,
-        chars,
-        hive,
-        overwrite,
-        preview,
-        preview_limit,
-        verbose,
-        force,
-        skip_analysis,
-        prefix,
-        profile,
-        geoparquet_version,
-    )
+    try:
+        partition_by_string_impl(
+            input_parquet,
+            output_folder,
+            column,
+            chars,
+            hive,
+            overwrite,
+            preview,
+            preview_limit,
+            verbose,
+            force,
+            skip_analysis,
+            prefix,
+            profile,
+            geoparquet_version,
+        )
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
 
 
 @partition.command(name="h3")
