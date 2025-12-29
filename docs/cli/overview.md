@@ -102,6 +102,16 @@ Partition commands output to directories:
 gpio partition h3 input.parquet output_dir/
 ```
 
+### Command Piping
+
+Chain commands with Unix pipes for efficient multi-step workflows:
+
+```bash
+gpio add bbox input.parquet | gpio sort hilbert - output.parquet
+```
+
+Use `-` as input to read from stdin. See the [Piping Guide](../guide/piping.md) for details.
+
 ## Common Options
 
 Many commands share these options:

@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.core.add_h3_column import add_h3_column, add_h3_table
+from tests.conftest import safe_unlink
 
 
 class TestAddH3Table:
@@ -78,8 +79,7 @@ class TestAddH3File:
         """Create a temp output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_add_h3_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_add_h3_file_basic(self, places_file, output_file):
         """Test basic file-to-file H3 addition."""
@@ -115,8 +115,7 @@ class TestAddH3Streaming:
         """Create a temp output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_add_h3_stream_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_stdin_to_file(self, sample_geo_table, output_file, monkeypatch):
         """Test reading from mocked stdin."""
@@ -175,8 +174,7 @@ class TestAddH3CLI:
         """Create a temp output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_add_h3_cli_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_add_h3_cli_help(self):
         """Test that add h3 command has help."""

@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.api import Table, ops, pipe, read
+from tests.conftest import safe_unlink
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 PLACES_PARQUET = TEST_DATA_DIR / "places_test.parquet"
@@ -61,8 +62,7 @@ class TestTable:
         """Create a temporary output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_api_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_table_repr(self, sample_table):
         """Test Table string representation."""

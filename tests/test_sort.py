@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import sort
 from geoparquet_io.core.sort_by_column import sort_by_column, sort_by_column_table
+from tests.conftest import safe_unlink
 
 
 class TestSortCommands:
@@ -301,8 +302,7 @@ class TestSortByColumnStreaming:
         """Create a temp output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_sort_column_stream_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_stdin_to_file(self, sample_geo_table, output_file, monkeypatch):
         """Test reading from mocked stdin."""

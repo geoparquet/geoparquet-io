@@ -22,15 +22,25 @@ gpio add bbox input.parquet - | gpio sort hilbert - output.parquet
 
 ## Supported Commands
 
-The following commands support Arrow IPC piping:
+All transformation commands support Arrow IPC piping:
 
 | Command | Stdin Input | Stdout Output |
 |---------|-------------|---------------|
 | `extract` | Yes | Yes |
 | `add bbox` | Yes | Yes |
 | `add quadkey` | Yes | Yes |
+| `add h3` | Yes | Yes |
+| `add kdtree` | Yes | Yes |
+| `add admin-divisions` | Yes | Yes |
 | `sort hilbert` | Yes | Yes |
+| `sort quadkey` | Yes | Yes |
+| `sort column` | Yes | Yes |
+| `reproject` | Yes | Yes |
 | `partition string` | Yes | No (writes to directory) |
+| `partition quadkey` | Yes | No (writes to directory) |
+| `partition h3` | Yes | No (writes to directory) |
+| `partition kdtree` | Yes | No (writes to directory) |
+| `partition admin` | Yes | No (writes to directory) |
 
 ## Performance Benefits
 
@@ -81,6 +91,39 @@ Select columns first, then add computed columns:
 ```bash
 gpio extract --include-cols name,address input.parquet | \
   gpio add bbox - output.parquet
+```
+
+### Add Multiple Spatial Indices
+
+Chain multiple `add` commands to add several spatial indices:
+
+```bash
+gpio add bbox input.parquet | \
+  gpio add h3 --resolution 9 - | \
+  gpio add quadkey - | \
+  gpio sort hilbert - output.parquet
+```
+
+### Reproject and Transform
+
+Reproject to a different CRS before adding indices:
+
+```bash
+gpio reproject --target-crs EPSG:4326 input.parquet | \
+  gpio add bbox - | \
+  gpio sort hilbert - output.parquet
+```
+
+### Full Processing Pipeline
+
+Combine extract, reproject, add indices, sort, and partition:
+
+```bash
+gpio extract --bbox "-122.5,37.5,-122.0,38.0" input.parquet | \
+  gpio add bbox - | \
+  gpio add h3 --resolution 8 - | \
+  gpio sort hilbert - | \
+  gpio partition h3 --resolution 4 - output_dir/
 ```
 
 ## How It Works
@@ -137,5 +180,7 @@ gpio sort hilbert intermediate.parquet output.parquet
 
 - [Python API](../api/python-api.md) - For programmatic access with even better performance
 - [Extract Command](extract.md) - Filtering and column selection
-- [Sort Command](sort.md) - Hilbert and other sorting options
+- [Add Command](../cli/add.md) - Add bbox, H3, quadkey, KD-tree, and admin division columns
+- [Sort Command](sort.md) - Hilbert, quadkey, and column sorting
+- [Reproject Guide](../cli/convert.md) - Reprojection options
 - [Partition Command](partition.md) - Partitioning strategies

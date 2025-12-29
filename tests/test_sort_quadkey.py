@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey, sort_by_quadkey_table
+from tests.conftest import safe_unlink
 
 
 class TestSortQuadkeyCommand:
@@ -28,8 +29,7 @@ class TestSortQuadkeyCommand:
         """Create a temp output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_sort_quadkey_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_sort_quadkey_help(self):
         """Test that quadkey sort command has help."""
@@ -131,8 +131,7 @@ class TestSortByQuadkeyFile:
         """Create a temp output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_sort_quadkey_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_sort_basic(self, places_file, output_file):
         """Test basic file sorting."""
@@ -169,8 +168,7 @@ class TestSortByQuadkeyStreaming:
         """Create a temp output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_sort_quadkey_stream_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_stdin_to_file(self, sample_geo_table, output_file, monkeypatch):
         """Test reading from mocked stdin."""

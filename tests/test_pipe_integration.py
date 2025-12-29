@@ -8,15 +8,15 @@ Tests multi-stage pipelines like:
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import tempfile
-import time
 import uuid
 from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
+
+from tests.conftest import safe_rmtree, safe_unlink
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 PLACES_PARQUET = TEST_DATA_DIR / "places_test.parquet"
@@ -39,20 +39,7 @@ def output_file():
     """Create a temporary output file path."""
     tmp_path = Path(tempfile.gettempdir()) / f"test_pipe_{uuid.uuid4()}.parquet"
     yield str(tmp_path)
-    # Retry cleanup to handle Windows file locking issues
-    last_error = None
-    for _attempt in range(5):
-        if not tmp_path.exists():
-            break
-        try:
-            tmp_path.unlink()
-            break
-        except (OSError, PermissionError) as e:
-            last_error = e
-            time.sleep(0.2)
-    else:
-        if last_error is not None:
-            raise last_error
+    safe_unlink(tmp_path)
 
 
 @pytest.fixture
@@ -61,20 +48,7 @@ def output_dir():
     tmp_path = Path(tempfile.gettempdir()) / f"test_pipe_dir_{uuid.uuid4()}"
     tmp_path.mkdir(exist_ok=True)
     yield str(tmp_path)
-    # Retry cleanup to handle Windows file locking issues
-    last_error = None
-    for _attempt in range(5):
-        if not tmp_path.exists():
-            break
-        try:
-            shutil.rmtree(tmp_path)
-            break
-        except (OSError, PermissionError) as e:
-            last_error = e
-            time.sleep(0.2)
-    else:
-        if last_error is not None:
-            raise last_error
+    safe_rmtree(tmp_path)
 
 
 class TestTwoStagePipelines:

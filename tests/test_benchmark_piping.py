@@ -12,7 +12,6 @@ Run with: pytest tests/test_benchmark_piping.py -v -s
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 import time
@@ -21,6 +20,8 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
+
+from tests.conftest import safe_rmtree
 
 # Benchmark file - 78MB GeoParquet
 # Use environment variable with fallback to allow contributors to override
@@ -49,20 +50,7 @@ def temp_dir():
     tmp_path = Path(tempfile.gettempdir()) / f"benchmark_{uuid.uuid4()}"
     tmp_path.mkdir(exist_ok=True)
     yield tmp_path
-    # Retry cleanup to handle Windows file locking issues
-    last_error = None
-    for _attempt in range(5):
-        if not tmp_path.exists():
-            break
-        try:
-            shutil.rmtree(tmp_path)
-            break
-        except PermissionError as e:
-            last_error = e
-            time.sleep(0.2)  # Short delay before retry
-    else:
-        if last_error is not None:
-            raise last_error
+    safe_rmtree(tmp_path)
 
 
 def _run_file_based_workflow(temp_dir: Path) -> float:

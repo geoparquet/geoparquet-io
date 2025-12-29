@@ -1,7 +1,6 @@
 """Tests for partition_by_quadkey module."""
 
 import io
-import shutil
 import sys
 import tempfile
 import uuid
@@ -16,6 +15,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.core.partition_by_quadkey import _validate_resolutions, partition_by_quadkey
 from geoparquet_io.core.partition_common import calculate_partition_stats
+from tests.conftest import safe_rmtree
 
 
 class TestValidateResolutions:
@@ -78,10 +78,7 @@ class TestPartitionQuadkeyCommand:
         """Create a temp output folder path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_partition_quadkey_{uuid.uuid4()}"
         yield str(tmp_path)
-        # Cleanup
-
-        if tmp_path.exists():
-            shutil.rmtree(tmp_path)
+        safe_rmtree(tmp_path)
 
     def test_partition_quadkey_help(self):
         """Test that quadkey partition command has help."""
@@ -116,8 +113,7 @@ class TestPartitionByQuadkeyFunction:
         """Create a temp output folder path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_partition_func_{uuid.uuid4()}"
         yield str(tmp_path)
-        if tmp_path.exists():
-            shutil.rmtree(tmp_path)
+        safe_rmtree(tmp_path)
 
     def test_partition_basic(self, places_file, output_folder):
         """Test basic partitioning."""
@@ -170,8 +166,7 @@ class TestPartitionByQuadkeyStreaming:
         """Create a temp output folder path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_partition_stream_{uuid.uuid4()}"
         yield str(tmp_path)
-        if tmp_path.exists():
-            shutil.rmtree(tmp_path)
+        safe_rmtree(tmp_path)
 
     def test_stdin_to_partition(self, sample_geo_table, output_folder, monkeypatch):
         """Test partitioning from stdin."""

@@ -170,20 +170,22 @@ def _setup_admin_dataset(dataset_name, verbose, levels):
     return dataset, boundary_columns
 
 
-def _setup_hierarchical_connection(input_parquet, verbose):
-    """Setup connection and get file info."""
+def _get_input_file_info(input_parquet, verbose):
+    """Get input file info (URL, geometry column, bbox column)."""
     input_url = safe_file_url(input_parquet, verbose)
     input_geom_col = find_primary_geometry_column(input_parquet, verbose)
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
     input_bbox_col = input_bbox_info["bbox_column_name"]
 
-    con = duckdb.connect()
+    return input_url, input_geom_col, input_bbox_col
+
+
+def _setup_duckdb_extensions(con):
+    """Load required DuckDB extensions."""
     con.execute("INSTALL spatial;")
     con.execute("LOAD spatial;")
     con.execute("INSTALL httpfs;")
     con.execute("LOAD httpfs;")
-
-    return con, input_url, input_geom_col, input_bbox_col
 
 
 def _build_admin_select_for_partitioning(levels, boundary_columns):
@@ -450,123 +452,118 @@ def partition_by_admin_hierarchical(
         actual_input = stdin_temp_file
 
     try:
-        # Setup dataset and connection
+        # Setup dataset and get input file info
         dataset, boundary_columns = _setup_admin_dataset(dataset_name, verbose, levels)
-        con, input_url, input_geom_col, input_bbox_col = _setup_hierarchical_connection(
-            actual_input, verbose
-        )
+        input_url, input_geom_col, input_bbox_col = _get_input_file_info(actual_input, verbose)
 
         # Get admin dataset info
         admin_geom_col = dataset.get_geometry_column()
         admin_bbox_col = dataset.get_bbox_column()
 
-        # Configure S3 settings based on dataset requirements
-        dataset.configure_s3(con)
+        # Use context manager for DuckDB connection to ensure cleanup
+        with duckdb.connect() as con:
+            _setup_duckdb_extensions(con)
 
-        # STEP 1: Spatial join to create enriched data with admin columns
-        progress("\n📍 Step 1/2: Performing spatial join with admin boundaries...")
+            # Configure S3 settings based on dataset requirements
+            dataset.configure_s3(con)
 
-        enriched_table = "_enriched_with_admin"
-        admin_source = dataset.prepare_data_source(con)
+            # STEP 1: Spatial join to create enriched data with admin columns
+            progress("\n📍 Step 1/2: Performing spatial join with admin boundaries...")
 
-        # Build SELECT clause for admin columns
-        admin_select_clause, output_column_names = _build_admin_select_for_partitioning(
-            levels, boundary_columns
-        )
+            enriched_table = "_enriched_with_admin"
+            admin_source = dataset.prepare_data_source(con)
 
-        # Build admin data source with read_parquet options if needed
-        admin_table_ref = _build_admin_table_reference(dataset, admin_source)
+            # Build SELECT clause for admin columns
+            admin_select_clause, output_column_names = _build_admin_select_for_partitioning(
+                levels, boundary_columns
+            )
 
-        # Build WHERE clause for admin boundaries
-        admin_where_clause = _build_admin_where_clause(
-            dataset,
-            levels,
-            con,
-            input_url,
-            input_bbox_col,
-            input_geom_col,
-            admin_bbox_col,
-            verbose,
-        )
+            # Build admin data source with read_parquet options if needed
+            admin_table_ref = _build_admin_table_reference(dataset, admin_source)
 
-        # Build efficient spatial join query
-        if input_bbox_col and admin_bbox_col and verbose:
-            debug("  → Using bbox columns for optimized spatial join")
-        elif not (input_bbox_col and admin_bbox_col) and verbose:
-            debug("  → Using full geometry intersection (no bbox optimization)")
+            # Build WHERE clause for admin boundaries
+            admin_where_clause = _build_admin_where_clause(
+                dataset,
+                levels,
+                con,
+                input_url,
+                input_bbox_col,
+                input_geom_col,
+                admin_bbox_col,
+                verbose,
+            )
 
-        # Perform enrichment join
-        _perform_enrichment_join(
-            con,
-            enriched_table,
-            input_url,
-            admin_table_ref,
-            admin_where_clause,
-            admin_select_clause,
-            admin_geom_col,
-            admin_bbox_col,
-            boundary_columns,
-            input_geom_col,
-            input_bbox_col,
-        )
+            # Build efficient spatial join query
+            if input_bbox_col and admin_bbox_col and verbose:
+                debug("  → Using bbox columns for optimized spatial join")
+            elif not (input_bbox_col and admin_bbox_col) and verbose:
+                debug("  → Using full geometry intersection (no bbox optimization)")
 
-        # Verify enrichment results
-        try:
+            # Perform enrichment join
+            _perform_enrichment_join(
+                con,
+                enriched_table,
+                input_url,
+                admin_table_ref,
+                admin_where_clause,
+                admin_select_clause,
+                admin_geom_col,
+                admin_bbox_col,
+                boundary_columns,
+                input_geom_col,
+                input_bbox_col,
+            )
+
+            # Verify enrichment results
             _verify_enrichment_results(con, enriched_table, output_column_names)
-        except click.ClickException:
-            con.close()
-            raise
 
-        # STEP 2: Partition the enriched data
-        progress(f"\n📁 Step 2/2: Partitioning by {' → '.join(levels)}...")
+            # STEP 2: Partition the enriched data
+            progress(f"\n📁 Step 2/2: Partitioning by {' → '.join(levels)}...")
 
-        # Preview mode
-        if preview:
-            _preview_hierarchical_partitions(
+            # Preview mode
+            if preview:
+                _preview_hierarchical_partitions(
+                    con,
+                    enriched_table,
+                    output_column_names,
+                    levels,
+                    preview_limit,
+                    verbose,
+                )
+                return 0
+
+            # Get metadata from input for preservation
+            metadata, _ = get_parquet_metadata(actual_input, verbose)
+
+            # Create output directory
+            os.makedirs(output_folder, exist_ok=True)
+
+            # Get unique partition combinations
+            combinations = _get_partition_combinations(con, enriched_table, output_column_names)
+
+            if verbose:
+                debug(f"  → Creating {len(combinations)} partition(s)...")
+
+            # Get original columns (exclude temporary admin columns)
+            original_cols = _get_original_columns(con, input_url)
+
+            # Create each partition
+            partition_count = _create_all_partitions(
                 con,
                 enriched_table,
                 output_column_names,
+                combinations,
                 levels,
-                preview_limit,
+                output_folder,
+                hive,
+                filename_prefix,
+                overwrite,
+                metadata,
                 verbose,
+                profile,
+                original_cols,
+                geoparquet_version,
             )
-            con.close()
-            return 0
-
-        # Get metadata from input for preservation
-        metadata, _ = get_parquet_metadata(actual_input, verbose)
-
-        # Create output directory
-        os.makedirs(output_folder, exist_ok=True)
-
-        # Get unique partition combinations
-        combinations = _get_partition_combinations(con, enriched_table, output_column_names)
-
-        if verbose:
-            debug(f"  → Creating {len(combinations)} partition(s)...")
-
-        # Get original columns (exclude temporary admin columns)
-        original_cols = _get_original_columns(con, input_url)
-
-        # Create each partition
-        partition_count = _create_all_partitions(
-            con,
-            enriched_table,
-            output_column_names,
-            combinations,
-            levels,
-            output_folder,
-            hive,
-            filename_prefix,
-            overwrite,
-            metadata,
-            verbose,
-            profile,
-            original_cols,
-            geoparquet_version,
-        )
-
-        con.close()
 
         success(f"\n✓ Created {partition_count} partition(s) in {output_folder}")
 

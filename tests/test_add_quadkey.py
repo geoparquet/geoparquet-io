@@ -12,6 +12,7 @@ from geoparquet_io.core.add_quadkey_column import (
     _lat_lon_to_quadkey,
 )
 from geoparquet_io.core.common import get_crs_display_name
+from tests.conftest import safe_unlink
 
 
 class TestLatLonToQuadkey:
@@ -140,8 +141,7 @@ class TestAddQuadkeyCommand:
         """Create a temp output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_quadkey_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_add_quadkey_help(self):
         """Test that add quadkey command has help."""

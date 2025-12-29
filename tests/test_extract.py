@@ -31,6 +31,7 @@ from geoparquet_io.core.extract import (
     validate_columns,
     validate_where_clause,
 )
+from tests.conftest import safe_unlink
 
 # Test data paths
 TEST_DATA_DIR = Path(__file__).parent / "data"
@@ -331,8 +332,7 @@ class TestParseGeometryInput:
             result = parse_geometry_input(f"@{tmp_path}")
             assert "POINT" in result.upper()
         finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
+            safe_unlink(tmp_path)
 
     def test_file_reference_wkt(self):
         """Test loading geometry from WKT file with @ prefix."""
@@ -343,8 +343,7 @@ class TestParseGeometryInput:
             result = parse_geometry_input(f"@{tmp_path}")
             assert "POINT" in result.upper()
         finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
+            safe_unlink(tmp_path)
 
     def test_auto_detect_file(self):
         """Test auto-detecting file by extension."""
@@ -355,8 +354,7 @@ class TestParseGeometryInput:
             result = parse_geometry_input(str(tmp_path))
             assert "POINT" in result.upper()
         finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
+            safe_unlink(tmp_path)
 
     def test_file_not_found(self):
         """Test error when file not found."""
@@ -580,16 +578,7 @@ class TestExtractIntegration:
         # Generate unique path without creating the file
         tmp_path = Path(tempfile.gettempdir()) / f"test_output_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        # Cleanup after test - try multiple times for Windows
-        if tmp_path.exists():
-            for _ in range(3):
-                try:
-                    tmp_path.unlink()
-                    break
-                except PermissionError:
-                    import time
-
-                    time.sleep(0.1)  # Give Windows time to release file handles
+        safe_unlink(tmp_path)
 
     def test_extract_all_columns(self, output_file):
         """Test extracting all columns."""
@@ -879,16 +868,7 @@ class TestExtractCLI:
         # Generate unique path without creating the file
         tmp_path = Path(tempfile.gettempdir()) / f"test_cli_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        # Cleanup after test - try multiple times for Windows
-        if tmp_path.exists():
-            for _ in range(3):
-                try:
-                    tmp_path.unlink()
-                    break
-                except PermissionError:
-                    import time
-
-                    time.sleep(0.1)  # Give Windows time to release file handles
+        safe_unlink(tmp_path)
 
     def test_cli_help(self):
         """Test CLI help output."""
@@ -1011,16 +991,7 @@ class TestExtractRemote:
         # Generate unique path without creating the file
         tmp_path = Path(tempfile.gettempdir()) / f"test_remote_{uuid.uuid4()}.parquet"
         yield str(tmp_path)
-        # Cleanup after test - try multiple times for Windows
-        if tmp_path.exists():
-            for _ in range(3):
-                try:
-                    tmp_path.unlink()
-                    break
-                except PermissionError:
-                    import time
-
-                    time.sleep(0.1)  # Give Windows time to release file handles
+        safe_unlink(tmp_path)
 
     def test_remote_file_bbox(self, output_file):
         """Test extracting from remote file with bbox filter."""
