@@ -3,6 +3,7 @@
 import pytest
 
 from geoparquet_io.core.common import (
+    _get_geometry_type_name,
     check_bbox_structure,
     detect_geoparquet_file_type,
     find_primary_geometry_column,
@@ -464,3 +465,55 @@ class TestIsGeographicCrs:
         """Test CRS with UTM in name is projected."""
         crs = {"name": "WGS 84 / UTM zone 10N"}
         assert is_geographic_crs(crs) is False
+
+
+class TestGetGeometryTypeName:
+    """Tests for _get_geometry_type_name function."""
+
+    def test_2d_types(self):
+        """Test 2D geometry types (codes 0-7)."""
+        assert _get_geometry_type_name(0) == "Unknown"
+        assert _get_geometry_type_name(1) == "Point"
+        assert _get_geometry_type_name(2) == "LineString"
+        assert _get_geometry_type_name(3) == "Polygon"
+        assert _get_geometry_type_name(4) == "MultiPoint"
+        assert _get_geometry_type_name(5) == "MultiLineString"
+        assert _get_geometry_type_name(6) == "MultiPolygon"
+        assert _get_geometry_type_name(7) == "GeometryCollection"
+
+    def test_z_types(self):
+        """Test Z geometry types (codes 1001-1007)."""
+        assert _get_geometry_type_name(1001) == "Point Z"
+        assert _get_geometry_type_name(1002) == "LineString Z"
+        assert _get_geometry_type_name(1003) == "Polygon Z"
+        assert _get_geometry_type_name(1004) == "MultiPoint Z"
+        assert _get_geometry_type_name(1005) == "MultiLineString Z"
+        assert _get_geometry_type_name(1006) == "MultiPolygon Z"
+        assert _get_geometry_type_name(1007) == "GeometryCollection Z"
+
+    def test_m_types(self):
+        """Test M geometry types (codes 2001-2007)."""
+        assert _get_geometry_type_name(2001) == "Point M"
+        assert _get_geometry_type_name(2002) == "LineString M"
+        assert _get_geometry_type_name(2003) == "Polygon M"
+        assert _get_geometry_type_name(2004) == "MultiPoint M"
+        assert _get_geometry_type_name(2005) == "MultiLineString M"
+        assert _get_geometry_type_name(2006) == "MultiPolygon M"
+        assert _get_geometry_type_name(2007) == "GeometryCollection M"
+
+    def test_zm_types(self):
+        """Test ZM geometry types (codes 3001-3007)."""
+        assert _get_geometry_type_name(3001) == "Point ZM"
+        assert _get_geometry_type_name(3002) == "LineString ZM"
+        assert _get_geometry_type_name(3003) == "Polygon ZM"
+        assert _get_geometry_type_name(3004) == "MultiPoint ZM"
+        assert _get_geometry_type_name(3005) == "MultiLineString ZM"
+        assert _get_geometry_type_name(3006) == "MultiPolygon ZM"
+        assert _get_geometry_type_name(3007) == "GeometryCollection ZM"
+
+    def test_unknown_base_type(self):
+        """Test unknown base type returns Unknown."""
+        assert _get_geometry_type_name(8) == "Unknown"
+        assert _get_geometry_type_name(99) == "Unknown"
+        assert _get_geometry_type_name(1008) == "Unknown"
+        assert _get_geometry_type_name(2099) == "Unknown"

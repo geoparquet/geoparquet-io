@@ -1712,182 +1712,581 @@ def validate_compression_settings(compression, compression_level, verbose=False)
     return compression, compression_level, compression_desc
 
 
-def build_copy_query(
-    query,
-    output_file,
-    compression,
-    compression_level=15,
-    row_group_rows=None,
-    geoparquet_version=None,
-):
+# =============================================================================
+# Arrow-based write helpers
+# =============================================================================
+
+
+def _get_query_columns(con, query: str) -> list[str]:
     """
-    Build a DuckDB COPY query with proper compression and GeoParquet version settings.
+    Get column names from a query without executing it fully.
+
+    Uses LIMIT 0 to get schema information efficiently.
 
     Args:
-        query: SELECT query or existing COPY query
-        output_file: Output file path
-        compression: Compression type (already validated)
-        compression_level: Compression level (for ZSTD, GZIP, BROTLI)
-        row_group_rows: Number of rows per row group (optional)
-        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
+        con: DuckDB connection
+        query: SQL SELECT query
 
     Returns:
-        str: Complete COPY query
+        list[str]: Column names from the query result
     """
-    # Map to DuckDB compression names
-    duckdb_compression_map = {
-        "ZSTD": "zstd",
-        "GZIP": "gzip",
-        "BROTLI": "brotli",
-        "LZ4": "lz4",
-        "SNAPPY": "snappy",
-        "UNCOMPRESSED": "uncompressed",
-    }
-    duckdb_compression = duckdb_compression_map[compression]
-
-    # Get GeoParquet version setting for DuckDB
-    version_config = GEOPARQUET_VERSIONS.get(
-        geoparquet_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
-    )
-    duckdb_gp_version = version_config["duckdb_param"]
-
-    # Build COPY options with all parameters
-    copy_options_list = [
-        "FORMAT PARQUET",
-        f"COMPRESSION '{duckdb_compression}'",
-        f"GEOPARQUET_VERSION '{duckdb_gp_version}'",
-    ]
-
-    # Add compression level only for ZSTD (DuckDB only supports it for ZSTD)
-    if compression == "ZSTD" and compression_level is not None:
-        copy_options_list.append(f"COMPRESSION_LEVEL {compression_level}")
-
-    # Add row group size if specified
-    if row_group_rows:
-        copy_options_list.append(f"ROW_GROUP_SIZE {row_group_rows}")
-
-    copy_options = ", ".join(copy_options_list)
-
-    # Modify query to use the specified settings
-    if "COPY (" in query and "TO '" in query:
-        # Extract the query parts
-        query_parts = query.split("TO '")
-        if len(query_parts) == 2:
-            output_path_and_rest = query_parts[1]
-            # Find the end of the output path
-            path_end = output_path_and_rest.find("'")
-            if path_end > 0:
-                # Rebuild query with options
-                base_query = query_parts[0] + f"TO '{output_file}'"
-                query = base_query + f"\n({copy_options});"
-    else:
-        # Assume it's a SELECT query that needs COPY wrapper
-        query = f"""COPY ({query})
-TO '{output_file}'
-({copy_options});"""
-
-    return query
+    describe_query = f"SELECT * FROM ({query}) AS __subq LIMIT 0"
+    result = con.execute(describe_query)
+    return [col[0] for col in result.description]
 
 
-def rewrite_with_metadata(
-    output_file,
-    original_metadata,
-    compression,
-    compression_level,
-    row_group_size_mb=None,
-    row_group_rows=None,
-    custom_metadata=None,
-    verbose=False,
-    metadata_version="1.1.0",
-    input_crs=None,
-    recalculate_bounds=False,
-):
+def _detect_geometry_from_query(
+    con,
+    query: str,
+    original_metadata: dict | None,
+    verbose: bool = False,
+) -> str:
     """
-    Rewrite a parquet file with updated metadata and compression settings.
+    Detect geometry column from metadata or query schema.
+
+    Priority:
+    1. GeoParquet metadata primary_column
+    2. Common geometry column names in query schema
+    3. Default to 'geometry'
 
     Args:
-        output_file: Path to the parquet file to rewrite
-        original_metadata: Original metadata to preserve
-        compression: Compression type
-        compression_level: Compression level
-        row_group_size_mb: Target row group size in MB
-        row_group_rows: Exact number of rows per row group
-        custom_metadata: Optional dict with custom metadata (e.g., H3 info)
+        con: DuckDB connection
+        query: SQL SELECT query
+        original_metadata: Original metadata dict (may contain geo metadata)
         verbose: Whether to print verbose output
-        metadata_version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
-        input_crs: PROJJSON dict with CRS to include in geo metadata (optional)
-        recalculate_bounds: If True, recalculate bounds from actual geometry data (default: False)
+
+    Returns:
+        str: Name of the geometry column
     """
-    if verbose:
-        debug("Updating metadata and optimizing file structure...")
+    # Try from original metadata first
+    if original_metadata and b"geo" in original_metadata:
+        try:
+            geo_meta = json.loads(original_metadata[b"geo"].decode("utf-8"))
+            if isinstance(geo_meta, dict) and "primary_column" in geo_meta:
+                if verbose:
+                    debug(f"Detected geometry column from metadata: {geo_meta['primary_column']}")
+                return geo_meta["primary_column"]
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
 
-    # Check if this is a Hive-partitioned file by examining the parent directory
-    parent_dir = os.path.basename(os.path.dirname(output_file))
-    is_hive_partition = "=" in parent_dir
+    # Detect from query schema
+    try:
+        columns = _get_query_columns(con, query)
+        common_names = ["geometry", "geom", "wkb_geometry", "shape", "the_geom"]
+        for name in common_names:
+            # Case-insensitive match
+            for col in columns:
+                if col.lower() == name.lower():
+                    if verbose:
+                        debug(f"Detected geometry column from schema: {col}")
+                    return col
+    except (duckdb.Error, RuntimeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not detect geometry column from query schema: {e}")
 
-    if is_hive_partition:
-        # For Hive-partitioned files, read directly as a single file
-        # to avoid PyArrow trying to interpret it as a dataset
-        with open(output_file, "rb") as f:
-            table = pq.read_table(f)
-    else:
-        # Read the written file normally
-        table = pq.read_table(output_file)
+    # Default
+    return "geometry"
 
-    # Prepare metadata
-    existing_metadata = table.schema.metadata or {}
+
+def _wrap_query_with_wkb_conversion(query: str, geometry_column: str) -> str:
+    """
+    Wrap query to convert geometry column to WKB for Arrow export.
+
+    DuckDB's GEOMETRY type doesn't translate directly to Arrow in a portable way.
+    This wraps the query to use ST_AsWKB for geometry output, ensuring the geometry
+    is in standard WKB format that geoarrow-pyarrow can handle.
+
+    Args:
+        query: Original SQL SELECT query
+        geometry_column: Name of the geometry column to convert
+
+    Returns:
+        str: Wrapped query with WKB conversion
+    """
+    # Quote column name to handle special characters
+    quoted_geom = geometry_column.replace('"', '""')
+
+    return f"""
+        WITH __arrow_source AS ({query})
+        SELECT * REPLACE (ST_AsWKB("{quoted_geom}") AS "{quoted_geom}")
+        FROM __arrow_source
+    """
+
+
+def _rebuild_array_with_type(
+    chunked_array,
+    new_type,
+):
+    """
+    Rebuild a chunked array with a new extension type.
+
+    This preserves CRS and other type metadata, unlike cast() which may reset them.
+    Used when applying CRS to geoarrow geometry arrays.
+
+    Args:
+        chunked_array: PyArrow ChunkedArray to rebuild
+        new_type: New PyArrow ExtensionType to apply
+
+    Returns:
+        pa.ChunkedArray: New chunked array with the new type
+    """
+    import pyarrow as pa
+
+    new_chunks = []
+    for chunk in chunked_array.chunks:
+        new_chunk = pa.ExtensionArray.from_storage(new_type, chunk.storage)
+        new_chunks.append(new_chunk)
+
+    return pa.chunked_array(new_chunks, type=new_type)
+
+
+def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
+    """
+    Detect bbox struct column from Arrow table schema.
+
+    Looks for columns with conventional names (bbox, bounds, extent) that have
+    the required struct fields (xmin, ymin, xmax, ymax).
+
+    Args:
+        table: PyArrow Table to check
+        verbose: Whether to print verbose output
+
+    Returns:
+        str: Name of bbox column if found, None otherwise
+    """
+    import pyarrow as pa
+
+    conventional_suffixes = ["bbox", "bounds", "extent"]
+    required_fields = {"xmin", "ymin", "xmax", "ymax"}
+
+    for field in table.schema:
+        name = field.name
+        field_type = field.type
+
+        # Check if column name ends with conventional suffixes
+        is_bbox_name = any(name.endswith(suffix) for suffix in conventional_suffixes)
+        if not is_bbox_name:
+            continue
+
+        # Check if it's a struct with the required fields
+        if pa.types.is_struct(field_type):
+            struct_field_names = {f.name for f in field_type}
+            if required_fields.issubset(struct_field_names):
+                if verbose:
+                    debug(f"Found bbox column in table: {name}")
+                return name
+
+    return None
+
+
+# WKB geometry type codes to GeoParquet base names (2D types)
+_GEOMETRY_TYPE_CODES = {
+    0: "Unknown",
+    1: "Point",
+    2: "LineString",
+    3: "Polygon",
+    4: "MultiPoint",
+    5: "MultiLineString",
+    6: "MultiPolygon",
+    7: "GeometryCollection",
+}
+
+# Dimensional suffixes based on WKB type code modifier
+_DIMENSION_SUFFIXES = {
+    0: "",  # 2D (no suffix)
+    1: " Z",  # Z dimension (codes 1001-1007)
+    2: " M",  # M dimension (codes 2001-2007)
+    3: " ZM",  # ZM dimensions (codes 3001-3007)
+}
+
+
+def _get_geometry_type_name(code: int) -> str:
+    """
+    Convert WKB geometry type code to GeoParquet geometry type name.
+
+    Handles 2D types (0-7) and Z/M/ZM variants (1001-1007, 2001-2007, 3001-3007).
+
+    Args:
+        code: WKB geometry type code
+
+    Returns:
+        GeoParquet geometry type name (e.g., "Point", "Point Z", "Polygon ZM")
+    """
+    # Extract base type (0-7) and dimensional modifier (0, 1, 2, or 3)
+    base_type = code % 1000
+    dimension = code // 1000
+
+    base_name = _GEOMETRY_TYPE_CODES.get(base_type, "Unknown")
+    if base_name == "Unknown":
+        return "Unknown"
+
+    suffix = _DIMENSION_SUFFIXES.get(dimension, "")
+    return base_name + suffix
+
+
+def _process_geometry_column_for_version(
+    table,
+    geometry_column: str,
+    geoparquet_version: str | None,
+    input_crs: dict | None,
+    verbose: bool,
+):
+    """
+    Process geometry column based on GeoParquet version.
+
+    Handles different GeoParquet versions:
+    - v1.x: Plain binary WKB (no extension type), CRS only in metadata
+    - v2.0/parquet-geo-only: geoarrow extension type with CRS in schema
+
+    Args:
+        table: PyArrow Table to modify
+        geometry_column: Name of the geometry column
+        geoparquet_version: GeoParquet version
+        input_crs: PROJJSON dict with CRS
+        verbose: Whether to print verbose output
+
+    Returns:
+        pa.Table: Table with geometry column processed
+    """
+    import geoarrow.pyarrow as ga
+
+    try:
+        geom_col = table.column(geometry_column)
+
+        if geoparquet_version in ("2.0", "parquet-geo-only"):
+            # For v2.0/parquet-geo-only: use geoarrow extension type with CRS
+            wkb_arr = ga.as_wkb(geom_col)
+
+            # Apply CRS to schema type if non-default
+            if input_crs and not is_default_crs(input_crs):
+                if verbose:
+                    debug(f"Applying CRS to geometry schema type: {_format_crs_display(input_crs)}")
+                new_type = wkb_arr.type.with_crs(input_crs)
+                wkb_arr = _rebuild_array_with_type(wkb_arr, new_type)
+
+            # Replace geometry column in table
+            col_index = table.schema.get_field_index(geometry_column)
+            table = table.set_column(col_index, geometry_column, wkb_arr)
+        else:
+            # For v1.x: keep as plain binary WKB (no geoarrow extension type)
+            # CRS goes only in metadata, not in schema
+            if verbose:
+                debug("v1.x: keeping geometry as plain binary WKB (CRS in metadata only)")
+
+    except (TypeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not process geometry column: {e}")
+        # Continue without conversion - geometry is already WKB
+
+    return table
+
+
+def _compute_geometry_types(table, geometry_column: str, verbose: bool) -> list[str]:
+    """
+    Compute geometry types from a geometry column using geoarrow.
+
+    Args:
+        table: PyArrow Table containing the geometry column
+        geometry_column: Name of the geometry column
+        verbose: Whether to print verbose output
+
+    Returns:
+        list: List of GeoParquet geometry type names (e.g., ["Point", "Polygon"])
+    """
+    import geoarrow.pyarrow as ga
+
+    # Skip for empty tables (geoarrow crashes on empty arrays)
+    if table.num_rows == 0:
+        return []
+
+    try:
+        geom_col = table.column(geometry_column)
+        wkb_arr = ga.as_wkb(geom_col)
+        types_struct = ga.unique_geometry_types(wkb_arr)
+
+        # Extract geometry type codes from struct array
+        type_codes = types_struct.field("geometry_type").to_pylist()
+
+        # Map codes to GeoParquet standard names (avoid duplicates)
+        type_names = []
+        for code in type_codes:
+            name = _get_geometry_type_name(code)
+            if name not in type_names:
+                type_names.append(name)
+
+        if verbose:
+            debug(f"Computed geometry_types from data: {type_names}")
+        return type_names
+
+    except (TypeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not compute geometry_types: {e}")
+        # Return empty list as fallback (allowed by spec - means any type)
+        return []
+
+
+def _compute_bbox_from_data(table, geometry_column: str, verbose: bool) -> list[float] | None:
+    """
+    Compute bounding box from geometry column data.
+
+    Args:
+        table: PyArrow Table containing the geometry column
+        geometry_column: Name of the geometry column
+        verbose: Whether to print verbose output
+
+    Returns:
+        list: [xmin, ymin, xmax, ymax] or None if computation fails
+    """
+    import geoarrow.pyarrow as ga
+    import pyarrow.compute as pc
+
+    # Skip for empty tables
+    if table.num_rows == 0:
+        return None
+
+    try:
+        geom_col = table.column(geometry_column)
+        wkb_arr = ga.as_wkb(geom_col)
+        box_arr = ga.box(wkb_arr)
+
+        # Combine chunks and get storage (underlying struct array)
+        combined = box_arr.combine_chunks()
+        storage = combined.storage
+
+        # Extract struct fields and compute min/max
+        xmin = pc.min(pc.struct_field(storage, "xmin")).as_py()
+        ymin = pc.min(pc.struct_field(storage, "ymin")).as_py()
+        xmax = pc.max(pc.struct_field(storage, "xmax")).as_py()
+        ymax = pc.max(pc.struct_field(storage, "ymax")).as_py()
+
+        if all(v is not None for v in [xmin, ymin, xmax, ymax]):
+            if verbose:
+                debug(f"Computed bbox from data: [{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]")
+            return [xmin, ymin, xmax, ymax]
+
+    except (TypeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not compute bbox: {e}")
+
+    return None
+
+
+def _assemble_and_apply_geo_metadata(
+    table,
+    geometry_column: str,
+    geo_meta: dict,
+    input_crs: dict | None,
+    metadata_version: str,
+    verbose: bool,
+):
+    """
+    Assemble final geo metadata and apply it to the table.
+
+    Adds CRS to geo metadata if provided and applies the complete
+    metadata to the table schema.
+
+    Args:
+        table: PyArrow Table to modify
+        geometry_column: Name of the geometry column
+        geo_meta: Geo metadata dict to finalize
+        input_crs: PROJJSON dict with CRS (optional)
+        metadata_version: GeoParquet metadata version string
+        verbose: Whether to print verbose output
+
+    Returns:
+        pa.Table: Table with geo metadata applied
+    """
+    # Add CRS to geo metadata if provided (for v1.x and v2.0)
+    if input_crs and not is_default_crs(input_crs):
+        if geometry_column not in geo_meta.get("columns", {}):
+            geo_meta["columns"][geometry_column] = {}
+        geo_meta["columns"][geometry_column]["crs"] = input_crs
+        if verbose:
+            debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
+
+    # Apply metadata to table
+    existing_metadata = dict(table.schema.metadata) if table.schema.metadata else {}
     new_metadata = {}
 
     # Copy non-geo metadata from existing
     for k, v in existing_metadata.items():
-        if not k.decode("utf-8").startswith("geo"):
+        key_str = k.decode("utf-8") if isinstance(k, bytes) else k
+        if not key_str.startswith("geo"):
             new_metadata[k] = v
 
-    # Get geometry column and bbox info
-    geom_col = find_primary_geometry_column(output_file, verbose=False)
-    bbox_info = check_bbox_structure(output_file, verbose=False)
-
-    # Create geo metadata - use existing metadata if no original provided
-    # This preserves DuckDB-generated metadata (encoding, geometry_types, etc.)
-    metadata_source = original_metadata if original_metadata else existing_metadata
-    geo_meta = create_geo_metadata(
-        metadata_source, geom_col, bbox_info, custom_metadata, verbose, version=metadata_version
-    )
-
-    # Add CRS to geo metadata if provided (for GeoParquet 1.x)
-    if input_crs and not is_default_crs(input_crs):
-        if geom_col not in geo_meta.get("columns", {}):
-            geo_meta["columns"][geom_col] = {}
-        geo_meta["columns"][geom_col]["crs"] = input_crs
-        if verbose:
-            debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
-
-    # Recalculate bounds from actual geometry data if requested
-    if recalculate_bounds:
-        bounds = calculate_file_bounds(output_file, geom_col, verbose=verbose)
-        if bounds:
-            if geom_col not in geo_meta.get("columns", {}):
-                geo_meta["columns"][geom_col] = {}
-            geo_meta["columns"][geom_col]["bbox"] = list(bounds)
-            if verbose:
-                debug(
-                    f"Updated bounds to: [{bounds[0]:.6f}, {bounds[1]:.6f}, "
-                    f"{bounds[2]:.6f}, {bounds[3]:.6f}]"
-                )
-
+    # Add geo metadata
     new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+    table = table.replace_schema_metadata(new_metadata)
 
-    # Update table schema with new metadata
-    new_table = table.replace_schema_metadata(new_metadata)
+    if verbose:
+        debug(f"Applied geo metadata with version {metadata_version}")
 
-    # Calculate optimal row groups
-    file_size = os.path.getsize(output_file)
-    rows_per_group = calculate_row_group_size(
-        new_table.num_rows,
-        file_size,
-        target_row_group_size_mb=row_group_size_mb,
-        target_row_group_rows=row_group_rows,
+    return table
+
+
+def _apply_geoparquet_metadata(
+    table,
+    geometry_column: str,
+    geoparquet_version: str | None,
+    original_metadata: dict | None = None,
+    input_crs: dict | None = None,
+    custom_metadata: dict | None = None,
+    verbose: bool = False,
+):
+    """
+    Apply GeoParquet metadata to an Arrow Table based on version.
+
+    Handles different GeoParquet versions:
+    - v1.x: Apply geo metadata to schema, CRS via geoarrow type
+    - v2.0: Apply CRS to schema type AND geo metadata
+    - parquet-geo-only: Apply CRS to schema type only, no geo metadata
+
+    Args:
+        table: PyArrow Table to modify
+        geometry_column: Name of the geometry column
+        geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, parquet-geo-only)
+        original_metadata: Original metadata to preserve
+        input_crs: PROJJSON dict with CRS
+        custom_metadata: Custom metadata (e.g., H3 covering info)
+        verbose: Whether to print verbose output
+
+    Returns:
+        pa.Table: Table with GeoParquet metadata applied
+    """
+    version_config = GEOPARQUET_VERSIONS.get(
+        geoparquet_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
     )
+    metadata_version = version_config["metadata_version"]
+    should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
+
+    if verbose:
+        debug(f"Applying GeoParquet metadata for version: {geoparquet_version or 'default (1.1)'}")
+
+    # Check if geometry column exists in table
+    if geometry_column not in table.column_names:
+        if verbose:
+            debug(f"Geometry column '{geometry_column}' not found in table, skipping metadata")
+        return table
+
+    # Step 1: Handle geometry column based on version
+    table = _process_geometry_column_for_version(
+        table, geometry_column, geoparquet_version, input_crs, verbose
+    )
+
+    # Step 2: Build and apply geo metadata (unless parquet-geo-only)
+    if not should_add_geo_metadata:
+        return table
+
+    # Detect bbox column from table schema
+    bbox_column = _detect_bbox_column_from_table(table, verbose)
+    bbox_info = {
+        "has_bbox_column": bbox_column is not None,
+        "bbox_column_name": bbox_column,
+    }
+
+    # Create geo metadata using existing helper
+    geo_meta = create_geo_metadata(
+        original_metadata,
+        geometry_column,
+        bbox_info,
+        custom_metadata,
+        verbose,
+        version=metadata_version,
+    )
+
+    # Ensure geometry_types is set (required by GeoParquet spec)
+    col_meta = geo_meta.get("columns", {}).get(geometry_column, {})
+    if "geometry_types" not in col_meta:
+        col_meta["geometry_types"] = _compute_geometry_types(table, geometry_column, verbose)
+        geo_meta["columns"][geometry_column] = col_meta
+
+    # Compute file-level bbox from geometry data
+    computed_bbox = _compute_bbox_from_data(table, geometry_column, verbose)
+    if computed_bbox:
+        col_meta["bbox"] = computed_bbox
+        geo_meta["columns"][geometry_column] = col_meta
+
+    # Assemble and apply final metadata
+    return _assemble_and_apply_geo_metadata(
+        table, geometry_column, geo_meta, input_crs, metadata_version, verbose
+    )
+
+
+def _estimate_row_size(table) -> int:
+    """
+    Estimate bytes per row from PyArrow table memory usage.
+
+    Uses table.get_total_buffer_size() if available (PyArrow >= 0.17),
+    falls back to table.nbytes, and uses a default of 100 bytes if
+    neither is available or returns 0.
+
+    Args:
+        table: PyArrow Table
+
+    Returns:
+        int: Estimated bytes per row (minimum 1)
+    """
+    default_row_size = 100
+    num_rows = max(1, table.num_rows)
+
+    # Try get_total_buffer_size() first (more accurate, includes all buffers)
+    if hasattr(table, "get_total_buffer_size"):
+        try:
+            total_bytes = table.get_total_buffer_size()
+            if total_bytes > 0:
+                return max(1, total_bytes // num_rows)
+        except Exception:
+            pass
+
+    # Fall back to nbytes property
+    if hasattr(table, "nbytes"):
+        try:
+            total_bytes = table.nbytes
+            if total_bytes > 0:
+                return max(1, total_bytes // num_rows)
+        except Exception:
+            pass
+
+    return default_row_size
+
+
+def _write_table_with_settings(
+    table,
+    output_path: str,
+    compression: str,
+    compression_level: int | None,
+    row_group_rows: int | None,
+    row_group_size_mb: int | None,
+    geoparquet_version: str | None,
+    geometry_column: str,
+    verbose: bool = False,
+) -> None:
+    """
+    Write Arrow table to Parquet with proper settings.
+
+    Uses pq.write_table directly since we've already applied all GeoParquet
+    metadata to the table. This preserves the metadata we set (including version,
+    geometry_types, CRS, etc.) without geoarrow overwriting it.
+
+    Args:
+        table: PyArrow Table to write
+        output_path: Output file path
+        compression: Compression type (ZSTD, GZIP, etc.)
+        compression_level: Compression level
+        row_group_rows: Exact number of rows per row group
+        row_group_size_mb: Target row group size in MB
+        geoparquet_version: GeoParquet version
+        geometry_column: Name of the geometry column
+        verbose: Whether to print verbose output
+    """
+    # Calculate row group size
+    rows_per_group = row_group_rows
+    if not rows_per_group and row_group_size_mb and table.num_rows > 0:
+        # Estimate bytes per row from actual table memory usage
+        estimated_row_size = _estimate_row_size(table)
+        target_bytes = row_group_size_mb * 1024 * 1024
+        rows_per_group = max(1, int(target_bytes // estimated_row_size))
+        rows_per_group = min(rows_per_group, table.num_rows)
 
     # Use central configuration for write settings
     settings = ParquetWriteSettings(
@@ -1898,19 +2297,147 @@ def rewrite_with_metadata(
     )
     write_kwargs = settings.get_pyarrow_kwargs(calculated_row_group_size=rows_per_group)
 
-    # Rewrite the file
-    pq.write_table(new_table, output_file, **write_kwargs)
+    if verbose:
+        compression_desc = (
+            f"{compression}:{compression_level}" if compression_level else compression
+        )
+        debug(f"Writing with {compression_desc} compression")
+        if rows_per_group:
+            debug(f"Row group size: {rows_per_group:,} rows")
+
+    # Use pq.write_table for all versions - we've already applied all metadata
+    # Using geoarrow's write_geoparquet_table would overwrite our carefully constructed metadata
+    pq.write_table(table, output_path, **write_kwargs)
 
     if verbose:
-        if compression in ["GZIP", "ZSTD", "BROTLI"]:
-            compression_desc = f"{compression}:{compression_level}"
+        success(f"Wrote {table.num_rows:,} rows to {output_path}")
+
+
+def write_geoparquet_via_arrow(
+    con,
+    query: str,
+    output_file: str,
+    geometry_column: str | None = None,
+    original_metadata: dict | None = None,
+    compression: str = "ZSTD",
+    compression_level: int = 15,
+    row_group_size_mb: int | None = None,
+    row_group_rows: int | None = None,
+    custom_metadata: dict | None = None,
+    verbose: bool = False,
+    show_sql: bool = False,
+    profile: str | None = None,
+    geoparquet_version: str | None = None,
+    input_crs: dict | None = None,
+) -> None:
+    """
+    Write a GeoParquet file using Arrow as the internal transfer format.
+
+    This is more efficient than the COPY-then-rewrite approach because it:
+    1. Fetches query results directly as an Arrow Table
+    2. Applies GeoParquet metadata in memory
+    3. Writes once to disk
+
+    Args:
+        con: DuckDB connection with spatial extension loaded
+        query: SQL SELECT query to execute
+        output_file: Path to output file (local or remote URL)
+        geometry_column: Name of geometry column (auto-detected if None)
+        original_metadata: Original metadata from source file for preservation
+        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+        compression_level: Compression level (varies by format)
+        row_group_size_mb: Target row group size in MB
+        row_group_rows: Exact number of rows per row group
+        custom_metadata: Optional dict with custom metadata (e.g., H3 covering info)
+        verbose: Whether to print verbose output
+        show_sql: Whether to print SQL statements before execution
+        profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
+        input_crs: PROJJSON dict with CRS from input file
+    """
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, output_file)
+
+    # Detect geometry column if not provided
+    if geometry_column is None:
+        geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
+
+    # Check if geometry column actually exists in the query result
+    query_columns = _get_query_columns(con, query)
+    has_geometry = geometry_column in query_columns
+
+    with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
+        actual_output,
+        is_remote,
+    ):
+        # Validate compression settings
+        compression, compression_level, compression_desc = validate_compression_settings(
+            compression, compression_level, verbose
+        )
+
+        if verbose:
+            debug(f"Writing output with {compression_desc} compression (Arrow path)...")
+            if geoparquet_version:
+                debug(f"Using GeoParquet version: {geoparquet_version}")
+
+        # Wrap query with WKB conversion only if geometry column exists
+        if has_geometry:
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
         else:
-            compression_desc = compression
-        success(f"✓ File written with {compression_desc} compression and updated metadata")
-        if row_group_rows:
-            debug(f"  Row group size: {rows_per_group:,} rows")
-        elif row_group_size_mb:
-            debug(f"  Row group size: ~{row_group_size_mb}MB ({rows_per_group:,} rows)")
+            final_query = query
+            if verbose:
+                debug(
+                    f"Geometry column '{geometry_column}' not in query - writing as regular Parquet"
+                )
+
+        if show_sql:
+            info("\n-- Arrow query (with WKB conversion):" if has_geometry else "\n-- Arrow query:")
+            progress(final_query)
+
+        # Fetch as Arrow table
+        if verbose:
+            debug("Fetching query results as Arrow table...")
+
+        result = con.execute(final_query)
+        table = result.fetch_arrow_table()
+
+        if verbose:
+            debug(f"Fetched {table.num_rows:,} rows, {len(table.column_names)} columns")
+
+        # Apply GeoParquet metadata only if geometry column exists
+        if has_geometry:
+            table = _apply_geoparquet_metadata(
+                table,
+                geometry_column=geometry_column,
+                geoparquet_version=geoparquet_version,
+                original_metadata=original_metadata,
+                input_crs=input_crs,
+                custom_metadata=custom_metadata,
+                verbose=verbose,
+            )
+
+        # Write to disk
+        _write_table_with_settings(
+            table,
+            actual_output,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
+            geoparquet_version=geoparquet_version,
+            geometry_column=geometry_column,
+            verbose=verbose,
+        )
+
+        # Upload to remote if needed
+        if is_remote:
+            upload_if_remote(
+                actual_output,
+                output_file,
+                profile=profile,
+                is_directory=False,
+                verbose=verbose,
+            )
 
 
 def write_parquet_with_metadata(
@@ -1928,16 +2455,16 @@ def write_parquet_with_metadata(
     profile=None,
     geoparquet_version=None,
     input_crs=None,
-    recalculate_bounds=False,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
 
+    Uses Arrow as the internal transfer format for efficiency - fetches DuckDB
+    query results directly as an Arrow table, applies metadata in memory, and
+    writes once to disk (no intermediate file rewrites).
+
     Supports both local and remote outputs (S3, GCS, Azure). Remote outputs
     are written to a temporary local file, then uploaded.
-
-    Note: Remote writes require ~2× output file size in local disk space
-    for temporary processing.
 
     Args:
         con: DuckDB connection
@@ -1953,103 +2480,29 @@ def write_parquet_with_metadata(
         show_sql: Whether to print SQL statements before execution
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
-        input_crs: PROJJSON dict with CRS from input file (for 2.0/parquet-geo-only)
-        recalculate_bounds: If True, recalculate bounds from actual geometry data (default: False)
+        input_crs: PROJJSON dict with CRS from input file
 
     Returns:
         None
     """
-    # Setup AWS profile if needed (for writes to S3)
-    setup_aws_profile_if_needed(profile, output_file)
-
-    # Get version configuration
-    version_config = GEOPARQUET_VERSIONS.get(
-        geoparquet_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
-    )
-
-    with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
-        actual_output,
-        is_remote,
-    ):
-        # Validate compression settings
-        compression, compression_level, compression_desc = validate_compression_settings(
-            compression, compression_level, verbose
-        )
-
-        if verbose:
-            debug(f"Writing output with {compression_desc} compression...")
-            if geoparquet_version:
-                debug(f"Using GeoParquet version: {geoparquet_version}")
-
-        # Build and execute query with version-specific settings
-        final_query = build_copy_query(
-            query,
-            actual_output,
-            compression,
-            compression_level=compression_level,
-            row_group_rows=row_group_rows,
-            geoparquet_version=geoparquet_version,
-        )
-
-        if show_sql:
-            info("\n-- COPY query:")
-            progress(final_query)
-
-        con.execute(final_query)
-
-        # For 2.0 and parquet-geo-only, apply CRS to Parquet native type if non-default
-        if geoparquet_version in ("2.0", "parquet-geo-only"):
-            if input_crs and not is_default_crs(input_crs):
-                if verbose:
-                    debug(
-                        f"Applying CRS {_format_crs_display(input_crs)} to Parquet native type..."
-                    )
-                # For v2.0, write CRS to BOTH schema and metadata in single pass
-                # For parquet-geo-only, write CRS to schema only
-                apply_crs_to_parquet(
-                    actual_output,
-                    input_crs,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_rows=row_group_rows,
-                    add_to_geo_metadata=(geoparquet_version == "2.0"),
-                    verbose=verbose,
-                )
-
-        # Rewrite with metadata and optimal settings (skip for parquet-geo-only)
-        should_rewrite = version_config["rewrite_metadata"] and (
-            original_metadata or verbose or row_group_size_mb or row_group_rows or True
-        )
-        if should_rewrite:
-            rewrite_with_metadata(
-                actual_output,
-                original_metadata,
-                compression,
-                compression_level,
-                row_group_size_mb,
-                row_group_rows,
-                custom_metadata,
-                verbose,
-                metadata_version=version_config["metadata_version"],
-                input_crs=input_crs,
-                recalculate_bounds=recalculate_bounds,
-            )
-
-        # Upload to remote if needed
-        if is_remote:
-            upload_if_remote(
-                actual_output, output_file, profile=profile, is_directory=False, verbose=verbose
-            )
-
-
-def update_metadata(output_file, original_metadata):
-    """Update a parquet file with original metadata and add bbox covering if present."""
-    if not original_metadata:
-        return
-
-    # Use the rewrite function with default compression settings
-    rewrite_with_metadata(
-        output_file, original_metadata, compression="ZSTD", compression_level=15, verbose=False
+    # Delegate to the Arrow-based implementation
+    # Bounds are always computed from actual table data during metadata application
+    write_geoparquet_via_arrow(
+        con=con,
+        query=query,
+        output_file=output_file,
+        geometry_column=None,  # Auto-detect
+        original_metadata=original_metadata,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
+        custom_metadata=custom_metadata,
+        verbose=verbose,
+        show_sql=show_sql,
+        profile=profile,
+        geoparquet_version=geoparquet_version,
+        input_crs=input_crs,
     )
 
 
