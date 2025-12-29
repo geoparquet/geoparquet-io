@@ -278,6 +278,160 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
     return temp_path
 
 
+def apply_geoarrow_extension_type(
+    table: pa.Table,
+    geometry_column: str,
+    crs: dict | str | None = None,
+) -> pa.Table:
+    """
+    Convert geometry column to geoarrow extension type.
+
+    This enables native geometry performance in downstream operations.
+    Arrow IPC preserves extension types, so geoarrow types survive piping.
+
+    Args:
+        table: PyArrow Table with geometry column
+        geometry_column: Name of the geometry column
+        crs: CRS as PROJJSON dict, string identifier, or None
+
+    Returns:
+        Table with geometry column converted to geoarrow extension type
+    """
+    import geoarrow.pyarrow as ga
+
+    if geometry_column not in table.column_names:
+        return table
+
+    try:
+        geom_col = table.column(geometry_column)
+
+        # Convert to geoarrow WKB extension type
+        wkb_arr = ga.as_wkb(geom_col)
+
+        # Apply CRS if provided
+        if crs:
+            new_type = wkb_arr.type.with_crs(crs)
+            # Use from_storage to preserve CRS (cast() resets it)
+            new_chunks = []
+            for chunk in wkb_arr.chunks:
+                new_chunk = pa.ExtensionArray.from_storage(new_type, chunk.storage)
+                new_chunks.append(new_chunk)
+            wkb_arr = pa.chunked_array(new_chunks, type=new_type)
+
+        # Replace geometry column in table
+        col_index = table.schema.get_field_index(geometry_column)
+        return table.set_column(col_index, geometry_column, wkb_arr)
+
+    except (TypeError, ValueError, AttributeError):
+        # If conversion fails, return original table
+        return table
+
+
+def extract_crs_from_table(
+    table: pa.Table,
+    geometry_column: str | None = None,
+) -> dict | str | None:
+    """
+    Extract CRS from Arrow table.
+
+    Checks in order:
+    1. Geoarrow extension type CRS
+    2. GeoParquet geo metadata
+
+    Args:
+        table: PyArrow Table to inspect
+        geometry_column: Name of geometry column (auto-detect if None)
+
+    Returns:
+        CRS as PROJJSON dict, string, or None if not found
+    """
+    # Find geometry column if not specified
+    if geometry_column is None:
+        geometry_column = find_geometry_column_from_table(table)
+
+    if geometry_column and geometry_column in table.column_names:
+        geom_type = table.column(geometry_column).type
+
+        # Check for geoarrow extension type with CRS
+        if hasattr(geom_type, "crs") and geom_type.crs is not None:
+            crs = geom_type.crs
+            # Convert to string if it's a CRS object
+            if hasattr(crs, "__str__"):
+                return str(crs)
+            return crs
+
+    # Fall back to geo metadata
+    if table.schema.metadata and b"geo" in table.schema.metadata:
+        try:
+            geo_meta = json.loads(table.schema.metadata[b"geo"].decode("utf-8"))
+            if isinstance(geo_meta, dict):
+                columns = geo_meta.get("columns", {})
+                geom_col_name = geometry_column or geo_meta.get("primary_column", "geometry")
+                if geom_col_name in columns:
+                    return columns[geom_col_name].get("crs")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+    return None
+
+
+def strip_geoarrow_extension_type(
+    table: pa.Table,
+    geometry_column: str,
+) -> pa.Table:
+    """
+    Convert geoarrow extension type back to plain binary WKB.
+
+    Used when writing GeoParquet 1.x output which uses plain binary
+    geometry with CRS only in metadata.
+
+    Args:
+        table: PyArrow Table with geoarrow geometry column
+        geometry_column: Name of the geometry column
+
+    Returns:
+        Table with geometry column as plain binary
+    """
+    if geometry_column not in table.column_names:
+        return table
+
+    geom_col = table.column(geometry_column)
+    geom_type = geom_col.type
+
+    # Check if it's a geoarrow extension type
+    if not hasattr(geom_type, "extension_name"):
+        return table  # Already plain binary
+
+    if not geom_type.extension_name.startswith("geoarrow"):
+        return table  # Not a geoarrow type
+
+    try:
+        # Extract storage (plain binary) from extension type
+        new_chunks = []
+        for chunk in geom_col.chunks:
+            if hasattr(chunk, "storage"):
+                new_chunks.append(chunk.storage)
+            else:
+                new_chunks.append(chunk)
+
+        # Create new binary column
+        plain_col = pa.chunked_array(new_chunks, type=pa.binary())
+
+        # Replace in table
+        col_index = table.schema.get_field_index(geometry_column)
+        return table.set_column(col_index, geometry_column, plain_col)
+
+    except (TypeError, ValueError, AttributeError):
+        return table
+
+
+def is_geoarrow_type(arrow_type) -> bool:
+    """Check if an Arrow type is a geoarrow extension type."""
+    if hasattr(arrow_type, "extension_name"):
+        return arrow_type.extension_name.startswith("geoarrow")
+    return False
+
+
 class StreamingError(Exception):
     """Error raised during Arrow IPC streaming operations."""
 

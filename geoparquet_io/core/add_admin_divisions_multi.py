@@ -13,6 +13,7 @@ from geoparquet_io.core.admin_datasets import AdminDatasetFactory
 from geoparquet_io.core.common import (
     check_bbox_structure,
     find_primary_geometry_column,
+    get_bbox_advice,
     get_parquet_metadata,
     safe_file_url,
     write_parquet_with_metadata,
@@ -150,6 +151,10 @@ def _add_extent_filter(con, input_url, input_bbox_col, input_geom_col, admin_bbo
 
 def _handle_bbox_optimization(input_parquet, input_bbox_info, add_bbox_flag, verbose):
     """Handle bbox optimization if needed."""
+    # Skip for native geometry files - they use native stats instead of bbox pre-filtering
+    if input_bbox_info.get("status") == "native":
+        return input_bbox_info
+
     if input_bbox_info["status"] != "optimal":
         warn(
             "\nWarning: Input file could benefit from bbox optimization:\n"
@@ -232,8 +237,17 @@ def _setup_dataset_and_columns(input_parquet, dataset_name, dataset_source, leve
     input_geom_col = find_primary_geometry_column(input_parquet, verbose)
     admin_geom_col = dataset.get_geometry_column()
 
-    input_bbox_info = check_bbox_structure(input_parquet, verbose)
-    input_bbox_col = input_bbox_info["bbox_column_name"]
+    # Check if we should skip bbox pre-filtering (for native geometry files)
+    input_bbox_advice = get_bbox_advice(input_parquet, "spatial_filtering", verbose)
+    if input_bbox_advice["skip_bbox_prefilter"]:
+        if verbose:
+            debug("Input has native geometry - skipping bbox pre-filter (native stats are faster)")
+        input_bbox_info = {"status": "native", "bbox_column_name": None, "has_bbox_column": False}
+        input_bbox_col = None
+    else:
+        input_bbox_info = check_bbox_structure(input_parquet, verbose)
+        input_bbox_col = input_bbox_info["bbox_column_name"]
+
     admin_bbox_col = dataset.get_bbox_column()
 
     return (

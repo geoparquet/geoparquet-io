@@ -1924,6 +1924,54 @@ def _get_geometry_type_name(code: int) -> str:
     return base_name + suffix
 
 
+def _is_geoarrow_extension_type(arrow_type) -> bool:
+    """Check if an Arrow type is a geoarrow extension type."""
+    if hasattr(arrow_type, "extension_name"):
+        return arrow_type.extension_name.startswith("geoarrow")
+    return False
+
+
+def _strip_geoarrow_to_plain_wkb(table, geometry_column: str, verbose: bool):
+    """
+    Convert geoarrow extension type back to plain binary WKB.
+
+    Used for GeoParquet 1.x output which uses plain binary geometry
+    with CRS only in metadata (not in schema).
+    """
+    import pyarrow as pa
+
+    geom_col = table.column(geometry_column)
+    geom_type = geom_col.type
+
+    # Check if it's a geoarrow extension type
+    if not _is_geoarrow_extension_type(geom_type):
+        return table  # Already plain binary
+
+    if verbose:
+        debug("v1.x: stripping geoarrow extension type to plain binary WKB")
+
+    try:
+        # Extract storage (plain binary) from extension type
+        new_chunks = []
+        for chunk in geom_col.chunks:
+            if hasattr(chunk, "storage"):
+                new_chunks.append(chunk.storage)
+            else:
+                new_chunks.append(chunk)
+
+        # Create new binary column
+        plain_col = pa.chunked_array(new_chunks, type=pa.binary())
+
+        # Replace in table
+        col_index = table.schema.get_field_index(geometry_column)
+        return table.set_column(col_index, geometry_column, plain_col)
+
+    except (TypeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not strip geoarrow type: {e}")
+        return table
+
+
 def _process_geometry_column_for_version(
     table,
     geometry_column: str,
@@ -1937,6 +1985,10 @@ def _process_geometry_column_for_version(
     Handles different GeoParquet versions:
     - v1.x: Plain binary WKB (no extension type), CRS only in metadata
     - v2.0/parquet-geo-only: geoarrow extension type with CRS in schema
+
+    When streaming data enters with geoarrow extension type:
+    - v1.x output: strips geoarrow to plain binary WKB
+    - v2.0 output: preserves/enhances geoarrow extension type
 
     Args:
         table: PyArrow Table to modify
@@ -1968,10 +2020,12 @@ def _process_geometry_column_for_version(
             col_index = table.schema.get_field_index(geometry_column)
             table = table.set_column(col_index, geometry_column, wkb_arr)
         else:
-            # For v1.x: keep as plain binary WKB (no geoarrow extension type)
+            # For v1.x: ensure plain binary WKB (strip geoarrow if present)
             # CRS goes only in metadata, not in schema
-            if verbose:
-                debug("v1.x: keeping geometry as plain binary WKB (CRS in metadata only)")
+            if _is_geoarrow_extension_type(geom_col.type):
+                table = _strip_geoarrow_to_plain_wkb(table, geometry_column, verbose)
+            elif verbose:
+                debug("v1.x: geometry is already plain binary WKB (CRS in metadata only)")
 
     except (TypeError, ValueError, AttributeError) as e:
         if verbose:
@@ -2777,6 +2831,91 @@ def check_bbox_structure(parquet_file, verbose=False):
         "status": status,
         "message": message,
     }
+
+
+def get_bbox_advice(
+    parquet_file: str,
+    operation: str,
+    verbose: bool = False,
+) -> dict:
+    """
+    Get version-aware bbox optimization advice.
+
+    Provides context-aware recommendations based on file type and operation:
+    - For GeoParquet 2.0/parquet-geo with spatial_filtering: No bbox needed (native stats work)
+    - For GeoParquet 2.0/parquet-geo with bounds_calculation: bbox still recommended (faster)
+    - For GeoParquet 1.x without bbox: Suggest adding bbox OR upgrading to 2.0
+
+    Args:
+        parquet_file: Path to the parquet file
+        operation: One of:
+            - "spatial_filtering": For ST_Intersects, spatial joins, etc.
+            - "bounds_calculation": For centroid, extent, quadkey, etc.
+            - "check": For validation/inspection
+        verbose: Whether to print verbose output
+
+    Returns:
+        dict with:
+            - needs_warning: bool - Whether to show a warning to the user
+            - skip_bbox_prefilter: bool - Whether to skip bbox pre-filtering in queries
+            - has_native_geometry: bool - Whether file uses native Parquet geometry types
+            - message: str - User-facing message (if needs_warning)
+            - suggestions: list[str] - Suggested actions for the user
+    """
+    file_info = detect_geoparquet_file_type(parquet_file, verbose)
+    bbox_info = check_bbox_structure(parquet_file, verbose)
+
+    has_native_geo = file_info["file_type"] in ("geoparquet_v2", "parquet_geo_only")
+    has_bbox = bbox_info["has_bbox_column"]
+
+    result = {
+        "needs_warning": False,
+        "skip_bbox_prefilter": has_native_geo,  # Skip bbox filter for native geometry
+        "has_native_geometry": has_native_geo,
+        "has_bbox_column": has_bbox,
+        "bbox_column_name": bbox_info.get("bbox_column_name"),
+        "message": "",
+        "suggestions": [],
+    }
+
+    if operation == "spatial_filtering":
+        if has_native_geo:
+            # Native geometry stats are used automatically - no warning needed
+            if verbose:
+                debug("Using native Parquet geometry statistics for spatial filtering")
+        elif not has_bbox:
+            # 1.x without bbox - warn and suggest options
+            result["needs_warning"] = True
+            result["message"] = "No bbox column found"
+            result["suggestions"] = [
+                "Add a bbox column: gpio add bbox <file>",
+                "Or upgrade to GeoParquet 2.0: gpio convert <file> --geoparquet-version 2.0",
+            ]
+
+    elif operation == "bounds_calculation":
+        # bbox column is still faster for bounds/centroid calculation (pre-computed values)
+        if not has_bbox:
+            result["needs_warning"] = True
+            result["message"] = "No bbox column - computing from geometry (slower)"
+            result["suggestions"] = [
+                "Add a bbox column for 3-4x faster bounds/centroid: gpio add bbox <file>"
+            ]
+
+    elif operation == "check":
+        if has_native_geo:
+            # Native geometry - bbox optional but can help with bounds queries
+            if not has_bbox and verbose:
+                debug("Native geometry type detected - bbox column optional for spatial queries")
+        elif not has_bbox:
+            # 1.x without bbox
+            result["needs_warning"] = True
+            result["message"] = "No bbox column found"
+            result["suggestions"] = [
+                "Add a bbox column: gpio add bbox <file>",
+                "Or upgrade to GeoParquet 2.0: gpio convert <file> --geoparquet-version 2.0",
+            ]
+
+    return result
 
 
 def _build_bounds_query(safe_url, bbox_info, geometry_column, verbose):

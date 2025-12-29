@@ -6,6 +6,7 @@ import duckdb
 from geoparquet_io.core.common import (
     check_bbox_structure,
     find_primary_geometry_column,
+    get_bbox_advice,
     get_dataset_bounds,
     get_parquet_metadata,
     safe_file_url,
@@ -404,7 +405,22 @@ def _setup_default_countries(
 def _prepare_bbox_columns(
     input_parquet, countries_parquet, using_default, add_bbox_flag, dry_run, verbose
 ):
-    """Prepare and optionally optimize bbox columns for input and countries files."""
+    """Prepare and optionally optimize bbox columns for input and countries files.
+
+    For GeoParquet 2.0 / parquet-geo files with native geometry types,
+    skip bbox pre-filtering entirely as native geometry row group statistics
+    are faster than manual bbox filtering.
+    """
+    # Check if input file has native geometry (2.0 / parquet-geo)
+    input_bbox_advice = get_bbox_advice(input_parquet, "spatial_filtering", verbose)
+
+    # For native geometry files, skip bbox pre-filtering
+    if input_bbox_advice["skip_bbox_prefilter"]:
+        if verbose:
+            debug("Input has native geometry - skipping bbox pre-filter (native stats are faster)")
+        return None, None
+
+    # For 1.x files, use bbox optimization if available
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
     input_bbox_col = input_bbox_info["bbox_column_name"]
 
@@ -415,10 +431,19 @@ def _prepare_bbox_columns(
         countries_bbox_col = countries_bbox_info["bbox_column_name"]
 
     if not dry_run:
-        input_bbox_info = _handle_bbox_optimization(
-            input_parquet, input_bbox_info, add_bbox_flag, "Input file", verbose
-        )
-        input_bbox_col = input_bbox_info["bbox_column_name"]
+        # Show warning and suggest options for 1.x files without bbox
+        if input_bbox_advice["needs_warning"]:
+            warn(f"\nWarning: {input_bbox_advice['message']}")
+            if not add_bbox_flag:
+                for suggestion in input_bbox_advice["suggestions"]:
+                    info(f"💡 Tip: {suggestion}")
+
+        # Handle bbox optimization if --add-bbox flag is used
+        if add_bbox_flag and not input_bbox_info["has_bbox_column"]:
+            input_bbox_info = _handle_bbox_optimization(
+                input_parquet, input_bbox_info, add_bbox_flag, "Input file", verbose
+            )
+            input_bbox_col = input_bbox_info["bbox_column_name"]
 
         if not using_default:
             countries_bbox_info = check_bbox_structure(countries_parquet, verbose)
