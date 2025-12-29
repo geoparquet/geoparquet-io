@@ -115,7 +115,8 @@ class TestArrowStreamIO:
     def geo_table(self):
         """Create a table with geometry column (as WKB)."""
         # Create simple WKB point geometry (POINT(0 0))
-        wkb_point = bytes.fromhex("0101000000000000000000000000000000000000")
+        # WKB format: 1 byte order + 4 bytes type + 8 bytes X + 8 bytes Y = 21 bytes
+        wkb_point = bytes.fromhex("010100000000000000000000000000000000000000")
         return pa.table({"id": [1, 2], "geometry": [wkb_point, wkb_point], "name": ["a", "b"]})
 
     def test_write_and_read_roundtrip(self, sample_table):

@@ -7,7 +7,6 @@ import tempfile
 import uuid
 
 import click
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.add_quadkey_column import add_quadkey_column
 from geoparquet_io.core.common import safe_file_url
@@ -22,30 +21,7 @@ from geoparquet_io.core.partition_common import (
     partition_by_column,
     preview_partition,
 )
-from geoparquet_io.core.streaming import is_stdin, read_arrow_stream
-
-
-def _read_stdin_to_temp_file(verbose: bool) -> str:
-    """
-    Read Arrow IPC stream from stdin and write to a temporary parquet file.
-
-    Returns the path to the temporary file. The caller is responsible for cleanup.
-    """
-    if verbose:
-        debug("Reading Arrow IPC stream from stdin...")
-
-    table = read_arrow_stream()
-
-    # Write to temp file
-    temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
-    os.close(temp_fd)
-
-    pq.write_table(table, temp_path)
-
-    if verbose:
-        debug(f"Wrote {table.num_rows} rows to temporary file: {temp_path}")
-
-    return temp_path
+from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
 
 
 def _validate_resolutions(resolution, partition_resolution):
@@ -180,7 +156,7 @@ def partition_by_quadkey(
     actual_input = input_parquet
 
     if is_stdin(input_parquet):
-        stdin_temp_file = _read_stdin_to_temp_file(verbose)
+        stdin_temp_file = read_stdin_to_temp_file(verbose)
         actual_input = stdin_temp_file
 
     try:

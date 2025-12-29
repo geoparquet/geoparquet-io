@@ -13,6 +13,7 @@ from pathlib import Path
 
 import click
 import duckdb
+import pyarrow as pa
 import pytest
 
 from geoparquet_io.core.extract import (
@@ -21,6 +22,7 @@ from geoparquet_io.core.extract import (
     build_spatial_filter,
     convert_geojson_to_wkt,
     extract,
+    extract_table,
     get_schema_columns,
     is_geographic_crs,
     looks_like_latlong_bbox,
@@ -1039,3 +1041,27 @@ class TestExtractRemote:
             assert count < 617941  # Less than total rows
         finally:
             con.close()
+
+
+class TestExtractTable:
+    """Tests for extract_table Python API function."""
+
+    def test_invalid_geometry_column_raises_error(self):
+        """Test that specifying a non-existent geometry column raises ValueError."""
+        table = pa.table({"id": [1, 2, 3], "name": ["a", "b", "c"], "geometry": [b"", b"", b""]})
+
+        with pytest.raises(ValueError) as exc_info:
+            extract_table(table, geometry_column="nonexistent")
+
+        assert "geometry_column 'nonexistent' not found" in str(exc_info.value)
+        assert "id" in str(exc_info.value)
+        assert "name" in str(exc_info.value)
+
+    def test_default_geometry_column_not_found_raises_error(self):
+        """Test that missing default 'geometry' column raises ValueError."""
+        table = pa.table({"id": [1, 2, 3], "data": ["x", "y", "z"]})
+
+        with pytest.raises(ValueError) as exc_info:
+            extract_table(table)
+
+        assert "geometry_column 'geometry' not found" in str(exc_info.value)

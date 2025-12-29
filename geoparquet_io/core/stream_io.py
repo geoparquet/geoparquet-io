@@ -43,6 +43,23 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+def _quote_identifier(name: str) -> str:
+    """
+    Quote a SQL identifier for safe use in DuckDB queries.
+
+    Escapes embedded double quotes by doubling them, then wraps in double quotes.
+    This handles column/table names with spaces, special characters, or reserved words.
+
+    Args:
+        name: The identifier to quote
+
+    Returns:
+        The quoted identifier safe for SQL use
+    """
+    escaped = name.replace('"', '""')
+    return f'"{escaped}"'
+
+
 def _create_view_with_geometry(
     con: duckdb.DuckDBPyConnection,
     table_name: str,
@@ -65,21 +82,25 @@ def _create_view_with_geometry(
     if not geometry_column:
         return table_name
 
+    quoted_table = _quote_identifier(table_name)
+
     # Get column info to check types
-    columns = con.execute(f"DESCRIBE {table_name}").fetchall()
+    columns = con.execute(f"DESCRIBE {quoted_table}").fetchall()
     column_defs = []
 
     for col_name, col_type, *_ in columns:
+        quoted_col = _quote_identifier(col_name)
         if col_name == geometry_column and "BLOB" in col_type.upper():
             # Convert BLOB to GEOMETRY using ST_GeomFromWKB
-            column_defs.append(f"ST_GeomFromWKB({col_name}) AS {col_name}")
+            column_defs.append(f"ST_GeomFromWKB({quoted_col}) AS {quoted_col}")
         else:
-            column_defs.append(col_name)
+            column_defs.append(quoted_col)
 
     # Create view with proper geometry type
     view_name = f"{table_name}_geom"
+    quoted_view = _quote_identifier(view_name)
     select_cols = ", ".join(column_defs)
-    con.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT {select_cols} FROM {table_name}")
+    con.execute(f"CREATE OR REPLACE VIEW {quoted_view} AS SELECT {select_cols} FROM {quoted_table}")
 
     return view_name
 
@@ -126,17 +147,22 @@ def _open_stdin_input(
     table = read_arrow_stream()
     metadata = dict(table.schema.metadata) if table.schema.metadata else {}
 
-    if con is None:
+    created_connection = con is None
+    if created_connection:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
 
-    # Register the Arrow table for SQL queries
-    con.register("input_stream", table)
+    try:
+        # Register the Arrow table for SQL queries
+        con.register("input_stream", table)
 
-    # Find geometry column and create view with proper geometry type
-    geom_col = find_geometry_column_from_table(table)
-    source_ref = _create_view_with_geometry(con, "input_stream", geom_col)
+        # Find geometry column and create view with proper geometry type
+        geom_col = find_geometry_column_from_table(table)
+        source_ref = _create_view_with_geometry(con, "input_stream", geom_col)
 
-    yield source_ref, metadata, True, con
+        yield source_ref, metadata, True, con
+    finally:
+        if created_connection:
+            con.close()
 
 
 def _open_file_input(
@@ -148,10 +174,15 @@ def _open_file_input(
     safe_url = safe_file_url(path, verbose=verbose)
     file_metadata, _ = get_parquet_metadata(path, verbose=verbose)
 
-    if con is None:
+    created_connection = con is None
+    if created_connection:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
 
-    yield f"read_parquet('{safe_url}')", file_metadata, False, con
+    try:
+        yield f"read_parquet('{safe_url}')", file_metadata, False, con
+    finally:
+        if created_connection:
+            con.close()
 
 
 def _wrap_query_with_wkb_conversion(

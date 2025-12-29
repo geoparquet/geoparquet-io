@@ -260,7 +260,7 @@ class Table:
         result = add_h3_table(
             self._table,
             h3_column_name=column_name,
-            h3_resolution=resolution,
+            resolution=resolution,
         )
         return Table(result, self._geometry_column)
 
@@ -310,7 +310,7 @@ class Table:
 
         result = sort_by_column_table(
             self._table,
-            column_name=column_name,
+            columns=column_name,
             descending=descending,
         )
         return Table(result, self._geometry_column)

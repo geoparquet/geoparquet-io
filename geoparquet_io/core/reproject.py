@@ -122,17 +122,35 @@ def reproject_table(
     try:
         con.register("__input_table", table)
 
+        # Check if geometry column is BLOB type (needs conversion to GEOMETRY)
+        geom_is_blob = False
+        if geom_col in table.column_names:
+            col_idx = table.column_names.index(geom_col)
+            col_type = str(table.schema.field(col_idx).type)
+            geom_is_blob = "large_binary" in col_type.lower() or "binary" in col_type.lower()
+
+        # Create view with geometry conversion if needed
+        source_table = "__input_table"
+        if geom_is_blob:
+            other_cols = [c for c in table.column_names if c != geom_col]
+            col_defs = other_cols + [f'ST_GeomFromWKB("{geom_col}") AS "{geom_col}"']
+            view_query = (
+                f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
+            )
+            con.execute(view_query)
+            source_table = "__input_view"
+
         # Build reprojection query
         query = f"""
             SELECT
-                * EXCLUDE ({geom_col}),
+                * EXCLUDE ("{geom_col}"),
                 ST_Transform(
-                    {geom_col},
+                    "{geom_col}",
                     '{effective_source_crs}',
                     '{target_crs}',
                     always_xy := true
-                ) AS {geom_col}
-            FROM __input_table
+                ) AS "{geom_col}"
+            FROM {source_table}
         """
 
         result = con.execute(query).fetch_arrow_table()

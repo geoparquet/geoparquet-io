@@ -240,6 +240,44 @@ def find_geometry_column_from_table(table: pa.Table) -> str | None:
     return None
 
 
+def read_stdin_to_temp_file(verbose: bool = False) -> str:
+    """
+    Read Arrow IPC stream from stdin and write to a temporary parquet file.
+
+    This is a shared utility for commands that need file-based processing
+    but want to support stdin input. The caller is responsible for cleanup.
+
+    Args:
+        verbose: Whether to print verbose output
+
+    Returns:
+        Path to the temporary parquet file. Caller must delete after use.
+    """
+    import os
+    import tempfile
+    import uuid
+
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.logging_config import debug
+
+    if verbose:
+        debug("Reading Arrow IPC stream from stdin...")
+
+    table = read_arrow_stream()
+
+    # Write to temp file with UUID for uniqueness
+    temp_dir = tempfile.gettempdir()
+    temp_path = os.path.join(temp_dir, f"gpio_stdin_{uuid.uuid4()}.parquet")
+
+    pq.write_table(table, temp_path)
+
+    if verbose:
+        debug(f"Wrote {table.num_rows} rows to temporary file: {temp_path}")
+
+    return temp_path
+
+
 class StreamingError(Exception):
     """Error raised during Arrow IPC streaming operations."""
 

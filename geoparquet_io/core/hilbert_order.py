@@ -86,7 +86,7 @@ def hilbert_order_table(
         """).fetchone()
 
         if not bounds_result or any(v is None for v in bounds_result):
-            raise click.ClickException("Could not calculate dataset bounds from table")
+            raise ValueError("Could not calculate dataset bounds from table")
 
         xmin, ymin, xmax, ymax = bounds_result
 

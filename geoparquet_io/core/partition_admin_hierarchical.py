@@ -11,11 +11,9 @@ This module provides partitioning by administrative boundaries through a two-ste
 from __future__ import annotations
 
 import os
-import tempfile
 
 import click
 import duckdb
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.admin_datasets import AdminDatasetFactory
 from geoparquet_io.core.common import (
@@ -29,29 +27,7 @@ from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition_common import (
     sanitize_filename,
 )
-from geoparquet_io.core.streaming import is_stdin, read_arrow_stream
-
-
-def _read_stdin_to_temp_file(verbose: bool) -> str:
-    """
-    Read Arrow IPC stream from stdin and write to a temporary parquet file.
-
-    Returns the path to the temporary file. The caller is responsible for cleanup.
-    """
-    if verbose:
-        debug("Reading Arrow IPC stream from stdin...")
-
-    table = read_arrow_stream()
-
-    temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
-    os.close(temp_fd)
-
-    pq.write_table(table, temp_path)
-
-    if verbose:
-        debug(f"Wrote {table.num_rows} rows to temporary file: {temp_path}")
-
-    return temp_path
+from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
 
 
 def _build_enrichment_query(
@@ -470,7 +446,7 @@ def partition_by_admin_hierarchical(
     actual_input = input_parquet
 
     if is_stdin(input_parquet):
-        stdin_temp_file = _read_stdin_to_temp_file(verbose)
+        stdin_temp_file = read_stdin_to_temp_file(verbose)
         actual_input = stdin_temp_file
 
     try:

@@ -2575,10 +2575,13 @@ def write_geoparquet_table(
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
 
-    # Normalize compression
-    compression_upper = compression.upper() if compression else "ZSTD"
-    if compression_upper == "UNCOMPRESSED":
-        compression_upper = None
+    # Validate and normalize compression settings
+    validated_compression, validated_level, _ = validate_compression_settings(
+        compression or "ZSTD", compression_level, verbose
+    )
+    # Handle UNCOMPRESSED - pass None for compression when uncompressed
+    if validated_compression == "UNCOMPRESSED":
+        validated_compression = None
 
     with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
         actual_output,
@@ -2600,8 +2603,8 @@ def write_geoparquet_table(
         _write_table_with_settings(
             table,
             actual_output,
-            compression=compression_upper or "UNCOMPRESSED",
-            compression_level=compression_level,
+            compression=validated_compression or "UNCOMPRESSED",
+            compression_level=validated_level,
             row_group_rows=row_group_rows,
             row_group_size_mb=row_group_size_mb,
             geoparquet_version=geoparquet_version,

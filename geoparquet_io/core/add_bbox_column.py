@@ -196,6 +196,7 @@ def add_bbox_column(
             row_group_size_mb,
             row_group_rows,
             profile,
+            force,
             geoparquet_version,
         )
         return
@@ -227,6 +228,7 @@ def _add_bbox_streaming(
     row_group_size_mb: float | None,
     row_group_rows: int | None,
     profile: str | None,
+    force: bool,
     geoparquet_version: str | None,
 ) -> None:
     """Handle streaming input/output for add_bbox."""
@@ -249,7 +251,7 @@ def _add_bbox_streaming(
         if not geom_col:
             geom_col = "geometry"
 
-        return _make_add_bbox_query(source, geom_col, bbox_column_name, replace_existing=False)
+        return _make_add_bbox_query(source, geom_col, bbox_column_name, replace_existing=force)
 
     execute_transform(
         input_path,

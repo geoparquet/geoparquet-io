@@ -32,6 +32,7 @@ from geoparquet_io.core.common import (
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
+    find_geometry_column_from_metadata,
     find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
@@ -702,6 +703,12 @@ def extract_table(
     if not geom_col:
         geom_col = "geometry"
 
+    # Validate geometry column exists
+    if geom_col not in all_columns:
+        raise ValueError(
+            f"geometry_column '{geom_col}' not found in table columns: {list(all_columns)}"
+        )
+
     # Build column selection
     selected_columns = build_column_selection(
         all_columns,
@@ -804,8 +811,6 @@ def _extract_streaming(
         all_columns = [col[0] for col in sample]
 
         # Find geometry column
-        from geoparquet_io.core.streaming import find_geometry_column_from_metadata
-
         geom_col = find_geometry_column_from_metadata(metadata)
         if not geom_col:
             for name in ["geometry", "geom", "the_geom"]:

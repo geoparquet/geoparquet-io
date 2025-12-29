@@ -28,7 +28,7 @@ from geoparquet_io.core.stream_io import write_output
 from geoparquet_io.core.streaming import (
     find_geometry_column_from_table,
     is_stdin,
-    read_arrow_stream,
+    read_stdin_to_temp_file,
     should_stream_output,
 )
 
@@ -247,47 +247,26 @@ def add_kdtree_table(
 
         # Process using file-based mode
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-        input_url = safe_file_url(temp_path, verbose=False)
+        try:
+            input_url = safe_file_url(temp_path, verbose=False)
 
-        # Build query using sampling approach
-        query = _build_sampling_query(
-            input_url, geom_col, kdtree_column_name, iterations, sample_size, con, verbose=False
-        )
+            # Build query using sampling approach
+            query = _build_sampling_query(
+                input_url, geom_col, kdtree_column_name, iterations, sample_size, con, verbose=False
+            )
 
-        result = con.execute(query).fetch_arrow_table()
-        con.close()
+            result = con.execute(query).fetch_arrow_table()
 
-        # Preserve metadata
-        if table.schema.metadata:
-            result = result.replace_schema_metadata(table.schema.metadata)
+            # Preserve metadata
+            if table.schema.metadata:
+                result = result.replace_schema_metadata(table.schema.metadata)
 
-        return result
+            return result
+        finally:
+            con.close()
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
-
-
-def _read_stdin_to_temp_file(verbose: bool) -> str:
-    """
-    Read Arrow IPC stream from stdin and write to a temporary parquet file.
-
-    Returns the path to the temporary file. The caller is responsible for cleanup.
-    """
-    if verbose:
-        debug("Reading Arrow IPC stream from stdin...")
-
-    table = read_arrow_stream()
-
-    # Write to temp file
-    temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
-    os.close(temp_fd)
-
-    pq.write_table(table, temp_path)
-
-    if verbose:
-        debug(f"Wrote {table.num_rows} rows to temporary file: {temp_path}")
-
-    return temp_path
 
 
 def add_kdtree_column(
@@ -570,7 +549,7 @@ def _add_kdtree_streaming(
     try:
         # If reading from stdin, write to temp file first
         if is_stdin(input_path):
-            temp_input_file = _read_stdin_to_temp_file(verbose)
+            temp_input_file = read_stdin_to_temp_file(verbose)
             working_file = temp_input_file
         else:
             working_file = input_path
@@ -579,43 +558,44 @@ def _add_kdtree_streaming(
         input_url = safe_file_url(working_file, verbose)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_file))
 
-        # Find geometry column
-        geom_col = find_primary_geometry_column(working_file, verbose)
+        try:
+            # Find geometry column
+            geom_col = find_primary_geometry_column(working_file, verbose)
 
-        # Validate iterations
-        if not 1 <= iterations <= 20:
-            raise click.BadParameter(f"Iterations must be between 1 and 20, got {iterations}")
+            # Validate iterations
+            if not 1 <= iterations <= 20:
+                raise click.BadParameter(f"Iterations must be between 1 and 20, got {iterations}")
 
-        if verbose:
-            debug(f"Computing KD-tree partitions ({iterations} iterations)...")
+            if verbose:
+                debug(f"Computing KD-tree partitions ({iterations} iterations)...")
 
-        # Build query using sampling approach
-        query = _build_sampling_query(
-            input_url, geom_col, kdtree_column_name, iterations, sample_size, con, verbose
-        )
+            # Build query using sampling approach
+            query = _build_sampling_query(
+                input_url, geom_col, kdtree_column_name, iterations, sample_size, con, verbose
+            )
 
-        # Get metadata from input
-        from geoparquet_io.core.common import get_parquet_metadata
+            # Get metadata from input
+            from geoparquet_io.core.common import get_parquet_metadata
 
-        metadata, _ = get_parquet_metadata(working_file, verbose=False)
+            metadata, _ = get_parquet_metadata(working_file, verbose=False)
 
-        # Write output
-        write_output(
-            con,
-            query,
-            output_path,
-            original_metadata=metadata,
-            geometry_column=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-        )
-
-        con.close()
+            # Write output
+            write_output(
+                con,
+                query,
+                output_path,
+                original_metadata=metadata,
+                geometry_column=geom_col,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                verbose=verbose,
+                profile=profile,
+                geoparquet_version=geoparquet_version,
+            )
+        finally:
+            con.close()
 
         if not should_stream_output(output_path):
             partition_count = 2**iterations

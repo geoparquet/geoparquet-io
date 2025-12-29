@@ -1,14 +1,20 @@
 """Tests for partition_by_quadkey module."""
 
+import io
+import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
+from unittest import mock
 
+import pyarrow.ipc as ipc
+import pyarrow.parquet as pq
 import pytest
 from click import UsageError
 from click.testing import CliRunner
 
-from geoparquet_io.core.partition_by_quadkey import _validate_resolutions
+from geoparquet_io.core.partition_by_quadkey import _validate_resolutions, partition_by_quadkey
 from geoparquet_io.core.partition_common import calculate_partition_stats
 
 
@@ -73,7 +79,6 @@ class TestPartitionQuadkeyCommand:
         tmp_path = Path(tempfile.gettempdir()) / f"test_partition_quadkey_{uuid.uuid4()}"
         yield str(tmp_path)
         # Cleanup
-        import shutil
 
         if tmp_path.exists():
             shutil.rmtree(tmp_path)
@@ -96,3 +101,105 @@ class TestPartitionQuadkeyCommand:
             cli, ["partition", "quadkey", sample_file, output_folder, "--resolution", "30"]
         )
         assert result.exit_code != 0
+
+
+class TestPartitionByQuadkeyFunction:
+    """Tests for partition_by_quadkey function."""
+
+    @pytest.fixture
+    def places_file(self):
+        """Return path to the places test file."""
+        return str(Path(__file__).parent / "data" / "places_test.parquet")
+
+    @pytest.fixture
+    def output_folder(self):
+        """Create a temp output folder path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_partition_func_{uuid.uuid4()}"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            shutil.rmtree(tmp_path)
+
+    def test_partition_basic(self, places_file, output_folder):
+        """Test basic partitioning."""
+        partition_by_quadkey(
+            places_file,
+            output_folder,
+            resolution=10,
+            partition_resolution=5,
+            skip_analysis=True,
+        )
+        # Check partitions were created
+        output_path = Path(output_folder)
+        assert output_path.exists()
+        parquet_files = list(output_path.glob("*.parquet"))
+        assert len(parquet_files) > 0
+
+    def test_partition_hive_style(self, places_file, output_folder):
+        """Test Hive-style partitioning."""
+        partition_by_quadkey(
+            places_file,
+            output_folder,
+            resolution=10,
+            partition_resolution=3,
+            hive=True,
+            skip_analysis=True,
+        )
+        # Check partitions were created in subdirectories
+        output_path = Path(output_folder)
+        assert output_path.exists()
+        # Hive style creates directories like quadkey=abc/
+        subdirs = [d for d in output_path.iterdir() if d.is_dir()]
+        assert len(subdirs) > 0
+
+
+class TestPartitionByQuadkeyStreaming:
+    """Tests for streaming input to partition_by_quadkey."""
+
+    @pytest.fixture
+    def places_file(self):
+        """Return path to the places test file."""
+        return str(Path(__file__).parent / "data" / "places_test.parquet")
+
+    @pytest.fixture
+    def sample_geo_table(self, places_file):
+        """Create a geo table from test data."""
+        return pq.read_table(places_file)
+
+    @pytest.fixture
+    def output_folder(self):
+        """Create a temp output folder path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_partition_stream_{uuid.uuid4()}"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            shutil.rmtree(tmp_path)
+
+    def test_stdin_to_partition(self, sample_geo_table, output_folder, monkeypatch):
+        """Test partitioning from stdin."""
+        # Create IPC buffer
+        ipc_buffer = io.BytesIO()
+        writer = ipc.RecordBatchStreamWriter(ipc_buffer, sample_geo_table.schema)
+        writer.write_table(sample_geo_table)
+        writer.close()
+        ipc_buffer.seek(0)
+
+        # Create a mock stdin with buffer attribute
+        mock_stdin = mock.MagicMock()
+        mock_stdin.isatty.return_value = False
+        mock_stdin.buffer = ipc_buffer
+
+        monkeypatch.setattr(sys, "stdin", mock_stdin)
+
+        # Call function with "-" input
+        partition_by_quadkey(
+            "-",
+            output_folder,
+            resolution=10,
+            partition_resolution=5,
+            skip_analysis=True,
+        )
+
+        # Verify partitions were created
+        output_path = Path(output_folder)
+        assert output_path.exists()
+        parquet_files = list(output_path.glob("*.parquet"))
+        assert len(parquet_files) > 0

@@ -137,6 +137,73 @@ class TestTable:
         loaded = pq.read_table(output_file)
         assert "bbox" in loaded.column_names
 
+    def test_add_h3(self, sample_table):
+        """Test add_h3() method."""
+        result = sample_table.add_h3()
+        assert isinstance(result, Table)
+        assert "h3_cell" in result.column_names
+        assert result.num_rows == 766
+
+    def test_add_h3_custom_resolution(self, sample_table):
+        """Test add_h3() with custom resolution."""
+        result = sample_table.add_h3(resolution=5)
+        assert "h3_cell" in result.column_names
+        assert result.num_rows == 766
+
+    def test_add_h3_custom_column_name(self, sample_table):
+        """Test add_h3() with custom column name."""
+        result = sample_table.add_h3(column_name="my_h3")
+        assert "my_h3" in result.column_names
+        assert result.num_rows == 766
+
+    def test_add_kdtree(self, sample_table):
+        """Test add_kdtree() method."""
+        result = sample_table.add_kdtree()
+        assert isinstance(result, Table)
+        assert "kdtree_cell" in result.column_names
+        assert result.num_rows == 766
+
+    def test_add_kdtree_custom_params(self, sample_table):
+        """Test add_kdtree() with custom parameters."""
+        result = sample_table.add_kdtree(iterations=5, sample_size=1000)
+        assert "kdtree_cell" in result.column_names
+        assert result.num_rows == 766
+
+    def test_sort_column(self, sample_table):
+        """Test sort_column() method."""
+        result = sample_table.sort_column("name")
+        assert isinstance(result, Table)
+        assert result.num_rows == 766
+
+    def test_sort_column_descending(self, sample_table):
+        """Test sort_column() in descending order."""
+        result = sample_table.sort_column("name", descending=True)
+        assert isinstance(result, Table)
+        assert result.num_rows == 766
+
+    def test_sort_quadkey(self, sample_table):
+        """Test sort_quadkey() method."""
+        result = sample_table.sort_quadkey(resolution=10)
+        assert isinstance(result, Table)
+        assert result.num_rows == 766
+        # Quadkey column should be auto-added
+        assert "quadkey" in result.column_names
+
+    def test_sort_quadkey_remove_column(self, sample_table):
+        """Test sort_quadkey() with remove_column=True."""
+        result = sample_table.sort_quadkey(resolution=10, remove_column=True)
+        assert isinstance(result, Table)
+        assert result.num_rows == 766
+        # Quadkey column should be removed after sorting
+        assert "quadkey" not in result.column_names
+
+    def test_reproject(self, sample_table):
+        """Test reproject() method."""
+        # Reproject to Web Mercator and back to WGS84
+        result = sample_table.reproject(target_crs="EPSG:3857")
+        assert isinstance(result, Table)
+        assert result.num_rows == 766
+
 
 class TestOps:
     """Tests for the ops module (pure functions)."""

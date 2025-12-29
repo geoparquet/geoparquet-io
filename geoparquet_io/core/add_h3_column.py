@@ -65,7 +65,8 @@ def add_h3_table(
 
         if geom_is_blob and geom_col in table.column_names:
             # Create view with geometry conversion
-            other_cols = [c for c in table.column_names if c != geom_col]
+            # Quote all column names for safety with special characters
+            other_cols = [f'"{c}"' for c in table.column_names if c != geom_col]
             col_defs = other_cols + [f'ST_GeomFromWKB("{geom_col}") AS "{geom_col}"']
             view_query = (
                 f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
