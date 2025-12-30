@@ -13,6 +13,7 @@ import duckdb
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
+from geoparquet_io.core.streaming import extract_version_from_metadata
 
 # Per-bucket cache for S3 buckets that require authentication
 # Buckets not in this set are accessed without credentials (works for public buckets)
@@ -2415,6 +2416,10 @@ def write_geoparquet_via_arrow(
     # Detect geometry column if not provided
     if geometry_column is None:
         geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
+
+    # Auto-detect GeoParquet version from input metadata if not explicitly provided
+    if geoparquet_version is None:
+        geoparquet_version = extract_version_from_metadata(original_metadata)
 
     # Check if geometry column actually exists in the query result
     query_columns = _get_query_columns(con, query)

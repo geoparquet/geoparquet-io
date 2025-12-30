@@ -31,6 +31,7 @@ from geoparquet_io.core.common import (
 from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
+    detect_version_for_output,
     find_geometry_column_from_metadata,
     find_geometry_column_from_table,
     is_stdin,
@@ -349,6 +350,10 @@ def _write_file_output(
     geoparquet_version: str | None,
 ) -> None:
     """Write output to Parquet file."""
+    # Auto-detect version from input metadata if not explicitly provided
+    if geoparquet_version is None:
+        geoparquet_version = detect_version_for_output(original_metadata)
+
     write_parquet_with_metadata(
         con,
         query,

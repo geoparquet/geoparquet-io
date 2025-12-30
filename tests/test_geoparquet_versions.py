@@ -1064,8 +1064,8 @@ class TestComprehensiveRoundTrips:
 class TestExtractGeoParquetVersion:
     """Test --geoparquet-version option on extract command."""
 
-    def test_extract_default_version(self, fields_v2_file, temp_output_file):
-        """Test extract uses default version (1.1)."""
+    def test_extract_preserves_input_version(self, fields_v2_file, temp_output_file):
+        """Test extract preserves input version (2.0 input -> 2.0 output)."""
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -1074,7 +1074,8 @@ class TestExtractGeoParquetVersion:
 
         assert result.exit_code == 0, f"Failed with: {result.output}"
         assert os.path.exists(temp_output_file)
-        assert get_geoparquet_version(temp_output_file) == "1.1.0"
+        # Input is GeoParquet 2.0, so output should also be 2.0
+        assert get_geoparquet_version(temp_output_file) == "2.0.0"
 
     def test_extract_version_2_0(self, fields_v2_file, temp_output_file):
         """Test extract with explicit 2.0 version."""
