@@ -436,6 +436,8 @@ def extract_version_from_metadata(metadata: dict | None) -> str | None:
     """
     Extract GeoParquet version string from schema metadata.
 
+    Upgrades 1.0 to 1.1 since 1.1 is backwards compatible and preferred.
+
     Args:
         metadata: Schema metadata dict (with bytes keys)
 
@@ -450,10 +452,13 @@ def extract_version_from_metadata(metadata: dict | None) -> str | None:
         if isinstance(geo_meta, dict):
             version = geo_meta.get("version")
             if version:
-                # Convert "1.1.0" -> "1.1", "2.0.0" -> "2.0"
                 parts = version.split(".")
                 if len(parts) >= 2:
-                    return f"{parts[0]}.{parts[1]}"
+                    major = parts[0]
+                    # Upgrade all 1.x versions to 1.1 (backwards compatible)
+                    if major == "1":
+                        return "1.1"
+                    return f"{major}.{parts[1]}"
         return None
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
@@ -483,7 +488,7 @@ def detect_version_for_output(
     Detect the appropriate GeoParquet version for output.
 
     Logic:
-    - If geo metadata has version 1.x -> return "1.0" or "1.1"
+    - If geo metadata has version 1.x -> return "1.1" (upgrade 1.0 to 1.1)
     - If geo metadata has version 2.x -> return "2.0"
     - If no geo metadata but has geoarrow types -> return "2.0" (upgrade)
     - Otherwise -> return None (will use default 1.1)

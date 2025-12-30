@@ -540,12 +540,13 @@ class TestVersionExtraction:
         metadata = {b"geo": json.dumps({"version": "1.1.0"}).encode("utf-8")}
         assert extract_version_from_metadata(metadata) == "1.1"
 
-    def test_extract_version_from_metadata_v10(self):
-        """Test extracting version 1.0 from metadata."""
+    def test_extract_version_from_metadata_v10_upgrades_to_v11(self):
+        """Test that version 1.0 is upgraded to 1.1."""
         from geoparquet_io.core.streaming import extract_version_from_metadata
 
         metadata = {b"geo": json.dumps({"version": "1.0.0"}).encode("utf-8")}
-        assert extract_version_from_metadata(metadata) == "1.0"
+        # 1.0 is upgraded to 1.1 since 1.1 is backwards compatible
+        assert extract_version_from_metadata(metadata) == "1.1"
 
     def test_extract_version_from_metadata_v20(self):
         """Test extracting version 2.0 from metadata."""
