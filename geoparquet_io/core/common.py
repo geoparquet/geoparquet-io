@@ -2857,7 +2857,10 @@ def get_bbox_advice(
     Returns:
         dict with:
             - needs_warning: bool - Whether to show a warning to the user
-            - skip_bbox_prefilter: bool - Whether to skip bbox pre-filtering in queries
+            - skip_bbox_prefilter: bool - Whether to skip bbox pre-filtering in queries.
+              Only True for spatial_filtering with native geometry (where Parquet stats
+              are used automatically). For bounds_calculation, always False since bbox
+              column provides pre-computed values that are faster than geometry stats.
             - has_native_geometry: bool - Whether file uses native Parquet geometry types
             - message: str - User-facing message (if needs_warning)
             - suggestions: list[str] - Suggested actions for the user
@@ -2868,9 +2871,13 @@ def get_bbox_advice(
     has_native_geo = file_info["file_type"] in ("geoparquet_v2", "parquet_geo_only")
     has_bbox = bbox_info["has_bbox_column"]
 
+    # Only skip bbox pre-filtering for spatial_filtering operations with native geometry.
+    # For bounds_calculation, bbox column provides pre-computed values that are faster.
+    skip_bbox = has_native_geo and operation == "spatial_filtering"
+
     result = {
         "needs_warning": False,
-        "skip_bbox_prefilter": has_native_geo,  # Skip bbox filter for native geometry
+        "skip_bbox_prefilter": skip_bbox,
         "has_native_geometry": has_native_geo,
         "has_bbox_column": has_bbox,
         "bbox_column_name": bbox_info.get("bbox_column_name"),

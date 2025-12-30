@@ -8,6 +8,7 @@ from geoparquet_io.core.common import (
     detect_geoparquet_file_type,
     find_primary_geometry_column,
     format_size,
+    get_bbox_advice,
     get_crs_display_name,
     get_duckdb_connection,
     get_parquet_metadata,
@@ -517,3 +518,75 @@ class TestGetGeometryTypeName:
         assert _get_geometry_type_name(99) == "Unknown"
         assert _get_geometry_type_name(1008) == "Unknown"
         assert _get_geometry_type_name(2099) == "Unknown"
+
+
+class TestGetBboxAdvice:
+    """Tests for get_bbox_advice function."""
+
+    def test_returns_expected_keys(self, places_test_file):
+        """Test that get_bbox_advice returns dict with expected keys."""
+        result = get_bbox_advice(places_test_file, "spatial_filtering", verbose=False)
+        assert isinstance(result, dict)
+        assert "needs_warning" in result
+        assert "skip_bbox_prefilter" in result
+        assert "has_native_geometry" in result
+        assert "has_bbox_column" in result
+        assert "message" in result
+        assert "suggestions" in result
+
+    def test_spatial_filtering_v1_with_bbox(self, places_test_file):
+        """Test spatial_filtering for 1.x file with bbox - no warning, no skip."""
+        result = get_bbox_advice(places_test_file, "spatial_filtering", verbose=False)
+        # places_test_file is GeoParquet 1.x with bbox
+        assert result["needs_warning"] is False
+        assert result["skip_bbox_prefilter"] is False  # Not native geo
+
+    def test_spatial_filtering_v1_without_bbox(self, buildings_test_file):
+        """Test spatial_filtering for 1.x file without bbox - warning issued."""
+        result = get_bbox_advice(buildings_test_file, "spatial_filtering", verbose=False)
+        # buildings_test_file is 1.x without bbox
+        assert result["needs_warning"] is True
+        assert result["skip_bbox_prefilter"] is False
+        assert "No bbox column found" in result["message"]
+        assert len(result["suggestions"]) > 0
+
+    def test_spatial_filtering_v2_skip_bbox(self, fields_v2_file):
+        """Test spatial_filtering for 2.0 file - skip bbox prefilter."""
+        result = get_bbox_advice(fields_v2_file, "spatial_filtering", verbose=False)
+        # fields_v2_file is GeoParquet 2.0 with native geometry
+        assert result["has_native_geometry"] is True
+        assert result["skip_bbox_prefilter"] is True  # Native geo + spatial_filtering
+        assert result["needs_warning"] is False
+
+    def test_bounds_calculation_never_skips_bbox(self, fields_v2_file):
+        """Test bounds_calculation for 2.0 file - does NOT skip bbox."""
+        result = get_bbox_advice(fields_v2_file, "bounds_calculation", verbose=False)
+        # Even with native geometry, bounds_calculation should NOT skip bbox
+        # because pre-computed bbox values are faster for bounds calculation
+        assert result["has_native_geometry"] is True
+        assert result["skip_bbox_prefilter"] is False  # Key test: bounds_calculation never skips
+
+    def test_bounds_calculation_without_bbox(self, buildings_test_file):
+        """Test bounds_calculation without bbox - warning issued."""
+        result = get_bbox_advice(buildings_test_file, "bounds_calculation", verbose=False)
+        assert result["needs_warning"] is True
+        assert "computing from geometry" in result["message"].lower()
+
+    def test_check_v1_without_bbox(self, buildings_test_file):
+        """Test check operation for 1.x file without bbox - warning issued."""
+        result = get_bbox_advice(buildings_test_file, "check", verbose=False)
+        assert result["needs_warning"] is True
+        assert result["skip_bbox_prefilter"] is False
+
+    def test_check_v2_no_warning(self, fields_v2_file):
+        """Test check operation for 2.0 file - no warning needed."""
+        result = get_bbox_advice(fields_v2_file, "check", verbose=False)
+        assert result["has_native_geometry"] is True
+        assert result["needs_warning"] is False
+        # check operation is not spatial_filtering, so skip_bbox_prefilter should be False
+        assert result["skip_bbox_prefilter"] is False
+
+    def test_verbose_mode(self, places_test_file):
+        """Test that verbose mode does not cause errors."""
+        result = get_bbox_advice(places_test_file, "spatial_filtering", verbose=True)
+        assert isinstance(result, dict)
