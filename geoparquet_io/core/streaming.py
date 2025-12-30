@@ -432,6 +432,82 @@ def is_geoarrow_type(arrow_type) -> bool:
     return False
 
 
+def extract_version_from_metadata(metadata: dict | None) -> str | None:
+    """
+    Extract GeoParquet version string from schema metadata.
+
+    Args:
+        metadata: Schema metadata dict (with bytes keys)
+
+    Returns:
+        Version string suitable for --geoparquet-version (e.g., "1.1", "2.0")
+        or None if no version detected
+    """
+    if not metadata or b"geo" not in metadata:
+        return None
+    try:
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+        if isinstance(geo_meta, dict):
+            version = geo_meta.get("version")
+            if version:
+                # Convert "1.1.0" -> "1.1", "2.0.0" -> "2.0"
+                parts = version.split(".")
+                if len(parts) >= 2:
+                    return f"{parts[0]}.{parts[1]}"
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def has_geoarrow_extension_in_table(table: pa.Table) -> bool:
+    """
+    Check if table has geoarrow extension types (indicating native geo types).
+
+    Args:
+        table: PyArrow Table to inspect
+
+    Returns:
+        True if table has geoarrow extension type columns
+    """
+    for field in table.schema:
+        if is_geoarrow_type(field.type):
+            return True
+    return False
+
+
+def detect_version_for_output(
+    original_metadata: dict | None,
+    table: pa.Table | None = None,
+) -> str | None:
+    """
+    Detect the appropriate GeoParquet version for output.
+
+    Logic:
+    - If geo metadata has version 1.x -> return "1.0" or "1.1"
+    - If geo metadata has version 2.x -> return "2.0"
+    - If no geo metadata but has geoarrow types -> return "2.0" (upgrade)
+    - Otherwise -> return None (will use default 1.1)
+
+    Args:
+        original_metadata: Schema metadata from input
+        table: Arrow table (optional, for detecting geoarrow types)
+
+    Returns:
+        Version string or None
+    """
+    # First check geo metadata for explicit version
+    version = extract_version_from_metadata(original_metadata)
+    if version:
+        return version
+
+    # Check for parquet-geo-only (geoarrow types without geo metadata)
+    if table is not None and has_geoarrow_extension_in_table(table):
+        return "2.0"  # Upgrade to 2.0 with proper metadata
+
+    # No version info - will use default (1.1)
+    return None
+
+
 class StreamingError(Exception):
     """Error raised during Arrow IPC streaming operations."""
 

@@ -2367,6 +2367,27 @@ def _write_table_with_settings(
         success(f"Wrote {table.num_rows:,} rows to {output_path}")
 
 
+def _extract_version_from_original_metadata(original_metadata: dict | None) -> str | None:
+    """
+    Extract GeoParquet version from original metadata for auto-preservation.
+
+    Returns short version string (e.g., "1.0", "1.1", "2.0") or None.
+    """
+    if not original_metadata or b"geo" not in original_metadata:
+        return None
+    try:
+        geo_meta = json.loads(original_metadata[b"geo"].decode("utf-8"))
+        if isinstance(geo_meta, dict):
+            version = geo_meta.get("version")
+            if version:
+                parts = version.split(".")
+                if len(parts) >= 2:
+                    return f"{parts[0]}.{parts[1]}"
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    return None
+
+
 def write_geoparquet_via_arrow(
     con,
     query: str,
@@ -2415,6 +2436,10 @@ def write_geoparquet_via_arrow(
     # Detect geometry column if not provided
     if geometry_column is None:
         geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
+
+    # Auto-detect GeoParquet version from input metadata if not explicitly provided
+    if geoparquet_version is None:
+        geoparquet_version = _extract_version_from_original_metadata(original_metadata)
 
     # Check if geometry column actually exists in the query result
     query_columns = _get_query_columns(con, query)

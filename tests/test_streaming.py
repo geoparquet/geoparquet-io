@@ -528,3 +528,116 @@ class TestStreamIO:
         assert result is None
         # Output file should NOT be created in dry_run
         assert not output_file.exists()
+
+
+class TestVersionExtraction:
+    """Tests for GeoParquet version extraction and auto-detection."""
+
+    def test_extract_version_from_metadata_v11(self):
+        """Test extracting version 1.1 from metadata."""
+        from geoparquet_io.core.streaming import extract_version_from_metadata
+
+        metadata = {b"geo": json.dumps({"version": "1.1.0"}).encode("utf-8")}
+        assert extract_version_from_metadata(metadata) == "1.1"
+
+    def test_extract_version_from_metadata_v10(self):
+        """Test extracting version 1.0 from metadata."""
+        from geoparquet_io.core.streaming import extract_version_from_metadata
+
+        metadata = {b"geo": json.dumps({"version": "1.0.0"}).encode("utf-8")}
+        assert extract_version_from_metadata(metadata) == "1.0"
+
+    def test_extract_version_from_metadata_v20(self):
+        """Test extracting version 2.0 from metadata."""
+        from geoparquet_io.core.streaming import extract_version_from_metadata
+
+        metadata = {b"geo": json.dumps({"version": "2.0.0"}).encode("utf-8")}
+        assert extract_version_from_metadata(metadata) == "2.0"
+
+    def test_extract_version_from_metadata_none(self):
+        """Test None when no metadata."""
+        from geoparquet_io.core.streaming import extract_version_from_metadata
+
+        assert extract_version_from_metadata(None) is None
+        assert extract_version_from_metadata({}) is None
+
+    def test_extract_version_from_metadata_no_geo(self):
+        """Test None when no geo key in metadata."""
+        from geoparquet_io.core.streaming import extract_version_from_metadata
+
+        metadata = {b"other": b"data"}
+        assert extract_version_from_metadata(metadata) is None
+
+    def test_extract_version_from_metadata_no_version(self):
+        """Test None when geo metadata lacks version field."""
+        from geoparquet_io.core.streaming import extract_version_from_metadata
+
+        metadata = {b"geo": json.dumps({"primary_column": "geometry"}).encode("utf-8")}
+        assert extract_version_from_metadata(metadata) is None
+
+    def test_has_geoarrow_extension_in_table_true(self):
+        """Test detection of geoarrow extension type in table."""
+        import geoarrow.pyarrow as ga
+
+        from geoparquet_io.core.streaming import has_geoarrow_extension_in_table
+
+        # Create WKB geometry with geoarrow type
+        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+        geom_arr = ga.as_wkb([wkb, wkb])
+        table = pa.table({"id": [1, 2], "geometry": geom_arr})
+
+        assert has_geoarrow_extension_in_table(table) is True
+
+    def test_has_geoarrow_extension_in_table_false(self):
+        """Test no geoarrow extension type in regular table."""
+        from geoparquet_io.core.streaming import has_geoarrow_extension_in_table
+
+        table = pa.table({"id": [1, 2], "geometry": [b"wkb1", b"wkb2"]})
+        assert has_geoarrow_extension_in_table(table) is False
+
+    def test_detect_version_for_output_from_metadata(self):
+        """Test version detection from metadata."""
+        from geoparquet_io.core.streaming import detect_version_for_output
+
+        metadata = {b"geo": json.dumps({"version": "2.0.0"}).encode("utf-8")}
+        assert detect_version_for_output(metadata) == "2.0"
+
+    def test_detect_version_for_output_from_geoarrow_table(self):
+        """Test version detection from geoarrow extension types."""
+        import geoarrow.pyarrow as ga
+
+        from geoparquet_io.core.streaming import detect_version_for_output
+
+        # Create table with geoarrow extension type but no geo metadata
+        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+        geom_arr = ga.as_wkb([wkb, wkb])
+        table = pa.table({"id": [1, 2], "geometry": geom_arr})
+
+        # No metadata, but has geoarrow types -> should return "2.0"
+        assert detect_version_for_output(None, table) == "2.0"
+        assert detect_version_for_output({}, table) == "2.0"
+
+    def test_detect_version_for_output_prefers_metadata(self):
+        """Test that metadata version takes precedence over geoarrow type."""
+        import geoarrow.pyarrow as ga
+
+        from geoparquet_io.core.streaming import detect_version_for_output
+
+        # Create table with geoarrow extension type AND v1.1 metadata
+        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+        geom_arr = ga.as_wkb([wkb, wkb])
+        table = pa.table({"id": [1, 2], "geometry": geom_arr})
+        metadata = {b"geo": json.dumps({"version": "1.1.0"}).encode("utf-8")}
+
+        # Metadata version should take precedence
+        assert detect_version_for_output(metadata, table) == "1.1"
+
+    def test_detect_version_for_output_returns_none(self):
+        """Test None returned when no version info available."""
+        from geoparquet_io.core.streaming import detect_version_for_output
+
+        # No metadata, no geoarrow types
+        table = pa.table({"id": [1, 2], "name": ["a", "b"]})
+        assert detect_version_for_output(None, table) is None
+        assert detect_version_for_output({}, table) is None
+        assert detect_version_for_output(None, None) is None
