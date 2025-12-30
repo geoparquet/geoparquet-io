@@ -10,8 +10,8 @@ import pyarrow as pa
 
 from geoparquet_io.core.common import (
     add_bbox,
-    check_bbox_structure,
     find_primary_geometry_column,
+    get_bbox_advice,
     get_dataset_bounds,
     get_duckdb_connection,
     get_parquet_metadata,
@@ -130,9 +130,9 @@ def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
     import shutil
     import tempfile
 
-    input_bbox_info = check_bbox_structure(input_parquet, verbose)
+    bbox_advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
 
-    if add_bbox_flag and not input_bbox_info["has_bbox_column"]:
+    if add_bbox_flag and not bbox_advice["has_bbox_column"]:
         info("\nAdding bbox column to enable fast bounds calculation...")
         temp_fd, temp_file = tempfile.mkstemp(suffix=".parquet")
         os.close(temp_fd)
@@ -141,13 +141,11 @@ def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
         success("Added bbox column for optimized processing")
         return temp_file, True, temp_file
 
-    if input_bbox_info["status"] != "optimal":
-        warn(
-            "\nWarning: Input file could benefit from bbox optimization:\n"
-            + input_bbox_info["message"]
-        )
+    if bbox_advice["needs_warning"]:
+        warn(f"\nWarning: {bbox_advice['message']}")
         if not add_bbox_flag:
-            info("Tip: Run this command with --add-bbox to enable fast bounds calculation")
+            for suggestion in bbox_advice["suggestions"]:
+                info(f"Tip: {suggestion}")
 
     return input_parquet, False, None
 

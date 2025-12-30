@@ -9,8 +9,8 @@ import mercantile
 import pyarrow as pa
 
 from geoparquet_io.core.common import (
-    check_bbox_structure,
     find_primary_geometry_column,
+    get_bbox_advice,
     get_crs_display_name,
     get_duckdb_connection,
     get_parquet_metadata,
@@ -504,15 +504,16 @@ def _add_quadkey_file_based(
     use_bbox = False
     bbox_col = None
     if not use_centroid:
-        bbox_info = check_bbox_structure(input_parquet, verbose)
-        if bbox_info["has_bbox_column"]:
+        bbox_advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
+        if bbox_advice["has_bbox_column"]:
             use_bbox = True
-            bbox_col = bbox_info["bbox_column_name"]
+            bbox_col = bbox_advice["bbox_column_name"]
             if verbose:
                 debug(f"Using bbox column '{bbox_col}' for quadkey calculation")
-        else:
-            warn("No bbox column found - using geometry centroid for quadkey calculation")
-            info("Tip: Add a bbox column with 'gpio add bbox' for faster computation")
+        elif bbox_advice["needs_warning"]:
+            warn(bbox_advice["message"] + " - using geometry centroid for quadkey calculation")
+            for suggestion in bbox_advice["suggestions"]:
+                info(f"Tip: {suggestion}")
 
     # Dry-run mode header
     if dry_run:

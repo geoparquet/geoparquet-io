@@ -29,6 +29,7 @@ from geoparquet_io.core.common import (
     write_parquet_with_metadata,
 )
 from geoparquet_io.core.streaming import (
+    apply_geoarrow_extension_type,
     apply_metadata_to_table,
     find_geometry_column_from_metadata,
     find_geometry_column_from_table,
@@ -278,22 +279,52 @@ def write_output(
         return None
 
 
+def _extract_crs_from_metadata(metadata: dict | None) -> dict | str | None:
+    """Extract CRS from GeoParquet metadata."""
+    if not metadata or b"geo" not in metadata:
+        return None
+    try:
+        import json
+
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+        if isinstance(geo_meta, dict):
+            columns = geo_meta.get("columns", {})
+            primary_col = geo_meta.get("primary_column", "geometry")
+            if primary_col in columns:
+                return columns[primary_col].get("crs")
+    except (json.JSONDecodeError, UnicodeDecodeError, KeyError):
+        pass
+    return None
+
+
 def _write_stream_output(
     con: duckdb.DuckDBPyConnection,
     query: str,
     original_metadata: dict | None,
     geometry_column: str | None,
 ) -> pa.Table:
-    """Write output as Arrow IPC stream to stdout."""
+    """Write output as Arrow IPC stream to stdout.
+
+    Uses geoarrow extension types for streaming, which enables:
+    - Native geometry performance in downstream commands
+    - CRS preservation through the pipeline
+    - Automatic native Parquet geometry when written to file
+    """
     # Auto-detect geometry column if not provided
     if geometry_column is None:
         geometry_column = find_geometry_column_from_metadata(original_metadata)
 
-    # Convert geometry back to WKB for portable Arrow export
+    # Convert geometry to WKB (DuckDB's fetch_arrow_table exports native format)
     stream_query = _wrap_query_with_wkb_conversion(query, geometry_column)
 
     result = con.execute(stream_query)
     table = result.fetch_arrow_table()
+
+    # Convert WKB binary to geoarrow extension type for streaming
+    # This enables native geometry performance in downstream operations
+    if geometry_column:
+        crs = _extract_crs_from_metadata(original_metadata)
+        table = apply_geoarrow_extension_type(table, geometry_column, crs)
 
     # Apply metadata to output table
     if original_metadata:
