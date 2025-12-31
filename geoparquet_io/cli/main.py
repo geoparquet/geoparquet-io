@@ -801,7 +801,18 @@ def check_row_group_cmd(
 # Convert command
 @cli.command()
 @click.argument("input_file")
-@click.argument("output_file", type=click.Path())
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--to",
+    "to_format",
+    type=click.Choice(["geojson"], case_sensitive=False),
+    help="Output format. Use 'geojson' to stream GeoJSONSeq to stdout for tippecanoe.",
+)
+@click.option(
+    "--no-rs",
+    is_flag=True,
+    help="Disable RFC 8142 record separators (enabled by default for tippecanoe -P)",
+)
 @click.option(
     "--skip-hilbert",
     is_flag=True,
@@ -841,6 +852,8 @@ def check_row_group_cmd(
 def convert(
     input_file,
     output_file,
+    to_format,
+    no_rs,
     skip_hilbert,
     wkt_column,
     lat_column,
@@ -855,11 +868,43 @@ def convert(
     profile,
 ):
     """
-    Convert vector formats to optimized GeoParquet.
+    Convert vector formats to/from GeoParquet.
 
-    Supports Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV with WKT or lat/lon columns.
-    Applies ZSTD compression, bbox metadata, and Hilbert ordering by default.
+    \b
+    To GeoParquet (default):
+      Converts Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV to optimized GeoParquet.
+      Applies ZSTD compression, bbox metadata, and Hilbert ordering by default.
+
+    \b
+    From GeoParquet (--to geojson):
+      Streams GeoParquet as newline-delimited GeoJSON (GeoJSONSeq) to stdout.
+      Designed for piping to tippecanoe for PMTiles/MBTiles generation.
+
+    \b
+    Examples:
+      gpio convert input.shp output.parquet
+      gpio convert input.parquet --to geojson | tippecanoe -P -o out.pmtiles
+      gpio extract in.parquet --bbox ... | gpio convert - --to geojson | tippecanoe -P -o out.pmtiles
     """
+    # Handle --to geojson for GeoJSON output
+    if to_format == "geojson":
+        from geoparquet_io.core.geojson_stream import convert_to_geojson
+
+        convert_to_geojson(
+            input_file,
+            rs=not no_rs,
+            verbose=verbose,
+            profile=profile,
+        )
+        return
+
+    # Standard conversion to GeoParquet requires output file
+    if output_file is None:
+        raise click.ClickException(
+            "OUTPUT_FILE is required when converting to GeoParquet.\n"
+            "Use --to geojson to stream GeoJSON to stdout instead."
+        )
+
     convert_to_geoparquet(
         input_file,
         output_file,
