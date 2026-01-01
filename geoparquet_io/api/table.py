@@ -503,13 +503,13 @@ class Table:
                 chunk_concurrency=chunk_concurrency,
             )
         finally:
-            # Retry cleanup with delay for Windows file handle release
-            for _ in range(3):
+            # Retry cleanup with incremental backoff for Windows file handle release
+            for attempt in range(3):
                 try:
                     temp_path.unlink(missing_ok=True)
                     break
                 except OSError:
-                    time.sleep(0.1)
+                    time.sleep(0.1 * (attempt + 1))
 
     def __repr__(self) -> str:
         """String representation of the Table."""

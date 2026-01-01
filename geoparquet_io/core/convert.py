@@ -853,7 +853,7 @@ def _read_csv_to_arrow(
 
     # Build query based on geometry type
     if geom_info["type"] == "wkt":
-        wkt_col = geom_info["wkt_column"]
+        wkt_col = _quote_identifier(geom_info["wkt_column"])
         if skip_invalid:
             query = f"""
                 SELECT * EXCLUDE ({wkt_col}),
@@ -869,8 +869,8 @@ def _read_csv_to_arrow(
                 WHERE {wkt_col} IS NOT NULL
             """
     else:  # latlon
-        lat_col = geom_info["lat_column"]
-        lon_col = geom_info["lon_column"]
+        lat_col = _quote_identifier(geom_info["lat_column"])
+        lon_col = _quote_identifier(geom_info["lon_column"])
         query = f"""
             SELECT * EXCLUDE ({lat_col}, {lon_col}),
                    ST_AsWKB(ST_Point(CAST({lon_col} AS DOUBLE), CAST({lat_col} AS DOUBLE))) AS geometry
