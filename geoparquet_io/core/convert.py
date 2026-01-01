@@ -699,6 +699,208 @@ def _convert_spatial_path(
     )
 
 
+def read_spatial_to_arrow(
+    input_file,
+    *,
+    verbose=False,
+    wkt_column=None,
+    lat_column=None,
+    lon_column=None,
+    delimiter=None,
+    crs="EPSG:4326",
+    skip_invalid=False,
+    profile=None,
+    geometry_column="geometry",
+):
+    """
+    Read a geospatial file and return an Arrow table with geometry.
+
+    This is the core reading function used by both the Python API and CLI.
+    Does NOT apply Hilbert sorting or bbox column - those are chainable operations.
+
+    Args:
+        input_file: Path to input file (GeoPackage, GeoJSON, Shapefile, CSV/TSV, etc.)
+        verbose: Print detailed progress
+        wkt_column: CSV/TSV only - WKT column name (auto-detected if not specified)
+        lat_column: CSV/TSV only - Latitude column name (requires lon_column)
+        lon_column: CSV/TSV only - Longitude column name (requires lat_column)
+        delimiter: CSV/TSV only - Delimiter character (auto-detected if not specified)
+        crs: CRS for CSV geometry data (default: EPSG:4326/WGS84)
+        skip_invalid: Skip rows with invalid geometries instead of failing
+        profile: AWS profile name for S3 operations
+        geometry_column: Name for output geometry column (default: 'geometry')
+
+    Returns:
+        tuple: (arrow_table, detected_crs_projjson, geometry_column_name)
+
+    Raises:
+        click.ClickException: If input file not found or reading fails
+    """
+
+    configure_verbose(verbose)
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, input_file)
+
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, input_file)
+
+    # Show progress for remote files
+    show_remote_read_message(input_file, verbose=False)
+
+    # Get safe URL
+    input_url = safe_file_url(input_file, verbose)
+
+    # Check input file type
+    is_csv = _is_csv_file(input_file)
+    is_parquet = _is_parquet_file(input_file)
+
+    # Check for partitioned parquet input (not supported)
+    if is_parquet and is_partition_path(input_file):
+        require_single_file(input_file, "read_spatial_to_arrow")
+
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
+
+    # Determine CRS
+    user_specified_crs = crs != "EPSG:4326"
+    detected_crs = None
+
+    try:
+        if user_specified_crs:
+            if not is_csv:
+                raise click.ClickException(
+                    f"The crs option is only valid for CSV/TSV files.\n"
+                    f"For {os.path.splitext(input_file)[1]} files, CRS is read from the file metadata."
+                )
+            detected_crs = parse_crs_string_to_projjson(crs, con)
+            if verbose:
+                debug(f"Using user-specified CRS: {crs}")
+        elif is_csv:
+            # CSV with default CRS - detected_crs stays None
+            pass
+        elif is_parquet:
+            crs_from_file = extract_crs_from_parquet(input_url, verbose=verbose)
+            if crs_from_file and not is_default_crs(crs_from_file):
+                detected_crs = crs_from_file
+                if verbose:
+                    debug(f"Preserving input CRS: {_format_crs_display(detected_crs)}")
+        else:
+            # Spatial files - detect CRS
+            crs_from_file = detect_crs_from_spatial_file(input_url, con, verbose=verbose)
+            if crs_from_file is None:
+                raise click.ClickException(
+                    f"No CRS found in input file: {input_file}\n"
+                    f"Spatial files (GeoPackage, Shapefile, GeoJSON, etc.) must have a defined CRS."
+                )
+            if not is_default_crs(crs_from_file):
+                detected_crs = crs_from_file
+                if verbose:
+                    debug(f"Detected input CRS: {_format_crs_display(detected_crs)}")
+
+        # Build and execute query
+        if is_csv:
+            arrow_table = _read_csv_to_arrow(
+                con, input_url, delimiter, wkt_column, lat_column, lon_column, skip_invalid, verbose
+            )
+        else:
+            arrow_table = _read_spatial_to_arrow(con, input_url, verbose, is_parquet=is_parquet)
+
+        return arrow_table, detected_crs, geometry_column
+
+    except duckdb.IOException as e:
+        error_msg = str(e)
+        if is_remote_url(input_file):
+            hints = get_remote_error_hint(error_msg, input_file)
+            raise click.ClickException(
+                f"Failed to read remote file.\n\n{hints}\n\nOriginal error: {error_msg}"
+            ) from e
+        raise click.ClickException(f"Failed to read input file: {error_msg}") from e
+
+    except duckdb.BinderException as e:
+        raise click.ClickException(f"Invalid geometry data: {str(e)}") from e
+
+    except Exception as e:
+        raise click.ClickException(f"Reading failed: {str(e)}") from e
+
+    finally:
+        con.close()
+
+
+def _read_csv_to_arrow(
+    con, input_url, delimiter, wkt_column, lat_column, lon_column, skip_invalid, verbose
+):
+    """Read CSV/TSV to Arrow table with geometry as WKB."""
+    geom_info = _detect_csv_geometry_column(
+        con, input_url, delimiter, wkt_column, lat_column, lon_column, verbose
+    )
+
+    # Validate geometry
+    if geom_info["type"] == "wkt":
+        if verbose:
+            progress(f"Using WKT column: {geom_info['wkt_column']}")
+        _validate_wkt_and_check_crs(
+            con, geom_info["csv_read"], geom_info["wkt_column"], skip_invalid, verbose
+        )
+    else:
+        if verbose:
+            progress(f"Using lat/lon columns: {geom_info['lat_column']}, {geom_info['lon_column']}")
+        _validate_latlon_ranges(
+            con, geom_info["csv_read"], geom_info["lat_column"], geom_info["lon_column"], verbose
+        )
+
+    csv_read = geom_info["csv_read"]
+
+    # Build query based on geometry type
+    if geom_info["type"] == "wkt":
+        wkt_col = geom_info["wkt_column"]
+        if skip_invalid:
+            query = f"""
+                SELECT * EXCLUDE ({wkt_col}),
+                       ST_AsWKB(TRY_CAST({wkt_col} AS GEOMETRY)) AS geometry
+                FROM {csv_read}
+                WHERE TRY_CAST({wkt_col} AS GEOMETRY) IS NOT NULL
+            """
+        else:
+            query = f"""
+                SELECT * EXCLUDE ({wkt_col}),
+                       ST_AsWKB(ST_GeomFromText({wkt_col})) AS geometry
+                FROM {csv_read}
+                WHERE {wkt_col} IS NOT NULL
+            """
+    else:  # latlon
+        lat_col = geom_info["lat_column"]
+        lon_col = geom_info["lon_column"]
+        query = f"""
+            SELECT * EXCLUDE ({lat_col}, {lon_col}),
+                   ST_AsWKB(ST_Point(CAST({lon_col} AS DOUBLE), CAST({lat_col} AS DOUBLE))) AS geometry
+            FROM {csv_read}
+            WHERE {lat_col} IS NOT NULL AND {lon_col} IS NOT NULL
+        """
+
+    result = con.execute(query)
+    return result.fetch_arrow_table()
+
+
+def _read_spatial_to_arrow(con, input_url, verbose, is_parquet=False):
+    """Read spatial file to Arrow table with geometry as WKB."""
+    geom_column = _detect_geometry_column(con, input_url, verbose, is_parquet=is_parquet)
+
+    if is_parquet:
+        table_expr = f"read_parquet('{input_url}')"
+    else:
+        table_expr = f"ST_Read('{input_url}')"
+
+    # Convert geometry to WKB for geoarrow compatibility
+    query = f"""
+        SELECT * EXCLUDE ({geom_column}),
+               ST_AsWKB({geom_column}) AS geometry
+        FROM {table_expr}
+    """
+
+    result = con.execute(query)
+    return result.fetch_arrow_table()
+
+
 def convert_to_geoparquet(
     input_file,
     output_file,

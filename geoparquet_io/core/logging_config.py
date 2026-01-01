@@ -208,11 +208,15 @@ def configure_verbose(verbose: bool) -> None:
     Configure the logger's verbosity level.
 
     Call this at the start of a function that has a verbose parameter.
+    Also ensures a handler is attached if none exists (for non-CLI usage).
 
     Args:
         verbose: If True, set logger to DEBUG level
     """
-    if verbose:
+    # Ensure at least a basic handler exists for non-CLI usage (e.g., tests, library usage)
+    if not logger.handlers:
+        setup_cli_logging(verbose=verbose, show_timestamps=False, use_colors=False)
+    elif verbose:
         logger.setLevel(logging.DEBUG)
 
 
