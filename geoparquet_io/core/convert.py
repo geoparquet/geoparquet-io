@@ -27,6 +27,7 @@ from geoparquet_io.core.common import (
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.partition_reader import require_single_file
+from geoparquet_io.core.stream_io import _quote_identifier
 
 
 def _detect_geometry_column(con, input_file, verbose, is_parquet=False):
@@ -884,6 +885,7 @@ def _read_csv_to_arrow(
 def _read_spatial_to_arrow(con, input_url, verbose, is_parquet=False):
     """Read spatial file to Arrow table with geometry as WKB."""
     geom_column = _detect_geometry_column(con, input_url, verbose, is_parquet=is_parquet)
+    quoted_geom = _quote_identifier(geom_column)
 
     if is_parquet:
         table_expr = f"read_parquet('{input_url}')"
@@ -892,8 +894,8 @@ def _read_spatial_to_arrow(con, input_url, verbose, is_parquet=False):
 
     # Convert geometry to WKB for geoarrow compatibility
     query = f"""
-        SELECT * EXCLUDE ({geom_column}),
-               ST_AsWKB({geom_column}) AS geometry
+        SELECT * EXCLUDE ({quoted_geom}),
+               ST_AsWKB({quoted_geom}) AS geometry
         FROM {table_expr}
     """
 
