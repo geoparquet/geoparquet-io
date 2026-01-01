@@ -55,6 +55,7 @@ def convert(
     delimiter: str | None = None,
     crs: str = "EPSG:4326",
     skip_invalid: bool = False,
+    profile: str | None = None,
 ) -> Table:
     """
     Convert a geospatial file to a Table.
@@ -64,7 +65,7 @@ def convert(
     Chain .sort_hilbert() explicitly if you want spatial ordering.
 
     Args:
-        path: Path to input file
+        path: Path to input file (local or S3 URL)
         geometry_column: Name for geometry column in output (default: 'geometry')
         wkt_column: For CSV: column containing WKT geometry
         lat_column: For CSV: latitude column
@@ -72,6 +73,7 @@ def convert(
         delimiter: For CSV: field delimiter (auto-detected if not specified)
         crs: Coordinate reference system (default: EPSG:4326)
         skip_invalid: Skip invalid geometries instead of erroring
+        profile: AWS profile name for S3 authentication (default: None)
 
     Returns:
         Table for chaining operations
@@ -80,6 +82,7 @@ def convert(
         >>> import geoparquet_io as gpio
         >>> gpio.convert('data.gpkg').sort_hilbert().write('out.parquet')
         >>> gpio.convert('data.csv', lat_column='lat', lon_column='lon').write('out.parquet')
+        >>> gpio.convert('s3://bucket/data.gpkg', profile='my-aws').write('out.parquet')
     """
     from geoparquet_io.core.convert import read_spatial_to_arrow
 
@@ -92,6 +95,7 @@ def convert(
         delimiter=delimiter,
         crs=crs,
         skip_invalid=skip_invalid,
+        profile=profile,
         geometry_column=geometry_column,
     )
 
@@ -467,6 +471,8 @@ class Table:
             ... )
         """
         import tempfile
+        import time
+        import uuid
         from pathlib import Path
 
         from geoparquet_io.core.common import setup_aws_profile_if_needed
@@ -474,9 +480,8 @@ class Table:
 
         setup_aws_profile_if_needed(profile, destination)
 
-        # Write to temp file
-        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            temp_path = Path(tmp.name)
+        # Write to temp file with uuid to avoid Windows file locking issues
+        temp_path = Path(tempfile.gettempdir()) / f"gpio_upload_{uuid.uuid4()}.parquet"
 
         try:
             self.write(
@@ -498,7 +503,13 @@ class Table:
                 chunk_concurrency=chunk_concurrency,
             )
         finally:
-            temp_path.unlink(missing_ok=True)
+            # Retry cleanup with delay for Windows file handle release
+            for _ in range(3):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time.sleep(0.1)
 
     def __repr__(self) -> str:
         """String representation of the Table."""
