@@ -801,7 +801,7 @@ def check_row_group_cmd(
 # Convert command
 @cli.command()
 @click.argument("input_file")
-@click.argument("output_file", type=click.Path())
+@click.argument("output_file", type=str)
 @click.option(
     "--skip-hilbert",
     is_flag=True,
@@ -859,24 +859,107 @@ def convert(
 
     Supports Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV with WKT or lat/lon columns.
     Applies ZSTD compression, bbox metadata, and Hilbert ordering by default.
+    Use "-" as output_file to stream Arrow IPC to stdout for piping.
+
+    \b
+    Examples:
+      # Standard conversion
+      gpio convert input.gpkg output.parquet
+
+      \b
+      # Pipe to another command
+      gpio convert input.gpkg - | gpio sort hilbert - | gpio upload - s3://bucket/data.parquet
     """
-    convert_to_geoparquet(
-        input_file,
-        output_file,
-        skip_hilbert=skip_hilbert,
-        verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_rows=100000,  # Best practice default
-        wkt_column=wkt_column,
-        lat_column=lat_column,
-        lon_column=lon_column,
-        delimiter=delimiter,
-        crs=crs,
-        skip_invalid=skip_invalid,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
+    from geoparquet_io.core.streaming import (
+        should_stream_output,
+        validate_output,
     )
+
+    # Check for streaming output
+    if should_stream_output(output_file):
+        validate_output(output_file)
+        # Suppress verbose for streaming
+        verbose = False
+        _convert_streaming(
+            input_file,
+            skip_hilbert=skip_hilbert,
+            wkt_column=wkt_column,
+            lat_column=lat_column,
+            lon_column=lon_column,
+            delimiter=delimiter,
+            crs=crs,
+            skip_invalid=skip_invalid,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+    else:
+        convert_to_geoparquet(
+            input_file,
+            output_file,
+            skip_hilbert=skip_hilbert,
+            verbose=verbose,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=100000,  # Best practice default
+            wkt_column=wkt_column,
+            lat_column=lat_column,
+            lon_column=lon_column,
+            delimiter=delimiter,
+            crs=crs,
+            skip_invalid=skip_invalid,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+
+
+def _convert_streaming(
+    input_file,
+    skip_hilbert,
+    wkt_column,
+    lat_column,
+    lon_column,
+    delimiter,
+    crs,
+    skip_invalid,
+    profile,
+    geoparquet_version,
+):
+    """Handle streaming output for convert command."""
+    import tempfile
+    import uuid
+
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.streaming import write_arrow_stream
+
+    # Convert to temp file first, then stream
+    temp_path = Path(tempfile.gettempdir()) / f"gpio_convert_{uuid.uuid4()}.parquet"
+
+    try:
+        convert_to_geoparquet(
+            input_file,
+            str(temp_path),
+            skip_hilbert=skip_hilbert,
+            verbose=False,
+            compression="ZSTD",
+            compression_level=15,
+            row_group_rows=100000,
+            wkt_column=wkt_column,
+            lat_column=lat_column,
+            lon_column=lon_column,
+            delimiter=delimiter,
+            crs=crs,
+            skip_invalid=skip_invalid,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+
+        # Read and stream to stdout
+        table = pq.read_table(temp_path)
+        write_arrow_stream(table)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 # Reproject command
@@ -3169,7 +3252,7 @@ def benchmark(
 
 
 @cli.command()
-@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("source", type=str)
 @click.argument("destination", type=str)
 @profile_option
 @click.option("--pattern", help="Glob pattern for filtering files (e.g., '*.parquet', '**/*.json')")
@@ -3184,6 +3267,19 @@ def benchmark(
 )
 @click.option("--chunk-size", type=int, help="Chunk size in bytes for multipart uploads")
 @click.option("--fail-fast", is_flag=True, help="Stop immediately on first error")
+@click.option(
+    "--s3-endpoint",
+    help="Custom S3-compatible endpoint (e.g., 'minio.example.com:9000')",
+)
+@click.option(
+    "--s3-region",
+    help="S3 region (default: us-east-1 when using custom endpoint)",
+)
+@click.option(
+    "--s3-no-ssl",
+    is_flag=True,
+    help="Disable SSL for S3 endpoint (use HTTP instead of HTTPS)",
+)
 @dry_run_option
 def upload(
     source,
@@ -3194,12 +3290,16 @@ def upload(
     chunk_concurrency,
     chunk_size,
     fail_fast,
+    s3_endpoint,
+    s3_region,
+    s3_no_ssl,
     dry_run,
 ):
     """Upload file or directory to object storage.
 
-    Supports S3, GCS, Azure, and HTTP destinations. Automatically handles
-    multipart uploads and preserves directory structure.
+    Supports S3, S3-compatible (MinIO, Rook/Ceph, source.coop), GCS, and Azure.
+    Automatically handles multipart uploads and preserves directory structure.
+    Use "-" as source to read from stdin (Arrow IPC format from piped gpio commands).
 
     \b
     Examples:
@@ -3215,21 +3315,52 @@ def upload(
       gpio upload output/ s3://bucket/dataset/ --pattern "*.parquet" --max-files 8
 
       \b
-      # Stop on first error instead of continuing
-      gpio upload output/ s3://bucket/dataset/ --fail-fast
+      # Upload from stdin (piped from another gpio command)
+      gpio convert input.gpkg - | gpio upload - s3://bucket/data.parquet
+
+      \b
+      # Custom S3-compatible endpoint (MinIO, Rook/Ceph)
+      gpio upload data.parquet s3://bucket/data.parquet \\
+          --s3-endpoint minio.example.com:9000 --s3-no-ssl
     """
+    from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
+
     try:
-        upload_impl(
-            source=source,
-            destination=destination,
-            profile=profile,
-            pattern=pattern,
-            max_files=max_files,
-            chunk_concurrency=chunk_concurrency,
-            chunk_size=chunk_size,
-            fail_fast=fail_fast,
-            dry_run=dry_run,
-        )
+        # Handle stdin input
+        if is_stdin(source):
+            temp_path = read_stdin_to_temp_file()
+            try:
+                upload_impl(
+                    source=Path(temp_path),
+                    destination=destination,
+                    profile=profile,
+                    chunk_concurrency=chunk_concurrency,
+                    chunk_size=chunk_size,
+                    dry_run=dry_run,
+                    s3_endpoint=s3_endpoint,
+                    s3_region=s3_region,
+                    s3_use_ssl=not s3_no_ssl,
+                )
+            finally:
+                Path(temp_path).unlink(missing_ok=True)
+        else:
+            source_path = Path(source)
+            if not source_path.exists():
+                raise click.ClickException(f"Source path does not exist: {source}")
+            upload_impl(
+                source=source_path,
+                destination=destination,
+                profile=profile,
+                pattern=pattern,
+                max_files=max_files,
+                chunk_concurrency=chunk_concurrency,
+                chunk_size=chunk_size,
+                fail_fast=fail_fast,
+                dry_run=dry_run,
+                s3_endpoint=s3_endpoint,
+                s3_region=s3_region,
+                s3_use_ssl=not s3_no_ssl,
+            )
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 

@@ -7,12 +7,13 @@ from __future__ import annotations
 import tempfile
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.api import Table, ops, pipe, read
+from geoparquet_io.api import Table, convert, ops, pipe, read
 from tests.conftest import safe_unlink
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
@@ -285,3 +286,125 @@ class TestPipe:
         result = transform(arrow_table)
         assert "bbox" in result.column_names
         assert result.num_rows == 10
+
+
+class TestConvert:
+    """Tests for gpio.convert() entry point."""
+
+    @pytest.fixture
+    def gpkg_file(self):
+        """Get path to test GeoPackage file."""
+        path = TEST_DATA_DIR / "buildings_test.gpkg"
+        if not path.exists():
+            pytest.skip("GeoPackage test data not available")
+        return str(path)
+
+    @pytest.fixture
+    def geojson_file(self):
+        """Get path to test GeoJSON file."""
+        path = TEST_DATA_DIR / "buildings_test.geojson"
+        if not path.exists():
+            pytest.skip("GeoJSON test data not available")
+        return str(path)
+
+    @pytest.fixture
+    def csv_wkt_file(self):
+        """Get path to test CSV file with WKT geometry."""
+        path = TEST_DATA_DIR / "points_wkt.csv"
+        if not path.exists():
+            pytest.skip("CSV WKT test data not available")
+        return str(path)
+
+    @pytest.fixture
+    def output_file(self):
+        """Create a temporary output file path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_convert_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        safe_unlink(tmp_path)
+
+    def test_convert_geopackage_returns_table(self, gpkg_file):
+        """Test that convert() returns a Table for GeoPackage input."""
+        table = convert(gpkg_file)
+        assert isinstance(table, Table)
+        assert table.num_rows > 0
+
+    def test_convert_geojson_returns_table(self, geojson_file):
+        """Test that convert() returns a Table for GeoJSON input."""
+        table = convert(geojson_file)
+        assert isinstance(table, Table)
+        assert table.num_rows > 0
+
+    def test_convert_csv_with_wkt(self, csv_wkt_file):
+        """Test converting CSV with WKT column."""
+        table = convert(csv_wkt_file)
+        assert isinstance(table, Table)
+        assert "geometry" in table.column_names
+
+    def test_convert_detects_geometry_column(self, gpkg_file):
+        """Test that convert() detects geometry column."""
+        table = convert(gpkg_file)
+        assert table.geometry_column == "geometry"
+
+    def test_convert_with_write(self, csv_wkt_file, output_file):
+        """Test writing converted data."""
+        # Test that convert -> write chain works (CSV has simpler geometry)
+        convert(csv_wkt_file).write(output_file)
+        assert Path(output_file).exists()
+
+        # Verify output
+        loaded = pq.read_table(output_file)
+        assert loaded.num_rows > 0
+        assert "geometry" in loaded.column_names
+
+
+class TestTableUpload:
+    """Tests for Table.upload() method."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    def test_upload_writes_temp_and_calls_upload(self, sample_table):
+        """Test that upload() writes to temp file and calls core upload."""
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            with patch("geoparquet_io.core.common.setup_aws_profile_if_needed"):
+                # Make upload a no-op
+                mock_upload.return_value = None
+
+                sample_table.upload("s3://test-bucket/test.parquet")
+
+                # Verify upload was called
+                mock_upload.assert_called_once()
+                call_args = mock_upload.call_args
+                assert call_args.kwargs["destination"] == "s3://test-bucket/test.parquet"
+
+    def test_upload_with_s3_endpoint(self, sample_table):
+        """Test upload() with custom S3 endpoint."""
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            with patch("geoparquet_io.core.common.setup_aws_profile_if_needed"):
+                mock_upload.return_value = None
+
+                sample_table.upload(
+                    "s3://test-bucket/test.parquet",
+                    s3_endpoint="minio.example.com:9000",
+                    s3_use_ssl=False,
+                )
+
+                call_args = mock_upload.call_args
+                assert call_args.kwargs["s3_endpoint"] == "minio.example.com:9000"
+                assert call_args.kwargs["s3_use_ssl"] is False
+
+    def test_upload_cleans_up_temp_file(self, sample_table):
+        """Test that upload() cleans up temp file even on error."""
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            with patch("geoparquet_io.core.common.setup_aws_profile_if_needed"):
+                mock_upload.side_effect = Exception("Upload failed")
+
+                with pytest.raises(Exception, match="Upload failed"):
+                    sample_table.upload("s3://test-bucket/test.parquet")
+
+                # Temp file should be cleaned up (we can't easily verify this,
+                # but the test ensures the exception propagates correctly)

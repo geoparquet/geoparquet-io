@@ -5,11 +5,17 @@ Provides a fluent API for chaining GeoParquet operations:
 
     import geoparquet_io as gpio
 
+    # Read existing GeoParquet
     gpio.read('input.parquet') \\
         .add_bbox() \\
         .add_quadkey(resolution=12) \\
         .sort_hilbert() \\
         .write('output.parquet')
+
+    # Convert other formats to GeoParquet
+    gpio.convert('data.gpkg') \\
+        .sort_hilbert() \\
+        .upload('s3://bucket/data.parquet')
 
 Also provides pure table-centric functions:
 
@@ -21,6 +27,6 @@ Also provides pure table-centric functions:
 """
 
 from geoparquet_io.api.pipeline import pipe
-from geoparquet_io.api.table import Table, read
+from geoparquet_io.api.table import Table, convert, read
 
-__all__ = ["Table", "read", "pipe"]
+__all__ = ["Table", "read", "convert", "pipe"]

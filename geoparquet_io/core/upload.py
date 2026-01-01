@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import obstore as obs
+from obstore.store import S3Store
 
 
 async def _upload_file_with_progress(store, source: Path, target_key: str, **kwargs) -> None:
@@ -68,18 +69,55 @@ def _print_directory_dry_run(
     print()
 
 
+def _create_s3_store_with_endpoint(
+    bucket_url: str,
+    s3_endpoint: str,
+    s3_region: str | None,
+    s3_use_ssl: bool,
+):
+    """Create an S3Store with custom endpoint configuration."""
+    bucket = bucket_url.replace("s3://", "").split("/")[0]
+    protocol = "https" if s3_use_ssl else "http"
+    return S3Store(
+        bucket,
+        endpoint=f"{protocol}://{s3_endpoint}",
+        region=s3_region or "us-east-1",
+    )
+
+
 def _setup_store_and_kwargs(
-    bucket_url: str, profile: str | None, chunk_concurrency: int, chunk_size: int | None
+    bucket_url: str,
+    profile: str | None,
+    chunk_concurrency: int,
+    chunk_size: int | None,
+    s3_endpoint: str | None = None,
+    s3_region: str | None = None,
+    s3_use_ssl: bool = True,
 ):
     """
     Setup object store and upload kwargs.
 
+    Args:
+        bucket_url: The object store bucket URL (e.g., s3://bucket)
+        profile: AWS profile name (handled via AWS_PROFILE env var by caller)
+        chunk_concurrency: Max concurrent chunks per file
+        chunk_size: Chunk size in bytes for multipart uploads
+        s3_endpoint: Custom S3-compatible endpoint (e.g., "minio.example.com:9000")
+        s3_region: S3 region (default: us-east-1 when using custom endpoint)
+        s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
+
     Note: Profile handling is done via AWS_PROFILE env var set by the caller
     (see setup_aws_profile_if_needed in common.py). The obstore library
     automatically respects AWS_PROFILE along with other standard AWS SDK
-    credential sources.
+    credential sources (including AWS_ENDPOINT_URL).
     """
-    store = obs.store.from_url(bucket_url)
+    # When explicit s3_endpoint is provided, use S3Store directly
+    # Otherwise, use from_url which automatically reads AWS_ENDPOINT_URL env var
+    if s3_endpoint and bucket_url.startswith("s3://"):
+        store = _create_s3_store_with_endpoint(bucket_url, s3_endpoint, s3_region, s3_use_ssl)
+    else:
+        store = obs.store.from_url(bucket_url)
+
     kwargs = {"max_concurrency": chunk_concurrency}
     if chunk_size:
         kwargs["chunk_size"] = chunk_size
@@ -95,6 +133,9 @@ def _upload_single_file(
     chunk_concurrency: int,
     chunk_size: int | None,
     dry_run: bool,
+    s3_endpoint: str | None = None,
+    s3_region: str | None = None,
+    s3_use_ssl: bool = True,
 ) -> None:
     """Upload a single file."""
     target_key = _get_target_key(source, prefix, destination.endswith("/"))
@@ -105,7 +146,9 @@ def _upload_single_file(
         _print_single_file_dry_run(source, destination, target_key, size_mb, profile)
         return
 
-    store, kwargs = _setup_store_and_kwargs(bucket_url, profile, chunk_concurrency, chunk_size)
+    store, kwargs = _setup_store_and_kwargs(
+        bucket_url, profile, chunk_concurrency, chunk_size, s3_endpoint, s3_region, s3_use_ssl
+    )
     asyncio.run(_upload_file_with_progress(store, source, target_key, **kwargs))
 
 
@@ -121,6 +164,9 @@ def _upload_directory(
     chunk_size: int | None,
     fail_fast: bool,
     dry_run: bool,
+    s3_endpoint: str | None = None,
+    s3_region: str | None = None,
+    s3_use_ssl: bool = True,
 ) -> None:
     """Upload a directory of files."""
     files = list(source.rglob(pattern) if pattern else source.rglob("*"))
@@ -139,7 +185,9 @@ def _upload_directory(
         )
         return
 
-    store, kwargs = _setup_store_and_kwargs(bucket_url, profile, chunk_concurrency, chunk_size)
+    store, kwargs = _setup_store_and_kwargs(
+        bucket_url, profile, chunk_concurrency, chunk_size, s3_endpoint, s3_region, s3_use_ssl
+    )
     asyncio.run(
         upload_directory_async(
             store=store,
@@ -163,6 +211,9 @@ def upload(
     chunk_size: int | None = None,
     fail_fast: bool = False,
     dry_run: bool = False,
+    s3_endpoint: str | None = None,
+    s3_region: str | None = None,
+    s3_use_ssl: bool = True,
 ) -> None:
     """Upload file(s) to remote object storage using obstore.
 
@@ -176,6 +227,9 @@ def upload(
         chunk_size: Chunk size in bytes for multipart uploads (optional)
         fail_fast: If True, stop on first error; otherwise continue and report at end
         dry_run: If True, show what would be uploaded without actually uploading
+        s3_endpoint: Custom S3-compatible endpoint (e.g., "minio.example.com:9000")
+        s3_region: S3 region (default: us-east-1 when using custom endpoint)
+        s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
 
     Examples:
         # Single file
@@ -186,12 +240,30 @@ def upload(
 
         # Directory (only parquet)
         upload(Path("output/"), "s3://bucket/dataset/", pattern="*.parquet")
+
+        # Custom S3 endpoint (MinIO, Rook/Ceph, source.coop)
+        upload(
+            Path("data.parquet"),
+            "s3://bucket/data.parquet",
+            s3_endpoint="minio.example.com:9000",
+            s3_use_ssl=False,
+        )
     """
     bucket_url, prefix = parse_object_store_url(destination)
 
     if source.is_file():
         _upload_single_file(
-            source, destination, bucket_url, prefix, profile, chunk_concurrency, chunk_size, dry_run
+            source,
+            destination,
+            bucket_url,
+            prefix,
+            profile,
+            chunk_concurrency,
+            chunk_size,
+            dry_run,
+            s3_endpoint,
+            s3_region,
+            s3_use_ssl,
         )
     else:
         _upload_directory(
@@ -206,6 +278,9 @@ def upload(
             chunk_size,
             fail_fast,
             dry_run,
+            s3_endpoint,
+            s3_region,
+            s3_use_ssl,
         )
 
 
