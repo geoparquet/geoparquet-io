@@ -1,14 +1,14 @@
-# meta Command
+# inspect --meta Command
 
 For detailed usage and examples, see the [Meta User Guide](../guide/meta.md).
 
 ## Quick Reference
 
 ```bash
-gpio meta --help
+gpio inspect --meta --help
 ```
 
-This will show all available options for the `meta` command.
+This will show all available options for the `inspect` command including `--meta`.
 
 ## Options
 
@@ -29,33 +29,33 @@ This will show all available options for the `meta` command.
 
 ```bash
 # Show all metadata sections
-gpio meta data.parquet
+gpio inspect --meta data.parquet
 
 # Show only Parquet file metadata
-gpio meta data.parquet --parquet
+gpio inspect --meta data.parquet --parquet
 
 # Show only GeoParquet metadata (from 'geo' key)
-gpio meta data.parquet --geoparquet
+gpio inspect --meta data.parquet --geoparquet
 
 # Show only Parquet geospatial metadata
-gpio meta data.parquet --parquet-geo
+gpio inspect --meta data.parquet --parquet-geo
 
 # Show all row groups (not just the first)
-gpio meta data.parquet --row-groups 10
+gpio inspect --meta data.parquet --row-groups 10
 
 # JSON output for scripting
-gpio meta data.parquet --json
+gpio inspect --meta data.parquet --json
 
 # Multiple specific sections
-gpio meta data.parquet --parquet --geoparquet
+gpio inspect --meta data.parquet --parquet --geoparquet
 
 # Remote file with AWS profile
-gpio meta s3://bucket/data.parquet --profile my-aws
+gpio inspect --meta s3://bucket/data.parquet --profile my-aws
 ```
 
 ## Output Sections
 
-By default, `gpio meta` shows three metadata sections:
+By default, `gpio inspect --meta` shows three metadata sections:
 
 ### 1. Parquet File Metadata
 
@@ -82,7 +82,7 @@ Geospatial metadata from the Parquet format specification:
 
 ## Comparison with inspect
 
-| Feature | `gpio inspect` | `gpio meta` |
+| Feature | `gpio inspect` | `gpio inspect --meta` |
 |---------|---------------|-------------|
 | Quick overview | Yes | No |
 | Data preview (--head/--tail) | Yes | No |

@@ -3,7 +3,7 @@
 The `inspect` command provides quick, human-readable summaries of GeoParquet files.
 
 !!! tip "Need more detail?"
-    For comprehensive metadata analysis including row group details and full schema information, use [`gpio meta`](meta.md) instead.
+    For comprehensive metadata analysis including row group details and full schema information, use `gpio inspect --meta` or see the [meta guide](meta.md).
 
 ## Basic Usage
 

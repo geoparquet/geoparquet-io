@@ -115,7 +115,7 @@ def _validate_crs_from_geo_metadata(
             f"Quadkeys require geographic coordinates (lat/lon), but this {source_description} "
             f"uses a projected CRS: {crs_name}\n\n"
             f"Reproject to WGS84 first using:\n"
-            f"  gpio reproject <input> <output> --dst-crs EPSG:4326"
+            f"  gpio convert reproject <input> <output> --dst-crs EPSG:4326"
         )
 
     if verbose and is_geographic:

@@ -245,7 +245,7 @@ Do NOT include the standard Claude Code footer. Keep commits minimal.
 Follow the template in `.github/pull_request_template.md` exactly:
 
 ### PR Title
-- Action-oriented: `<Verb> <what>` - e.g., "Add `gpio meta` command"
+- Action-oriented: `<Verb> <what>` - e.g., "Add `gpio inspect --meta` option"
 - Used in changelogs and release notes
 
 ### PR Body Structure
@@ -541,7 +541,7 @@ if b"geo" in metadata:
 gpio inspect file.parquet --verbose
 
 # Check metadata
-gpio meta file.parquet --json
+gpio inspect --meta file.parquet --json
 
 # Dry-run to see SQL
 gpio extract input.parquet output.parquet --dry-run

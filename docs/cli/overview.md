@@ -47,7 +47,7 @@ gpio check --help
 gpio add bbox --help
 gpio partition h3 --help
 gpio check spatial --help
-gpio stac --help
+gpio publish stac --help
 ```
 
 ## Legacy Alias
@@ -91,7 +91,7 @@ Analysis commands take a single input:
 ```bash
 gpio inspect myfile.parquet
 gpio check all myfile.parquet
-gpio validate myfile.parquet
+gpio check spec myfile.parquet
 ```
 
 ### Partition Commands

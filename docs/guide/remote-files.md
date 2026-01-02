@@ -69,7 +69,7 @@ gpio add bbox gs://bucket/input.parquet gs://bucket/output.parquet
 
 ## Exceptions
 
-**STAC generation** (`gpio stac item` and `gpio stac collection`) requires local files because asset paths reference local storage.
+**STAC generation** (`gpio publish stac`) requires local files because asset paths reference local storage.
 
 ## Notes
 

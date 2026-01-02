@@ -1,11 +1,11 @@
 # Viewing File Metadata
 
-The `meta` command provides comprehensive metadata inspection for GeoParquet files. Use it to understand file structure, schema details, row group organization, and geospatial metadata.
+The `inspect --meta` command provides comprehensive metadata inspection for GeoParquet files. Use it to understand file structure, schema details, row group organization, and geospatial metadata.
 
 ## Basic Usage
 
 ```bash
-gpio meta myfile.parquet
+gpio inspect --meta myfile.parquet
 ```
 
 This displays all three metadata sections: Parquet file metadata, GeoParquet metadata, and Parquet geospatial metadata.
@@ -17,12 +17,12 @@ This displays all three metadata sections: Parquet file metadata, GeoParquet met
 | Quick file overview | `gpio inspect` |
 | Preview actual data | `gpio inspect --head 10` |
 | Check file is valid | `gpio inspect` |
-| Deep dive into metadata | `gpio meta` |
-| Debug row group issues | `gpio meta --row-groups 10` |
-| Check GeoParquet compliance | `gpio meta --geoparquet` |
-| Scripting/automation | `gpio meta --json` |
+| Deep dive into metadata | `gpio inspect --meta` |
+| Debug row group issues | `gpio inspect --meta --row-groups 10` |
+| Check GeoParquet compliance | `gpio inspect --meta --geoparquet` |
+| Scripting/automation | `gpio inspect --meta --json` |
 
-**Rule of thumb**: Start with `inspect` for a quick look. Switch to `meta` when you need detailed structural information.
+**Rule of thumb**: Start with `inspect` for a quick look. Add `--meta` when you need detailed structural information.
 
 ## Metadata Sections
 
@@ -31,7 +31,7 @@ This displays all three metadata sections: Parquet file metadata, GeoParquet met
 Shows the internal structure of the Parquet file:
 
 ```bash
-gpio meta data.parquet --parquet
+gpio inspect --meta data.parquet --parquet
 ```
 
 Output includes:
@@ -50,7 +50,7 @@ This is useful for:
 Shows GeoParquet-specific metadata from the 'geo' key:
 
 ```bash
-gpio meta data.parquet --geoparquet
+gpio inspect --meta data.parquet --geoparquet
 ```
 
 Output includes:
@@ -70,7 +70,7 @@ This is useful for:
 Shows geospatial metadata from the Parquet format specification (separate from GeoParquet):
 
 ```bash
-gpio meta data.parquet --parquet-geo
+gpio inspect --meta data.parquet --parquet-geo
 ```
 
 Output includes:
@@ -89,10 +89,10 @@ By default, only the first row group is shown. To see more:
 
 ```bash
 # Show first 5 row groups
-gpio meta data.parquet --row-groups 5
+gpio inspect --meta data.parquet --row-groups 5
 
 # Show all row groups (for smaller files)
-gpio meta data.parquet --row-groups 100
+gpio inspect --meta data.parquet --row-groups 100
 ```
 
 Row group analysis helps you:
@@ -106,13 +106,13 @@ Get machine-readable output:
 
 ```bash
 # Full metadata as JSON
-gpio meta data.parquet --json
+gpio inspect --meta data.parquet --json
 
 # Specific section as JSON
-gpio meta data.parquet --geoparquet --json
+gpio inspect --meta data.parquet --geoparquet --json
 
 # Parse with jq
-gpio meta data.parquet --json | jq '.geoparquet.primary_column'
+gpio inspect --meta data.parquet --json | jq '.geoparquet.primary_column'
 ```
 
 ## Remote Files
@@ -121,13 +121,13 @@ Works with all remote file types:
 
 ```bash
 # HTTPS
-gpio meta https://data.example.com/file.parquet
+gpio inspect --meta https://data.example.com/file.parquet
 
 # S3
-gpio meta s3://bucket/data.parquet --profile my-aws
+gpio inspect --meta s3://bucket/data.parquet --profile my-aws
 
 # Google Cloud Storage
-gpio meta gs://bucket/data.parquet
+gpio inspect --meta gs://bucket/data.parquet
 ```
 
 ## Common Patterns
@@ -136,7 +136,7 @@ gpio meta gs://bucket/data.parquet
 
 ```bash
 # View GeoParquet metadata
-gpio meta data.parquet --geoparquet
+gpio inspect --meta data.parquet --geoparquet
 
 # Look for:
 # - version: Should be "1.0.0", "1.1.0", or similar
@@ -148,7 +148,7 @@ gpio meta data.parquet --geoparquet
 
 ```bash
 # Check row group sizes
-gpio meta data.parquet --parquet --row-groups 10
+gpio inspect --meta data.parquet --parquet --row-groups 10
 
 # Look for:
 # - Row groups of similar size (balanced distribution)
@@ -160,7 +160,7 @@ gpio meta data.parquet --parquet --row-groups 10
 
 ```bash
 # Check bbox covering exists
-gpio meta data.parquet --geoparquet --json | jq '.columns.geometry.covering'
+gpio inspect --meta data.parquet --geoparquet --json | jq '.columns.geometry.covering'
 
 # Should show something like:
 # {
@@ -177,12 +177,12 @@ gpio meta data.parquet --geoparquet --json | jq '.columns.geometry.covering'
 
 ```bash
 # Compare schemas
-diff <(gpio meta file1.parquet --parquet --json | jq '.schema') \
-     <(gpio meta file2.parquet --parquet --json | jq '.schema')
+diff <(gpio inspect --meta file1.parquet --parquet --json | jq '.schema') \
+     <(gpio inspect --meta file2.parquet --parquet --json | jq '.schema')
 ```
 
 ## See Also
 
-- [CLI Reference: meta](../cli/meta.md) - Complete option reference
+- [CLI Reference: inspect --meta](../cli/meta.md) - Complete option reference
 - [Inspecting Files](inspect.md) - Quick file overview and data preview
 - [Checking Best Practices](check.md) - Validate GeoParquet files

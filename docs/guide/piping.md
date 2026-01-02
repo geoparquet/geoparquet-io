@@ -109,7 +109,7 @@ gpio add bbox input.parquet | \
 Reproject to a different CRS before adding indices:
 
 ```bash
-gpio reproject --target-crs EPSG:4326 input.parquet | \
+gpio convert reproject --dst-crs EPSG:4326 input.parquet | \
   gpio add bbox - | \
   gpio sort hilbert - output.parquet
 ```
@@ -173,7 +173,7 @@ gpio sort hilbert intermediate.parquet output.parquet
 ## Limitations
 
 - **Partition commands**: `partition string`, `partition quadkey`, etc. can read from stdin but always write to a directory (not stdout)
-- **Remote output**: Streaming to remote destinations (S3, HTTP) is not supported; use file output then `gpio upload`
+- **Remote output**: Streaming to remote destinations (S3, HTTP) is not supported; use file output then `gpio publish upload`
 - **Memory**: Large datasets are streamed, but some operations (like Hilbert sorting) require loading the full dataset into memory
 
 ## See Also

@@ -1,11 +1,11 @@
 # Validating GeoParquet Files
 
-The `validate` command checks GeoParquet files against the official specifications, supporting GeoParquet 1.0, 1.1, 2.0, and Parquet native geospatial types.
+The `check spec` command checks GeoParquet files against the official specifications, supporting GeoParquet 1.0, 1.1, 2.0, and Parquet native geospatial types.
 
 ## Basic Validation
 
 ```bash
-gpio validate myfile.parquet
+gpio check spec myfile.parquet
 ```
 
 The command auto-detects the file type and runs appropriate checks:
@@ -41,7 +41,7 @@ The validate command handles four types of files:
 Standard GeoParquet files with `geo` metadata key containing version, primary_column, and column definitions.
 
 ```bash
-gpio validate geoparquet_v1.parquet
+gpio check spec geoparquet_v1.parquet
 ```
 
 ### GeoParquet 2.0
@@ -49,7 +49,7 @@ gpio validate geoparquet_v1.parquet
 GeoParquet 2.0 files that use Parquet native GEOMETRY/GEOGRAPHY types alongside `geo` metadata.
 
 ```bash
-gpio validate geoparquet_v2.parquet
+gpio check spec geoparquet_v2.parquet
 ```
 
 Additional checks verify:
@@ -63,7 +63,7 @@ Additional checks verify:
 Files with Parquet native geospatial types but no GeoParquet metadata. These are valid but may have limited tool compatibility.
 
 ```bash
-gpio validate parquet_geo_only.parquet
+gpio check spec parquet_geo_only.parquet
 ```
 
 Output includes recommendations:
@@ -124,7 +124,7 @@ Optional checks that read actual geometry data:
 For faster validation, skip reading actual geometry data:
 
 ```bash
-gpio validate myfile.parquet --skip-data-validation
+gpio check spec myfile.parquet --skip-data-validation
 ```
 
 ### Sample Size
@@ -133,10 +133,10 @@ Control how many rows are checked for data validation:
 
 ```bash
 # Check first 500 rows (default: 1000)
-gpio validate myfile.parquet --sample-size 500
+gpio check spec myfile.parquet --sample-size 500
 
 # Check all rows
-gpio validate myfile.parquet --sample-size 0
+gpio check spec myfile.parquet --sample-size 0
 ```
 
 ### Target Version
@@ -144,7 +144,7 @@ gpio validate myfile.parquet --sample-size 0
 Validate against a specific version instead of auto-detecting:
 
 ```bash
-gpio validate myfile.parquet --geoparquet-version 1.1
+gpio check spec myfile.parquet --geoparquet-version 1.1
 ```
 
 ### JSON Output
@@ -152,7 +152,7 @@ gpio validate myfile.parquet --geoparquet-version 1.1
 Get machine-readable results:
 
 ```bash
-gpio validate myfile.parquet --json
+gpio check spec myfile.parquet --json
 ```
 
 Output:
@@ -193,10 +193,10 @@ The command returns different exit codes for scripting:
 
 ```bash
 # Use in scripts
-gpio validate myfile.parquet && echo "Valid!"
+gpio check spec myfile.parquet && echo "Valid!"
 
 # Check exit code
-gpio validate myfile.parquet
+gpio check spec myfile.parquet
 if [ $? -eq 0 ]; then
   echo "Valid GeoParquet file"
 elif [ $? -eq 2 ]; then
@@ -253,10 +253,10 @@ Validate files directly from S3, GCS, or HTTPS:
 
 ```bash
 # S3 with AWS profile
-gpio validate s3://bucket/file.parquet --profile my-aws
+gpio check spec s3://bucket/file.parquet --profile my-aws
 
 # Public HTTPS
-gpio validate https://example.com/data.parquet
+gpio check spec https://example.com/data.parquet
 ```
 
 ## Comparison with check Command
@@ -293,11 +293,11 @@ Geometry coordinates don't match the declared CRS bounds. Common causes:
 - Projected coordinates in a file declared as geographic CRS
 - Incorrect CRS assignment when the file was created
 
-**Fix:** Use `gpio reproject` to transform coordinates, or `gpio convert` with `--target-crs` to correct the CRS declaration:
+**Fix:** Use `gpio convert reproject` to transform coordinates:
 
 ```bash
 # Transform coordinates to a new CRS
-gpio reproject input.parquet output.parquet --target-crs EPSG:4326
+gpio convert reproject input.parquet output.parquet --dst-crs EPSG:4326
 
 # Or inspect the file to understand the current state
 gpio inspect input.parquet --verbose
@@ -346,7 +346,7 @@ Files with only warnings are still valid GeoParquet files but may benefit from o
 If you specify `--geoparquet-version` and the file is a different version, validation fails immediately:
 
 ```bash
-gpio validate v1_file.parquet --geoparquet-version 2.0
+gpio check spec v1_file.parquet --geoparquet-version 2.0
 # Fails: "file is 1.0.0, not 2.0"
 ```
 
@@ -354,16 +354,15 @@ gpio validate v1_file.parquet --geoparquet-version 2.0
 
 ```bash
 # Validate as-is
-gpio validate v1_file.parquet
+gpio check spec v1_file.parquet
 
 # Or convert then validate
 gpio convert v1_file.parquet v2_file.parquet --geoparquet-version 2.0
-gpio validate v2_file.parquet --geoparquet-version 2.0
+gpio check spec v2_file.parquet --geoparquet-version 2.0
 ```
 
 ## See Also
 
-- [CLI Reference: validate](../cli/validate.md)
+- [CLI Reference: check spec](../cli/validate.md)
 - [check command](check.md) - Best practices validation
 - [inspect command](inspect.md) - View file metadata
-- [meta command](meta.md) - Detailed metadata examination

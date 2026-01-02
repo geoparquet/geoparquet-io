@@ -5,7 +5,7 @@ Upload GeoParquet files to cloud object storage (S3, GCS, Azure).
 ## Usage
 
 ```bash
-gpio upload SOURCE DESTINATION [OPTIONS]
+gpio publish upload SOURCE DESTINATION [OPTIONS]
 ```
 
 ## Arguments
@@ -31,33 +31,33 @@ gpio upload SOURCE DESTINATION [OPTIONS]
 
 ```bash
 # Upload to S3 with AWS profile
-gpio upload buildings.parquet s3://bucket/data/buildings.parquet --profile prod
+gpio publish upload buildings.parquet s3://bucket/data/buildings.parquet --profile prod
 
 # Upload to GCS
-gpio upload data.parquet gs://bucket/path/data.parquet
+gpio publish upload data.parquet gs://bucket/path/data.parquet
 
 # Upload to Azure
-gpio upload data.parquet az://account/container/path/data.parquet
+gpio publish upload data.parquet az://account/container/path/data.parquet
 ```
 
 ### Directory
 
 ```bash
 # Upload all files
-gpio upload partitions/ s3://bucket/dataset/ --profile prod
+gpio publish upload partitions/ s3://bucket/dataset/ --profile prod
 
 # Upload only JSON files
-gpio upload data/ s3://bucket/json-files/ --pattern "*.json" --profile prod
+gpio publish upload data/ s3://bucket/json-files/ --pattern "*.json" --profile prod
 
 # Upload with higher parallelism
-gpio upload large-dataset/ s3://bucket/data/ --max-files 16 --profile prod
+gpio publish upload large-dataset/ s3://bucket/data/ --max-files 16 --profile prod
 ```
 
 ### Preview
 
 ```bash
 # See what would be uploaded
-gpio upload data/ s3://bucket/dataset/ --dry-run
+gpio publish upload data/ s3://bucket/dataset/ --dry-run
 ```
 
 ## Authentication
@@ -67,7 +67,7 @@ gpio upload data/ s3://bucket/dataset/ --dry-run
 Uses AWS profiles from `~/.aws/credentials`:
 
 ```bash
-gpio upload data.parquet s3://bucket/file.parquet --profile my-profile
+gpio publish upload data.parquet s3://bucket/file.parquet --profile my-profile
 ```
 
 ### Google Cloud Storage
@@ -76,7 +76,7 @@ Uses application default credentials:
 
 ```bash
 gcloud auth application-default login
-gpio upload data.parquet gs://bucket/file.parquet
+gpio publish upload data.parquet gs://bucket/file.parquet
 ```
 
 ### Azure Blob Storage
@@ -85,7 +85,7 @@ Uses Azure CLI credentials:
 
 ```bash
 az login
-gpio upload data.parquet az://account/container/file.parquet
+gpio publish upload data.parquet az://account/container/file.parquet
 ```
 
 ## See Also

@@ -6,10 +6,10 @@ The `upload` command uploads GeoParquet files to cloud object storage (S3, GCS, 
 
 ```bash
 # Single file to S3
-gpio upload input.parquet s3://bucket/path/output.parquet --profile my-profile
+gpio publish upload input.parquet s3://bucket/path/output.parquet --profile my-profile
 
 # Directory to S3
-gpio upload data/ s3://bucket/dataset/ --profile my-profile
+gpio publish upload data/ s3://bucket/dataset/ --profile my-profile
 ```
 
 ## Supported Destinations
@@ -38,10 +38,10 @@ Upload only specific file types:
 
 ```bash
 # Only JSON files
-gpio upload data/ s3://bucket/dataset/ --pattern "*.json"
+gpio publish upload data/ s3://bucket/dataset/ --pattern "*.json"
 
 # Only Parquet files
-gpio upload data/ s3://bucket/dataset/ --pattern "*.parquet"
+gpio publish upload data/ s3://bucket/dataset/ --pattern "*.parquet"
 ```
 
 ### Parallel Uploads
@@ -50,7 +50,7 @@ Control concurrency for directory uploads:
 
 ```bash
 # Upload 8 files in parallel (default: 4)
-gpio upload data/ s3://bucket/dataset/ --max-files 8
+gpio publish upload data/ s3://bucket/dataset/ --max-files 8
 ```
 
 Trade-off: Higher parallelism = faster uploads but more bandwidth/memory usage.
@@ -61,7 +61,7 @@ Control concurrent chunks within each file:
 
 ```bash
 # More concurrent chunks per file (default: 12)
-gpio upload large.parquet s3://bucket/file.parquet --chunk-concurrency 20
+gpio publish upload large.parquet s3://bucket/file.parquet --chunk-concurrency 20
 ```
 
 ### Custom Chunk Size
@@ -70,7 +70,7 @@ Override default multipart upload chunk size:
 
 ```bash
 # 10MB chunks instead of default 5MB
-gpio upload data.parquet s3://bucket/file.parquet --chunk-size 10485760
+gpio publish upload data.parquet s3://bucket/file.parquet --chunk-size 10485760
 ```
 
 ### Error Handling
@@ -79,7 +79,7 @@ By default, continues uploading remaining files if one fails:
 
 ```bash
 # Stop immediately on first error
-gpio upload data/ s3://bucket/dataset/ --fail-fast
+gpio publish upload data/ s3://bucket/dataset/ --fail-fast
 ```
 
 ### Dry Run
@@ -87,7 +87,7 @@ gpio upload data/ s3://bucket/dataset/ --fail-fast
 Preview what would be uploaded without actually uploading:
 
 ```bash
-gpio upload data/ s3://bucket/dataset/ --dry-run
+gpio publish upload data/ s3://bucket/dataset/ --dry-run
 ```
 
 Shows:
