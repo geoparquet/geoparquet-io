@@ -399,12 +399,20 @@ class TestTableUpload:
 
     def test_upload_cleans_up_temp_file(self, sample_table):
         """Test that upload() cleans up temp file even on error."""
+        captured_paths = []
+
+        def capture_and_raise(**kwargs):
+            captured_paths.append(kwargs["source"])
+            raise Exception("Upload failed")
+
         with patch("geoparquet_io.core.upload.upload") as mock_upload:
             with patch("geoparquet_io.core.common.setup_aws_profile_if_needed"):
-                mock_upload.side_effect = Exception("Upload failed")
+                mock_upload.side_effect = capture_and_raise
 
                 with pytest.raises(Exception, match="Upload failed"):
                     sample_table.upload("s3://test-bucket/test.parquet")
 
-                # Temp file should be cleaned up (we can't easily verify this,
-                # but the test ensures the exception propagates correctly)
+                # Verify the temp file path was captured and cleaned up
+                assert len(captured_paths) == 1
+                temp_path = captured_paths[0]
+                assert not Path(temp_path).exists(), "Temp file should be deleted after error"

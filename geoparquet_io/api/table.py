@@ -53,7 +53,6 @@ def convert(
     lat_column: str | None = None,
     lon_column: str | None = None,
     delimiter: str | None = None,
-    crs: str = "EPSG:4326",
     skip_invalid: bool = False,
     profile: str | None = None,
 ) -> Table:
@@ -71,7 +70,6 @@ def convert(
         lat_column: For CSV: latitude column
         lon_column: For CSV: longitude column
         delimiter: For CSV: field delimiter (auto-detected if not specified)
-        crs: Coordinate reference system (default: EPSG:4326)
         skip_invalid: Skip invalid geometries instead of erroring
         profile: AWS profile name for S3 authentication (default: None)
 
@@ -93,7 +91,6 @@ def convert(
         lat_column=lat_column,
         lon_column=lon_column,
         delimiter=delimiter,
-        crs=crs,
         skip_invalid=skip_invalid,
         profile=profile,
         geometry_column=geometry_column,
