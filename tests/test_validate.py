@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from geoparquet_io.cli.main import validate
+from geoparquet_io.cli.main import cli, validate
 from geoparquet_io.core.common import is_geographic_crs
 from geoparquet_io.core.validate import (
     CheckStatus,
@@ -32,6 +32,7 @@ from geoparquet_io.core.validate import (
     format_json_output,
     validate_geoparquet,
 )
+from tests.conftest import _extract_json_from_output
 
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent / "data"
@@ -579,8 +580,9 @@ class TestValidateCLI:
         runner = CliRunner()
         result = runner.invoke(validate, [geoparquet_v1_file, "--json"])
         assert result.exit_code == 0
-        # Should be valid JSON
-        data = json.loads(result.output)
+        # Should be valid JSON (filter out deprecation warning)
+        json_output = _extract_json_from_output(result.output)
+        data = json.loads(json_output)
         assert "is_valid" in data
         assert data["is_valid"] is True
 
@@ -734,3 +736,57 @@ class TestValidateWithCovering:
         # Should have covering-related checks
         covering_checks = [c for c in result.checks if "covering" in c.name.lower()]
         assert len(covering_checks) > 0
+
+
+# =============================================================================
+# Test Deprecation and New check spec Command
+# =============================================================================
+
+
+class TestValidateDeprecation:
+    """Test that validate command is deprecated."""
+
+    def test_validate_shows_deprecation_warning(self, geoparquet_v1_file):
+        """Test that validate command shows deprecation warning."""
+        runner = CliRunner()
+        # Use cli to invoke validate to test the full deprecation flow
+        result = runner.invoke(cli, ["validate", geoparquet_v1_file])
+        assert result.exit_code == 0
+        assert "deprecated" in result.output.lower()
+        assert "gpio check spec" in result.output
+
+
+class TestCheckSpec:
+    """Test the new check spec subcommand."""
+
+    def test_check_spec_basic(self, geoparquet_v1_file):
+        """Test basic check spec command."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["check", "spec", geoparquet_v1_file])
+        assert result.exit_code == 0
+        assert "GeoParquet Validation Report" in result.output
+
+    def test_check_spec_json_output(self, geoparquet_v1_file):
+        """Test check spec with --json flag produces valid JSON."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["check", "spec", geoparquet_v1_file, "--json"])
+        assert result.exit_code == 0
+        # No deprecation warning, should be pure JSON
+        data = json.loads(result.output)
+        assert "is_valid" in data
+        assert data["is_valid"] is True
+
+    def test_check_spec_skip_data_validation(self, geoparquet_v1_file):
+        """Test check spec with --skip-data-validation."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["check", "spec", geoparquet_v1_file, "--skip-data-validation"])
+        assert result.exit_code == 0
+        assert "Data Validation" not in result.output
+
+    def test_check_spec_with_version(self, geoparquet_v1_file):
+        """Test check spec with --geoparquet-version."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["check", "spec", geoparquet_v1_file, "--geoparquet-version", "1.0"]
+        )
+        assert result.exit_code == 0

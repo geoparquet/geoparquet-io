@@ -526,6 +526,7 @@ def _build_conversion_query(
     is_parquet=False,
     skip_bbox=False,
     existing_bbox_col=None,
+    preserve_existing_bbox=False,
 ):
     """Build SQL query for conversion with optional Hilbert ordering.
 
@@ -537,6 +538,7 @@ def _build_conversion_query(
         is_parquet: Whether input is a parquet file
         skip_bbox: Skip adding bbox column (for 2.0/parquet-geo-only)
         existing_bbox_col: Name of existing bbox column to remove (for parquet input)
+        preserve_existing_bbox: If True, keep existing bbox column instead of adding new one
     """
     # For parquet files, read directly; for other formats use ST_Read
     if is_parquet:
@@ -547,6 +549,7 @@ def _build_conversion_query(
     # Build exclusion list - always exclude geom_column, optionally exclude existing bbox
     exclude_cols = [geom_column]
     if existing_bbox_col and skip_bbox:
+        # For 2.0: remove existing bbox column (not needed for native geo types)
         exclude_cols.append(existing_bbox_col)
     exclude_clause = ", ".join(exclude_cols)
 
@@ -558,8 +561,16 @@ def _build_conversion_query(
                 {geom_column} AS geometry
             FROM {table_expr}
         """
+    elif preserve_existing_bbox:
+        # For 1.x with existing bbox: preserve existing bbox column, don't add new one
+        base_select = f"""
+            SELECT
+                * EXCLUDE ({exclude_clause}),
+                {geom_column} AS geometry
+            FROM {table_expr}
+        """
     else:
-        # For 1.x: add bbox column
+        # For 1.x without existing bbox: add bbox column
         base_select = f"""
             SELECT
                 * EXCLUDE ({exclude_clause}),
@@ -661,16 +672,23 @@ def _convert_spatial_path(
     # Determine if bbox should be skipped for this version
     skip_bbox = should_skip_bbox(geoparquet_version)
 
-    # Check for existing bbox column if input is parquet and we're skipping bbox
+    # Check for existing bbox column if input is parquet
     existing_bbox_col = None
-    if is_parquet and skip_bbox:
+    preserve_existing_bbox = False
+    if is_parquet:
         bbox_info = check_bbox_structure(input_file, verbose=False)
         if bbox_info["has_bbox_column"]:
             existing_bbox_col = bbox_info["bbox_column_name"]
-            # Always inform user when removing bbox (not needed for native geo types)
-            progress(
-                f"Removing bbox column '{existing_bbox_col}' (not needed for native geo types)"
-            )
+            if skip_bbox:
+                # For 2.0/parquet-geo-only: remove bbox (not needed for native geo types)
+                progress(
+                    f"Removing bbox column '{existing_bbox_col}' (not needed for native geo types)"
+                )
+            else:
+                # For 1.x: preserve existing valid bbox column
+                preserve_existing_bbox = True
+                if verbose:
+                    debug(f"Preserving existing bbox column: {existing_bbox_col}")
 
     bounds = (
         None
@@ -683,6 +701,10 @@ def _convert_spatial_path(
             msg = "Reading input (skipping bbox for native geo types)..."
             if not skip_hilbert:
                 msg = "Pass 1: Reading input and applying Hilbert ordering (skipping bbox)..."
+        elif preserve_existing_bbox:
+            msg = "Reading input (preserving existing bbox)..."
+            if not skip_hilbert:
+                msg = "Pass 1: Reading input and applying Hilbert ordering (preserving bbox)..."
         else:
             msg = "Reading input and adding bbox column..."
             if not skip_hilbert:
@@ -697,6 +719,7 @@ def _convert_spatial_path(
         is_parquet=is_parquet,
         skip_bbox=skip_bbox,
         existing_bbox_col=existing_bbox_col,
+        preserve_existing_bbox=preserve_existing_bbox,
     )
 
 

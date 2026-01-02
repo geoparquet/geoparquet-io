@@ -280,6 +280,26 @@ def country_partition_dir():
     return str(COUNTRY_PARTITION_DIR)
 
 
+# Helper functions for CLI output parsing
+
+
+def _extract_json_from_output(output: str) -> str:
+    """Extract JSON from output that may contain warnings or other text.
+
+    Some commands (e.g., deprecated ones) output warning lines before JSON.
+    This helper finds and returns just the JSON part.
+
+    Handles JSON that starts with '{', '[', or is the literal 'null'.
+    """
+    lines = output.strip().split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("{") or stripped.startswith("[") or stripped == "null":
+            return "\n".join(lines[i:])
+    # If no JSON found, return original output
+    return output
+
+
 # CRS reference format test files
 @pytest.fixture
 def crs_projjson_file(test_data_dir):
