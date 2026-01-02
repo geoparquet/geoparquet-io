@@ -22,7 +22,7 @@ This displays all three metadata sections: Parquet file metadata, GeoParquet met
 | Check GeoParquet compliance | `gpio inspect --meta --geoparquet` |
 | Scripting/automation | `gpio inspect --meta --json` |
 
-**Rule of thumb**: Start with `inspect` for a quick look. Add `--meta` when you need detailed structural information.
+**Rule of thumb**: Start with `inspect` for a brief look. Add `--meta` when you need detailed structural information.
 
 ## Metadata Sections
 
