@@ -253,3 +253,82 @@ def check_partition_options(func):
         help="For partitioned data: check first N files (default: check first file only).",
     )(func)
     return func
+
+
+class GlobAwareCommand(click.Command):
+    """
+    Command that detects shell-expanded glob patterns and provides helpful errors.
+
+    When a shell expands a glob pattern (e.g., *.parquet) before passing it to
+    the CLI, the command receives multiple file arguments instead of a single
+    pattern. This class detects that situation and provides a helpful error
+    message suggesting the user quote their glob pattern.
+
+    For commands that support glob patterns (like extract), it suggests quoting.
+    For commands that don't (like convert), it suggests using gpio extract first.
+
+    Usage:
+        @cli.command(cls=GlobAwareCommand)
+        def my_command(...):
+            ...
+
+        # For single-file commands:
+        @cli.command(cls=SingleFileCommand)
+        def convert_command(...):
+            ...
+    """
+
+    # Override in subclass or check command context
+    supports_glob = True
+
+    def make_context(self, info_name, args, parent=None, **extra):
+        """Detect shell-expanded glob patterns and provide helpful errors."""
+        # Count args that look like parquet files (not options)
+        parquet_args = [a for a in args if a.endswith(".parquet") and not a.startswith("-")]
+
+        # If more than 2 parquet files (input + output), likely shell-expanded glob
+        if len(parquet_args) > 2:
+            # Build full command path (e.g., "check all" instead of just "all")
+            cmd_path = self._build_command_path(info_name, parent)
+
+            if self.supports_glob:
+                # Commands like extract that DO support globs
+                raise click.UsageError(
+                    f"Received {len(parquet_args)} parquet files as separate arguments.\n\n"
+                    "This usually means the shell expanded a glob pattern.\n"
+                    "Use quotes to pass the pattern to gpio:\n\n"
+                    f'    gpio {cmd_path} "path/*.parquet" output.parquet'
+                )
+            else:
+                # Commands like convert that DON'T support globs
+                raise click.UsageError(
+                    f"Received {len(parquet_args)} parquet files as separate arguments.\n\n"
+                    f"The '{cmd_path}' command requires a single file.\n"
+                    "To work with multiple files, first consolidate using:\n\n"
+                    f'    gpio extract "path/*.parquet" consolidated.parquet\n\n'
+                    f"Then run: gpio {cmd_path} consolidated.parquet ..."
+                )
+
+        return super().make_context(info_name, args, parent=parent, **extra)
+
+    def _build_command_path(self, info_name, parent):
+        """Build full command path like 'check all' from parent context chain."""
+        parts = [info_name]
+        ctx = parent
+        while ctx is not None:
+            # Skip the root 'gpio' command
+            if ctx.parent is not None:
+                parts.insert(0, ctx.info_name)
+            ctx = ctx.parent
+        return " ".join(parts)
+
+
+class SingleFileCommand(GlobAwareCommand):
+    """
+    Command that requires a single input file (no glob/partition support).
+
+    Use this for commands like convert, sort, add that don't support
+    multiple input files natively.
+    """
+
+    supports_glob = False

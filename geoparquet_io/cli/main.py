@@ -3,6 +3,8 @@ from pathlib import Path
 import click
 
 from geoparquet_io.cli.decorators import (
+    GlobAwareCommand,
+    SingleFileCommand,
     check_partition_options,
     compression_options,
     dry_run_option,
@@ -56,8 +58,11 @@ from geoparquet_io.core.upload import upload as upload_impl
 __version__ = "0.7.0"
 
 
-class OptionalIntCommand(click.Command):
+class OptionalIntCommand(GlobAwareCommand):
     """Custom Command that supports options with optional integer values.
+
+    Inherits from GlobAwareCommand to also detect shell-expanded glob patterns
+    and provide helpful error messages.
 
     Options listed in optional_int_options can be used as flags (defaulting to 10)
     or with an explicit integer value. For example:
@@ -117,6 +122,28 @@ class DefaultGroup(click.Group):
         # No subcommand or unknown subcommand - default to 'all'
         # Insert 'all' as the subcommand
         return super().parse_args(ctx, ["all"] + args)
+
+
+class ConvertDefaultGroup(click.Group):
+    """Custom Group that invokes 'to-geoparquet' when no subcommand is provided.
+
+    This allows backwards compatibility:
+    - gpio convert input.shp output.parquet  -> invokes to-geoparquet
+    - gpio convert to-geoparquet input.shp output.parquet -> explicit
+    - gpio convert reproject input.parquet output.parquet -> subcommand
+    """
+
+    def parse_args(self, ctx, args):
+        # Handle --help for group
+        if "--help" in args and (not args or args[0] not in self.commands):
+            return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
+
+        # If first arg is a known subcommand, use it
+        if args and not args[0].startswith("-") and args[0] in self.commands:
+            return super().parse_args(ctx, args)
+
+        # Default to 'to-geoparquet' subcommand for backwards compat
+        return super().parse_args(ctx, ["to-geoparquet"] + args)
 
 
 @cli.group(cls=DefaultGroup)
@@ -238,7 +265,7 @@ class MultiFileCheckRunner:
         click.echo(f"Summary: {summary} ({total} files checked)")
 
 
-@check.command(name="all")
+@check.command(name="all", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
 @click.option("--fix", is_flag=True, help="Fix detected issues")
@@ -377,7 +404,7 @@ def check_all(
     runner.print_summary()
 
 
-@check.command(name="spatial")
+@check.command(name="spatial", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option(
     "--random-sample-size",
@@ -494,7 +521,7 @@ def check_spatial(
     runner.print_summary()
 
 
-@check.command(name="compression")
+@check.command(name="compression", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
 @click.option("--fix", is_flag=True, help="Recompress geometry with ZSTD")
@@ -580,7 +607,7 @@ def check_compression_cmd(
     runner.print_summary()
 
 
-@check.command(name="bbox")
+@check.command(name="bbox", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
 @click.option("--fix", is_flag=True, help="Fix bbox (add for v1.x, remove for v2/parquet-geo)")
@@ -712,7 +739,7 @@ def check_bbox_cmd(
     runner.print_summary()
 
 
-@check.command(name="row-group")
+@check.command(name="row-group", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
 @click.option("--fix", is_flag=True, help="Optimize row group size")
@@ -798,8 +825,26 @@ def check_row_group_cmd(
     runner.print_summary()
 
 
-# Convert command
-@cli.command()
+# Convert commands group
+@cli.group(cls=ConvertDefaultGroup)
+@click.pass_context
+def convert(ctx):
+    """Convert between formats and coordinate systems.
+
+    By default, converts to optimized GeoParquet. Use subcommands for specific operations.
+
+    \b
+    Examples:
+        gpio convert input.shp output.parquet                    # To GeoParquet (default)
+        gpio convert to-geoparquet input.shp output.parquet      # Explicit subcommand
+        gpio convert reproject input.parquet out.parquet -d EPSG:32610
+    """
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+
+
+@convert.command(name="to-geoparquet", cls=SingleFileCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path())
 @click.option(
@@ -838,7 +883,7 @@ def check_row_group_cmd(
 @verbose_option
 @compression_options
 @profile_option
-def convert(
+def convert_to_geoparquet_cmd(
     input_file,
     output_file,
     skip_hilbert,
@@ -879,8 +924,114 @@ def convert(
     )
 
 
-# Reproject command
-@cli.command()
+def _reproject_impl_cli(
+    input_file,
+    output_file,
+    dst_crs,
+    src_crs,
+    overwrite,
+    verbose,
+    profile,
+    compression,
+    compression_level,
+    geoparquet_version,
+):
+    """Shared reproject CLI implementation."""
+    from geoparquet_io.core.common import validate_profile_for_urls
+
+    # Configure verbose logging
+    configure_verbose(verbose)
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, input_file, output_file)
+
+    try:
+        result = reproject_impl(
+            input_parquet=input_file,
+            output_parquet=output_file,
+            target_crs=dst_crs,
+            source_crs=src_crs,
+            overwrite=overwrite,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+
+        click.echo(f"\nReprojected {result.feature_count:,} features")
+        click.echo(f"  Source CRS: {result.source_crs}")
+        click.echo(f"  Destination CRS: {result.target_crs}")
+        click.echo(f"  Output: {result.output_path}")
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@convert.command(name="reproject", cls=SingleFileCommand)
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--dst-crs",
+    "-d",
+    default="EPSG:4326",
+    show_default=True,
+    help="Destination CRS (e.g., 'EPSG:4326', 'EPSG:32610')",
+)
+@click.option(
+    "--src-crs",
+    "-s",
+    default=None,
+    help="Override source CRS (e.g., 'EPSG:4326'). If not provided, detected from file metadata.",
+)
+@overwrite_option
+@verbose_option
+@profile_option
+@compression_options
+@geoparquet_version_option
+def convert_reproject(
+    input_file,
+    output_file,
+    dst_crs,
+    src_crs,
+    overwrite,
+    verbose,
+    profile,
+    compression,
+    compression_level,
+    geoparquet_version,
+):
+    """
+    Reproject a GeoParquet file to a different CRS.
+
+    Uses DuckDB's ST_Transform for fast, streaming reprojection.
+    Automatically detects source CRS from GeoParquet metadata unless --src-crs is provided.
+
+    If OUTPUT_FILE is not provided, creates <input>_<crs>.parquet.
+    Use --overwrite to modify the input file in place.
+
+    \b
+    Examples:
+        gpio convert reproject input.parquet output.parquet
+        gpio convert reproject input.parquet -d EPSG:32610
+        gpio convert reproject input.parquet --overwrite -d EPSG:4326
+        gpio convert reproject input.parquet output.parquet --dst-crs EPSG:3857
+    """
+    _reproject_impl_cli(
+        input_file,
+        output_file,
+        dst_crs,
+        src_crs,
+        overwrite,
+        verbose,
+        profile,
+        compression,
+        compression_level,
+        geoparquet_version,
+    )
+
+
+# Deprecated reproject command
+@cli.command(hidden=True)  # Deprecated: use 'gpio convert reproject' instead
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
@@ -914,50 +1065,28 @@ def reproject(
     geoparquet_version,
 ):
     """
-    Reproject a GeoParquet file to a different CRS.
+    [DEPRECATED] Reproject a GeoParquet file to a different CRS.
 
-    Uses DuckDB's ST_Transform for fast, streaming reprojection.
-    Automatically detects source CRS from GeoParquet metadata unless --src-crs is provided.
-
-    If OUTPUT_FILE is not provided, creates <input>_<crs>.parquet.
-    Use --overwrite to modify the input file in place.
-
-    \b
-    Examples:
-        gpio reproject input.parquet output.parquet
-        gpio reproject input.parquet -d EPSG:32610
-        gpio reproject input.parquet --overwrite -d EPSG:4326
-        gpio reproject input.parquet output.parquet --dst-crs EPSG:3857
-        gpio reproject input.parquet output.parquet -s EPSG:4326 -d EPSG:32610
+    This command is deprecated. Use 'gpio convert reproject' instead.
     """
-    from geoparquet_io.core.common import validate_profile_for_urls
+    from geoparquet_io.core.logging_config import warn
 
-    # Configure verbose logging
-    configure_verbose(verbose)
-
-    # Validate profile is only used with S3
-    validate_profile_for_urls(profile, input_file, output_file)
-
-    try:
-        result = reproject_impl(
-            input_parquet=input_file,
-            output_parquet=output_file,
-            target_crs=dst_crs,
-            source_crs=src_crs,
-            overwrite=overwrite,
-            compression=compression,
-            compression_level=compression_level,
-            verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-        )
-
-        click.echo(f"\nReprojected {result.feature_count:,} features")
-        click.echo(f"  Source CRS: {result.source_crs}")
-        click.echo(f"  Destination CRS: {result.target_crs}")
-        click.echo(f"  Output: {result.output_path}")
-    except Exception as e:
-        raise click.ClickException(str(e)) from e
+    warn(
+        "'gpio reproject' is deprecated and will be removed in a future release. "
+        "Use 'gpio convert reproject' instead."
+    )
+    _reproject_impl_cli(
+        input_file,
+        output_file,
+        dst_crs,
+        src_crs,
+        overwrite,
+        verbose,
+        profile,
+        compression,
+        compression_level,
+        geoparquet_version,
+    )
 
 
 # Inspect command - uses OptionalIntCommand for --head/--tail optional values
@@ -967,6 +1096,36 @@ def reproject(
 @click.option("--tail", type=int, default=None, help="Show last N rows (default: 10)")
 @click.option(
     "--stats", is_flag=True, help="Show column statistics (nulls, min/max, unique counts)"
+)
+@click.option(
+    "--meta",
+    is_flag=True,
+    help="Show comprehensive metadata (Parquet, GeoParquet, row groups)",
+)
+@click.option(
+    "--parquet",
+    "meta_parquet",
+    is_flag=True,
+    help="With --meta: show only Parquet file metadata",
+)
+@click.option(
+    "--geoparquet",
+    "meta_geoparquet",
+    is_flag=True,
+    help="With --meta: show only GeoParquet metadata from 'geo' key",
+)
+@click.option(
+    "--parquet-geo",
+    "meta_parquet_geo",
+    is_flag=True,
+    help="With --meta: show only Parquet geospatial metadata",
+)
+@click.option(
+    "--row-groups",
+    "meta_row_groups",
+    type=int,
+    default=1,
+    help="With --meta: number of row groups to display (default: 1)",
 )
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
 @click.option(
@@ -980,14 +1139,26 @@ def reproject(
 )
 @profile_option
 def inspect(
-    parquet_file, head, tail, stats, json_output, markdown_output, check_all_files, profile
+    parquet_file,
+    head,
+    tail,
+    stats,
+    meta,
+    meta_parquet,
+    meta_geoparquet,
+    meta_parquet_geo,
+    meta_row_groups,
+    json_output,
+    markdown_output,
+    check_all_files,
+    profile,
 ):
     """
     Inspect a GeoParquet file and show metadata summary.
 
     Provides quick examination of GeoParquet files without launching external tools.
     Default behavior shows metadata only (instant). Use --head/--tail to preview data,
-    or --stats to calculate column statistics.
+    --stats to calculate column statistics, or --meta for comprehensive metadata.
 
     Examples:
 
@@ -1016,6 +1187,18 @@ def inspect(
         gpio inspect data.parquet --stats
 
         \b
+        # Comprehensive metadata (Parquet, GeoParquet, row groups)
+        gpio inspect data.parquet --meta
+
+        \b
+        # Show only GeoParquet metadata
+        gpio inspect data.parquet --meta --geoparquet
+
+        \b
+        # Show all row groups instead of just the first
+        gpio inspect data.parquet --meta --row-groups 10
+
+        \b
         # JSON output for scripting
         gpio inspect data.parquet --json
 
@@ -1031,6 +1214,50 @@ def inspect(
         setup_aws_profile_if_needed,
         validate_profile_for_urls,
     )
+
+    # Validate mutually exclusive options
+    if head and tail:
+        raise click.UsageError("--head and --tail are mutually exclusive")
+
+    if json_output and markdown_output:
+        raise click.UsageError("--json and --markdown are mutually exclusive")
+
+    # Validate --meta related options require --meta flag
+    meta_sub_options = meta_parquet or meta_geoparquet or meta_parquet_geo or meta_row_groups != 1
+    if meta_sub_options and not meta:
+        raise click.UsageError(
+            "--parquet, --geoparquet, --parquet-geo, and --row-groups require --meta flag"
+        )
+
+    # Handle --meta mode
+    if meta:
+        if head or tail:
+            raise click.UsageError("--meta cannot be used with --head or --tail")
+        if stats:
+            raise click.UsageError("--meta cannot be used with --stats")
+        if markdown_output:
+            raise click.UsageError("--meta does not support --markdown output")
+        if check_all_files:
+            raise click.UsageError("--meta cannot be used with --check-all")
+
+        # Validate profile is only used with S3
+        validate_profile_for_urls(profile, parquet_file)
+        setup_aws_profile_if_needed(profile, parquet_file)
+
+        try:
+            _handle_meta_display(
+                parquet_file,
+                meta_parquet,
+                meta_geoparquet,
+                meta_parquet_geo,
+                meta_row_groups,
+                json_output,
+            )
+        except Exception as e:
+            raise click.ClickException(str(e)) from e
+        return
+
+    # Continue with standard inspect mode
     from geoparquet_io.core.duckdb_metadata import get_usable_columns
     from geoparquet_io.core.inspect_utils import (
         extract_partition_summary,
@@ -1039,13 +1266,6 @@ def inspect(
         format_partition_terminal_output,
     )
     from geoparquet_io.core.partition_reader import get_partition_info
-
-    # Validate mutually exclusive options
-    if head and tail:
-        raise click.UsageError("--head and --tail are mutually exclusive")
-
-    if json_output and markdown_output:
-        raise click.UsageError("--json and --markdown are mutually exclusive")
 
     # Check for partition and handle --check-all
     if check_all_files:
@@ -1167,7 +1387,7 @@ def inspect(
 
 
 # Extract command
-@cli.command()
+@cli.command(cls=GlobAwareCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
@@ -1408,7 +1628,7 @@ def _handle_meta_display(
             format_parquet_geo_metadata(parquet_file, json_output, row_groups)
 
 
-@cli.command()
+@cli.command(hidden=True)  # Deprecated: use 'gpio inspect --meta' instead
 @click.argument("parquet_file")
 @click.option("--parquet", is_flag=True, help="Show only Parquet file metadata")
 @click.option("--geoparquet", is_flag=True, help="Show only GeoParquet metadata from 'geo' key")
@@ -1420,38 +1640,18 @@ def _handle_meta_display(
 @profile_option
 def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output, profile):
     """
-    Show comprehensive metadata for a GeoParquet file.
+    [DEPRECATED] Show comprehensive metadata for a GeoParquet file.
 
-    Displays three types of metadata:
-    1. Parquet File Metadata - File structure, schema, row groups, and column statistics
-    2. Parquet Geo Metadata - Geospatial metadata from Parquet format specification
-    3. GeoParquet Metadata - GeoParquet-specific metadata from 'geo' key
-
-    By default, shows all three sections. Use flags to show specific sections only.
-
-    Examples:
-
-        \b
-        # Show all metadata sections
-        gpio meta data.parquet
-
-        \b
-        # Show only Parquet file metadata
-        gpio meta data.parquet --parquet
-
-        \b
-        # Show only GeoParquet metadata
-        gpio meta data.parquet --geoparquet
-
-        \b
-        # Show all row groups instead of just the first
-        gpio meta data.parquet --row-groups 10
-
-        \b
-        # JSON output for scripting
-        gpio meta data.parquet --json
+    This command is deprecated. Use 'gpio inspect --meta' instead.
     """
     from geoparquet_io.core.common import setup_aws_profile_if_needed, validate_profile_for_urls
+    from geoparquet_io.core.logging_config import warn
+
+    # Show deprecation warning
+    warn(
+        "'gpio meta' is deprecated and will be removed in a future release. "
+        "Use 'gpio inspect --meta' instead."
+    )
 
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, parquet_file)
@@ -1478,7 +1678,7 @@ def sort(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-@sort.command(name="hilbert")
+@sort.command(name="hilbert", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path(), required=False, default=None)
 @click.option(
@@ -1551,7 +1751,7 @@ def hilbert_order(
         raise click.ClickException(str(e)) from None
 
 
-@sort.command(name="column")
+@sort.command(name="column", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path())
 @click.argument("columns")
@@ -1623,7 +1823,7 @@ def sort_column(
         raise click.ClickException(str(e)) from e
 
 
-@sort.command(name="quadkey")
+@sort.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path())
 @click.option(
@@ -1720,7 +1920,7 @@ def add(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-@add.command(name="admin-divisions")
+@add.command(name="admin-divisions", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
 @click.option(
@@ -1852,7 +2052,7 @@ def add_country_codes(
     )
 
 
-@add.command(name="bbox")
+@add.command(name="bbox", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
@@ -1943,7 +2143,7 @@ def add_bbox(
         raise click.ClickException(str(e)) from None
 
 
-@add.command(name="bbox-metadata")
+@add.command(name="bbox-metadata", cls=SingleFileCommand)
 @click.argument("parquet_file")
 @profile_option
 @verbose_option
@@ -1966,7 +2166,7 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
     add_bbox_metadata_impl(parquet_file, verbose)
 
 
-@add.command(name="h3")
+@add.command(name="h3", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
 @click.option("--h3-name", default="h3_cell", help="Name for the H3 column (default: h3_cell)")
@@ -2042,7 +2242,7 @@ def add_h3(
         raise click.ClickException(str(e)) from None
 
 
-@add.command(name="kdtree")
+@add.command(name="kdtree", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet")
 @click.option(
@@ -2186,7 +2386,7 @@ def add_kdtree(
     )
 
 
-@add.command(name="quadkey")
+@add.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
 @click.option(
@@ -2284,7 +2484,7 @@ def partition(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-@partition.command(name="admin")
+@partition.command(name="admin", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option(
@@ -2382,7 +2582,7 @@ def partition_admin(
     )
 
 
-@partition.command(name="string")
+@partition.command(name="string", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option("--column", required=True, help="Column name to partition by (required)")
@@ -2455,7 +2655,7 @@ def partition_string(
         raise click.ClickException(str(e)) from None
 
 
-@partition.command(name="h3")
+@partition.command(name="h3", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option(
@@ -2549,7 +2749,7 @@ def partition_h3(
     )
 
 
-@partition.command(name="kdtree")
+@partition.command(name="kdtree", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option(
@@ -2698,7 +2898,7 @@ def partition_kdtree(
     )
 
 
-@partition.command(name="quadkey")
+@partition.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option(
@@ -2957,7 +3157,161 @@ def _handle_stac_collection(
     click.echo(f"✓ Created {len(item_dicts)} STAC Items alongside data files in {input_path}")
 
 
-@cli.command()
+def _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose):
+    """Shared STAC generation implementation for both command paths."""
+    from pathlib import Path
+
+    from geoparquet_io.core.stac import detect_stac
+
+    input_path = Path(input)
+
+    # Check if input is already a STAC file/collection
+    stac_type = detect_stac(str(input_path))
+    if stac_type:
+        raise click.ClickException(
+            f"Input is already a STAC {stac_type}: {input}\n"
+            f"Use 'gpio check stac {input}' to validate it, or provide a GeoParquet file/directory."
+        )
+
+    if input_path.is_file():
+        _handle_stac_item(input_path, output, bucket, public_url, item_id, overwrite, verbose)
+    elif input_path.is_dir():
+        _handle_stac_collection(
+            input_path, output, bucket, public_url, collection_id, overwrite, verbose
+        )
+    else:
+        raise click.BadParameter(f"Input must be file or directory: {input}")
+
+
+# Publish commands group
+@cli.group()
+@click.pass_context
+def publish(ctx):
+    """Commands for publishing GeoParquet data (STAC metadata, cloud uploads)."""
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+
+
+@publish.command(name="stac")
+@click.argument("input")
+@click.argument("output", type=click.Path())
+@click.option(
+    "--bucket",
+    required=True,
+    help="S3 bucket prefix for asset hrefs (e.g., s3://source.coop/org/dataset/)",
+)
+@click.option(
+    "--public-url",
+    help="Optional public HTTPS URL for assets (e.g., https://data.source.coop/org/dataset/)",
+)
+@click.option("--collection-id", help="Custom collection ID (for partitioned datasets)")
+@click.option("--item-id", help="Custom item ID (for single files)")
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Overwrite existing STAC files in output location",
+)
+@verbose_option
+def publish_stac(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose):
+    """
+    Generate STAC Item or Collection from GeoParquet file(s).
+
+    Single file -> STAC Item JSON
+
+    Partitioned directory -> STAC Collection + Items (co-located with data)
+
+    For partitioned datasets, Items are written alongside their parquet files
+    following STAC best practices. collection.json is written to OUTPUT.
+
+    Automatically detects PMTiles overview files and includes them as assets.
+
+    Examples:
+
+      \b
+      # Single file
+      gpio publish stac input.parquet output.json --bucket s3://my-bucket/roads/
+
+      \b
+      # Partitioned dataset - Items written next to parquet files
+      gpio publish stac partitions/ . --bucket s3://my-bucket/roads/
+
+      \b
+      # With public URL mapping
+      gpio publish stac data.parquet output.json \\
+        --bucket s3://my-bucket/roads/ \\
+        --public-url https://data.example.com/roads/
+    """
+    _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
+
+
+@publish.command(name="upload")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("destination", type=str)
+@profile_option
+@click.option("--pattern", help="Glob pattern for filtering files (e.g., '*.parquet', '**/*.json')")
+@click.option(
+    "--max-files", default=4, show_default=True, help="Max parallel file uploads for directories"
+)
+@click.option(
+    "--chunk-concurrency",
+    default=12,
+    show_default=True,
+    help="Max concurrent chunks per file",
+)
+@click.option("--chunk-size", type=int, help="Chunk size in bytes for multipart uploads")
+@click.option("--fail-fast", is_flag=True, help="Stop immediately on first error")
+@dry_run_option
+def publish_upload(
+    source,
+    destination,
+    profile,
+    pattern,
+    max_files,
+    chunk_concurrency,
+    chunk_size,
+    fail_fast,
+    dry_run,
+):
+    """Upload file or directory to object storage.
+
+    Supports S3, GCS, Azure, and HTTP destinations. Automatically handles
+    multipart uploads and preserves directory structure.
+
+    \b
+    Examples:
+      # Single file to S3
+      gpio publish upload data.parquet s3://bucket/path/data.parquet --profile source-coop
+
+      \b
+      # Directory to GCS (preserves structure, uploads files in parallel)
+      gpio publish upload output/ gs://bucket/dataset/
+
+      \b
+      # Only parquet files with increased parallelism
+      gpio publish upload output/ s3://bucket/dataset/ --pattern "*.parquet" --max-files 8
+
+      \b
+      # Stop on first error instead of continuing
+      gpio publish upload output/ s3://bucket/dataset/ --fail-fast
+    """
+    try:
+        upload_impl(
+            source=source,
+            destination=destination,
+            profile=profile,
+            pattern=pattern,
+            max_files=max_files,
+            chunk_concurrency=chunk_concurrency,
+            chunk_size=chunk_size,
+            fail_fast=fail_fast,
+            dry_run=dry_run,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+
+
+@cli.command(hidden=True)  # Deprecated: use 'gpio publish stac' instead
 @click.argument("input")
 @click.argument("output", type=click.Path())
 @click.option(
@@ -2979,57 +3333,17 @@ def _handle_stac_collection(
 @verbose_option
 def stac(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose):
     """
-    Generate STAC Item or Collection from GeoParquet file(s).
+    [DEPRECATED] Generate STAC Item or Collection from GeoParquet file(s).
 
-    Single file → STAC Item JSON
-
-    Partitioned directory → STAC Collection + Items (co-located with data)
-
-    For partitioned datasets, Items are written alongside their parquet files
-    following STAC best practices. collection.json is written to OUTPUT.
-
-    Automatically detects PMTiles overview files and includes them as assets.
-
-    Examples:
-
-      \b
-      # Single file
-      gpio stac input.parquet output.json --bucket s3://my-bucket/roads/
-
-      \b
-      # Partitioned dataset - Items written next to parquet files
-      gpio stac partitions/ . --bucket s3://my-bucket/roads/
-
-      \b
-      # With public URL mapping
-      gpio stac data.parquet output.json \\
-        --bucket s3://my-bucket/roads/ \\
-        --public-url https://data.example.com/roads/
+    This command is deprecated. Use 'gpio publish stac' instead.
     """
-    from pathlib import Path
+    from geoparquet_io.core.logging_config import warn
 
-    from geoparquet_io.core.stac import (
-        detect_stac,
+    warn(
+        "'gpio stac' is deprecated and will be removed in a future release. "
+        "Use 'gpio publish stac' instead."
     )
-
-    input_path = Path(input)
-
-    # Check if input is already a STAC file/collection
-    stac_type = detect_stac(str(input_path))
-    if stac_type:
-        raise click.ClickException(
-            f"Input is already a STAC {stac_type}: {input}\n"
-            f"Use 'gpio check stac {input}' to validate it, or provide a GeoParquet file/directory."
-        )
-
-    if input_path.is_file():
-        _handle_stac_item(input_path, output, bucket, public_url, item_id, overwrite, verbose)
-    elif input_path.is_dir():
-        _handle_stac_collection(
-            input_path, output, bucket, public_url, collection_id, overwrite, verbose
-        )
-    else:
-        raise click.BadParameter(f"Input must be file or directory: {input}")
+    _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
 
 
 @check.command(name="stac")
@@ -3065,6 +3379,121 @@ def check_stac_cmd(stac_file, profile, verbose):
     setup_aws_profile_if_needed(profile, stac_file)
 
     check_stac(stac_file, verbose)
+
+
+@check.command(name="spec", cls=GlobAwareCommand)
+@click.argument("parquet_file")
+@click.option(
+    "--geoparquet-version",
+    type=click.Choice(["1.0", "1.1", "2.0", "parquet-geo-only"]),
+    default=None,
+    help="Validate against specific GeoParquet version (default: auto-detect)",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output as JSON for machine parsing",
+)
+@click.option(
+    "--skip-data-validation",
+    is_flag=True,
+    help="Skip validation of actual data values against metadata claims",
+)
+@click.option(
+    "--sample-size",
+    type=click.IntRange(0, None),
+    default=1000,
+    show_default=True,
+    help="Number of rows to sample for data validation (0 = all rows)",
+)
+@verbose_option
+@profile_option
+def check_spec(
+    parquet_file,
+    geoparquet_version,
+    json_output,
+    skip_data_validation,
+    sample_size,
+    verbose,
+    profile,
+):
+    """
+    Validate a GeoParquet file against specification requirements.
+
+    Checks file structure, metadata, and optionally data consistency against
+    the GeoParquet specification. Automatically detects the file version unless
+    --geoparquet-version is specified.
+
+    Supports GeoParquet 1.0, 1.1, 2.0, and Parquet native geo types.
+
+    \b
+    Exit codes:
+      0 - All checks passed
+      1 - One or more checks failed
+      2 - Warnings only (all required checks passed)
+
+    \b
+    Examples:
+      # Basic validation (auto-detect version)
+      gpio check spec data.parquet
+
+      \b
+      # Validate against specific version
+      gpio check spec data.parquet --geoparquet-version 1.1
+
+      \b
+      # JSON output for CI/CD
+      gpio check spec data.parquet --json
+
+      \b
+      # Skip data validation for faster check
+      gpio check spec data.parquet --skip-data-validation
+    """
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_profile_for_urls,
+    )
+    from geoparquet_io.core.validate import (
+        format_json_output as format_json,
+    )
+    from geoparquet_io.core.validate import (
+        format_terminal_output as format_terminal,
+    )
+    from geoparquet_io.core.validate import (
+        validate_geoparquet,
+    )
+
+    configure_verbose(verbose)
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, parquet_file)
+    setup_aws_profile_if_needed(profile, parquet_file)
+
+    try:
+        result = validate_geoparquet(
+            parquet_file,
+            target_version=geoparquet_version,
+            validate_data=not skip_data_validation,
+            sample_size=sample_size,
+            verbose=verbose,
+        )
+
+        if json_output:
+            click.echo(format_json(result))
+        else:
+            format_terminal(result)
+
+        # Exit codes: 0=passed, 1=failed, 2=warnings only
+        if result.failed_count > 0:
+            raise click.exceptions.Exit(1)
+        elif result.warning_count > 0:
+            raise click.exceptions.Exit(2)
+        # Exit 0 is implicit when no exception is raised
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 # Benchmark command
@@ -3168,7 +3597,7 @@ def benchmark(
     )
 
 
-@cli.command()
+@cli.command(hidden=True)  # Deprecated: use 'gpio publish upload' instead
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.argument("destination", type=str)
 @profile_option
@@ -3196,28 +3625,17 @@ def upload(
     fail_fast,
     dry_run,
 ):
-    """Upload file or directory to object storage.
-
-    Supports S3, GCS, Azure, and HTTP destinations. Automatically handles
-    multipart uploads and preserves directory structure.
-
-    \b
-    Examples:
-      # Single file to S3
-      gpio upload data.parquet s3://bucket/path/data.parquet --profile source-coop
-
-      \b
-      # Directory to GCS (preserves structure, uploads files in parallel)
-      gpio upload output/ gs://bucket/dataset/
-
-      \b
-      # Only parquet files with increased parallelism
-      gpio upload output/ s3://bucket/dataset/ --pattern "*.parquet" --max-files 8
-
-      \b
-      # Stop on first error instead of continuing
-      gpio upload output/ s3://bucket/dataset/ --fail-fast
     """
+    [DEPRECATED] Upload file or directory to object storage.
+
+    This command is deprecated. Use 'gpio publish upload' instead.
+    """
+    from geoparquet_io.core.logging_config import warn
+
+    warn(
+        "'gpio upload' is deprecated and will be removed in a future release. "
+        "Use 'gpio publish upload' instead."
+    )
     try:
         upload_impl(
             source=source,
@@ -3234,7 +3652,7 @@ def upload(
         raise click.ClickException(str(e)) from e
 
 
-@cli.command()
+@cli.command(hidden=True)  # Deprecated: use 'gpio check spec' instead
 @click.argument("parquet_file")
 @click.option(
     "--geoparquet-version",
@@ -3272,41 +3690,15 @@ def validate(
     profile,
 ):
     """
-    Validate a GeoParquet file against specification requirements.
+    [DEPRECATED] Validate a GeoParquet file against specification requirements.
 
-    Checks file structure, metadata, and optionally data consistency against
-    the GeoParquet specification. Automatically detects the file version unless
-    --geoparquet-version is specified.
-
-    Supports GeoParquet 1.0, 1.1, 2.0, and Parquet native geo types.
-
-    \b
-    Exit codes:
-      0 - All checks passed
-      1 - One or more checks failed
-      2 - Warnings only (all required checks passed)
-
-    \b
-    Examples:
-      # Basic validation (auto-detect version)
-      gpio validate data.parquet
-
-      \b
-      # Validate against specific version
-      gpio validate data.parquet --geoparquet-version 1.1
-
-      \b
-      # JSON output for CI/CD
-      gpio validate data.parquet --json
-
-      \b
-      # Skip data validation for faster check
-      gpio validate data.parquet --skip-data-validation
+    This command is deprecated. Use 'gpio check spec' instead.
     """
     from geoparquet_io.core.common import (
         setup_aws_profile_if_needed,
         validate_profile_for_urls,
     )
+    from geoparquet_io.core.logging_config import warn
     from geoparquet_io.core.validate import (
         format_json_output as format_json,
     )
@@ -3315,6 +3707,12 @@ def validate(
     )
     from geoparquet_io.core.validate import (
         validate_geoparquet,
+    )
+
+    # Show deprecation warning
+    warn(
+        "'gpio validate' is deprecated and will be removed in a future release. "
+        "Use 'gpio check spec' instead."
     )
 
     configure_verbose(verbose)
