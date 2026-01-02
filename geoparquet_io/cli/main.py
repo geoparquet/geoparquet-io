@@ -3,6 +3,8 @@ from pathlib import Path
 import click
 
 from geoparquet_io.cli.decorators import (
+    GlobAwareCommand,
+    SingleFileCommand,
     check_partition_options,
     compression_options,
     dry_run_option,
@@ -56,8 +58,11 @@ from geoparquet_io.core.upload import upload as upload_impl
 __version__ = "0.7.0"
 
 
-class OptionalIntCommand(click.Command):
+class OptionalIntCommand(GlobAwareCommand):
     """Custom Command that supports options with optional integer values.
+
+    Inherits from GlobAwareCommand to also detect shell-expanded glob patterns
+    and provide helpful error messages.
 
     Options listed in optional_int_options can be used as flags (defaulting to 10)
     or with an explicit integer value. For example:
@@ -260,7 +265,7 @@ class MultiFileCheckRunner:
         click.echo(f"Summary: {summary} ({total} files checked)")
 
 
-@check.command(name="all")
+@check.command(name="all", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
 @click.option("--fix", is_flag=True, help="Fix detected issues")
@@ -399,7 +404,7 @@ def check_all(
     runner.print_summary()
 
 
-@check.command(name="spatial")
+@check.command(name="spatial", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option(
     "--random-sample-size",
@@ -516,7 +521,7 @@ def check_spatial(
     runner.print_summary()
 
 
-@check.command(name="compression")
+@check.command(name="compression", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
 @click.option("--fix", is_flag=True, help="Recompress geometry with ZSTD")
@@ -602,7 +607,7 @@ def check_compression_cmd(
     runner.print_summary()
 
 
-@check.command(name="bbox")
+@check.command(name="bbox", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
 @click.option("--fix", is_flag=True, help="Fix bbox (add for v1.x, remove for v2/parquet-geo)")
@@ -734,7 +739,7 @@ def check_bbox_cmd(
     runner.print_summary()
 
 
-@check.command(name="row-group")
+@check.command(name="row-group", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
 @click.option("--fix", is_flag=True, help="Optimize row group size")
@@ -839,7 +844,7 @@ def convert(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-@convert.command(name="to-geoparquet")
+@convert.command(name="to-geoparquet", cls=SingleFileCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path())
 @click.option(
@@ -962,7 +967,7 @@ def _reproject_impl_cli(
         raise click.ClickException(str(e)) from e
 
 
-@convert.command(name="reproject")
+@convert.command(name="reproject", cls=SingleFileCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
@@ -1382,7 +1387,7 @@ def inspect(
 
 
 # Extract command
-@cli.command()
+@cli.command(cls=GlobAwareCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
@@ -1673,7 +1678,7 @@ def sort(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-@sort.command(name="hilbert")
+@sort.command(name="hilbert", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path(), required=False, default=None)
 @click.option(
@@ -1746,7 +1751,7 @@ def hilbert_order(
         raise click.ClickException(str(e)) from None
 
 
-@sort.command(name="column")
+@sort.command(name="column", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path())
 @click.argument("columns")
@@ -1818,7 +1823,7 @@ def sort_column(
         raise click.ClickException(str(e)) from e
 
 
-@sort.command(name="quadkey")
+@sort.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path())
 @click.option(
@@ -1915,7 +1920,7 @@ def add(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-@add.command(name="admin-divisions")
+@add.command(name="admin-divisions", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
 @click.option(
@@ -2047,7 +2052,7 @@ def add_country_codes(
     )
 
 
-@add.command(name="bbox")
+@add.command(name="bbox", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
 @click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
@@ -2138,7 +2143,7 @@ def add_bbox(
         raise click.ClickException(str(e)) from None
 
 
-@add.command(name="bbox-metadata")
+@add.command(name="bbox-metadata", cls=SingleFileCommand)
 @click.argument("parquet_file")
 @profile_option
 @verbose_option
@@ -2161,7 +2166,7 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
     add_bbox_metadata_impl(parquet_file, verbose)
 
 
-@add.command(name="h3")
+@add.command(name="h3", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
 @click.option("--h3-name", default="h3_cell", help="Name for the H3 column (default: h3_cell)")
@@ -2237,7 +2242,7 @@ def add_h3(
         raise click.ClickException(str(e)) from None
 
 
-@add.command(name="kdtree")
+@add.command(name="kdtree", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet")
 @click.option(
@@ -2381,7 +2386,7 @@ def add_kdtree(
     )
 
 
-@add.command(name="quadkey")
+@add.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
 @click.option(
@@ -2479,7 +2484,7 @@ def partition(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-@partition.command(name="admin")
+@partition.command(name="admin", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option(
@@ -2577,7 +2582,7 @@ def partition_admin(
     )
 
 
-@partition.command(name="string")
+@partition.command(name="string", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option("--column", required=True, help="Column name to partition by (required)")
@@ -2650,7 +2655,7 @@ def partition_string(
         raise click.ClickException(str(e)) from None
 
 
-@partition.command(name="h3")
+@partition.command(name="h3", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option(
@@ -2744,7 +2749,7 @@ def partition_h3(
     )
 
 
-@partition.command(name="kdtree")
+@partition.command(name="kdtree", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option(
@@ -2893,7 +2898,7 @@ def partition_kdtree(
     )
 
 
-@partition.command(name="quadkey")
+@partition.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
 @click.option(
@@ -3376,7 +3381,7 @@ def check_stac_cmd(stac_file, profile, verbose):
     check_stac(stac_file, verbose)
 
 
-@check.command(name="spec")
+@check.command(name="spec", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option(
     "--geoparquet-version",
