@@ -7,22 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-
-
-def _extract_json_from_output(output: str) -> str:
-    """Extract JSON from output that may contain deprecation warnings.
-
-    The deprecated meta command outputs a warning line before JSON.
-    This helper finds and returns just the JSON part.
-    """
-    lines = output.strip().split("\n")
-    # Find the first line that starts with { or [ (JSON start) or is "null"
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("{") or stripped.startswith("[") or stripped == "null":
-            return "\n".join(lines[i:])
-    # If no JSON found, return original output
-    return output
+from tests.conftest import _extract_json_from_output
 
 
 @pytest.fixture
