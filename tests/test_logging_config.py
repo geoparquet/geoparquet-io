@@ -327,7 +327,7 @@ class TestDynamicStreamHandler:
     """Tests for DynamicStreamHandler class."""
 
     def test_emit_success(self, capsys):
-        """Test emit writes to stdout."""
+        """Test emit writes to stderr when stdout is piped (not a TTY)."""
         handler = DynamicStreamHandler()
         handler.setFormatter(CLIFormatter(use_colors=False))
         record = logging.LogRecord(
@@ -341,10 +341,11 @@ class TestDynamicStreamHandler:
         )
         handler.emit(record)
 
-        # Verify output was written to stdout
+        # Verify output was written to stderr (when stdout is not a TTY, logs go to stderr
+        # to avoid corrupting binary data streams like Arrow IPC)
         captured = capsys.readouterr()
-        assert captured.out, "Expected output to stdout but got nothing"
-        assert "Test emit" in captured.out
+        assert captured.err, "Expected output to stderr but got nothing"
+        assert "Test emit" in captured.err
 
     def test_emit_exception_handling(self):
         """Test emit handles exceptions (lines 142-143)."""

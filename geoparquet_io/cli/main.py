@@ -801,7 +801,7 @@ def check_row_group_cmd(
 # Convert command
 @cli.command()
 @click.argument("input_file")
-@click.argument("output_file", type=str)
+@click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
     "--skip-hilbert",
     is_flag=True,
@@ -859,7 +859,7 @@ def convert(
 
     Supports Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV with WKT or lat/lon columns.
     Applies ZSTD compression, bbox metadata, and Hilbert ordering by default.
-    Use "-" as output_file to stream Arrow IPC to stdout for piping.
+    Auto-streams Arrow IPC to stdout when piped (or use "-" as output).
 
     \b
     Examples:
@@ -867,17 +867,23 @@ def convert(
       gpio convert input.gpkg output.parquet
 
       \b
-      # Pipe to another command
-      gpio convert input.gpkg - | gpio sort hilbert - | gpio upload - s3://bucket/data.parquet
+      # Pipe to another command (auto-streams when piped)
+      gpio convert input.gpkg | gpio add bbox - | gpio upload - s3://bucket/data.parquet
     """
     from geoparquet_io.core.streaming import (
+        StreamingError,
         should_stream_output,
         validate_output,
     )
 
+    # Validate output early - provides helpful error if no output and not piping
+    try:
+        validate_output(output_file)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Check for streaming output
     if should_stream_output(output_file):
-        validate_output(output_file)
         # Suppress verbose for streaming
         verbose = False
         _convert_streaming(
@@ -1395,6 +1401,14 @@ def extract(
         # Extract first 1000 rows
         gpio extract data.parquet output.parquet --limit 1000
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_file)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive row group options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -1601,6 +1615,14 @@ def hilbert_order(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_parquet)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -1990,6 +2012,14 @@ def add_bbox(
         # Force replace existing bbox
         gpio add bbox input.parquet output.parquet --force
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_parquet)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2089,6 +2119,14 @@ def add_h3(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_parquet)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2103,8 +2141,6 @@ def add_h3(
             row_group_mb = size_bytes / (1024 * 1024)
         except ValueError as e:
             raise click.UsageError(f"Invalid row group size: {e}") from e
-
-    from geoparquet_io.core.streaming import StreamingError
 
     try:
         add_h3_column_impl(
@@ -2319,6 +2355,14 @@ def add_quadkey(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_parquet)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2333,8 +2377,6 @@ def add_quadkey(
             row_group_mb = size_bytes / (1024 * 1024)
         except ValueError as e:
             raise click.UsageError(f"Invalid row group size: {e}") from e
-
-    from geoparquet_io.core.streaming import StreamingError
 
     try:
         add_quadkey_column_impl(

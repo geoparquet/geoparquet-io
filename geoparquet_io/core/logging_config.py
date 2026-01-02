@@ -121,11 +121,13 @@ class LibraryFormatter(logging.Formatter):
 
 class DynamicStreamHandler(logging.StreamHandler):
     """
-    A StreamHandler that works correctly with Click's CliRunner.
+    A StreamHandler that works correctly with Click's CliRunner and piping.
 
     Click's CliRunner substitutes sys.stdout with a wrapper. To ensure
-    output is captured by CliRunner, we use click.echo() when we detect
-    we're not writing to the real stdout.
+    output is captured by CliRunner, we dynamically select the stream.
+
+    When stdout is piped (for binary data like Arrow IPC), logs go to stderr.
+    When stdout is a terminal, logs go to stdout (standard CLI behavior).
     """
 
     def __init__(self):
@@ -134,10 +136,13 @@ class DynamicStreamHandler(logging.StreamHandler):
 
     def emit(self, record):
         try:
-            # Always write to the current sys.stdout so that any environment
-            # that replaces stdout (e.g., Click's CliRunner, pytest capture)
-            # will receive the log output.
-            self.stream = sys.stdout
+            # When stdout is piped (not a TTY), write to stderr to avoid
+            # corrupting binary data streams (like Arrow IPC).
+            # When stdout is a terminal, write to stdout for normal CLI output.
+            if sys.stdout.isatty():
+                self.stream = sys.stdout
+            else:
+                self.stream = sys.stderr
             super().emit(record)
         except Exception:
             self.handleError(record)
