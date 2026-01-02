@@ -363,6 +363,6 @@ gpio check spec v2_file.parquet --geoparquet-version 2.0
 
 ## See Also
 
-- [CLI Reference: check spec](../cli/validate.md)
+- [CLI Reference: check spec](../cli/check.md)
 - [check command](check.md) - Best practices validation
 - [inspect command](inspect.md) - View file metadata

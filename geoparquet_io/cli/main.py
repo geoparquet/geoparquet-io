@@ -1352,7 +1352,7 @@ def inspect(
     )
 
     # Validate mutually exclusive options
-    if head and tail:
+    if head is not None and tail is not None:
         raise click.UsageError("--head and --tail are mutually exclusive")
 
     if json_output and markdown_output:
@@ -1367,7 +1367,7 @@ def inspect(
 
     # Handle --meta mode
     if meta:
-        if head or tail:
+        if head is not None or tail is not None:
             raise click.UsageError("--meta cannot be used with --head or --tail")
         if stats:
             raise click.UsageError("--meta cannot be used with --stats")
@@ -1406,7 +1406,7 @@ def inspect(
     # Check for partition and handle --check-all
     if check_all_files:
         # Validate --check-all is not used with preview/stats options
-        if head or tail:
+        if head is not None or tail is not None:
             raise click.UsageError("--check-all cannot be used with --head or --tail")
         if stats:
             raise click.UsageError("--check-all cannot be used with --stats")
@@ -1494,7 +1494,7 @@ def inspect(
         # Get preview data if requested
         preview_table = None
         preview_mode = None
-        if head or tail:
+        if head is not None or tail is not None:
             preview_table, preview_mode = get_preview_data(file_to_inspect, head=head, tail=tail)
 
         # Get statistics if requested
@@ -3414,7 +3414,12 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
         --bucket s3://my-bucket/roads/ \\
         --public-url https://data.example.com/roads/
     """
-    _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
+    try:
+        _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 @publish.command(name="upload")
@@ -3479,7 +3484,9 @@ def publish_upload(
             fail_fast=fail_fast,
             dry_run=dry_run,
         )
-    except ValueError as e:
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
@@ -3515,7 +3522,12 @@ def stac(input, output, bucket, public_url, collection_id, item_id, overwrite, v
         "'gpio stac' is deprecated and will be removed in a future release. "
         "Use 'gpio publish stac' instead."
     )
-    _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
+    try:
+        _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 @check.command(name="stac")
@@ -3861,7 +3873,9 @@ def upload(
                 s3_region=s3_region,
                 s3_use_ssl=not s3_no_ssl,
             )
-    except ValueError as e:
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
         raise click.ClickException(str(e)) from e
 
 

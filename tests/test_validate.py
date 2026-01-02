@@ -34,21 +34,6 @@ from geoparquet_io.core.validate import (
 )
 from tests.conftest import _extract_json_from_output
 
-
-def _extract_json_from_output(output: str) -> str:
-    """Extract JSON from output that may contain deprecation warnings.
-
-    The deprecated validate command outputs a warning line before JSON.
-    This helper finds and returns just the JSON part.
-    """
-    lines = output.strip().split("\n")
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("{") or stripped.startswith("["):
-            return "\n".join(lines[i:])
-    return output
-
-
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent / "data"
 

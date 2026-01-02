@@ -73,7 +73,7 @@ class TestSingleFileCommand:
             cli,
             [
                 "convert",
-                "to-geoparquet",
+                "geoparquet",
                 "file1.parquet",
                 "file2.parquet",
                 "file3.parquet",
@@ -82,9 +82,9 @@ class TestSingleFileCommand:
         )
         assert result.exit_code != 0
         assert "Received 4 parquet files" in result.output
-        assert "'convert to-geoparquet' command requires a single file" in result.output
+        assert "'convert geoparquet' command requires a single file" in result.output
         assert 'gpio extract "path/*.parquet"' in result.output
-        assert "gpio convert to-geoparquet consolidated.parquet" in result.output
+        assert "gpio convert geoparquet consolidated.parquet" in result.output
 
     def test_sort_hilbert_shell_expanded_glob_error(self):
         """Test sort hilbert shows helpful error suggesting gpio extract."""
@@ -161,7 +161,7 @@ class TestTwoFilesNotTriggered:
     def test_convert_two_files_ok(self):
         """Two parquet files should not trigger glob expansion error."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["convert", "to-geoparquet", "input.parquet", "output.parquet"])
+        result = runner.invoke(cli, ["convert", "geoparquet", "input.parquet", "output.parquet"])
         # Should fail for different reason (file not found), not glob expansion
         if result.exit_code != 0:
             assert "requires a single file" not in result.output

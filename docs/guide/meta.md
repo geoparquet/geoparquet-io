@@ -183,6 +183,6 @@ diff <(gpio inspect --meta file1.parquet --parquet --json | jq '.schema') \
 
 ## See Also
 
-- [CLI Reference: inspect --meta](../cli/meta.md) - Complete option reference
+- [CLI Reference: inspect --meta](../cli/inspect.md) - Complete option reference
 - [Inspecting Files](inspect.md) - Quick file overview and data preview
 - [Checking Best Practices](check.md) - Validate GeoParquet files
