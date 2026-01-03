@@ -362,7 +362,7 @@ class Table:
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
-    ) -> None:
+    ) -> Path:
         """
         Write the table to a GeoParquet file.
 
@@ -373,13 +373,24 @@ class Table:
             row_group_size_mb: Target row group size in MB
             row_group_rows: Exact rows per row group
             geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, or None to preserve)
+
+        Returns:
+            Path: The output file path
+
+        Example:
+            >>> path = table.write('output.parquet')
+            >>> print(f"Wrote to {path}")
         """
+        from pathlib import Path as PathLib
+
+        output_path = PathLib(path)
+
         # Use write_geoparquet_table for proper metadata preservation
         # It handles compression normalization, row group size estimation,
         # and GeoParquet metadata (bbox, version, geo metadata) correctly
         write_geoparquet_table(
             self._table,
-            output_file=str(path),
+            output_file=str(output_path),
             geometry_column=self._geometry_column,
             compression=compression,
             compression_level=compression_level,
@@ -388,6 +399,8 @@ class Table:
             geoparquet_version=geoparquet_version,
             verbose=False,
         )
+
+        return output_path
 
     def add_bbox(self, column_name: str = "bbox") -> Table:
         """
