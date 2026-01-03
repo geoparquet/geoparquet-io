@@ -113,12 +113,84 @@ table = gpio.read('input.parquet').add_quadkey(resolution=10)
 table = gpio.read('input.parquet').add_quadkey(use_centroid=True)
 ```
 
+#### `add_h3(column_name='h3_cell', resolution=9)`
+
+Add an H3 hexagonal cell column based on geometry location.
+
+```python
+# Default resolution (9, ~100m cells)
+table = gpio.read('input.parquet').add_h3()
+
+# Lower resolution for larger cells
+table = gpio.read('input.parquet').add_h3(resolution=6)
+
+# Custom column name
+table = gpio.read('input.parquet').add_h3(column_name='hex_id', resolution=8)
+```
+
+#### `add_kdtree(column_name='kdtree_cell', iterations=9, sample_size=100000)`
+
+Add a KD-tree cell column for data-adaptive spatial partitioning.
+
+```python
+# Default settings (512 partitions = 2^9)
+table = gpio.read('input.parquet').add_kdtree()
+
+# Fewer partitions
+table = gpio.read('input.parquet').add_kdtree(iterations=6)  # 64 partitions
+
+# More partitions with larger sample
+table = gpio.read('input.parquet').add_kdtree(iterations=12, sample_size=500000)
+```
+
 #### `sort_hilbert()`
 
 Reorder rows using Hilbert curve ordering for better spatial locality.
 
 ```python
 table = gpio.read('input.parquet').sort_hilbert()
+```
+
+#### `sort_column(column_name, descending=False)`
+
+Sort rows by a specified column.
+
+```python
+# Sort by name ascending
+table = gpio.read('input.parquet').sort_column('name')
+
+# Sort by population descending
+table = gpio.read('input.parquet').sort_column('population', descending=True)
+```
+
+#### `sort_quadkey(column_name='quadkey', resolution=13, use_centroid=False, remove_column=False)`
+
+Sort rows by quadkey for spatial locality. If no quadkey column exists, one is added automatically.
+
+```python
+# Sort by quadkey (auto-adds column if needed)
+table = gpio.read('input.parquet').sort_quadkey()
+
+# Sort and remove the quadkey column afterward
+table = gpio.read('input.parquet').sort_quadkey(remove_column=True)
+
+# Use existing quadkey column
+table = gpio.read('input.parquet').sort_quadkey(column_name='my_quadkey')
+```
+
+#### `reproject(target_crs='EPSG:4326', source_crs=None)`
+
+Reproject geometry to a different coordinate reference system.
+
+```python
+# Reproject to WGS84 (auto-detects source CRS from metadata)
+table = gpio.read('input.parquet').reproject(target_crs='EPSG:4326')
+
+# Reproject with explicit source CRS
+table = gpio.read('input.parquet').reproject(
+    target_crs='EPSG:3857',
+    source_crs='EPSG:4326'
+)
 ```
 
 #### `extract(columns=None, exclude_columns=None, bbox=None, where=None, limit=None)`
@@ -192,6 +264,67 @@ Partition the table into a Hive-partitioned directory by H3 cell.
 # Partition by H3
 stats = table.partition_by_h3('output/', resolution=6)
 print(f"Created {stats['file_count']} files")
+```
+
+#### `upload(destination, compression='ZSTD', profile=None, s3_endpoint=None, ...)`
+
+Write and upload the table to cloud object storage (S3, GCS, Azure).
+
+```python
+# Upload to S3
+gpio.read('input.parquet') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .upload('s3://bucket/data.parquet')
+
+# Upload with AWS profile
+table.upload('s3://bucket/data.parquet', profile='my-aws-profile')
+
+# Upload to S3-compatible storage (MinIO, source.coop)
+table.upload(
+    's3://bucket/data.parquet',
+    s3_endpoint='minio.example.com:9000',
+    s3_use_ssl=False
+)
+
+# Upload to GCS
+table.upload('gs://bucket/data.parquet')
+```
+
+## Converting Other Formats
+
+Use `gpio.convert()` to load GeoPackage, Shapefile, GeoJSON, FlatGeobuf, or CSV files:
+
+```python
+import geoparquet_io as gpio
+
+# Convert GeoPackage
+table = gpio.convert('data.gpkg')
+
+# Convert Shapefile
+table = gpio.convert('data.shp')
+
+# Convert GeoJSON
+table = gpio.convert('data.geojson')
+
+# Convert CSV with WKT geometry
+table = gpio.convert('data.csv', wkt_column='geometry')
+
+# Convert CSV with lat/lon columns
+table = gpio.convert('data.csv', lat_column='latitude', lon_column='longitude')
+
+# Convert from S3 with authentication
+table = gpio.convert('s3://bucket/data.gpkg', profile='my-aws')
+```
+
+Unlike the CLI `convert` command, the Python API does NOT apply Hilbert sorting by default. Chain `.sort_hilbert()` explicitly if you want spatial ordering:
+
+```python
+# Full conversion workflow
+gpio.convert('data.shp') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
 ```
 
 ## Reading Partitioned Data
@@ -330,7 +463,41 @@ arrow_result = result.to_arrow()
 filtered = arrow_result.filter(arrow_result['population'] > 1000)
 ```
 
+## Advanced: Direct Core Function Access
+
+For power users who need direct access to core functions (e.g., for custom pipelines or when you need file-based operations without the Table wrapper):
+
+```python
+from geoparquet_io.core.add_bbox_column import add_bbox_column
+from geoparquet_io.core.hilbert_order import hilbert_order
+
+# File-based operations
+add_bbox_column(
+    input_parquet="input.parquet",
+    output_parquet="output.parquet",
+    bbox_name="bbox",
+    verbose=True
+)
+
+hilbert_order(
+    input_parquet="input.parquet",
+    output_parquet="sorted.parquet",
+    geometry_column="geometry",
+    add_bbox=True,
+    verbose=True
+)
+```
+
+See [Core Functions Reference](core.md) for all available functions.
+
+> **Note:** The fluent API (`gpio.read()...`) is recommended for most use cases as it provides better ergonomics and in-memory performance. The core API is primarily useful for:
+>
+> - Integrating with existing file-based pipelines
+> - When you need fine-grained control over function parameters
+> - Building custom tooling around gpio
+
 ## See Also
 
 - [Command Piping](../guide/piping.md) - CLI piping for shell workflows
 - [Core API Reference](core.md) - Low-level function reference
+- [Spatial Performance Guide](../concepts/spatial-indices.md) - Understanding bbox, sorting, and partitioning

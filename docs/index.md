@@ -79,6 +79,30 @@ New to geoparquet-io? Start here:
 - [benchmark](cli/benchmark.md) - Compare conversion performance
 - [piping](guide/piping.md) - Chain commands with Unix pipes
 
+## Python API
+
+Use gpio programmatically for the best performance and integration with Python workflows:
+
+```python
+import geoparquet_io as gpio
+
+gpio.read('input.parquet') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
+```
+
+- [Python API Reference](api/python-api.md) - Fluent Table API for chainable operations
+- [Pipeline Composition](api/python-api.md#pipeline-composition) - Build reusable transformation pipelines
+- [Pure Functions (ops)](api/python-api.md#pure-functions-ops-module) - Arrow-native function interface
+- [PyArrow Integration](api/python-api.md#integration-with-pyarrow) - Seamless interop with PyArrow workflows
+
+## Concepts
+
+- [What is GeoParquet?](concepts/geoparquet-overview.md) - Format overview and key concepts
+- [Best Practices](concepts/best-practices.md) - Optimization techniques for spatial performance
+- [Spatial Performance](concepts/spatial-indices.md) - Understanding bbox, sorting, and partitioning
+
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/cholmes/geoparquet-io/issues)

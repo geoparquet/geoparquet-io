@@ -58,6 +58,33 @@ gpio extract --bbox "-122.5,37.5,-122.0,38.0" input.parquet | gpio add bbox - | 
 
 For more examples and detailed usage, see the [Quick Start Tutorial](https://geoparquet.org/geoparquet-io/getting-started/quickstart/) and [User Guide](https://geoparquet.org/geoparquet-io/guide/inspect/).
 
+## Python API
+
+Use gpio programmatically for the best performance:
+
+```python
+import geoparquet_io as gpio
+
+# Read, transform, and write in a fluent chain
+gpio.read('input.parquet') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
+
+# Convert from other formats (Shapefile, GeoJSON, GeoPackage, CSV)
+gpio.convert('data.gpkg') \
+    .add_h3(resolution=9) \
+    .partition_by_h3('output/', resolution=5)
+
+# Upload to cloud storage
+gpio.read('data.parquet') \
+    .extract(bbox=(-122.5, 37.5, -122.0, 38.0)) \
+    .add_bbox() \
+    .upload('s3://bucket/filtered.parquet')
+```
+
+The Python API keeps data in memory as Arrow tables, providing up to 5x better performance than CLI operations. See the [Python API documentation](https://geoparquet.org/geoparquet-io/api/python-api/) for full details.
+
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](docs/contributing.md) for development setup, coding standards, and how to submit changes.

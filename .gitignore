@@ -86,8 +86,9 @@ ipython_config.py
 
 # Parquet files generated
 *.parquet
-# But allow test data files
+# But allow test data files and example data
 !tests/data/*.parquet
+!examples/data/*.parquet
 
 # DuckDB
 .tmp/

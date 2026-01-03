@@ -1,8 +1,29 @@
 # GeoParquet-IO Examples
 
-This directory contains example scripts demonstrating how to use geoparquet-io.
+This directory contains example scripts and Jupyter notebooks demonstrating how to use geoparquet-io.
 
-## Available Examples
+## Jupyter Notebooks
+
+Interactive notebooks for learning the Python API:
+
+| Notebook | Description |
+|----------|-------------|
+| [01_getting_started.ipynb](01_getting_started.ipynb) | Reading files, inspecting properties, basic transformations |
+| [02_python_api_chaining.ipynb](02_python_api_chaining.ipynb) | Method chaining, pipelines, ops module |
+| [03_spatial_indices.ipynb](03_spatial_indices.ipynb) | Bbox, H3, quadkey, and KD-tree columns |
+| [04_partitioning.ipynb](04_partitioning.ipynb) | Splitting data into multiple files |
+| [05_cloud_workflows.ipynb](05_cloud_workflows.ipynb) | Uploading to S3, GCS, Azure |
+
+The notebooks use sample data from the `data/` subdirectory.
+
+To run the notebooks:
+```bash
+pip install jupyter
+cd examples
+jupyter notebook
+```
+
+## Python Scripts
 
 ### 1. Basic Usage (`basic_usage.py`)
 

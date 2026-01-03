@@ -1,31 +1,28 @@
 ```python
-from geoparquet_io.core.add_bbox_column import add_bbox_column
-from geoparquet_io.core.hilbert_order import hilbert_order
-from geoparquet_io.core.partition_by_h3 import partition_by_h3
+import geoparquet_io as gpio
 
-# Add bounding box column
-add_bbox_column(
-    input_parquet="input.parquet",
-    output_parquet="with_bbox.parquet",
-    bbox_name="bbox",
-    verbose=True
-)
+# Read, transform, and write in a fluent chain
+gpio.read('input.parquet') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('optimized.parquet')
 
-# Sort by Hilbert curve
-hilbert_order(
-    input_parquet="input.parquet",
-    output_parquet="sorted.parquet",
-    geometry_column="geometry",
-    add_bbox=True,
-    verbose=True
-)
+# Add multiple spatial indices
+gpio.read('input.parquet') \
+    .add_bbox() \
+    .add_h3(resolution=9) \
+    .add_quadkey(resolution=12) \
+    .sort_hilbert() \
+    .write('output.parquet')
 
-# Partition by H3
-partition_by_h3(
-    input_parquet="input.parquet",
-    output_folder="output/",
-    resolution=9,
-    hive=False,
-    verbose=True
-)
+# Partition by H3 cells
+gpio.read('input.parquet') \
+    .add_h3(resolution=9) \
+    .partition_by_h3('output/', resolution=6)
+
+# Convert from other formats
+gpio.convert('data.gpkg') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
 ```

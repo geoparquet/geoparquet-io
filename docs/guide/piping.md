@@ -176,6 +176,40 @@ gpio sort hilbert intermediate.parquet output.parquet
 - **Remote output**: Streaming to remote destinations (S3, HTTP) is not supported; use file output then `gpio publish upload`
 - **Memory**: Large datasets are streamed, but some operations (like Hilbert sorting) require loading the full dataset into memory
 
+## Python API Alternative
+
+For maximum performance, use the Python API which keeps data in memory:
+
+```python
+import geoparquet_io as gpio
+
+# Equivalent to:
+# gpio extract --bbox "..." input.parquet | gpio add bbox - | gpio sort hilbert - output.parquet
+
+gpio.read('input.parquet') \
+    .extract(bbox=(-122.5, 37.5, -122.0, 38.0)) \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
+```
+
+### Performance Comparison
+
+| Approach | Time (75MB, 400K rows) | Notes |
+|----------|------------------------|-------|
+| CLI (file-based) | 34s | Each command writes intermediate file |
+| CLI (piped) | 16s | Arrow IPC streaming between commands |
+| **Python API** | **7s** | In-memory, no I/O overhead |
+
+The Python API is up to 5x faster than file-based CLI operations because data stays in memory as Arrow tables. Use the Python API when:
+
+- You're building Python applications
+- Performance is critical
+- You need to integrate with other Python tools
+- You're working in Jupyter notebooks
+
+See [Python API Reference](../api/python-api.md) for full documentation.
+
 ## See Also
 
 - [Python API](../api/python-api.md) - For programmatic access with even better performance
