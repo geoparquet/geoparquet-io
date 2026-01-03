@@ -681,6 +681,60 @@ class Table:
         )
         return Table(result, self._geometry_column)
 
+    def _partition_with_temp_file(
+        self,
+        partition_func,
+        output_dir: str | Path,
+        partition_kwargs: dict,
+        compression: str,
+    ) -> dict:
+        """
+        Common helper for partition operations using a temp file.
+
+        Handles temp file creation, writing, partition function call,
+        stats collection, and cleanup with retry.
+
+        Args:
+            partition_func: The partition function to call
+            output_dir: Output directory path
+            partition_kwargs: Keyword arguments for the partition function
+            compression: Compression codec for temp file
+
+        Returns:
+            dict with partition statistics (output_dir, file_count, hive)
+        """
+        import tempfile
+        import time
+        import uuid
+        from pathlib import Path as PathLib
+
+        temp_path = PathLib(tempfile.gettempdir()) / f"gpio_partition_{uuid.uuid4()}.parquet"
+
+        try:
+            self.write(temp_path, compression=compression)
+
+            partition_func(
+                input_parquet=str(temp_path),
+                output_folder=str(output_dir),
+                **partition_kwargs,
+            )
+
+            # Return basic stats
+            output_path = PathLib(output_dir)
+            parquet_files = list(output_path.rglob("*.parquet"))
+            return {
+                "output_dir": str(output_path),
+                "file_count": len(parquet_files),
+                "hive": partition_kwargs.get("hive", True),
+            }
+        finally:
+            for attempt in range(3):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time.sleep(0.1 * (attempt + 1))
+
     def partition_by_quadkey(
         self,
         output_dir: str | Path,
@@ -712,44 +766,20 @@ class Table:
             >>> stats = table.partition_by_quadkey('output/', resolution=12)
             >>> print(f"Created {stats['file_count']} files")
         """
-        import tempfile
-        import time
-        import uuid
-        from pathlib import Path as PathLib
-
         from geoparquet_io.core.partition_by_quadkey import partition_by_quadkey
 
-        # Write to temp file first
-        temp_path = PathLib(tempfile.gettempdir()) / f"gpio_partition_{uuid.uuid4()}.parquet"
-
-        try:
-            self.write(temp_path, compression=compression)
-
-            partition_by_quadkey(
-                input_parquet=str(temp_path),
-                output_folder=str(output_dir),
-                resolution=resolution,
-                partition_resolution=partition_resolution,
-                hive=hive,
-                overwrite=overwrite,
-                verbose=verbose,
-            )
-
-            # Return basic stats
-            output_path = PathLib(output_dir)
-            parquet_files = list(output_path.rglob("*.parquet"))
-            return {
-                "output_dir": str(output_path),
-                "file_count": len(parquet_files),
+        return self._partition_with_temp_file(
+            partition_func=partition_by_quadkey,
+            output_dir=output_dir,
+            partition_kwargs={
+                "resolution": resolution,
+                "partition_resolution": partition_resolution,
                 "hive": hive,
-            }
-        finally:
-            for attempt in range(3):
-                try:
-                    temp_path.unlink(missing_ok=True)
-                    break
-                except OSError:
-                    time.sleep(0.1 * (attempt + 1))
+                "overwrite": overwrite,
+                "verbose": verbose,
+            },
+            compression=compression,
+        )
 
     def partition_by_h3(
         self,
@@ -780,43 +810,19 @@ class Table:
             >>> stats = table.partition_by_h3('output/', resolution=6)
             >>> print(f"Created {stats['file_count']} files")
         """
-        import tempfile
-        import time
-        import uuid
-        from pathlib import Path as PathLib
-
         from geoparquet_io.core.partition_by_h3 import partition_by_h3
 
-        # Write to temp file first
-        temp_path = PathLib(tempfile.gettempdir()) / f"gpio_partition_{uuid.uuid4()}.parquet"
-
-        try:
-            self.write(temp_path, compression=compression)
-
-            partition_by_h3(
-                input_parquet=str(temp_path),
-                output_folder=str(output_dir),
-                resolution=resolution,
-                hive=hive,
-                overwrite=overwrite,
-                verbose=verbose,
-            )
-
-            # Return basic stats
-            output_path = PathLib(output_dir)
-            parquet_files = list(output_path.rglob("*.parquet"))
-            return {
-                "output_dir": str(output_path),
-                "file_count": len(parquet_files),
+        return self._partition_with_temp_file(
+            partition_func=partition_by_h3,
+            output_dir=output_dir,
+            partition_kwargs={
+                "resolution": resolution,
                 "hive": hive,
-            }
-        finally:
-            for attempt in range(3):
-                try:
-                    temp_path.unlink(missing_ok=True)
-                    break
-                except OSError:
-                    time.sleep(0.1 * (attempt + 1))
+                "overwrite": overwrite,
+                "verbose": verbose,
+            },
+            compression=compression,
+        )
 
     def upload(
         self,
