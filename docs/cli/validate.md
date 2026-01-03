@@ -1,6 +1,6 @@
 # check spec Command
 
-For detailed usage and examples, see the [Validate User Guide](../guide/validate.md).
+For detailed usage and examples, see the [Check Spec Guide](../guide/validate.md).
 
 ## Quick Reference
 

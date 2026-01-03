@@ -419,9 +419,10 @@ def check_all(
         combined_passed, combined_issues, _ = aggregate_check_results(
             structure_results, spatial_result
         )
-        # Include spec failures in passed status
+        # Include spec failures in passed status and issues summary
         if spec_result.failed_count > 0:
             combined_passed = False
+            combined_issues.append(f"Spec validation: {spec_result.failed_count} checks failed")
         runner.record_result(
             file_path, {"passed": combined_passed, "issues": combined_issues, **structure_results}
         )
