@@ -26,7 +26,8 @@ Also provides pure table-centric functions:
     table = ops.sort_hilbert(table)
 """
 
+from geoparquet_io.api import ops
 from geoparquet_io.api.pipeline import pipe
-from geoparquet_io.api.table import Table, convert, read
+from geoparquet_io.api.table import Table, convert, read, read_partition
 
-__all__ = ["Table", "read", "convert", "pipe"]
+__all__ = ["Table", "read", "read_partition", "convert", "pipe", "ops"]

@@ -416,3 +416,188 @@ class TestTableUpload:
                 assert len(captured_paths) == 1
                 temp_path = captured_paths[0]
                 assert not Path(temp_path).exists(), "Temp file should be deleted after error"
+
+
+class TestTableMetadataProperties:
+    """Tests for the new metadata properties on Table."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    def test_crs_property(self, sample_table):
+        """Test crs property returns CRS or None."""
+        crs = sample_table.crs
+        # Can be None (OGC:CRS84 default) or a dict/string
+        assert crs is None or isinstance(crs, (dict, str))
+
+    def test_bounds_property(self, sample_table):
+        """Test bounds property returns tuple."""
+        bounds = sample_table.bounds
+        assert bounds is not None
+        assert isinstance(bounds, tuple)
+        assert len(bounds) == 4
+        xmin, ymin, xmax, ymax = bounds
+        assert xmin < xmax
+        assert ymin < ymax
+
+    def test_schema_property(self, sample_table):
+        """Test schema property returns PyArrow Schema."""
+        import pyarrow as pa
+
+        schema = sample_table.schema
+        assert isinstance(schema, pa.Schema)
+        assert "geometry" in [field.name for field in schema]
+
+    def test_geoparquet_version_property(self, sample_table):
+        """Test geoparquet_version property returns version string."""
+        version = sample_table.geoparquet_version
+        # Should be a version string like "1.1" or "1.1.0" or None
+        assert version is None or isinstance(version, str)
+        if version:
+            # Accept patched versions like "1.1.0" by checking major.minor
+            major_minor = ".".join(version.split(".")[:2])
+            assert major_minor in ["1.0", "1.1", "2.0"]
+
+
+class TestTableInfo:
+    """Tests for the info() method."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    def test_info_verbose_returns_none(self, sample_table, capsys):
+        """Test info(verbose=True) prints output and returns None."""
+        result = sample_table.info(verbose=True)
+        assert result is None
+
+        captured = capsys.readouterr()
+        assert "Table:" in captured.out
+        assert "766" in captured.out
+        assert "Geometry:" in captured.out
+
+    def test_info_dict_mode(self, sample_table):
+        """Test info(verbose=False) returns dict."""
+        info = sample_table.info(verbose=False)
+        assert isinstance(info, dict)
+        assert info["rows"] == 766
+        assert "geometry_column" in info
+        assert "crs" in info
+        assert "bounds" in info
+        assert "geoparquet_version" in info
+        assert "column_names" in info
+
+
+class TestWriteReturnsPath:
+    """Tests for write() returning Path."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    @pytest.fixture
+    def output_file(self):
+        """Create a temporary output file path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_write_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        safe_unlink(tmp_path)
+
+    def test_write_returns_path(self, sample_table, output_file):
+        """Test that write() returns a Path object."""
+        result = sample_table.write(output_file)
+        assert isinstance(result, Path)
+        assert result.exists()
+        assert str(result) == output_file
+
+
+class TestOpsNewFunctions:
+    """Tests for the new ops module functions."""
+
+    @pytest.fixture
+    def arrow_table(self):
+        """Get an Arrow table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return pq.read_table(PLACES_PARQUET)
+
+    def test_add_h3(self, arrow_table):
+        """Test ops.add_h3()."""
+        result = ops.add_h3(arrow_table, resolution=7)
+        assert isinstance(result, pa.Table)
+        assert "h3_cell" in result.column_names
+
+    def test_add_kdtree(self, arrow_table):
+        """Test ops.add_kdtree()."""
+        result = ops.add_kdtree(arrow_table, iterations=5)
+        assert isinstance(result, pa.Table)
+        assert "kdtree_cell" in result.column_names
+
+    def test_sort_column(self, arrow_table):
+        """Test ops.sort_column()."""
+        result = ops.sort_column(arrow_table, column="name")
+        assert isinstance(result, pa.Table)
+        assert result.num_rows == 766
+
+    def test_sort_quadkey(self, arrow_table):
+        """Test ops.sort_quadkey()."""
+        result = ops.sort_quadkey(arrow_table, resolution=10)
+        assert isinstance(result, pa.Table)
+        assert result.num_rows == 766
+
+    def test_reproject(self, arrow_table):
+        """Test ops.reproject()."""
+        result = ops.reproject(arrow_table, target_crs="EPSG:3857")
+        assert isinstance(result, pa.Table)
+        assert result.num_rows == 766
+
+
+class TestReadPartition:
+    """Tests for the read_partition() function."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    @pytest.fixture
+    def partition_dir(self, sample_table):
+        """Create a temporary partitioned directory."""
+        tmp_dir = Path(tempfile.gettempdir()) / f"test_partition_{uuid.uuid4()}"
+        tmp_dir.mkdir(exist_ok=True)
+
+        # Use the full table (766 rows) which is above the minimum threshold
+        sample_table.partition_by_quadkey(tmp_dir, overwrite=True, partition_resolution=3)
+
+        yield tmp_dir
+
+        # Cleanup with retry for Windows file locking
+        import shutil
+        import time
+
+        for attempt in range(3):
+            try:
+                shutil.rmtree(tmp_dir)
+                break
+            except OSError:
+                time.sleep(0.1 * (attempt + 1))
+
+    def test_read_partition_from_directory(self, partition_dir):
+        """Test reading a partitioned directory."""
+        from geoparquet_io import read_partition
+
+        table = read_partition(partition_dir)
+        assert isinstance(table, Table)
+        assert table.num_rows > 0
+        assert table.geometry_column == "geometry"

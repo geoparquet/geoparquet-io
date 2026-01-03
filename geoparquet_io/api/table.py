@@ -23,6 +23,59 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _calculate_bounds_from_table(
+    table: pa.Table,
+    geometry_column: str | None,
+) -> tuple[float, float, float, float] | None:
+    """
+    Calculate bounding box from an in-memory PyArrow Table.
+
+    Uses DuckDB to compute the bbox from geometry column.
+
+    Args:
+        table: PyArrow Table
+        geometry_column: Name of geometry column
+
+    Returns:
+        Tuple of (xmin, ymin, xmax, ymax) or None if empty/error
+    """
+    if geometry_column is None or geometry_column not in table.column_names:
+        return None
+
+    if table.num_rows == 0:
+        return None
+
+    import duckdb
+
+    con = None
+    try:
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        con.register("input_table", table)
+
+        # Use ST_Extent to get the bounding box of all geometries
+        query = f"""
+            SELECT
+                ST_XMin(ST_Extent_Agg(ST_GeomFromWKB("{geometry_column}"))),
+                ST_YMin(ST_Extent_Agg(ST_GeomFromWKB("{geometry_column}"))),
+                ST_XMax(ST_Extent_Agg(ST_GeomFromWKB("{geometry_column}"))),
+                ST_YMax(ST_Extent_Agg(ST_GeomFromWKB("{geometry_column}")))
+            FROM input_table
+            WHERE "{geometry_column}" IS NOT NULL
+        """
+        result = con.execute(query).fetchone()
+
+        if result and all(v is not None for v in result):
+            return (result[0], result[1], result[2], result[3])
+        return None
+
+    except Exception:
+        return None
+    finally:
+        if con is not None:
+            con.close()
+
+
 def read(path: str | Path, **kwargs) -> Table:
     """
     Read a GeoParquet file into a Table.
@@ -43,6 +96,57 @@ def read(path: str | Path, **kwargs) -> Table:
     """
     arrow_table = pq.read_table(str(path), **kwargs)
     return Table(arrow_table)
+
+
+def read_partition(
+    path: str | Path,
+    *,
+    hive_input: bool | None = None,
+    allow_schema_diff: bool = False,
+) -> Table:
+    """
+    Read a Hive-partitioned GeoParquet dataset.
+
+    Supports reading from:
+    - Hive-partitioned directories (e.g., `output/quadkey=0123/data.parquet`)
+    - Glob patterns (e.g., `data/quadkey=*/*.parquet`)
+    - Flat directories containing multiple parquet files
+
+    Args:
+        path: Path to partition root directory or glob pattern
+        hive_input: Explicitly enable/disable hive partitioning. None = auto-detect.
+        allow_schema_diff: If True, allow merging schemas across files with
+                           different columns (uses DuckDB union_by_name)
+
+    Returns:
+        Table containing all partition data combined
+
+    Example:
+        >>> import geoparquet_io as gpio
+        >>> table = gpio.read_partition('partitioned_output/')
+        >>> table = gpio.read_partition('data/quadkey=*/*.parquet')
+    """
+    from geoparquet_io.core.common import get_duckdb_connection, needs_httpfs
+    from geoparquet_io.core.partition_reader import build_read_parquet_expr
+    from geoparquet_io.core.streaming import find_geometry_column_from_table
+
+    path_str = str(path)
+    expr = build_read_parquet_expr(
+        path_str,
+        allow_schema_diff=allow_schema_diff,
+        hive_input=hive_input,
+    )
+
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path_str))
+    try:
+        arrow_table = con.execute(f"SELECT * FROM {expr}").fetch_arrow_table()
+    finally:
+        con.close()
+
+    # Detect geometry column from the combined table
+    geometry_column = find_geometry_column_from_table(arrow_table)
+
+    return Table(arrow_table, geometry_column=geometry_column)
 
 
 def convert(
@@ -134,6 +238,17 @@ class Table:
 
         return find_geometry_column_from_table(self._table)
 
+    def _format_crs_display(self, crs: dict | str | None) -> str:
+        """Format CRS for human-readable display."""
+        if crs is None:
+            return "OGC:CRS84 (default)"
+        if isinstance(crs, dict) and "id" in crs:
+            crs_id = crs["id"]
+            if isinstance(crs_id, dict):
+                return f"{crs_id.get('authority', 'EPSG')}:{crs_id.get('code', '?')}"
+            return str(crs_id)
+        return str(crs)
+
     @property
     def table(self) -> pa.Table:
         """Get the underlying PyArrow Table."""
@@ -154,6 +269,134 @@ class Table:
         """Get list of column names."""
         return self._table.column_names
 
+    @property
+    def crs(self) -> dict | str | None:
+        """
+        Get the Coordinate Reference System (CRS) of the geometry column.
+
+        Returns CRS as a PROJJSON dict (full definition) or string identifier.
+        Returns None if no CRS is specified, which means OGC:CRS84 by default
+        per the GeoParquet specification.
+
+        Returns:
+            PROJJSON dict, string identifier, or None (OGC:CRS84 default)
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> print(table.crs)  # e.g., {'id': {'authority': 'EPSG', 'code': 4326}, ...}
+        """
+        from geoparquet_io.core.streaming import extract_crs_from_table
+
+        return extract_crs_from_table(self._table, self._geometry_column)
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float] | None:
+        """
+        Get the bounding box of all geometries in the table.
+
+        Returns a tuple of (xmin, ymin, xmax, ymax) representing the
+        total extent of all geometries.
+
+        Returns:
+            Tuple of (xmin, ymin, xmax, ymax) or None if empty/error
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> print(table.bounds)  # e.g., (-122.5, 37.5, -122.0, 38.0)
+        """
+        return _calculate_bounds_from_table(self._table, self._geometry_column)
+
+    @property
+    def schema(self) -> pa.Schema:
+        """
+        Get the PyArrow schema of the table.
+
+        Returns:
+            PyArrow Schema object
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> for field in table.schema:
+            ...     print(f"{field.name}: {field.type}")
+        """
+        return self._table.schema
+
+    @property
+    def geoparquet_version(self) -> str | None:
+        """
+        Get the GeoParquet version from metadata.
+
+        Returns the version string (e.g., '1.1.0', '2.0.0') or None
+        if no GeoParquet metadata is present.
+
+        Returns:
+            Version string or None
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> print(table.geoparquet_version)  # e.g., '1.1.0'
+        """
+        from geoparquet_io.core.streaming import extract_version_from_metadata
+
+        return extract_version_from_metadata(self._table.schema.metadata)
+
+    def info(self, verbose: bool = True) -> dict | None:
+        """
+        Print or return summary information about the Table.
+
+        When verbose=True, prints a formatted summary to stdout.
+        When verbose=False, returns a dictionary with all metadata.
+
+        Args:
+            verbose: If True, print to stdout and return None.
+                     If False, return dict with metadata.
+
+        Returns:
+            dict with metadata if verbose=False, else None
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> table.info()
+            Table: 766 rows, 6 columns
+            Geometry: geometry
+            CRS: OGC:CRS84 (default)
+            Bounds: [-122.500000, 37.500000, -122.000000, 38.000000]
+            GeoParquet: 1.1
+
+            >>> info_dict = table.info(verbose=False)
+            >>> print(info_dict['rows'])
+            766
+        """
+        info_dict = {
+            "rows": self.num_rows,
+            "columns": len(self.column_names),
+            "column_names": list(self.column_names),
+            "geometry_column": self._geometry_column,
+            "crs": self.crs,
+            "bounds": self.bounds,
+            "geoparquet_version": self.geoparquet_version,
+        }
+
+        if not verbose:
+            return info_dict
+
+        # Print formatted summary
+        print(f"Table: {self.num_rows:,} rows, {len(self.column_names)} columns")
+        print(f"Geometry: {self._geometry_column}")
+        print(f"CRS: {self._format_crs_display(self.crs)}")
+
+        # Format bounds
+        bounds = self.bounds
+        if bounds:
+            print(f"Bounds: [{bounds[0]:.6f}, {bounds[1]:.6f}, {bounds[2]:.6f}, {bounds[3]:.6f}]")
+
+        # GeoParquet version
+        version = self.geoparquet_version
+        if version:
+            print(f"GeoParquet: {version}")
+
+        return None
+
     def to_arrow(self) -> pa.Table:
         """
         Convert to PyArrow Table.
@@ -171,7 +414,7 @@ class Table:
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
-    ) -> None:
+    ) -> Path:
         """
         Write the table to a GeoParquet file.
 
@@ -182,13 +425,24 @@ class Table:
             row_group_size_mb: Target row group size in MB
             row_group_rows: Exact rows per row group
             geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, or None to preserve)
+
+        Returns:
+            Path: The output file path
+
+        Example:
+            >>> path = table.write('output.parquet')
+            >>> print(f"Wrote to {path}")
         """
+        from pathlib import Path as PathLib
+
+        output_path = PathLib(path)
+
         # Use write_geoparquet_table for proper metadata preservation
         # It handles compression normalization, row group size estimation,
         # and GeoParquet metadata (bbox, version, geo metadata) correctly
         write_geoparquet_table(
             self._table,
-            output_file=str(path),
+            output_file=str(output_path),
             geometry_column=self._geometry_column,
             compression=compression,
             compression_level=compression_level,
@@ -197,6 +451,8 @@ class Table:
             geoparquet_version=geoparquet_version,
             verbose=False,
         )
+
+        return output_path
 
     def add_bbox(self, column_name: str = "bbox") -> Table:
         """
@@ -425,6 +681,149 @@ class Table:
             geometry_column=self._geometry_column,
         )
         return Table(result, self._geometry_column)
+
+    def _partition_with_temp_file(
+        self,
+        partition_func,
+        output_dir: str | Path,
+        partition_kwargs: dict,
+        compression: str,
+    ) -> dict:
+        """
+        Common helper for partition operations using a temp file.
+
+        Handles temp file creation, writing, partition function call,
+        stats collection, and cleanup with retry.
+
+        Args:
+            partition_func: The partition function to call
+            output_dir: Output directory path
+            partition_kwargs: Keyword arguments for the partition function
+            compression: Compression codec for temp file
+
+        Returns:
+            dict with partition statistics (output_dir, file_count, hive)
+        """
+        import tempfile
+        import time
+        import uuid
+        from pathlib import Path as PathLib
+
+        temp_path = PathLib(tempfile.gettempdir()) / f"gpio_partition_{uuid.uuid4()}.parquet"
+
+        try:
+            self.write(temp_path, compression=compression)
+
+            partition_func(
+                input_parquet=str(temp_path),
+                output_folder=str(output_dir),
+                **partition_kwargs,
+            )
+
+            # Return basic stats
+            output_path = PathLib(output_dir)
+            parquet_files = list(output_path.rglob("*.parquet"))
+            return {
+                "output_dir": str(output_path),
+                "file_count": len(parquet_files),
+                "hive": partition_kwargs.get("hive", True),
+            }
+        finally:
+            for attempt in range(3):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time.sleep(0.1 * (attempt + 1))
+
+    def partition_by_quadkey(
+        self,
+        output_dir: str | Path,
+        *,
+        resolution: int = 13,
+        partition_resolution: int = 6,
+        compression: str = "ZSTD",
+        hive: bool = True,
+        overwrite: bool = False,
+        verbose: bool = False,
+    ) -> dict:
+        """
+        Partition the table into Hive-partitioned directory by quadkey.
+
+        Args:
+            output_dir: Output directory path
+            resolution: Quadkey resolution for sorting (0-23, default: 13)
+            partition_resolution: Resolution for partition boundaries (default: 6)
+            compression: Compression codec (default: ZSTD)
+            hive: Use Hive-style partitioning (default: True)
+            overwrite: Overwrite existing output directory
+            verbose: Print progress information
+
+        Returns:
+            dict with partition statistics (file_count, etc.)
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> stats = table.partition_by_quadkey('output/', resolution=12)
+            >>> print(f"Created {stats['file_count']} files")
+        """
+        from geoparquet_io.core.partition_by_quadkey import partition_by_quadkey
+
+        return self._partition_with_temp_file(
+            partition_func=partition_by_quadkey,
+            output_dir=output_dir,
+            partition_kwargs={
+                "resolution": resolution,
+                "partition_resolution": partition_resolution,
+                "hive": hive,
+                "overwrite": overwrite,
+                "verbose": verbose,
+            },
+            compression=compression,
+        )
+
+    def partition_by_h3(
+        self,
+        output_dir: str | Path,
+        *,
+        resolution: int = 9,
+        compression: str = "ZSTD",
+        hive: bool = True,
+        overwrite: bool = False,
+        verbose: bool = False,
+    ) -> dict:
+        """
+        Partition the table into Hive-partitioned directory by H3 cell.
+
+        Args:
+            output_dir: Output directory path
+            resolution: H3 resolution level 0-15 (default: 9)
+            compression: Compression codec (default: ZSTD)
+            hive: Use Hive-style partitioning (default: True)
+            overwrite: Overwrite existing output directory
+            verbose: Print progress information
+
+        Returns:
+            dict with partition statistics (file_count, etc.)
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> stats = table.partition_by_h3('output/', resolution=6)
+            >>> print(f"Created {stats['file_count']} files")
+        """
+        from geoparquet_io.core.partition_by_h3 import partition_by_h3
+
+        return self._partition_with_temp_file(
+            partition_func=partition_by_h3,
+            output_dir=output_dir,
+            partition_kwargs={
+                "resolution": resolution,
+                "hive": hive,
+                "overwrite": overwrite,
+                "verbose": verbose,
+            },
+            compression=compression,
+        )
 
     def upload(
         self,

@@ -48,8 +48,45 @@ The `Table` class wraps a PyArrow Table and provides chainable transformation me
 | `num_rows` | Number of rows in the table |
 | `column_names` | List of column names |
 | `geometry_column` | Name of the geometry column |
+| `crs` | CRS as PROJJSON dict or string (None = OGC:CRS84 default) |
+| `bounds` | Bounding box tuple (xmin, ymin, xmax, ymax) |
+| `schema` | PyArrow Schema object |
+| `geoparquet_version` | GeoParquet version string (e.g., "1.1") |
+
+```python
+table = gpio.read('data.parquet')
+
+# Get CRS
+print(table.crs)  # e.g., {'id': {'authority': 'EPSG', 'code': 4326}, ...}
+
+# Get bounds
+print(table.bounds)  # e.g., (-122.5, 37.5, -122.0, 38.0)
+
+# Get schema
+for field in table.schema:
+    print(f"{field.name}: {field.type}")
+```
 
 ### Methods
+
+#### `info(verbose=True)`
+
+Print or return summary information about the table.
+
+```python
+# Print formatted summary
+table.info()
+# Table: 766 rows, 6 columns
+# Geometry: geometry
+# CRS: EPSG:4326
+# Bounds: [-122.500000, 37.500000, -122.000000, 38.000000]
+# GeoParquet: 1.1
+
+# Get as dictionary
+info_dict = table.info(verbose=False)
+print(info_dict['rows'])  # 766
+print(info_dict['crs'])   # None or CRS dict
+```
 
 #### `add_bbox(column_name='bbox')`
 
@@ -107,10 +144,12 @@ table = gpio.read('input.parquet').extract(where="population > 10000")
 
 #### `write(path, compression='ZSTD', compression_level=None, row_group_size_mb=None, row_group_rows=None)`
 
-Write the table to a GeoParquet file.
+Write the table to a GeoParquet file. Returns the output `Path` for chaining or confirmation.
 
 ```python
-table.write('output.parquet')
+# Basic write
+path = table.write('output.parquet')
+print(f"Wrote to {path}")
 
 # With compression options
 table.write('output.parquet', compression='GZIP', compression_level=6)
@@ -125,6 +164,51 @@ Get the underlying PyArrow Table for interop with other Arrow-based tools.
 
 ```python
 arrow_table = table.to_arrow()
+```
+
+#### `partition_by_quadkey(output_dir, resolution=13, partition_resolution=6, compression='ZSTD', hive=True, overwrite=False)`
+
+Partition the table into a Hive-partitioned directory by quadkey.
+
+```python
+# Partition to a directory
+stats = table.partition_by_quadkey('output/', resolution=12)
+print(f"Created {stats['file_count']} files")
+
+# With custom options
+stats = table.partition_by_quadkey(
+    'output/',
+    partition_resolution=4,
+    compression='SNAPPY',
+    overwrite=True
+)
+```
+
+#### `partition_by_h3(output_dir, resolution=9, compression='ZSTD', hive=True, overwrite=False)`
+
+Partition the table into a Hive-partitioned directory by H3 cell.
+
+```python
+# Partition by H3
+stats = table.partition_by_h3('output/', resolution=6)
+print(f"Created {stats['file_count']} files")
+```
+
+## Reading Partitioned Data
+
+Use `gpio.read_partition()` to read Hive-partitioned datasets:
+
+```python
+import geoparquet_io as gpio
+
+# Read from a partitioned directory
+table = gpio.read_partition('partitioned_output/')
+
+# Read with glob pattern
+table = gpio.read_partition('data/quadkey=*/*.parquet')
+
+# Allow schema differences across partitions
+table = gpio.read_partition('output/', allow_schema_diff=True)
 ```
 
 ## Method Chaining
@@ -169,7 +253,12 @@ pq.write_table(table, 'output.parquet')
 |----------|-------------|
 | `ops.add_bbox(table, column_name='bbox', geometry_column=None)` | Add bounding box column |
 | `ops.add_quadkey(table, column_name='quadkey', resolution=13, use_centroid=False, geometry_column=None)` | Add quadkey column |
+| `ops.add_h3(table, column_name='h3_cell', resolution=9, geometry_column=None)` | Add H3 cell column |
+| `ops.add_kdtree(table, column_name='kdtree_cell', iterations=9, sample_size=100000, geometry_column=None)` | Add KD-tree cell column |
 | `ops.sort_hilbert(table, geometry_column=None)` | Reorder by Hilbert curve |
+| `ops.sort_column(table, column, descending=False)` | Sort by column(s) |
+| `ops.sort_quadkey(table, column_name='quadkey', resolution=13, use_centroid=False, remove_column=False)` | Sort by quadkey |
+| `ops.reproject(table, target_crs='EPSG:4326', source_crs=None, geometry_column=None)` | Reproject geometry |
 | `ops.extract(table, columns=None, exclude_columns=None, bbox=None, where=None, limit=None, geometry_column=None)` | Filter columns/rows |
 
 ## Pipeline Composition

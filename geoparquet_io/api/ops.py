@@ -20,9 +20,14 @@ from __future__ import annotations
 import pyarrow as pa
 
 from geoparquet_io.core.add_bbox_column import add_bbox_table
+from geoparquet_io.core.add_h3_column import add_h3_table
+from geoparquet_io.core.add_kdtree_column import add_kdtree_table
 from geoparquet_io.core.add_quadkey_column import add_quadkey_table
 from geoparquet_io.core.extract import extract_table
 from geoparquet_io.core.hilbert_order import hilbert_order_table
+from geoparquet_io.core.reproject import reproject_table
+from geoparquet_io.core.sort_by_column import sort_by_column_table
+from geoparquet_io.core.sort_quadkey import sort_by_quadkey_table
 
 
 def add_bbox(
@@ -128,5 +133,140 @@ def extract(
         bbox=bbox,
         where=where,
         limit=limit,
+        geometry_column=geometry_column,
+    )
+
+
+def add_h3(
+    table: pa.Table,
+    column_name: str = "h3_cell",
+    resolution: int = 9,
+    geometry_column: str | None = None,
+) -> pa.Table:
+    """
+    Add an H3 cell column based on geometry location.
+
+    Args:
+        table: Input PyArrow Table
+        column_name: Name for the H3 column (default: 'h3_cell')
+        resolution: H3 resolution level 0-15 (default: 9)
+        geometry_column: Geometry column name (auto-detected if None)
+
+    Returns:
+        New table with H3 column added
+    """
+    return add_h3_table(
+        table,
+        h3_column_name=column_name,
+        resolution=resolution,
+        geometry_column=geometry_column,
+    )
+
+
+def add_kdtree(
+    table: pa.Table,
+    column_name: str = "kdtree_cell",
+    iterations: int = 9,
+    sample_size: int = 100000,
+    geometry_column: str | None = None,
+) -> pa.Table:
+    """
+    Add a KD-tree cell column based on geometry location.
+
+    Args:
+        table: Input PyArrow Table
+        column_name: Name for the KD-tree column (default: 'kdtree_cell')
+        iterations: Number of recursive splits 1-20 (default: 9)
+        sample_size: Number of points to sample for boundaries (default: 100000)
+        geometry_column: Geometry column name (auto-detected if None)
+
+    Returns:
+        New table with KD-tree column added
+    """
+    return add_kdtree_table(
+        table,
+        kdtree_column_name=column_name,
+        iterations=iterations,
+        sample_size=sample_size,
+        geometry_column=geometry_column,
+    )
+
+
+def sort_column(
+    table: pa.Table,
+    column: str | list[str],
+    descending: bool = False,
+) -> pa.Table:
+    """
+    Sort table rows by the specified column(s).
+
+    Args:
+        table: Input PyArrow Table
+        column: Column name or list of column names to sort by
+        descending: Sort in descending order (default: False)
+
+    Returns:
+        New table with rows sorted by the column(s)
+    """
+    return sort_by_column_table(
+        table,
+        columns=column,
+        descending=descending,
+    )
+
+
+def sort_quadkey(
+    table: pa.Table,
+    column_name: str = "quadkey",
+    resolution: int = 13,
+    use_centroid: bool = False,
+    remove_column: bool = False,
+) -> pa.Table:
+    """
+    Sort table rows by quadkey column.
+
+    If the quadkey column doesn't exist, it will be auto-added.
+
+    Args:
+        table: Input PyArrow Table
+        column_name: Name of the quadkey column (default: 'quadkey')
+        resolution: Quadkey resolution for auto-adding (0-23, default: 13)
+        use_centroid: Use geometry centroid when auto-adding
+        remove_column: Remove the quadkey column after sorting
+
+    Returns:
+        New table with rows sorted by quadkey
+    """
+    return sort_by_quadkey_table(
+        table,
+        quadkey_column_name=column_name,
+        resolution=resolution,
+        use_centroid=use_centroid,
+        remove_quadkey_column=remove_column,
+    )
+
+
+def reproject(
+    table: pa.Table,
+    target_crs: str = "EPSG:4326",
+    source_crs: str | None = None,
+    geometry_column: str | None = None,
+) -> pa.Table:
+    """
+    Reproject geometry to a different coordinate reference system.
+
+    Args:
+        table: Input PyArrow Table
+        target_crs: Target CRS (default: EPSG:4326)
+        source_crs: Source CRS. If None, detected from metadata.
+        geometry_column: Geometry column name (auto-detected if None)
+
+    Returns:
+        New table with reprojected geometry
+    """
+    return reproject_table(
+        table,
+        target_crs=target_crs,
+        source_crs=source_crs,
         geometry_column=geometry_column,
     )
