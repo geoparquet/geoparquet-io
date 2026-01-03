@@ -23,6 +23,56 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _calculate_bounds_from_table(
+    table: pa.Table,
+    geometry_column: str | None,
+) -> tuple[float, float, float, float] | None:
+    """
+    Calculate bounding box from an in-memory PyArrow Table.
+
+    Uses DuckDB to compute the bbox from geometry column.
+
+    Args:
+        table: PyArrow Table
+        geometry_column: Name of geometry column
+
+    Returns:
+        Tuple of (xmin, ymin, xmax, ymax) or None if empty/error
+    """
+    if geometry_column is None or geometry_column not in table.column_names:
+        return None
+
+    if table.num_rows == 0:
+        return None
+
+    import duckdb
+
+    try:
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        con.register("input_table", table)
+
+        # Use ST_Extent to get the bounding box of all geometries
+        query = f"""
+            SELECT
+                ST_XMin(ST_Extent_Agg(ST_GeomFromWKB("{geometry_column}"))),
+                ST_YMin(ST_Extent_Agg(ST_GeomFromWKB("{geometry_column}"))),
+                ST_XMax(ST_Extent_Agg(ST_GeomFromWKB("{geometry_column}"))),
+                ST_YMax(ST_Extent_Agg(ST_GeomFromWKB("{geometry_column}")))
+            FROM input_table
+            WHERE "{geometry_column}" IS NOT NULL
+        """
+        result = con.execute(query).fetchone()
+        con.close()
+
+        if result and all(v is not None for v in result):
+            return (result[0], result[1], result[2], result[3])
+        return None
+
+    except Exception:
+        return None
+
+
 def read(path: str | Path, **kwargs) -> Table:
     """
     Read a GeoParquet file into a Table.
@@ -153,6 +203,77 @@ class Table:
     def column_names(self) -> list[str]:
         """Get list of column names."""
         return self._table.column_names
+
+    @property
+    def crs(self) -> dict | str | None:
+        """
+        Get the Coordinate Reference System (CRS) of the geometry column.
+
+        Returns CRS as a PROJJSON dict (full definition) or string identifier.
+        Returns None if no CRS is specified, which means OGC:CRS84 by default
+        per the GeoParquet specification.
+
+        Returns:
+            PROJJSON dict, string identifier, or None (OGC:CRS84 default)
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> print(table.crs)  # e.g., {'id': {'authority': 'EPSG', 'code': 4326}, ...}
+        """
+        from geoparquet_io.core.streaming import extract_crs_from_table
+
+        return extract_crs_from_table(self._table, self._geometry_column)
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float] | None:
+        """
+        Get the bounding box of all geometries in the table.
+
+        Returns a tuple of (xmin, ymin, xmax, ymax) representing the
+        total extent of all geometries.
+
+        Returns:
+            Tuple of (xmin, ymin, xmax, ymax) or None if empty/error
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> print(table.bounds)  # e.g., (-122.5, 37.5, -122.0, 38.0)
+        """
+        return _calculate_bounds_from_table(self._table, self._geometry_column)
+
+    @property
+    def schema(self) -> pa.Schema:
+        """
+        Get the PyArrow schema of the table.
+
+        Returns:
+            PyArrow Schema object
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> for field in table.schema:
+            ...     print(f"{field.name}: {field.type}")
+        """
+        return self._table.schema
+
+    @property
+    def geoparquet_version(self) -> str | None:
+        """
+        Get the GeoParquet version from metadata.
+
+        Returns the version string (e.g., '1.1.0', '2.0.0') or None
+        if no GeoParquet metadata is present.
+
+        Returns:
+            Version string or None
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> print(table.geoparquet_version)  # e.g., '1.1.0'
+        """
+        from geoparquet_io.core.streaming import extract_version_from_metadata
+
+        return extract_version_from_metadata(self._table.schema.metadata)
 
     def to_arrow(self) -> pa.Table:
         """
