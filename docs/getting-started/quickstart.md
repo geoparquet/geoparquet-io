@@ -206,30 +206,42 @@ gpio partition h3 input.parquet output/ --resolution 8
 
 ## Using the Python API
 
-You can also use geoparquet-io from Python:
+The Python API provides the best performance by keeping data in memory:
 
 ```python
-from geoparquet_io.core.add_bbox_column import add_bbox_column
-from geoparquet_io.core.hilbert_order import hilbert_order
+import geoparquet_io as gpio
 
-# Add bounding box
-add_bbox_column(
-    input_parquet="input.parquet",
-    output_parquet="output.parquet",
-    bbox_name="bbox",
-    verbose=True
-)
+# Read and inspect a file
+table = gpio.read('data.parquet')
+table.info()  # Print summary
 
-# Sort by Hilbert curve
-hilbert_order(
-    input_parquet="input.parquet",
-    output_parquet="sorted.parquet",
-    geometry_column="geometry",
-    verbose=True
-)
+# Transform and write
+gpio.read('input.parquet') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('optimized.parquet')
+
+# Chain multiple operations
+gpio.read('input.parquet') \
+    .extract(limit=10000) \
+    .add_bbox() \
+    .add_quadkey(resolution=12) \
+    .sort_hilbert() \
+    .write('output.parquet')
+
+# Convert from other formats
+gpio.convert('data.gpkg') \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
+
+# Upload to cloud storage
+gpio.read('data.parquet') \
+    .add_bbox() \
+    .upload('s3://bucket/data.parquet')
 ```
 
-See the [Python API documentation](../api/overview.md) for more details.
+The Python API is up to 5x faster than CLI operations because data stays in memory. See the [Python API documentation](../api/python-api.md) for the full reference.
 
 ## Getting Help
 
@@ -252,6 +264,8 @@ gpio partition h3 --help
 
 Now that you know the basics, explore:
 
+- [Python API Reference](../api/python-api.md) - Full Python API documentation
 - [User Guide](../guide/inspect.md) - Detailed documentation for all features
 - [CLI Reference](../cli/overview.md) - Complete command reference
 - [Examples](../examples/basic.md) - Real-world usage patterns
+- [Spatial Performance](../concepts/spatial-indices.md) - Understanding bbox, sorting, and partitioning
