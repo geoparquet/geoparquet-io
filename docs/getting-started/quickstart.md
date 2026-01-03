@@ -158,7 +158,7 @@ gpio convert input.shp data.parquet
 gpio check all data.parquet --fix --fix-output data_fixed.parquet
 
 # 3. Upload to cloud storage
-gpio upload data_fixed.parquet s3://bucket/data.parquet --profile prod
+gpio publish upload data_fixed.parquet s3://bucket/data.parquet --profile prod
 ```
 
 ### Quality Check → Optimize → Validate

@@ -5,7 +5,7 @@ For detailed usage and examples, see the [STAC User Guide](../guide/stac.md).
 ## Quick Reference
 
 ```bash
-gpio stac --help
+gpio publish stac --help
 ```
 
 This will show all available options and examples.
@@ -23,18 +23,18 @@ Automatically detects PMTiles overview files and includes them as assets.
 
 ```bash
 # Single file
-gpio stac input.parquet output.json --bucket s3://my-bucket/roads/
+gpio publish stac input.parquet output.json --bucket s3://my-bucket/roads/
 
 # Partitioned dataset
-gpio stac partitions/ stac-output/ --bucket s3://my-bucket/roads/
+gpio publish stac partitions/ stac-output/ --bucket s3://my-bucket/roads/
 
 # With public URL mapping
-gpio stac data.parquet output.json \
+gpio publish stac data.parquet output.json \
   --bucket s3://my-bucket/roads/ \
   --public-url https://data.example.com/roads/
 
 # Overwrite existing STAC files
-gpio stac partitions/ stac-output/ \
+gpio publish stac partitions/ stac-output/ \
   --bucket s3://my-bucket/roads/ \
   --overwrite
 ```

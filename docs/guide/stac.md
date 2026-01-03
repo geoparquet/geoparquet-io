@@ -11,7 +11,7 @@ STAC is a specification for describing geospatial data with standardized metadat
 Generate a STAC Item JSON for a single GeoParquet file:
 
 ```bash
-gpio stac roads.parquet roads.json \
+gpio publish stac roads.parquet roads.json \
   --bucket s3://source.coop/my-org/roads/
 ```
 
@@ -27,7 +27,7 @@ Creates `roads.json` with:
 Generate Collection + Items for partitioned datasets:
 
 ```bash
-gpio stac partitioned/ . \
+gpio publish stac partitioned/ . \
   --bucket s3://source.coop/my-org/roads/
 ```
 
@@ -43,7 +43,7 @@ Creates:
 Convert S3 URIs to public HTTPS URLs:
 
 ```bash
-gpio stac data.parquet output.json \
+gpio publish stac data.parquet output.json \
   --bucket s3://my-bucket/roads/ \
   --public-url https://data.example.com/roads/
 ```
@@ -72,10 +72,10 @@ If the output location already contains a valid STAC Collection or Item, the com
 
 ```bash
 # Error if output already exists
-gpio stac data.parquet output.json --bucket s3://...
+gpio publish stac data.parquet output.json --bucket s3://...
 
 # Use --overwrite to allow overwriting
-gpio stac data.parquet output.json --bucket s3://... --overwrite
+gpio publish stac data.parquet output.json --bucket s3://... --overwrite
 ```
 
 **Note:** The command will error if the **input** is a pure STAC file (no parquet files). If the input directory contains both STAC files and parquet files, it will generate from the parquet files.
@@ -109,7 +109,7 @@ gpio partition admin roads.parquet partitioned/ \
 
 # 4. Generate STAC collection
 # Items written next to parquet files, collection.json in partitioned/
-gpio stac partitioned/ partitioned/ \
+gpio publish stac partitioned/ partitioned/ \
   --bucket s3://my-bucket/roads/ \
   --public-url https://data.example.com/roads/
 
@@ -139,12 +139,12 @@ partitioned/
 
 ```bash
 # Custom Item ID
-gpio stac data.parquet output.json \
+gpio publish stac data.parquet output.json \
   --item-id my-roads \
   --bucket s3://...
 
 # Custom Collection ID
-gpio stac partitions/ output/ \
+gpio publish stac partitions/ output/ \
   --collection-id global-roads \
   --bucket s3://...
 ```
@@ -152,7 +152,7 @@ gpio stac partitions/ output/ \
 ### Verbose Output
 
 ```bash
-gpio stac data.parquet output.json \
+gpio publish stac data.parquet output.json \
   --bucket s3://... \
   --verbose
 ```

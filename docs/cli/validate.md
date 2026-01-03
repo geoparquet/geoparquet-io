@@ -1,11 +1,11 @@
-# validate Command
+# check spec Command
 
-For detailed usage and examples, see the [Validate User Guide](../guide/validate.md).
+For detailed usage and examples, see the [Check Spec Guide](../guide/validate.md).
 
 ## Quick Reference
 
 ```bash
-gpio validate --help
+gpio check spec --help
 ```
 
 This will show all available options.
@@ -14,16 +14,16 @@ This will show all available options.
 
 ```bash
 # Validate a GeoParquet file
-gpio validate myfile.parquet
+gpio check spec myfile.parquet
 
 # JSON output for machine processing
-gpio validate myfile.parquet --json
+gpio check spec myfile.parquet --json
 
 # Skip data validation for faster checks
-gpio validate myfile.parquet --skip-data-validation
+gpio check spec myfile.parquet --skip-data-validation
 
 # Validate against specific version
-gpio validate myfile.parquet --geoparquet-version 1.1
+gpio check spec myfile.parquet --geoparquet-version 1.1
 ```
 
 ## Options

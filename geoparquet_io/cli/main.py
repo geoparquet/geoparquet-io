@@ -125,11 +125,11 @@ class DefaultGroup(click.Group):
 
 
 class ConvertDefaultGroup(click.Group):
-    """Custom Group that invokes 'to-geoparquet' when no subcommand is provided.
+    """Custom Group that invokes 'geoparquet' when no subcommand is provided.
 
     This allows backwards compatibility:
-    - gpio convert input.shp output.parquet  -> invokes to-geoparquet
-    - gpio convert to-geoparquet input.shp output.parquet -> explicit
+    - gpio convert input.shp output.parquet  -> invokes geoparquet
+    - gpio convert geoparquet input.shp output.parquet -> explicit
     - gpio convert reproject input.parquet output.parquet -> subcommand
     """
 
@@ -142,8 +142,8 @@ class ConvertDefaultGroup(click.Group):
         if args and not args[0].startswith("-") and args[0] in self.commands:
             return super().parse_args(ctx, args)
 
-        # Default to 'to-geoparquet' subcommand for backwards compat
-        return super().parse_args(ctx, ["to-geoparquet"] + args)
+        # Default to 'geoparquet' subcommand for backwards compat
+        return super().parse_args(ctx, ["geoparquet"] + args)
 
 
 @cli.group(cls=DefaultGroup)
@@ -292,6 +292,11 @@ class MultiFileCheckRunner:
     show_default=True,
     help="Max rows for spatial order check",
 )
+@click.option(
+    "--spec-details",
+    is_flag=True,
+    help="Show full spec validation results instead of summary",
+)
 @check_partition_options
 @profile_option
 def check_all(
@@ -303,11 +308,12 @@ def check_all(
     overwrite,
     random_sample_size,
     limit_rows,
+    spec_details,
     check_all_files,
     check_sample,
     profile,
 ):
-    """Check compression, bbox, row groups, and spatial order."""
+    """Check compression, bbox, row groups, spatial order, and spec compliance."""
     from geoparquet_io.core.common import is_remote_url, show_remote_read_message
     from geoparquet_io.core.partition_reader import get_files_to_check
 
@@ -371,10 +377,52 @@ def check_all(
 
         display_spatial_result(ratio, show_output)
 
-        # Aggregate results for runner tracking
+        # Run spec validation
+        from geoparquet_io.core.validate import validate_geoparquet
+
+        spec_result = validate_geoparquet(
+            file_path, validate_data=True, sample_size=1000, verbose=False
+        )
+
+        # Display spec validation results
+        if show_output:
+            click.echo("\nSpec Validation:")
+            if spec_details:
+                # Full output
+                from geoparquet_io.core.validate import format_terminal_output
+
+                format_terminal_output(spec_result)
+            else:
+                # Summary only
+                if spec_result.failed_count > 0:
+                    click.echo(
+                        click.style(
+                            f"  ✗ {spec_result.failed_count} failed, "
+                            f"{spec_result.passed_count} passed",
+                            fg="red",
+                        )
+                    )
+                elif spec_result.warning_count > 0:
+                    click.echo(
+                        click.style(
+                            f"  ⚠ {spec_result.passed_count} passed, "
+                            f"{spec_result.warning_count} warnings",
+                            fg="yellow",
+                        )
+                    )
+                else:
+                    click.echo(
+                        click.style(f"  ✓ {spec_result.passed_count} checks passed", fg="green")
+                    )
+
+        # Aggregate results for runner tracking (include spec failures)
         combined_passed, combined_issues, _ = aggregate_check_results(
             structure_results, spatial_result
         )
+        # Include spec failures in passed status and issues summary
+        if spec_result.failed_count > 0:
+            combined_passed = False
+            combined_issues.append(f"Spec validation: {spec_result.failed_count} checks failed")
         runner.record_result(
             file_path, {"passed": combined_passed, "issues": combined_issues, **structure_results}
         )
@@ -836,7 +884,7 @@ def convert(ctx):
     \b
     Examples:
         gpio convert input.shp output.parquet                    # To GeoParquet (default)
-        gpio convert to-geoparquet input.shp output.parquet      # Explicit subcommand
+        gpio convert geoparquet input.shp output.parquet         # Explicit subcommand
         gpio convert reproject input.parquet out.parquet -d EPSG:32610
     """
     ctx.ensure_object(dict)
@@ -844,7 +892,7 @@ def convert(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-@convert.command(name="to-geoparquet", cls=SingleFileCommand)
+@convert.command(name="geoparquet", cls=SingleFileCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
@@ -1305,7 +1353,7 @@ def inspect(
     )
 
     # Validate mutually exclusive options
-    if head and tail:
+    if head is not None and tail is not None:
         raise click.UsageError("--head and --tail are mutually exclusive")
 
     if json_output and markdown_output:
@@ -1320,7 +1368,7 @@ def inspect(
 
     # Handle --meta mode
     if meta:
-        if head or tail:
+        if head is not None or tail is not None:
             raise click.UsageError("--meta cannot be used with --head or --tail")
         if stats:
             raise click.UsageError("--meta cannot be used with --stats")
@@ -1359,7 +1407,7 @@ def inspect(
     # Check for partition and handle --check-all
     if check_all_files:
         # Validate --check-all is not used with preview/stats options
-        if head or tail:
+        if head is not None or tail is not None:
             raise click.UsageError("--check-all cannot be used with --head or --tail")
         if stats:
             raise click.UsageError("--check-all cannot be used with --stats")
@@ -1447,7 +1495,7 @@ def inspect(
         # Get preview data if requested
         preview_table = None
         preview_mode = None
-        if head or tail:
+        if head is not None or tail is not None:
             preview_table, preview_mode = get_preview_data(file_to_inspect, head=head, tail=tail)
 
         # Get statistics if requested
@@ -3367,7 +3415,12 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
         --bucket s3://my-bucket/roads/ \\
         --public-url https://data.example.com/roads/
     """
-    _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
+    try:
+        _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 @publish.command(name="upload")
@@ -3432,7 +3485,9 @@ def publish_upload(
             fail_fast=fail_fast,
             dry_run=dry_run,
         )
-    except ValueError as e:
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
@@ -3468,7 +3523,12 @@ def stac(input, output, bucket, public_url, collection_id, item_id, overwrite, v
         "'gpio stac' is deprecated and will be removed in a future release. "
         "Use 'gpio publish stac' instead."
     )
-    _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
+    try:
+        _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwrite, verbose)
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 @check.command(name="stac")
@@ -3814,7 +3874,9 @@ def upload(
                 s3_region=s3_region,
                 s3_use_ssl=not s3_no_ssl,
             )
-    except ValueError as e:
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
         raise click.ClickException(str(e)) from e
 
 

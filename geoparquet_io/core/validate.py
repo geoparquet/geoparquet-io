@@ -2094,18 +2094,25 @@ def _check_geographic_bounds(
     actual: tuple[float, float, float, float],
     expected: tuple[float, float, float, float],
 ) -> list[str]:
-    """Check if actual bounds are within expected geographic bounds (strict)."""
+    """Check if actual bounds are within expected geographic bounds.
+
+    Uses a small tolerance to handle floating-point precision issues
+    (e.g., -180.00000001 should be treated as valid -180.0).
+    """
     actual_xmin, actual_xmax, actual_ymin, actual_ymax = actual
     expected_xmin, expected_ymin, expected_xmax, expected_ymax = expected
 
+    # Small tolerance for floating-point comparison
+    tolerance = 1e-6
+
     issues = []
-    if actual_xmin < expected_xmin:
+    if actual_xmin < expected_xmin - tolerance:
         issues.append(f"min_x={actual_xmin:.4f} < {expected_xmin}")
-    if actual_xmax > expected_xmax:
+    if actual_xmax > expected_xmax + tolerance:
         issues.append(f"max_x={actual_xmax:.4f} > {expected_xmax}")
-    if actual_ymin < expected_ymin:
+    if actual_ymin < expected_ymin - tolerance:
         issues.append(f"min_y={actual_ymin:.4f} < {expected_ymin}")
-    if actual_ymax > expected_ymax:
+    if actual_ymax > expected_ymax + tolerance:
         issues.append(f"max_y={actual_ymax:.4f} > {expected_ymax}")
     return issues
 
@@ -2512,7 +2519,7 @@ def _check_version_matches(
             name="version_match",
             status=CheckStatus.FAILED,
             message=message,
-            details=f"Run 'gpio validate' without --geoparquet-version to validate "
+            details=f"Run 'gpio check spec' without --geoparquet-version to validate "
             f"as {detected_version}",
             category="version_check",
         )
