@@ -47,6 +47,7 @@ def _calculate_bounds_from_table(
 
     import duckdb
 
+    con = None
     try:
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
@@ -63,7 +64,6 @@ def _calculate_bounds_from_table(
             WHERE "{geometry_column}" IS NOT NULL
         """
         result = con.execute(query).fetchone()
-        con.close()
 
         if result and all(v is not None for v in result):
             return (result[0], result[1], result[2], result[3])
@@ -71,6 +71,9 @@ def _calculate_bounds_from_table(
 
     except Exception:
         return None
+    finally:
+        if con is not None:
+            con.close()
 
 
 def read(path: str | Path, **kwargs) -> Table:
@@ -235,6 +238,17 @@ class Table:
 
         return find_geometry_column_from_table(self._table)
 
+    def _format_crs_display(self, crs: dict | str | None) -> str:
+        """Format CRS for human-readable display."""
+        if crs is None:
+            return "OGC:CRS84 (default)"
+        if isinstance(crs, dict) and "id" in crs:
+            crs_id = crs["id"]
+            if isinstance(crs_id, dict):
+                return f"{crs_id.get('authority', 'EPSG')}:{crs_id.get('code', '?')}"
+            return str(crs_id)
+        return str(crs)
+
     @property
     def table(self) -> pa.Table:
         """Get the underlying PyArrow Table."""
@@ -369,20 +383,7 @@ class Table:
         # Print formatted summary
         print(f"Table: {self.num_rows:,} rows, {len(self.column_names)} columns")
         print(f"Geometry: {self._geometry_column}")
-
-        # Format CRS display
-        crs = self.crs
-        if crs is None:
-            crs_display = "OGC:CRS84 (default)"
-        elif isinstance(crs, dict) and "id" in crs:
-            crs_id = crs["id"]
-            if isinstance(crs_id, dict):
-                crs_display = f"{crs_id.get('authority', 'EPSG')}:{crs_id.get('code', '?')}"
-            else:
-                crs_display = str(crs_id)
-        else:
-            crs_display = str(crs)
-        print(f"CRS: {crs_display}")
+        print(f"CRS: {self._format_crs_display(self.crs)}")
 
         # Format bounds
         bounds = self.bounds

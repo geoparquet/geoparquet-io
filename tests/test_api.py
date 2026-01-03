@@ -582,17 +582,16 @@ class TestReadPartition:
 
         yield tmp_dir
 
-        # Cleanup
+        # Cleanup with retry for Windows file locking
         import shutil
+        import time
 
-        for _ in range(3):
+        for attempt in range(3):
             try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+                shutil.rmtree(tmp_dir)
                 break
             except OSError:
-                import time
-
-                time.sleep(0.1)
+                time.sleep(0.1 * (attempt + 1))
 
     def test_read_partition_from_directory(self, partition_dir):
         """Test reading a partitioned directory."""
