@@ -95,6 +95,57 @@ def read(path: str | Path, **kwargs) -> Table:
     return Table(arrow_table)
 
 
+def read_partition(
+    path: str | Path,
+    *,
+    hive_input: bool | None = None,
+    allow_schema_diff: bool = False,
+) -> Table:
+    """
+    Read a Hive-partitioned GeoParquet dataset.
+
+    Supports reading from:
+    - Hive-partitioned directories (e.g., `output/quadkey=0123/data.parquet`)
+    - Glob patterns (e.g., `data/quadkey=*/*.parquet`)
+    - Flat directories containing multiple parquet files
+
+    Args:
+        path: Path to partition root directory or glob pattern
+        hive_input: Explicitly enable/disable hive partitioning. None = auto-detect.
+        allow_schema_diff: If True, allow merging schemas across files with
+                           different columns (uses DuckDB union_by_name)
+
+    Returns:
+        Table containing all partition data combined
+
+    Example:
+        >>> import geoparquet_io as gpio
+        >>> table = gpio.read_partition('partitioned_output/')
+        >>> table = gpio.read_partition('data/quadkey=*/*.parquet')
+    """
+    from geoparquet_io.core.common import get_duckdb_connection, needs_httpfs
+    from geoparquet_io.core.partition_reader import build_read_parquet_expr
+    from geoparquet_io.core.streaming import find_geometry_column_from_table
+
+    path_str = str(path)
+    expr = build_read_parquet_expr(
+        path_str,
+        allow_schema_diff=allow_schema_diff,
+        hive_input=hive_input,
+    )
+
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path_str))
+    try:
+        arrow_table = con.execute(f"SELECT * FROM {expr}").fetch_arrow_table()
+    finally:
+        con.close()
+
+    # Detect geometry column from the combined table
+    geometry_column = find_geometry_column_from_table(arrow_table)
+
+    return Table(arrow_table, geometry_column=geometry_column)
+
+
 def convert(
     path: str | Path,
     *,
@@ -629,6 +680,143 @@ class Table:
             geometry_column=self._geometry_column,
         )
         return Table(result, self._geometry_column)
+
+    def partition_by_quadkey(
+        self,
+        output_dir: str | Path,
+        *,
+        resolution: int = 13,
+        partition_resolution: int = 6,
+        compression: str = "ZSTD",
+        hive: bool = True,
+        overwrite: bool = False,
+        verbose: bool = False,
+    ) -> dict:
+        """
+        Partition the table into Hive-partitioned directory by quadkey.
+
+        Args:
+            output_dir: Output directory path
+            resolution: Quadkey resolution for sorting (0-23, default: 13)
+            partition_resolution: Resolution for partition boundaries (default: 6)
+            compression: Compression codec (default: ZSTD)
+            hive: Use Hive-style partitioning (default: True)
+            overwrite: Overwrite existing output directory
+            verbose: Print progress information
+
+        Returns:
+            dict with partition statistics (file_count, etc.)
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> stats = table.partition_by_quadkey('output/', resolution=12)
+            >>> print(f"Created {stats['file_count']} files")
+        """
+        import tempfile
+        import time
+        import uuid
+        from pathlib import Path as PathLib
+
+        from geoparquet_io.core.partition_by_quadkey import partition_by_quadkey
+
+        # Write to temp file first
+        temp_path = PathLib(tempfile.gettempdir()) / f"gpio_partition_{uuid.uuid4()}.parquet"
+
+        try:
+            self.write(temp_path, compression=compression)
+
+            partition_by_quadkey(
+                input_parquet=str(temp_path),
+                output_folder=str(output_dir),
+                resolution=resolution,
+                partition_resolution=partition_resolution,
+                hive=hive,
+                overwrite=overwrite,
+                verbose=verbose,
+            )
+
+            # Return basic stats
+            output_path = PathLib(output_dir)
+            parquet_files = list(output_path.rglob("*.parquet"))
+            return {
+                "output_dir": str(output_path),
+                "file_count": len(parquet_files),
+                "hive": hive,
+            }
+        finally:
+            for attempt in range(3):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time.sleep(0.1 * (attempt + 1))
+
+    def partition_by_h3(
+        self,
+        output_dir: str | Path,
+        *,
+        resolution: int = 9,
+        compression: str = "ZSTD",
+        hive: bool = True,
+        overwrite: bool = False,
+        verbose: bool = False,
+    ) -> dict:
+        """
+        Partition the table into Hive-partitioned directory by H3 cell.
+
+        Args:
+            output_dir: Output directory path
+            resolution: H3 resolution level 0-15 (default: 9)
+            compression: Compression codec (default: ZSTD)
+            hive: Use Hive-style partitioning (default: True)
+            overwrite: Overwrite existing output directory
+            verbose: Print progress information
+
+        Returns:
+            dict with partition statistics (file_count, etc.)
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> stats = table.partition_by_h3('output/', resolution=6)
+            >>> print(f"Created {stats['file_count']} files")
+        """
+        import tempfile
+        import time
+        import uuid
+        from pathlib import Path as PathLib
+
+        from geoparquet_io.core.partition_by_h3 import partition_by_h3
+
+        # Write to temp file first
+        temp_path = PathLib(tempfile.gettempdir()) / f"gpio_partition_{uuid.uuid4()}.parquet"
+
+        try:
+            self.write(temp_path, compression=compression)
+
+            partition_by_h3(
+                input_parquet=str(temp_path),
+                output_folder=str(output_dir),
+                resolution=resolution,
+                hive=hive,
+                overwrite=overwrite,
+                verbose=verbose,
+            )
+
+            # Return basic stats
+            output_path = PathLib(output_dir)
+            parquet_files = list(output_path.rglob("*.parquet"))
+            return {
+                "output_dir": str(output_path),
+                "file_count": len(parquet_files),
+                "hive": hive,
+            }
+        finally:
+            for attempt in range(3):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time.sleep(0.1 * (attempt + 1))
 
     def upload(
         self,
