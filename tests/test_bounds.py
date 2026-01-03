@@ -2,6 +2,8 @@
 Tests for get_dataset_bounds function.
 """
 
+import logging
+
 import pytest
 
 from geoparquet_io.core.common import get_dataset_bounds
@@ -55,15 +57,16 @@ class TestGetDatasetBounds:
         assert bounds is not None
         assert len(bounds) == 4
 
-    def test_get_bounds_verbose_output(self, buildings_test_file, capsys):
+    def test_get_bounds_verbose_output(self, buildings_test_file, caplog):
         """Test verbose output when calculating bounds."""
 
-        # Capture click output
-        bounds = get_dataset_bounds(buildings_test_file, verbose=True)
+        # Capture log output
+        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+            bounds = get_dataset_bounds(buildings_test_file, verbose=True)
 
-        captured = capsys.readouterr()
         # Should show warnings about no bbox column
-        assert "bbox column" in captured.out.lower() or "Dataset bounds:" in captured.out
+        log_text = " ".join(record.message.lower() for record in caplog.records)
+        assert "bbox column" in log_text or "dataset bounds" in log_text
 
         assert bounds is not None
 
@@ -99,26 +102,30 @@ class TestGetDatasetBounds:
         with pytest.raises(click.BadParameter):
             get_dataset_bounds("nonexistent.parquet", verbose=False)
 
-    def test_get_bounds_performance_difference(self, buildings_test_file, temp_output_file, capsys):
+    def test_get_bounds_performance_difference(self, buildings_test_file, temp_output_file, caplog):
         """Test that bbox column actually helps performance (via warnings)."""
         from geoparquet_io.core.add_bbox_column import add_bbox_column
 
         # Get bounds without bbox column - should show warning
-        bounds1 = get_dataset_bounds(buildings_test_file, verbose=False)
-        captured1 = capsys.readouterr()
+        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+            bounds1 = get_dataset_bounds(buildings_test_file, verbose=False)
 
         # Should have warning about slow calculation
-        assert "slow" in captured1.out.lower() or "bbox" in captured1.out.lower()
+        log_text1 = " ".join(record.message.lower() for record in caplog.records)
+        assert "slow" in log_text1 or "bbox" in log_text1
 
         # Add bbox column
+        caplog.clear()
         add_bbox_column(buildings_test_file, temp_output_file, verbose=False)
 
         # Get bounds with bbox column - should not show warning
-        bounds2 = get_dataset_bounds(temp_output_file, verbose=False)
-        captured2 = capsys.readouterr()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+            bounds2 = get_dataset_bounds(temp_output_file, verbose=False)
 
         # Should not have warning about slow calculation
-        assert "slow" not in captured2.out.lower() or len(captured2.out) == 0
+        log_text2 = " ".join(record.message.lower() for record in caplog.records)
+        assert "slow" not in log_text2 or len(log_text2) == 0
 
         # Results should be the same
         assert bounds1 is not None
