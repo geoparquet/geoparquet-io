@@ -588,10 +588,44 @@ git commit -m "Brief description of change"
 ### Adding a New CLI Command
 
 1. Define core logic in `core/newcommand.py`
+   - Create a `*_table()` function that accepts/returns `pa.Table` for Python API use
+   - Keep file I/O separate from the core transformation logic
 2. Add CLI wrapper in `cli/main.py`
 3. Use existing decorators from `cli/decorators.py`
-4. Add tests in `tests/test_newcommand.py`
-5. Check complexity: `xenon --max-absolute=A geoparquet_io/core/newcommand.py`
+4. **Add Python API support** (see below)
+5. Add tests in `tests/test_newcommand.py` and `tests/test_api.py`
+6. Check complexity: `xenon --max-absolute=A geoparquet_io/core/newcommand.py`
+
+### Adding Python API for New Commands
+
+**CRITICAL: Every new CLI command must have a corresponding Python API.**
+
+The Python API is equally important as the CLI. Users expect to be able to use gpio programmatically.
+
+1. **Add a method to `Table` class** in `api/table.py`:
+   ```python
+   def new_operation(self, param: str = "default") -> Table:
+       """Brief description."""
+       from geoparquet_io.core.newcommand import new_operation_table
+       result = new_operation_table(self._table, param=param)
+       return Table(result, self._geometry_column)
+   ```
+
+2. **Add a function to `ops` module** in `api/ops.py`:
+   ```python
+   def new_operation(table: pa.Table, param: str = "default") -> pa.Table:
+       """Brief description for functional API users."""
+       from geoparquet_io.core.newcommand import new_operation_table
+       return new_operation_table(table, param=param)
+   ```
+
+3. **Export if needed** from `api/__init__.py` and top-level `__init__.py`
+
+4. **Add tests** in `tests/test_api.py` for both Table method and ops function
+
+5. **Update documentation** in `docs/api/python-api.md`
+
+The Python API should mirror the CLI functionality but work with in-memory Arrow tables for better performance and composability.
 
 ### Adding a CLI Option
 
