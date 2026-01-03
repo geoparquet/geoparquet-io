@@ -455,10 +455,12 @@ class TestTableMetadataProperties:
     def test_geoparquet_version_property(self, sample_table):
         """Test geoparquet_version property returns version string."""
         version = sample_table.geoparquet_version
-        # Should be a version string like "1.1" or None
+        # Should be a version string like "1.1" or "1.1.0" or None
         assert version is None or isinstance(version, str)
         if version:
-            assert version in ["1.0", "1.1", "2.0"]
+            # Accept patched versions like "1.1.0" by checking major.minor
+            major_minor = ".".join(version.split(".")[:2])
+            assert major_minor in ["1.0", "1.1", "2.0"]
 
 
 class TestTableInfo:
