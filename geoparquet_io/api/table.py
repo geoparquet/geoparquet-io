@@ -275,6 +275,76 @@ class Table:
 
         return extract_version_from_metadata(self._table.schema.metadata)
 
+    def info(self, verbose: bool = True) -> dict | None:
+        """
+        Print or return summary information about the Table.
+
+        When verbose=True, prints a formatted summary to stdout.
+        When verbose=False, returns a dictionary with all metadata.
+
+        Args:
+            verbose: If True, print to stdout and return None.
+                     If False, return dict with metadata.
+
+        Returns:
+            dict with metadata if verbose=False, else None
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> table.info()
+            Table: 766 rows, 6 columns
+            Geometry: geometry
+            CRS: OGC:CRS84 (default)
+            Bounds: [-122.500000, 37.500000, -122.000000, 38.000000]
+            GeoParquet: 1.1
+
+            >>> info_dict = table.info(verbose=False)
+            >>> print(info_dict['rows'])
+            766
+        """
+        info_dict = {
+            "rows": self.num_rows,
+            "columns": len(self.column_names),
+            "column_names": list(self.column_names),
+            "geometry_column": self._geometry_column,
+            "crs": self.crs,
+            "bounds": self.bounds,
+            "geoparquet_version": self.geoparquet_version,
+        }
+
+        if not verbose:
+            return info_dict
+
+        # Print formatted summary
+        print(f"Table: {self.num_rows:,} rows, {len(self.column_names)} columns")
+        print(f"Geometry: {self._geometry_column}")
+
+        # Format CRS display
+        crs = self.crs
+        if crs is None:
+            crs_display = "OGC:CRS84 (default)"
+        elif isinstance(crs, dict) and "id" in crs:
+            crs_id = crs["id"]
+            if isinstance(crs_id, dict):
+                crs_display = f"{crs_id.get('authority', 'EPSG')}:{crs_id.get('code', '?')}"
+            else:
+                crs_display = str(crs_id)
+        else:
+            crs_display = str(crs)
+        print(f"CRS: {crs_display}")
+
+        # Format bounds
+        bounds = self.bounds
+        if bounds:
+            print(f"Bounds: [{bounds[0]:.6f}, {bounds[1]:.6f}, {bounds[2]:.6f}, {bounds[3]:.6f}]")
+
+        # GeoParquet version
+        version = self.geoparquet_version
+        if version:
+            print(f"GeoParquet: {version}")
+
+        return None
+
     def to_arrow(self) -> pa.Table:
         """
         Convert to PyArrow Table.
