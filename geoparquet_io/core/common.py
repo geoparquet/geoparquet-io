@@ -12,7 +12,15 @@ import click
 import duckdb
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
+from geoparquet_io.core.logging_config import (
+    configure_verbose,
+    debug,
+    error,
+    info,
+    progress,
+    success,
+    warn,
+)
 from geoparquet_io.core.streaming import extract_version_from_metadata
 
 # Per-bucket cache for S3 buckets that require authentication
@@ -2976,6 +2984,7 @@ def get_dataset_bounds(parquet_file, geometry_column=None, verbose=False):
     Returns:
         tuple: (xmin, ymin, xmax, ymax) or None if error
     """
+    configure_verbose(verbose)
     safe_url = safe_file_url(parquet_file, verbose)
 
     # Get geometry column if not specified

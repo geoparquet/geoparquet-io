@@ -60,11 +60,11 @@ class TestGetDatasetBounds:
     def test_get_bounds_verbose_output(self, buildings_test_file, caplog):
         """Test verbose output when calculating bounds."""
 
-        # Capture log output
-        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        # Capture log output at DEBUG level to see verbose messages
+        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
             bounds = get_dataset_bounds(buildings_test_file, verbose=True)
 
-        # Should show warnings about no bbox column
+        # Should show debug message about dataset bounds
         log_text = " ".join(record.message.lower() for record in caplog.records)
         assert "bbox column" in log_text or "dataset bounds" in log_text
 
