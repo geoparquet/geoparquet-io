@@ -3,11 +3,16 @@ Tests for upload functionality.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.upload import parse_object_store_url
+from geoparquet_io.core.upload import (
+    _create_s3_store_with_endpoint,
+    _setup_store_and_kwargs,
+    parse_object_store_url,
+)
 
 
 class TestUploadUrlParsing:
@@ -232,3 +237,127 @@ class TestUploadDryRun:
 
         assert result.exit_code == 0
         assert "No files found" in result.output
+
+
+class TestS3EndpointConfiguration:
+    """Test suite for S3 endpoint configuration."""
+
+    def test_create_s3_store_with_endpoint_https(self):
+        """Test creating S3Store with HTTPS endpoint."""
+        with patch("geoparquet_io.core.upload.S3Store") as mock_store:
+            _create_s3_store_with_endpoint(
+                bucket_url="s3://my-bucket/data.parquet",
+                s3_endpoint="minio.example.com:9000",
+                s3_region="us-west-2",
+                s3_use_ssl=True,
+            )
+
+            mock_store.assert_called_once_with(
+                "my-bucket",
+                endpoint="https://minio.example.com:9000",
+                region="us-west-2",
+            )
+
+    def test_create_s3_store_with_endpoint_http(self):
+        """Test creating S3Store with HTTP endpoint (no SSL)."""
+        with patch("geoparquet_io.core.upload.S3Store") as mock_store:
+            _create_s3_store_with_endpoint(
+                bucket_url="s3://my-bucket/data.parquet",
+                s3_endpoint="minio.local:9000",
+                s3_region=None,  # Should default to us-east-1
+                s3_use_ssl=False,
+            )
+
+            mock_store.assert_called_once_with(
+                "my-bucket",
+                endpoint="http://minio.local:9000",
+                region="us-east-1",
+            )
+
+    def test_setup_store_with_custom_endpoint(self):
+        """Test _setup_store_and_kwargs uses S3Store for custom endpoint."""
+        with patch("geoparquet_io.core.upload.S3Store") as mock_s3store:
+            with patch("geoparquet_io.core.upload.obs.store.from_url") as mock_from_url:
+                _setup_store_and_kwargs(
+                    bucket_url="s3://my-bucket",
+                    profile=None,
+                    chunk_concurrency=12,
+                    chunk_size=None,
+                    s3_endpoint="custom.endpoint.com",
+                    s3_region="eu-west-1",
+                    s3_use_ssl=True,
+                )
+
+                # Should use S3Store, not from_url
+                mock_s3store.assert_called_once()
+                mock_from_url.assert_not_called()
+
+    def test_setup_store_without_endpoint_uses_from_url(self):
+        """Test _setup_store_and_kwargs uses from_url when no custom endpoint."""
+        with patch("geoparquet_io.core.upload.S3Store") as mock_s3store:
+            with patch("geoparquet_io.core.upload.obs.store.from_url") as mock_from_url:
+                _setup_store_and_kwargs(
+                    bucket_url="s3://my-bucket",
+                    profile=None,
+                    chunk_concurrency=12,
+                    chunk_size=None,
+                    # No s3_endpoint
+                )
+
+                # Should use from_url, not S3Store
+                mock_from_url.assert_called_once_with("s3://my-bucket")
+                mock_s3store.assert_not_called()
+
+    def test_setup_store_returns_kwargs(self):
+        """Test _setup_store_and_kwargs returns correct kwargs."""
+        with patch("geoparquet_io.core.upload.obs.store.from_url"):
+            store, kwargs = _setup_store_and_kwargs(
+                bucket_url="s3://my-bucket",
+                profile=None,
+                chunk_concurrency=24,
+                chunk_size=16 * 1024 * 1024,
+            )
+
+            assert kwargs["max_concurrency"] == 24
+            assert kwargs["chunk_size"] == 16 * 1024 * 1024
+
+
+class TestUploadCLIS3Options:
+    """Test suite for S3 endpoint CLI options."""
+
+    def test_upload_with_s3_endpoint_dry_run(self, places_test_file):
+        """Test dry-run mode with S3 endpoint options."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "upload",
+                places_test_file,
+                "s3://test-bucket/data.parquet",
+                "--s3-endpoint",
+                "minio.example.com:9000",
+                "--s3-no-ssl",
+                "--dry-run",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "DRY RUN MODE" in result.output
+
+    def test_upload_with_s3_region_dry_run(self, places_test_file):
+        """Test dry-run mode with S3 region option."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "upload",
+                places_test_file,
+                "s3://test-bucket/data.parquet",
+                "--s3-region",
+                "eu-west-1",
+                "--dry-run",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "DRY RUN MODE" in result.output

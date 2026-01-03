@@ -161,9 +161,10 @@ class TestConvertCore:
         )
 
         captured = capsys.readouterr()
-        assert "Detecting geometry column" in captured.out
-        assert "Dataset bounds" in captured.out
-        assert "bbox" in captured.out.lower()
+        # Logging output goes to stderr
+        assert "Detecting geometry column" in captured.err
+        assert "Dataset bounds" in captured.err
+        assert "bbox" in captured.err.lower()
 
     def test_convert_custom_compression(self, shapefile_input, temp_output_file):
         """Test custom compression settings."""

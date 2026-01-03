@@ -45,6 +45,60 @@ def read(path: str | Path, **kwargs) -> Table:
     return Table(arrow_table)
 
 
+def convert(
+    path: str | Path,
+    *,
+    geometry_column: str = "geometry",
+    wkt_column: str | None = None,
+    lat_column: str | None = None,
+    lon_column: str | None = None,
+    delimiter: str | None = None,
+    skip_invalid: bool = False,
+    profile: str | None = None,
+) -> Table:
+    """
+    Convert a geospatial file to a Table.
+
+    Supports: GeoPackage, GeoJSON, Shapefile, FlatGeobuf, CSV/TSV (with WKT or lat/lon).
+    Unlike the CLI convert command, this does NOT apply Hilbert sorting by default.
+    Chain .sort_hilbert() explicitly if you want spatial ordering.
+
+    Args:
+        path: Path to input file (local or S3 URL)
+        geometry_column: Name for geometry column in output (default: 'geometry')
+        wkt_column: For CSV: column containing WKT geometry
+        lat_column: For CSV: latitude column
+        lon_column: For CSV: longitude column
+        delimiter: For CSV: field delimiter (auto-detected if not specified)
+        skip_invalid: Skip invalid geometries instead of erroring
+        profile: AWS profile name for S3 authentication (default: None)
+
+    Returns:
+        Table for chaining operations
+
+    Example:
+        >>> import geoparquet_io as gpio
+        >>> gpio.convert('data.gpkg').sort_hilbert().write('out.parquet')
+        >>> gpio.convert('data.csv', lat_column='lat', lon_column='lon').write('out.parquet')
+        >>> gpio.convert('s3://bucket/data.gpkg', profile='my-aws').write('out.parquet')
+    """
+    from geoparquet_io.core.convert import read_spatial_to_arrow
+
+    arrow_table, detected_crs, geom_col = read_spatial_to_arrow(
+        str(path),
+        verbose=False,
+        wkt_column=wkt_column,
+        lat_column=lat_column,
+        lon_column=lon_column,
+        delimiter=delimiter,
+        skip_invalid=skip_invalid,
+        profile=profile,
+        geometry_column=geometry_column,
+    )
+
+    return Table(arrow_table, geometry_column=geom_col)
+
+
 class Table:
     """
     Fluent wrapper around PyArrow Table for GeoParquet operations.
@@ -371,6 +425,88 @@ class Table:
             geometry_column=self._geometry_column,
         )
         return Table(result, self._geometry_column)
+
+    def upload(
+        self,
+        destination: str,
+        *,
+        compression: str = "ZSTD",
+        compression_level: int | None = None,
+        row_group_size_mb: float | None = None,
+        row_group_rows: int | None = None,
+        geoparquet_version: str | None = None,
+        profile: str | None = None,
+        s3_endpoint: str | None = None,
+        s3_region: str | None = None,
+        s3_use_ssl: bool = True,
+        chunk_concurrency: int = 12,
+    ) -> None:
+        """
+        Write and upload the table to cloud object storage.
+
+        Supports S3, S3-compatible (MinIO, Rook/Ceph, source.coop), GCS, and Azure.
+        Writes the table to a temporary local file, then uploads it to the destination.
+
+        Args:
+            destination: Object store URL (e.g., s3://bucket/path/data.parquet)
+            compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+            compression_level: Compression level
+            row_group_size_mb: Target row group size in MB
+            row_group_rows: Exact rows per row group
+            geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, or None to preserve)
+            profile: AWS profile name for S3
+            s3_endpoint: Custom S3-compatible endpoint (e.g., "minio.example.com:9000")
+            s3_region: S3 region (default: us-east-1 when using custom endpoint)
+            s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
+            chunk_concurrency: Max concurrent chunks per file upload (default: 12)
+
+        Example:
+            >>> gpio.read('data.parquet').sort_hilbert().upload(
+            ...     's3://bucket/data.parquet',
+            ...     s3_endpoint='minio.example.com:9000',
+            ...     s3_use_ssl=False,
+            ... )
+        """
+        import tempfile
+        import time
+        import uuid
+        from pathlib import Path
+
+        from geoparquet_io.core.common import setup_aws_profile_if_needed
+        from geoparquet_io.core.upload import upload as do_upload
+
+        setup_aws_profile_if_needed(profile, destination)
+
+        # Write to temp file with uuid to avoid Windows file locking issues
+        temp_path = Path(tempfile.gettempdir()) / f"gpio_upload_{uuid.uuid4()}.parquet"
+
+        try:
+            self.write(
+                temp_path,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                geoparquet_version=geoparquet_version,
+            )
+
+            do_upload(
+                source=temp_path,
+                destination=destination,
+                profile=profile,
+                s3_endpoint=s3_endpoint,
+                s3_region=s3_region,
+                s3_use_ssl=s3_use_ssl,
+                chunk_concurrency=chunk_concurrency,
+            )
+        finally:
+            # Retry cleanup with incremental backoff for Windows file handle release
+            for attempt in range(3):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time.sleep(0.1 * (attempt + 1))
 
     def __repr__(self) -> str:
         """String representation of the Table."""

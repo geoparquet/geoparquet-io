@@ -846,7 +846,7 @@ def convert(ctx):
 
 @convert.command(name="to-geoparquet", cls=SingleFileCommand)
 @click.argument("input_file")
-@click.argument("output_file", type=click.Path())
+@click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
     "--skip-hilbert",
     is_flag=True,
@@ -904,24 +904,113 @@ def convert_to_geoparquet_cmd(
 
     Supports Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV with WKT or lat/lon columns.
     Applies ZSTD compression, bbox metadata, and Hilbert ordering by default.
+    Auto-streams Arrow IPC to stdout when piped (or use "-" as output).
+
+    \b
+    Examples:
+      # Standard conversion
+      gpio convert input.gpkg output.parquet
+
+      \b
+      # Pipe to another command (auto-streams when piped)
+      gpio convert input.gpkg | gpio add bbox - | gpio upload - s3://bucket/data.parquet
     """
-    convert_to_geoparquet(
-        input_file,
-        output_file,
-        skip_hilbert=skip_hilbert,
-        verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_rows=100000,  # Best practice default
-        wkt_column=wkt_column,
-        lat_column=lat_column,
-        lon_column=lon_column,
-        delimiter=delimiter,
-        crs=crs,
-        skip_invalid=skip_invalid,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
+    from geoparquet_io.core.streaming import (
+        StreamingError,
+        should_stream_output,
+        validate_output,
     )
+
+    # Validate output early - provides helpful error if no output and not piping
+    try:
+        validate_output(output_file)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
+    # Check for streaming output
+    if should_stream_output(output_file):
+        # Suppress verbose for streaming
+        verbose = False
+        _convert_streaming(
+            input_file,
+            skip_hilbert=skip_hilbert,
+            wkt_column=wkt_column,
+            lat_column=lat_column,
+            lon_column=lon_column,
+            delimiter=delimiter,
+            crs=crs,
+            skip_invalid=skip_invalid,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+    else:
+        convert_to_geoparquet(
+            input_file,
+            output_file,
+            skip_hilbert=skip_hilbert,
+            verbose=verbose,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=100000,  # Best practice default
+            wkt_column=wkt_column,
+            lat_column=lat_column,
+            lon_column=lon_column,
+            delimiter=delimiter,
+            crs=crs,
+            skip_invalid=skip_invalid,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+
+
+def _convert_streaming(
+    input_file,
+    skip_hilbert,
+    wkt_column,
+    lat_column,
+    lon_column,
+    delimiter,
+    crs,
+    skip_invalid,
+    profile,
+    geoparquet_version,
+):
+    """Handle streaming output for convert command."""
+    import tempfile
+    import uuid
+
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.streaming import write_arrow_stream
+
+    # Convert to temp file first, then stream
+    temp_path = Path(tempfile.gettempdir()) / f"gpio_convert_{uuid.uuid4()}.parquet"
+
+    try:
+        convert_to_geoparquet(
+            input_file,
+            str(temp_path),
+            skip_hilbert=skip_hilbert,
+            verbose=False,
+            compression="ZSTD",
+            compression_level=15,
+            row_group_rows=100000,
+            wkt_column=wkt_column,
+            lat_column=lat_column,
+            lon_column=lon_column,
+            delimiter=delimiter,
+            crs=crs,
+            skip_invalid=skip_invalid,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+        )
+
+        # Read and stream to stdout
+        table = pq.read_table(temp_path)
+        write_arrow_stream(table)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def _reproject_impl_cli(
@@ -1532,6 +1621,14 @@ def extract(
         # Extract first 1000 rows
         gpio extract data.parquet output.parquet --limit 1000
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_file)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive row group options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -1718,6 +1815,14 @@ def hilbert_order(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_parquet)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2107,6 +2212,14 @@ def add_bbox(
         # Force replace existing bbox
         gpio add bbox input.parquet output.parquet --force
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_parquet)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2206,6 +2319,14 @@ def add_h3(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_parquet)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2220,8 +2341,6 @@ def add_h3(
             row_group_mb = size_bytes / (1024 * 1024)
         except ValueError as e:
             raise click.UsageError(f"Invalid row group size: {e}") from e
-
-    from geoparquet_io.core.streaming import StreamingError
 
     try:
         add_h3_column_impl(
@@ -2436,6 +2555,14 @@ def add_quadkey(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate output early - provides helpful error if no output and not piping
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_parquet)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2450,8 +2577,6 @@ def add_quadkey(
             row_group_mb = size_bytes / (1024 * 1024)
         except ValueError as e:
             raise click.UsageError(f"Invalid row group size: {e}") from e
-
-    from geoparquet_io.core.streaming import StreamingError
 
     try:
         add_quadkey_column_impl(
@@ -3598,7 +3723,7 @@ def benchmark(
 
 
 @cli.command(hidden=True)  # Deprecated: use 'gpio publish upload' instead
-@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("source", type=str)  # String type to support stdin ("-")
 @click.argument("destination", type=str)
 @profile_option
 @click.option("--pattern", help="Glob pattern for filtering files (e.g., '*.parquet', '**/*.json')")
@@ -3613,6 +3738,19 @@ def benchmark(
 )
 @click.option("--chunk-size", type=int, help="Chunk size in bytes for multipart uploads")
 @click.option("--fail-fast", is_flag=True, help="Stop immediately on first error")
+@click.option(
+    "--s3-endpoint",
+    help="Custom S3-compatible endpoint (e.g., 'minio.example.com:9000')",
+)
+@click.option(
+    "--s3-region",
+    help="S3 region (default: us-east-1 when using custom endpoint)",
+)
+@click.option(
+    "--s3-no-ssl",
+    is_flag=True,
+    help="Disable SSL for S3 endpoint (use HTTP instead of HTTPS)",
+)
 @dry_run_option
 def upload(
     source,
@@ -3623,6 +3761,9 @@ def upload(
     chunk_concurrency,
     chunk_size,
     fail_fast,
+    s3_endpoint,
+    s3_region,
+    s3_no_ssl,
     dry_run,
 ):
     """
@@ -3631,23 +3772,48 @@ def upload(
     This command is deprecated. Use 'gpio publish upload' instead.
     """
     from geoparquet_io.core.logging_config import warn
+    from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
 
     warn(
         "'gpio upload' is deprecated and will be removed in a future release. "
         "Use 'gpio publish upload' instead."
     )
     try:
-        upload_impl(
-            source=source,
-            destination=destination,
-            profile=profile,
-            pattern=pattern,
-            max_files=max_files,
-            chunk_concurrency=chunk_concurrency,
-            chunk_size=chunk_size,
-            fail_fast=fail_fast,
-            dry_run=dry_run,
-        )
+        # Handle stdin input
+        if is_stdin(source):
+            temp_path = read_stdin_to_temp_file()
+            try:
+                upload_impl(
+                    source=Path(temp_path),
+                    destination=destination,
+                    profile=profile,
+                    chunk_concurrency=chunk_concurrency,
+                    chunk_size=chunk_size,
+                    dry_run=dry_run,
+                    s3_endpoint=s3_endpoint,
+                    s3_region=s3_region,
+                    s3_use_ssl=not s3_no_ssl,
+                )
+            finally:
+                Path(temp_path).unlink(missing_ok=True)
+        else:
+            source_path = Path(source)
+            if not source_path.exists():
+                raise click.ClickException(f"Source path does not exist: {source}")
+            upload_impl(
+                source=source_path,
+                destination=destination,
+                profile=profile,
+                pattern=pattern,
+                max_files=max_files,
+                chunk_concurrency=chunk_concurrency,
+                chunk_size=chunk_size,
+                fail_fast=fail_fast,
+                dry_run=dry_run,
+                s3_endpoint=s3_endpoint,
+                s3_region=s3_region,
+                s3_use_ssl=not s3_no_ssl,
+            )
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
