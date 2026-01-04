@@ -1260,25 +1260,39 @@ def convert_geojson(
 
       # Pretty-print with description
       gpio convert geojson data.parquet output.geojson --pretty --description "My dataset"
+
+    \b
+    Note: GeoParquet input is automatically reprojected to WGS84 (EPSG:4326)
+    for RFC 7946 compliance. Use --keep-crs to preserve the original CRS.
     """
+    from geoparquet_io.core.common import validate_profile_for_urls
     from geoparquet_io.core.geojson_stream import convert_to_geojson
 
     configure_verbose(verbose)
 
-    convert_to_geojson(
-        input_path=input_file,
-        output_path=output_file,
-        rs=not no_rs,
-        precision=precision,
-        write_bbox=write_bbox,
-        id_field=id_field,
-        description=description,
-        seq=not no_seq,
-        pretty=pretty,
-        verbose=verbose,
-        profile=profile,
-        keep_crs=keep_crs,
-    )
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, input_file, output_file)
+
+    try:
+        feature_count = convert_to_geojson(
+            input_path=input_file,
+            output_path=output_file,
+            rs=not no_rs,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+            description=description,
+            seq=not no_seq,
+            pretty=pretty,
+            verbose=verbose,
+            profile=profile,
+            keep_crs=keep_crs,
+        )
+
+        if output_file:
+            click.echo(f"Converted {feature_count:,} features to {output_file}")
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 # Deprecated reproject command
