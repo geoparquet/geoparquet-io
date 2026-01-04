@@ -52,6 +52,7 @@ from geoparquet_io.core.partition_by_string import (
 from geoparquet_io.core.reproject import reproject_impl
 from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_impl
+from geoparquet_io.core.upload import check_credentials
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
@@ -3489,8 +3490,6 @@ def publish_upload(
       # Stop on first error instead of continuing
       gpio publish upload output/ s3://bucket/dataset/ --fail-fast
     """
-    from geoparquet_io.core.upload import check_credentials
-
     # Check credentials before attempting upload
     creds_ok, hint = check_credentials(destination, profile)
     if not creds_ok:
@@ -3859,7 +3858,6 @@ def upload(
     """
     from geoparquet_io.core.logging_config import warn
     from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
-    from geoparquet_io.core.upload import check_credentials
 
     warn(
         "'gpio upload' is deprecated and will be removed in a future release. "
