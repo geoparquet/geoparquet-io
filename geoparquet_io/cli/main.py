@@ -3473,6 +3473,13 @@ def publish_upload(
       # Stop on first error instead of continuing
       gpio publish upload output/ s3://bucket/dataset/ --fail-fast
     """
+    from geoparquet_io.core.upload import check_credentials
+
+    # Check credentials before attempting upload
+    creds_ok, hint = check_credentials(destination, profile)
+    if not creds_ok:
+        raise click.ClickException(f"Authentication failed:\n\n{hint}")
+
     try:
         upload_impl(
             source=source,
@@ -3833,11 +3840,18 @@ def upload(
     """
     from geoparquet_io.core.logging_config import warn
     from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
+    from geoparquet_io.core.upload import check_credentials
 
     warn(
         "'gpio upload' is deprecated and will be removed in a future release. "
         "Use 'gpio publish upload' instead."
     )
+
+    # Check credentials before attempting upload
+    creds_ok, hint = check_credentials(destination, profile)
+    if not creds_ok:
+        raise click.ClickException(f"Authentication failed:\n\n{hint}")
+
     try:
         # Handle stdin input
         if is_stdin(source):
