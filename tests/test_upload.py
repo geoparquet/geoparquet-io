@@ -75,6 +75,7 @@ class TestUploadDryRun:
             result = runner.invoke(
                 cli,
                 [
+                    "publish",
                     "upload",
                     places_test_file,
                     "s3://test-bucket/path/output.parquet",
@@ -103,6 +104,7 @@ class TestUploadDryRun:
             result = runner.invoke(
                 cli,
                 [
+                    "publish",
                     "upload",
                     places_test_file,
                     "s3://test-bucket/data.parquet",
@@ -133,6 +135,7 @@ class TestUploadDryRun:
             result = runner.invoke(
                 cli,
                 [
+                    "publish",
                     "upload",
                     str(test_dir),
                     "s3://test-bucket/dataset/",
@@ -168,6 +171,7 @@ class TestUploadDryRun:
             result = runner.invoke(
                 cli,
                 [
+                    "publish",
                     "upload",
                     str(test_dir),
                     "s3://test-bucket/dataset/",
@@ -204,6 +208,7 @@ class TestUploadDryRun:
             result = runner.invoke(
                 cli,
                 [
+                    "publish",
                     "upload",
                     str(test_dir),
                     "s3://test-bucket/dataset/",
@@ -229,6 +234,7 @@ class TestUploadDryRun:
             result = runner.invoke(
                 cli,
                 [
+                    "publish",
                     "upload",
                     str(test_dir),
                     "s3://test-bucket/dataset/",
@@ -256,6 +262,7 @@ class TestUploadDryRun:
             result = runner.invoke(
                 cli,
                 [
+                    "publish",
                     "upload",
                     str(test_dir),
                     "s3://test-bucket/dataset/",
@@ -414,6 +421,7 @@ class TestUploadCLIS3Options:
             result = runner.invoke(
                 cli,
                 [
+                    "publish",
                     "upload",
                     places_test_file,
                     "s3://test-bucket/data.parquet",
@@ -437,6 +445,7 @@ class TestUploadCLIS3Options:
             result = runner.invoke(
                 cli,
                 [
+                    "publish",
                     "upload",
                     places_test_file,
                     "s3://test-bucket/data.parquet",

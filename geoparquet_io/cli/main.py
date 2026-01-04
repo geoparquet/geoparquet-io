@@ -3439,6 +3439,19 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
 )
 @click.option("--chunk-size", type=int, help="Chunk size in bytes for multipart uploads")
 @click.option("--fail-fast", is_flag=True, help="Stop immediately on first error")
+@click.option(
+    "--s3-endpoint",
+    help="Custom S3-compatible endpoint (e.g., 'minio.example.com:9000')",
+)
+@click.option(
+    "--s3-region",
+    help="S3 region (default: us-east-1 when using custom endpoint)",
+)
+@click.option(
+    "--s3-no-ssl",
+    is_flag=True,
+    help="Disable SSL for S3 endpoint (use HTTP instead of HTTPS)",
+)
 @dry_run_option
 def publish_upload(
     source,
@@ -3449,6 +3462,9 @@ def publish_upload(
     chunk_concurrency,
     chunk_size,
     fail_fast,
+    s3_endpoint,
+    s3_region,
+    s3_no_ssl,
     dry_run,
 ):
     """Upload file or directory to object storage.
@@ -3491,6 +3507,9 @@ def publish_upload(
             chunk_size=chunk_size,
             fail_fast=fail_fast,
             dry_run=dry_run,
+            s3_endpoint=s3_endpoint,
+            s3_region=s3_region,
+            s3_use_ssl=not s3_no_ssl,
         )
     except click.exceptions.Exit:
         raise
