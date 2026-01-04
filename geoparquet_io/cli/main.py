@@ -1181,8 +1181,7 @@ def convert_reproject(
     type=int,
     default=None,
     help="Coordinate decimal precision (default: 7 per RFC 7946). "
-    "In streaming mode, applies to bbox only; geometry coordinates use full precision. "
-    "In file mode, applies to all coordinates via GDAL.",
+    "Applies to bbox coordinates; geometry uses full precision for accuracy.",
 )
 @click.option(
     "--write-bbox",
@@ -1213,21 +1212,6 @@ def convert_reproject(
     help="Pretty-print the JSON output with indentation",
 )
 @click.option(
-    "--significant-figures",
-    type=int,
-    default=None,
-    help="Max significant figures for floating-point numbers (default: 17). "
-    "Also applies to coordinates if --precision not set.",
-)
-@click.option(
-    "--lco",
-    "lco_options",
-    multiple=True,
-    metavar="KEY=VALUE",
-    help="GDAL layer creation option (may be repeated). "
-    "See https://gdal.org/drivers/vector/geojson.html",
-)
-@click.option(
     "--keep-crs",
     is_flag=True,
     help="Keep original CRS instead of reprojecting to WGS84 (EPSG:4326)",
@@ -1244,8 +1228,6 @@ def convert_geojson(
     description,
     no_seq,
     pretty,
-    significant_figures,
-    lco_options,
     keep_crs,
     verbose,
     profile,
@@ -1260,11 +1242,11 @@ def convert_geojson(
       Streams newline-delimited GeoJSON (GeoJSONSeq) to stdout with RFC 8142
       record separators. Designed for piping to tippecanoe for PMTiles/MBTiles.
       Use --feature-collection to output a FeatureCollection instead.
+      Supports reading from stdin with "-" for pipeline use.
 
     \b
     FILE MODE (with output file):
       Writes a standard GeoJSON FeatureCollection to the specified file.
-      Complex column types (STRUCT, LIST, MAP) are automatically skipped.
 
     \b
     Examples:
@@ -1279,30 +1261,10 @@ def convert_geojson(
 
       # Pretty-print with description
       gpio convert geojson data.parquet output.geojson --pretty --description "My dataset"
-
-      # Use advanced GDAL options
-      gpio convert geojson data.parquet out.geojson --lco WRITE_NAME=NO --lco RFC7946=YES
     """
-    from geoparquet_io.core.geojson_stream import convert_to_geojson, validate_lco_conflicts
+    from geoparquet_io.core.geojson_stream import convert_to_geojson
 
     configure_verbose(verbose)
-
-    # Convert tuple to list for lco_options
-    lco_list = list(lco_options) if lco_options else None
-
-    # Validate no conflicts between flags and --lco
-    try:
-        validate_lco_conflicts(
-            lco_options=lco_list or [],
-            precision=precision,
-            write_bbox=write_bbox,
-            id_field=id_field,
-            description=description,
-            pretty=pretty,
-            significant_figures=significant_figures,
-        )
-    except ValueError as e:
-        raise click.ClickException(str(e)) from None
 
     # Use default precision if not specified
     if precision is None:
@@ -1318,8 +1280,6 @@ def convert_geojson(
         description=description,
         seq=not no_seq,
         pretty=pretty,
-        significant_figures=significant_figures,
-        lco_options=lco_list,
         verbose=verbose,
         profile=profile,
         keep_crs=keep_crs,

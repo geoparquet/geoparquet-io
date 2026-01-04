@@ -1,10 +1,11 @@
 """
 GeoJSON conversion for GeoParquet files.
 
-Supports two output modes:
+Outputs GeoJSON using DuckDB's ST_AsGeoJSON function. Supports:
 1. Streaming to stdout: Newline-delimited GeoJSON (GeoJSONSeq) with RFC 8142
    record separators for piping to tippecanoe.
-2. File output: Standard GeoJSON FeatureCollection using DuckDB's GDAL integration.
+2. File output: Standard GeoJSON FeatureCollection written to a file.
+3. Stdin input: Read Arrow IPC streams from stdin for pipeline use.
 
 Examples:
     # Stream to tippecanoe for PMTiles
@@ -267,15 +268,17 @@ def _stream_feature_collection(
     query: str,
     description: str | None = None,
     pretty: bool = False,
+    output_path: str | None = None,
 ) -> int:
     """
-    Stream GeoJSON as a complete FeatureCollection to stdout.
+    Output GeoJSON as a complete FeatureCollection to stdout or file.
 
     Args:
         con: DuckDB connection
         query: SQL query that returns feature JSON strings
         description: Optional description for the FeatureCollection
         pretty: Whether to pretty-print the output
+        output_path: If provided, write to this file; otherwise write to stdout
 
     Returns:
         Number of features written
@@ -283,7 +286,6 @@ def _stream_feature_collection(
     import json
 
     result = con.execute(query)
-    output = sys.stdout
     features = []
     count = 0
 
@@ -305,14 +307,23 @@ def _stream_feature_collection(
 
     fc["features"] = features
 
-    # Output
-    if pretty:
-        output.write(json.dumps(fc, indent=2))
+    # Output to file or stdout
+    if output_path:
+        with open(output_path, "w", encoding="utf-8") as f:
+            if pretty:
+                json.dump(fc, f, indent=2)
+            else:
+                json.dump(fc, f)
+            f.write("\n")
     else:
-        output.write(json.dumps(fc))
+        output = sys.stdout
+        if pretty:
+            output.write(json.dumps(fc, indent=2))
+        else:
+            output.write(json.dumps(fc))
+        output.write("\n")
+        output.flush()
 
-    output.write("\n")
-    output.flush()
     return count
 
 
@@ -361,133 +372,9 @@ def _find_geometry_column(
     )
 
 
-def _build_layer_creation_options(
-    precision: int = 7,
-    write_bbox: bool = False,
-    id_field: str | None = None,
-    description: str | None = None,
-    pretty: bool = False,
-    significant_figures: int | None = None,
-    extra_options: list[str] | None = None,
-) -> str:
-    """
-    Build GDAL layer creation options string for GeoJSON output.
-
-    Args:
-        precision: Coordinate decimal precision
-        write_bbox: Whether to write bbox for features
-        id_field: Field to use as feature id
-        description: Description for the FeatureCollection
-        pretty: Whether to indent/pretty-print the output
-        significant_figures: Max significant figures for floating-point numbers
-        extra_options: Additional GDAL layer creation options
-
-    Returns:
-        Layer creation options string for GDAL
-    """
-    options = [
-        "RFC7946=YES",  # Use RFC 7946 standard
-        f"COORDINATE_PRECISION={precision}",
-    ]
-
-    if write_bbox:
-        options.append("WRITE_BBOX=YES")
-
-    if id_field:
-        options.append(f"ID_FIELD={id_field}")
-
-    if description:
-        # Escape any commas in the description
-        escaped_desc = description.replace(",", "\\,")
-        options.append(f"DESCRIPTION={escaped_desc}")
-
-    if pretty:
-        options.append("INDENT=YES")
-
-    if significant_figures is not None:
-        options.append(f"SIGNIFICANT_FIGURES={significant_figures}")
-
-    # Add extra options
-    if extra_options:
-        options.extend(extra_options)
-
-    return ",".join(options)
-
-
-# Mapping of CLI flags to GDAL layer creation option names
-FLAG_TO_LCO_MAP = {
-    "precision": "COORDINATE_PRECISION",
-    "write_bbox": "WRITE_BBOX",
-    "id_field": "ID_FIELD",
-    "description": "DESCRIPTION",
-    "pretty": "INDENT",
-    "significant_figures": "SIGNIFICANT_FIGURES",
-}
-
-
-def validate_lco_conflicts(
-    lco_options: list[str],
-    precision: int | None = None,
-    write_bbox: bool = False,
-    id_field: str | None = None,
-    description: str | None = None,
-    pretty: bool = False,
-    significant_figures: int | None = None,
-) -> None:
-    """
-    Validate that --lco options don't conflict with explicit flags.
-
-    Args:
-        lco_options: List of KEY=VALUE layer creation options
-        precision: Value of --precision flag (None if not set)
-        write_bbox: Value of --write-bbox flag
-        id_field: Value of --id-field flag
-        description: Value of --description flag
-        pretty: Value of --pretty flag
-        significant_figures: Value of --significant-figures flag (None if not set)
-
-    Raises:
-        ValueError: If a conflict is detected
-    """
-    if not lco_options:
-        return
-
-    # Parse LCO keys
-    lco_keys = set()
-    for opt in lco_options:
-        if "=" in opt:
-            key = opt.split("=", 1)[0].upper()
-            lco_keys.add(key)
-
-    # Check for conflicts
-    conflicts = []
-
-    if "COORDINATE_PRECISION" in lco_keys and precision is not None:
-        conflicts.append("--precision and --lco COORDINATE_PRECISION")
-
-    if "WRITE_BBOX" in lco_keys and write_bbox:
-        conflicts.append("--write-bbox and --lco WRITE_BBOX")
-
-    if "ID_FIELD" in lco_keys and id_field is not None:
-        conflicts.append("--id-field and --lco ID_FIELD")
-
-    if "DESCRIPTION" in lco_keys and description is not None:
-        conflicts.append("--description and --lco DESCRIPTION")
-
-    if "INDENT" in lco_keys and pretty:
-        conflicts.append("--pretty and --lco INDENT")
-
-    if "SIGNIFICANT_FIGURES" in lco_keys and significant_figures is not None:
-        conflicts.append("--significant-figures and --lco SIGNIFICANT_FIGURES")
-
-    if conflicts:
-        raise ValueError(
-            f"Conflicting options: {', '.join(conflicts)}. Use either the flag or --lco, not both."
-        )
-
-
 def convert_to_geojson_stream(
     input_path: str,
+    output_path: str | None = None,
     rs: bool = True,
     precision: int = 7,
     write_bbox: bool = False,
@@ -500,22 +387,25 @@ def convert_to_geojson_stream(
     keep_crs: bool = False,
 ) -> int:
     """
-    Stream GeoParquet as GeoJSON to stdout.
+    Convert GeoParquet to GeoJSON.
 
-    By default, outputs RFC 8142 GeoJSONSeq format (newline-delimited features),
-    suitable for piping to tippecanoe with the -P (parallel) flag.
+    By default (no output_path), outputs RFC 8142 GeoJSONSeq format (newline-delimited
+    features) to stdout, suitable for piping to tippecanoe with the -P (parallel) flag.
+
+    When output_path is provided, writes a FeatureCollection to the file.
 
     Automatically reprojects to WGS84 (EPSG:4326) for RFC 7946 compliance unless
     keep_crs is True.
 
     Args:
         input_path: Path to input file, or "-" to read Arrow IPC from stdin
-        rs: Include RFC 8142 record separators (default True for tippecanoe)
+        output_path: Output file path (writes FeatureCollection), or None to stream
+        rs: Include RFC 8142 record separators (streaming only, default True)
         precision: Coordinate decimal precision (default 7 per RFC 7946)
         write_bbox: Include bbox property for each feature
         id_field: Field to use as feature 'id' member
-        description: Description for FeatureCollection (non-seq mode only)
-        seq: If True, output GeoJSONSeq; if False, output FeatureCollection
+        description: Description for FeatureCollection
+        seq: If True and no output_path, output GeoJSONSeq; if False, FeatureCollection
         pretty: Pretty-print the JSON output
         verbose: Enable verbose output (to stderr)
         profile: AWS profile name for S3 files
@@ -530,7 +420,7 @@ def convert_to_geojson_stream(
         safe_file_url,
         setup_aws_profile_if_needed,
     )
-    from geoparquet_io.core.logging_config import configure_verbose, debug, info
+    from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
     from geoparquet_io.core.streaming import is_stdin
 
     configure_verbose(verbose)
@@ -538,6 +428,7 @@ def convert_to_geojson_stream(
     # Handle stdin input
     if is_stdin(input_path):
         return _convert_from_stream(
+            output_path=output_path,
             rs=rs,
             precision=precision,
             write_bbox=write_bbox,
@@ -588,6 +479,15 @@ def convert_to_geojson_stream(
         )
         debug(f"Query: {query}")
 
+        # File output: always write FeatureCollection
+        if output_path:
+            count = _stream_feature_collection(
+                con, query, description, pretty, output_path=output_path
+            )
+            success(f"Wrote {count:,} features to {output_path}")
+            return count
+
+        # Streaming output: GeoJSONSeq or FeatureCollection to stdout
         if seq:
             return _stream_to_stdout(con, query, rs, pretty)
         else:
@@ -598,6 +498,7 @@ def convert_to_geojson_stream(
 
 
 def _convert_from_stream(
+    output_path: str | None = None,
     rs: bool = True,
     precision: int = 7,
     write_bbox: bool = False,
@@ -609,15 +510,16 @@ def _convert_from_stream(
     keep_crs: bool = False,
 ) -> int:
     """
-    Convert Arrow IPC stream from stdin to GeoJSON stream.
+    Convert Arrow IPC stream from stdin to GeoJSON.
 
     Args:
-        rs: Whether to include RFC 8142 record separators
+        output_path: Output file path, or None to stream to stdout
+        rs: Whether to include RFC 8142 record separators (streaming only)
         precision: Coordinate decimal precision
         write_bbox: Include bbox property for each feature
         id_field: Field to use as feature 'id' member
-        description: Description for FeatureCollection (non-seq mode only)
-        seq: If True, output GeoJSONSeq; if False, output FeatureCollection
+        description: Description for FeatureCollection
+        seq: If True and no output_path, output GeoJSONSeq; if False, FeatureCollection
         pretty: Pretty-print the JSON output
         verbose: Enable verbose output
         keep_crs: If True, keep original CRS instead of reprojecting to WGS84
@@ -630,7 +532,7 @@ def _convert_from_stream(
         ensure source data is already in WGS84 or use gpio convert reproject first.
     """
     from geoparquet_io.core.common import get_duckdb_connection
-    from geoparquet_io.core.logging_config import debug, info
+    from geoparquet_io.core.logging_config import debug, info, success
     from geoparquet_io.core.stream_io import _create_view_with_geometry
     from geoparquet_io.core.streaming import (
         find_geometry_column_from_table,
@@ -685,255 +587,19 @@ def _convert_from_stream(
         )
         debug(f"Query: {query}")
 
+        # File output: always write FeatureCollection
+        if output_path:
+            count = _stream_feature_collection(
+                con, query, description, pretty, output_path=output_path
+            )
+            success(f"Wrote {count:,} features to {output_path}")
+            return count
+
+        # Streaming output: GeoJSONSeq or FeatureCollection to stdout
         if seq:
             return _stream_to_stdout(con, query, rs, pretty)
         else:
             return _stream_feature_collection(con, query, description, pretty)
-
-    finally:
-        con.close()
-
-
-def _get_column_info(
-    con: duckdb.DuckDBPyConnection,
-    source_ref: str,
-    geometry_column: str,
-) -> tuple[list[str], list[str], bool]:
-    """
-    Get column information for GeoJSON export via GDAL.
-
-    Categorizes columns into:
-    - Simple columns (can be exported directly)
-    - Complex columns (STRUCT, LIST, MAP - need JSON conversion)
-    - bbox column (GeoParquet covering, controlled by --write-bbox flag)
-
-    Args:
-        con: DuckDB connection
-        source_ref: Table reference for SQL query
-        geometry_column: Name of geometry column
-
-    Returns:
-        Tuple of (simple column names, complex column names needing JSON, has_bbox)
-    """
-    # Get column types
-    type_query = f"DESCRIBE SELECT * FROM {source_ref}"
-    result = con.execute(type_query).fetchall()
-
-    simple_columns = []
-    complex_columns = []
-    has_bbox = False
-
-    for row in result:
-        col_name = row[0]
-        col_type = str(row[1]).upper()
-
-        # Skip bbox column - it's a standard GeoParquet covering column
-        # The --write-bbox flag controls whether bbox is included via GDAL option
-        if col_name.lower() == "bbox":
-            has_bbox = True
-            continue
-
-        # Complex types that GDAL/OGR doesn't support - convert to JSON
-        if any(complex_type in col_type for complex_type in ["STRUCT", "LIST", "MAP", "[]"]):
-            # But keep the geometry column as-is (it's handled by ST_AsGeoJSON)
-            if col_name.lower() == geometry_column.lower():
-                simple_columns.append(col_name)
-            else:
-                complex_columns.append(col_name)
-            continue
-
-        simple_columns.append(col_name)
-
-    return simple_columns, complex_columns, has_bbox
-
-
-def _build_columns_sql(
-    simple_columns: list[str],
-    complex_columns: list[str],
-) -> str:
-    """
-    Build SQL column list, converting complex columns to JSON.
-
-    Args:
-        simple_columns: Columns to select directly
-        complex_columns: Columns to wrap with to_json()
-
-    Returns:
-        SQL column expression string
-    """
-    parts = []
-
-    # Simple columns - select directly
-    for col in simple_columns:
-        parts.append(_quote_identifier(col))
-
-    # Complex columns - convert to JSON string
-    for col in complex_columns:
-        quoted = _quote_identifier(col)
-        parts.append(f"to_json({quoted}) AS {quoted}")
-
-    return ", ".join(parts)
-
-
-def _build_columns_sql_with_reprojection(
-    simple_columns: list[str],
-    complex_columns: list[str],
-    geometry_column: str,
-    source_crs: str | None = None,
-) -> str:
-    """
-    Build SQL column list with JSON conversion and optional geometry reprojection.
-
-    Args:
-        simple_columns: Columns to select directly
-        complex_columns: Columns to wrap with to_json()
-        geometry_column: Name of geometry column
-        source_crs: If provided, reproject geometry from this CRS to WGS84
-
-    Returns:
-        SQL column expression string
-    """
-    parts = []
-
-    # Simple columns - handle geometry specially if reprojection needed
-    for col in simple_columns:
-        if col.lower() == geometry_column.lower() and source_crs:
-            # Reproject geometry to WGS84
-            quoted = _quote_identifier(col)
-            parts.append(f"ST_Transform({quoted}, '{source_crs}', '{WGS84_CRS}') AS {quoted}")
-        else:
-            parts.append(_quote_identifier(col))
-
-    # Complex columns - convert to JSON string
-    for col in complex_columns:
-        quoted = _quote_identifier(col)
-        parts.append(f"to_json({quoted}) AS {quoted}")
-
-    return ", ".join(parts)
-
-
-def convert_to_geojson_file(
-    input_path: str,
-    output_path: str,
-    precision: int = 7,
-    write_bbox: bool = False,
-    id_field: str | None = None,
-    description: str | None = None,
-    pretty: bool = False,
-    significant_figures: int | None = None,
-    lco_options: list[str] | None = None,
-    verbose: bool = False,
-    profile: str | None = None,
-    keep_crs: bool = False,
-) -> int:
-    """
-    Write GeoParquet to GeoJSON file using GDAL.
-
-    Outputs a standard GeoJSON FeatureCollection. Automatically reprojects
-    to WGS84 (EPSG:4326) for RFC 7946 compliance unless keep_crs is True.
-
-    Args:
-        input_path: Path to input GeoParquet file
-        output_path: Path to output GeoJSON file
-        precision: Coordinate decimal precision (default 7 per RFC 7946)
-        write_bbox: Include bbox property for features
-        id_field: Field to use as feature 'id' member
-        description: Description for the FeatureCollection
-        pretty: Pretty-print the output
-        significant_figures: Max significant figures for floating-point numbers
-        lco_options: Additional GDAL layer creation options
-        verbose: Enable verbose output
-        profile: AWS profile name for S3 files
-        keep_crs: If True, keep original CRS instead of reprojecting to WGS84
-
-    Returns:
-        Number of features written
-    """
-    from geoparquet_io.core.common import (
-        get_duckdb_connection,
-        needs_httpfs,
-        safe_file_url,
-        setup_aws_profile_if_needed,
-    )
-    from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
-
-    configure_verbose(verbose)
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_path)
-
-    # Get safe URL for input
-    input_url = safe_file_url(input_path, verbose)
-
-    # Check if reprojection is needed
-    source_crs = _get_source_crs(input_path)
-    needs_reproject = not keep_crs and _needs_reprojection(source_crs)
-    if needs_reproject:
-        info(f"Reprojecting from {source_crs} to WGS84 (RFC 7946)")
-        debug(f"Source CRS: {source_crs}, reprojecting to {WGS84_CRS}")
-
-    # Build layer creation options
-    layer_options = _build_layer_creation_options(
-        precision=precision,
-        write_bbox=write_bbox,
-        id_field=id_field,
-        description=description,
-        pretty=pretty,
-        significant_figures=significant_figures,
-        extra_options=lco_options,
-    )
-
-    # Create DuckDB connection with GDAL support
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_path))
-
-    try:
-        source_ref = f"read_parquet('{input_url}')"
-
-        # Find geometry column
-        geometry_column = _find_geometry_column(con, source_ref)
-        debug(f"Using geometry column: {geometry_column}")
-
-        # Get row count first
-        count_result = con.execute(f"SELECT COUNT(*) FROM {source_ref}").fetchone()
-        row_count = count_result[0] if count_result else 0
-
-        # Get column info (simple, complex needing JSON conversion, has_bbox)
-        simple_columns, complex_columns, _has_bbox = _get_column_info(
-            con, source_ref, geometry_column
-        )
-
-        if complex_columns:
-            debug(
-                f"Converting {len(complex_columns)} complex column(s) to JSON: "
-                f"{', '.join(complex_columns)}"
-            )
-
-        # Build column SQL with JSON conversion for complex types
-        # Handle geometry reprojection if needed
-        columns_sql = _build_columns_sql_with_reprojection(
-            simple_columns,
-            complex_columns,
-            geometry_column,
-            source_crs if needs_reproject else None,
-        )
-
-        # Use COPY TO with GDAL driver
-        copy_query = f"""
-            COPY (
-                SELECT {columns_sql} FROM {source_ref}
-            ) TO '{output_path}'
-            WITH (
-                FORMAT GDAL,
-                DRIVER 'GeoJSON',
-                LAYER_CREATION_OPTIONS '{layer_options}'
-            )
-        """
-        debug(f"COPY query: {copy_query}")
-
-        con.execute(copy_query)
-
-        success(f"Wrote {row_count:,} features to {output_path}")
-        return row_count
 
     finally:
         con.close()
@@ -949,8 +615,6 @@ def convert_to_geojson(
     description: str | None = None,
     seq: bool = True,
     pretty: bool = False,
-    significant_figures: int | None = None,
-    lco_options: list[str] | None = None,
     verbose: bool = False,
     profile: str | None = None,
     keep_crs: bool = False,
@@ -958,7 +622,9 @@ def convert_to_geojson(
     """
     Convert GeoParquet to GeoJSON.
 
-    Routes to streaming mode (stdout) or file mode based on output_path.
+    When output_path is provided, writes a FeatureCollection to the file.
+    Otherwise, streams to stdout (GeoJSONSeq by default, or FeatureCollection with seq=False).
+
     Automatically reprojects to WGS84 (EPSG:4326) for RFC 7946 compliance
     unless keep_crs is True.
 
@@ -970,10 +636,8 @@ def convert_to_geojson(
         write_bbox: Include bbox property for features
         id_field: Field to use as feature 'id' member
         description: Description for FeatureCollection
-        seq: If True, output GeoJSONSeq (streaming); if False, FeatureCollection
+        seq: If True and streaming, output GeoJSONSeq; if False, FeatureCollection
         pretty: Pretty-print the output
-        significant_figures: Max significant figures for floating-point numbers (file only)
-        lco_options: Additional GDAL layer creation options (file mode only)
         verbose: Enable verbose output
         profile: AWS profile name for S3 files
         keep_crs: If True, keep original CRS instead of reprojecting to WGS84
@@ -981,32 +645,17 @@ def convert_to_geojson(
     Returns:
         Number of features written
     """
-    if output_path:
-        return convert_to_geojson_file(
-            input_path=input_path,
-            output_path=output_path,
-            precision=precision,
-            write_bbox=write_bbox,
-            id_field=id_field,
-            description=description,
-            pretty=pretty,
-            significant_figures=significant_figures,
-            lco_options=lco_options,
-            verbose=verbose,
-            profile=profile,
-            keep_crs=keep_crs,
-        )
-    else:
-        return convert_to_geojson_stream(
-            input_path=input_path,
-            rs=rs,
-            precision=precision,
-            write_bbox=write_bbox,
-            id_field=id_field,
-            description=description,
-            seq=seq,
-            pretty=pretty,
-            verbose=verbose,
-            profile=profile,
-            keep_crs=keep_crs,
-        )
+    return convert_to_geojson_stream(
+        input_path=input_path,
+        output_path=output_path,
+        rs=rs,
+        precision=precision,
+        write_bbox=write_bbox,
+        id_field=id_field,
+        description=description,
+        seq=seq,
+        pretty=pretty,
+        verbose=verbose,
+        profile=profile,
+        keep_crs=keep_crs,
+    )

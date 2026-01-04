@@ -21,16 +21,12 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.geojson_stream import (
     WGS84_CRS,
-    _build_columns_sql,
     _build_feature_query,
-    _build_layer_creation_options,
     _get_property_columns,
     _needs_reprojection,
     _quote_identifier,
     convert_to_geojson,
-    convert_to_geojson_file,
     convert_to_geojson_stream,
-    validate_lco_conflicts,
 )
 
 # Test data
@@ -92,132 +88,6 @@ class TestBuildFeatureQuery:
         query = _build_feature_query("test_table", "geometry", ["name"], id_field="osm_id")
         assert '"osm_id"' in query
         assert '"id":' in query
-
-
-class TestBuildLayerCreationOptions:
-    """Tests for GDAL layer creation options."""
-
-    def test_default_options(self):
-        """Test default layer creation options."""
-        options = _build_layer_creation_options()
-        assert "RFC7946=YES" in options
-        assert "COORDINATE_PRECISION=7" in options
-
-    def test_custom_precision(self):
-        """Test custom coordinate precision."""
-        options = _build_layer_creation_options(precision=5)
-        assert "COORDINATE_PRECISION=5" in options
-
-    def test_write_bbox(self):
-        """Test write bbox option."""
-        options = _build_layer_creation_options(write_bbox=True)
-        assert "WRITE_BBOX=YES" in options
-
-    def test_id_field(self):
-        """Test id field option."""
-        options = _build_layer_creation_options(id_field="my_id")
-        assert "ID_FIELD=my_id" in options
-
-    def test_description(self):
-        """Test description option."""
-        options = _build_layer_creation_options(description="My dataset")
-        assert "DESCRIPTION=My dataset" in options
-
-    def test_pretty(self):
-        """Test pretty option."""
-        options = _build_layer_creation_options(pretty=True)
-        assert "INDENT=YES" in options
-
-    def test_extra_options(self):
-        """Test extra layer creation options."""
-        options = _build_layer_creation_options(extra_options=["WRITE_NAME=NO"])
-        assert "WRITE_NAME=NO" in options
-
-
-class TestBuildColumnsSql:
-    """Tests for SQL column building with JSON conversion."""
-
-    def test_simple_columns_only(self):
-        """Test SQL generation with only simple columns."""
-        result = _build_columns_sql(["id", "name"], [])
-        assert '"id"' in result
-        assert '"name"' in result
-        assert "to_json" not in result
-
-    def test_complex_columns_converted_to_json(self):
-        """Test complex columns are wrapped with to_json()."""
-        result = _build_columns_sql(["id"], ["sources", "metadata"])
-        assert '"id"' in result
-        assert 'to_json("sources") AS "sources"' in result
-        assert 'to_json("metadata") AS "metadata"' in result
-
-    def test_mixed_columns(self):
-        """Test mix of simple and complex columns."""
-        result = _build_columns_sql(["id", "name", "geometry"], ["sources"])
-        assert '"id"' in result
-        assert '"name"' in result
-        assert '"geometry"' in result
-        assert 'to_json("sources") AS "sources"' in result
-
-    def test_empty_columns(self):
-        """Test with no columns."""
-        result = _build_columns_sql([], [])
-        assert result == ""
-
-
-class TestValidateLcoConflicts:
-    """Tests for LCO conflict validation."""
-
-    def test_no_conflicts(self):
-        """Test no conflicts when options don't overlap."""
-        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
-
-        # Should not raise
-        validate_lco_conflicts(
-            lco_options=["WRITE_NAME=NO"],
-            precision=7,
-            write_bbox=True,
-        )
-
-    def test_precision_conflict(self):
-        """Test conflict between --precision and --lco COORDINATE_PRECISION."""
-        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
-
-        with pytest.raises(ValueError, match="--precision and --lco COORDINATE_PRECISION"):
-            validate_lco_conflicts(
-                lco_options=["COORDINATE_PRECISION=5"],
-                precision=7,
-            )
-
-    def test_write_bbox_conflict(self):
-        """Test conflict between --write-bbox and --lco WRITE_BBOX."""
-        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
-
-        with pytest.raises(ValueError, match="--write-bbox and --lco WRITE_BBOX"):
-            validate_lco_conflicts(
-                lco_options=["WRITE_BBOX=YES"],
-                write_bbox=True,
-            )
-
-    def test_description_conflict(self):
-        """Test conflict between --description and --lco DESCRIPTION."""
-        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
-
-        with pytest.raises(ValueError, match="--description and --lco DESCRIPTION"):
-            validate_lco_conflicts(
-                lco_options=["DESCRIPTION=test"],
-                description="other",
-            )
-
-    def test_pretty_conflict(self):
-        """Test conflict between --pretty and --lco INDENT."""
-        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
-
-        with pytest.raises(ValueError, match="--pretty and --lco INDENT"):
-            validate_lco_conflicts(
-                lco_options=["INDENT=YES"],
-                pretty=True,
-            )
 
 
 class TestGetPropertyColumns:
@@ -458,9 +328,7 @@ class TestConvertToGeoJSONFile:
 
     def test_writes_valid_geojson_file(self, output_file):
         """Test that file output produces valid GeoJSON FeatureCollection."""
-        from geoparquet_io.core.geojson_stream import convert_to_geojson_file
-
-        count = convert_to_geojson_file(str(PLACES_PARQUET), output_file)
+        count = convert_to_geojson(str(PLACES_PARQUET), output_path=output_file)
 
         assert count > 0
         assert Path(output_file).exists()
@@ -545,44 +413,6 @@ class TestBuildFeatureQueryWithReprojection:
         assert "ST_Envelope" in query or "ST_XMin" in query
 
 
-class TestValidateLcoConflictsExtended:
-    """Extended tests for LCO conflict validation with new options."""
-
-    def test_significant_figures_conflict(self):
-        """Error when --significant-figures conflicts with --lco SIGNIFICANT_FIGURES."""
-        with pytest.raises(ValueError, match="--significant-figures and --lco SIGNIFICANT_FIGURES"):
-            validate_lco_conflicts(
-                lco_options=["SIGNIFICANT_FIGURES=10"],
-                significant_figures=8,
-            )
-
-
-class TestBuildLayerCreationOptionsExtended:
-    """Extended tests for GDAL layer creation options with new options."""
-
-    def test_significant_figures(self):
-        """Test significant_figures is included in options."""
-        opts = _build_layer_creation_options(precision=7, significant_figures=10)
-        assert "SIGNIFICANT_FIGURES=10" in opts
-
-    def test_all_options_with_significant_figures(self):
-        """Test all options together including significant_figures."""
-        opts = _build_layer_creation_options(
-            precision=5,
-            write_bbox=True,
-            id_field="id",
-            description="Test data",
-            pretty=True,
-            significant_figures=8,
-        )
-        assert "COORDINATE_PRECISION=5" in opts
-        assert "WRITE_BBOX=YES" in opts
-        assert "ID_FIELD=id" in opts
-        assert "DESCRIPTION=Test data" in opts
-        assert "INDENT=YES" in opts
-        assert "SIGNIFICANT_FIGURES=8" in opts
-
-
 class TestKeepCrsFlag:
     """Tests for --keep-crs flag behavior."""
 
@@ -613,81 +443,13 @@ class TestKeepCrsFlag:
 
     def test_keep_crs_in_file_mode(self, output_file):
         """Test keep_crs parameter works in file mode."""
-        count = convert_to_geojson_file(
+        count = convert_to_geojson(
             str(PLACES_PARQUET),
-            output_file,
+            output_path=output_file,
             keep_crs=True,
         )
         assert count > 0
         assert Path(output_file).exists()
-
-
-class TestSignificantFiguresFlag:
-    """Tests for --significant-figures flag."""
-
-    @pytest.fixture
-    def output_file(self):
-        """Create a temporary output file."""
-        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
-        yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-    def test_significant_figures_flag_exists(self):
-        """Test that --significant-figures flag is recognized by CLI."""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["convert", "geojson", "--help"])
-        assert result.exit_code == 0
-        assert "--significant-figures" in result.output
-
-    def test_significant_figures_in_file_mode(self, output_file):
-        """Test significant_figures parameter works in file mode."""
-        count = convert_to_geojson_file(
-            str(PLACES_PARQUET),
-            output_file,
-            significant_figures=10,
-        )
-        assert count > 0
-        assert Path(output_file).exists()
-
-
-class TestBuildColumnsSqlComplex:
-    """Tests for SQL column building with JSON conversion for complex types."""
-
-    def test_simple_columns_only(self):
-        """Test building SQL with only simple columns."""
-        result = _build_columns_sql(["id", "name"], [])
-        assert '"id"' in result
-        assert '"name"' in result
-        assert "to_json" not in result
-
-    def test_complex_columns_converted_to_json(self):
-        """Test complex columns are wrapped with to_json()."""
-        result = _build_columns_sql(["id"], ["sources", "metadata"])
-        assert '"id"' in result
-        assert 'to_json("sources") AS "sources"' in result
-        assert 'to_json("metadata") AS "metadata"' in result
-
-    def test_mixed_simple_and_complex_columns(self):
-        """Test mixed simple and complex columns."""
-        result = _build_columns_sql(["id", "name"], ["sources"])
-        assert '"id"' in result
-        assert '"name"' in result
-        assert 'to_json("sources") AS "sources"' in result
-        # Verify simple columns don't have to_json
-        assert 'to_json("id")' not in result
-        assert 'to_json("name")' not in result
-
-    def test_empty_columns(self):
-        """Test with empty column lists."""
-        result = _build_columns_sql([], [])
-        assert result == ""
-
-    def test_only_complex_columns(self):
-        """Test with only complex columns."""
-        result = _build_columns_sql([], ["struct_col", "list_col"])
-        assert 'to_json("struct_col") AS "struct_col"' in result
-        assert 'to_json("list_col") AS "list_col"' in result
 
 
 class TestWgs84Constant:
