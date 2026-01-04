@@ -1179,9 +1179,8 @@ def convert_reproject(
 @click.option(
     "--precision",
     type=int,
-    default=None,
-    help="Coordinate decimal precision (default: 7 per RFC 7946). "
-    "Applies to bbox coordinates; geometry uses full precision for accuracy.",
+    default=7,
+    help="Coordinate decimal precision for geometry and bbox (default: 7 per RFC 7946).",
 )
 @click.option(
     "--write-bbox",
@@ -1265,10 +1264,6 @@ def convert_geojson(
     from geoparquet_io.core.geojson_stream import convert_to_geojson
 
     configure_verbose(verbose)
-
-    # Use default precision if not specified
-    if precision is None:
-        precision = 7
 
     convert_to_geojson(
         input_path=input_file,
