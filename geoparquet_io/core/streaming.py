@@ -240,6 +240,45 @@ def find_geometry_column_from_table(table: pa.Table) -> str | None:
     return None
 
 
+def get_crs_from_arrow_table(table: pa.Table, geometry_column: str) -> str | None:
+    """
+    Get CRS from Arrow table's GeoParquet metadata.
+
+    Args:
+        table: PyArrow Table to inspect
+        geometry_column: Name of the geometry column
+
+    Returns:
+        CRS string (e.g., "EPSG:4326") or None if not found
+    """
+    import json
+
+    metadata = dict(table.schema.metadata) if table.schema.metadata else {}
+
+    # Check for GeoParquet geo metadata
+    geo_bytes = metadata.get(b"geo")
+    if not geo_bytes:
+        return None
+
+    try:
+        geo_meta = json.loads(geo_bytes.decode("utf-8"))
+        columns = geo_meta.get("columns", {})
+        col_meta = columns.get(geometry_column, {})
+
+        crs = col_meta.get("crs")
+        if crs:
+            # Extract EPSG code from CRS object
+            if isinstance(crs, dict):
+                auth = crs.get("id", {})
+                if auth.get("authority") == "EPSG":
+                    return f"EPSG:{auth.get('code')}"
+            return str(crs) if not isinstance(crs, dict) else None
+
+        return None
+    except Exception:
+        return None
+
+
 def read_stdin_to_temp_file(verbose: bool = False) -> str:
     """
     Read Arrow IPC stream from stdin and write to a temporary parquet file.

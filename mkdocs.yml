@@ -64,6 +64,7 @@ nav:
     - Inspecting Files: guide/inspect.md
     - Viewing Metadata: guide/meta.md
     - Converting Formats: guide/convert.md
+    - GeoJSON & PMTiles: guide/geojson.md
     - Extracting Data: guide/extract.md
     - Checking Best Practices: guide/check.md
     - Sorting Data: guide/sort.md

@@ -886,6 +886,7 @@ def convert(ctx):
         gpio convert input.shp output.parquet                    # To GeoParquet (default)
         gpio convert geoparquet input.shp output.parquet         # Explicit subcommand
         gpio convert reproject input.parquet out.parquet -d EPSG:32610
+        gpio convert geojson data.parquet | tippecanoe -P -o tiles.pmtiles
     """
     ctx.ensure_object(dict)
     timestamps = ctx.obj.get("timestamps", False)
@@ -1165,6 +1166,133 @@ def convert_reproject(
         compression_level,
         geoparquet_version,
     )
+
+
+@convert.command(name="geojson", cls=SingleFileCommand)
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--no-rs",
+    is_flag=True,
+    help="Disable RFC 8142 record separators (enabled by default for tippecanoe -P)",
+)
+@click.option(
+    "--precision",
+    type=int,
+    default=7,
+    help="Coordinate decimal precision for geometry and bbox (default: 7 per RFC 7946).",
+)
+@click.option(
+    "--write-bbox",
+    is_flag=True,
+    help="Include bbox property for each feature",
+)
+@click.option(
+    "--id-field",
+    type=str,
+    default=None,
+    help="Source field to use as feature 'id' member",
+)
+@click.option(
+    "--description",
+    type=str,
+    default=None,
+    help="Description to add to the FeatureCollection",
+)
+@click.option(
+    "--feature-collection",
+    "no_seq",
+    is_flag=True,
+    help="Output a FeatureCollection instead of newline-delimited GeoJSONSeq (streaming only)",
+)
+@click.option(
+    "--pretty",
+    is_flag=True,
+    help="Pretty-print the JSON output with indentation",
+)
+@click.option(
+    "--keep-crs",
+    is_flag=True,
+    help="Keep original CRS instead of reprojecting to WGS84 (EPSG:4326)",
+)
+@verbose_option
+@profile_option
+def convert_geojson(
+    input_file,
+    output_file,
+    no_rs,
+    precision,
+    write_bbox,
+    id_field,
+    description,
+    no_seq,
+    pretty,
+    keep_crs,
+    verbose,
+    profile,
+):
+    """
+    Convert GeoParquet to GeoJSON format.
+
+    Supports two modes based on whether OUTPUT_FILE is provided:
+
+    \b
+    STREAMING MODE (no output file):
+      Streams newline-delimited GeoJSON (GeoJSONSeq) to stdout with RFC 8142
+      record separators. Designed for piping to tippecanoe for PMTiles/MBTiles.
+      Use --feature-collection to output a FeatureCollection instead.
+      Supports reading from stdin with "-" for pipeline use.
+
+    \b
+    FILE MODE (with output file):
+      Writes a standard GeoJSON FeatureCollection to the specified file.
+
+    \b
+    Examples:
+      # Stream to tippecanoe for PMTiles generation
+      gpio convert geojson buildings.parquet | tippecanoe -P -o buildings.pmtiles
+
+      # Pipeline with filtering
+      gpio extract data.parquet --bbox "-122.5,37.5,-122,38" | gpio convert geojson - | tippecanoe -P -o sf.pmtiles
+
+      # Write to GeoJSON file
+      gpio convert geojson data.parquet output.geojson
+
+      # Pretty-print with description
+      gpio convert geojson data.parquet output.geojson --pretty --description "My dataset"
+
+    \b
+    Note: GeoParquet input is automatically reprojected to WGS84 (EPSG:4326)
+    for RFC 7946 compliance. Use --keep-crs to preserve the original CRS.
+    """
+    from geoparquet_io.core.common import validate_profile_for_urls
+    from geoparquet_io.core.geojson_stream import convert_to_geojson
+
+    configure_verbose(verbose)
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, input_file, output_file)
+
+    try:
+        feature_count = convert_to_geojson(
+            input_path=input_file,
+            output_path=output_file,
+            rs=not no_rs,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+            description=description,
+            seq=not no_seq,
+            pretty=pretty,
+            verbose=verbose,
+            profile=profile,
+            keep_crs=keep_crs,
+        )
+
+        if output_file:
+            click.echo(f"Converted {feature_count:,} features to {output_file}")
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 # Deprecated reproject command
