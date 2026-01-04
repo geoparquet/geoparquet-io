@@ -111,6 +111,10 @@ File output uses DuckDB's GDAL integration to produce properly formatted GeoJSON
 | `--precision N` | 7 | Coordinate decimal precision (RFC 7946 recommends 7) |
 | `--write-bbox` | false | Include bbox property for each feature |
 | `--id-field COLUMN` | none | Use this column as the GeoJSON feature `id` |
+| `--description TEXT` | none | Add a description to the FeatureCollection |
+| `--feature-collection` | false | Output a FeatureCollection instead of GeoJSONSeq (streaming only) |
+| `--pretty` | false | Pretty-print the JSON output with indentation |
+| `--lco KEY=VALUE` | none | GDAL layer creation option (may be repeated) |
 | `--verbose` | false | Show debug output |
 | `--profile NAME` | none | AWS profile for S3 files |
 
@@ -147,6 +151,46 @@ Include per-feature bounding boxes with `--write-bbox`:
 ```bash
 gpio convert geojson data.parquet output.geojson --write-bbox
 ```
+
+### Description
+
+Add a description to the FeatureCollection:
+
+```bash
+gpio convert geojson data.parquet output.geojson --description "My dataset"
+```
+
+### Pretty Print
+
+For human-readable output with indentation:
+
+```bash
+gpio convert geojson data.parquet output.geojson --pretty
+```
+
+### FeatureCollection Mode (Streaming)
+
+By default, streaming outputs newline-delimited GeoJSONSeq. To output a complete FeatureCollection instead:
+
+```bash
+gpio convert geojson data.parquet --feature-collection > output.geojson
+```
+
+### Advanced GDAL Options
+
+For advanced use cases, pass GDAL layer creation options directly with `--lco`:
+
+```bash
+# Disable writing the layer name
+gpio convert geojson data.parquet out.geojson --lco WRITE_NAME=NO
+
+# Multiple options
+gpio convert geojson data.parquet out.geojson --lco WRITE_NAME=NO --lco SIGNIFICANT_FIGURES=10
+```
+
+See the [GDAL GeoJSON driver documentation](https://gdal.org/drivers/vector/geojson.html#layer-creation-options) for all available options.
+
+Note: Using `--lco` with the same option as a dedicated flag (e.g., `--lco COORDINATE_PRECISION=5` with `--precision 7`) will raise an error.
 
 ## Performance Tips
 

@@ -1179,9 +1179,8 @@ def convert_reproject(
 @click.option(
     "--precision",
     type=int,
-    default=7,
-    show_default=True,
-    help="Coordinate decimal precision (RFC 7946 default is 7)",
+    default=None,
+    help="Coordinate decimal precision (default: 7 per RFC 7946)",
 )
 @click.option(
     "--write-bbox",
@@ -1194,6 +1193,31 @@ def convert_reproject(
     default=None,
     help="Source field to use as feature 'id' member",
 )
+@click.option(
+    "--description",
+    type=str,
+    default=None,
+    help="Description to add to the FeatureCollection",
+)
+@click.option(
+    "--feature-collection",
+    "no_seq",
+    is_flag=True,
+    help="Output a FeatureCollection instead of newline-delimited GeoJSONSeq (streaming only)",
+)
+@click.option(
+    "--pretty",
+    is_flag=True,
+    help="Pretty-print the JSON output with indentation",
+)
+@click.option(
+    "--lco",
+    "lco_options",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="GDAL layer creation option (may be repeated). "
+    "See https://gdal.org/drivers/vector/geojson.html",
+)
 @verbose_option
 @profile_option
 def convert_geojson(
@@ -1203,6 +1227,10 @@ def convert_geojson(
     precision,
     write_bbox,
     id_field,
+    description,
+    no_seq,
+    pretty,
+    lco_options,
     verbose,
     profile,
 ):
@@ -1215,10 +1243,12 @@ def convert_geojson(
     STREAMING MODE (no output file):
       Streams newline-delimited GeoJSON (GeoJSONSeq) to stdout with RFC 8142
       record separators. Designed for piping to tippecanoe for PMTiles/MBTiles.
+      Use --feature-collection to output a FeatureCollection instead.
 
     \b
     FILE MODE (with output file):
       Writes a standard GeoJSON FeatureCollection to the specified file.
+      Complex column types (STRUCT, LIST, MAP) are automatically skipped.
 
     \b
     Examples:
@@ -1231,15 +1261,35 @@ def convert_geojson(
       # Write to GeoJSON file
       gpio convert geojson data.parquet output.geojson
 
-      # Reduce coordinate precision for smaller output
-      gpio convert geojson data.parquet --precision 5 | tippecanoe -P -o tiles.pmtiles
+      # Pretty-print with description
+      gpio convert geojson data.parquet output.geojson --pretty --description "My dataset"
 
-      # Include bounding box and use custom ID field
-      gpio convert geojson data.parquet output.geojson --write-bbox --id-field osm_id
+      # Use advanced GDAL options
+      gpio convert geojson data.parquet out.geojson --lco WRITE_NAME=NO --lco RFC7946=YES
     """
-    from geoparquet_io.core.geojson_stream import convert_to_geojson
+    from geoparquet_io.core.geojson_stream import convert_to_geojson, validate_lco_conflicts
 
     configure_verbose(verbose)
+
+    # Convert tuple to list for lco_options
+    lco_list = list(lco_options) if lco_options else None
+
+    # Validate no conflicts between flags and --lco
+    try:
+        validate_lco_conflicts(
+            lco_options=lco_list or [],
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+            description=description,
+            pretty=pretty,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from None
+
+    # Use default precision if not specified
+    if precision is None:
+        precision = 7
 
     convert_to_geojson(
         input_path=input_file,
@@ -1248,6 +1298,10 @@ def convert_geojson(
         precision=precision,
         write_bbox=write_bbox,
         id_field=id_field,
+        description=description,
+        seq=not no_seq,
+        pretty=pretty,
+        lco_options=lco_list,
         verbose=verbose,
         profile=profile,
     )

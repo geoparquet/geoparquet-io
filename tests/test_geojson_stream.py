@@ -113,6 +113,76 @@ class TestBuildLayerCreationOptions:
         options = _build_layer_creation_options(id_field="my_id")
         assert "ID_FIELD=my_id" in options
 
+    def test_description(self):
+        """Test description option."""
+        options = _build_layer_creation_options(description="My dataset")
+        assert "DESCRIPTION=My dataset" in options
+
+    def test_pretty(self):
+        """Test pretty option."""
+        options = _build_layer_creation_options(pretty=True)
+        assert "INDENT=YES" in options
+
+    def test_extra_options(self):
+        """Test extra layer creation options."""
+        options = _build_layer_creation_options(extra_options=["WRITE_NAME=NO"])
+        assert "WRITE_NAME=NO" in options
+
+
+class TestValidateLcoConflicts:
+    """Tests for LCO conflict validation."""
+
+    def test_no_conflicts(self):
+        """Test no conflicts when options don't overlap."""
+        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
+
+        # Should not raise
+        validate_lco_conflicts(
+            lco_options=["WRITE_NAME=NO"],
+            precision=7,
+            write_bbox=True,
+        )
+
+    def test_precision_conflict(self):
+        """Test conflict between --precision and --lco COORDINATE_PRECISION."""
+        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
+
+        with pytest.raises(ValueError, match="--precision and --lco COORDINATE_PRECISION"):
+            validate_lco_conflicts(
+                lco_options=["COORDINATE_PRECISION=5"],
+                precision=7,
+            )
+
+    def test_write_bbox_conflict(self):
+        """Test conflict between --write-bbox and --lco WRITE_BBOX."""
+        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
+
+        with pytest.raises(ValueError, match="--write-bbox and --lco WRITE_BBOX"):
+            validate_lco_conflicts(
+                lco_options=["WRITE_BBOX=YES"],
+                write_bbox=True,
+            )
+
+    def test_description_conflict(self):
+        """Test conflict between --description and --lco DESCRIPTION."""
+        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
+
+        with pytest.raises(ValueError, match="--description and --lco DESCRIPTION"):
+            validate_lco_conflicts(
+                lco_options=["DESCRIPTION=test"],
+                description="other",
+            )
+
+    def test_pretty_conflict(self):
+        """Test conflict between --pretty and --lco INDENT."""
+        from geoparquet_io.core.geojson_stream import validate_lco_conflicts
+
+        with pytest.raises(ValueError, match="--pretty and --lco INDENT"):
+            validate_lco_conflicts(
+                lco_options=["INDENT=YES"],
+                pretty=True,
+            )
+
 
 class TestGetPropertyColumns:
     """Tests for property column selection."""

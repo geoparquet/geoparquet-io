@@ -51,6 +51,10 @@ gpio convert geojson data.parquet output.geojson
 | `--precision N` | 7 | Coordinate decimal precision |
 | `--write-bbox` | false | Include bbox property for features |
 | `--id-field COL` | none | Use column as feature id |
+| `--description TEXT` | none | Add description to FeatureCollection |
+| `--feature-collection` | false | Output FeatureCollection instead of GeoJSONSeq |
+| `--pretty` | false | Pretty-print with indentation |
+| `--lco KEY=VALUE` | none | GDAL layer creation option (repeatable) |
 | `--verbose` | false | Show debug output |
 | `--profile NAME` | none | AWS profile for S3 |
 
