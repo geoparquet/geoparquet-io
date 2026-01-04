@@ -1211,12 +1211,24 @@ def convert_reproject(
     help="Pretty-print the JSON output with indentation",
 )
 @click.option(
+    "--significant-figures",
+    type=int,
+    default=None,
+    help="Max significant figures for floating-point numbers (default: 17). "
+    "Also applies to coordinates if --precision not set.",
+)
+@click.option(
     "--lco",
     "lco_options",
     multiple=True,
     metavar="KEY=VALUE",
     help="GDAL layer creation option (may be repeated). "
     "See https://gdal.org/drivers/vector/geojson.html",
+)
+@click.option(
+    "--keep-crs",
+    is_flag=True,
+    help="Keep original CRS instead of reprojecting to WGS84 (EPSG:4326)",
 )
 @verbose_option
 @profile_option
@@ -1230,7 +1242,9 @@ def convert_geojson(
     description,
     no_seq,
     pretty,
+    significant_figures,
     lco_options,
+    keep_crs,
     verbose,
     profile,
 ):
@@ -1283,6 +1297,7 @@ def convert_geojson(
             id_field=id_field,
             description=description,
             pretty=pretty,
+            significant_figures=significant_figures,
         )
     except ValueError as e:
         raise click.ClickException(str(e)) from None
@@ -1301,9 +1316,11 @@ def convert_geojson(
         description=description,
         seq=not no_seq,
         pretty=pretty,
+        significant_figures=significant_figures,
         lco_options=lco_list,
         verbose=verbose,
         profile=profile,
+        keep_crs=keep_crs,
     )
 
 

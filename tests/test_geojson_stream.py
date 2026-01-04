@@ -20,12 +20,17 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.geojson_stream import (
+    WGS84_CRS,
+    _build_columns_sql,
     _build_feature_query,
     _build_layer_creation_options,
     _get_property_columns,
+    _needs_reprojection,
     _quote_identifier,
     convert_to_geojson,
+    convert_to_geojson_file,
     convert_to_geojson_stream,
+    validate_lco_conflicts,
 )
 
 # Test data
@@ -127,6 +132,37 @@ class TestBuildLayerCreationOptions:
         """Test extra layer creation options."""
         options = _build_layer_creation_options(extra_options=["WRITE_NAME=NO"])
         assert "WRITE_NAME=NO" in options
+
+
+class TestBuildColumnsSql:
+    """Tests for SQL column building with JSON conversion."""
+
+    def test_simple_columns_only(self):
+        """Test SQL generation with only simple columns."""
+        result = _build_columns_sql(["id", "name"], [])
+        assert '"id"' in result
+        assert '"name"' in result
+        assert "to_json" not in result
+
+    def test_complex_columns_converted_to_json(self):
+        """Test complex columns are wrapped with to_json()."""
+        result = _build_columns_sql(["id"], ["sources", "metadata"])
+        assert '"id"' in result
+        assert 'to_json("sources") AS "sources"' in result
+        assert 'to_json("metadata") AS "metadata"' in result
+
+    def test_mixed_columns(self):
+        """Test mix of simple and complex columns."""
+        result = _build_columns_sql(["id", "name", "geometry"], ["sources"])
+        assert '"id"' in result
+        assert '"name"' in result
+        assert '"geometry"' in result
+        assert 'to_json("sources") AS "sources"' in result
+
+    def test_empty_columns(self):
+        """Test with no columns."""
+        result = _build_columns_sql([], [])
+        assert result == ""
 
 
 class TestValidateLcoConflicts:
@@ -348,7 +384,7 @@ class TestConvertGeoJSONCLI:
             assert output_path.exists()
 
             # Verify the file contains valid GeoJSON
-            with open(output_path) as f:
+            with open(output_path, encoding="utf-8") as f:
                 geojson = json.load(f)
             assert geojson["type"] == "FeatureCollection"
             assert "features" in geojson
@@ -429,7 +465,7 @@ class TestConvertToGeoJSONFile:
         assert count > 0
         assert Path(output_file).exists()
 
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             geojson = json.load(f)
 
         assert geojson["type"] == "FeatureCollection"
@@ -447,3 +483,216 @@ class TestConvertToGeoJSONFile:
         count_file = convert_to_geojson(str(PLACES_PARQUET), output_path=output_file)
         assert Path(output_file).exists()
         assert count_file > 0
+
+
+class TestNeedsReprojection:
+    """Tests for CRS detection and reprojection logic."""
+
+    def test_wgs84_epsg4326_no_reprojection(self):
+        """WGS84 (EPSG:4326) should not need reprojection."""
+        assert _needs_reprojection("EPSG:4326") is False
+
+    def test_wgs84_ogc_crs84_no_reprojection(self):
+        """OGC:CRS84 is WGS84 and should not need reprojection."""
+        assert _needs_reprojection("OGC:CRS84") is False
+
+    def test_wgs84_crs84_no_reprojection(self):
+        """CRS84 variant should not need reprojection."""
+        assert _needs_reprojection("CRS84") is False
+
+    def test_wgs84_case_insensitive(self):
+        """WGS84 detection should be case insensitive."""
+        assert _needs_reprojection("epsg:4326") is False
+        assert _needs_reprojection("EPSG:4326") is False
+
+    def test_other_crs_needs_reprojection(self):
+        """Non-WGS84 CRS should need reprojection."""
+        assert _needs_reprojection("EPSG:32610") is True
+        assert _needs_reprojection("EPSG:3857") is True
+        assert _needs_reprojection("EPSG:28992") is True
+
+    def test_none_crs_no_reprojection(self):
+        """None CRS should not need reprojection (assume WGS84)."""
+        assert _needs_reprojection(None) is False
+
+
+class TestBuildFeatureQueryWithReprojection:
+    """Tests for query building with CRS reprojection."""
+
+    def test_query_without_reprojection(self):
+        """Test query without source_crs produces no ST_Transform."""
+        query = _build_feature_query("test_table", "geometry", ["name"], source_crs=None)
+        assert "ST_Transform" not in query
+        assert "ST_AsGeoJSON" in query
+
+    def test_query_with_reprojection(self):
+        """Test query with source_crs includes ST_Transform."""
+        query = _build_feature_query("test_table", "geometry", ["name"], source_crs="EPSG:32610")
+        assert "ST_Transform" in query
+        assert "EPSG:32610" in query
+        assert WGS84_CRS in query
+
+    def test_query_with_bbox_and_reprojection(self):
+        """Test query with both bbox and reprojection."""
+        query = _build_feature_query(
+            "test_table",
+            "geometry",
+            ["name"],
+            write_bbox=True,
+            source_crs="EPSG:3857",
+        )
+        assert "ST_Transform" in query
+        assert "ST_Envelope" in query or "ST_XMin" in query
+
+
+class TestValidateLcoConflictsExtended:
+    """Extended tests for LCO conflict validation with new options."""
+
+    def test_significant_figures_conflict(self):
+        """Error when --significant-figures conflicts with --lco SIGNIFICANT_FIGURES."""
+        with pytest.raises(ValueError, match="--significant-figures and --lco SIGNIFICANT_FIGURES"):
+            validate_lco_conflicts(
+                lco_options=["SIGNIFICANT_FIGURES=10"],
+                significant_figures=8,
+            )
+
+
+class TestBuildLayerCreationOptionsExtended:
+    """Extended tests for GDAL layer creation options with new options."""
+
+    def test_significant_figures(self):
+        """Test significant_figures is included in options."""
+        opts = _build_layer_creation_options(precision=7, significant_figures=10)
+        assert "SIGNIFICANT_FIGURES=10" in opts
+
+    def test_all_options_with_significant_figures(self):
+        """Test all options together including significant_figures."""
+        opts = _build_layer_creation_options(
+            precision=5,
+            write_bbox=True,
+            id_field="id",
+            description="Test data",
+            pretty=True,
+            significant_figures=8,
+        )
+        assert "COORDINATE_PRECISION=5" in opts
+        assert "WRITE_BBOX=YES" in opts
+        assert "ID_FIELD=id" in opts
+        assert "DESCRIPTION=Test data" in opts
+        assert "INDENT=YES" in opts
+        assert "SIGNIFICANT_FIGURES=8" in opts
+
+
+class TestKeepCrsFlag:
+    """Tests for --keep-crs flag behavior."""
+
+    @pytest.fixture
+    def output_file(self):
+        """Create a temporary output file."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    def test_keep_crs_flag_exists(self):
+        """Test that --keep-crs flag is recognized by CLI."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["convert", "geojson", "--help"])
+        assert result.exit_code == 0
+        assert "--keep-crs" in result.output
+
+    def test_keep_crs_in_streaming_mode(self, capsys):
+        """Test keep_crs parameter works in streaming mode."""
+        # Should not raise with keep_crs=True
+        count = convert_to_geojson_stream(
+            str(PLACES_PARQUET),
+            rs=False,
+            keep_crs=True,
+        )
+        assert count > 0
+
+    def test_keep_crs_in_file_mode(self, output_file):
+        """Test keep_crs parameter works in file mode."""
+        count = convert_to_geojson_file(
+            str(PLACES_PARQUET),
+            output_file,
+            keep_crs=True,
+        )
+        assert count > 0
+        assert Path(output_file).exists()
+
+
+class TestSignificantFiguresFlag:
+    """Tests for --significant-figures flag."""
+
+    @pytest.fixture
+    def output_file(self):
+        """Create a temporary output file."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    def test_significant_figures_flag_exists(self):
+        """Test that --significant-figures flag is recognized by CLI."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["convert", "geojson", "--help"])
+        assert result.exit_code == 0
+        assert "--significant-figures" in result.output
+
+    def test_significant_figures_in_file_mode(self, output_file):
+        """Test significant_figures parameter works in file mode."""
+        count = convert_to_geojson_file(
+            str(PLACES_PARQUET),
+            output_file,
+            significant_figures=10,
+        )
+        assert count > 0
+        assert Path(output_file).exists()
+
+
+class TestBuildColumnsSqlComplex:
+    """Tests for SQL column building with JSON conversion for complex types."""
+
+    def test_simple_columns_only(self):
+        """Test building SQL with only simple columns."""
+        result = _build_columns_sql(["id", "name"], [])
+        assert '"id"' in result
+        assert '"name"' in result
+        assert "to_json" not in result
+
+    def test_complex_columns_converted_to_json(self):
+        """Test complex columns are wrapped with to_json()."""
+        result = _build_columns_sql(["id"], ["sources", "metadata"])
+        assert '"id"' in result
+        assert 'to_json("sources") AS "sources"' in result
+        assert 'to_json("metadata") AS "metadata"' in result
+
+    def test_mixed_simple_and_complex_columns(self):
+        """Test mixed simple and complex columns."""
+        result = _build_columns_sql(["id", "name"], ["sources"])
+        assert '"id"' in result
+        assert '"name"' in result
+        assert 'to_json("sources") AS "sources"' in result
+        # Verify simple columns don't have to_json
+        assert 'to_json("id")' not in result
+        assert 'to_json("name")' not in result
+
+    def test_empty_columns(self):
+        """Test with empty column lists."""
+        result = _build_columns_sql([], [])
+        assert result == ""
+
+    def test_only_complex_columns(self):
+        """Test with only complex columns."""
+        result = _build_columns_sql([], ["struct_col", "list_col"])
+        assert 'to_json("struct_col") AS "struct_col"' in result
+        assert 'to_json("list_col") AS "list_col"' in result
+
+
+class TestWgs84Constant:
+    """Tests for WGS84_CRS constant."""
+
+    def test_wgs84_crs_value(self):
+        """Test WGS84_CRS is correctly defined."""
+        assert WGS84_CRS == "EPSG:4326"

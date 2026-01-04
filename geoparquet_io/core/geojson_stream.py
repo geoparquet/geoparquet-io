@@ -28,6 +28,78 @@ if TYPE_CHECKING:
 # RFC 8142 record separator character
 RS = "\x1e"
 
+# WGS84 CRS identifier for RFC 7946 compliance
+WGS84_CRS = "EPSG:4326"
+
+
+def _get_source_crs(input_path: str) -> str | None:
+    """
+    Get CRS from GeoParquet metadata.
+
+    Args:
+        input_path: Path to input GeoParquet file
+
+    Returns:
+        CRS string (e.g., "EPSG:4326") or None if not found
+    """
+    from geoparquet_io.core.common import get_parquet_metadata, parse_geo_metadata
+
+    try:
+        metadata, _ = get_parquet_metadata(input_path, verbose=False)
+        geo_meta = parse_geo_metadata(metadata, verbose=False)
+
+        if not geo_meta:
+            return None
+
+        # Get primary geometry column's CRS
+        primary_col = geo_meta.get("primary_column", "geometry")
+        columns = geo_meta.get("columns", {})
+        col_meta = columns.get(primary_col, {})
+
+        crs = col_meta.get("crs")
+        if crs:
+            # Extract EPSG code from CRS object
+            if isinstance(crs, dict):
+                # Check for EPSG identifier
+                auth = crs.get("id", {})
+                if auth.get("authority") == "EPSG":
+                    return f"EPSG:{auth.get('code')}"
+                # Fall back to projjson parsing
+                return None
+            return str(crs)
+
+        return None
+    except Exception:
+        return None
+
+
+def _needs_reprojection(source_crs: str | None) -> bool:
+    """
+    Check if reprojection to WGS84 is needed for RFC 7946 compliance.
+
+    Args:
+        source_crs: Source CRS string or None
+
+    Returns:
+        True if data needs reprojection to WGS84
+    """
+    if source_crs is None:
+        # No CRS info - assume WGS84
+        return False
+
+    # Normalize CRS string for comparison
+    crs_upper = source_crs.upper().replace(" ", "")
+
+    # Common WGS84 representations
+    wgs84_variants = {
+        "EPSG:4326",
+        "OGC:CRS84",
+        "CRS84",
+        "WGS84",
+    }
+
+    return crs_upper not in wgs84_variants
+
 
 def _quote_identifier(name: str) -> str:
     """Quote a SQL identifier for safe use in DuckDB queries."""
@@ -67,6 +139,7 @@ def _build_feature_query(
     precision: int = 7,
     write_bbox: bool = False,
     id_field: str | None = None,
+    source_crs: str | None = None,
 ) -> str:
     """
     Build SQL query that outputs GeoJSON Feature strings.
@@ -78,15 +151,23 @@ def _build_feature_query(
         precision: Coordinate decimal precision
         write_bbox: Whether to include bbox property
         id_field: Optional field to use as feature id
+        source_crs: If provided, reproject from this CRS to WGS84
 
     Returns:
         SQL query string
     """
     quoted_geom = _quote_identifier(geometry_column)
 
+    # Apply reprojection if needed
+    if source_crs:
+        # Transform to WGS84 before converting to GeoJSON
+        geom_for_output = f"ST_Transform({quoted_geom}, '{source_crs}', '{WGS84_CRS}')"
+    else:
+        geom_for_output = quoted_geom
+
     # ST_AsGeoJSON doesn't support precision directly in DuckDB
     # We use it as-is; precision is handled by GDAL for file output
-    geom_expr = f"ST_AsGeoJSON({quoted_geom})"
+    geom_expr = f"ST_AsGeoJSON({geom_for_output})"
 
     # Build properties expression
     if property_columns:
@@ -103,15 +184,15 @@ def _build_feature_query(
         quoted_id = _quote_identifier(id_field)
         id_expr = f"'\"id\":' || to_json({quoted_id}) || ',',"
 
-    # Build bbox expression if requested
+    # Build bbox expression if requested (use reprojected geometry)
     bbox_expr = ""
     if write_bbox:
         bbox_expr = (
             f"'\"bbox\":[' || "
-            f"ST_XMin({quoted_geom}) || ',' || "
-            f"ST_YMin({quoted_geom}) || ',' || "
-            f"ST_XMax({quoted_geom}) || ',' || "
-            f"ST_YMax({quoted_geom}) || '],',"
+            f"ST_XMin({geom_for_output}) || ',' || "
+            f"ST_YMin({geom_for_output}) || ',' || "
+            f"ST_XMax({geom_for_output}) || ',' || "
+            f"ST_YMax({geom_for_output}) || '],',"
         )
 
     # Build complete Feature JSON using string concatenation
@@ -283,6 +364,7 @@ def _build_layer_creation_options(
     id_field: str | None = None,
     description: str | None = None,
     pretty: bool = False,
+    significant_figures: int | None = None,
     extra_options: list[str] | None = None,
 ) -> str:
     """
@@ -294,6 +376,7 @@ def _build_layer_creation_options(
         id_field: Field to use as feature id
         description: Description for the FeatureCollection
         pretty: Whether to indent/pretty-print the output
+        significant_figures: Max significant figures for floating-point numbers
         extra_options: Additional GDAL layer creation options
 
     Returns:
@@ -318,6 +401,9 @@ def _build_layer_creation_options(
     if pretty:
         options.append("INDENT=YES")
 
+    if significant_figures is not None:
+        options.append(f"SIGNIFICANT_FIGURES={significant_figures}")
+
     # Add extra options
     if extra_options:
         options.extend(extra_options)
@@ -332,6 +418,7 @@ FLAG_TO_LCO_MAP = {
     "id_field": "ID_FIELD",
     "description": "DESCRIPTION",
     "pretty": "INDENT",
+    "significant_figures": "SIGNIFICANT_FIGURES",
 }
 
 
@@ -342,6 +429,7 @@ def validate_lco_conflicts(
     id_field: str | None = None,
     description: str | None = None,
     pretty: bool = False,
+    significant_figures: int | None = None,
 ) -> None:
     """
     Validate that --lco options don't conflict with explicit flags.
@@ -353,6 +441,7 @@ def validate_lco_conflicts(
         id_field: Value of --id-field flag
         description: Value of --description flag
         pretty: Value of --pretty flag
+        significant_figures: Value of --significant-figures flag (None if not set)
 
     Raises:
         ValueError: If a conflict is detected
@@ -385,6 +474,9 @@ def validate_lco_conflicts(
     if "INDENT" in lco_keys and pretty:
         conflicts.append("--pretty and --lco INDENT")
 
+    if "SIGNIFICANT_FIGURES" in lco_keys and significant_figures is not None:
+        conflicts.append("--significant-figures and --lco SIGNIFICANT_FIGURES")
+
     if conflicts:
         raise ValueError(
             f"Conflicting options: {', '.join(conflicts)}. Use either the flag or --lco, not both."
@@ -402,12 +494,16 @@ def convert_to_geojson_stream(
     pretty: bool = False,
     verbose: bool = False,
     profile: str | None = None,
+    keep_crs: bool = False,
 ) -> int:
     """
     Stream GeoParquet as GeoJSON to stdout.
 
     By default, outputs RFC 8142 GeoJSONSeq format (newline-delimited features),
     suitable for piping to tippecanoe with the -P (parallel) flag.
+
+    Automatically reprojects to WGS84 (EPSG:4326) for RFC 7946 compliance unless
+    keep_crs is True.
 
     Args:
         input_path: Path to input file, or "-" to read Arrow IPC from stdin
@@ -420,6 +516,7 @@ def convert_to_geojson_stream(
         pretty: Pretty-print the JSON output
         verbose: Enable verbose output (to stderr)
         profile: AWS profile name for S3 files
+        keep_crs: If True, keep original CRS instead of reprojecting to WGS84
 
     Returns:
         Number of features written
@@ -430,7 +527,7 @@ def convert_to_geojson_stream(
         safe_file_url,
         setup_aws_profile_if_needed,
     )
-    from geoparquet_io.core.logging_config import configure_verbose, debug
+    from geoparquet_io.core.logging_config import configure_verbose, debug, info
     from geoparquet_io.core.streaming import is_stdin
 
     configure_verbose(verbose)
@@ -446,6 +543,7 @@ def convert_to_geojson_stream(
             seq=seq,
             pretty=pretty,
             verbose=verbose,
+            keep_crs=keep_crs,
         )
 
     # Setup AWS profile if needed
@@ -453,6 +551,13 @@ def convert_to_geojson_stream(
 
     # Get safe URL for input
     input_url = safe_file_url(input_path, verbose)
+
+    # Check if reprojection is needed
+    source_crs = _get_source_crs(input_path)
+    needs_reproject = not keep_crs and _needs_reprojection(source_crs)
+    if needs_reproject:
+        info(f"Reprojecting from {source_crs} to WGS84 (RFC 7946)")
+        debug(f"Source CRS: {source_crs}, reprojecting to {WGS84_CRS}")
 
     # Create DuckDB connection
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_path))
@@ -468,7 +573,7 @@ def convert_to_geojson_stream(
         property_columns = _get_property_columns(con, source_ref, geometry_column)
         debug(f"Property columns: {', '.join(property_columns)}")
 
-        # Build and execute query
+        # Build and execute query (pass source_crs if reprojection needed)
         query = _build_feature_query(
             source_ref,
             geometry_column,
@@ -476,6 +581,7 @@ def convert_to_geojson_stream(
             precision=precision,
             write_bbox=write_bbox,
             id_field=id_field,
+            source_crs=source_crs if needs_reproject else None,
         )
         debug(f"Query: {query}")
 
@@ -497,6 +603,7 @@ def _convert_from_stream(
     seq: bool = True,
     pretty: bool = False,
     verbose: bool = False,
+    keep_crs: bool = False,
 ) -> int:
     """
     Convert Arrow IPC stream from stdin to GeoJSON stream.
@@ -510,15 +617,21 @@ def _convert_from_stream(
         seq: If True, output GeoJSONSeq; if False, output FeatureCollection
         pretty: Pretty-print the JSON output
         verbose: Enable verbose output
+        keep_crs: If True, keep original CRS instead of reprojecting to WGS84
 
     Returns:
         Number of features written
+
+    Note:
+        CRS detection from Arrow IPC stream is limited. For pipeline use,
+        ensure source data is already in WGS84 or use gpio convert reproject first.
     """
     from geoparquet_io.core.common import get_duckdb_connection
-    from geoparquet_io.core.logging_config import debug
+    from geoparquet_io.core.logging_config import debug, info
     from geoparquet_io.core.stream_io import _create_view_with_geometry
     from geoparquet_io.core.streaming import (
         find_geometry_column_from_table,
+        get_crs_from_arrow_table,
         read_arrow_stream,
     )
 
@@ -535,6 +648,12 @@ def _convert_from_stream(
         geometry_column = "geometry"
 
     debug(f"Using geometry column: {geometry_column}")
+
+    # Check CRS from Arrow table metadata (if available)
+    source_crs = get_crs_from_arrow_table(table, geometry_column)
+    needs_reproject = not keep_crs and _needs_reprojection(source_crs)
+    if needs_reproject and source_crs:
+        info(f"Reprojecting from {source_crs} to WGS84 (RFC 7946)")
 
     # Get property columns
     excluded = {geometry_column.lower(), "bbox"}
@@ -559,6 +678,7 @@ def _convert_from_stream(
             precision=precision,
             write_bbox=write_bbox,
             id_field=id_field,
+            source_crs=source_crs if needs_reproject else None,
         )
         debug(f"Query: {query}")
 
@@ -571,19 +691,18 @@ def _convert_from_stream(
         con.close()
 
 
-def _get_exportable_columns(
+def _get_column_info(
     con: duckdb.DuckDBPyConnection,
     source_ref: str,
     geometry_column: str,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], bool]:
     """
-    Get columns that can be exported to GeoJSON via GDAL.
+    Get column information for GeoJSON export via GDAL.
 
-    Filters out:
-    - bbox column (STRUCT type)
-    - STRUCT columns (not supported by OGR)
-    - ARRAY/LIST columns (not supported by OGR)
-    - MAP columns (not supported by OGR)
+    Categorizes columns into:
+    - Simple columns (can be exported directly)
+    - Complex columns (STRUCT, LIST, MAP - need JSON conversion)
+    - bbox column (GeoParquet covering, controlled by --write-bbox flag)
 
     Args:
         con: DuckDB connection
@@ -591,36 +710,103 @@ def _get_exportable_columns(
         geometry_column: Name of geometry column
 
     Returns:
-        Tuple of (exportable column names, skipped column names)
+        Tuple of (simple column names, complex column names needing JSON, has_bbox)
     """
     # Get column types
     type_query = f"DESCRIBE SELECT * FROM {source_ref}"
     result = con.execute(type_query).fetchall()
 
-    exportable = []
-    skipped = []
+    simple_columns = []
+    complex_columns = []
+    has_bbox = False
 
     for row in result:
         col_name = row[0]
         col_type = str(row[1]).upper()
 
-        # Always skip bbox
+        # Skip bbox column - it's a standard GeoParquet covering column
+        # The --write-bbox flag controls whether bbox is included via GDAL option
         if col_name.lower() == "bbox":
-            skipped.append(col_name)
+            has_bbox = True
             continue
 
-        # Skip complex types that GDAL/OGR doesn't support
-        if any(unsupported in col_type for unsupported in ["STRUCT", "LIST", "MAP", "[]"]):
-            # But keep the geometry column
+        # Complex types that GDAL/OGR doesn't support - convert to JSON
+        if any(complex_type in col_type for complex_type in ["STRUCT", "LIST", "MAP", "[]"]):
+            # But keep the geometry column as-is (it's handled by ST_AsGeoJSON)
             if col_name.lower() == geometry_column.lower():
-                exportable.append(col_name)
+                simple_columns.append(col_name)
             else:
-                skipped.append(col_name)
+                complex_columns.append(col_name)
             continue
 
-        exportable.append(col_name)
+        simple_columns.append(col_name)
 
-    return exportable, skipped
+    return simple_columns, complex_columns, has_bbox
+
+
+def _build_columns_sql(
+    simple_columns: list[str],
+    complex_columns: list[str],
+) -> str:
+    """
+    Build SQL column list, converting complex columns to JSON.
+
+    Args:
+        simple_columns: Columns to select directly
+        complex_columns: Columns to wrap with to_json()
+
+    Returns:
+        SQL column expression string
+    """
+    parts = []
+
+    # Simple columns - select directly
+    for col in simple_columns:
+        parts.append(_quote_identifier(col))
+
+    # Complex columns - convert to JSON string
+    for col in complex_columns:
+        quoted = _quote_identifier(col)
+        parts.append(f"to_json({quoted}) AS {quoted}")
+
+    return ", ".join(parts)
+
+
+def _build_columns_sql_with_reprojection(
+    simple_columns: list[str],
+    complex_columns: list[str],
+    geometry_column: str,
+    source_crs: str | None = None,
+) -> str:
+    """
+    Build SQL column list with JSON conversion and optional geometry reprojection.
+
+    Args:
+        simple_columns: Columns to select directly
+        complex_columns: Columns to wrap with to_json()
+        geometry_column: Name of geometry column
+        source_crs: If provided, reproject geometry from this CRS to WGS84
+
+    Returns:
+        SQL column expression string
+    """
+    parts = []
+
+    # Simple columns - handle geometry specially if reprojection needed
+    for col in simple_columns:
+        if col.lower() == geometry_column.lower() and source_crs:
+            # Reproject geometry to WGS84
+            quoted = _quote_identifier(col)
+            parts.append(f"ST_Transform({quoted}, '{source_crs}', '{WGS84_CRS}') AS {quoted}")
+        else:
+            parts.append(_quote_identifier(col))
+
+    # Complex columns - convert to JSON string
+    for col in complex_columns:
+        quoted = _quote_identifier(col)
+        parts.append(f"to_json({quoted}) AS {quoted}")
+
+    return ", ".join(parts)
 
 
 def convert_to_geojson_file(
@@ -631,14 +817,17 @@ def convert_to_geojson_file(
     id_field: str | None = None,
     description: str | None = None,
     pretty: bool = False,
+    significant_figures: int | None = None,
     lco_options: list[str] | None = None,
     verbose: bool = False,
     profile: str | None = None,
+    keep_crs: bool = False,
 ) -> int:
     """
     Write GeoParquet to GeoJSON file using GDAL.
 
-    Outputs a standard GeoJSON FeatureCollection.
+    Outputs a standard GeoJSON FeatureCollection. Automatically reprojects
+    to WGS84 (EPSG:4326) for RFC 7946 compliance unless keep_crs is True.
 
     Args:
         input_path: Path to input GeoParquet file
@@ -648,9 +837,11 @@ def convert_to_geojson_file(
         id_field: Field to use as feature 'id' member
         description: Description for the FeatureCollection
         pretty: Pretty-print the output
+        significant_figures: Max significant figures for floating-point numbers
         lco_options: Additional GDAL layer creation options
         verbose: Enable verbose output
         profile: AWS profile name for S3 files
+        keep_crs: If True, keep original CRS instead of reprojecting to WGS84
 
     Returns:
         Number of features written
@@ -661,7 +852,7 @@ def convert_to_geojson_file(
         safe_file_url,
         setup_aws_profile_if_needed,
     )
-    from geoparquet_io.core.logging_config import configure_verbose, debug, success, warn
+    from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
 
     configure_verbose(verbose)
 
@@ -671,6 +862,13 @@ def convert_to_geojson_file(
     # Get safe URL for input
     input_url = safe_file_url(input_path, verbose)
 
+    # Check if reprojection is needed
+    source_crs = _get_source_crs(input_path)
+    needs_reproject = not keep_crs and _needs_reprojection(source_crs)
+    if needs_reproject:
+        info(f"Reprojecting from {source_crs} to WGS84 (RFC 7946)")
+        debug(f"Source CRS: {source_crs}, reprojecting to {WGS84_CRS}")
+
     # Build layer creation options
     layer_options = _build_layer_creation_options(
         precision=precision,
@@ -678,6 +876,7 @@ def convert_to_geojson_file(
         id_field=id_field,
         description=description,
         pretty=pretty,
+        significant_figures=significant_figures,
         extra_options=lco_options,
     )
 
@@ -695,18 +894,25 @@ def convert_to_geojson_file(
         count_result = con.execute(f"SELECT COUNT(*) FROM {source_ref}").fetchone()
         row_count = count_result[0] if count_result else 0
 
-        # Get exportable columns (filter out STRUCT, LIST, MAP types)
-        columns_to_export, skipped_columns = _get_exportable_columns(
+        # Get column info (simple, complex needing JSON conversion, has_bbox)
+        simple_columns, complex_columns, _has_bbox = _get_column_info(
             con, source_ref, geometry_column
         )
 
-        if skipped_columns:
-            warn(
-                f"Skipping {len(skipped_columns)} column(s) with unsupported types: "
-                f"{', '.join(skipped_columns)}"
+        if complex_columns:
+            debug(
+                f"Converting {len(complex_columns)} complex column(s) to JSON: "
+                f"{', '.join(complex_columns)}"
             )
 
-        columns_sql = ", ".join(_quote_identifier(col) for col in columns_to_export)
+        # Build column SQL with JSON conversion for complex types
+        # Handle geometry reprojection if needed
+        columns_sql = _build_columns_sql_with_reprojection(
+            simple_columns,
+            complex_columns,
+            geometry_column,
+            source_crs if needs_reproject else None,
+        )
 
         # Use COPY TO with GDAL driver
         copy_query = f"""
@@ -740,14 +946,18 @@ def convert_to_geojson(
     description: str | None = None,
     seq: bool = True,
     pretty: bool = False,
+    significant_figures: int | None = None,
     lco_options: list[str] | None = None,
     verbose: bool = False,
     profile: str | None = None,
+    keep_crs: bool = False,
 ) -> int:
     """
     Convert GeoParquet to GeoJSON.
 
     Routes to streaming mode (stdout) or file mode based on output_path.
+    Automatically reprojects to WGS84 (EPSG:4326) for RFC 7946 compliance
+    unless keep_crs is True.
 
     Args:
         input_path: Path to input file, or "-" to read Arrow IPC from stdin
@@ -759,9 +969,11 @@ def convert_to_geojson(
         description: Description for FeatureCollection
         seq: If True, output GeoJSONSeq (streaming); if False, FeatureCollection
         pretty: Pretty-print the output
+        significant_figures: Max significant figures for floating-point numbers (file only)
         lco_options: Additional GDAL layer creation options (file mode only)
         verbose: Enable verbose output
         profile: AWS profile name for S3 files
+        keep_crs: If True, keep original CRS instead of reprojecting to WGS84
 
     Returns:
         Number of features written
@@ -775,9 +987,11 @@ def convert_to_geojson(
             id_field=id_field,
             description=description,
             pretty=pretty,
+            significant_figures=significant_figures,
             lco_options=lco_options,
             verbose=verbose,
             profile=profile,
+            keep_crs=keep_crs,
         )
     else:
         return convert_to_geojson_stream(
@@ -791,4 +1005,5 @@ def convert_to_geojson(
             pretty=pretty,
             verbose=verbose,
             profile=profile,
+            keep_crs=keep_crs,
         )
