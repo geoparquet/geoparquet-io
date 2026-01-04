@@ -886,6 +886,7 @@ def convert(ctx):
         gpio convert input.shp output.parquet                    # To GeoParquet (default)
         gpio convert geoparquet input.shp output.parquet         # Explicit subcommand
         gpio convert reproject input.parquet out.parquet -d EPSG:32610
+        gpio convert geojson data.parquet | tippecanoe -P -o tiles.pmtiles
     """
     ctx.ensure_object(dict)
     timestamps = ctx.obj.get("timestamps", False)
@@ -1164,6 +1165,91 @@ def convert_reproject(
         compression,
         compression_level,
         geoparquet_version,
+    )
+
+
+@convert.command(name="geojson")
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--no-rs",
+    is_flag=True,
+    help="Disable RFC 8142 record separators (enabled by default for tippecanoe -P)",
+)
+@click.option(
+    "--precision",
+    type=int,
+    default=7,
+    show_default=True,
+    help="Coordinate decimal precision (RFC 7946 default is 7)",
+)
+@click.option(
+    "--write-bbox",
+    is_flag=True,
+    help="Include bbox property for each feature",
+)
+@click.option(
+    "--id-field",
+    type=str,
+    default=None,
+    help="Source field to use as feature 'id' member",
+)
+@verbose_option
+@profile_option
+def convert_geojson(
+    input_file,
+    output_file,
+    no_rs,
+    precision,
+    write_bbox,
+    id_field,
+    verbose,
+    profile,
+):
+    """
+    Convert GeoParquet to GeoJSON format.
+
+    Supports two modes based on whether OUTPUT_FILE is provided:
+
+    \b
+    STREAMING MODE (no output file):
+      Streams newline-delimited GeoJSON (GeoJSONSeq) to stdout with RFC 8142
+      record separators. Designed for piping to tippecanoe for PMTiles/MBTiles.
+
+    \b
+    FILE MODE (with output file):
+      Writes a standard GeoJSON FeatureCollection to the specified file.
+
+    \b
+    Examples:
+      # Stream to tippecanoe for PMTiles generation
+      gpio convert geojson buildings.parquet | tippecanoe -P -o buildings.pmtiles
+
+      # Pipeline with filtering
+      gpio extract data.parquet --bbox "-122.5,37.5,-122,38" | gpio convert geojson - | tippecanoe -P -o sf.pmtiles
+
+      # Write to GeoJSON file
+      gpio convert geojson data.parquet output.geojson
+
+      # Reduce coordinate precision for smaller output
+      gpio convert geojson data.parquet --precision 5 | tippecanoe -P -o tiles.pmtiles
+
+      # Include bounding box and use custom ID field
+      gpio convert geojson data.parquet output.geojson --write-bbox --id-field osm_id
+    """
+    from geoparquet_io.core.geojson_stream import convert_to_geojson
+
+    configure_verbose(verbose)
+
+    convert_to_geojson(
+        input_path=input_file,
+        output_path=output_file,
+        rs=not no_rs,
+        precision=precision,
+        write_bbox=write_bbox,
+        id_field=id_field,
+        verbose=verbose,
+        profile=profile,
     )
 
 
