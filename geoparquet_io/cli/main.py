@@ -1180,7 +1180,9 @@ def convert_reproject(
     "--precision",
     type=int,
     default=None,
-    help="Coordinate decimal precision (default: 7 per RFC 7946)",
+    help="Coordinate decimal precision (default: 7 per RFC 7946). "
+    "In streaming mode, applies to bbox only; geometry coordinates use full precision. "
+    "In file mode, applies to all coordinates via GDAL.",
 )
 @click.option(
     "--write-bbox",

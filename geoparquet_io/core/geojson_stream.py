@@ -165,9 +165,11 @@ def _build_feature_query(
     else:
         geom_for_output = quoted_geom
 
-    # ST_AsGeoJSON doesn't support precision directly in DuckDB
-    # We use it as-is; precision is handled by GDAL for file output
-    geom_expr = f"ST_AsGeoJSON({geom_for_output})"
+    # Apply coordinate precision using ST_ReducePrecision before GeoJSON conversion.
+    # The grid size is 10^-precision (e.g., precision=7 -> grid=0.0000001).
+    # Note: Very low precision values may collapse small geometries to empty.
+    geom_with_precision = f"ST_ReducePrecision({geom_for_output}, pow(10, -{precision}))"
+    geom_expr = f"ST_AsGeoJSON({geom_with_precision})"
 
     # Build properties expression
     if property_columns:
@@ -185,14 +187,15 @@ def _build_feature_query(
         id_expr = f"'\"id\":' || to_json({quoted_id}) || ',',"
 
     # Build bbox expression if requested (use reprojected geometry)
+    # Bbox coordinates honor the precision parameter via ROUND()
     bbox_expr = ""
     if write_bbox:
         bbox_expr = (
             f"'\"bbox\":[' || "
-            f"ST_XMin({geom_for_output}) || ',' || "
-            f"ST_YMin({geom_for_output}) || ',' || "
-            f"ST_XMax({geom_for_output}) || ',' || "
-            f"ST_YMax({geom_for_output}) || '],',"
+            f"ROUND(ST_XMin({geom_for_output}), {precision}) || ',' || "
+            f"ROUND(ST_YMin({geom_for_output}), {precision}) || ',' || "
+            f"ROUND(ST_XMax({geom_for_output}), {precision}) || ',' || "
+            f"ROUND(ST_YMax({geom_for_output}), {precision}) || '],',"
         )
 
     # Build complete Feature JSON using string concatenation
