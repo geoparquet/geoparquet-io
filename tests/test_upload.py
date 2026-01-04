@@ -2,15 +2,19 @@
 Tests for upload functionality.
 """
 
+import importlib
 from pathlib import Path
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from geoparquet_io.cli.main import cli
-from geoparquet_io.core.upload import (
-    _create_s3_store_with_endpoint,
+# Use importlib to get the actual module (avoids namespace collision with cli group)
+main_module = importlib.import_module("geoparquet_io.cli.main")
+cli = main_module.cli
+from geoparquet_io.core.upload import (  # noqa: E402
     _setup_store_and_kwargs,
+    _try_infer_region_from_bucket,
+    check_credentials,
     parse_object_store_url,
 )
 
@@ -67,15 +71,17 @@ class TestUploadDryRun:
     def test_upload_single_file_dry_run(self, places_test_file):
         """Test dry-run mode for single file upload."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                places_test_file,
-                "s3://test-bucket/path/output.parquet",
-                "--dry-run",
-            ],
-        )
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            result = runner.invoke(
+                cli,
+                [
+                    "publish",
+                    "upload",
+                    places_test_file,
+                    "s3://test-bucket/path/output.parquet",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -90,17 +96,20 @@ class TestUploadDryRun:
     def test_upload_single_file_dry_run_with_profile(self, places_test_file):
         """Test dry-run mode with AWS profile."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                places_test_file,
-                "s3://test-bucket/data.parquet",
-                "--profile",
-                "test-profile",
-                "--dry-run",
-            ],
-        )
+        # Mock credential check to pass (since test-profile doesn't exist)
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            result = runner.invoke(
+                cli,
+                [
+                    "publish",
+                    "upload",
+                    places_test_file,
+                    "s3://test-bucket/data.parquet",
+                    "--profile",
+                    "test-profile",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -116,15 +125,17 @@ class TestUploadDryRun:
             (test_dir / f"file_{i}.parquet").write_text(f"test content {i}")
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--dry-run",
-            ],
-        )
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            result = runner.invoke(
+                cli,
+                [
+                    "publish",
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -147,17 +158,19 @@ class TestUploadDryRun:
             (test_dir / f"readme_{i}.txt").write_text(f"text {i}")
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--pattern",
-                "*.json",
-                "--dry-run",
-            ],
-        )
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            result = runner.invoke(
+                cli,
+                [
+                    "publish",
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--pattern",
+                    "*.json",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -179,15 +192,17 @@ class TestUploadDryRun:
             (test_dir / f"file_{i:02d}.parquet").write_text(f"test {i}")
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--dry-run",
-            ],
-        )
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            result = runner.invoke(
+                cli,
+                [
+                    "publish",
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "Would upload 15 file(s)" in result.output
@@ -200,15 +215,17 @@ class TestUploadDryRun:
         test_dir.mkdir()
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--dry-run",
-            ],
-        )
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            result = runner.invoke(
+                cli,
+                [
+                    "publish",
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "No files found" in result.output
@@ -223,56 +240,93 @@ class TestUploadDryRun:
             (test_dir / f"data_{i}.parquet").write_text(f"test {i}")
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--pattern",
-                "*.csv",  # No CSV files exist
-                "--dry-run",
-            ],
-        )
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            result = runner.invoke(
+                cli,
+                [
+                    "publish",
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--pattern",
+                    "*.csv",  # No CSV files exist
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "No files found" in result.output
 
 
+class TestRegionInference:
+    """Test suite for region inference from bucket names."""
+
+    def test_infer_us_west_2_from_bucket(self):
+        """Test inferring us-west-2 region from bucket name."""
+        result = _try_infer_region_from_bucket("us-west-2.opendata.source.coop")
+        assert result == "us-west-2"
+
+    def test_infer_eu_central_1_from_bucket(self):
+        """Test inferring eu-central-1 region from bucket name."""
+        result = _try_infer_region_from_bucket("eu-central-1.example.com")
+        assert result == "eu-central-1"
+
+    def test_no_region_in_bucket_name(self):
+        """Test returns None when no region in bucket name."""
+        result = _try_infer_region_from_bucket("my-normal-bucket")
+        assert result is None
+
+    def test_no_region_in_regular_domain(self):
+        """Test returns None for regular domain bucket name."""
+        result = _try_infer_region_from_bucket("example.com")
+        assert result is None
+
+
+class TestCredentialChecking:
+    """Test suite for credential checking functionality."""
+
+    def test_check_credentials_with_env_vars(self):
+        """Test credential checking passes with environment variables."""
+        with patch.dict(
+            "os.environ", {"AWS_ACCESS_KEY_ID": "key", "AWS_SECRET_ACCESS_KEY": "secret"}
+        ):
+            ok, hint = check_credentials("s3://bucket/path")
+            assert ok is True
+            assert hint == ""
+
+    def test_check_credentials_without_env_vars(self):
+        """Test credential checking fails without environment variables or default profile."""
+        with patch.dict("os.environ", {}, clear=True):
+            # Also mock the default profile fallback to return no credentials
+            with patch(
+                "geoparquet_io.core.upload._load_aws_credentials_from_profile",
+                return_value=(None, None, None),
+            ):
+                ok, hint = check_credentials("s3://bucket/path")
+                assert ok is False
+                assert "S3 credentials not found" in hint
+
+    def test_check_credentials_with_default_profile_fallback(self):
+        """Test credential checking falls back to default profile in ~/.aws/credentials."""
+        with patch.dict("os.environ", {}, clear=True):
+            # Mock the default profile to return valid credentials
+            with patch(
+                "geoparquet_io.core.upload._load_aws_credentials_from_profile",
+                return_value=("access_key", "secret_key", "us-west-2"),
+            ):
+                ok, hint = check_credentials("s3://bucket/path")
+                assert ok is True
+                assert hint == ""
+
+    def test_check_credentials_http_always_ok(self):
+        """Test credential checking passes for HTTP URLs."""
+        ok, hint = check_credentials("https://example.com/file.parquet")
+        assert ok is True
+        assert hint == ""
+
+
 class TestS3EndpointConfiguration:
     """Test suite for S3 endpoint configuration."""
-
-    def test_create_s3_store_with_endpoint_https(self):
-        """Test creating S3Store with HTTPS endpoint."""
-        with patch("geoparquet_io.core.upload.S3Store") as mock_store:
-            _create_s3_store_with_endpoint(
-                bucket_url="s3://my-bucket/data.parquet",
-                s3_endpoint="minio.example.com:9000",
-                s3_region="us-west-2",
-                s3_use_ssl=True,
-            )
-
-            mock_store.assert_called_once_with(
-                "my-bucket",
-                endpoint="https://minio.example.com:9000",
-                region="us-west-2",
-            )
-
-    def test_create_s3_store_with_endpoint_http(self):
-        """Test creating S3Store with HTTP endpoint (no SSL)."""
-        with patch("geoparquet_io.core.upload.S3Store") as mock_store:
-            _create_s3_store_with_endpoint(
-                bucket_url="s3://my-bucket/data.parquet",
-                s3_endpoint="minio.local:9000",
-                s3_region=None,  # Should default to us-east-1
-                s3_use_ssl=False,
-            )
-
-            mock_store.assert_called_once_with(
-                "my-bucket",
-                endpoint="http://minio.local:9000",
-                region="us-east-1",
-            )
 
     def test_setup_store_with_custom_endpoint(self):
         """Test _setup_store_and_kwargs uses S3Store for custom endpoint."""
@@ -292,8 +346,8 @@ class TestS3EndpointConfiguration:
                 mock_s3store.assert_called_once()
                 mock_from_url.assert_not_called()
 
-    def test_setup_store_without_endpoint_uses_from_url(self):
-        """Test _setup_store_and_kwargs uses from_url when no custom endpoint."""
+    def test_setup_store_for_s3_uses_s3store(self):
+        """Test _setup_store_and_kwargs uses S3Store for S3 URLs."""
         with patch("geoparquet_io.core.upload.S3Store") as mock_s3store:
             with patch("geoparquet_io.core.upload.obs.store.from_url") as mock_from_url:
                 _setup_store_and_kwargs(
@@ -301,16 +355,15 @@ class TestS3EndpointConfiguration:
                     profile=None,
                     chunk_concurrency=12,
                     chunk_size=None,
-                    # No s3_endpoint
                 )
 
-                # Should use from_url, not S3Store
-                mock_from_url.assert_called_once_with("s3://my-bucket")
-                mock_s3store.assert_not_called()
+                # Should use S3Store for S3 URLs to handle credentials properly
+                mock_s3store.assert_called_once()
+                mock_from_url.assert_not_called()
 
     def test_setup_store_returns_kwargs(self):
         """Test _setup_store_and_kwargs returns correct kwargs."""
-        with patch("geoparquet_io.core.upload.obs.store.from_url"):
+        with patch("geoparquet_io.core.upload.S3Store"):
             store, kwargs = _setup_store_and_kwargs(
                 bucket_url="s3://my-bucket",
                 profile=None,
@@ -321,6 +374,21 @@ class TestS3EndpointConfiguration:
             assert kwargs["max_concurrency"] == 24
             assert kwargs["chunk_size"] == 16 * 1024 * 1024
 
+    def test_setup_store_for_non_s3_uses_from_url(self):
+        """Test _setup_store_and_kwargs uses from_url for non-S3 URLs."""
+        with patch("geoparquet_io.core.upload.S3Store") as mock_s3store:
+            with patch("geoparquet_io.core.upload.obs.store.from_url") as mock_from_url:
+                _setup_store_and_kwargs(
+                    bucket_url="gs://my-bucket",
+                    profile=None,
+                    chunk_concurrency=12,
+                    chunk_size=None,
+                )
+
+                # Should use from_url for non-S3 URLs
+                mock_from_url.assert_called_once_with("gs://my-bucket")
+                mock_s3store.assert_not_called()
+
 
 class TestUploadCLIS3Options:
     """Test suite for S3 endpoint CLI options."""
@@ -328,18 +396,20 @@ class TestUploadCLIS3Options:
     def test_upload_with_s3_endpoint_dry_run(self, places_test_file):
         """Test dry-run mode with S3 endpoint options."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                places_test_file,
-                "s3://test-bucket/data.parquet",
-                "--s3-endpoint",
-                "minio.example.com:9000",
-                "--s3-no-ssl",
-                "--dry-run",
-            ],
-        )
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            result = runner.invoke(
+                cli,
+                [
+                    "publish",
+                    "upload",
+                    places_test_file,
+                    "s3://test-bucket/data.parquet",
+                    "--s3-endpoint",
+                    "minio.example.com:9000",
+                    "--s3-no-ssl",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -347,17 +417,19 @@ class TestUploadCLIS3Options:
     def test_upload_with_s3_region_dry_run(self, places_test_file):
         """Test dry-run mode with S3 region option."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                places_test_file,
-                "s3://test-bucket/data.parquet",
-                "--s3-region",
-                "eu-west-1",
-                "--dry-run",
-            ],
-        )
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            result = runner.invoke(
+                cli,
+                [
+                    "publish",
+                    "upload",
+                    places_test_file,
+                    "s3://test-bucket/data.parquet",
+                    "--s3-region",
+                    "eu-west-1",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output

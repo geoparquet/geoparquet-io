@@ -22,6 +22,9 @@ gpio publish upload SOURCE DESTINATION [OPTIONS]
 --chunk-concurrency INTEGER Max concurrent chunks per file [default: 12]
 --chunk-size INTEGER        Chunk size in bytes for multipart uploads
 --fail-fast                 Stop immediately on first error
+--s3-endpoint TEXT          Custom S3-compatible endpoint (e.g., 'minio.example.com:9000')
+--s3-region TEXT            S3 region (default: us-east-1 when using custom endpoint)
+--s3-no-ssl                 Disable SSL for S3 endpoint (use HTTP instead of HTTPS)
 --dry-run                   Preview what would be uploaded without uploading
 ```
 
@@ -58,6 +61,20 @@ gpio publish upload large-dataset/ s3://bucket/data/ --max-files 16 --profile pr
 ```bash
 # See what would be uploaded
 gpio publish upload data/ s3://bucket/dataset/ --dry-run
+```
+
+### S3-Compatible Storage
+
+```bash
+# MinIO with custom endpoint
+gpio publish upload data.parquet s3://bucket/file.parquet \
+  --s3-endpoint minio.example.com:9000 \
+  --s3-no-ssl
+
+# Custom endpoint with specific region
+gpio publish upload data.parquet s3://bucket/file.parquet \
+  --s3-endpoint storage.example.com \
+  --s3-region eu-west-1
 ```
 
 ## Authentication

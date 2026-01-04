@@ -96,6 +96,27 @@ Shows:
 - Destination paths
 - AWS profile (if specified)
 
+### S3-Compatible Storage
+
+Upload to MinIO, Ceph, or other S3-compatible storage:
+
+```bash
+# MinIO without SSL
+gpio publish upload data.parquet s3://bucket/file.parquet \
+  --s3-endpoint minio.example.com:9000 \
+  --s3-no-ssl
+
+# Custom endpoint with specific region
+gpio publish upload data/ s3://bucket/dataset/ \
+  --s3-endpoint storage.example.com \
+  --s3-region eu-west-1
+```
+
+Options:
+- `--s3-endpoint` - Custom endpoint hostname and optional port
+- `--s3-region` - Override region (defaults to us-east-1 for custom endpoints)
+- `--s3-no-ssl` - Use HTTP instead of HTTPS
+
 ## Directory Structure
 
 When uploading directories, the structure is preserved:

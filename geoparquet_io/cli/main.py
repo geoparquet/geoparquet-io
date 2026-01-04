@@ -54,6 +54,7 @@ from geoparquet_io.core.partition_by_string import (
 from geoparquet_io.core.reproject import reproject_impl
 from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_impl
+from geoparquet_io.core.upload import check_credentials
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
@@ -3624,6 +3625,19 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
 )
 @click.option("--chunk-size", type=int, help="Chunk size in bytes for multipart uploads")
 @click.option("--fail-fast", is_flag=True, help="Stop immediately on first error")
+@click.option(
+    "--s3-endpoint",
+    help="Custom S3-compatible endpoint (e.g., 'minio.example.com:9000')",
+)
+@click.option(
+    "--s3-region",
+    help="S3 region (default: us-east-1 when using custom endpoint)",
+)
+@click.option(
+    "--s3-no-ssl",
+    is_flag=True,
+    help="Disable SSL for S3 endpoint (use HTTP instead of HTTPS)",
+)
 @dry_run_option
 def publish_upload(
     source,
@@ -3634,6 +3648,9 @@ def publish_upload(
     chunk_concurrency,
     chunk_size,
     fail_fast,
+    s3_endpoint,
+    s3_region,
+    s3_no_ssl,
     dry_run,
 ):
     """Upload file or directory to object storage.
@@ -3658,6 +3675,11 @@ def publish_upload(
       # Stop on first error instead of continuing
       gpio publish upload output/ s3://bucket/dataset/ --fail-fast
     """
+    # Check credentials before attempting upload
+    creds_ok, hint = check_credentials(destination, profile)
+    if not creds_ok:
+        raise click.ClickException(f"Authentication failed:\n\n{hint}")
+
     try:
         upload_impl(
             source=source,
@@ -3669,6 +3691,9 @@ def publish_upload(
             chunk_size=chunk_size,
             fail_fast=fail_fast,
             dry_run=dry_run,
+            s3_endpoint=s3_endpoint,
+            s3_region=s3_region,
+            s3_use_ssl=not s3_no_ssl,
         )
     except click.exceptions.Exit:
         raise
@@ -4023,6 +4048,12 @@ def upload(
         "'gpio upload' is deprecated and will be removed in a future release. "
         "Use 'gpio publish upload' instead."
     )
+
+    # Check credentials before attempting upload
+    creds_ok, hint = check_credentials(destination, profile)
+    if not creds_ok:
+        raise click.ClickException(f"Authentication failed:\n\n{hint}")
+
     try:
         # Handle stdin input
         if is_stdin(source):
