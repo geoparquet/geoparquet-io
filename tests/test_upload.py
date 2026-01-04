@@ -68,15 +68,19 @@ class TestUploadDryRun:
     def test_upload_single_file_dry_run(self, places_test_file):
         """Test dry-run mode for single file upload."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                places_test_file,
-                "s3://test-bucket/path/output.parquet",
-                "--dry-run",
-            ],
-        )
+        with patch(
+            "geoparquet_io.core.upload.check_credentials",
+            return_value=(True, ""),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "upload",
+                    places_test_file,
+                    "s3://test-bucket/path/output.parquet",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -122,15 +126,19 @@ class TestUploadDryRun:
             (test_dir / f"file_{i}.parquet").write_text(f"test content {i}")
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--dry-run",
-            ],
-        )
+        with patch(
+            "geoparquet_io.core.upload.check_credentials",
+            return_value=(True, ""),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -153,17 +161,21 @@ class TestUploadDryRun:
             (test_dir / f"readme_{i}.txt").write_text(f"text {i}")
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--pattern",
-                "*.json",
-                "--dry-run",
-            ],
-        )
+        with patch(
+            "geoparquet_io.core.upload.check_credentials",
+            return_value=(True, ""),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--pattern",
+                    "*.json",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -185,15 +197,19 @@ class TestUploadDryRun:
             (test_dir / f"file_{i:02d}.parquet").write_text(f"test {i}")
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--dry-run",
-            ],
-        )
+        with patch(
+            "geoparquet_io.core.upload.check_credentials",
+            return_value=(True, ""),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "Would upload 15 file(s)" in result.output
@@ -206,15 +222,19 @@ class TestUploadDryRun:
         test_dir.mkdir()
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--dry-run",
-            ],
-        )
+        with patch(
+            "geoparquet_io.core.upload.check_credentials",
+            return_value=(True, ""),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "No files found" in result.output
@@ -229,17 +249,21 @@ class TestUploadDryRun:
             (test_dir / f"data_{i}.parquet").write_text(f"test {i}")
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                str(test_dir),
-                "s3://test-bucket/dataset/",
-                "--pattern",
-                "*.csv",  # No CSV files exist
-                "--dry-run",
-            ],
-        )
+        with patch(
+            "geoparquet_io.core.upload.check_credentials",
+            return_value=(True, ""),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "upload",
+                    str(test_dir),
+                    "s3://test-bucket/dataset/",
+                    "--pattern",
+                    "*.csv",  # No CSV files exist
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "No files found" in result.output
@@ -383,18 +407,22 @@ class TestUploadCLIS3Options:
     def test_upload_with_s3_endpoint_dry_run(self, places_test_file):
         """Test dry-run mode with S3 endpoint options."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                places_test_file,
-                "s3://test-bucket/data.parquet",
-                "--s3-endpoint",
-                "minio.example.com:9000",
-                "--s3-no-ssl",
-                "--dry-run",
-            ],
-        )
+        with patch(
+            "geoparquet_io.core.upload.check_credentials",
+            return_value=(True, ""),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "upload",
+                    places_test_file,
+                    "s3://test-bucket/data.parquet",
+                    "--s3-endpoint",
+                    "minio.example.com:9000",
+                    "--s3-no-ssl",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -402,17 +430,21 @@ class TestUploadCLIS3Options:
     def test_upload_with_s3_region_dry_run(self, places_test_file):
         """Test dry-run mode with S3 region option."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                places_test_file,
-                "s3://test-bucket/data.parquet",
-                "--s3-region",
-                "eu-west-1",
-                "--dry-run",
-            ],
-        )
+        with patch(
+            "geoparquet_io.core.upload.check_credentials",
+            return_value=(True, ""),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "upload",
+                    places_test_file,
+                    "s3://test-bucket/data.parquet",
+                    "--s3-region",
+                    "eu-west-1",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
