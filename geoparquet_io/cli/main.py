@@ -5,6 +5,7 @@ import click
 from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
     SingleFileCommand,
+    any_extension_option,
     check_partition_options,
     compression_options,
     dry_run_option,
@@ -25,6 +26,7 @@ from geoparquet_io.core.add_kdtree_column import add_kdtree_column as add_kdtree
 from geoparquet_io.core.add_quadkey_column import add_quadkey_column as add_quadkey_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
+from geoparquet_io.core.common import validate_parquet_extension
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
@@ -931,6 +933,7 @@ def convert(ctx):
 @verbose_option
 @compression_options
 @profile_option
+@any_extension_option
 def convert_to_geoparquet_cmd(
     input_file,
     output_file,
@@ -946,6 +949,7 @@ def convert_to_geoparquet_cmd(
     compression,
     compression_level,
     profile,
+    any_extension,
 ):
     """
     Convert vector formats to optimized GeoParquet.
@@ -974,6 +978,9 @@ def convert_to_geoparquet_cmd(
         validate_output(output_file)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_file, any_extension)
 
     # Check for streaming output
     if should_stream_output(output_file):
@@ -1125,6 +1132,7 @@ def _reproject_impl_cli(
 @profile_option
 @compression_options
 @geoparquet_version_option
+@any_extension_option
 def convert_reproject(
     input_file,
     output_file,
@@ -1136,6 +1144,7 @@ def convert_reproject(
     compression,
     compression_level,
     geoparquet_version,
+    any_extension,
 ):
     """
     Reproject a GeoParquet file to a different CRS.
@@ -1153,6 +1162,9 @@ def convert_reproject(
         gpio convert reproject input.parquet --overwrite -d EPSG:4326
         gpio convert reproject input.parquet output.parquet --dst-crs EPSG:3857
     """
+    # Validate .parquet extension
+    validate_parquet_extension(output_file, any_extension)
+
     _reproject_impl_cli(
         input_file,
         output_file,
@@ -1570,6 +1582,7 @@ def inspect(
 @show_sql_option
 @verbose_option
 @profile_option
+@any_extension_option
 def extract(
     input_file,
     output_file,
@@ -1592,6 +1605,7 @@ def extract(
     show_sql,
     verbose,
     profile,
+    any_extension,
 ):
     """
     Extract columns and rows from GeoParquet files.
@@ -1676,6 +1690,9 @@ def extract(
         validate_output(output_file)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_file, any_extension)
 
     # Validate mutually exclusive row group options
     if row_group_size and row_group_size_mb:
@@ -1839,6 +1856,7 @@ def sort(ctx):
 @geoparquet_version_option
 @profile_option
 @verbose_option
+@any_extension_option
 def hilbert_order(
     input_parquet,
     output_parquet,
@@ -1851,6 +1869,7 @@ def hilbert_order(
     row_group_size_mb,
     geoparquet_version,
     verbose,
+    any_extension,
 ):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -1870,6 +1889,9 @@ def hilbert_order(
         validate_output(output_parquet)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -1917,6 +1939,7 @@ def hilbert_order(
 @output_format_options
 @geoparquet_version_option
 @verbose_option
+@any_extension_option
 def sort_column(
     input_parquet,
     output_parquet,
@@ -1929,6 +1952,7 @@ def sort_column(
     row_group_size_mb,
     geoparquet_version,
     verbose,
+    any_extension,
 ):
     """
     Sort a GeoParquet file by specified column(s).
@@ -1943,6 +1967,9 @@ def sort_column(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2004,6 +2031,7 @@ def sort_column(
 @output_format_options
 @geoparquet_version_option
 @verbose_option
+@any_extension_option
 def sort_quadkey(
     input_parquet,
     output_parquet,
@@ -2018,6 +2046,7 @@ def sort_quadkey(
     row_group_size_mb,
     geoparquet_version,
     verbose,
+    any_extension,
 ):
     """
     Sort a GeoParquet file by quadkey spatial index.
@@ -2031,6 +2060,9 @@ def sort_quadkey(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2095,6 +2127,7 @@ def add(ctx):
 @profile_option
 @dry_run_option
 @verbose_option
+@any_extension_option
 def add_country_codes(
     input_parquet,
     output_parquet,
@@ -2109,6 +2142,7 @@ def add_country_codes(
     geoparquet_version,
     dry_run,
     verbose,
+    any_extension,
 ):
     """Add admin division columns via spatial join with remote boundaries datasets.
 
@@ -2158,6 +2192,9 @@ def add_country_codes(
     # Require output_parquet for non-streaming mode
     if output_parquet is None:
         raise click.UsageError("Missing argument 'OUTPUT_PARQUET'.")
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -2219,6 +2256,7 @@ def add_country_codes(
 @profile_option
 @dry_run_option
 @verbose_option
+@any_extension_option
 def add_bbox(
     input_parquet,
     output_parquet,
@@ -2232,6 +2270,7 @@ def add_bbox(
     geoparquet_version,
     dry_run,
     verbose,
+    any_extension,
 ):
     """Add a bbox struct column to a GeoParquet file.
 
@@ -2267,6 +2306,9 @@ def add_bbox(
         validate_output(output_parquet)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -2342,6 +2384,7 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
 @profile_option
 @dry_run_option
 @verbose_option
+@any_extension_option
 def add_h3(
     input_parquet,
     output_parquet,
@@ -2355,6 +2398,7 @@ def add_h3(
     geoparquet_version,
     dry_run,
     verbose,
+    any_extension,
 ):
     """Add an H3 cell ID column to a GeoParquet file.
 
@@ -2374,6 +2418,9 @@ def add_h3(
         validate_output(output_parquet)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -2450,6 +2497,7 @@ def add_h3(
     help="Force operation on large datasets without confirmation",
 )
 @verbose_option
+@any_extension_option
 def add_kdtree(
     input_parquet,
     output_parquet,
@@ -2467,6 +2515,7 @@ def add_kdtree(
     dry_run,
     force,
     verbose,
+    any_extension,
 ):
     """Add a KD-tree cell ID column to a GeoParquet file.
 
@@ -2484,6 +2533,9 @@ def add_kdtree(
     Use --verbose to track progress with iteration-by-iteration updates.
     """
     import math
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if sum([partitions is not None, auto is not None]) > 1:
@@ -2577,6 +2629,7 @@ def add_kdtree(
 @geoparquet_version_option
 @dry_run_option
 @verbose_option
+@any_extension_option
 def add_quadkey(
     input_parquet,
     output_parquet,
@@ -2591,6 +2644,7 @@ def add_quadkey(
     geoparquet_version,
     dry_run,
     verbose,
+    any_extension,
 ):
     """Add a quadkey column to a GeoParquet file.
 
@@ -2610,6 +2664,9 @@ def add_quadkey(
         validate_output(output_parquet)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:

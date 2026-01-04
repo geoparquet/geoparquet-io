@@ -104,6 +104,20 @@ def overwrite_option(func):
     return click.option("--overwrite", is_flag=True, help="Overwrite existing files")(func)
 
 
+def any_extension_option(func):
+    """
+    Add --any-extension option to a command.
+
+    Allows output files without .parquet extension. By default, commands
+    that write parquet files require the output to have a .parquet extension.
+    """
+    return click.option(
+        "--any-extension",
+        is_flag=True,
+        help="Allow output file without .parquet extension",
+    )(func)
+
+
 def profile_option(func):
     """
     Add --profile option to a command.

@@ -22,6 +22,7 @@ from geoparquet_io.core.common import (
     parse_size_string,
     should_skip_bbox,
     validate_compression_settings,
+    validate_parquet_extension,
 )
 
 
@@ -590,3 +591,78 @@ class TestGetBboxAdvice:
         """Test that verbose mode does not cause errors."""
         result = get_bbox_advice(places_test_file, "spatial_filtering", verbose=True)
         assert isinstance(result, dict)
+
+
+class TestValidateParquetExtension:
+    """Tests for validate_parquet_extension function."""
+
+    def test_valid_parquet_extension(self):
+        """Test that .parquet extension passes validation."""
+        # Should not raise
+        validate_parquet_extension("output.parquet")
+        validate_parquet_extension("/path/to/output.parquet")
+        validate_parquet_extension("./relative/output.parquet")
+
+    def test_valid_parquet_extension_uppercase(self):
+        """Test that uppercase .PARQUET extension passes validation."""
+        validate_parquet_extension("output.PARQUET")
+        validate_parquet_extension("output.Parquet")
+
+    def test_invalid_extension_raises_error(self):
+        """Test that non-.parquet extension raises ClickException."""
+        import click
+
+        with pytest.raises(click.ClickException) as exc_info:
+            validate_parquet_extension("output.geojson")
+        assert ".parquet extension" in str(exc_info.value)
+        assert "--any-extension" in str(exc_info.value)
+
+    def test_no_extension_raises_error(self):
+        """Test that file without extension raises ClickException."""
+        import click
+
+        with pytest.raises(click.ClickException):
+            validate_parquet_extension("output_file")
+
+    def test_wrong_extension_variations(self):
+        """Test various wrong extensions raise errors."""
+        import click
+
+        for ext in [".json", ".csv", ".txt", ".gpkg", ".shp"]:
+            with pytest.raises(click.ClickException):
+                validate_parquet_extension(f"output{ext}")
+
+    def test_any_extension_flag_allows_non_parquet(self):
+        """Test that any_extension=True bypasses validation."""
+        # Should not raise with any_extension=True
+        validate_parquet_extension("output.geojson", any_extension=True)
+        validate_parquet_extension("output.csv", any_extension=True)
+        validate_parquet_extension("no_extension", any_extension=True)
+
+    def test_none_output_skips_validation(self):
+        """Test that None output (streaming) skips validation."""
+        # Should not raise
+        validate_parquet_extension(None)
+        validate_parquet_extension(None, any_extension=False)
+
+    def test_streaming_output_skips_validation(self):
+        """Test that '-' output (stdout) skips validation."""
+        # Should not raise
+        validate_parquet_extension("-")
+        validate_parquet_extension("-", any_extension=False)
+
+    def test_remote_s3_url_validation(self):
+        """Test that S3 URLs are validated for extension."""
+        import click
+
+        # Valid
+        validate_parquet_extension("s3://bucket/path/file.parquet")
+
+        # Invalid
+        with pytest.raises(click.ClickException):
+            validate_parquet_extension("s3://bucket/path/file.geojson")
+
+    def test_remote_url_with_any_extension(self):
+        """Test that remote URLs with any_extension bypass validation."""
+        validate_parquet_extension("s3://bucket/path/file.geojson", any_extension=True)
+        validate_parquet_extension("gs://bucket/path/file.json", any_extension=True)
