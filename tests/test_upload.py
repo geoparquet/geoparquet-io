@@ -91,17 +91,22 @@ class TestUploadDryRun:
     def test_upload_single_file_dry_run_with_profile(self, places_test_file):
         """Test dry-run mode with AWS profile."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "upload",
-                places_test_file,
-                "s3://test-bucket/data.parquet",
-                "--profile",
-                "test-profile",
-                "--dry-run",
-            ],
-        )
+        # Mock credential check to pass (since test-profile doesn't exist)
+        with patch(
+            "geoparquet_io.core.upload.check_credentials",
+            return_value=(True, ""),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "upload",
+                    places_test_file,
+                    "s3://test-bucket/data.parquet",
+                    "--profile",
+                    "test-profile",
+                    "--dry-run",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
@@ -277,11 +282,28 @@ class TestCredentialChecking:
             assert hint == ""
 
     def test_check_credentials_without_env_vars(self):
-        """Test credential checking fails without environment variables."""
+        """Test credential checking fails without environment variables or default profile."""
         with patch.dict("os.environ", {}, clear=True):
-            ok, hint = check_credentials("s3://bucket/path")
-            assert ok is False
-            assert "S3 credentials not found" in hint
+            # Also mock the default profile fallback to return no credentials
+            with patch(
+                "geoparquet_io.core.upload._load_aws_credentials_from_profile",
+                return_value=(None, None, None),
+            ):
+                ok, hint = check_credentials("s3://bucket/path")
+                assert ok is False
+                assert "S3 credentials not found" in hint
+
+    def test_check_credentials_with_default_profile_fallback(self):
+        """Test credential checking falls back to default profile in ~/.aws/credentials."""
+        with patch.dict("os.environ", {}, clear=True):
+            # Mock the default profile to return valid credentials
+            with patch(
+                "geoparquet_io.core.upload._load_aws_credentials_from_profile",
+                return_value=("access_key", "secret_key", "us-west-2"),
+            ):
+                ok, hint = check_credentials("s3://bucket/path")
+                assert ok is True
+                assert hint == ""
 
     def test_check_credentials_http_always_ok(self):
         """Test credential checking passes for HTTP URLs."""

@@ -114,10 +114,15 @@ def _check_s3_credentials(profile: str | None = None) -> tuple[bool, str]:
             hints.append("  export AWS_SECRET_ACCESS_KEY=your_secret_key")
             return False, "\n".join(hints)
 
-    # Check environment variables
+    # Check environment variables first
     access_key = os.environ.get("AWS_ACCESS_KEY_ID")
     secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
 
+    if access_key and secret_key:
+        return True, ""
+
+    # Fall back to default profile in ~/.aws/credentials
+    access_key, secret_key, _ = _load_aws_credentials_from_profile("default")
     if access_key and secret_key:
         return True, ""
 
@@ -296,14 +301,15 @@ def _setup_store_and_kwargs(
         s3_region: S3 region (auto-detected from env var or profile config)
         s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
 
-    Note: For S3, credentials are loaded from:
+    Note: For S3, credentials are loaded from (in order):
     1. --profile flag (reads ~/.aws/credentials)
     2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+    3. Default profile in ~/.aws/credentials (automatic fallback)
     """
     if bucket_url.startswith("s3://"):
         bucket = bucket_url.replace("s3://", "").split("/")[0]
 
-        # Load credentials from profile or environment
+        # Load credentials from profile, environment, or default profile
         access_key = None
         secret_key = None
         profile_region = None
@@ -311,8 +317,15 @@ def _setup_store_and_kwargs(
         if profile:
             access_key, secret_key, profile_region = _load_aws_credentials_from_profile(profile)
         else:
+            # Try environment variables first
             access_key = os.environ.get("AWS_ACCESS_KEY_ID")
             secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+            # Fall back to default profile if no env vars
+            if not (access_key and secret_key):
+                access_key, secret_key, profile_region = _load_aws_credentials_from_profile(
+                    "default"
+                )
 
         # Determine region: explicit flag > env var > profile config > bucket heuristic
         region = s3_region
