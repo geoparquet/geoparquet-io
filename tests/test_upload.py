@@ -69,7 +69,7 @@ class TestUploadDryRun:
         """Test dry-run mode for single file upload."""
         runner = CliRunner()
         with patch(
-            "geoparquet_io.core.upload.check_credentials",
+            "geoparquet_io.cli.main.check_credentials",
             return_value=(True, ""),
         ):
             result = runner.invoke(
@@ -98,7 +98,7 @@ class TestUploadDryRun:
         runner = CliRunner()
         # Mock credential check to pass (since test-profile doesn't exist)
         with patch(
-            "geoparquet_io.core.upload.check_credentials",
+            "geoparquet_io.cli.main.check_credentials",
             return_value=(True, ""),
         ):
             result = runner.invoke(
@@ -129,7 +129,7 @@ class TestUploadDryRun:
 
         runner = CliRunner()
         with patch(
-            "geoparquet_io.core.upload.check_credentials",
+            "geoparquet_io.cli.main.check_credentials",
             return_value=(True, ""),
         ):
             result = runner.invoke(
@@ -165,7 +165,7 @@ class TestUploadDryRun:
 
         runner = CliRunner()
         with patch(
-            "geoparquet_io.core.upload.check_credentials",
+            "geoparquet_io.cli.main.check_credentials",
             return_value=(True, ""),
         ):
             result = runner.invoke(
@@ -202,7 +202,7 @@ class TestUploadDryRun:
 
         runner = CliRunner()
         with patch(
-            "geoparquet_io.core.upload.check_credentials",
+            "geoparquet_io.cli.main.check_credentials",
             return_value=(True, ""),
         ):
             result = runner.invoke(
@@ -228,7 +228,7 @@ class TestUploadDryRun:
 
         runner = CliRunner()
         with patch(
-            "geoparquet_io.core.upload.check_credentials",
+            "geoparquet_io.cli.main.check_credentials",
             return_value=(True, ""),
         ):
             result = runner.invoke(
@@ -256,7 +256,7 @@ class TestUploadDryRun:
 
         runner = CliRunner()
         with patch(
-            "geoparquet_io.core.upload.check_credentials",
+            "geoparquet_io.cli.main.check_credentials",
             return_value=(True, ""),
         ):
             result = runner.invoke(
@@ -415,7 +415,7 @@ class TestUploadCLIS3Options:
         """Test dry-run mode with S3 endpoint options."""
         runner = CliRunner()
         with patch(
-            "geoparquet_io.core.upload.check_credentials",
+            "geoparquet_io.cli.main.check_credentials",
             return_value=(True, ""),
         ):
             result = runner.invoke(
@@ -439,7 +439,7 @@ class TestUploadCLIS3Options:
         """Test dry-run mode with S3 region option."""
         runner = CliRunner()
         with patch(
-            "geoparquet_io.core.upload.check_credentials",
+            "geoparquet_io.cli.main.check_credentials",
             return_value=(True, ""),
         ):
             result = runner.invoke(
