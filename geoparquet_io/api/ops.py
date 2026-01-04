@@ -270,3 +270,67 @@ def reproject(
         source_crs=source_crs,
         geometry_column=geometry_column,
     )
+
+
+def convert_to_geojson(
+    table: pa.Table,
+    output_path: str | None = None,
+    rs: bool = True,
+    precision: int = 7,
+    write_bbox: bool = False,
+    id_field: str | None = None,
+) -> str | None:
+    """
+    Convert a GeoParquet table to GeoJSON.
+
+    Writes to file if output_path is provided, otherwise streams to stdout.
+
+    Args:
+        table: Input PyArrow Table with geometry column
+        output_path: Output file path, or None to stream to stdout
+        rs: Include RFC 8142 record separators (streaming mode only)
+        precision: Coordinate decimal precision (default 7 per RFC 7946).
+            Note: Very low precision values (e.g., 3) may collapse small
+            geometries since coordinates are snapped to a grid.
+        write_bbox: Include bbox property for each feature
+        id_field: Field to use as feature 'id' member
+
+    Returns:
+        Output path if writing to file, None if streaming to stdout
+    """
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from geoparquet_io.core.geojson_stream import (
+        convert_to_geojson as convert_to_geojson_impl,
+    )
+
+    if not isinstance(table, pa.Table):
+        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
+
+    # Write table to temp parquet file for processing
+    temp_dir = Path(tempfile.gettempdir())
+    temp_input = temp_dir / f"gpio_geojson_{uuid.uuid4()}.parquet"
+
+    try:
+        import pyarrow.parquet as pq
+
+        pq.write_table(table, str(temp_input))
+
+        # Call core function
+        convert_to_geojson_impl(
+            input_path=str(temp_input),
+            output_path=output_path,
+            rs=rs,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+        )
+
+        return output_path
+
+    finally:
+        # Clean up temp file
+        if temp_input.exists():
+            temp_input.unlink()

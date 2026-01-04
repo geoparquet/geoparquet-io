@@ -1,11 +1,222 @@
 """Upload GeoParquet files to cloud object storage."""
 
 import asyncio
+import configparser
+import os
+import re
 import time
 from pathlib import Path
 
 import obstore as obs
 from obstore.store import S3Store
+
+
+def _load_aws_credentials_from_profile(
+    profile: str = "default",
+) -> tuple[str | None, str | None, str | None]:
+    """Load AWS credentials from ~/.aws/credentials file.
+
+    Uses Python's built-in configparser to read credentials without requiring boto3.
+
+    Args:
+        profile: AWS profile name (default: "default")
+
+    Returns:
+        Tuple of (access_key_id, secret_access_key, region)
+        Any value may be None if not found.
+    """
+    creds_file = Path.home() / ".aws" / "credentials"
+    config_file = Path.home() / ".aws" / "config"
+
+    access_key = None
+    secret_key = None
+    region = None
+
+    # Read credentials
+    if creds_file.exists():
+        parser = configparser.ConfigParser()
+        parser.read(creds_file)
+
+        if profile in parser.sections():
+            section = parser[profile]
+            access_key = section.get("aws_access_key_id")
+            secret_key = section.get("aws_secret_access_key")
+        elif profile == "default" and "DEFAULT" in parser:
+            access_key = parser["DEFAULT"].get("aws_access_key_id")
+            secret_key = parser["DEFAULT"].get("aws_secret_access_key")
+
+    # Read region from config
+    if config_file.exists():
+        config = configparser.ConfigParser()
+        config.read(config_file)
+
+        # Profile sections in config are named "profile <name>" except for default
+        profile_section = profile if profile == "default" else f"profile {profile}"
+        if profile_section in config.sections():
+            region = config[profile_section].get("region")
+        elif profile == "default" and "DEFAULT" in config:
+            region = config["DEFAULT"].get("region")
+
+    return access_key, secret_key, region
+
+
+def _try_infer_region_from_bucket(bucket: str) -> str | None:
+    """Try to infer AWS region from bucket name.
+
+    Some S3-compatible services include region in bucket name, e.g.:
+    - us-west-2.opendata.source.coop -> us-west-2
+    - eu-central-1.example.com -> eu-central-1
+
+    This is a best-effort heuristic and should not be relied upon.
+
+    Args:
+        bucket: S3 bucket name
+
+    Returns:
+        Region string if detected, None otherwise
+    """
+    # Pattern matches AWS region format at start of bucket name
+    region_pattern = r"^(us|eu|ap|sa|ca|me|af)-(north|south|east|west|central|northeast|southeast|northwest|southwest)-\d"
+    match = re.match(region_pattern, bucket)
+    if match:
+        # Extract full region (e.g., "us-west-2" from "us-west-2.opendata.source.coop")
+        region_end = bucket.find(".")
+        if region_end > 0:
+            return bucket[:region_end]
+    return None
+
+
+def _check_s3_credentials(profile: str | None = None) -> tuple[bool, str]:
+    """Check if S3 credentials are available.
+
+    Args:
+        profile: AWS profile name to check (optional)
+
+    Returns:
+        Tuple of (credentials_found, hint_message)
+    """
+    # If profile specified, check credentials file
+    if profile:
+        access_key, secret_key, _ = _load_aws_credentials_from_profile(profile)
+        if access_key and secret_key:
+            return True, ""
+        else:
+            hints = []
+            hints.append(f"AWS profile '{profile}' not found or incomplete.")
+            hints.append("")
+            hints.append("Ensure your ~/.aws/credentials file has this profile:")
+            hints.append(f"  [{profile}]")
+            hints.append("  aws_access_key_id = YOUR_ACCESS_KEY")
+            hints.append("  aws_secret_access_key = YOUR_SECRET_KEY")
+            hints.append("")
+            hints.append("Or use environment variables instead:")
+            hints.append("  export AWS_ACCESS_KEY_ID=your_access_key")
+            hints.append("  export AWS_SECRET_ACCESS_KEY=your_secret_key")
+            return False, "\n".join(hints)
+
+    # Check environment variables first
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+    if access_key and secret_key:
+        return True, ""
+
+    # Fall back to default profile in ~/.aws/credentials
+    access_key, secret_key, _ = _load_aws_credentials_from_profile("default")
+    if access_key and secret_key:
+        return True, ""
+
+    hints = []
+    hints.append("S3 credentials not found. To configure credentials:")
+    hints.append("")
+    hints.append("Option 1: Set environment variables")
+    hints.append("  export AWS_ACCESS_KEY_ID=your_access_key")
+    hints.append("  export AWS_SECRET_ACCESS_KEY=your_secret_key")
+    hints.append("  export AWS_REGION=us-west-2  # required for most buckets")
+    hints.append("")
+    hints.append("Option 2: Use --profile flag with AWS credentials file")
+    hints.append("  gpio publish upload file.parquet s3://bucket/path --profile myprofile")
+    hints.append("")
+    hints.append("Option 3: Configure AWS CLI")
+    hints.append("  aws configure")
+
+    return False, "\n".join(hints)
+
+
+def _check_gcs_credentials() -> tuple[bool, str]:
+    """Check if GCS credentials are available.
+
+    Returns:
+        Tuple of (credentials_found, hint_message)
+    """
+    # Check for application default credentials or service account key
+    gcloud_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if gcloud_creds and os.path.exists(gcloud_creds):
+        return True, ""
+
+    # Check if running in GCP (metadata service available)
+    # For now, we'll assume credentials might be available via metadata
+
+    hints = []
+    hints.append("GCS credentials not found. To configure credentials:")
+    hints.append("")
+    hints.append("Option 1: Set service account key")
+    hints.append("  export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json")
+    hints.append("")
+    hints.append("Option 2: Use application default credentials")
+    hints.append("  gcloud auth application-default login")
+
+    return False, "\n".join(hints)
+
+
+def _check_azure_credentials() -> tuple[bool, str]:
+    """Check if Azure credentials are available.
+
+    Returns:
+        Tuple of (credentials_found, hint_message)
+    """
+    # Check for various Azure credential env vars
+    account_key = os.environ.get("AZURE_STORAGE_ACCOUNT_KEY")
+    sas_token = os.environ.get("AZURE_STORAGE_SAS_TOKEN")
+    client_id = os.environ.get("AZURE_CLIENT_ID")
+
+    if account_key or sas_token or client_id:
+        return True, ""
+
+    hints = []
+    hints.append("Azure credentials not found. To configure credentials:")
+    hints.append("")
+    hints.append("Option 1: Set storage account key")
+    hints.append("  export AZURE_STORAGE_ACCOUNT_KEY=your_key")
+    hints.append("")
+    hints.append("Option 2: Set SAS token")
+    hints.append("  export AZURE_STORAGE_SAS_TOKEN=your_token")
+    hints.append("")
+    hints.append("Option 3: Use Azure CLI")
+    hints.append("  az login")
+
+    return False, "\n".join(hints)
+
+
+def check_credentials(destination: str, profile: str | None = None) -> tuple[bool, str]:
+    """Check if credentials are available for the destination.
+
+    Args:
+        destination: Object store URL (s3://, gs://, az://)
+        profile: AWS profile name (for S3 only)
+
+    Returns:
+        Tuple of (credentials_ok, hint_message)
+    """
+    if destination.startswith("s3://"):
+        return _check_s3_credentials(profile)
+    elif destination.startswith("gs://"):
+        return _check_gcs_credentials()
+    elif destination.startswith("az://"):
+        return _check_azure_credentials()
+    else:
+        # HTTP or other - assume ok
+        return True, ""
 
 
 async def _upload_file_with_progress(store, source: Path, target_key: str, **kwargs) -> None:
@@ -69,22 +280,6 @@ def _print_directory_dry_run(
     print()
 
 
-def _create_s3_store_with_endpoint(
-    bucket_url: str,
-    s3_endpoint: str,
-    s3_region: str | None,
-    s3_use_ssl: bool,
-):
-    """Create an S3Store with custom endpoint configuration."""
-    bucket = bucket_url.replace("s3://", "").split("/")[0]
-    protocol = "https" if s3_use_ssl else "http"
-    return S3Store(
-        bucket,
-        endpoint=f"{protocol}://{s3_endpoint}",
-        region=s3_region or "us-east-1",
-    )
-
-
 def _setup_store_and_kwargs(
     bucket_url: str,
     profile: str | None,
@@ -99,23 +294,64 @@ def _setup_store_and_kwargs(
 
     Args:
         bucket_url: The object store bucket URL (e.g., s3://bucket)
-        profile: AWS profile name (handled via AWS_PROFILE env var by caller)
+        profile: AWS profile name (loads credentials from ~/.aws/credentials)
         chunk_concurrency: Max concurrent chunks per file
         chunk_size: Chunk size in bytes for multipart uploads
         s3_endpoint: Custom S3-compatible endpoint (e.g., "minio.example.com:9000")
-        s3_region: S3 region (default: us-east-1 when using custom endpoint)
+        s3_region: S3 region (auto-detected from env var or profile config)
         s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
 
-    Note: Profile handling is done via AWS_PROFILE env var set by the caller
-    (see setup_aws_profile_if_needed in common.py). The obstore library
-    automatically respects AWS_PROFILE along with other standard AWS SDK
-    credential sources (including AWS_ENDPOINT_URL).
+    Note: For S3, credentials are loaded from (in order):
+    1. --profile flag (reads ~/.aws/credentials)
+    2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+    3. Default profile in ~/.aws/credentials (automatic fallback)
     """
-    # When explicit s3_endpoint is provided, use S3Store directly
-    # Otherwise, use from_url which automatically reads AWS_ENDPOINT_URL env var
-    if s3_endpoint and bucket_url.startswith("s3://"):
-        store = _create_s3_store_with_endpoint(bucket_url, s3_endpoint, s3_region, s3_use_ssl)
+    if bucket_url.startswith("s3://"):
+        bucket = bucket_url.replace("s3://", "").split("/")[0]
+
+        # Load credentials from profile, environment, or default profile
+        access_key = None
+        secret_key = None
+        profile_region = None
+
+        if profile:
+            access_key, secret_key, profile_region = _load_aws_credentials_from_profile(profile)
+        else:
+            # Try environment variables first
+            access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+            secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+            # Fall back to default profile if no env vars
+            if not (access_key and secret_key):
+                access_key, secret_key, profile_region = _load_aws_credentials_from_profile(
+                    "default"
+                )
+
+        # Determine region: explicit flag > env var > profile config > bucket heuristic
+        region = s3_region
+        if not region:
+            region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        if not region and profile_region:
+            region = profile_region
+        if not region:
+            region = _try_infer_region_from_bucket(bucket)
+
+        # Build S3Store with appropriate configuration
+        store_kwargs = {"region": region} if region else {}
+
+        if access_key and secret_key:
+            store_kwargs["access_key_id"] = access_key
+            store_kwargs["secret_access_key"] = secret_key
+
+        if s3_endpoint:
+            protocol = "https" if s3_use_ssl else "http"
+            store_kwargs["endpoint"] = f"{protocol}://{s3_endpoint}"
+            if not region:
+                store_kwargs["region"] = "us-east-1"  # Default for custom endpoints
+
+        store = S3Store(bucket, **store_kwargs)
     else:
+        # Non-S3 stores (GCS, Azure, HTTP)
         store = obs.store.from_url(bucket_url)
 
     kwargs = {"max_concurrency": chunk_concurrency}

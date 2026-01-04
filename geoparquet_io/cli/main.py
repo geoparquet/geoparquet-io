@@ -5,6 +5,7 @@ import click
 from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
     SingleFileCommand,
+    any_extension_option,
     check_partition_options,
     compression_options,
     dry_run_option,
@@ -25,6 +26,7 @@ from geoparquet_io.core.add_kdtree_column import add_kdtree_column as add_kdtree
 from geoparquet_io.core.add_quadkey_column import add_quadkey_column as add_quadkey_column_impl
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
+from geoparquet_io.core.common import validate_parquet_extension
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
@@ -52,6 +54,7 @@ from geoparquet_io.core.partition_by_string import (
 from geoparquet_io.core.reproject import reproject_impl
 from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_impl
+from geoparquet_io.core.upload import check_credentials
 from geoparquet_io.core.upload import upload as upload_impl
 
 # Version info
@@ -886,6 +889,7 @@ def convert(ctx):
         gpio convert input.shp output.parquet                    # To GeoParquet (default)
         gpio convert geoparquet input.shp output.parquet         # Explicit subcommand
         gpio convert reproject input.parquet out.parquet -d EPSG:32610
+        gpio convert geojson data.parquet | tippecanoe -P -o tiles.pmtiles
     """
     ctx.ensure_object(dict)
     timestamps = ctx.obj.get("timestamps", False)
@@ -931,6 +935,7 @@ def convert(ctx):
 @verbose_option
 @compression_options
 @profile_option
+@any_extension_option
 def convert_to_geoparquet_cmd(
     input_file,
     output_file,
@@ -946,6 +951,7 @@ def convert_to_geoparquet_cmd(
     compression,
     compression_level,
     profile,
+    any_extension,
 ):
     """
     Convert vector formats to optimized GeoParquet.
@@ -974,6 +980,9 @@ def convert_to_geoparquet_cmd(
         validate_output(output_file)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_file, any_extension)
 
     # Check for streaming output
     if should_stream_output(output_file):
@@ -1125,6 +1134,7 @@ def _reproject_impl_cli(
 @profile_option
 @compression_options
 @geoparquet_version_option
+@any_extension_option
 def convert_reproject(
     input_file,
     output_file,
@@ -1136,6 +1146,7 @@ def convert_reproject(
     compression,
     compression_level,
     geoparquet_version,
+    any_extension,
 ):
     """
     Reproject a GeoParquet file to a different CRS.
@@ -1153,6 +1164,9 @@ def convert_reproject(
         gpio convert reproject input.parquet --overwrite -d EPSG:4326
         gpio convert reproject input.parquet output.parquet --dst-crs EPSG:3857
     """
+    # Validate .parquet extension
+    validate_parquet_extension(output_file, any_extension)
+
     _reproject_impl_cli(
         input_file,
         output_file,
@@ -1165,6 +1179,133 @@ def convert_reproject(
         compression_level,
         geoparquet_version,
     )
+
+
+@convert.command(name="geojson", cls=SingleFileCommand)
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--no-rs",
+    is_flag=True,
+    help="Disable RFC 8142 record separators (enabled by default for tippecanoe -P)",
+)
+@click.option(
+    "--precision",
+    type=int,
+    default=7,
+    help="Coordinate decimal precision for geometry and bbox (default: 7 per RFC 7946).",
+)
+@click.option(
+    "--write-bbox",
+    is_flag=True,
+    help="Include bbox property for each feature",
+)
+@click.option(
+    "--id-field",
+    type=str,
+    default=None,
+    help="Source field to use as feature 'id' member",
+)
+@click.option(
+    "--description",
+    type=str,
+    default=None,
+    help="Description to add to the FeatureCollection",
+)
+@click.option(
+    "--feature-collection",
+    "no_seq",
+    is_flag=True,
+    help="Output a FeatureCollection instead of newline-delimited GeoJSONSeq (streaming only)",
+)
+@click.option(
+    "--pretty",
+    is_flag=True,
+    help="Pretty-print the JSON output with indentation",
+)
+@click.option(
+    "--keep-crs",
+    is_flag=True,
+    help="Keep original CRS instead of reprojecting to WGS84 (EPSG:4326)",
+)
+@verbose_option
+@profile_option
+def convert_geojson(
+    input_file,
+    output_file,
+    no_rs,
+    precision,
+    write_bbox,
+    id_field,
+    description,
+    no_seq,
+    pretty,
+    keep_crs,
+    verbose,
+    profile,
+):
+    """
+    Convert GeoParquet to GeoJSON format.
+
+    Supports two modes based on whether OUTPUT_FILE is provided:
+
+    \b
+    STREAMING MODE (no output file):
+      Streams newline-delimited GeoJSON (GeoJSONSeq) to stdout with RFC 8142
+      record separators. Designed for piping to tippecanoe for PMTiles/MBTiles.
+      Use --feature-collection to output a FeatureCollection instead.
+      Supports reading from stdin with "-" for pipeline use.
+
+    \b
+    FILE MODE (with output file):
+      Writes a standard GeoJSON FeatureCollection to the specified file.
+
+    \b
+    Examples:
+      # Stream to tippecanoe for PMTiles generation
+      gpio convert geojson buildings.parquet | tippecanoe -P -o buildings.pmtiles
+
+      # Pipeline with filtering
+      gpio extract data.parquet --bbox "-122.5,37.5,-122,38" | gpio convert geojson - | tippecanoe -P -o sf.pmtiles
+
+      # Write to GeoJSON file
+      gpio convert geojson data.parquet output.geojson
+
+      # Pretty-print with description
+      gpio convert geojson data.parquet output.geojson --pretty --description "My dataset"
+
+    \b
+    Note: GeoParquet input is automatically reprojected to WGS84 (EPSG:4326)
+    for RFC 7946 compliance. Use --keep-crs to preserve the original CRS.
+    """
+    from geoparquet_io.core.common import validate_profile_for_urls
+    from geoparquet_io.core.geojson_stream import convert_to_geojson
+
+    configure_verbose(verbose)
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, input_file, output_file)
+
+    try:
+        feature_count = convert_to_geojson(
+            input_path=input_file,
+            output_path=output_file,
+            rs=not no_rs,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+            description=description,
+            seq=not no_seq,
+            pretty=pretty,
+            verbose=verbose,
+            profile=profile,
+            keep_crs=keep_crs,
+        )
+
+        if output_file:
+            click.echo(f"Converted {feature_count:,} features to {output_file}")
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
 
 # Deprecated reproject command
@@ -1570,6 +1711,7 @@ def inspect(
 @show_sql_option
 @verbose_option
 @profile_option
+@any_extension_option
 def extract(
     input_file,
     output_file,
@@ -1592,6 +1734,7 @@ def extract(
     show_sql,
     verbose,
     profile,
+    any_extension,
 ):
     """
     Extract columns and rows from GeoParquet files.
@@ -1676,6 +1819,9 @@ def extract(
         validate_output(output_file)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_file, any_extension)
 
     # Validate mutually exclusive row group options
     if row_group_size and row_group_size_mb:
@@ -1839,6 +1985,7 @@ def sort(ctx):
 @geoparquet_version_option
 @profile_option
 @verbose_option
+@any_extension_option
 def hilbert_order(
     input_parquet,
     output_parquet,
@@ -1851,6 +1998,7 @@ def hilbert_order(
     row_group_size_mb,
     geoparquet_version,
     verbose,
+    any_extension,
 ):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -1870,6 +2018,9 @@ def hilbert_order(
         validate_output(output_parquet)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -1917,6 +2068,7 @@ def hilbert_order(
 @output_format_options
 @geoparquet_version_option
 @verbose_option
+@any_extension_option
 def sort_column(
     input_parquet,
     output_parquet,
@@ -1929,6 +2081,7 @@ def sort_column(
     row_group_size_mb,
     geoparquet_version,
     verbose,
+    any_extension,
 ):
     """
     Sort a GeoParquet file by specified column(s).
@@ -1943,6 +2096,9 @@ def sort_column(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2004,6 +2160,7 @@ def sort_column(
 @output_format_options
 @geoparquet_version_option
 @verbose_option
+@any_extension_option
 def sort_quadkey(
     input_parquet,
     output_parquet,
@@ -2018,6 +2175,7 @@ def sort_quadkey(
     row_group_size_mb,
     geoparquet_version,
     verbose,
+    any_extension,
 ):
     """
     Sort a GeoParquet file by quadkey spatial index.
@@ -2031,6 +2189,9 @@ def sort_quadkey(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
+
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
         raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
@@ -2095,6 +2256,7 @@ def add(ctx):
 @profile_option
 @dry_run_option
 @verbose_option
+@any_extension_option
 def add_country_codes(
     input_parquet,
     output_parquet,
@@ -2109,6 +2271,7 @@ def add_country_codes(
     geoparquet_version,
     dry_run,
     verbose,
+    any_extension,
 ):
     """Add admin division columns via spatial join with remote boundaries datasets.
 
@@ -2158,6 +2321,9 @@ def add_country_codes(
     # Require output_parquet for non-streaming mode
     if output_parquet is None:
         raise click.UsageError("Missing argument 'OUTPUT_PARQUET'.")
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -2219,6 +2385,7 @@ def add_country_codes(
 @profile_option
 @dry_run_option
 @verbose_option
+@any_extension_option
 def add_bbox(
     input_parquet,
     output_parquet,
@@ -2232,6 +2399,7 @@ def add_bbox(
     geoparquet_version,
     dry_run,
     verbose,
+    any_extension,
 ):
     """Add a bbox struct column to a GeoParquet file.
 
@@ -2267,6 +2435,9 @@ def add_bbox(
         validate_output(output_parquet)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -2342,6 +2513,7 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
 @profile_option
 @dry_run_option
 @verbose_option
+@any_extension_option
 def add_h3(
     input_parquet,
     output_parquet,
@@ -2355,6 +2527,7 @@ def add_h3(
     geoparquet_version,
     dry_run,
     verbose,
+    any_extension,
 ):
     """Add an H3 cell ID column to a GeoParquet file.
 
@@ -2374,6 +2547,9 @@ def add_h3(
         validate_output(output_parquet)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -2450,6 +2626,7 @@ def add_h3(
     help="Force operation on large datasets without confirmation",
 )
 @verbose_option
+@any_extension_option
 def add_kdtree(
     input_parquet,
     output_parquet,
@@ -2467,6 +2644,7 @@ def add_kdtree(
     dry_run,
     force,
     verbose,
+    any_extension,
 ):
     """Add a KD-tree cell ID column to a GeoParquet file.
 
@@ -2484,6 +2662,9 @@ def add_kdtree(
     Use --verbose to track progress with iteration-by-iteration updates.
     """
     import math
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if sum([partitions is not None, auto is not None]) > 1:
@@ -2577,6 +2758,7 @@ def add_kdtree(
 @geoparquet_version_option
 @dry_run_option
 @verbose_option
+@any_extension_option
 def add_quadkey(
     input_parquet,
     output_parquet,
@@ -2591,6 +2773,7 @@ def add_quadkey(
     geoparquet_version,
     dry_run,
     verbose,
+    any_extension,
 ):
     """Add a quadkey column to a GeoParquet file.
 
@@ -2610,6 +2793,9 @@ def add_quadkey(
         validate_output(output_parquet)
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_parquet, any_extension)
 
     # Validate mutually exclusive options
     if row_group_size and row_group_size_mb:
@@ -3439,6 +3625,19 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
 )
 @click.option("--chunk-size", type=int, help="Chunk size in bytes for multipart uploads")
 @click.option("--fail-fast", is_flag=True, help="Stop immediately on first error")
+@click.option(
+    "--s3-endpoint",
+    help="Custom S3-compatible endpoint (e.g., 'minio.example.com:9000')",
+)
+@click.option(
+    "--s3-region",
+    help="S3 region (default: us-east-1 when using custom endpoint)",
+)
+@click.option(
+    "--s3-no-ssl",
+    is_flag=True,
+    help="Disable SSL for S3 endpoint (use HTTP instead of HTTPS)",
+)
 @dry_run_option
 def publish_upload(
     source,
@@ -3449,6 +3648,9 @@ def publish_upload(
     chunk_concurrency,
     chunk_size,
     fail_fast,
+    s3_endpoint,
+    s3_region,
+    s3_no_ssl,
     dry_run,
 ):
     """Upload file or directory to object storage.
@@ -3473,6 +3675,11 @@ def publish_upload(
       # Stop on first error instead of continuing
       gpio publish upload output/ s3://bucket/dataset/ --fail-fast
     """
+    # Check credentials before attempting upload
+    creds_ok, hint = check_credentials(destination, profile)
+    if not creds_ok:
+        raise click.ClickException(f"Authentication failed:\n\n{hint}")
+
     try:
         upload_impl(
             source=source,
@@ -3484,6 +3691,9 @@ def publish_upload(
             chunk_size=chunk_size,
             fail_fast=fail_fast,
             dry_run=dry_run,
+            s3_endpoint=s3_endpoint,
+            s3_region=s3_region,
+            s3_use_ssl=not s3_no_ssl,
         )
     except click.exceptions.Exit:
         raise
@@ -3838,6 +4048,12 @@ def upload(
         "'gpio upload' is deprecated and will be removed in a future release. "
         "Use 'gpio publish upload' instead."
     )
+
+    # Check credentials before attempting upload
+    creds_ok, hint = check_credentials(destination, profile)
+    if not creds_ok:
+        raise click.ClickException(f"Authentication failed:\n\n{hint}")
+
     try:
         # Handle stdin input
         if is_stdin(source):

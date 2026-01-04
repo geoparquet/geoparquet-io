@@ -684,6 +684,46 @@ def validate_output_path(output_path, verbose=False):
         raise click.ClickException(f"No write permission for: {output_dir}")
 
 
+def validate_parquet_extension(output_file: str, any_extension: bool = False) -> None:
+    """
+    Validate that output file has .parquet extension.
+
+    By default, gpio commands that write parquet files require the output
+    to have a .parquet extension to prevent accidental misuse (e.g., writing
+    a parquet file with .geojson extension).
+
+    Args:
+        output_file: Output file path (local or remote)
+        any_extension: If True, skip validation and allow any extension
+
+    Raises:
+        click.ClickException: If extension is not .parquet and any_extension=False
+    """
+    # Skip for streaming output or no output specified
+    if output_file is None or output_file == "-":
+        return
+
+    # User explicitly allowed any extension
+    if any_extension:
+        return
+
+    # Extract the filename from the path (handles both local and remote URLs)
+    if "://" in output_file:
+        # Remote URL: extract path portion after protocol://bucket/
+        path_part = output_file.split("://", 1)[1]
+        filename = path_part.split("/")[-1] if "/" in path_part else path_part
+    else:
+        filename = os.path.basename(output_file)
+
+    # Check extension (case-insensitive)
+    _, ext = os.path.splitext(filename)
+    if ext.lower() != ".parquet":
+        raise click.ClickException(
+            f"Output file '{output_file}' does not have .parquet extension. "
+            f"Use --any-extension to allow non-standard extensions."
+        )
+
+
 def get_duckdb_connection(load_spatial=True, load_httpfs=None, use_s3_auth=False):
     """
     Create a DuckDB connection with necessary extensions loaded.

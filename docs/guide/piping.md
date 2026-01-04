@@ -36,6 +36,7 @@ All transformation commands support Arrow IPC piping:
 | `sort quadkey` | Yes | Yes |
 | `sort column` | Yes | Yes |
 | `reproject` | Yes | Yes |
+| `convert geojson` | Yes | No (outputs GeoJSON to stdout) |
 | `partition string` | Yes | No (writes to directory) |
 | `partition quadkey` | Yes | No (writes to directory) |
 | `partition h3` | Yes | No (writes to directory) |
