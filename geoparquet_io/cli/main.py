@@ -1168,7 +1168,7 @@ def convert_reproject(
     )
 
 
-@convert.command(name="geojson")
+@convert.command(name="geojson", cls=SingleFileCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(

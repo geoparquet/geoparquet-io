@@ -306,9 +306,6 @@ class TestPipelineIntegration:
 
     def test_arrow_stream_to_geojson_conversion(self):
         """Test full conversion from Arrow table to GeoJSON."""
-        import tempfile
-        import uuid
-        from pathlib import Path
         from unittest.mock import patch
 
         import pyarrow.parquet as pq
@@ -362,17 +359,18 @@ class TestPolygonGeometries:
         assert feature["geometry"]["type"] in ["Polygon", "MultiPolygon"]
 
 
+@pytest.fixture
+def output_file():
+    """Create a temp output file path."""
+    tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
+    yield str(tmp_path)
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+
 @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
 class TestConvertToGeoJSONFile:
     """Tests for file output mode."""
-
-    @pytest.fixture
-    def output_file(self):
-        """Create a temp output file path."""
-        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
-        yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
 
     def test_writes_valid_geojson_file(self, output_file):
         """Test that file output produces valid GeoJSON FeatureCollection."""
@@ -463,14 +461,6 @@ class TestBuildFeatureQueryWithReprojection:
 
 class TestKeepCrsFlag:
     """Tests for --keep-crs flag behavior."""
-
-    @pytest.fixture
-    def output_file(self):
-        """Create a temporary output file."""
-        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
-        yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
 
     def test_keep_crs_flag_exists(self):
         """Test that --keep-crs flag is recognized by CLI."""
