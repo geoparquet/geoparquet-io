@@ -2,13 +2,16 @@
 Tests for upload functionality.
 """
 
+import importlib
 from pathlib import Path
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from geoparquet_io.cli.main import cli
-from geoparquet_io.core.upload import (
+# Use importlib to get the actual module (avoids namespace collision with cli group)
+main_module = importlib.import_module("geoparquet_io.cli.main")
+cli = main_module.cli
+from geoparquet_io.core.upload import (  # noqa: E402
     _setup_store_and_kwargs,
     _try_infer_region_from_bucket,
     check_credentials,
@@ -68,10 +71,7 @@ class TestUploadDryRun:
     def test_upload_single_file_dry_run(self, places_test_file):
         """Test dry-run mode for single file upload."""
         runner = CliRunner()
-        with patch(
-            "geoparquet_io.cli.main.check_credentials",
-            return_value=(True, ""),
-        ):
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -97,10 +97,7 @@ class TestUploadDryRun:
         """Test dry-run mode with AWS profile."""
         runner = CliRunner()
         # Mock credential check to pass (since test-profile doesn't exist)
-        with patch(
-            "geoparquet_io.cli.main.check_credentials",
-            return_value=(True, ""),
-        ):
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -128,10 +125,7 @@ class TestUploadDryRun:
             (test_dir / f"file_{i}.parquet").write_text(f"test content {i}")
 
         runner = CliRunner()
-        with patch(
-            "geoparquet_io.cli.main.check_credentials",
-            return_value=(True, ""),
-        ):
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -164,10 +158,7 @@ class TestUploadDryRun:
             (test_dir / f"readme_{i}.txt").write_text(f"text {i}")
 
         runner = CliRunner()
-        with patch(
-            "geoparquet_io.cli.main.check_credentials",
-            return_value=(True, ""),
-        ):
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -201,10 +192,7 @@ class TestUploadDryRun:
             (test_dir / f"file_{i:02d}.parquet").write_text(f"test {i}")
 
         runner = CliRunner()
-        with patch(
-            "geoparquet_io.cli.main.check_credentials",
-            return_value=(True, ""),
-        ):
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -227,10 +215,7 @@ class TestUploadDryRun:
         test_dir.mkdir()
 
         runner = CliRunner()
-        with patch(
-            "geoparquet_io.cli.main.check_credentials",
-            return_value=(True, ""),
-        ):
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -255,10 +240,7 @@ class TestUploadDryRun:
             (test_dir / f"data_{i}.parquet").write_text(f"test {i}")
 
         runner = CliRunner()
-        with patch(
-            "geoparquet_io.cli.main.check_credentials",
-            return_value=(True, ""),
-        ):
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -414,10 +396,7 @@ class TestUploadCLIS3Options:
     def test_upload_with_s3_endpoint_dry_run(self, places_test_file):
         """Test dry-run mode with S3 endpoint options."""
         runner = CliRunner()
-        with patch(
-            "geoparquet_io.cli.main.check_credentials",
-            return_value=(True, ""),
-        ):
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -438,10 +417,7 @@ class TestUploadCLIS3Options:
     def test_upload_with_s3_region_dry_run(self, places_test_file):
         """Test dry-run mode with S3 region option."""
         runner = CliRunner()
-        with patch(
-            "geoparquet_io.cli.main.check_credentials",
-            return_value=(True, ""),
-        ):
+        with patch.object(main_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
