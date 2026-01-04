@@ -550,7 +550,13 @@ def _convert_from_stream(
     # Find geometry column
     geometry_column = find_geometry_column_from_table(table)
     if not geometry_column:
-        geometry_column = "geometry"
+        available_columns = ", ".join(table.column_names)
+        raise ValueError(
+            f"No geometry column found in Arrow stream. "
+            f"Available columns: [{available_columns}]. "
+            "Expected a column named 'geometry', 'geom', 'wkb_geometry', or 'the_geom', "
+            "or a column with GeoParquet 'geo' metadata."
+        )
 
     debug(f"Using geometry column: {geometry_column}")
 

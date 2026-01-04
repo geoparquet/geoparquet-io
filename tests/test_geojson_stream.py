@@ -269,30 +269,78 @@ class TestConvertGeoJSONCLI:
 class TestPipelineIntegration:
     """Tests for pipeline integration."""
 
-    def test_stdin_from_arrow_stream(self):
-        """Test reading from Arrow IPC stream (simulating pipeline)."""
-        from io import BytesIO
-
-        import pyarrow.ipc as ipc
+    def test_geometry_column_detection_from_arrow_table(self):
+        """Test geometry column detection from Arrow table schema."""
         import pyarrow.parquet as pq
 
-        # Read test data and create Arrow IPC stream
-        table = pq.read_table(str(PLACES_PARQUET))
-        # Take only 3 rows for testing
-        table = table.slice(0, 3)
-
-        # Create IPC stream in memory
-        sink = BytesIO()
-        writer = ipc.new_stream(sink, table.schema)
-        writer.write_table(table)
-        writer.close()
-
-        # Test that _convert_from_stream works with the table
         from geoparquet_io.core.streaming import find_geometry_column_from_table
+
+        # Read test data
+        table = pq.read_table(str(PLACES_PARQUET))
 
         # Find geometry column from the table
         geom_col = find_geometry_column_from_table(table)
         assert geom_col is not None
+
+    def test_no_geometry_column_raises_error(self):
+        """Test that missing geometry column raises ValueError with helpful message."""
+        from unittest.mock import patch
+
+        import pyarrow as pa
+
+        from geoparquet_io.core.geojson_stream import _convert_from_stream
+
+        # Create a table without geometry column
+        table_no_geom = pa.table({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+
+        # Mock read_arrow_stream at the source module
+        with patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table_no_geom):
+            with pytest.raises(ValueError) as exc_info:
+                _convert_from_stream()
+
+            # Check error message contains helpful information
+            error_msg = str(exc_info.value)
+            assert "No geometry column found" in error_msg
+            assert "id" in error_msg  # Available columns listed
+            assert "name" in error_msg
+
+    def test_arrow_stream_to_geojson_conversion(self):
+        """Test full conversion from Arrow table to GeoJSON."""
+        import tempfile
+        import uuid
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.geojson_stream import _convert_from_stream
+
+        # Read test data
+        table = pq.read_table(str(PLACES_PARQUET))
+        table = table.slice(0, 3)  # Small subset for testing
+
+        # Create temp output file
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
+
+        try:
+            # Mock read_arrow_stream at the source module
+            with patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table):
+                count = _convert_from_stream(output_path=str(output_path))
+
+            assert count == 3
+            assert output_path.exists()
+
+            # Verify valid GeoJSON FeatureCollection
+            with open(output_path, encoding="utf-8") as f:
+                geojson = json.load(f)
+
+            assert geojson["type"] == "FeatureCollection"
+            assert len(geojson["features"]) == 3
+            assert geojson["features"][0]["type"] == "Feature"
+            assert "geometry" in geojson["features"][0]
+        finally:
+            if output_path.exists():
+                output_path.unlink()
 
 
 @pytest.mark.skipif(not BUILDINGS_PARQUET.exists(), reason="Test data not available")
