@@ -1,5 +1,9 @@
 # Viewing File Metadata
 
+!!! info "CLI Only"
+    Detailed metadata inspection is currently only available via the CLI.
+    For basic file info in Python, use `table.info()`. See [issue #151](https://github.com/geoparquet/geoparquet-io/issues/151) for Python API roadmap.
+
 The `inspect --meta` command provides comprehensive metadata inspection for GeoParquet files. Use it to understand file structure, schema details, row group organization, and geospatial metadata.
 
 ## Basic Usage

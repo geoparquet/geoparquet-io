@@ -44,6 +44,8 @@ plugins:
 markdown_extensions:
   - admonition
   - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
   - pymdownx.highlight
   - pymdownx.snippets:
       base_path: docs
@@ -57,6 +59,7 @@ nav:
   - Getting Started:
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quickstart.md
+    - CLI vs Python: getting-started/cli-vs-python.md
   - Concepts:
     - What is GeoParquet?: concepts/geoparquet-overview.md
     - Best Practices: concepts/best-practices.md

@@ -7,12 +7,27 @@ The `inspect` command provides quick, human-readable summaries of GeoParquet fil
 
 ## Basic Usage
 
-```bash
-gpio inspect data.parquet
+=== "CLI"
 
-# Or inspect remote file
-gpio inspect s3://bucket/data.parquet
-```
+    ```bash
+    gpio inspect data.parquet
+
+    # Or inspect remote file
+    gpio inspect s3://bucket/data.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Print summary to stdout
+    gpio.read('data.parquet').info()
+
+    # Get as dictionary
+    info = gpio.read('data.parquet').info(verbose=False)
+    print(info['rows'], info['bounds'])
+    ```
 
 Shows:
 
@@ -21,6 +36,9 @@ Shows:
 - Column schema with types
 
 ## Preview Data
+
+!!! info "CLI Only"
+    Preview options (`--head`, `--tail`) are currently only available via the CLI. For Python, use PyArrow's slice methods: `table.to_arrow().slice(0, 10)`. See [issue #152](https://github.com/geoparquet/geoparquet-io/issues/152) for planned improvements.
 
 ```bash
 # First 10 rows (default when no value given)
@@ -38,6 +56,9 @@ gpio inspect data.parquet --tail 5
 
 ## Statistics
 
+!!! info "CLI Only"
+    Statistics (`--stats`) is currently only available via the CLI. See [issue #152](https://github.com/geoparquet/geoparquet-io/issues/152) for planned improvements.
+
 ```bash
 # Column statistics (nulls, min/max, unique counts)
 gpio inspect data.parquet --stats
@@ -47,6 +68,9 @@ gpio inspect data.parquet --head --stats
 ```
 
 ## GeoParquet Metadata
+
+!!! info "CLI Only"
+    Detailed metadata inspection is currently only available via the CLI. See [issue #152](https://github.com/geoparquet/geoparquet-io/issues/152) for planned improvements.
 
 View the complete GeoParquet metadata from the 'geo' key:
 

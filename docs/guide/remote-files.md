@@ -37,22 +37,44 @@ Credentials are automatically discovered in this order:
 
 **Examples:**
 
-```bash
-# Use default credentials (from ~/.aws/credentials [default] or IAM role)
-gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
+=== "CLI"
 
-# Use environment variables
-export AWS_ACCESS_KEY_ID=your_key
-export AWS_SECRET_ACCESS_KEY=your_secret
-gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
+    ```bash
+    # Use default credentials (from ~/.aws/credentials [default] or IAM role)
+    gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
 
-# Use a named AWS profile (convenient CLI flag)
-gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet --profile production
+    # Use environment variables
+    export AWS_ACCESS_KEY_ID=your_key
+    export AWS_SECRET_ACCESS_KEY=your_secret
+    gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
 
-# Or set AWS_PROFILE environment variable (equivalent to --profile)
-export AWS_PROFILE=production
-gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
-```
+    # Use a named AWS profile (convenient CLI flag)
+    gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet --profile production
+
+    # Or set AWS_PROFILE environment variable (equivalent to --profile)
+    export AWS_PROFILE=production
+    gpio add bbox s3://bucket/input.parquet s3://bucket/output.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    import os
+    import geoparquet_io as gpio
+
+    # Use default credentials (from ~/.aws/credentials [default] or IAM role)
+    gpio.read('s3://bucket/input.parquet').add_bbox().write('output.parquet')
+
+    # Use a named AWS profile
+    gpio.read('s3://bucket/input.parquet').add_bbox().upload(
+        's3://bucket/output.parquet',
+        profile='production'
+    )
+
+    # Or set AWS_PROFILE environment variable
+    os.environ['AWS_PROFILE'] = 'production'
+    gpio.read('s3://bucket/input.parquet').add_bbox().upload('s3://bucket/output.parquet')
+    ```
 
 **Note:** The `--profile` flag is available on all commands and sets `AWS_PROFILE` for you.
 
@@ -90,21 +112,43 @@ gpio add bbox gs://bucket/input.parquet gs://bucket/output.parquet
 
 ## S3-Compatible Storage
 
-For MinIO, Ceph, or other S3-compatible storage, use `gpio publish upload` which supports custom endpoints:
+For MinIO, Ceph, or other S3-compatible storage:
 
-```bash
-# MinIO without SSL
-gpio publish upload data.parquet s3://bucket/file.parquet \
-  --s3-endpoint minio.example.com:9000 \
-  --s3-no-ssl
+=== "CLI"
 
-# Custom endpoint with specific region
-gpio publish upload data/ s3://bucket/dataset/ \
-  --s3-endpoint storage.example.com \
-  --s3-region eu-west-1
-```
+    ```bash
+    # MinIO without SSL
+    gpio publish upload data.parquet s3://bucket/file.parquet \
+      --s3-endpoint minio.example.com:9000 \
+      --s3-no-ssl
 
-These options are only available on `gpio publish upload` because it uses obstore for direct uploads. Other commands use DuckDB's httpfs which only supports standard AWS S3 endpoints.
+    # Custom endpoint with specific region
+    gpio publish upload data/ s3://bucket/dataset/ \
+      --s3-endpoint storage.example.com \
+      --s3-region eu-west-1
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # MinIO without SSL
+    gpio.read('data.parquet').upload(
+        's3://bucket/file.parquet',
+        s3_endpoint='minio.example.com:9000',
+        s3_use_ssl=False
+    )
+
+    # Custom endpoint with specific region
+    gpio.read('data.parquet').upload(
+        's3://bucket/file.parquet',
+        s3_endpoint='storage.example.com',
+        s3_region='eu-west-1'
+    )
+    ```
+
+These options use obstore for direct uploads. Standard commands reading from S3 use DuckDB's httpfs which only supports standard AWS S3 endpoints.
 
 ## Piping to Upload
 

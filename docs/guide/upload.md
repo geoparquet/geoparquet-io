@@ -4,13 +4,34 @@ The `upload` command uploads GeoParquet files to cloud object storage (S3, GCS, 
 
 ## Basic Usage
 
-```bash
-# Single file to S3
-gpio publish upload input.parquet s3://bucket/path/output.parquet --profile my-profile
+=== "CLI"
 
-# Directory to S3
-gpio publish upload data/ s3://bucket/dataset/ --profile my-profile
-```
+    ```bash
+    # Single file to S3
+    gpio publish upload input.parquet s3://bucket/path/output.parquet --profile my-profile
+
+    # Directory to S3
+    gpio publish upload data/ s3://bucket/dataset/ --profile my-profile
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Upload to S3 with transform
+    gpio.read('input.parquet') \
+        .sort_hilbert() \
+        .upload('s3://bucket/path/output.parquet', profile='my-profile')
+
+    # Upload with S3-compatible endpoint (MinIO, etc)
+    gpio.read('input.parquet') \
+        .upload(
+            's3://bucket/path/output.parquet',
+            s3_endpoint='minio.example.com:9000',
+            s3_use_ssl=False
+        )
+    ```
 
 ## Supported Destinations
 
@@ -100,22 +121,44 @@ Shows:
 
 Upload to MinIO, Ceph, or other S3-compatible storage:
 
-```bash
-# MinIO without SSL
-gpio publish upload data.parquet s3://bucket/file.parquet \
-  --s3-endpoint minio.example.com:9000 \
-  --s3-no-ssl
+=== "CLI"
 
-# Custom endpoint with specific region
-gpio publish upload data/ s3://bucket/dataset/ \
-  --s3-endpoint storage.example.com \
-  --s3-region eu-west-1
-```
+    ```bash
+    # MinIO without SSL
+    gpio publish upload data.parquet s3://bucket/file.parquet \
+      --s3-endpoint minio.example.com:9000 \
+      --s3-no-ssl
+
+    # Custom endpoint with specific region
+    gpio publish upload data/ s3://bucket/dataset/ \
+      --s3-endpoint storage.example.com \
+      --s3-region eu-west-1
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # MinIO without SSL
+    gpio.read('data.parquet').upload(
+        's3://bucket/file.parquet',
+        s3_endpoint='minio.example.com:9000',
+        s3_use_ssl=False
+    )
+
+    # Custom endpoint with specific region
+    gpio.read('data.parquet').upload(
+        's3://bucket/file.parquet',
+        s3_endpoint='storage.example.com',
+        s3_region='eu-west-1'
+    )
+    ```
 
 Options:
-- `--s3-endpoint` - Custom endpoint hostname and optional port
-- `--s3-region` - Override region (defaults to us-east-1 for custom endpoints)
-- `--s3-no-ssl` - Use HTTP instead of HTTPS
+- `--s3-endpoint` / `s3_endpoint` - Custom endpoint hostname and optional port
+- `--s3-region` / `s3_region` - Override region (defaults to us-east-1 for custom endpoints)
+- `--s3-no-ssl` / `s3_use_ssl=False` - Use HTTP instead of HTTPS
 
 ## Directory Structure
 

@@ -1,5 +1,9 @@
 # STAC Generation
 
+!!! info "CLI Only"
+    STAC generation is currently only available via the CLI.
+    See [issue #151](https://github.com/geoparquet/geoparquet-io/issues/151) for Python API roadmap.
+
 Generate STAC (SpatioTemporal Asset Catalog) metadata for GeoParquet datasets.
 
 ## What is STAC?
