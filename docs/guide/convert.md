@@ -2,18 +2,37 @@
 
 The `convert` command transforms vector formats into optimized GeoParquet files with all best practices applied automatically.
 
+!!! note "CLI vs Python Behavior"
+    The CLI `gpio convert` applies Hilbert sorting by default for optimal spatial queries.
+    The Python `gpio.convert()` does NOT sort by default - chain `.sort_hilbert()` explicitly if needed.
+
 ## Basic Usage
 
-```bash
-gpio convert input.shp output.parquet
-```
+=== "CLI"
 
-Automatically applies:
-- ZSTD compression (level 15)
-- 100,000 row groups
-- Bbox column with proper metadata
-- Hilbert spatial ordering
-- GeoParquet 1.1.0 metadata
+    ```bash
+    gpio convert input.shp output.parquet
+    ```
+
+    Automatically applies:
+
+    - ZSTD compression (level 15)
+    - 100,000 row groups
+    - Bbox column with proper metadata
+    - Hilbert spatial ordering
+    - GeoParquet 1.1.0 metadata
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Convert with Hilbert sorting (recommended)
+    gpio.convert('input.shp').sort_hilbert().write('output.parquet')
+
+    # Or without sorting (faster but less optimal for spatial queries)
+    gpio.convert('input.shp').write('output.parquet')
+    ```
 
 ## Supported Input Formats
 
@@ -92,23 +111,44 @@ Shows:
 
 ### Basic Shapefile Conversion
 
-```bash
-gpio convert buildings.shp buildings.parquet
-```
+=== "CLI"
 
-Output:
-```
-Converting buildings.shp...
-Done in 2.3s
-Output: buildings.parquet (4.2 MB)
-✓ Output passes GeoParquet validation
-```
+    ```bash
+    gpio convert buildings.shp buildings.parquet
+    ```
+
+    Output:
+    ```
+    Converting buildings.shp...
+    Done in 2.3s
+    Output: buildings.parquet (4.2 MB)
+    ✓ Output passes GeoParquet validation
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.convert('buildings.shp').sort_hilbert().write('buildings.parquet')
+    ```
 
 ### Large Dataset Without Hilbert
 
-```bash
-gpio convert large_dataset.gpkg output.parquet --skip-hilbert
-```
+=== "CLI"
+
+    ```bash
+    gpio convert large_dataset.gpkg output.parquet --skip-hilbert
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Python doesn't sort by default, so just skip sort_hilbert()
+    gpio.convert('large_dataset.gpkg').write('output.parquet')
+    ```
 
 Skips Hilbert ordering for faster processing on large files.
 

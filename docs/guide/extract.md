@@ -4,13 +4,27 @@ The `extract` command allows you to filter and subset GeoParquet files by column
 
 ## Basic Usage
 
-```bash
-# Extract all data (useful for format conversion or compression change)
-gpio extract input.parquet output.parquet
+=== "CLI"
 
-# Extract with different compression
-gpio extract input.parquet output.parquet --compression GZIP
-```
+    ```bash
+    # Extract all data (useful for format conversion or compression change)
+    gpio extract input.parquet output.parquet
+
+    # Extract with different compression
+    gpio extract input.parquet output.parquet --compression GZIP
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract all data (useful for format conversion or compression change)
+    gpio.read('input.parquet').write('output.parquet')
+
+    # Extract with different compression
+    gpio.read('input.parquet').write('output.parquet', compression='GZIP')
+    ```
 
 ## Column Selection
 
@@ -18,41 +32,89 @@ gpio extract input.parquet output.parquet --compression GZIP
 
 Select only the columns you need. The geometry column and bbox column (if present) are automatically included unless explicitly excluded.
 
-```bash
-# Extract only id and name columns (plus geometry and bbox)
-gpio extract places.parquet subset.parquet --include-cols id,name
+=== "CLI"
 
-# Extract multiple attribute columns
-gpio extract buildings.parquet subset.parquet --include-cols height,building_type,address
-```
+    ```bash
+    # Extract only id and name columns (plus geometry and bbox)
+    gpio extract places.parquet subset.parquet --include-cols id,name
+
+    # Extract multiple attribute columns
+    gpio extract buildings.parquet subset.parquet --include-cols height,building_type,address
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract only id and name columns (plus geometry and bbox)
+    gpio.read('places.parquet').extract(columns=['id', 'name']).write('subset.parquet')
+
+    # Extract multiple attribute columns
+    gpio.read('buildings.parquet').extract(columns=['height', 'building_type', 'address']).write('subset.parquet')
+    ```
 
 ### Excluding Columns
 
 Remove unwanted columns from the output:
 
-```bash
-# Exclude large or unnecessary columns
-gpio extract data.parquet output.parquet --exclude-cols raw_data,metadata_json
+=== "CLI"
 
-# Exclude multiple columns
-gpio extract data.parquet output.parquet --exclude-cols temp_id,internal_notes,debug_info
-```
+    ```bash
+    # Exclude large or unnecessary columns
+    gpio extract data.parquet output.parquet --exclude-cols raw_data,metadata_json
+
+    # Exclude multiple columns
+    gpio extract data.parquet output.parquet --exclude-cols temp_id,internal_notes,debug_info
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Exclude large or unnecessary columns
+    gpio.read('data.parquet').extract(exclude_columns=['raw_data', 'metadata_json']).write('output.parquet')
+
+    # Exclude multiple columns
+    gpio.read('data.parquet').extract(exclude_columns=['temp_id', 'internal_notes', 'debug_info']).write('output.parquet')
+    ```
 
 ### Combining Include and Exclude
 
 You can combine both to control exactly which columns appear, including removing geometry or bbox columns:
 
-```bash
-# Include specific columns but exclude geometry (for non-spatial export)
-gpio extract data.parquet output.parquet \
-  --include-cols id,name,population \
-  --exclude-cols geometry
+=== "CLI"
 
-# Include columns but exclude bbox to save space
-gpio extract data.parquet output.parquet \
-  --include-cols id,name,area \
-  --exclude-cols bbox
-```
+    ```bash
+    # Include specific columns but exclude geometry (for non-spatial export)
+    gpio extract data.parquet output.parquet \
+      --include-cols id,name,population \
+      --exclude-cols geometry
+
+    # Include columns but exclude bbox to save space
+    gpio extract data.parquet output.parquet \
+      --include-cols id,name,area \
+      --exclude-cols bbox
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Include specific columns but exclude geometry (for non-spatial export)
+    gpio.read('data.parquet').extract(
+        columns=['id', 'name', 'population'],
+        exclude_columns=['geometry']
+    ).write('output.parquet')
+
+    # Include columns but exclude bbox to save space
+    gpio.read('data.parquet').extract(
+        columns=['id', 'name', 'area'],
+        exclude_columns=['bbox']
+    ).write('output.parquet')
+    ```
 
 ## Spatial Filtering
 
@@ -60,25 +122,47 @@ gpio extract data.parquet output.parquet \
 
 Filter features by a rectangular bounding box. The bbox is specified as `xmin,ymin,xmax,ymax` in the same coordinate system as your data.
 
-```bash
-# Extract features in San Francisco area (WGS84 coordinates)
-gpio extract places.parquet sf_places.parquet \
-  --bbox -122.5,37.7,-122.3,37.8
+=== "CLI"
 
-# Extract from remote FIBOA dataset (projected coordinates)
-gpio extract https://data.source.coop/fiboa/data/si/si-2024.parquet slovenia_subset.parquet \
-  --bbox 450000,50000,500000,100000
+    ```bash
+    # Extract features in San Francisco area (WGS84 coordinates)
+    gpio extract places.parquet sf_places.parquet \
+      --bbox -122.5,37.7,-122.3,37.8
 
-# Extract from S3 building dataset (WGS84 coordinates)
-gpio extract s3://us-west-2.opendata.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/country_iso=AGO/2017612633061982208.parquet angola_subset.parquet \
-  --bbox 13.0,-9.0,14.0,-8.0
-```
+    # Extract from remote FIBOA dataset (projected coordinates)
+    gpio extract https://data.source.coop/fiboa/data/si/si-2024.parquet slovenia_subset.parquet \
+      --bbox 450000,50000,500000,100000
+
+    # Extract from S3 building dataset (WGS84 coordinates)
+    gpio extract s3://us-west-2.opendata.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/country_iso=AGO/2017612633061982208.parquet angola_subset.parquet \
+      --bbox 13.0,-9.0,14.0,-8.0
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract features in San Francisco area (WGS84 coordinates)
+    gpio.read('places.parquet').extract(bbox=(-122.5, 37.7, -122.3, 37.8)).write('sf_places.parquet')
+
+    # Extract from remote FIBOA dataset (projected coordinates)
+    gpio.read('https://data.source.coop/fiboa/data/si/si-2024.parquet').extract(
+        bbox=(450000, 50000, 500000, 100000)
+    ).write('slovenia_subset.parquet')
+
+    # Note: For S3 URLs, use the CLI or configure AWS credentials
+    ```
 
 **CRS Awareness**: The tool detects coordinate system mismatches. If your bbox looks like lat/long coordinates but the data uses a projected CRS, you'll get a helpful warning showing the data's actual bounds.
 
 ### Geometry Filter
 
 Filter features by intersection with any geometry, not just rectangles.
+
+!!! note "CLI Only"
+    Geometry filtering with arbitrary shapes is currently only available via the CLI.
+    For rectangular regions, use the `bbox` parameter in Python.
 
 ```bash
 # Filter by inline WKT polygon
@@ -114,32 +198,52 @@ Use SQL WHERE clauses to filter by attribute values. This uses DuckDB SQL syntax
 
 ### Simple WHERE Examples
 
-```bash
-# Filter by numeric value
-gpio extract data.parquet output.parquet --where "population > 10000"
+=== "CLI"
 
-# Filter by string equality
-gpio extract data.parquet output.parquet --where "status = 'active'"
+    ```bash
+    # Filter by numeric value
+    gpio extract data.parquet output.parquet --where "population > 10000"
 
-# Filter by string pattern
-gpio extract data.parquet output.parquet --where "name LIKE '%Hotel%'"
+    # Filter by string equality
+    gpio extract data.parquet output.parquet --where "status = 'active'"
 
-# Filter by multiple conditions
-gpio extract data.parquet output.parquet \
-  --where "population > 10000 AND area_km2 < 500"
+    # Filter by string pattern
+    gpio extract data.parquet output.parquet --where "name LIKE '%Hotel%'"
 
-# Filter with IN clause
-gpio extract data.parquet output.parquet \
-  --where "category IN ('restaurant', 'cafe', 'bar')"
+    # Filter by multiple conditions
+    gpio extract data.parquet output.parquet \
+      --where "population > 10000 AND area_km2 < 500"
 
-# Filter by date
-gpio extract data.parquet output.parquet \
-  --where "updated_at >= '2024-01-01'"
+    # Filter with IN clause
+    gpio extract data.parquet output.parquet \
+      --where "category IN ('restaurant', 'cafe', 'bar')"
 
-# Filter with NULL check
-gpio extract data.parquet output.parquet \
-  --where "description IS NOT NULL"
-```
+    # Filter by date
+    gpio extract data.parquet output.parquet \
+      --where "updated_at >= '2024-01-01'"
+
+    # Filter with NULL check
+    gpio extract data.parquet output.parquet \
+      --where "description IS NOT NULL"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Filter by numeric value
+    gpio.read('data.parquet').extract(where="population > 10000").write('output.parquet')
+
+    # Filter by string equality
+    gpio.read('data.parquet').extract(where="status = 'active'").write('output.parquet')
+
+    # Filter by multiple conditions
+    gpio.read('data.parquet').extract(where="population > 10000 AND area_km2 < 500").write('output.parquet')
+
+    # Filter with IN clause
+    gpio.read('data.parquet').extract(where="category IN ('restaurant', 'cafe', 'bar')").write('output.parquet')
+    ```
 
 ### WHERE with Special Column Names
 
@@ -237,39 +341,79 @@ gpio extract data.parquet output.parquet \
 
 Combine column selection, spatial filtering, and WHERE clauses:
 
-```bash
-# Extract specific columns in a bbox with attribute filter
-gpio extract places.parquet hotels.parquet \
-  --include-cols name,address,rating \
-  --bbox -122.5,37.7,-122.3,37.8 \
-  --where "category = 'hotel' AND rating >= 4"
+=== "CLI"
 
-# Extract from remote file with all filter types
-gpio extract https://data.source.coop/fiboa/data/si/si-2024.parquet wheat_subset.parquet \
-  --bbox 450000,50000,500000,100000 \
-  --include-cols id,area,crop:name,farm:organic \
-  --where '"crop:name" = '\''wheat'\'' AND area > 10000'
+    ```bash
+    # Extract specific columns in a bbox with attribute filter
+    gpio extract places.parquet hotels.parquet \
+      --include-cols name,address,rating \
+      --bbox -122.5,37.7,-122.3,37.8 \
+      --where "category = 'hotel' AND rating >= 4"
 
-# Extract buildings in area with specific attributes
-gpio extract s3://us-west-2.opendata.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/country_iso=AGO/2017612633061982208.parquet large_buildings.parquet \
-  --bbox 13.0,-9.0,14.0,-8.0 \
-  --where "area_in_meters > 1000"
-```
+    # Extract from remote file with all filter types
+    gpio extract https://data.source.coop/fiboa/data/si/si-2024.parquet wheat_subset.parquet \
+      --bbox 450000,50000,500000,100000 \
+      --include-cols id,area,crop:name,farm:organic \
+      --where '"crop:name" = '\''wheat'\'' AND area > 10000'
+
+    # Extract buildings in area with specific attributes
+    gpio extract s3://us-west-2.opendata.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/country_iso=AGO/2017612633061982208.parquet large_buildings.parquet \
+      --bbox 13.0,-9.0,14.0,-8.0 \
+      --where "area_in_meters > 1000"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract specific columns in a bbox with attribute filter
+    gpio.read('places.parquet').extract(
+        columns=['name', 'address', 'rating'],
+        bbox=(-122.5, 37.7, -122.3, 37.8),
+        where="category = 'hotel' AND rating >= 4"
+    ).write('hotels.parquet')
+
+    # Extract from remote file with all filter types
+    gpio.read('https://data.source.coop/fiboa/data/si/si-2024.parquet').extract(
+        columns=['id', 'area', 'crop:name', 'farm:organic'],
+        bbox=(450000, 50000, 500000, 100000),
+        where='"crop:name" = \'wheat\' AND area > 10000'
+    ).write('wheat_subset.parquet')
+    ```
 
 ## Limiting Results
 
 Limit the number of rows extracted, useful for testing or sampling:
 
-```bash
-# Extract first 1000 matching rows
-gpio extract data.parquet sample.parquet --limit 1000
+=== "CLI"
 
-# Extract first 100 hotels in bbox
-gpio extract places.parquet hotels_sample.parquet \
-  --bbox -122.5,37.7,-122.3,37.8 \
-  --where "category = 'hotel'" \
-  --limit 100
-```
+    ```bash
+    # Extract first 1000 matching rows
+    gpio extract data.parquet sample.parquet --limit 1000
+
+    # Extract first 100 hotels in bbox
+    gpio extract places.parquet hotels_sample.parquet \
+      --bbox -122.5,37.7,-122.3,37.8 \
+      --where "category = 'hotel'" \
+      --limit 100
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract first 1000 matching rows
+    gpio.read('data.parquet').extract(limit=1000).write('sample.parquet')
+
+    # Extract first 100 hotels in bbox
+    gpio.read('places.parquet').extract(
+        bbox=(-122.5, 37.7, -122.3, 37.8),
+        where="category = 'hotel'",
+        limit=100
+    ).write('hotels_sample.parquet')
+    ```
 
 ## Working with Remote Files
 
@@ -413,48 +557,106 @@ gpio extract data.parquet output.parquet --row-group-size 100000
 
 ### Extract Sample Data
 
-```bash
-# Get a small sample for testing
-gpio extract large_file.parquet sample.parquet --limit 1000
+=== "CLI"
 
-# Get sample from specific area
-gpio extract large_file.parquet sample.parquet \
-  --bbox 0,0,1,1 \
-  --limit 100
-```
+    ```bash
+    # Get a small sample for testing
+    gpio extract large_file.parquet sample.parquet --limit 1000
+
+    # Get sample from specific area
+    gpio extract large_file.parquet sample.parquet \
+      --bbox 0,0,1,1 \
+      --limit 100
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Get a small sample for testing
+    gpio.read('large_file.parquet').extract(limit=1000).write('sample.parquet')
+
+    # Get sample from specific area
+    gpio.read('large_file.parquet').extract(bbox=(0, 0, 1, 1), limit=100).write('sample.parquet')
+    ```
 
 ### Extract by Category
 
-```bash
-# Extract all features of a specific type
-gpio extract data.parquet restaurants.parquet \
-  --where "category = 'restaurant'"
+=== "CLI"
 
-# Extract multiple categories
-gpio extract data.parquet food_places.parquet \
-  --where "category IN ('restaurant', 'cafe', 'bakery')"
-```
+    ```bash
+    # Extract all features of a specific type
+    gpio extract data.parquet restaurants.parquet \
+      --where "category = 'restaurant'"
+
+    # Extract multiple categories
+    gpio extract data.parquet food_places.parquet \
+      --where "category IN ('restaurant', 'cafe', 'bakery')"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract all features of a specific type
+    gpio.read('data.parquet').extract(where="category = 'restaurant'").write('restaurants.parquet')
+
+    # Extract multiple categories
+    gpio.read('data.parquet').extract(where="category IN ('restaurant', 'cafe', 'bakery')").write('food_places.parquet')
+    ```
 
 ### Extract Recent Data
 
-```bash
-# Extract data updated this year
-gpio extract data.parquet recent.parquet \
-  --where "updated_at >= '2024-01-01'"
+=== "CLI"
 
-# Extract data from specific time range
-gpio extract data.parquet range.parquet \
-  --where "created_at BETWEEN '2024-01-01' AND '2024-06-30'"
-```
+    ```bash
+    # Extract data updated this year
+    gpio extract data.parquet recent.parquet \
+      --where "updated_at >= '2024-01-01'"
+
+    # Extract data from specific time range
+    gpio extract data.parquet range.parquet \
+      --where "created_at BETWEEN '2024-01-01' AND '2024-06-30'"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract data updated this year
+    gpio.read('data.parquet').extract(where="updated_at >= '2024-01-01'").write('recent.parquet')
+
+    # Extract data from specific time range
+    gpio.read('data.parquet').extract(
+        where="created_at BETWEEN '2024-01-01' AND '2024-06-30'"
+    ).write('range.parquet')
+    ```
 
 ### Extract Non-Spatial Subset
 
-```bash
-# Extract as attribute table (no geometry)
-gpio extract data.parquet attributes.parquet \
-  --include-cols id,name,category,population \
-  --exclude-cols geometry,bbox
-```
+=== "CLI"
+
+    ```bash
+    # Extract as attribute table (no geometry)
+    gpio extract data.parquet attributes.parquet \
+      --include-cols id,name,category,population \
+      --exclude-cols geometry,bbox
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract as attribute table (no geometry)
+    gpio.read('data.parquet').extract(
+        columns=['id', 'name', 'category', 'population'],
+        exclude_columns=['geometry', 'bbox']
+    ).write('attributes.parquet')
+    ```
 
 ## Error Handling
 

@@ -9,12 +9,27 @@ The `sort` command reorders GeoParquet files for optimal performance and query e
 
 ## Hilbert Curve Ordering
 
-```bash
-gpio sort hilbert input.parquet output.parquet
+=== "CLI"
 
-# From HTTPS to S3
-gpio sort hilbert https://example.com/data.parquet s3://bucket/sorted.parquet --profile prod
-```
+    ```bash
+    gpio sort hilbert input.parquet output.parquet
+
+    # From HTTPS to S3
+    gpio sort hilbert https://example.com/data.parquet s3://bucket/sorted.parquet --profile prod
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.read('input.parquet').sort_hilbert().write('output.parquet')
+
+    # With upload to S3
+    gpio.read('https://example.com/data.parquet') \
+        .sort_hilbert() \
+        .upload('s3://bucket/sorted.parquet', profile='prod')
+    ```
 
 Reorders rows using a [Hilbert space-filling curve](https://en.wikipedia.org/wiki/Hilbert_curve), which:
 
@@ -63,16 +78,30 @@ gpio sort hilbert input.parquet output.parquet --row-group-size-mb 1GB
 
 Sort by any column(s) for non-spatial ordering needs:
 
-```bash
-# Sort by a single column
-gpio sort column input.parquet output.parquet name
+=== "CLI"
 
-# Sort by multiple columns (comma-separated)
-gpio sort column input.parquet output.parquet country,city
+    ```bash
+    # Sort by a single column
+    gpio sort column input.parquet output.parquet name
 
-# Sort in descending order
-gpio sort column input.parquet output.parquet date --descending
-```
+    # Sort by multiple columns (comma-separated)
+    gpio sort column input.parquet output.parquet country,city
+
+    # Sort in descending order
+    gpio sort column input.parquet output.parquet date --descending
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Sort by a single column
+    gpio.read('input.parquet').sort_column('name').write('output.parquet')
+
+    # Sort in descending order
+    gpio.read('input.parquet').sort_column('date', descending=True).write('output.parquet')
+    ```
 
 Column sorting:
 

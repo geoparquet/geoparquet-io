@@ -6,6 +6,9 @@ The `partition` commands split GeoParquet files into separate files based on col
 
 ## By String Column
 
+!!! info "CLI Only"
+    String column partitioning is currently only available via the CLI. See [issue #151](https://github.com/cholmes/geoparquet-io/issues/151) for Python API roadmap.
+
 Partition by string column values or prefixes:
 
 ```bash
@@ -29,19 +32,41 @@ gpio partition string s3://bucket/input.parquet s3://bucket/output/ --column reg
 
 Partition by H3 hexagonal cells:
 
-```bash
-# Preview at resolution 7 (~5km² cells)
-gpio partition h3 input.parquet --resolution 7 --preview
+=== "CLI"
 
-# Partition at default resolution 9
-gpio partition h3 input.parquet output/
+    ```bash
+    # Preview at resolution 7 (~5km² cells)
+    gpio partition h3 input.parquet --resolution 7 --preview
 
-# Keep H3 column in output files
-gpio partition h3 input.parquet output/ --keep-h3-column
+    # Partition at default resolution 9
+    gpio partition h3 input.parquet output/
 
-# Hive-style (H3 column included by default)
-gpio partition h3 input.parquet output/ --resolution 8 --hive
-```
+    # Keep H3 column in output files
+    gpio partition h3 input.parquet output/ --keep-h3-column
+
+    # Hive-style (H3 column included by default)
+    gpio partition h3 input.parquet output/ --resolution 8 --hive
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Partition by H3 (Hive-style by default)
+    gpio.read('input.parquet').partition_by_h3('output/')
+
+    # Custom resolution
+    gpio.read('input.parquet').partition_by_h3('output/', resolution=7)
+
+    # With options
+    gpio.read('input.parquet').partition_by_h3(
+        'output/',
+        resolution=8,
+        compression='ZSTD',
+        overwrite=True
+    )
+    ```
 
 **Column behavior:**
 - Non-Hive: H3 column excluded by default (redundant with path)
@@ -51,6 +76,9 @@ gpio partition h3 input.parquet output/ --resolution 8 --hive
 If H3 column doesn't exist, it's automatically added.
 
 ## By KD-Tree
+
+!!! info "CLI Only"
+    KD-Tree partitioning is currently only available via the CLI. See [issue #151](https://github.com/cholmes/geoparquet-io/issues/151) for Python API roadmap.
 
 Partition by balanced spatial partitions:
 
@@ -78,6 +106,9 @@ gpio partition kdtree input.parquet output/ --hive --verbose
 If KD-tree column doesn't exist, it's automatically added.
 
 ## By Admin Boundaries
+
+!!! info "CLI Only"
+    Admin boundary partitioning is currently only available via the CLI. See [issue #151](https://github.com/cholmes/geoparquet-io/issues/151) for Python API roadmap.
 
 Split by administrative boundaries via spatial join with remote datasets:
 

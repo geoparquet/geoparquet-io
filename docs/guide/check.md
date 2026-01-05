@@ -1,5 +1,9 @@
 # Checking Best Practices
 
+!!! info "CLI Only"
+    The check commands are currently only available via the CLI.
+    See [issue #151](https://github.com/geoparquet/geoparquet-io/issues/151) for Python API roadmap.
+
 The `check` commands validate GeoParquet files against [best practices](https://github.com/opengeospatial/geoparquet/pull/254/files).
 
 ## Run All Checks
