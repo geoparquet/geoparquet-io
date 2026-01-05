@@ -150,9 +150,10 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
     gpio.read('https://data.source.coop/fiboa/data/si/si-2024.parquet').extract(
         bbox=(450000, 50000, 500000, 100000)
     ).write('slovenia_subset.parquet')
-
-    # Note: For S3 URLs, use the CLI or configure AWS credentials
     ```
+
+!!! note "Remote file support"
+    S3, GCS, Azure, and HTTPS URLs are supported via DuckDB's httpfs extension. See the [Remote Files guide](remote-files.md) for credential configuration.
 
 **CRS Awareness**: The tool detects coordinate system mismatches. If your bbox looks like lat/long coordinates but the data uses a projected CRS, you'll get a helpful warning showing the data's actual bounds.
 
