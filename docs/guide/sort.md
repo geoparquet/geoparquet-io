@@ -95,13 +95,22 @@ Sort by any column(s) for non-spatial ordering needs:
 
     ```python
     import geoparquet_io as gpio
+    from geoparquet_io.api import ops
 
-    # Sort by a single column
+    # Sort by a single column (fluent API)
     gpio.read('input.parquet').sort_column('name').write('output.parquet')
 
     # Sort in descending order
     gpio.read('input.parquet').sort_column('date', descending=True).write('output.parquet')
+
+    # Multi-column sorting (requires ops API)
+    table = gpio.read('input.parquet')
+    sorted_arrow = ops.sort_column(table.to_arrow(), ['country', 'city'])
+    gpio.Table(sorted_arrow).write('output.parquet')
     ```
+
+!!! note "Multi-column sorting"
+    `Table.sort_column()` accepts a single column. For multi-column sorting, use `ops.sort_column()` which accepts a list of column names.
 
 Column sorting:
 

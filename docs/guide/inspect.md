@@ -38,7 +38,7 @@ Shows:
 ## Preview Data
 
 !!! info "CLI Only"
-    Preview options (`--head`, `--tail`) are currently only available via the CLI. For Python, use PyArrow's slice methods: `table.to_arrow().slice(0, 10)`. See [issue #152](https://github.com/cholmes/geoparquet-io/issues/152) for planned improvements.
+    Preview options (`--head`, `--tail`) are currently only available via the CLI. For Python, use PyArrow's slice methods: `table.to_arrow().slice(0, 10)`. See [issue #152](https://github.com/geoparquet/geoparquet-io/issues/152) for planned improvements.
 
 ```bash
 # First 10 rows (default when no value given)
@@ -57,7 +57,7 @@ gpio inspect data.parquet --tail 5
 ## Statistics
 
 !!! info "CLI Only"
-    Statistics (`--stats`) is currently only available via the CLI. See [issue #152](https://github.com/cholmes/geoparquet-io/issues/152) for planned improvements.
+    Statistics (`--stats`) is currently only available via the CLI. See [issue #152](https://github.com/geoparquet/geoparquet-io/issues/152) for planned improvements.
 
 ```bash
 # Column statistics (nulls, min/max, unique counts)
@@ -70,7 +70,7 @@ gpio inspect data.parquet --head --stats
 ## GeoParquet Metadata
 
 !!! info "CLI Only"
-    Detailed metadata inspection is currently only available via the CLI. See [issue #152](https://github.com/cholmes/geoparquet-io/issues/152) for planned improvements.
+    Detailed metadata inspection is currently only available via the CLI. See [issue #152](https://github.com/geoparquet/geoparquet-io/issues/152) for planned improvements.
 
 View the complete GeoParquet metadata from the 'geo' key:
 
