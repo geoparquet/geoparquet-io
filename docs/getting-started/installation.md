@@ -5,7 +5,7 @@
 [uv](https://github.com/astral-sh/uv) is a fast Python package manager that we use for this project:
 
 ```bash
-# Install from PyPI (coming soon)
+# Install from PyPI 
 uv pip install geoparquet-io
 
 # Or install from source
