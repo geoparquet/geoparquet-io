@@ -753,8 +753,7 @@ class TestTableToGeojson:
         """Create a temporary output file path."""
         tmp_path = Path(tempfile.gettempdir()) / f"test_geojson_{uuid.uuid4()}.geojson"
         yield str(tmp_path)
-        if tmp_path.exists():
-            tmp_path.unlink()
+        safe_unlink(tmp_path)
 
     def test_to_geojson_to_file(self, sample_table, output_file):
         """Test to_geojson() writes to file."""
@@ -900,9 +899,27 @@ class TestTableAddBboxMetadata:
         geo_meta = meta.get("geo_metadata", {})
         columns = geo_meta.get("columns", {})
         geom_col = with_meta.geometry_column
-        if geom_col in columns:
-            covering = columns[geom_col].get("covering")
-            assert covering is not None
+
+        assert geom_col in columns, "Geometry column should be in geo metadata columns"
+        covering = columns[geom_col].get("covering")
+
+        # Verify covering structure
+        assert covering is not None, "Covering metadata should be present"
+        assert isinstance(covering, dict), "Covering should be a dict"
+        assert "bbox" in covering, "Covering should have 'bbox' key"
+
+        bbox_paths = covering["bbox"]
+        assert isinstance(bbox_paths, dict), "Covering bbox should be a dict"
+        assert "xmin" in bbox_paths, "Covering should have xmin path"
+        assert "ymin" in bbox_paths, "Covering should have ymin path"
+        assert "xmax" in bbox_paths, "Covering should have xmax path"
+        assert "ymax" in bbox_paths, "Covering should have ymax path"
+
+        # Each path should be a list like ["bbox", "xmin"]
+        for key in ["xmin", "ymin", "xmax", "ymax"]:
+            path = bbox_paths[key]
+            assert isinstance(path, list), f"Path for {key} should be a list"
+            assert len(path) == 2, f"Path for {key} should have 2 elements"
 
 
 class TestTopLevelExports:

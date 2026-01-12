@@ -914,16 +914,21 @@ class Table:
         Return the first n rows as a new Table.
 
         Args:
-            n: Number of rows to return (default: 10)
+            n: Number of rows to return (default: 10). Must be non-negative.
 
         Returns:
             New Table with the first n rows
+
+        Raises:
+            ValueError: If n is negative
 
         Example:
             >>> table = gpio.read('data.parquet')
             >>> first_10 = table.head()
             >>> first_100 = table.head(100)
         """
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
         n = min(n, self.num_rows)
         return Table(self._table.slice(0, n), self._geometry_column)
 
@@ -932,16 +937,21 @@ class Table:
         Return the last n rows as a new Table.
 
         Args:
-            n: Number of rows to return (default: 10)
+            n: Number of rows to return (default: 10). Must be non-negative.
 
         Returns:
             New Table with the last n rows
+
+        Raises:
+            ValueError: If n is negative
 
         Example:
             >>> table = gpio.read('data.parquet')
             >>> last_10 = table.tail()
             >>> last_100 = table.tail(100)
         """
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
         n = min(n, self.num_rows)
         offset = max(0, self.num_rows - n)
         return Table(self._table.slice(offset, n), self._geometry_column)
@@ -1535,7 +1545,11 @@ class Table:
 
         try:
             write_geoparquet_table(
-                self._table, str(temp_input), geometry_column=self._geometry_column
+                self._table,
+                str(temp_input),
+                geometry_column=self._geometry_column,
+                compression=compression,
+                compression_level=compression_level,
             )
 
             result = partition_by_string(
@@ -1600,7 +1614,11 @@ class Table:
 
         try:
             write_geoparquet_table(
-                self._table, str(temp_input), geometry_column=self._geometry_column
+                self._table,
+                str(temp_input),
+                geometry_column=self._geometry_column,
+                compression=compression,
+                compression_level=compression_level,
             )
 
             result = partition_by_kdtree(
@@ -1672,7 +1690,11 @@ class Table:
 
         try:
             write_geoparquet_table(
-                self._table, str(temp_input), geometry_column=self._geometry_column
+                self._table,
+                str(temp_input),
+                geometry_column=self._geometry_column,
+                compression=compression,
+                compression_level=compression_level,
             )
 
             result = partition_by_admin_hierarchical(

@@ -141,6 +141,13 @@ Partition by balanced spatial partitions:
     )
     ```
 
+    !!! note "CLI vs Python API"
+        The Python API uses `iterations` which creates 2^iterations partitions (power-of-two semantics).
+        The CLI uses `--partitions N` to specify an absolute count directly. For example:
+
+        - Python `iterations=6` → 64 partitions (2^6)
+        - CLI `--partitions 64` → 64 partitions
+
 **Column behavior:**
 - Similar to H3: excluded by default, included for Hive
 - Use `--keep-kdtree-column` to explicitly keep

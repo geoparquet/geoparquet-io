@@ -89,7 +89,7 @@ def generate_stac(
     else:
         # Directory -> STAC Collection
         stac_dict = generate_stac_collection(
-            input_folder=str(input_path),
+            partition_dir=str(input_path),
             bucket_prefix=bucket,
             public_url=public_url,
             collection_id=collection_id,
@@ -134,4 +134,8 @@ def validate_stac(stac_path: str | Path, verbose: bool = False) -> CheckResult:
     from geoparquet_io.core.stac_check import validate_stac_file
 
     results = validate_stac_file(str(stac_path), verbose=verbose)
+
+    # Translate "valid" key to "passed" for CheckResult compatibility
+    results["passed"] = results.pop("valid", True)
+
     return CheckResult(results, check_type="stac")

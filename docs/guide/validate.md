@@ -148,7 +148,8 @@ For faster validation, skip reading actual geometry data:
 
 === "Python"
 
-    The Python API always validates data. Use `sample_size` to limit the check.
+    The Python `validate()` method always validates data with a default sample size.
+    This option is CLI-only.
 
 ### Sample Size
 
@@ -166,9 +167,13 @@ Control how many rows are checked for data validation:
 
 === "Python"
 
+    The `sample_size` option is CLI-only. The Python `validate()` method uses a
+    fixed internal sample size (1000 rows) for data validation.
+
     ```python
-    # Sample size is handled internally by the validate() method
+    # Python validate() only accepts version parameter
     result = table.validate()
+    result = table.validate(version='1.1')
     ```
 
 ### Target Version
