@@ -775,7 +775,6 @@ class TestTableToGeojson:
         """Create a temporary output file path using pytest's tmp_path fixture."""
         file_path = tmp_path / f"test_geojson_{uuid.uuid4()}.geojson"
         yield str(file_path)
-        safe_unlink(file_path)
 
     def test_to_geojson_to_file(self, sample_table, output_file):
         """Test to_geojson() writes to file."""
@@ -889,6 +888,28 @@ class TestTableCheck:
         result = sample_table.check_row_groups()
         assert isinstance(result, CheckResult)
         assert result.check_type == "row_groups"
+
+    def test_check_spatial_returns_check_result(self, sample_table):
+        """Test check_spatial() returns a CheckResult."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = sample_table.check_spatial()
+        assert isinstance(result, CheckResult)
+        assert result.check_type == "spatial"
+        assert isinstance(result.to_dict(), dict)
+
+    def test_validate_returns_check_result(self, sample_table):
+        """Test validate() returns a CheckResult."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = sample_table.validate()
+        assert isinstance(result, CheckResult)
+        assert result.check_type == "validate"
+        assert isinstance(result.to_dict(), dict)
+        # The result dict should have expected validation fields
+        result_dict = result.to_dict()
+        assert "passed" in result_dict
+        assert "detected_version" in result_dict
 
 
 class TestTableAddBboxMetadata:

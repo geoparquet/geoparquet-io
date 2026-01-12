@@ -76,8 +76,6 @@ def _run_partition_with_temp_file(
     import uuid
     from pathlib import Path as PathLib
 
-    from geoparquet_io.core.common import write_geoparquet_table
-
     temp_input = PathLib(tempfile.gettempdir()) / f"{temp_prefix}_{uuid.uuid4()}.parquet"
 
     try:
@@ -1109,6 +1107,13 @@ class Table:
                             }
                 except Exception:
                     # If batched query fails, fall back to per-column queries
+                    import logging
+
+                    logger = logging.getLogger(__name__)
+                    logger.debug(
+                        "Batched stats query failed, falling back to per-column queries",
+                        exc_info=True,
+                    )
                     for col_name in regular_cols:
                         escaped_col = col_name.replace('"', '""')
                         try:
@@ -1137,6 +1142,11 @@ class Table:
                                 }
                         except Exception:
                             # If stats fail for this column, provide basic info
+                            logger.debug(
+                                "Stats query failed for column '%s'",
+                                col_name,
+                                exc_info=True,
+                            )
                             stats[col_name] = {
                                 "nulls": 0,
                                 "min": None,
@@ -1257,21 +1267,23 @@ class Table:
         Convert the table to GeoJSON.
 
         If output_path is provided, writes a GeoJSON FeatureCollection file.
-        If output_path is None, returns GeoJSON as a string.
+        If output_path is None, writes GeoJSON to stdout and returns None.
+
+        This method delegates to convert_to_geojson from the ops module.
 
         Args:
-            output_path: Output file path, or None to return as string
+            output_path: Output file path, or None to write to stdout
             precision: Coordinate decimal precision (default 7 per RFC 7946)
             write_bbox: Include bbox property for each feature
             id_field: Column to use as feature 'id' member
 
         Returns:
-            Output path if writing to file, GeoJSON string if output_path is None
+            Output path if writing to file, None if writing to stdout
 
         Example:
             >>> table = gpio.read('data.parquet')
-            >>> table.to_geojson('output.geojson')
-            >>> geojson_str = table.to_geojson()
+            >>> table.to_geojson('output.geojson')  # Writes to file, returns path
+            >>> table.to_geojson()  # Writes to stdout, returns None
         """
         from geoparquet_io.api.ops import convert_to_geojson
 
@@ -1300,8 +1312,6 @@ class Table:
         import tempfile
         import uuid
         from pathlib import Path
-
-        from geoparquet_io.core.common import write_geoparquet_table
 
         temp_path = Path(tempfile.gettempdir()) / f"gpio_check_{uuid.uuid4()}.parquet"
         try:
@@ -1333,8 +1343,6 @@ class Table:
         import tempfile
         import uuid
         from pathlib import Path
-
-        from geoparquet_io.core.common import write_geoparquet_table
 
         temp_input = Path(tempfile.gettempdir()) / f"gpio_in_{uuid.uuid4()}.parquet"
         temp_output = Path(tempfile.gettempdir()) / f"gpio_out_{uuid.uuid4()}.parquet"
@@ -1533,7 +1541,7 @@ class Table:
             "issues": [
                 f"{c.name}: {c.message}"
                 for c in validation_result.checks
-                if c.status.value == "FAILED"
+                if c.status.value == "failed"
             ],
         }
         return CheckResult(results, check_type="validate")
