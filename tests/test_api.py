@@ -601,3 +601,322 @@ class TestReadPartition:
         assert isinstance(table, Table)
         assert table.num_rows > 0
         assert table.geometry_column == "geometry"
+
+
+class TestTableHeadTail:
+    """Tests for head() and tail() methods."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    def test_head_default(self, sample_table):
+        """Test head() returns first 10 rows by default."""
+        result = sample_table.head()
+        assert isinstance(result, Table)
+        assert result.num_rows == 10
+        assert result.geometry_column == sample_table.geometry_column
+
+    def test_head_custom_n(self, sample_table):
+        """Test head() with custom n value."""
+        result = sample_table.head(25)
+        assert result.num_rows == 25
+
+    def test_head_larger_than_table(self, sample_table):
+        """Test head() with n larger than table size."""
+        result = sample_table.head(10000)
+        assert result.num_rows == sample_table.num_rows
+
+    def test_tail_default(self, sample_table):
+        """Test tail() returns last 10 rows by default."""
+        result = sample_table.tail()
+        assert isinstance(result, Table)
+        assert result.num_rows == 10
+        assert result.geometry_column == sample_table.geometry_column
+
+    def test_tail_custom_n(self, sample_table):
+        """Test tail() with custom n value."""
+        result = sample_table.tail(25)
+        assert result.num_rows == 25
+
+    def test_tail_larger_than_table(self, sample_table):
+        """Test tail() with n larger than table size."""
+        result = sample_table.tail(10000)
+        assert result.num_rows == sample_table.num_rows
+
+
+class TestTableStats:
+    """Tests for stats() method."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    def test_stats_returns_dict(self, sample_table):
+        """Test stats() returns a dictionary."""
+        result = sample_table.stats()
+        assert isinstance(result, dict)
+
+    def test_stats_has_all_columns(self, sample_table):
+        """Test stats() includes all columns."""
+        result = sample_table.stats()
+        for col_name in sample_table.column_names:
+            assert col_name in result
+
+    def test_stats_structure(self, sample_table):
+        """Test stats() returns expected structure per column."""
+        result = sample_table.stats()
+        for _col_name, col_stats in result.items():
+            assert "nulls" in col_stats
+            assert "min" in col_stats
+            assert "max" in col_stats
+            assert "unique" in col_stats
+
+    def test_stats_geometry_column(self, sample_table):
+        """Test stats() handles geometry columns correctly."""
+        result = sample_table.stats()
+        geom_col = sample_table.geometry_column
+        if geom_col:
+            assert result[geom_col]["min"] is None
+            assert result[geom_col]["max"] is None
+
+
+class TestTableMetadata:
+    """Tests for metadata() method."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    def test_metadata_returns_dict(self, sample_table):
+        """Test metadata() returns a dictionary."""
+        result = sample_table.metadata()
+        assert isinstance(result, dict)
+
+    def test_metadata_has_basic_fields(self, sample_table):
+        """Test metadata() includes basic fields."""
+        result = sample_table.metadata()
+        assert "rows" in result
+        assert "columns_count" in result
+        assert "geometry_column" in result
+        assert "columns" in result
+
+    def test_metadata_rows_match(self, sample_table):
+        """Test metadata() rows matches table."""
+        result = sample_table.metadata()
+        assert result["rows"] == sample_table.num_rows
+
+    def test_metadata_columns_structure(self, sample_table):
+        """Test metadata() columns have expected structure."""
+        result = sample_table.metadata()
+        for col in result["columns"]:
+            assert "name" in col
+            assert "type" in col
+            assert "is_geometry" in col
+
+    def test_metadata_includes_geo_metadata(self, sample_table):
+        """Test metadata() includes geo_metadata for GeoParquet files."""
+        result = sample_table.metadata()
+        # The test file should have geo metadata
+        if result.get("geoparquet_version"):
+            assert "geo_metadata" in result
+
+    def test_metadata_with_parquet_metadata(self, sample_table):
+        """Test metadata() includes parquet metadata when requested."""
+        result = sample_table.metadata(include_parquet_metadata=True)
+        # If there's any metadata besides 'geo', it should be included
+        assert isinstance(result, dict)
+
+
+class TestTableToGeojson:
+    """Tests for to_geojson() method."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        # Use a smaller subset for faster tests
+        return read(PLACES_PARQUET).head(10)
+
+    @pytest.fixture
+    def output_file(self):
+        """Create a temporary output file path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_geojson_{uuid.uuid4()}.geojson"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    def test_to_geojson_to_file(self, sample_table, output_file):
+        """Test to_geojson() writes to file."""
+        result = sample_table.to_geojson(output_file)
+        assert result == output_file
+        assert Path(output_file).exists()
+
+    def test_to_geojson_file_is_valid_json(self, sample_table, output_file):
+        """Test to_geojson() produces valid JSON."""
+        import json
+
+        sample_table.to_geojson(output_file)
+        with open(output_file) as f:
+            data = json.load(f)
+        assert "type" in data
+        assert data["type"] == "FeatureCollection"
+
+
+class TestCheckResult:
+    """Tests for CheckResult class."""
+
+    def test_check_result_import(self):
+        """Test CheckResult can be imported."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult({"passed": True}, check_type="test")
+        assert result.passed()
+
+    def test_check_result_passed(self):
+        """Test CheckResult.passed() method."""
+        from geoparquet_io.api.check import CheckResult
+
+        passing = CheckResult({"passed": True}, check_type="test")
+        assert passing.passed()
+
+        failing = CheckResult({"passed": False}, check_type="test")
+        assert not failing.passed()
+
+    def test_check_result_failures(self):
+        """Test CheckResult.failures() method."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult({"passed": False, "issues": ["Issue 1", "Issue 2"]}, check_type="test")
+        failures = result.failures()
+        assert len(failures) == 2
+        assert "Issue 1" in failures
+
+    def test_check_result_to_dict(self):
+        """Test CheckResult.to_dict() method."""
+        from geoparquet_io.api.check import CheckResult
+
+        raw = {"passed": True, "some_data": 123}
+        result = CheckResult(raw, check_type="test")
+        assert result.to_dict() == raw
+
+    def test_check_result_bool(self):
+        """Test CheckResult bool conversion."""
+        from geoparquet_io.api.check import CheckResult
+
+        passing = CheckResult({"passed": True}, check_type="test")
+        assert bool(passing)
+
+        failing = CheckResult({"passed": False}, check_type="test")
+        assert not bool(failing)
+
+
+class TestTableCheck:
+    """Tests for Table check methods."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    def test_check_returns_check_result(self, sample_table):
+        """Test check() returns a CheckResult."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = sample_table.check()
+        assert isinstance(result, CheckResult)
+        assert result.check_type == "all"
+
+    def test_check_has_results(self, sample_table):
+        """Test check() returns results dict."""
+        result = sample_table.check()
+        results_dict = result.to_dict()
+        assert isinstance(results_dict, dict)
+
+    def test_check_compression_returns_check_result(self, sample_table):
+        """Test check_compression() returns a CheckResult."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = sample_table.check_compression()
+        assert isinstance(result, CheckResult)
+        assert result.check_type == "compression"
+
+    def test_check_bbox_returns_check_result(self, sample_table):
+        """Test check_bbox() returns a CheckResult."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = sample_table.check_bbox()
+        assert isinstance(result, CheckResult)
+        assert result.check_type == "bbox"
+
+    def test_check_row_groups_returns_check_result(self, sample_table):
+        """Test check_row_groups() returns a CheckResult."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = sample_table.check_row_groups()
+        assert isinstance(result, CheckResult)
+        assert result.check_type == "row_groups"
+
+
+class TestTableAddBboxMetadata:
+    """Tests for add_bbox_metadata() method."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    def test_add_bbox_metadata_requires_bbox_column(self, sample_table):
+        """Test add_bbox_metadata() raises error if bbox column missing."""
+        import click
+
+        # Use a non-existent column name to trigger the error
+        with pytest.raises(click.ClickException):
+            sample_table.add_bbox_metadata(bbox_column="nonexistent_bbox")
+
+    def test_add_bbox_metadata_with_bbox_column(self, sample_table):
+        """Test add_bbox_metadata() works with bbox column."""
+        # First add the bbox column, then add metadata
+        with_bbox = sample_table.add_bbox()
+        with_meta = with_bbox.add_bbox_metadata()
+        assert isinstance(with_meta, Table)
+
+        # Check metadata was added
+        meta = with_meta.metadata()
+        geo_meta = meta.get("geo_metadata", {})
+        columns = geo_meta.get("columns", {})
+        geom_col = with_meta.geometry_column
+        if geom_col in columns:
+            covering = columns[geom_col].get("covering")
+            assert covering is not None
+
+
+class TestTopLevelExports:
+    """Tests for top-level module exports."""
+
+    def test_check_result_exported(self):
+        """Test CheckResult is exported from top-level module."""
+        from geoparquet_io import CheckResult
+
+        assert CheckResult is not None
+
+    def test_stac_functions_exported(self):
+        """Test STAC functions are exported from top-level module."""
+        from geoparquet_io import generate_stac, validate_stac
+
+        assert generate_stac is not None
+        assert validate_stac is not None

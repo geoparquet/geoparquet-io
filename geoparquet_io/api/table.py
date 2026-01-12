@@ -22,6 +22,8 @@ from geoparquet_io.core.common import write_geoparquet_table
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from geoparquet_io.api.check import CheckResult
+
 
 def _calculate_bounds_from_table(
     table: pa.Table,
@@ -906,6 +908,791 @@ class Table:
                     break
                 except OSError:
                     time.sleep(0.1 * (attempt + 1))
+
+    def head(self, n: int = 10) -> Table:
+        """
+        Return the first n rows as a new Table.
+
+        Args:
+            n: Number of rows to return (default: 10)
+
+        Returns:
+            New Table with the first n rows
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> first_10 = table.head()
+            >>> first_100 = table.head(100)
+        """
+        n = min(n, self.num_rows)
+        return Table(self._table.slice(0, n), self._geometry_column)
+
+    def tail(self, n: int = 10) -> Table:
+        """
+        Return the last n rows as a new Table.
+
+        Args:
+            n: Number of rows to return (default: 10)
+
+        Returns:
+            New Table with the last n rows
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> last_10 = table.tail()
+            >>> last_100 = table.tail(100)
+        """
+        n = min(n, self.num_rows)
+        offset = max(0, self.num_rows - n)
+        return Table(self._table.slice(offset, n), self._geometry_column)
+
+    def stats(self) -> dict:
+        """
+        Calculate column statistics.
+
+        Computes statistics for each column including:
+        - nulls: Number of null values
+        - min: Minimum value (non-geometry columns only)
+        - max: Maximum value (non-geometry columns only)
+        - unique: Approximate unique count (non-geometry columns only)
+
+        Returns:
+            dict: Statistics per column name
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> stats = table.stats()
+            >>> print(stats['population']['min'])
+            1000
+            >>> print(stats['population']['max'])
+            10000000
+        """
+        import duckdb
+
+        con = None
+        try:
+            con = duckdb.connect()
+            con.execute("INSTALL spatial; LOAD spatial;")
+            con.register("input_table", self._table)
+
+            stats = {}
+            for field in self._table.schema:
+                col_name = field.name
+                is_geometry = col_name == self._geometry_column
+
+                # Escape column name for SQL
+                escaped_col = col_name.replace('"', '""')
+
+                if is_geometry:
+                    # For geometry columns, only count nulls
+                    query = f"""
+                        SELECT COUNT(*) FILTER (WHERE "{escaped_col}" IS NULL) as null_count
+                        FROM input_table
+                    """
+                    result = con.execute(query).fetchone()
+                    stats[col_name] = {
+                        "nulls": result[0] if result else 0,
+                        "min": None,
+                        "max": None,
+                        "unique": None,
+                    }
+                else:
+                    # For non-geometry columns, get full stats
+                    query = f"""
+                        SELECT
+                            COUNT(*) FILTER (WHERE "{escaped_col}" IS NULL) as null_count,
+                            MIN("{escaped_col}") as min_val,
+                            MAX("{escaped_col}") as max_val,
+                            APPROX_COUNT_DISTINCT("{escaped_col}") as unique_count
+                        FROM input_table
+                    """
+                    try:
+                        result = con.execute(query).fetchone()
+                        if result:
+                            stats[col_name] = {
+                                "nulls": result[0],
+                                "min": result[1],
+                                "max": result[2],
+                                "unique": result[3],
+                            }
+                        else:
+                            stats[col_name] = {
+                                "nulls": 0,
+                                "min": None,
+                                "max": None,
+                                "unique": None,
+                            }
+                    except Exception:
+                        # If stats fail for this column, provide basic info
+                        stats[col_name] = {
+                            "nulls": 0,
+                            "min": None,
+                            "max": None,
+                            "unique": None,
+                        }
+
+            return stats
+
+        finally:
+            if con is not None:
+                con.close()
+
+    def metadata(self, include_parquet_metadata: bool = False) -> dict:
+        """
+        Get GeoParquet and schema metadata from the table.
+
+        Returns metadata including:
+        - geoparquet_version: GeoParquet version string
+        - primary_column: Primary geometry column name
+        - crs: Coordinate Reference System (PROJJSON dict or string)
+        - geometry_types: List of geometry types
+        - bounds: Bounding box (xmin, ymin, xmax, ymax)
+        - columns: List of column info dicts
+        - geo_metadata: Full 'geo' metadata dict (if present)
+
+        Args:
+            include_parquet_metadata: If True, include raw Parquet schema metadata
+
+        Returns:
+            dict: Metadata dictionary
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> meta = table.metadata()
+            >>> print(meta['geoparquet_version'])
+            1.1.0
+            >>> print(meta['crs'])
+            {'id': {'authority': 'EPSG', 'code': 4326}}
+        """
+        import json
+
+        result = {
+            "rows": self.num_rows,
+            "columns_count": len(self.column_names),
+            "geometry_column": self._geometry_column,
+            "geoparquet_version": self.geoparquet_version,
+            "crs": self.crs,
+            "bounds": self.bounds,
+            "columns": [
+                {
+                    "name": field.name,
+                    "type": str(field.type),
+                    "is_geometry": field.name == self._geometry_column,
+                }
+                for field in self._table.schema
+            ],
+        }
+
+        # Extract full geo metadata if available
+        schema_metadata = self._table.schema.metadata
+        if schema_metadata and b"geo" in schema_metadata:
+            try:
+                geo_meta = json.loads(schema_metadata[b"geo"].decode("utf-8"))
+                result["geo_metadata"] = geo_meta
+
+                # Extract geometry_types from geo metadata
+                columns_meta = geo_meta.get("columns", {})
+                if self._geometry_column and self._geometry_column in columns_meta:
+                    col_meta = columns_meta[self._geometry_column]
+                    result["geometry_types"] = col_meta.get("geometry_types")
+                    result["edges"] = col_meta.get("edges")
+                    result["orientation"] = col_meta.get("orientation")
+
+                    # Check for covering/bbox info
+                    covering = col_meta.get("covering")
+                    if covering:
+                        result["covering"] = covering
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                result["geo_metadata"] = None
+
+        # Optionally include raw Parquet schema metadata
+        if include_parquet_metadata and schema_metadata:
+            result["parquet_metadata"] = {
+                k.decode("utf-8") if isinstance(k, bytes) else k: (
+                    v.decode("utf-8") if isinstance(v, bytes) else v
+                )
+                for k, v in schema_metadata.items()
+                if k != b"geo"  # Already included above
+            }
+
+        return result
+
+    def to_geojson(
+        self,
+        output_path: str | None = None,
+        *,
+        precision: int = 7,
+        write_bbox: bool = False,
+        id_field: str | None = None,
+    ) -> str | None:
+        """
+        Convert the table to GeoJSON.
+
+        If output_path is provided, writes a GeoJSON FeatureCollection file.
+        If output_path is None, returns GeoJSON as a string.
+
+        Args:
+            output_path: Output file path, or None to return as string
+            precision: Coordinate decimal precision (default 7 per RFC 7946)
+            write_bbox: Include bbox property for each feature
+            id_field: Column to use as feature 'id' member
+
+        Returns:
+            Output path if writing to file, GeoJSON string if output_path is None
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> table.to_geojson('output.geojson')
+            >>> geojson_str = table.to_geojson()
+        """
+        from geoparquet_io.api.ops import convert_to_geojson
+
+        return convert_to_geojson(
+            self._table,
+            output_path=output_path,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+        )
+
+    def _with_temp_file(self, func, *args, **kwargs):
+        """
+        Execute a file-based function with a temporary file containing this table.
+
+        Writes the table to a temp file, runs the function, and cleans up.
+
+        Args:
+            func: Function to call with temp file path as first argument
+            *args: Additional positional arguments for func
+            **kwargs: Additional keyword arguments for func
+
+        Returns:
+            Result from func
+        """
+        import tempfile
+        import time as time_module
+        import uuid
+        from pathlib import Path
+
+        from geoparquet_io.core.common import write_geoparquet_table
+
+        temp_path = Path(tempfile.gettempdir()) / f"gpio_check_{uuid.uuid4()}.parquet"
+        try:
+            # Write table to temp file
+            write_geoparquet_table(
+                self._table,
+                str(temp_path),
+                geometry_column=self._geometry_column,
+            )
+            # Call the function with temp file
+            return func(str(temp_path), *args, **kwargs)
+        finally:
+            # Cleanup with retry for Windows file handle release
+            for attempt in range(3):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time_module.sleep(0.1 * (attempt + 1))
+
+    def check(self) -> CheckResult:
+        """
+        Run all best-practice checks on the table.
+
+        Checks include:
+        - Row group optimization
+        - Bbox structure and metadata
+        - Compression settings
+
+        Returns:
+            CheckResult with pass/fail status and details
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> result = table.check()
+            >>> if result.passed():
+            ...     print("All checks passed!")
+            >>> else:
+            ...     for failure in result.failures():
+            ...         print(failure)
+        """
+        from geoparquet_io.api.check import CheckResult
+        from geoparquet_io.core.check_parquet_structure import check_all
+
+        results = self._with_temp_file(check_all, verbose=False, return_results=True, quiet=True)
+        return CheckResult(results, check_type="all")
+
+    def check_spatial(self, sample_size: int = 100, limit_rows: int = 100000) -> CheckResult:
+        """
+        Check if data is spatially ordered.
+
+        Compares distance between consecutive features vs random pairs.
+        A ratio < 0.5 indicates good spatial clustering.
+
+        Args:
+            sample_size: Number of random pairs to sample
+            limit_rows: Maximum rows to analyze
+
+        Returns:
+            CheckResult with spatial ordering analysis
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> result = table.check_spatial()
+            >>> if result.passed():
+            ...     print("Data is spatially ordered")
+            >>> else:
+            ...     print("Consider using sort_hilbert()")
+        """
+        from geoparquet_io.api.check import CheckResult
+        from geoparquet_io.core.check_spatial_order import check_spatial_order
+
+        results = self._with_temp_file(
+            check_spatial_order,
+            random_sample_size=sample_size,
+            limit_rows=limit_rows,
+            verbose=False,
+            return_results=True,
+            quiet=True,
+        )
+        return CheckResult(results, check_type="spatial")
+
+    def check_compression(self) -> CheckResult:
+        """
+        Check compression settings on geometry column.
+
+        Recommends ZSTD compression for best performance.
+
+        Returns:
+            CheckResult with compression analysis
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> result = table.check_compression()
+            >>> print(result.to_dict())
+        """
+        from geoparquet_io.api.check import CheckResult
+        from geoparquet_io.core.check_parquet_structure import check_compression
+
+        results = self._with_temp_file(
+            check_compression, verbose=False, return_results=True, quiet=True
+        )
+        return CheckResult(results, check_type="compression")
+
+    def check_bbox(self) -> CheckResult:
+        """
+        Check bbox structure and metadata.
+
+        Verifies:
+        - Bbox column exists and has correct structure
+        - GeoParquet covering metadata is present
+
+        Returns:
+            CheckResult with bbox analysis
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> result = table.check_bbox()
+            >>> if not result.passed():
+            ...     table = table.add_bbox()
+        """
+        from geoparquet_io.api.check import CheckResult
+        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+        results = self._with_temp_file(
+            check_metadata_and_bbox, verbose=False, return_results=True, quiet=True
+        )
+        return CheckResult(results, check_type="bbox")
+
+    def check_row_groups(self) -> CheckResult:
+        """
+        Check row group optimization.
+
+        Checks if row group sizes are optimal for cloud-native access
+        (recommended: 64-256 MB per group, 10k-200k rows per group).
+
+        Returns:
+            CheckResult with row group analysis
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> result = table.check_row_groups()
+            >>> print(result.recommendations())
+        """
+        from geoparquet_io.api.check import CheckResult
+        from geoparquet_io.core.check_parquet_structure import check_row_groups
+
+        results = self._with_temp_file(
+            check_row_groups, verbose=False, return_results=True, quiet=True
+        )
+        return CheckResult(results, check_type="row_groups")
+
+    def validate(self, version: str | None = None) -> CheckResult:
+        """
+        Validate against GeoParquet specification.
+
+        Checks compliance with GeoParquet 1.0, 1.1, 2.0, or auto-detects version.
+
+        Args:
+            version: Target GeoParquet version (None for auto-detect)
+
+        Returns:
+            CheckResult with validation results
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> result = table.validate()
+            >>> if result.passed():
+            ...     print(f"Valid GeoParquet {table.geoparquet_version}")
+        """
+        from geoparquet_io.api.check import CheckResult
+        from geoparquet_io.core.validate import validate_geoparquet
+
+        results = self._with_temp_file(
+            validate_geoparquet,
+            target_version=version,
+            skip_data_validation=False,
+            sample_size=1000,
+            return_results=True,
+            quiet=True,
+        )
+        return CheckResult(results, check_type="validate")
+
+    def add_admin_divisions(
+        self,
+        *,
+        dataset: str = "overture",
+        levels: list[str] | None = None,
+        country_filter: str | None = None,
+        use_centroid: bool = False,
+    ) -> Table:
+        """
+        Add administrative division columns via spatial join.
+
+        Enriches each row with country codes and/or admin subdivision codes
+        based on spatial intersection with an administrative boundaries dataset.
+
+        Args:
+            dataset: Boundaries dataset ("overture", "gaul", or custom URL)
+            levels: Admin levels to add (e.g., ["country", "admin1"])
+            country_filter: Only include specific country (ISO code)
+            use_centroid: Use geometry centroid for join (faster)
+
+        Returns:
+            Table with admin division columns added
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> enriched = table.add_admin_divisions(levels=["country", "admin1"])
+        """
+        import tempfile
+        import time as time_module
+        import uuid
+        from pathlib import Path
+
+        from geoparquet_io.core.add_admin_divisions_multi import add_admin_divisions
+        from geoparquet_io.core.common import write_geoparquet_table
+
+        # Write to temp file, process, read back
+        temp_input = Path(tempfile.gettempdir()) / f"gpio_admin_in_{uuid.uuid4()}.parquet"
+        temp_output = Path(tempfile.gettempdir()) / f"gpio_admin_out_{uuid.uuid4()}.parquet"
+
+        try:
+            write_geoparquet_table(
+                self._table, str(temp_input), geometry_column=self._geometry_column
+            )
+
+            add_admin_divisions(
+                input_parquet=str(temp_input),
+                output_parquet=str(temp_output),
+                dataset=dataset,
+                levels=levels or ["country"],
+                country_filter=country_filter,
+                use_centroid=use_centroid,
+                verbose=False,
+            )
+
+            result_table = pq.read_table(str(temp_output))
+            return Table(result_table, self._geometry_column)
+        finally:
+            for temp_path in [temp_input, temp_output]:
+                for attempt in range(3):
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                        break
+                    except OSError:
+                        time_module.sleep(0.1 * (attempt + 1))
+
+    def add_bbox_metadata(self, bbox_column: str = "bbox") -> Table:
+        """
+        Add bbox covering metadata to the table schema.
+
+        Updates the GeoParquet metadata to indicate that the bbox column
+        provides per-feature bounding boxes for the geometry column.
+        This enables query engines to use bbox for efficient filtering.
+
+        Note: This requires the bbox column to already exist. Use add_bbox()
+        first if the table doesn't have a bbox column.
+
+        Args:
+            bbox_column: Name of the bbox column (default "bbox")
+
+        Returns:
+            Table with updated metadata
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> table = table.add_bbox().add_bbox_metadata()
+        """
+        import json
+
+        if bbox_column not in self.column_names:
+            from click import ClickException
+
+            raise ClickException(f"Bbox column '{bbox_column}' not found. Use add_bbox() first.")
+
+        # Get existing metadata
+        schema = self._table.schema
+        schema_metadata = dict(schema.metadata) if schema.metadata else {}
+
+        # Parse existing geo metadata or create new
+        if b"geo" in schema_metadata:
+            geo_meta = json.loads(schema_metadata[b"geo"].decode("utf-8"))
+        else:
+            geo_meta = {
+                "version": "1.1.0",
+                "primary_column": self._geometry_column,
+                "columns": {},
+            }
+
+        # Add covering metadata for the geometry column
+        geom_col = self._geometry_column
+        if geom_col not in geo_meta.get("columns", {}):
+            geo_meta["columns"][geom_col] = {}
+
+        geo_meta["columns"][geom_col]["covering"] = {
+            "bbox": {
+                "xmin": [bbox_column, "xmin"],
+                "ymin": [bbox_column, "ymin"],
+                "xmax": [bbox_column, "xmax"],
+                "ymax": [bbox_column, "ymax"],
+            }
+        }
+
+        # Update schema with new metadata
+        schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+        new_schema = schema.with_metadata(schema_metadata)
+        new_table = self._table.cast(new_schema)
+
+        return Table(new_table, self._geometry_column)
+
+    def partition_by_string(
+        self,
+        output_dir: str | Path,
+        column: str,
+        *,
+        chars: int | None = None,
+        hive: bool = True,
+        overwrite: bool = False,
+        compression: str = "ZSTD",
+        compression_level: int = 15,
+    ) -> dict:
+        """
+        Partition by string column values.
+
+        Creates partitioned output files based on unique values (or prefixes)
+        of a string column.
+
+        Args:
+            output_dir: Output directory for partition files
+            column: Column name to partition by
+            chars: Use first N characters as prefix (None for full value)
+            hive: Use Hive-style partitioning (column=value/)
+            overwrite: Overwrite existing files
+            compression: Compression codec
+            compression_level: Compression level
+
+        Returns:
+            dict with partition statistics
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> stats = table.partition_by_string(
+            ...     'output/',
+            ...     column='country_code',
+            ...     hive=True
+            ... )
+        """
+        import tempfile
+        import time as time_module
+        import uuid
+        from pathlib import Path as PathLib
+
+        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.partition_by_string import partition_by_string
+
+        temp_input = PathLib(tempfile.gettempdir()) / f"gpio_part_str_{uuid.uuid4()}.parquet"
+
+        try:
+            write_geoparquet_table(
+                self._table, str(temp_input), geometry_column=self._geometry_column
+            )
+
+            result = partition_by_string(
+                input_parquet=str(temp_input),
+                output_folder=str(output_dir),
+                column=column,
+                chars=chars,
+                hive=hive,
+                overwrite=overwrite,
+                verbose=False,
+            )
+
+            return result if result else {"status": "completed"}
+        finally:
+            for attempt in range(3):
+                try:
+                    temp_input.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time_module.sleep(0.1 * (attempt + 1))
+
+    def partition_by_kdtree(
+        self,
+        output_dir: str | Path,
+        *,
+        iterations: int = 9,
+        hive: bool = True,
+        overwrite: bool = False,
+        compression: str = "ZSTD",
+        compression_level: int = 15,
+    ) -> dict:
+        """
+        Partition by KD-tree spatial cells.
+
+        Recursively splits the data spatially using KD-tree algorithm,
+        creating balanced partitions based on geometry distribution.
+
+        Args:
+            output_dir: Output directory for partition files
+            iterations: Number of KD-tree splits (creates 2^iterations partitions)
+            hive: Use Hive-style partitioning
+            overwrite: Overwrite existing files
+            compression: Compression codec
+            compression_level: Compression level
+
+        Returns:
+            dict with partition statistics
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> stats = table.partition_by_kdtree('output/', iterations=6)
+        """
+        import tempfile
+        import time as time_module
+        import uuid
+        from pathlib import Path as PathLib
+
+        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.partition_by_kdtree import partition_by_kdtree
+
+        temp_input = PathLib(tempfile.gettempdir()) / f"gpio_part_kd_{uuid.uuid4()}.parquet"
+
+        try:
+            write_geoparquet_table(
+                self._table, str(temp_input), geometry_column=self._geometry_column
+            )
+
+            result = partition_by_kdtree(
+                input_parquet=str(temp_input),
+                output_folder=str(output_dir),
+                iterations=iterations,
+                hive=hive,
+                overwrite=overwrite,
+                verbose=False,
+            )
+
+            return result if result else {"status": "completed"}
+        finally:
+            for attempt in range(3):
+                try:
+                    temp_input.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time_module.sleep(0.1 * (attempt + 1))
+
+    def partition_by_admin(
+        self,
+        output_dir: str | Path,
+        *,
+        dataset: str = "gaul",
+        levels: list[str] | None = None,
+        hive: bool = True,
+        overwrite: bool = False,
+        compression: str = "ZSTD",
+        compression_level: int = 15,
+    ) -> dict:
+        """
+        Partition by administrative boundaries.
+
+        Partitions data based on country codes and/or admin subdivisions
+        using a spatial join with an administrative boundaries dataset.
+
+        Args:
+            output_dir: Output directory for partition files
+            dataset: Boundaries dataset ("gaul", "overture", or custom URL)
+            levels: Admin levels to partition by (e.g., ["country", "admin1"])
+            hive: Use Hive-style partitioning
+            overwrite: Overwrite existing files
+            compression: Compression codec
+            compression_level: Compression level
+
+        Returns:
+            dict with partition statistics
+
+        Example:
+            >>> table = gpio.read('data.parquet')
+            >>> stats = table.partition_by_admin(
+            ...     'output/',
+            ...     dataset='gaul',
+            ...     levels=['country', 'admin1']
+            ... )
+        """
+        import tempfile
+        import time as time_module
+        import uuid
+        from pathlib import Path as PathLib
+
+        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.partition_admin_hierarchical import (
+            partition_by_admin_hierarchical,
+        )
+
+        temp_input = PathLib(tempfile.gettempdir()) / f"gpio_part_adm_{uuid.uuid4()}.parquet"
+
+        try:
+            write_geoparquet_table(
+                self._table, str(temp_input), geometry_column=self._geometry_column
+            )
+
+            result = partition_by_admin_hierarchical(
+                input_parquet=str(temp_input),
+                output_folder=str(output_dir),
+                dataset=dataset,
+                levels=levels or ["country"],
+                hive=hive,
+                overwrite=overwrite,
+                verbose=False,
+            )
+
+            return result if result else {"status": "completed"}
+        finally:
+            for attempt in range(3):
+                try:
+                    temp_input.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    time_module.sleep(0.1 * (attempt + 1))
 
     def __repr__(self) -> str:
         """String representation of the Table."""
