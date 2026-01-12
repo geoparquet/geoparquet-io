@@ -295,6 +295,14 @@ class GlobAwareCommand(click.Command):
     # Override in subclass or check command context
     supports_glob = True
 
+    # Default subcommands that should be omitted from hints
+    # Maps parent group name to their default subcommand name
+    DEFAULT_SUBCOMMANDS = {
+        "check": "all",
+        "convert": "geoparquet",
+        "inspect": "summary",
+    }
+
     def make_context(self, info_name, args, parent=None, **extra):
         """Detect shell-expanded glob patterns and provide helpful errors."""
         # Count args that look like parquet files (not options)
@@ -303,6 +311,7 @@ class GlobAwareCommand(click.Command):
         # If more than 2 parquet files (input + output), likely shell-expanded glob
         if len(parquet_args) > 2:
             # Build full command path (e.g., "check all" instead of just "all")
+            # Omits default subcommands for cleaner UX
             cmd_path = self._build_command_path(info_name, parent)
 
             if self.supports_glob:
@@ -326,7 +335,12 @@ class GlobAwareCommand(click.Command):
         return super().make_context(info_name, args, parent=parent, **extra)
 
     def _build_command_path(self, info_name, parent):
-        """Build full command path like 'check all' from parent context chain."""
+        """Build full command path like 'check all' from parent context chain.
+
+        Omits default subcommands for cleaner user-facing hints.
+        For example, 'inspect summary' becomes just 'inspect' since
+        'summary' is the default subcommand.
+        """
         parts = [info_name]
         ctx = parent
         while ctx is not None:
@@ -334,6 +348,15 @@ class GlobAwareCommand(click.Command):
             if ctx.parent is not None:
                 parts.insert(0, ctx.info_name)
             ctx = ctx.parent
+
+        # Check if the last part is a default subcommand and should be omitted
+        if len(parts) >= 2:
+            parent_name = parts[-2]
+            subcommand_name = parts[-1]
+            if self.DEFAULT_SUBCOMMANDS.get(parent_name) == subcommand_name:
+                # Omit the default subcommand from the path
+                parts = parts[:-1]
+
         return " ".join(parts)
 
 

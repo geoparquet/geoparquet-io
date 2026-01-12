@@ -22,7 +22,7 @@ repos:
 
     # find unused code
   - repo: https://github.com/jendrikseipp/vulture
-    rev: 'v2.3'
+    rev: 'v2.14'
     hooks:
       - id: vulture
 

@@ -465,7 +465,7 @@ def parse_wkb_type(wkb_bytes: bytes) -> str:
         return "GEOMETRY"
 
 
-def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 60) -> str:
+def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 45) -> str:
     """
     Convert WKB bytes to WKT and truncate for preview display.
 
@@ -509,12 +509,12 @@ def wkb_to_wkt_preview(wkb_bytes: bytes, max_length: int = 60) -> str:
         return f"<{parse_wkb_type(wkb_bytes)}>"
 
 
-def format_geometry_display(value: Any, max_length: int = 60) -> str:
+def format_geometry_display(value: Any, max_length: int = 45) -> str:
     """
     Format a geometry value for display.
 
     Args:
-        value: Geometry value (WKB bytes or other)
+        value: Geometry value (WKB bytes, WKT string, or other)
         max_length: Maximum length for WKT preview
 
     Returns:
@@ -526,10 +526,14 @@ def format_geometry_display(value: Any, max_length: int = 60) -> str:
     if isinstance(value, bytes):
         return wkb_to_wkt_preview(value, max_length)
 
-    return str(value)
+    # Handle WKT strings (already converted from geometry)
+    value_str = str(value)
+    if len(value_str) > max_length:
+        return value_str[: max_length - 3] + "..."
+    return value_str
 
 
-def format_bbox_display(value: dict, max_length: int = 60) -> str:
+def format_bbox_display(value: dict, max_length: int = 45) -> str:
     """
     Format a bbox struct value for display.
 
@@ -564,7 +568,7 @@ def is_bbox_value(value: Any) -> bool:
 
 
 def format_value_for_display(
-    value: Any, column_type: str, is_geometry: bool, max_length: int = 60
+    value: Any, column_type: str, is_geometry: bool, max_length: int = 45
 ) -> str:
     """
     Format a cell value for terminal display.
@@ -573,7 +577,7 @@ def format_value_for_display(
         value: Cell value
         column_type: Column type string
         is_geometry: Whether this is a geometry column
-        max_length: Maximum length for geometry WKT preview
+        max_length: Maximum length for geometry/bbox preview
 
     Returns:
         str: Formatted display string

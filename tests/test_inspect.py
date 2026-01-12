@@ -46,8 +46,8 @@ def test_inspect_default(runner, test_file):
 
 
 def test_inspect_head(runner, test_file):
-    """Test inspect with --head flag."""
-    result = runner.invoke(cli, ["inspect", test_file, "--head", "5"])
+    """Test inspect head subcommand."""
+    result = runner.invoke(cli, ["inspect", "head", test_file, "5"])
 
     assert result.exit_code == 0
     assert "Preview (first" in result.output
@@ -57,8 +57,8 @@ def test_inspect_head(runner, test_file):
 
 
 def test_inspect_head_default(runner, test_file):
-    """Test inspect with --head flag without value uses default of 10."""
-    result = runner.invoke(cli, ["inspect", test_file, "--head"])
+    """Test inspect head subcommand without count uses default of 10."""
+    result = runner.invoke(cli, ["inspect", "head", test_file])
 
     assert result.exit_code == 0
     assert "Preview (first" in result.output
@@ -67,8 +67,8 @@ def test_inspect_head_default(runner, test_file):
 
 
 def test_inspect_tail(runner, test_file):
-    """Test inspect with --tail flag."""
-    result = runner.invoke(cli, ["inspect", test_file, "--tail", "3"])
+    """Test inspect tail subcommand."""
+    result = runner.invoke(cli, ["inspect", "tail", test_file, "3"])
 
     assert result.exit_code == 0
     assert "Preview (last" in result.output
@@ -76,8 +76,8 @@ def test_inspect_tail(runner, test_file):
 
 
 def test_inspect_tail_default(runner, test_file):
-    """Test inspect with --tail flag without value uses default of 10."""
-    result = runner.invoke(cli, ["inspect", test_file, "--tail"])
+    """Test inspect tail subcommand without count uses default of 10."""
+    result = runner.invoke(cli, ["inspect", "tail", test_file])
 
     assert result.exit_code == 0
     assert "Preview (last" in result.output
@@ -86,7 +86,7 @@ def test_inspect_tail_default(runner, test_file):
 
 
 def test_inspect_head_default_with_other_option(runner, test_file):
-    """Test --head without value followed by another option uses default."""
+    """Test deprecated --head without value followed by another option uses default."""
     result = runner.invoke(cli, ["inspect", test_file, "--head", "--stats"])
 
     assert result.exit_code == 0
@@ -95,10 +95,12 @@ def test_inspect_head_default_with_other_option(runner, test_file):
     assert "10 rows" in result.output or "rows)" in result.output
     # Should also show stats
     assert "Statistics:" in result.output
+    # Should show deprecation warning
+    assert "--head flag is deprecated" in result.output
 
 
 def test_inspect_tail_default_with_other_option(runner, test_file):
-    """Test --tail without value followed by another option uses default."""
+    """Test deprecated --tail without value followed by another option uses default."""
     result = runner.invoke(cli, ["inspect", test_file, "--tail", "--stats"])
 
     assert result.exit_code == 0
@@ -107,6 +109,8 @@ def test_inspect_tail_default_with_other_option(runner, test_file):
     assert "10 rows" in result.output or "rows)" in result.output
     # Should also show stats
     assert "Statistics:" in result.output
+    # Should show deprecation warning
+    assert "--tail flag is deprecated" in result.output
 
 
 def test_inspect_head_tail_exclusive(runner, test_file):
@@ -118,8 +122,8 @@ def test_inspect_head_tail_exclusive(runner, test_file):
 
 
 def test_inspect_stats(runner, test_file):
-    """Test inspect with --stats flag."""
-    result = runner.invoke(cli, ["inspect", test_file, "--stats"])
+    """Test inspect stats subcommand."""
+    result = runner.invoke(cli, ["inspect", "stats", test_file])
 
     assert result.exit_code == 0
     assert "Statistics:" in result.output
@@ -164,8 +168,8 @@ def test_inspect_json(runner, test_file):
 
 
 def test_inspect_json_with_head(runner, test_file):
-    """Test JSON output includes preview data when --head is specified."""
-    result = runner.invoke(cli, ["inspect", test_file, "--json", "--head", "2"])
+    """Test JSON output includes preview data when head subcommand is used."""
+    result = runner.invoke(cli, ["inspect", "head", test_file, "2", "--json"])
 
     assert result.exit_code == 0
 
@@ -179,8 +183,8 @@ def test_inspect_json_with_head(runner, test_file):
 
 
 def test_inspect_json_with_stats(runner, test_file):
-    """Test JSON output includes statistics when --stats is specified."""
-    result = runner.invoke(cli, ["inspect", test_file, "--json", "--stats"])
+    """Test JSON output includes statistics when stats subcommand is used."""
+    result = runner.invoke(cli, ["inspect", "stats", test_file, "--json"])
 
     assert result.exit_code == 0
 
@@ -476,17 +480,18 @@ def test_inspect_combined_flags(runner, test_file):
     assert "Statistics" in result.output
 
 
-def test_inspect_json_combined_flags(runner, test_file):
-    """Test JSON output with multiple flags."""
-    result = runner.invoke(cli, ["inspect", test_file, "--json", "--head", "2", "--stats"])
+def test_inspect_deprecated_combined_flags(runner, test_file):
+    """Test deprecated legacy interface with multiple flags shows warnings."""
+    result = runner.invoke(cli, ["inspect", test_file, "--head", "2", "--stats"])
 
     assert result.exit_code == 0
 
-    data = json.loads(result.output)
-
     # Both preview and statistics should be present
-    assert data["preview"] is not None
-    assert data["statistics"] is not None
+    assert "Preview (first" in result.output
+    assert "Statistics:" in result.output
+    # Should show deprecation warnings for both flags
+    assert "--head flag is deprecated" in result.output
+    assert "--stats flag is deprecated" in result.output
 
 
 def test_inspect_large_head_value(runner, test_file):
@@ -507,16 +512,19 @@ def test_inspect_zero_head(runner, test_file):
 
 
 def test_inspect_help(runner):
-    """Test inspect command help."""
+    """Test inspect command group help shows available subcommands."""
     result = runner.invoke(cli, ["inspect", "--help"])
 
     assert result.exit_code == 0
-    assert "Inspect a GeoParquet file" in result.output
-    assert "--head" in result.output
-    assert "--tail" in result.output
-    assert "--stats" in result.output
-    assert "--json" in result.output
-    assert "--markdown" in result.output
+    assert "Inspect GeoParquet files" in result.output
+    # Check for subcommands
+    assert "head" in result.output
+    assert "tail" in result.output
+    assert "stats" in result.output
+    assert "meta" in result.output
+    assert "summary" in result.output
+    # Check for Commands section
+    assert "Commands:" in result.output
 
 
 def test_inspect_markdown(runner, test_file):
@@ -819,3 +827,76 @@ class TestCRSComparison:
         from geoparquet_io.core.inspect_utils import _format_crs_for_display
 
         assert _format_crs_for_display("EPSG:4326") == "EPSG:4326"
+
+
+# Tests for new subcommand structure
+class TestInspectSubcommands:
+    """Tests for the new inspect subcommand structure."""
+
+    @pytest.fixture
+    def runner(self):
+        return CliRunner()
+
+    @pytest.fixture
+    def test_file(self):
+        return os.path.join(os.path.dirname(__file__), "data", "places_test.parquet")
+
+    def test_inspect_summary_subcommand(self, runner, test_file):
+        """Test explicit summary subcommand."""
+        result = runner.invoke(cli, ["inspect", "summary", test_file])
+
+        assert result.exit_code == 0
+        assert "Rows:" in result.output
+        assert "Columns" in result.output
+
+    def test_inspect_head_subcommand_with_count(self, runner, test_file):
+        """Test head subcommand with explicit count."""
+        result = runner.invoke(cli, ["inspect", "head", test_file, "3"])
+
+        assert result.exit_code == 0
+        assert "Preview (first" in result.output
+        assert "3 rows" in result.output or "rows)" in result.output
+
+    def test_inspect_tail_subcommand_json(self, runner, test_file):
+        """Test tail subcommand with JSON output."""
+        result = runner.invoke(cli, ["inspect", "tail", test_file, "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["preview"] is not None
+
+    def test_inspect_meta_subcommand(self, runner, test_file):
+        """Test meta subcommand."""
+        result = runner.invoke(cli, ["inspect", "meta", test_file])
+
+        assert result.exit_code == 0
+        # Should show metadata output
+        assert "Parquet" in result.output or "GeoParquet" in result.output
+
+    def test_inspect_meta_subcommand_geo_flag(self, runner, test_file):
+        """Test meta subcommand with --geo flag."""
+        result = runner.invoke(cli, ["inspect", "meta", test_file, "--geo"])
+
+        assert result.exit_code == 0
+
+    def test_inspect_stats_subcommand_markdown(self, runner, test_file):
+        """Test stats subcommand with markdown output."""
+        result = runner.invoke(cli, ["inspect", "stats", test_file, "--markdown"])
+
+        assert result.exit_code == 0
+        # Should contain markdown formatting
+        assert "#" in result.output or "Statistics" in result.output
+
+    def test_inspect_head_subcommand_help(self, runner):
+        """Test head subcommand help."""
+        result = runner.invoke(cli, ["inspect", "head", "--help"])
+
+        assert result.exit_code == 0
+        assert "Show first N rows" in result.output
+
+    def test_inspect_deprecated_meta_flag_warns(self, runner, test_file):
+        """Test that deprecated --meta flag shows warning."""
+        result = runner.invoke(cli, ["inspect", test_file, "--meta"])
+
+        assert result.exit_code == 0
+        assert "--meta flag is deprecated" in result.output

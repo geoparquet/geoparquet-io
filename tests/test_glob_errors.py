@@ -42,6 +42,7 @@ class TestGlobAwareCommand:
         assert result.exit_code != 0
         assert "Received 3 parquet files" in result.output
         assert "shell expanded a glob pattern" in result.output
+        # Default subcommand "summary" is omitted from hint for cleaner UX
         assert 'gpio inspect "path/*.parquet"' in result.output
 
     def test_check_all_shell_expanded_glob_error(self):
@@ -60,7 +61,8 @@ class TestGlobAwareCommand:
         assert result.exit_code != 0
         assert "Received 3 parquet files" in result.output
         assert "shell expanded a glob pattern" in result.output
-        assert 'gpio check all "path/*.parquet"' in result.output
+        # Default subcommand "all" is omitted from hint for cleaner UX
+        assert 'gpio check "path/*.parquet"' in result.output
 
 
 class TestSingleFileCommand:
@@ -82,9 +84,9 @@ class TestSingleFileCommand:
         )
         assert result.exit_code != 0
         assert "Received 4 parquet files" in result.output
-        assert "'convert geoparquet' command requires a single file" in result.output
+        assert "The 'convert' command requires a single file" in result.output
         assert 'gpio extract "path/*.parquet"' in result.output
-        assert "gpio convert geoparquet consolidated.parquet" in result.output
+        assert "gpio convert consolidated.parquet" in result.output
 
     def test_sort_hilbert_shell_expanded_glob_error(self):
         """Test sort hilbert shows helpful error suggesting gpio extract."""
@@ -102,7 +104,7 @@ class TestSingleFileCommand:
         )
         assert result.exit_code != 0
         assert "Received 4 parquet files" in result.output
-        assert "'sort hilbert' command requires a single file" in result.output
+        assert "The 'sort hilbert' command requires a single file" in result.output
         assert 'gpio extract "path/*.parquet"' in result.output
         assert "gpio sort hilbert consolidated.parquet" in result.output
 
@@ -121,7 +123,7 @@ class TestSingleFileCommand:
         )
         assert result.exit_code != 0
         assert "Received 3 parquet files" in result.output
-        assert "'add bbox' command requires a single file" in result.output
+        assert "The 'add bbox' command requires a single file" in result.output
         assert 'gpio extract "path/*.parquet"' in result.output
         assert "gpio add bbox consolidated.parquet" in result.output
 
@@ -141,7 +143,7 @@ class TestSingleFileCommand:
         )
         assert result.exit_code != 0
         assert "Received 3 parquet files" in result.output
-        assert "'partition admin' command requires a single file" in result.output
+        assert "The 'partition admin' command requires a single file" in result.output
         assert 'gpio extract "path/*.parquet"' in result.output
         assert "gpio partition admin consolidated.parquet" in result.output
 
