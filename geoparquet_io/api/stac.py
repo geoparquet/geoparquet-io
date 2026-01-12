@@ -70,9 +70,7 @@ def generate_stac(
 
     # Check for existing file
     if output_path.exists() and not overwrite:
-        from click import ClickException
-
-        raise ClickException(
+        raise ValueError(
             f"STAC file already exists: {output_path}\nUse overwrite=True to replace it."
         )
 
@@ -86,9 +84,14 @@ def generate_stac(
             item_id=item_id,
             verbose=verbose,
         )
+
+        # Write output
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(stac_dict, f, indent=2, default=str)
     else:
-        # Directory -> STAC Collection
-        stac_dict = generate_stac_collection(
+        # Directory -> STAC Collection with Items
+        collection_dict, items_list = generate_stac_collection(
             partition_dir=str(input_path),
             bucket_prefix=bucket,
             public_url=public_url,
@@ -96,10 +99,19 @@ def generate_stac(
             verbose=verbose,
         )
 
-    # Write output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(stac_dict, f, indent=2, default=str)
+        # Write collection
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(collection_dict, f, indent=2, default=str)
+
+        # Write each item as a separate JSON file
+        items_dir = output_path.parent / "items"
+        items_dir.mkdir(parents=True, exist_ok=True)
+        for item in items_list:
+            item_id_str = item.get("id", "unknown")
+            item_path = items_dir / f"{item_id_str}.json"
+            with open(item_path, "w") as f:
+                json.dump(item, f, indent=2, default=str)
 
     return output_path
 

@@ -986,60 +986,102 @@ class Table:
             con.register("input_table", self._table)
 
             stats = {}
+
+            # Separate geometry and non-geometry columns
+            geometry_cols = []
+            regular_cols = []
             for field in self._table.schema:
                 col_name = field.name
-                is_geometry = col_name == self._geometry_column
-
-                # Escape column name for SQL
-                escaped_col = col_name.replace('"', '""')
-
-                if is_geometry:
-                    # For geometry columns, only count nulls
-                    query = f"""
-                        SELECT COUNT(*) FILTER (WHERE "{escaped_col}" IS NULL) as null_count
-                        FROM input_table
-                    """
-                    result = con.execute(query).fetchone()
-                    stats[col_name] = {
-                        "nulls": result[0] if result else 0,
-                        "min": None,
-                        "max": None,
-                        "unique": None,
-                    }
+                if col_name == self._geometry_column:
+                    geometry_cols.append(col_name)
                 else:
-                    # For non-geometry columns, get full stats
-                    query = f"""
-                        SELECT
-                            COUNT(*) FILTER (WHERE "{escaped_col}" IS NULL) as null_count,
-                            MIN("{escaped_col}") as min_val,
-                            MAX("{escaped_col}") as max_val,
-                            APPROX_COUNT_DISTINCT("{escaped_col}") as unique_count
-                        FROM input_table
-                    """
-                    try:
-                        result = con.execute(query).fetchone()
-                        if result:
+                    regular_cols.append(col_name)
+
+            # Build a single batched query for all non-geometry columns
+            if regular_cols:
+                select_parts = []
+                for col_name in regular_cols:
+                    escaped_col = col_name.replace('"', '""')
+                    select_parts.extend(
+                        [
+                            f'COUNT(*) FILTER (WHERE "{escaped_col}" IS NULL)',
+                            f'MIN("{escaped_col}")',
+                            f'MAX("{escaped_col}")',
+                            f'APPROX_COUNT_DISTINCT("{escaped_col}")',
+                        ]
+                    )
+
+                query = f"SELECT {', '.join(select_parts)} FROM input_table"
+                try:
+                    result = con.execute(query).fetchone()
+                    if result:
+                        for i, col_name in enumerate(regular_cols):
+                            base_idx = i * 4
                             stats[col_name] = {
-                                "nulls": result[0],
-                                "min": result[1],
-                                "max": result[2],
-                                "unique": result[3],
+                                "nulls": result[base_idx],
+                                "min": result[base_idx + 1],
+                                "max": result[base_idx + 2],
+                                "unique": result[base_idx + 3],
                             }
-                        else:
+                    else:
+                        for col_name in regular_cols:
                             stats[col_name] = {
                                 "nulls": 0,
                                 "min": None,
                                 "max": None,
                                 "unique": None,
                             }
-                    except Exception:
-                        # If stats fail for this column, provide basic info
-                        stats[col_name] = {
-                            "nulls": 0,
-                            "min": None,
-                            "max": None,
-                            "unique": None,
-                        }
+                except Exception:
+                    # If batched query fails, fall back to per-column queries
+                    for col_name in regular_cols:
+                        escaped_col = col_name.replace('"', '""')
+                        try:
+                            query = f"""
+                                SELECT
+                                    COUNT(*) FILTER (WHERE "{escaped_col}" IS NULL),
+                                    MIN("{escaped_col}"),
+                                    MAX("{escaped_col}"),
+                                    APPROX_COUNT_DISTINCT("{escaped_col}")
+                                FROM input_table
+                            """
+                            result = con.execute(query).fetchone()
+                            if result:
+                                stats[col_name] = {
+                                    "nulls": result[0],
+                                    "min": result[1],
+                                    "max": result[2],
+                                    "unique": result[3],
+                                }
+                            else:
+                                stats[col_name] = {
+                                    "nulls": 0,
+                                    "min": None,
+                                    "max": None,
+                                    "unique": None,
+                                }
+                        except Exception:
+                            # If stats fail for this column, provide basic info
+                            stats[col_name] = {
+                                "nulls": 0,
+                                "min": None,
+                                "max": None,
+                                "unique": None,
+                            }
+
+            # Handle geometry columns separately (only null count)
+            for col_name in geometry_cols:
+                escaped_col = col_name.replace('"', '""')
+                query = f"""
+                    SELECT COUNT(*) FILTER (WHERE "{escaped_col}" IS NULL)
+                    FROM input_table
+                """
+                result = con.execute(query).fetchone()
+                stats[col_name] = {
+                    "nulls": result[0] if result else 0,
+                    "min": None,
+                    "max": None,
+                    "unique": None,
+                }
 
             return stats
 
@@ -1205,6 +1247,57 @@ class Table:
                 except OSError:
                     time_module.sleep(0.1 * (attempt + 1))
 
+    def _with_temp_io_files(self, func, **kwargs) -> pa.Table:
+        """
+        Execute an input->output file transformation using temp files.
+
+        Writes the table to a temp input file, calls func which writes
+        to a temp output file, reads the output, and cleans up both.
+
+        Args:
+            func: Function to call with input_parquet and output_parquet kwargs
+            **kwargs: Additional keyword arguments for func
+
+        Returns:
+            PyArrow Table from the output file
+        """
+        import tempfile
+        import time as time_module
+        import uuid
+        from pathlib import Path
+
+        from geoparquet_io.core.common import write_geoparquet_table
+
+        temp_input = Path(tempfile.gettempdir()) / f"gpio_in_{uuid.uuid4()}.parquet"
+        temp_output = Path(tempfile.gettempdir()) / f"gpio_out_{uuid.uuid4()}.parquet"
+
+        try:
+            # Write table to temp input file
+            write_geoparquet_table(
+                self._table,
+                str(temp_input),
+                geometry_column=self._geometry_column,
+            )
+
+            # Call the function with input and output paths
+            func(
+                input_parquet=str(temp_input),
+                output_parquet=str(temp_output),
+                **kwargs,
+            )
+
+            # Read the output file
+            return pq.read_table(str(temp_output))
+        finally:
+            # Cleanup with retry for Windows file handle release
+            for temp_path in [temp_input, temp_output]:
+                for attempt in range(3):
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                        break
+                    except OSError:
+                        time_module.sleep(0.1 * (attempt + 1))
+
     def check(self) -> CheckResult:
         """
         Run all best-practice checks on the table.
@@ -1358,14 +1451,29 @@ class Table:
         from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.validate import validate_geoparquet
 
-        results = self._with_temp_file(
+        validation_result = self._with_temp_file(
             validate_geoparquet,
             target_version=version,
-            skip_data_validation=False,
+            validate_data=True,
             sample_size=1000,
-            return_results=True,
-            quiet=True,
+            verbose=False,
         )
+
+        # Convert ValidationResult to dict for CheckResult
+        results = {
+            "passed": validation_result.is_valid,
+            "file_path": validation_result.file_path,
+            "detected_version": validation_result.detected_version,
+            "target_version": validation_result.target_version,
+            "passed_count": validation_result.passed_count,
+            "failed_count": validation_result.failed_count,
+            "warning_count": validation_result.warning_count,
+            "issues": [
+                f"{c.name}: {c.message}"
+                for c in validation_result.checks
+                if c.status.value == "FAILED"
+            ],
+        }
         return CheckResult(results, check_type="validate")
 
     def add_admin_divisions(
@@ -1395,43 +1503,17 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> enriched = table.add_admin_divisions(levels=["country", "admin1"])
         """
-        import tempfile
-        import time as time_module
-        import uuid
-        from pathlib import Path
-
         from geoparquet_io.core.add_admin_divisions_multi import add_admin_divisions
-        from geoparquet_io.core.common import write_geoparquet_table
 
-        # Write to temp file, process, read back
-        temp_input = Path(tempfile.gettempdir()) / f"gpio_admin_in_{uuid.uuid4()}.parquet"
-        temp_output = Path(tempfile.gettempdir()) / f"gpio_admin_out_{uuid.uuid4()}.parquet"
-
-        try:
-            write_geoparquet_table(
-                self._table, str(temp_input), geometry_column=self._geometry_column
-            )
-
-            add_admin_divisions(
-                input_parquet=str(temp_input),
-                output_parquet=str(temp_output),
-                dataset=dataset,
-                levels=levels or ["country"],
-                country_filter=country_filter,
-                use_centroid=use_centroid,
-                verbose=False,
-            )
-
-            result_table = pq.read_table(str(temp_output))
-            return Table(result_table, self._geometry_column)
-        finally:
-            for temp_path in [temp_input, temp_output]:
-                for attempt in range(3):
-                    try:
-                        temp_path.unlink(missing_ok=True)
-                        break
-                    except OSError:
-                        time_module.sleep(0.1 * (attempt + 1))
+        result_table = self._with_temp_io_files(
+            add_admin_divisions,
+            dataset=dataset,
+            levels=levels or ["country"],
+            country_filter=country_filter,
+            use_centroid=use_centroid,
+            verbose=False,
+        )
+        return Table(result_table, self._geometry_column)
 
     def add_bbox_metadata(self, bbox_column: str = "bbox") -> Table:
         """
@@ -1457,9 +1539,7 @@ class Table:
         import json
 
         if bbox_column not in self.column_names:
-            from click import ClickException
-
-            raise ClickException(f"Bbox column '{bbox_column}' not found. Use add_bbox() first.")
+            raise ValueError(f"Bbox column '{bbox_column}' not found. Use add_bbox() first.")
 
         # Get existing metadata
         schema = self._table.schema
@@ -1489,10 +1569,9 @@ class Table:
             }
         }
 
-        # Update schema with new metadata
+        # Update schema with new metadata (metadata-only change, not a cast)
         schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-        new_schema = schema.with_metadata(schema_metadata)
-        new_table = self._table.cast(new_schema)
+        new_table = self._table.replace_schema_metadata(schema_metadata)
 
         return Table(new_table, self._geometry_column)
 

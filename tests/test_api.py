@@ -647,6 +647,28 @@ class TestTableHeadTail:
         result = sample_table.tail(10000)
         assert result.num_rows == sample_table.num_rows
 
+    def test_head_zero(self, sample_table):
+        """Test head(0) returns empty Table."""
+        result = sample_table.head(0)
+        assert isinstance(result, Table)
+        assert result.num_rows == 0
+
+    def test_head_negative_raises(self, sample_table):
+        """Test head(-1) raises ValueError."""
+        with pytest.raises(ValueError, match="n must be non-negative"):
+            sample_table.head(-1)
+
+    def test_tail_zero(self, sample_table):
+        """Test tail(0) returns empty Table."""
+        result = sample_table.tail(0)
+        assert isinstance(result, Table)
+        assert result.num_rows == 0
+
+    def test_tail_negative_raises(self, sample_table):
+        """Test tail(-1) raises ValueError."""
+        with pytest.raises(ValueError, match="n must be non-negative"):
+            sample_table.tail(-1)
+
 
 class TestTableStats:
     """Tests for stats() method."""
@@ -881,10 +903,8 @@ class TestTableAddBboxMetadata:
 
     def test_add_bbox_metadata_requires_bbox_column(self, sample_table):
         """Test add_bbox_metadata() raises error if bbox column missing."""
-        import click
-
         # Use a non-existent column name to trigger the error
-        with pytest.raises(click.ClickException):
+        with pytest.raises(ValueError, match="not found"):
             sample_table.add_bbox_metadata(bbox_column="nonexistent_bbox")
 
     def test_add_bbox_metadata_with_bbox_column(self, sample_table):
