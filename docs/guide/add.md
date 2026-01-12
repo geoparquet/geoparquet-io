@@ -64,11 +64,28 @@ gpio add bbox input.parquet output.parquet --dry-run
 
 If your file already has a bbox column but lacks covering metadata (e.g., from external tools):
 
-```bash
-gpio add bbox-metadata myfile.parquet
-```
+=== "CLI"
 
-This modifies the file in-place to add only the metadata, without creating a new file.
+    ```bash
+    gpio add bbox-metadata myfile.parquet
+    ```
+
+    This modifies the file in-place to add only the metadata, without creating a new file.
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Add bbox column, then add covering metadata
+    table = gpio.read('input.parquet')
+    table_with_bbox = table.add_bbox().add_bbox_metadata()
+    table_with_bbox.write('output.parquet')
+
+    # Or just add metadata if bbox column already exists
+    table = gpio.read('file_with_bbox.parquet')
+    table.add_bbox_metadata().write('output.parquet')
+    ```
 
 ## H3 Hexagonal Cells
 
@@ -171,9 +188,6 @@ gpio add kdtree input.parquet output.parquet --verbose
 
 ## Administrative Divisions
 
-!!! info "CLI Only"
-    Administrative divisions is currently only available via the CLI. See [issue #151](https://github.com/cholmes/geoparquet-io/issues/151) for Python API roadmap.
-
 Add administrative division columns via spatial join with remote boundaries datasets:
 
 ### How It Works
@@ -182,30 +196,69 @@ Performs spatial intersection between your data and remote admin boundaries to a
 
 ### Quick Start
 
-```bash
-# Add all GAUL levels (continent, country, department)
-gpio add admin-divisions input.parquet output.parquet --dataset gaul
+=== "CLI"
 
-# Preview SQL before execution
-gpio add admin-divisions input.parquet output.parquet --dataset gaul --dry-run
-```
+    ```bash
+    # Add all GAUL levels (continent, country, department)
+    gpio add admin-divisions input.parquet output.parquet --dataset gaul
+
+    # Preview SQL before execution
+    gpio add admin-divisions input.parquet output.parquet --dataset gaul --dry-run
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Add country codes using Overture dataset
+    table = gpio.read('input.parquet')
+    enriched = table.add_admin_divisions(
+        dataset='overture',
+        levels=['country']
+    )
+    enriched.write('output.parquet')
+    ```
 
 ### Multi-Level Admin Divisions
 
 Add multiple hierarchical administrative levels:
 
-```bash
-# Add all GAUL levels (adds admin:continent, admin:country, admin:department)
-gpio add admin-divisions buildings.parquet output.parquet --dataset gaul
+=== "CLI"
 
-# Add specific levels only
-gpio add admin-divisions buildings.parquet output.parquet --dataset gaul \
-  --levels continent,country
+    ```bash
+    # Add all GAUL levels (adds admin:continent, admin:country, admin:department)
+    gpio add admin-divisions buildings.parquet output.parquet --dataset gaul
 
-# Use Overture Maps dataset
-gpio add admin-divisions buildings.parquet output.parquet --dataset overture \
-  --levels country,region
-```
+    # Add specific levels only
+    gpio add admin-divisions buildings.parquet output.parquet --dataset gaul \
+      --levels continent,country
+
+    # Use Overture Maps dataset
+    gpio add admin-divisions buildings.parquet output.parquet --dataset overture \
+      --levels country,region
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Add multiple levels
+    table = gpio.read('buildings.parquet')
+    enriched = table.add_admin_divisions(
+        dataset='gaul',
+        levels=['continent', 'country', 'department']
+    )
+    enriched.write('output.parquet')
+
+    # With country filter for faster processing
+    enriched = table.add_admin_divisions(
+        dataset='overture',
+        levels=['country', 'region'],
+        country_filter='US'
+    )
+    ```
 
 ### Datasets
 

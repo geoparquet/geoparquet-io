@@ -1,9 +1,5 @@
 # STAC Generation
 
-!!! info "CLI Only"
-    STAC generation is currently only available via the CLI.
-    See [issue #151](https://github.com/geoparquet/geoparquet-io/issues/151) for Python API roadmap.
-
 Generate STAC (SpatioTemporal Asset Catalog) metadata for GeoParquet datasets.
 
 ## What is STAC?
@@ -14,10 +10,24 @@ STAC is a specification for describing geospatial data with standardized metadat
 
 Generate a STAC Item JSON for a single GeoParquet file:
 
-```bash
-gpio publish stac roads.parquet roads.json \
-  --bucket s3://source.coop/my-org/roads/
-```
+=== "CLI"
+
+    ```bash
+    gpio publish stac roads.parquet roads.json \
+      --bucket s3://source.coop/my-org/roads/
+    ```
+
+=== "Python"
+
+    ```python
+    from geoparquet_io import generate_stac
+
+    stac_path = generate_stac(
+        'roads.parquet',
+        bucket='s3://source.coop/my-org/roads/'
+    )
+    print(f"Generated: {stac_path}")
+    ```
 
 Creates `roads.json` with:
 
@@ -30,10 +40,25 @@ Creates `roads.json` with:
 
 Generate Collection + Items for partitioned datasets:
 
-```bash
-gpio publish stac partitioned/ . \
-  --bucket s3://source.coop/my-org/roads/
-```
+=== "CLI"
+
+    ```bash
+    gpio publish stac partitioned/ . \
+      --bucket s3://source.coop/my-org/roads/
+    ```
+
+=== "Python"
+
+    ```python
+    from geoparquet_io import generate_stac
+
+    # For directories, generates a Collection with Items
+    stac_path = generate_stac(
+        'partitioned/',
+        bucket='s3://source.coop/my-org/roads/',
+        collection_id='roads'
+    )
+    ```
 
 Creates:
 
@@ -88,9 +113,24 @@ gpio publish stac data.parquet output.json --bucket s3://... --overwrite
 
 Check STAC compliance:
 
-```bash
-gpio check stac output.json
-```
+=== "CLI"
+
+    ```bash
+    gpio check stac output.json
+    ```
+
+=== "Python"
+
+    ```python
+    from geoparquet_io import validate_stac
+
+    result = validate_stac('output.json')
+    if result.passed():
+        print("Valid STAC!")
+    else:
+        for failure in result.failures():
+            print(f"Issue: {failure}")
+    ```
 
 Validates:
 

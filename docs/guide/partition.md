@@ -6,27 +6,50 @@ The `partition` commands split GeoParquet files into separate files based on col
 
 ## By String Column
 
-!!! info "CLI Only"
-    String column partitioning is currently only available via the CLI. See [issue #151](https://github.com/cholmes/geoparquet-io/issues/151) for Python API roadmap.
-
 Partition by string column values or prefixes:
 
-```bash
-# Preview partitions
-gpio partition string input.parquet --column region --preview
+=== "CLI"
 
-# Partition by full column values
-gpio partition string input.parquet output/ --column category
+    ```bash
+    # Preview partitions
+    gpio partition string input.parquet --column region --preview
 
-# Partition by first 2 characters
-gpio partition string input.parquet output/ --column mgrs_code --chars 2
+    # Partition by full column values
+    gpio partition string input.parquet output/ --column category
 
-# Hive-style partitioning
-gpio partition string input.parquet output/ --column region --hive
+    # Partition by first 2 characters
+    gpio partition string input.parquet output/ --column mgrs_code --chars 2
 
-# To cloud storage
-gpio partition string s3://bucket/input.parquet s3://bucket/output/ --column region --profile prod
-```
+    # Hive-style partitioning
+    gpio partition string input.parquet output/ --column region --hive
+
+    # To cloud storage
+    gpio partition string s3://bucket/input.parquet s3://bucket/output/ --column region --profile prod
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Partition by full column values
+    gpio.read('input.parquet').partition_by_string('output/', column='category')
+
+    # Partition by first 2 characters
+    gpio.read('input.parquet').partition_by_string(
+        'output/',
+        column='mgrs_code',
+        chars=2
+    )
+
+    # Hive-style with options
+    gpio.read('input.parquet').partition_by_string(
+        'output/',
+        column='region',
+        hive=True,
+        overwrite=True
+    )
+    ```
 
 ## By H3 Cells
 
@@ -77,27 +100,46 @@ If H3 column doesn't exist, it's automatically added.
 
 ## By KD-Tree
 
-!!! info "CLI Only"
-    KD-Tree partitioning is currently only available via the CLI. See [issue #151](https://github.com/cholmes/geoparquet-io/issues/151) for Python API roadmap.
-
 Partition by balanced spatial partitions:
 
-```bash
-# Auto-partition (default: ~120k rows each)
-gpio partition kdtree input.parquet output/
+=== "CLI"
 
-# Preview auto-selected partitions
-gpio partition kdtree input.parquet --preview
+    ```bash
+    # Auto-partition (default: ~120k rows each)
+    gpio partition kdtree input.parquet output/
 
-# Explicit partition count (must be power of 2)
-gpio partition kdtree input.parquet output/ --partitions 32
+    # Preview auto-selected partitions
+    gpio partition kdtree input.parquet --preview
 
-# Exact computation (deterministic)
-gpio partition kdtree input.parquet output/ --partitions 16 --exact
+    # Explicit partition count (must be power of 2)
+    gpio partition kdtree input.parquet output/ --partitions 32
 
-# Hive-style with progress tracking
-gpio partition kdtree input.parquet output/ --hive --verbose
-```
+    # Exact computation (deterministic)
+    gpio partition kdtree input.parquet output/ --partitions 16 --exact
+
+    # Hive-style with progress tracking
+    gpio partition kdtree input.parquet output/ --hive --verbose
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Partition using KD-tree (creates 2^iterations partitions)
+    gpio.read('input.parquet').partition_by_kdtree('output/')
+
+    # 64 partitions (2^6)
+    gpio.read('input.parquet').partition_by_kdtree('output/', iterations=6)
+
+    # With options
+    gpio.read('input.parquet').partition_by_kdtree(
+        'output/',
+        iterations=5,  # 32 partitions
+        hive=True,
+        overwrite=True
+    )
+    ```
 
 **Column behavior:**
 - Similar to H3: excluded by default, included for Hive
@@ -106,9 +148,6 @@ gpio partition kdtree input.parquet output/ --hive --verbose
 If KD-tree column doesn't exist, it's automatically added.
 
 ## By Admin Boundaries
-
-!!! info "CLI Only"
-    Admin boundary partitioning is currently only available via the CLI. See [issue #151](https://github.com/cholmes/geoparquet-io/issues/151) for Python API roadmap.
 
 Split by administrative boundaries via spatial join with remote datasets:
 
@@ -121,35 +160,81 @@ This command performs **two operations**:
 
 ### Quick Start
 
-```bash
-# Preview GAUL partitions by continent
-gpio partition admin input.parquet --dataset gaul --levels continent --preview
+=== "CLI"
 
-# Partition by continent
-gpio partition admin input.parquet output/ --dataset gaul --levels continent
+    ```bash
+    # Preview GAUL partitions by continent
+    gpio partition admin input.parquet --dataset gaul --levels continent --preview
 
-# Hive-style partitioning
-gpio partition admin input.parquet output/ --dataset gaul --levels continent --hive
-```
+    # Partition by continent
+    gpio partition admin input.parquet output/ --dataset gaul --levels continent
+
+    # Hive-style partitioning
+    gpio partition admin input.parquet output/ --dataset gaul --levels continent --hive
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Partition by country using GAUL dataset
+    gpio.read('input.parquet').partition_by_admin(
+        'output/',
+        dataset='gaul',
+        levels=['country']
+    )
+
+    # Hive-style partitioning
+    gpio.read('input.parquet').partition_by_admin(
+        'output/',
+        dataset='gaul',
+        levels=['country'],
+        hive=True
+    )
+    ```
 
 ### Multi-Level Hierarchical Partitioning
 
 Partition by multiple administrative levels:
 
-```bash
-# Hierarchical: continent → country
-gpio partition admin input.parquet output/ --dataset gaul --levels continent,country
+=== "CLI"
 
-# All GAUL levels: continent → country → department
-gpio partition admin input.parquet output/ --dataset gaul --levels continent,country,department
+    ```bash
+    # Hierarchical: continent → country
+    gpio partition admin input.parquet output/ --dataset gaul --levels continent,country
 
-# Hive-style multi-level (creates continent=Africa/country=Kenya/department=Accra/)
-gpio partition admin input.parquet output/ --dataset gaul \
-    --levels continent,country,department --hive
+    # All GAUL levels: continent → country → department
+    gpio partition admin input.parquet output/ --dataset gaul --levels continent,country,department
 
-# Overture Maps by country and region
-gpio partition admin input.parquet output/ --dataset overture --levels country,region
-```
+    # Hive-style multi-level (creates continent=Africa/country=Kenya/department=Accra/)
+    gpio partition admin input.parquet output/ --dataset gaul \
+        --levels continent,country,department --hive
+
+    # Overture Maps by country and region
+    gpio partition admin input.parquet output/ --dataset overture --levels country,region
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Multi-level hierarchical
+    gpio.read('input.parquet').partition_by_admin(
+        'output/',
+        dataset='gaul',
+        levels=['continent', 'country', 'department'],
+        hive=True
+    )
+
+    # Using Overture Maps dataset
+    gpio.read('input.parquet').partition_by_admin(
+        'output/',
+        dataset='overture',
+        levels=['country', 'region']
+    )
+    ```
 
 ### Datasets
 

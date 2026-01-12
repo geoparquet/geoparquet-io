@@ -1,16 +1,32 @@
 # Checking Best Practices
 
-!!! info "CLI Only"
-    The check commands are currently only available via the CLI.
-    See [issue #151](https://github.com/geoparquet/geoparquet-io/issues/151) for Python API roadmap.
-
 The `check` commands validate GeoParquet files against [best practices](https://github.com/opengeospatial/geoparquet/pull/254/files).
 
 ## Run All Checks
 
-```bash
-gpio check all myfile.parquet
-```
+=== "CLI"
+
+    ```bash
+    gpio check all myfile.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('myfile.parquet')
+    result = table.check()
+
+    if result.passed():
+        print("All checks passed!")
+    else:
+        for failure in result.failures():
+            print(f"Failed: {failure}")
+
+    # Get full results as dictionary
+    details = result.to_dict()
+    ```
 
 Runs all validation checks:
 
@@ -23,9 +39,18 @@ Runs all validation checks:
 
 ### Spatial Ordering
 
-```bash
-gpio check spatial myfile.parquet
-```
+=== "CLI"
+
+    ```bash
+    gpio check spatial myfile.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    result = table.check_spatial()
+    print(f"Spatially ordered: {result.passed()}")
+    ```
 
 Checks if data is spatially ordered using random sampling. Spatially ordered data improves:
 
@@ -35,17 +60,37 @@ Checks if data is spatially ordered using random sampling. Spatially ordered dat
 
 ### Compression
 
-```bash
-gpio check compression myfile.parquet
-```
+=== "CLI"
+
+    ```bash
+    gpio check compression myfile.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    result = table.check_compression()
+    print(f"Compression optimal: {result.passed()}")
+    ```
 
 Validates geometry column compression settings.
 
 ### Bbox Structure
 
-```bash
-gpio check bbox myfile.parquet
-```
+=== "CLI"
+
+    ```bash
+    gpio check bbox myfile.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    result = table.check_bbox()
+    if not result.passed():
+        # Add bbox if missing
+        table = table.add_bbox().add_bbox_metadata()
+    ```
 
 Verifies:
 
@@ -55,17 +100,39 @@ Verifies:
 
 ### Row Groups
 
-```bash
-gpio check row-group myfile.parquet
-```
+=== "CLI"
+
+    ```bash
+    gpio check row-group myfile.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    result = table.check_row_groups()
+    for rec in result.recommendations():
+        print(rec)
+    ```
 
 Checks row group size optimization for cloud-native access.
 
 ### STAC Validation
 
-```bash
-gpio check stac output.json
-```
+=== "CLI"
+
+    ```bash
+    gpio check stac output.json
+    ```
+
+=== "Python"
+
+    ```python
+    from geoparquet_io import validate_stac
+
+    result = validate_stac('output.json')
+    if result.passed():
+        print("Valid STAC!")
+    ```
 
 Validates STAC Item or Collection JSON:
 
@@ -76,13 +143,22 @@ Validates STAC Item or Collection JSON:
 
 ## Options
 
-```bash
-# Verbose output with details
-gpio check all myfile.parquet --verbose
+=== "CLI"
 
-# Custom sampling for spatial check
-gpio check spatial myfile.parquet --random-sample-size 200 --limit-rows 1000000
-```
+    ```bash
+    # Verbose output with details
+    gpio check all myfile.parquet --verbose
+
+    # Custom sampling for spatial check
+    gpio check spatial myfile.parquet --random-sample-size 200 --limit-rows 1000000
+    ```
+
+=== "Python"
+
+    ```python
+    # Custom sampling for spatial check
+    result = table.check_spatial(sample_size=200, limit_rows=1000000)
+    ```
 
 ## Checking Partitioned Data
 
