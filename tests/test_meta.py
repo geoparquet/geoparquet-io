@@ -153,7 +153,7 @@ def test_meta_shows_deprecation_warning(runner, test_file):
 
     assert result.exit_code == 0
     assert "deprecated" in result.output.lower()
-    assert "gpio inspect --meta" in result.output
+    assert "gpio inspect meta" in result.output
 
 
 # Tests for new inspect --meta functionality
@@ -188,12 +188,12 @@ def test_inspect_meta_geoparquet_only(runner, test_file):
 
 
 def test_inspect_meta_json_output(runner, test_file):
-    """Test inspect --meta --json produces valid JSON."""
-    result = runner.invoke(cli, ["inspect", test_file, "--meta", "--geoparquet", "--json"])
+    """Test inspect meta --json produces valid JSON."""
+    result = runner.invoke(cli, ["inspect", "meta", test_file, "--geo", "--json"])
 
     assert result.exit_code == 0
 
-    # Should be valid JSON (no deprecation warning with inspect)
+    # Should be valid JSON (no deprecation warning with subcommand)
     try:
         data = json.loads(result.output)
         assert data is None or isinstance(data, dict)

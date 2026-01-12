@@ -149,6 +149,47 @@ class ConvertDefaultGroup(click.Group):
         return super().parse_args(ctx, ["geoparquet"] + args)
 
 
+class InspectDefaultGroup(click.Group):
+    """Custom Group that runs 'summary' when no subcommand is provided.
+
+    Also routes deprecated flags (--head, --tail, --stats, --meta, etc.) to legacy command.
+
+    This allows:
+    - gpio inspect data.parquet          -> invokes summary (default)
+    - gpio inspect head data.parquet     -> invokes head subcommand
+    - gpio inspect data.parquet --head   -> invokes legacy (deprecated)
+    """
+
+    # All deprecated flags that should route to the legacy command
+    deprecated_flags = {
+        "--head",
+        "--tail",
+        "--stats",
+        "--meta",
+        "--parquet",
+        "--geoparquet",
+        "--parquet-geo",
+        "--row-groups",
+    }
+
+    def parse_args(self, ctx, args):
+        # Handle --help for group
+        if "--help" in args and (not args or args[0] not in self.commands):
+            return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
+
+        # Check for deprecated flags - route to legacy command
+        for flag in self.deprecated_flags:
+            if flag in args:
+                return super().parse_args(ctx, ["legacy"] + args)
+
+        # If first arg is a known subcommand, use it
+        if args and not args[0].startswith("-") and args[0] in self.commands:
+            return super().parse_args(ctx, args)
+
+        # Default to 'summary' subcommand
+        return super().parse_args(ctx, ["summary"] + args)
+
+
 @cli.group(cls=DefaultGroup)
 @click.pass_context
 def check(ctx):
@@ -1367,8 +1408,402 @@ def reproject(
     )
 
 
-# Inspect command - uses OptionalIntCommand for --head/--tail optional values
-@cli.command(cls=OptionalIntCommand)
+# Inspect command group
+@cli.group(cls=InspectDefaultGroup)
+@click.pass_context
+def inspect(ctx):
+    """Inspect GeoParquet files and show metadata, previews, or statistics.
+
+    By default shows a quick metadata summary. Use subcommands for specific operations.
+
+    Examples:
+
+        \b
+        # Quick metadata summary (default)
+        gpio inspect data.parquet
+
+        \b
+        # Preview first 10 rows
+        gpio inspect head data.parquet
+
+        \b
+        # Preview first 20 rows
+        gpio inspect head data.parquet 20
+
+        \b
+        # Preview last 5 rows
+        gpio inspect tail data.parquet 5
+
+        \b
+        # Show column statistics
+        gpio inspect stats data.parquet
+
+        \b
+        # Comprehensive metadata
+        gpio inspect meta data.parquet
+
+        \b
+        # GeoParquet 'geo' key metadata only
+        gpio inspect meta data.parquet --geo
+    """
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+
+
+def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files, profile):
+    """Shared implementation for inspect summary."""
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_profile_for_urls,
+    )
+    from geoparquet_io.core.duckdb_metadata import get_usable_columns
+    from geoparquet_io.core.inspect_utils import (
+        extract_partition_summary,
+        format_partition_json_output,
+        format_partition_markdown_output,
+        format_partition_terminal_output,
+    )
+    from geoparquet_io.core.partition_reader import get_partition_info
+
+    if json_output and markdown_output:
+        raise click.UsageError("--json and --markdown are mutually exclusive")
+
+    # Validate profile is only used with S3
+    validate_profile_for_urls(profile, parquet_file)
+    setup_aws_profile_if_needed(profile, parquet_file)
+
+    try:
+        partition_info = get_partition_info(parquet_file, verbose=False)
+
+        if partition_info["is_partition"] and check_all_files:
+            all_files = partition_info["all_files"]
+            if not all_files:
+                raise click.ClickException("No parquet files found in partition")
+
+            partition_summary = extract_partition_summary(all_files, verbose=False)
+            first_file = partition_info["first_file"]
+            geo_info = extract_geo_info(first_file)
+            usable_columns = get_usable_columns(first_file)
+            primary_geom_col = geo_info.get("primary_column")
+
+            columns_info = [
+                {
+                    "name": col["name"],
+                    "type": col["type"],
+                    "is_geometry": col["name"] == primary_geom_col,
+                }
+                for col in usable_columns
+            ]
+
+            if json_output:
+                output = format_partition_json_output(partition_summary, geo_info, columns_info)
+                click.echo(output)
+            elif markdown_output:
+                output = format_partition_markdown_output(partition_summary, geo_info, columns_info)
+                click.echo(output)
+            else:
+                format_partition_terminal_output(partition_summary, geo_info, columns_info)
+            return
+
+        file_to_inspect = parquet_file
+        if partition_info["is_partition"]:
+            file_to_inspect = partition_info["first_file"]
+            file_count = partition_info["file_count"]
+            click.echo(
+                click.style(
+                    f"Inspecting first file (of {file_count} total). "
+                    "Use --check-all to aggregate all files.",
+                    fg="cyan",
+                )
+            )
+            click.echo()
+
+        file_info = extract_file_info(file_to_inspect)
+        geo_info = extract_geo_info(file_to_inspect)
+        usable_columns = get_usable_columns(file_to_inspect)
+        primary_geom_col = geo_info.get("primary_column")
+
+        columns_info = [
+            {
+                "name": col["name"],
+                "type": col["type"],
+                "is_geometry": col["name"] == primary_geom_col,
+            }
+            for col in usable_columns
+        ]
+
+        if json_output:
+            output = format_json_output(file_info, geo_info, columns_info, None, None)
+            click.echo(output)
+        elif markdown_output:
+            output = format_markdown_output(file_info, geo_info, columns_info, None, None, None)
+            click.echo(output)
+        else:
+            format_terminal_output(file_info, geo_info, columns_info, None, None, None)
+
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+def _inspect_preview_impl(parquet_file, count, mode, json_output, markdown_output, profile):
+    """Shared implementation for inspect head/tail."""
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_profile_for_urls,
+    )
+    from geoparquet_io.core.duckdb_metadata import get_usable_columns
+    from geoparquet_io.core.partition_reader import get_partition_info
+
+    if json_output and markdown_output:
+        raise click.UsageError("--json and --markdown are mutually exclusive")
+
+    validate_profile_for_urls(profile, parquet_file)
+    setup_aws_profile_if_needed(profile, parquet_file)
+
+    try:
+        partition_info = get_partition_info(parquet_file, verbose=False)
+        file_to_inspect = parquet_file
+
+        if partition_info["is_partition"]:
+            file_to_inspect = partition_info["first_file"]
+            file_count = partition_info["file_count"]
+            click.echo(
+                click.style(
+                    f"Previewing first file (of {file_count} total).",
+                    fg="cyan",
+                )
+            )
+            click.echo()
+
+        file_info = extract_file_info(file_to_inspect)
+        geo_info = extract_geo_info(file_to_inspect)
+        usable_columns = get_usable_columns(file_to_inspect)
+        primary_geom_col = geo_info.get("primary_column")
+
+        columns_info = [
+            {
+                "name": col["name"],
+                "type": col["type"],
+                "is_geometry": col["name"] == primary_geom_col,
+            }
+            for col in usable_columns
+        ]
+
+        head_val = count if mode == "head" else None
+        tail_val = count if mode == "tail" else None
+        preview_table, preview_mode = get_preview_data(
+            file_to_inspect, head=head_val, tail=tail_val
+        )
+
+        if json_output:
+            output = format_json_output(file_info, geo_info, columns_info, preview_table, None)
+            click.echo(output)
+        elif markdown_output:
+            output = format_markdown_output(
+                file_info, geo_info, columns_info, preview_table, preview_mode, None
+            )
+            click.echo(output)
+        else:
+            format_terminal_output(
+                file_info, geo_info, columns_info, preview_table, preview_mode, None
+            )
+
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+def _inspect_stats_impl(parquet_file, json_output, markdown_output, profile):
+    """Shared implementation for inspect stats."""
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_profile_for_urls,
+    )
+    from geoparquet_io.core.duckdb_metadata import get_usable_columns
+    from geoparquet_io.core.partition_reader import get_partition_info
+
+    if json_output and markdown_output:
+        raise click.UsageError("--json and --markdown are mutually exclusive")
+
+    validate_profile_for_urls(profile, parquet_file)
+    setup_aws_profile_if_needed(profile, parquet_file)
+
+    try:
+        partition_info = get_partition_info(parquet_file, verbose=False)
+        file_to_inspect = parquet_file
+
+        if partition_info["is_partition"]:
+            file_to_inspect = partition_info["first_file"]
+            file_count = partition_info["file_count"]
+            click.echo(
+                click.style(
+                    f"Showing stats for first file (of {file_count} total).",
+                    fg="cyan",
+                )
+            )
+            click.echo()
+
+        file_info = extract_file_info(file_to_inspect)
+        geo_info = extract_geo_info(file_to_inspect)
+        usable_columns = get_usable_columns(file_to_inspect)
+        primary_geom_col = geo_info.get("primary_column")
+
+        columns_info = [
+            {
+                "name": col["name"],
+                "type": col["type"],
+                "is_geometry": col["name"] == primary_geom_col,
+            }
+            for col in usable_columns
+        ]
+
+        statistics = get_column_statistics(file_to_inspect, columns_info)
+
+        if json_output:
+            output = format_json_output(file_info, geo_info, columns_info, None, statistics)
+            click.echo(output)
+        elif markdown_output:
+            output = format_markdown_output(
+                file_info, geo_info, columns_info, None, None, statistics
+            )
+            click.echo(output)
+        else:
+            format_terminal_output(file_info, geo_info, columns_info, None, None, statistics)
+
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@inspect.command(name="summary", cls=GlobAwareCommand)
+@click.argument("parquet_file")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
+@click.option(
+    "--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files"
+)
+@click.option(
+    "--check-all",
+    "check_all_files",
+    is_flag=True,
+    help="For partitioned data: aggregate info from all files",
+)
+@profile_option
+def inspect_summary(parquet_file, json_output, markdown_output, check_all_files, profile):
+    """Show quick metadata summary (default).
+
+    Displays file size, row count, columns, geometry type, CRS, and bounding box.
+    """
+    _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files, profile)
+
+
+@inspect.command(name="head", cls=GlobAwareCommand)
+@click.argument("parquet_file")
+@click.argument("count", type=int, default=10, required=False)
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
+@click.option(
+    "--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files"
+)
+@profile_option
+def inspect_head(parquet_file, count, json_output, markdown_output, profile):
+    """Show first N rows of data (default: 10).
+
+    Examples:
+
+        \b
+        gpio inspect head data.parquet        # First 10 rows
+        gpio inspect head data.parquet 20     # First 20 rows
+    """
+    _inspect_preview_impl(parquet_file, count, "head", json_output, markdown_output, profile)
+
+
+@inspect.command(name="tail", cls=GlobAwareCommand)
+@click.argument("parquet_file")
+@click.argument("count", type=int, default=10, required=False)
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
+@click.option(
+    "--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files"
+)
+@profile_option
+def inspect_tail(parquet_file, count, json_output, markdown_output, profile):
+    """Show last N rows of data (default: 10).
+
+    Examples:
+
+        \b
+        gpio inspect tail data.parquet        # Last 10 rows
+        gpio inspect tail data.parquet 5      # Last 5 rows
+    """
+    _inspect_preview_impl(parquet_file, count, "tail", json_output, markdown_output, profile)
+
+
+@inspect.command(name="stats", cls=GlobAwareCommand)
+@click.argument("parquet_file")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
+@click.option(
+    "--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files"
+)
+@profile_option
+def inspect_stats(parquet_file, json_output, markdown_output, profile):
+    """Show column statistics (nulls, min/max, unique counts)."""
+    _inspect_stats_impl(parquet_file, json_output, markdown_output, profile)
+
+
+@inspect.command(name="meta", cls=GlobAwareCommand)
+@click.argument("parquet_file")
+@click.option("--geo", "meta_geoparquet", is_flag=True, help="Show only GeoParquet 'geo' metadata")
+@click.option("--parquet", "meta_parquet", is_flag=True, help="Show only Parquet file metadata")
+@click.option(
+    "--parquet-geo", "meta_parquet_geo", is_flag=True, help="Show only Parquet geospatial metadata"
+)
+@click.option(
+    "--row-groups",
+    "meta_row_groups",
+    type=int,
+    default=1,
+    help="Number of row groups to display (default: 1)",
+)
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
+@profile_option
+def inspect_meta(
+    parquet_file,
+    meta_geoparquet,
+    meta_parquet,
+    meta_parquet_geo,
+    meta_row_groups,
+    json_output,
+    profile,
+):
+    """Show comprehensive metadata (Parquet, GeoParquet, row groups).
+
+    Examples:
+
+        \b
+        gpio inspect meta data.parquet                # All metadata
+        gpio inspect meta data.parquet --geo          # GeoParquet 'geo' key only
+        gpio inspect meta data.parquet --parquet      # Parquet file metadata only
+        gpio inspect meta data.parquet --row-groups 5 # Show 5 row groups
+    """
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_profile_for_urls,
+    )
+
+    validate_profile_for_urls(profile, parquet_file)
+    setup_aws_profile_if_needed(profile, parquet_file)
+
+    try:
+        _handle_meta_display(
+            parquet_file,
+            meta_parquet,
+            meta_geoparquet,
+            meta_parquet_geo,
+            meta_row_groups,
+            json_output,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@inspect.command(name="legacy", hidden=True, cls=OptionalIntCommand)
 @click.argument("parquet_file")
 @click.option("--head", type=int, default=None, help="Show first N rows (default: 10)")
 @click.option("--tail", type=int, default=None, help="Show last N rows (default: 10)")
@@ -1413,10 +1848,10 @@ def reproject(
     "--check-all",
     "check_all_files",
     is_flag=True,
-    help="For partitioned data: aggregate info from all files (bounds, row counts, etc.)",
+    help="For partitioned data: aggregate info from all files",
 )
 @profile_option
-def inspect(
+def inspect_legacy(
     parquet_file,
     head,
     tail,
@@ -1431,67 +1866,39 @@ def inspect(
     check_all_files,
     profile,
 ):
-    """
-    Inspect a GeoParquet file and show metadata summary.
+    """[DEPRECATED] Legacy inspect command with flag-based interface.
 
-    Provides quick examination of GeoParquet files without launching external tools.
-    Default behavior shows metadata only (instant). Use --head/--tail to preview data,
-    --stats to calculate column statistics, or --meta for comprehensive metadata.
+    This interface is deprecated. Please use subcommands instead:
 
-    Examples:
-
-        \b
-        # Quick metadata inspection
-        gpio inspect data.parquet
-
-        \b
-        # Preview first 10 rows (default when no value given)
-        gpio inspect data.parquet --head
-
-        \b
-        # Preview first 20 rows
-        gpio inspect data.parquet --head 20
-
-        \b
-        # Preview last 10 rows (default when no value given)
-        gpio inspect data.parquet --tail
-
-        \b
-        # Preview last 5 rows
-        gpio inspect data.parquet --tail 5
-
-        \b
-        # Show statistics
-        gpio inspect data.parquet --stats
-
-        \b
-        # Comprehensive metadata (Parquet, GeoParquet, row groups)
-        gpio inspect data.parquet --meta
-
-        \b
-        # Show only GeoParquet metadata
-        gpio inspect data.parquet --meta --geoparquet
-
-        \b
-        # Show all row groups instead of just the first
-        gpio inspect data.parquet --meta --row-groups 10
-
-        \b
-        # JSON output for scripting
-        gpio inspect data.parquet --json
-
-        \b
-        # Markdown output for README files
-        gpio inspect data.parquet --markdown
-
-        \b
-        # Aggregate info from all files in partition
-        gpio inspect partitions/ --check-all
+    \b
+    --head    -> gpio inspect head <file> [count]
+    --tail    -> gpio inspect tail <file> [count]
+    --stats   -> gpio inspect stats <file>
+    --meta    -> gpio inspect meta <file>
     """
     from geoparquet_io.core.common import (
         setup_aws_profile_if_needed,
         validate_profile_for_urls,
     )
+    from geoparquet_io.core.duckdb_metadata import get_usable_columns
+    from geoparquet_io.core.inspect_utils import (
+        extract_partition_summary,
+        format_partition_json_output,
+        format_partition_markdown_output,
+        format_partition_terminal_output,
+    )
+    from geoparquet_io.core.logging_config import warn
+    from geoparquet_io.core.partition_reader import get_partition_info
+
+    # Show deprecation warnings
+    if head is not None:
+        warn("--head flag is deprecated. Use: gpio inspect head <file> [count]")
+    if tail is not None:
+        warn("--tail flag is deprecated. Use: gpio inspect tail <file> [count]")
+    if stats:
+        warn("--stats flag is deprecated. Use: gpio inspect stats <file>")
+    if meta:
+        warn("--meta flag is deprecated. Use: gpio inspect meta <file>")
 
     # Validate mutually exclusive options
     if head is not None and tail is not None:
@@ -1518,7 +1925,6 @@ def inspect(
         if check_all_files:
             raise click.UsageError("--meta cannot be used with --check-all")
 
-        # Validate profile is only used with S3
         validate_profile_for_urls(profile, parquet_file)
         setup_aws_profile_if_needed(profile, parquet_file)
 
@@ -1535,45 +1941,25 @@ def inspect(
             raise click.ClickException(str(e)) from e
         return
 
-    # Continue with standard inspect mode
-    from geoparquet_io.core.duckdb_metadata import get_usable_columns
-    from geoparquet_io.core.inspect_utils import (
-        extract_partition_summary,
-        format_partition_json_output,
-        format_partition_markdown_output,
-        format_partition_terminal_output,
-    )
-    from geoparquet_io.core.partition_reader import get_partition_info
-
     # Check for partition and handle --check-all
     if check_all_files:
-        # Validate --check-all is not used with preview/stats options
         if head is not None or tail is not None:
             raise click.UsageError("--check-all cannot be used with --head or --tail")
         if stats:
             raise click.UsageError("--check-all cannot be used with --stats")
 
-    # Validate profile is only used with S3
     validate_profile_for_urls(profile, parquet_file)
-
-    # Setup AWS profile if needed
     setup_aws_profile_if_needed(profile, parquet_file)
 
     try:
-        # Check if this is a partition
         partition_info = get_partition_info(parquet_file, verbose=False)
 
         if partition_info["is_partition"] and check_all_files:
-            # Partition mode with --check-all: aggregate all files
             all_files = partition_info["all_files"]
-
             if not all_files:
                 raise click.ClickException("No parquet files found in partition")
 
-            # Get partition summary
             partition_summary = extract_partition_summary(all_files, verbose=False)
-
-            # Get geo info and columns from first file for column schema
             first_file = partition_info["first_file"]
             geo_info = extract_geo_info(first_file)
             usable_columns = get_usable_columns(first_file)
@@ -1588,7 +1974,6 @@ def inspect(
                 for col in usable_columns
             ]
 
-            # Output
             if json_output:
                 output = format_partition_json_output(partition_summary, geo_info, columns_info)
                 click.echo(output)
@@ -1597,13 +1982,10 @@ def inspect(
                 click.echo(output)
             else:
                 format_partition_terminal_output(partition_summary, geo_info, columns_info)
-
             return
 
-        # Single file mode (or partition without --check-all - inspect first file)
         file_to_inspect = parquet_file
         if partition_info["is_partition"]:
-            # Partition without --check-all: inspect first file with notice
             file_to_inspect = partition_info["first_file"]
             file_count = partition_info["file_count"]
             click.echo(
@@ -1615,15 +1997,11 @@ def inspect(
             )
             click.echo()
 
-        # Extract metadata
         file_info = extract_file_info(file_to_inspect)
         geo_info = extract_geo_info(file_to_inspect)
-
-        # Get usable columns using DESCRIBE (handles nested struct wrappers correctly)
         usable_columns = get_usable_columns(file_to_inspect)
         primary_geom_col = geo_info.get("primary_column")
 
-        # Build column info with geometry marking
         columns_info = [
             {
                 "name": col["name"],
@@ -1633,18 +2011,15 @@ def inspect(
             for col in usable_columns
         ]
 
-        # Get preview data if requested
         preview_table = None
         preview_mode = None
         if head is not None or tail is not None:
             preview_table, preview_mode = get_preview_data(file_to_inspect, head=head, tail=tail)
 
-        # Get statistics if requested
         statistics = None
         if stats:
             statistics = get_column_statistics(file_to_inspect, columns_info)
 
-        # Output
         if json_output:
             output = format_json_output(
                 file_info, geo_info, columns_info, preview_table, statistics
@@ -1919,7 +2294,7 @@ def _handle_meta_display(
             format_parquet_geo_metadata(parquet_file, json_output, row_groups)
 
 
-@cli.command(hidden=True)  # Deprecated: use 'gpio inspect --meta' instead
+@cli.command(hidden=True)  # Deprecated: use 'gpio inspect meta' instead
 @click.argument("parquet_file")
 @click.option("--parquet", is_flag=True, help="Show only Parquet file metadata")
 @click.option("--geoparquet", is_flag=True, help="Show only GeoParquet metadata from 'geo' key")
@@ -1933,7 +2308,7 @@ def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output
     """
     [DEPRECATED] Show comprehensive metadata for a GeoParquet file.
 
-    This command is deprecated. Use 'gpio inspect --meta' instead.
+    This command is deprecated. Use 'gpio inspect meta' instead.
     """
     from geoparquet_io.core.common import setup_aws_profile_if_needed, validate_profile_for_urls
     from geoparquet_io.core.logging_config import warn
@@ -1941,7 +2316,7 @@ def meta(parquet_file, parquet, geoparquet, parquet_geo, row_groups, json_output
     # Show deprecation warning
     warn(
         "'gpio meta' is deprecated and will be removed in a future release. "
-        "Use 'gpio inspect --meta' instead."
+        "Use 'gpio inspect meta' instead."
     )
 
     # Validate profile is only used with S3

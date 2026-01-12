@@ -42,7 +42,8 @@ class TestGlobAwareCommand:
         assert result.exit_code != 0
         assert "Received 3 parquet files" in result.output
         assert "shell expanded a glob pattern" in result.output
-        assert 'gpio inspect "path/*.parquet"' in result.output
+        # With new subcommand structure, the suggested command shows "summary"
+        assert 'gpio inspect summary "path/*.parquet"' in result.output
 
     def test_check_all_shell_expanded_glob_error(self):
         """Test check all shows helpful error when glob is shell-expanded."""
