@@ -49,10 +49,11 @@ def _run_partition_with_temp_file(
     core_fn,
     output_dir: str | Path,
     *,
-    temp_prefix: str,
+    temp_prefix: str = "gpio_partition",
     core_kwargs: dict,
     compression: str = "ZSTD",
     compression_level: int = 15,
+    collect_stats: bool = False,
 ) -> dict:
     """
     Run a partition operation using a temporary file.
@@ -68,9 +69,10 @@ def _run_partition_with_temp_file(
         core_kwargs: Keyword arguments for the core function
         compression: Compression codec
         compression_level: Compression level
+        collect_stats: If True, return file count stats instead of core_fn result
 
     Returns:
-        dict with partition results or {"status": "completed"}
+        dict with partition results or file stats if collect_stats=True
     """
     import tempfile
     import uuid
@@ -93,6 +95,15 @@ def _run_partition_with_temp_file(
             **core_kwargs,
             verbose=False,
         )
+
+        if collect_stats:
+            output_path = PathLib(output_dir)
+            parquet_files = list(output_path.rglob("*.parquet"))
+            return {
+                "output_dir": str(output_path),
+                "file_count": len(parquet_files),
+                "hive": core_kwargs.get("hive", True),
+            }
 
         return result if result else {"status": "completed"}
     finally:
@@ -758,60 +769,6 @@ class Table:
         )
         return Table(result, self._geometry_column)
 
-    def _partition_with_temp_file(
-        self,
-        partition_func,
-        output_dir: str | Path,
-        partition_kwargs: dict,
-        compression: str,
-    ) -> dict:
-        """
-        Common helper for partition operations using a temp file.
-
-        Handles temp file creation, writing, partition function call,
-        stats collection, and cleanup with retry.
-
-        Args:
-            partition_func: The partition function to call
-            output_dir: Output directory path
-            partition_kwargs: Keyword arguments for the partition function
-            compression: Compression codec for temp file
-
-        Returns:
-            dict with partition statistics (output_dir, file_count, hive)
-        """
-        import tempfile
-        import time
-        import uuid
-        from pathlib import Path as PathLib
-
-        temp_path = PathLib(tempfile.gettempdir()) / f"gpio_partition_{uuid.uuid4()}.parquet"
-
-        try:
-            self.write(temp_path, compression=compression)
-
-            partition_func(
-                input_parquet=str(temp_path),
-                output_folder=str(output_dir),
-                **partition_kwargs,
-            )
-
-            # Return basic stats
-            output_path = PathLib(output_dir)
-            parquet_files = list(output_path.rglob("*.parquet"))
-            return {
-                "output_dir": str(output_path),
-                "file_count": len(parquet_files),
-                "hive": partition_kwargs.get("hive", True),
-            }
-        finally:
-            for attempt in range(3):
-                try:
-                    temp_path.unlink(missing_ok=True)
-                    break
-                except OSError:
-                    time.sleep(0.1 * (attempt + 1))
-
     def partition_by_quadkey(
         self,
         output_dir: str | Path,
@@ -821,7 +778,6 @@ class Table:
         compression: str = "ZSTD",
         hive: bool = True,
         overwrite: bool = False,
-        verbose: bool = False,
     ) -> dict:
         """
         Partition the table into Hive-partitioned directory by quadkey.
@@ -833,7 +789,6 @@ class Table:
             compression: Compression codec (default: ZSTD)
             hive: Use Hive-style partitioning (default: True)
             overwrite: Overwrite existing output directory
-            verbose: Print progress information
 
         Returns:
             dict with partition statistics (file_count, etc.)
@@ -845,17 +800,20 @@ class Table:
         """
         from geoparquet_io.core.partition_by_quadkey import partition_by_quadkey
 
-        return self._partition_with_temp_file(
-            partition_func=partition_by_quadkey,
-            output_dir=output_dir,
-            partition_kwargs={
+        return _run_partition_with_temp_file(
+            self._table,
+            self._geometry_column,
+            partition_by_quadkey,
+            output_dir,
+            temp_prefix="gpio_part_qk",
+            core_kwargs={
                 "resolution": resolution,
                 "partition_resolution": partition_resolution,
                 "hive": hive,
                 "overwrite": overwrite,
-                "verbose": verbose,
             },
             compression=compression,
+            collect_stats=True,
         )
 
     def partition_by_h3(
@@ -866,7 +824,6 @@ class Table:
         compression: str = "ZSTD",
         hive: bool = True,
         overwrite: bool = False,
-        verbose: bool = False,
     ) -> dict:
         """
         Partition the table into Hive-partitioned directory by H3 cell.
@@ -877,7 +834,6 @@ class Table:
             compression: Compression codec (default: ZSTD)
             hive: Use Hive-style partitioning (default: True)
             overwrite: Overwrite existing output directory
-            verbose: Print progress information
 
         Returns:
             dict with partition statistics (file_count, etc.)
@@ -889,16 +845,19 @@ class Table:
         """
         from geoparquet_io.core.partition_by_h3 import partition_by_h3
 
-        return self._partition_with_temp_file(
-            partition_func=partition_by_h3,
-            output_dir=output_dir,
-            partition_kwargs={
+        return _run_partition_with_temp_file(
+            self._table,
+            self._geometry_column,
+            partition_by_h3,
+            output_dir,
+            temp_prefix="gpio_part_h3",
+            core_kwargs={
                 "resolution": resolution,
                 "hive": hive,
                 "overwrite": overwrite,
-                "verbose": verbose,
             },
             compression=compression,
+            collect_stats=True,
         )
 
     def upload(
@@ -1551,8 +1510,6 @@ class Table:
         *,
         dataset: str = "overture",
         levels: list[str] | None = None,
-        country_filter: str | None = None,
-        use_centroid: bool = False,
     ) -> Table:
         """
         Add administrative division columns via spatial join.
@@ -1563,8 +1520,6 @@ class Table:
         Args:
             dataset: Boundaries dataset ("overture", "gaul", or custom URL)
             levels: Admin levels to add (e.g., ["country", "admin1"])
-            country_filter: Only include specific country (ISO code)
-            use_centroid: Use geometry centroid for join (faster)
 
         Returns:
             Table with admin division columns added
@@ -1573,14 +1528,12 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> enriched = table.add_admin_divisions(levels=["country", "admin1"])
         """
-        from geoparquet_io.core.add_admin_divisions_multi import add_admin_divisions
+        from geoparquet_io.core.add_admin_divisions_multi import add_admin_divisions_multi
 
         result_table = self._with_temp_io_files(
-            add_admin_divisions,
-            dataset=dataset,
+            add_admin_divisions_multi,
+            dataset_name=dataset,
             levels=levels or ["country"],
-            country_filter=country_filter,
-            use_centroid=use_centroid,
             verbose=False,
         )
         return Table(result_table, self._geometry_column)

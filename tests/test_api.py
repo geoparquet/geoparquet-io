@@ -755,8 +755,13 @@ class TestTableMetadata:
     def test_metadata_with_parquet_metadata(self, sample_table):
         """Test metadata() includes parquet metadata when requested."""
         result = sample_table.metadata(include_parquet_metadata=True)
-        # If there's any metadata besides 'geo', it should be included
         assert isinstance(result, dict)
+        # When include_parquet_metadata=True, the key should be present
+        # It will be a dict (possibly empty if only 'geo' metadata exists)
+        if result.get("geo_metadata"):
+            # If geo metadata exists, schema has metadata, so parquet_metadata should be present
+            assert "parquet_metadata" in result
+            assert isinstance(result["parquet_metadata"], dict)
 
 
 class TestTableToGeojson:
