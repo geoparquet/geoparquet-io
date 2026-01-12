@@ -771,11 +771,11 @@ class TestTableToGeojson:
         return read(PLACES_PARQUET).head(10)
 
     @pytest.fixture
-    def output_file(self):
-        """Create a temporary output file path."""
-        tmp_path = Path(tempfile.gettempdir()) / f"test_geojson_{uuid.uuid4()}.geojson"
-        yield str(tmp_path)
-        safe_unlink(tmp_path)
+    def output_file(self, tmp_path):
+        """Create a temporary output file path using pytest's tmp_path fixture."""
+        file_path = tmp_path / f"test_geojson_{uuid.uuid4()}.geojson"
+        yield str(file_path)
+        safe_unlink(file_path)
 
     def test_to_geojson_to_file(self, sample_table, output_file):
         """Test to_geojson() writes to file."""

@@ -87,7 +87,7 @@ def generate_stac(
 
         # Write output
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(stac_dict, f, indent=2, default=str)
     else:
         # Directory -> STAC Collection with Items
@@ -101,16 +101,22 @@ def generate_stac(
 
         # Write collection
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(collection_dict, f, indent=2, default=str)
 
-        # Write each item as a separate JSON file
-        items_dir = output_path.parent / "items"
-        items_dir.mkdir(parents=True, exist_ok=True)
+        # Write each item as a separate JSON file next to collection.json
+        # (matches the links emitted by generate_stac_collection)
         for item in items_list:
             item_id_str = item.get("id", "unknown")
-            item_path = items_dir / f"{item_id_str}.json"
-            with open(item_path, "w") as f:
+            item_path = output_path.parent / f"{item_id_str}.json"
+
+            # Enforce overwrite check for each item file
+            if item_path.exists() and not overwrite:
+                raise ValueError(
+                    f"STAC item file already exists: {item_path}\nUse overwrite=True to replace it."
+                )
+
+            with open(item_path, "w", encoding="utf-8") as f:
                 json.dump(item, f, indent=2, default=str)
 
     return output_path
@@ -149,5 +155,9 @@ def validate_stac(stac_path: str | Path, verbose: bool = False) -> CheckResult:
 
     # Translate "valid" key to "passed" for CheckResult compatibility
     results["passed"] = results.pop("valid", True)
+
+    # Merge errors into issues so CheckResult.failures() works correctly
+    # Keep original "errors" and "warnings" intact for direct access
+    results["issues"] = results.get("issues", []) + results.get("errors", [])
 
     return CheckResult(results, check_type="stac")

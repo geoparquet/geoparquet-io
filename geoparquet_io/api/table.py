@@ -25,6 +25,82 @@ if TYPE_CHECKING:
     from geoparquet_io.api.check import CheckResult
 
 
+def _safe_unlink(path: Path, attempts: int = 3) -> None:
+    """
+    Safely unlink a file with retry for Windows file handle release.
+
+    Args:
+        path: Path to the file to delete
+        attempts: Number of retry attempts (default: 3)
+    """
+    import time
+
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            break
+        except OSError:
+            time.sleep(0.1 * (attempt + 1))
+
+
+def _run_partition_with_temp_file(
+    table: pa.Table,
+    geometry_column: str | None,
+    core_fn,
+    output_dir: str | Path,
+    *,
+    temp_prefix: str,
+    core_kwargs: dict,
+    compression: str = "ZSTD",
+    compression_level: int = 15,
+) -> dict:
+    """
+    Run a partition operation using a temporary file.
+
+    Handles temp file creation, writing, partition function call, and cleanup.
+
+    Args:
+        table: The PyArrow table to partition
+        geometry_column: Name of geometry column
+        core_fn: The partition core function to call
+        output_dir: Output directory path
+        temp_prefix: Prefix for the temp file name
+        core_kwargs: Keyword arguments for the core function
+        compression: Compression codec
+        compression_level: Compression level
+
+    Returns:
+        dict with partition results or {"status": "completed"}
+    """
+    import tempfile
+    import uuid
+    from pathlib import Path as PathLib
+
+    from geoparquet_io.core.common import write_geoparquet_table
+
+    temp_input = PathLib(tempfile.gettempdir()) / f"{temp_prefix}_{uuid.uuid4()}.parquet"
+
+    try:
+        write_geoparquet_table(
+            table,
+            str(temp_input),
+            geometry_column=geometry_column,
+            compression=compression,
+            compression_level=compression_level,
+        )
+
+        result = core_fn(
+            input_parquet=str(temp_input),
+            output_folder=str(output_dir),
+            **core_kwargs,
+            verbose=False,
+        )
+
+        return result if result else {"status": "completed"}
+    finally:
+        _safe_unlink(temp_input)
+
+
 def _calculate_bounds_from_table(
     table: pa.Table,
     geometry_column: str | None,
@@ -1222,7 +1298,6 @@ class Table:
             Result from func
         """
         import tempfile
-        import time as time_module
         import uuid
         from pathlib import Path
 
@@ -1239,13 +1314,7 @@ class Table:
             # Call the function with temp file
             return func(str(temp_path), *args, **kwargs)
         finally:
-            # Cleanup with retry for Windows file handle release
-            for attempt in range(3):
-                try:
-                    temp_path.unlink(missing_ok=True)
-                    break
-                except OSError:
-                    time_module.sleep(0.1 * (attempt + 1))
+            _safe_unlink(temp_path)
 
     def _with_temp_io_files(self, func, **kwargs) -> pa.Table:
         """
@@ -1262,7 +1331,6 @@ class Table:
             PyArrow Table from the output file
         """
         import tempfile
-        import time as time_module
         import uuid
         from pathlib import Path
 
@@ -1289,14 +1357,8 @@ class Table:
             # Read the output file
             return pq.read_table(str(temp_output))
         finally:
-            # Cleanup with retry for Windows file handle release
-            for temp_path in [temp_input, temp_output]:
-                for attempt in range(3):
-                    try:
-                        temp_path.unlink(missing_ok=True)
-                        break
-                    except OSError:
-                        time_module.sleep(0.1 * (attempt + 1))
+            _safe_unlink(temp_input)
+            _safe_unlink(temp_output)
 
     def check(self) -> CheckResult:
         """
@@ -1538,8 +1600,17 @@ class Table:
         """
         import json
 
+        # Guard against None geometry column
+        if self._geometry_column is None:
+            raise ValueError(
+                "Cannot add bbox metadata: no geometry column detected. "
+                "Ensure the table has a valid geometry column."
+            )
+
         if bbox_column not in self.column_names:
             raise ValueError(f"Bbox column '{bbox_column}' not found. Use add_bbox() first.")
+
+        geom_col = str(self._geometry_column)
 
         # Get existing metadata
         schema = self._table.schema
@@ -1547,17 +1618,24 @@ class Table:
 
         # Parse existing geo metadata or create new
         if b"geo" in schema_metadata:
-            geo_meta = json.loads(schema_metadata[b"geo"].decode("utf-8"))
+            try:
+                geo_meta = json.loads(schema_metadata[b"geo"].decode("utf-8"))
+                # Ensure geo_meta is a dict and has "columns" key
+                if not isinstance(geo_meta, dict):
+                    geo_meta = {}
+                if "columns" not in geo_meta or not isinstance(geo_meta.get("columns"), dict):
+                    geo_meta["columns"] = {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                geo_meta = {"columns": {}}
         else:
             geo_meta = {
                 "version": "1.1.0",
-                "primary_column": self._geometry_column,
+                "primary_column": geom_col,
                 "columns": {},
             }
 
         # Add covering metadata for the geometry column
-        geom_col = self._geometry_column
-        if geom_col not in geo_meta.get("columns", {}):
+        if geom_col not in geo_meta["columns"]:
             geo_meta["columns"][geom_col] = {}
 
         geo_meta["columns"][geom_col]["covering"] = {
@@ -1612,43 +1690,23 @@ class Table:
             ...     hive=True
             ... )
         """
-        import tempfile
-        import time as time_module
-        import uuid
-        from pathlib import Path as PathLib
-
-        from geoparquet_io.core.common import write_geoparquet_table
         from geoparquet_io.core.partition_by_string import partition_by_string
 
-        temp_input = PathLib(tempfile.gettempdir()) / f"gpio_part_str_{uuid.uuid4()}.parquet"
-
-        try:
-            write_geoparquet_table(
-                self._table,
-                str(temp_input),
-                geometry_column=self._geometry_column,
-                compression=compression,
-                compression_level=compression_level,
-            )
-
-            result = partition_by_string(
-                input_parquet=str(temp_input),
-                output_folder=str(output_dir),
-                column=column,
-                chars=chars,
-                hive=hive,
-                overwrite=overwrite,
-                verbose=False,
-            )
-
-            return result if result else {"status": "completed"}
-        finally:
-            for attempt in range(3):
-                try:
-                    temp_input.unlink(missing_ok=True)
-                    break
-                except OSError:
-                    time_module.sleep(0.1 * (attempt + 1))
+        return _run_partition_with_temp_file(
+            self._table,
+            self._geometry_column,
+            partition_by_string,
+            output_dir,
+            temp_prefix="gpio_part_str",
+            core_kwargs={
+                "column": column,
+                "chars": chars,
+                "hive": hive,
+                "overwrite": overwrite,
+            },
+            compression=compression,
+            compression_level=compression_level,
+        )
 
     def partition_by_kdtree(
         self,
@@ -1681,42 +1739,22 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> stats = table.partition_by_kdtree('output/', iterations=6)
         """
-        import tempfile
-        import time as time_module
-        import uuid
-        from pathlib import Path as PathLib
-
-        from geoparquet_io.core.common import write_geoparquet_table
         from geoparquet_io.core.partition_by_kdtree import partition_by_kdtree
 
-        temp_input = PathLib(tempfile.gettempdir()) / f"gpio_part_kd_{uuid.uuid4()}.parquet"
-
-        try:
-            write_geoparquet_table(
-                self._table,
-                str(temp_input),
-                geometry_column=self._geometry_column,
-                compression=compression,
-                compression_level=compression_level,
-            )
-
-            result = partition_by_kdtree(
-                input_parquet=str(temp_input),
-                output_folder=str(output_dir),
-                iterations=iterations,
-                hive=hive,
-                overwrite=overwrite,
-                verbose=False,
-            )
-
-            return result if result else {"status": "completed"}
-        finally:
-            for attempt in range(3):
-                try:
-                    temp_input.unlink(missing_ok=True)
-                    break
-                except OSError:
-                    time_module.sleep(0.1 * (attempt + 1))
+        return _run_partition_with_temp_file(
+            self._table,
+            self._geometry_column,
+            partition_by_kdtree,
+            output_dir,
+            temp_prefix="gpio_part_kd",
+            core_kwargs={
+                "iterations": iterations,
+                "hive": hive,
+                "overwrite": overwrite,
+            },
+            compression=compression,
+            compression_level=compression_level,
+        )
 
     def partition_by_admin(
         self,
@@ -1755,45 +1793,25 @@ class Table:
             ...     levels=['country', 'admin1']
             ... )
         """
-        import tempfile
-        import time as time_module
-        import uuid
-        from pathlib import Path as PathLib
-
-        from geoparquet_io.core.common import write_geoparquet_table
         from geoparquet_io.core.partition_admin_hierarchical import (
             partition_by_admin_hierarchical,
         )
 
-        temp_input = PathLib(tempfile.gettempdir()) / f"gpio_part_adm_{uuid.uuid4()}.parquet"
-
-        try:
-            write_geoparquet_table(
-                self._table,
-                str(temp_input),
-                geometry_column=self._geometry_column,
-                compression=compression,
-                compression_level=compression_level,
-            )
-
-            result = partition_by_admin_hierarchical(
-                input_parquet=str(temp_input),
-                output_folder=str(output_dir),
-                dataset=dataset,
-                levels=levels or ["country"],
-                hive=hive,
-                overwrite=overwrite,
-                verbose=False,
-            )
-
-            return result if result else {"status": "completed"}
-        finally:
-            for attempt in range(3):
-                try:
-                    temp_input.unlink(missing_ok=True)
-                    break
-                except OSError:
-                    time_module.sleep(0.1 * (attempt + 1))
+        return _run_partition_with_temp_file(
+            self._table,
+            self._geometry_column,
+            partition_by_admin_hierarchical,
+            output_dir,
+            temp_prefix="gpio_part_adm",
+            core_kwargs={
+                "dataset": dataset,
+                "levels": levels or ["country"],
+                "hive": hive,
+                "overwrite": overwrite,
+            },
+            compression=compression,
+            compression_level=compression_level,
+        )
 
     def __repr__(self) -> str:
         """String representation of the Table."""
