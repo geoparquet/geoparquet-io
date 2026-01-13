@@ -164,6 +164,28 @@ class ConvertDefaultGroup(click.Group):
         return super().parse_args(ctx, ["geoparquet"] + args)
 
 
+class ExtractDefaultGroup(click.Group):
+    """Custom Group that invokes 'geoparquet' when no subcommand is provided.
+
+    This allows backwards compatibility:
+    - gpio extract input.parquet output.parquet  -> invokes geoparquet
+    - gpio extract geoparquet input.parquet output.parquet -> explicit
+    - gpio extract bigquery project.dataset.table output.parquet -> subcommand
+    """
+
+    def parse_args(self, ctx, args):
+        # Handle --help for group
+        if "--help" in args and (not args or args[0] not in self.commands):
+            return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
+
+        # If first arg is a known subcommand, use it
+        if args and not args[0].startswith("-") and args[0] in self.commands:
+            return super().parse_args(ctx, args)
+
+        # Default to 'geoparquet' subcommand for backwards compat
+        return super().parse_args(ctx, ["geoparquet"] + args)
+
+
 class InspectDefaultGroup(click.Group):
     """Custom Group that runs 'summary' when no subcommand is provided.
 
@@ -1901,7 +1923,26 @@ def inspect_legacy(
 
 
 # Extract command
-@cli.command(cls=GlobAwareCommand)
+@cli.group(cls=ExtractDefaultGroup)
+@click.pass_context
+def extract(ctx):
+    """Extract data from GeoParquet files or BigQuery tables.
+
+    By default, extracts from GeoParquet files. Use subcommands for other sources.
+
+    \b
+    Examples:
+        gpio extract data.parquet output.parquet --bbox -122,37,-121,38
+        gpio extract geoparquet data.parquet output.parquet  # Explicit
+        gpio extract bigquery project.dataset.table output.parquet
+    """
+    # Ensure logging is set up (in case this group is invoked directly in tests)
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+
+
+@extract.command(name="geoparquet", cls=GlobAwareCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
@@ -1948,7 +1989,7 @@ def inspect_legacy(
 @verbose_option
 @profile_option
 @any_extension_option
-def extract(
+def extract_geoparquet(
     input_file,
     output_file,
     include_cols,
@@ -2097,6 +2138,160 @@ def extract(
             geoparquet_version=geoparquet_version,
             allow_schema_diff=allow_schema_diff,
             hive_input=hive_input,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@extract.command(name="bigquery")
+@click.argument("table_id", metavar="TABLE_ID")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--project",
+    help="GCP project ID (overrides project in TABLE_ID if specified)",
+)
+@click.option(
+    "--credentials-file",
+    type=click.Path(exists=True),
+    help="Path to GCP service account JSON file (otherwise uses gcloud auth or "
+    "GOOGLE_APPLICATION_CREDENTIALS)",
+)
+@click.option(
+    "--include-cols",
+    help="Comma-separated columns to include",
+)
+@click.option(
+    "--exclude-cols",
+    help="Comma-separated columns to exclude",
+)
+@click.option(
+    "--where",
+    help="SQL WHERE clause for filtering (BigQuery SQL syntax)",
+)
+@click.option(
+    "--limit",
+    type=int,
+    help="Maximum number of rows to extract",
+)
+@click.option(
+    "--geography-column",
+    help="Name of GEOGRAPHY column to convert to geometry (auto-detected if not set)",
+)
+@output_format_options
+@geoparquet_version_option
+@dry_run_option
+@show_sql_option
+@verbose_option
+@any_extension_option
+def extract_bigquery_cmd(
+    table_id,
+    output_file,
+    project,
+    credentials_file,
+    include_cols,
+    exclude_cols,
+    where,
+    limit,
+    geography_column,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    geoparquet_version,
+    dry_run,
+    show_sql,
+    verbose,
+    any_extension,
+):
+    """
+    Extract data from a BigQuery table to GeoParquet.
+
+    TABLE_ID is the fully qualified BigQuery table identifier:
+    PROJECT.DATASET.TABLE or DATASET.TABLE (if --project is set).
+
+    Authentication (in order of precedence):
+
+    \b
+    1. --credentials-file: Path to service account JSON
+    2. GOOGLE_APPLICATION_CREDENTIALS environment variable
+    3. gcloud auth application-default credentials
+
+    GEOGRAPHY columns are automatically converted to GeoParquet geometry
+    with spherical edges (edges: "spherical" in metadata).
+
+    \b
+    Limitations:
+    - Cannot read BigQuery views or external tables (Storage Read API limitation)
+    - BIGNUMERIC columns are not supported
+
+    Examples:
+
+        \b
+        # Extract entire table
+        gpio extract bigquery myproject.geodata.buildings output.parquet
+
+        \b
+        # Extract with filtering
+        gpio extract bigquery myproject.geodata.buildings output.parquet \\
+            --where "area > 1000" --limit 10000
+
+        \b
+        # Use service account credentials
+        gpio extract bigquery myproject.geodata.buildings output.parquet \\
+            --credentials-file /path/to/service-account.json
+
+        \b
+        # Select specific columns
+        gpio extract bigquery myproject.geodata.buildings output.parquet \\
+            --include-cols "id,name,geography"
+    """
+    from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+    # Validate output early
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_file)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
+    # Validate .parquet extension
+    validate_parquet_extension(output_file, any_extension)
+
+    # Validate mutually exclusive row group options
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    # Parse row group size string if provided
+    from geoparquet_io.core.common import parse_size_string
+
+    row_group_mb = None
+    if row_group_size_mb:
+        try:
+            size_bytes = parse_size_string(row_group_size_mb)
+            row_group_mb = size_bytes / (1024 * 1024)
+        except ValueError as e:
+            raise click.UsageError(f"Invalid row group size: {e}") from e
+
+    try:
+        extract_bigquery(
+            table_id=table_id,
+            output_parquet=output_file,
+            project=project,
+            credentials_file=credentials_file,
+            where=where,
+            limit=limit,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
+            geography_column=geography_column,
+            dry_run=dry_run,
+            show_sql=show_sql,
+            verbose=verbose,
+            compression=compression.upper(),
+            compression_level=compression_level,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
+            geoparquet_version=geoparquet_version,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e

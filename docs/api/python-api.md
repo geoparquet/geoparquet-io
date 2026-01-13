@@ -37,6 +37,41 @@ print(f"Columns: {table.column_names}")
 print(f"Geometry column: {table.geometry_column}")
 ```
 
+### Reading from BigQuery
+
+Use `Table.from_bigquery()` to read directly from BigQuery tables:
+
+```python
+import geoparquet_io as gpio
+
+# Basic read
+table = gpio.Table.from_bigquery('myproject.geodata.buildings')
+
+# With filtering
+table = gpio.Table.from_bigquery(
+    'myproject.geodata.buildings',
+    where="area_sqm > 1000",
+    columns=['id', 'name', 'geography'],
+    limit=10000
+)
+
+# With explicit credentials
+table = gpio.Table.from_bigquery(
+    'myproject.geodata.buildings',
+    credentials_file='/path/to/service-account.json'
+)
+
+# Chain with other operations
+gpio.Table.from_bigquery('myproject.geodata.buildings', limit=10000) \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
+```
+
+!!! warning "BigQuery Limitations"
+    - **Cannot read views or external tables** (Storage Read API limitation)
+    - BIGNUMERIC columns are not supported
+
 ## Table Class
 
 The `Table` class wraps a PyArrow Table and provides chainable transformation methods.
@@ -575,6 +610,7 @@ pq.write_table(table, 'output.parquet')
 | `ops.sort_quadkey(table, column_name='quadkey', resolution=13, use_centroid=False, remove_column=False)` | Sort by quadkey |
 | `ops.reproject(table, target_crs='EPSG:4326', source_crs=None, geometry_column=None)` | Reproject geometry |
 | `ops.extract(table, columns=None, exclude_columns=None, bbox=None, where=None, limit=None, geometry_column=None)` | Filter columns/rows |
+| `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table |
 
 ## Pipeline Composition
 

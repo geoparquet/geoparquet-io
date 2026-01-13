@@ -10,6 +10,48 @@ gpio extract --help
 
 This will show all available options for the `extract` command.
 
+## Subcommands
+
+The `extract` command supports multiple data sources:
+
+### extract geoparquet (default)
+
+Extract from GeoParquet files. This is the default when no subcommand is specified.
+
+```bash
+gpio extract input.parquet output.parquet --bbox -122,37,-121,38
+gpio extract geoparquet input.parquet output.parquet  # Explicit
+```
+
+### extract bigquery
+
+Extract from BigQuery tables to GeoParquet.
+
+```bash
+gpio extract bigquery PROJECT.DATASET.TABLE output.parquet
+```
+
+**Options:**
+
+- `--project` - GCP project ID (overrides project in TABLE_ID)
+- `--credentials-file` - Path to service account JSON file
+- `--include-cols` - Comma-separated columns to include
+- `--exclude-cols` - Comma-separated columns to exclude
+- `--where` - SQL WHERE clause (BigQuery SQL syntax)
+- `--limit` - Maximum rows to extract
+- `--geography-column` - GEOGRAPHY column name (auto-detected if not set)
+- `--dry-run` - Show SQL without executing
+- `--show-sql` - Print SQL during execution
+
+**Authentication (in order of precedence):**
+
+1. `--credentials-file`: Path to service account JSON
+2. `GOOGLE_APPLICATION_CREDENTIALS` environment variable
+3. `gcloud auth application-default` credentials
+
+!!! warning "Limitations"
+    **Cannot read BigQuery views or external tables** - this is a limitation of the BigQuery Storage Read API. BIGNUMERIC columns are not supported (exceeds DuckDB's precision).
+
 ## Options
 
 ### Column Selection

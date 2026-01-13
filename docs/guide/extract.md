@@ -435,6 +435,148 @@ gpio extract s3://my-bucket/data.parquet output.parquet \
   --bbox 0,0,10,10
 ```
 
+## Extracting from BigQuery
+
+Extract data directly from BigQuery tables to GeoParquet. BigQuery `GEOGRAPHY` columns are automatically converted to GeoParquet geometry with spherical edges.
+
+### Basic Usage
+
+=== "CLI"
+
+    ```bash
+    # Extract entire table
+    gpio extract bigquery myproject.geodata.buildings output.parquet
+
+    # Extract with row limit
+    gpio extract bigquery myproject.geodata.buildings output.parquet --limit 10000
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Read from BigQuery
+    table = gpio.Table.from_bigquery('myproject.geodata.buildings')
+    table.write('output.parquet')
+
+    # With limit
+    table = gpio.Table.from_bigquery('myproject.geodata.buildings', limit=10000)
+    ```
+
+### Filtering Data
+
+Apply filters that are pushed down to BigQuery for efficient querying:
+
+=== "CLI"
+
+    ```bash
+    # WHERE filter (BigQuery SQL syntax)
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --where "area_sqm > 1000 AND building_type = 'commercial'"
+
+    # Select specific columns
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --include-cols "id,name,geography,area_sqm"
+
+    # Combined filters
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --include-cols "id,name,geography" \
+      --where "updated_date > '2024-01-01'" \
+      --limit 50000
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # With filtering
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.buildings',
+        where="area_sqm > 1000",
+        columns=['id', 'name', 'geography', 'area_sqm'],
+        limit=50000
+    )
+    ```
+
+### Authentication
+
+The command uses Google Cloud credentials in this order:
+
+1. **--credentials-file**: Explicit service account JSON file
+2. **GOOGLE_APPLICATION_CREDENTIALS**: Environment variable pointing to JSON file
+3. **gcloud auth**: Application default credentials from `gcloud auth application-default login`
+
+```bash
+# Using service account file
+gpio extract bigquery myproject.geodata.table output.parquet \
+  --credentials-file /path/to/service-account.json
+
+# Using environment variable
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+gpio extract bigquery myproject.geodata.table output.parquet
+
+# Using gcloud auth (for development)
+gcloud auth application-default login
+gpio extract bigquery myproject.geodata.table output.parquet
+```
+
+### GEOGRAPHY Column Handling
+
+BigQuery `GEOGRAPHY` columns are automatically converted to GeoParquet geometry:
+
+- GEOGRAPHY data is returned in WGS84 (EPSG:4326)
+- The geometry column is auto-detected by common names (`geography`, `geom`, `geometry`)
+- Use `--geography-column` to specify explicitly if needed
+
+```bash
+# Explicit geography column
+gpio extract bigquery myproject.geodata.parcels output.parquet \
+  --geography-column "parcel_boundary"
+```
+
+### Spherical Edges
+
+BigQuery GEOGRAPHY uses **spherical geodesic edges** (S2-based), meaning lines between points follow the shortest path on a sphere rather than planar straight lines. This is automatically reflected in the output GeoParquet metadata:
+
+```json
+{
+  "columns": {
+    "geometry": {
+      "edges": "spherical",
+      "orientation": "counterclockwise"
+    }
+  }
+}
+```
+
+This ensures downstream tools correctly interpret the geometry edges. Most GIS tools assume planar edges by default, so the `edges: "spherical"` metadata is important for accurate analysis.
+
+### Limitations
+
+!!! warning "Important Limitations"
+
+    **Views and External Tables Not Supported**
+
+    The BigQuery Storage Read API cannot read from:
+
+    - Logical views
+    - Materialized views
+    - External tables (e.g., tables backed by Cloud Storage)
+
+    You must extract from native BigQuery tables. If you need data from a view,
+    create a table from the view first:
+
+    ```sql
+    CREATE TABLE mydataset.mytable AS SELECT * FROM mydataset.myview;
+    ```
+
+Other limitations:
+
+- **BIGNUMERIC columns**: Not supported (76-digit precision exceeds DuckDB's 38-digit limit)
+- **Large results**: Consider using `--limit` and `--where` to reduce data transfer
+
 ## Working with Partitioned Input Data
 
 The `extract` command can read from partitioned GeoParquet datasets, including directories containing multiple parquet files and hive-style partitions.

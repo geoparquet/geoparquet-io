@@ -300,6 +300,7 @@ class GlobAwareCommand(click.Command):
     DEFAULT_SUBCOMMANDS = {
         "check": "all",
         "convert": "geoparquet",
+        "extract": "geoparquet",
         "inspect": "summary",
     }
 

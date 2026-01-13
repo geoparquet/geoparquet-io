@@ -871,13 +871,21 @@ class TestExtractCLI:
         safe_unlink(tmp_path)
 
     def test_cli_help(self):
-        """Test CLI help output."""
+        """Test CLI help output for extract command group."""
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import extract as extract_cmd
 
         runner = CliRunner()
+
+        # Test group help shows subcommands
         result = runner.invoke(extract_cmd, ["--help"])
+        assert result.exit_code == 0
+        assert "geoparquet" in result.output
+        assert "bigquery" in result.output
+
+        # Test geoparquet subcommand help shows options
+        result = runner.invoke(extract_cmd, ["geoparquet", "--help"])
         assert result.exit_code == 0
         assert "Extract columns and rows" in result.output
         assert "--include-cols" in result.output
