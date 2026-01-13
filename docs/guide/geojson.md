@@ -93,13 +93,34 @@ gpio convert reproject data.parquet - --dst-crs EPSG:4326 | \
 
 To write a standard GeoJSON FeatureCollection, specify an output file:
 
-```bash
-# Write to GeoJSON file
-gpio convert geojson data.parquet output.geojson
+=== "CLI"
 
-# With options
-gpio convert geojson data.parquet output.geojson --precision 5 --write-bbox
-```
+    ```bash
+    # Write to GeoJSON file
+    gpio convert geojson data.parquet output.geojson
+
+    # With options
+    gpio convert geojson data.parquet output.geojson --precision 5 --write-bbox
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Write to GeoJSON file
+    gpio.read('data.parquet').to_geojson('output.geojson')
+
+    # With options
+    gpio.read('data.parquet').to_geojson(
+        'output.geojson',
+        precision=5,
+        write_bbox=True
+    )
+
+    # Get as string (no file output)
+    geojson_str = gpio.read('data.parquet').to_geojson()
+    ```
 
 File output uses DuckDB's GDAL integration to produce properly formatted GeoJSON with RFC 7946 compliance.
 

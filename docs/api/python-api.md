@@ -88,6 +88,80 @@ print(info_dict['rows'])  # 766
 print(info_dict['crs'])   # None or CRS dict
 ```
 
+#### `head(n=10)` / `tail(n=10)`
+
+Get the first or last N rows.
+
+```python
+# First 10 rows (default)
+first_rows = table.head()
+
+# First 50 rows
+first_50 = table.head(50)
+
+# Last 10 rows (default)
+last_rows = table.tail()
+
+# Last 5 rows
+last_5 = table.tail(5)
+
+# Chain with other operations
+preview = table.head(100).add_bbox()
+```
+
+#### `stats()`
+
+Calculate column statistics.
+
+```python
+stats = table.stats()
+
+# Access stats for a column
+print(stats['population']['min'])     # Minimum value
+print(stats['population']['max'])     # Maximum value
+print(stats['population']['nulls'])   # Null count
+print(stats['population']['unique'])  # Approximate unique count
+
+# Geometry columns have only null counts
+print(stats['geometry']['nulls'])
+```
+
+#### `metadata(include_parquet_metadata=False)`
+
+Get GeoParquet and schema metadata.
+
+```python
+meta = table.metadata()
+
+# Access metadata
+print(meta['geoparquet_version'])  # e.g., '1.1.0'
+print(meta['geometry_column'])     # e.g., 'geometry'
+print(meta['crs'])                 # CRS dict or None
+print(meta['bounds'])              # (xmin, ymin, xmax, ymax)
+print(meta['columns'])             # List of column info dicts
+
+# Full geo metadata from 'geo' key
+geo_meta = meta.get('geo_metadata', {})
+
+# Include raw Parquet schema metadata
+full_meta = table.metadata(include_parquet_metadata=True)
+```
+
+#### `to_geojson(output_path=None, precision=7, write_bbox=False, id_field=None)`
+
+Convert to GeoJSON.
+
+```python
+# Write to file
+table.to_geojson('output.geojson')
+
+# With options
+table.to_geojson('output.geojson', precision=5, write_bbox=True)
+
+# Get as string (no file output)
+geojson_str = table.to_geojson()
+```
+
 #### `add_bbox(column_name='bbox')`
 
 Add a bounding box struct column computed from geometry.
@@ -264,6 +338,114 @@ Partition the table into a Hive-partitioned directory by H3 cell.
 # Partition by H3
 stats = table.partition_by_h3('output/', resolution=6)
 print(f"Created {stats['file_count']} files")
+```
+
+#### `partition_by_string(output_dir, column, chars=None, hive=True, overwrite=False)`
+
+Partition by string column values or prefixes.
+
+```python
+# Partition by full column values
+stats = table.partition_by_string('output/', column='category')
+
+# Partition by first 2 characters
+stats = table.partition_by_string('output/', column='mgrs_code', chars=2)
+```
+
+#### `partition_by_kdtree(output_dir, iterations=9, hive=True, overwrite=False)`
+
+Partition by KD-tree spatial cells.
+
+```python
+# Default (512 partitions = 2^9)
+stats = table.partition_by_kdtree('output/')
+
+# 64 partitions (2^6)
+stats = table.partition_by_kdtree('output/', iterations=6)
+```
+
+#### `partition_by_admin(output_dir, dataset='gaul', levels=None, hive=True, overwrite=False)`
+
+Partition by administrative boundaries.
+
+```python
+# Partition by country using GAUL dataset
+stats = table.partition_by_admin('output/', dataset='gaul', levels=['country'])
+
+# Multi-level hierarchical
+stats = table.partition_by_admin(
+    'output/',
+    dataset='gaul',
+    levels=['continent', 'country', 'department'],
+    hive=True
+)
+```
+
+#### `add_admin_divisions(dataset='overture', levels=None, country_filter=None, use_centroid=False)`
+
+Add administrative division columns via spatial join.
+
+```python
+# Add country codes
+enriched = table.add_admin_divisions(
+    dataset='overture',
+    levels=['country']
+)
+
+# Add multiple levels with country filter
+enriched = table.add_admin_divisions(
+    dataset='gaul',
+    levels=['continent', 'country', 'department'],
+    country_filter='US'
+)
+```
+
+#### `add_bbox_metadata(bbox_column='bbox')`
+
+Add bbox covering metadata to the table schema.
+
+```python
+# Add bbox column and metadata in one chain
+table_with_bbox = table.add_bbox().add_bbox_metadata()
+
+# Or add metadata to existing bbox column
+table_with_meta = table.add_bbox_metadata()
+```
+
+#### `check()` / `check_spatial()` / `check_compression()` / `check_bbox()` / `check_row_groups()`
+
+Run best-practice checks on the table.
+
+```python
+# Run all checks
+result = table.check()
+if result.passed():
+    print("All checks passed!")
+else:
+    for failure in result.failures():
+        print(f"Failed: {failure}")
+
+# Individual checks
+spatial_result = table.check_spatial()
+compression_result = table.check_compression()
+bbox_result = table.check_bbox()
+row_group_result = table.check_row_groups()
+
+# Access results as dictionary
+details = result.to_dict()
+```
+
+#### `validate(version=None)`
+
+Validate against GeoParquet specification.
+
+```python
+result = table.validate()
+if result.passed():
+    print(f"Valid GeoParquet {table.geoparquet_version}")
+
+# Validate against specific version
+result = table.validate(version='1.1')
 ```
 
 #### `upload(destination, compression='ZSTD', profile=None, s3_endpoint=None, ...)`
@@ -495,6 +677,67 @@ See [Core Functions Reference](core.md) for all available functions.
 > - Integrating with existing file-based pipelines
 > - When you need fine-grained control over function parameters
 > - Building custom tooling around gpio
+
+## Standalone Functions
+
+### STAC Generation
+
+Generate and validate STAC (SpatioTemporal Asset Catalog) metadata:
+
+```python
+from geoparquet_io import generate_stac, validate_stac
+
+# Generate STAC Item for a single file
+stac_path = generate_stac(
+    'data.parquet',
+    bucket='s3://my-bucket/data/'
+)
+
+# Generate STAC Collection for a directory
+stac_path = generate_stac(
+    'partitioned/',
+    bucket='s3://my-bucket/data/',
+    collection_id='my-dataset'
+)
+
+# With all options
+stac_path = generate_stac(
+    'data.parquet',
+    output_path='custom.json',
+    bucket='s3://my-bucket/data/',
+    item_id='my-item',
+    public_url='https://data.example.com/',
+    overwrite=True,
+    verbose=True
+)
+
+# Validate STAC
+result = validate_stac('collection.json')
+if result.passed():
+    print("Valid STAC!")
+else:
+    for failure in result.failures():
+        print(f"Issue: {failure}")
+```
+
+### CheckResult Class
+
+All check and validate methods return a `CheckResult` object:
+
+```python
+from geoparquet_io import CheckResult
+
+# Methods
+result.passed()          # Returns True if all checks passed
+result.failures()        # List of failure messages
+result.warnings()        # List of warning messages
+result.recommendations() # List of recommendations
+result.to_dict()         # Full results as dictionary
+
+# Can be used as boolean
+if result:
+    print("Passed!")
+```
 
 ## See Also
 

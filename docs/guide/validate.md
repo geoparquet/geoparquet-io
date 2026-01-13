@@ -4,9 +4,26 @@ The `check spec` command checks GeoParquet files against the official specificat
 
 ## Basic Validation
 
-```bash
-gpio check spec myfile.parquet
-```
+=== "CLI"
+
+    ```bash
+    gpio check spec myfile.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('myfile.parquet')
+    result = table.validate()
+
+    if result.passed():
+        print(f"Valid GeoParquet {table.geoparquet_version}")
+    else:
+        for failure in result.failures():
+            print(f"Failed: {failure}")
+    ```
 
 The command auto-detects the file type and runs appropriate checks:
 
@@ -123,29 +140,57 @@ Optional checks that read actual geometry data:
 
 For faster validation, skip reading actual geometry data:
 
-```bash
-gpio check spec myfile.parquet --skip-data-validation
-```
+=== "CLI"
+
+    ```bash
+    gpio check spec myfile.parquet --skip-data-validation
+    ```
+
+=== "Python"
+
+    The Python `validate()` method always validates data with a default sample size.
+    This option is CLI-only.
 
 ### Sample Size
 
 Control how many rows are checked for data validation:
 
-```bash
-# Check first 500 rows (default: 1000)
-gpio check spec myfile.parquet --sample-size 500
+=== "CLI"
 
-# Check all rows
-gpio check spec myfile.parquet --sample-size 0
-```
+    ```bash
+    # Check first 500 rows (default: 1000)
+    gpio check spec myfile.parquet --sample-size 500
+
+    # Check all rows
+    gpio check spec myfile.parquet --sample-size 0
+    ```
+
+=== "Python"
+
+    The `sample_size` option is CLI-only. The Python `validate()` method uses a
+    fixed internal sample size (1000 rows) for data validation.
+
+    ```python
+    # Python validate() only accepts version parameter
+    result = table.validate()
+    result = table.validate(version='1.1')
+    ```
 
 ### Target Version
 
 Validate against a specific version instead of auto-detecting:
 
-```bash
-gpio check spec myfile.parquet --geoparquet-version 1.1
-```
+=== "CLI"
+
+    ```bash
+    gpio check spec myfile.parquet --geoparquet-version 1.1
+    ```
+
+=== "Python"
+
+    ```python
+    result = table.validate(version='1.1')
+    ```
 
 ### JSON Output
 

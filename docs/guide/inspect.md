@@ -37,50 +37,114 @@ Shows:
 
 ## Preview Data
 
-!!! info "CLI Only"
-    Preview options (`--head`, `--tail`) are currently only available via the CLI. For Python, use PyArrow's slice methods: `table.to_arrow().slice(0, 10)`. See [issue #152](https://github.com/geoparquet/geoparquet-io/issues/152) for planned improvements.
+=== "CLI"
 
-```bash
-# First 10 rows (default when no value given)
-gpio inspect data.parquet --head
+    ```bash
+    # First 10 rows (default when no value given)
+    gpio inspect data.parquet --head
 
-# First 20 rows
-gpio inspect data.parquet --head 20
+    # First 20 rows
+    gpio inspect data.parquet --head 20
 
-# Last 10 rows (default when no value given)
-gpio inspect data.parquet --tail
+    # Last 10 rows (default when no value given)
+    gpio inspect data.parquet --tail
 
-# Last 5 rows
-gpio inspect data.parquet --tail 5
-```
+    # Last 5 rows
+    gpio inspect data.parquet --tail 5
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('data.parquet')
+
+    # First 10 rows (default)
+    first_10 = table.head()
+
+    # First 20 rows
+    first_20 = table.head(20)
+
+    # Last 10 rows (default)
+    last_10 = table.tail()
+
+    # Last 5 rows
+    last_5 = table.tail(5)
+
+    # Chain with other operations
+    preview = table.head(100).add_bbox()
+    ```
 
 ## Statistics
 
-!!! info "CLI Only"
-    Statistics (`--stats`) is currently only available via the CLI. See [issue #152](https://github.com/geoparquet/geoparquet-io/issues/152) for planned improvements.
+=== "CLI"
 
-```bash
-# Column statistics (nulls, min/max, unique counts)
-gpio inspect data.parquet --stats
+    ```bash
+    # Column statistics (nulls, min/max, unique counts)
+    gpio inspect data.parquet --stats
 
-# Combine with preview
-gpio inspect data.parquet --head --stats
-```
+    # Combine with preview
+    gpio inspect data.parquet --head --stats
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('data.parquet')
+
+    # Get column statistics as dictionary
+    stats = table.stats()
+
+    # Access stats for a specific column
+    print(stats['population']['min'])
+    print(stats['population']['max'])
+    print(stats['population']['nulls'])
+    print(stats['population']['unique'])
+
+    # Geometry columns have null counts only
+    print(stats['geometry']['nulls'])
+    ```
 
 ## GeoParquet Metadata
 
-!!! info "CLI Only"
-    Detailed metadata inspection is currently only available via the CLI. See [issue #152](https://github.com/geoparquet/geoparquet-io/issues/152) for planned improvements.
+=== "CLI"
 
-View the complete GeoParquet metadata from the 'geo' key:
+    View the complete GeoParquet metadata from the 'geo' key:
 
-```bash
-# Human-readable format
-gpio inspect data.parquet --geo-metadata
+    ```bash
+    # Human-readable format
+    gpio inspect data.parquet --geo-metadata
 
-# JSON format (exact metadata content)
-gpio inspect data.parquet --geo-metadata --json
-```
+    # JSON format (exact metadata content)
+    gpio inspect data.parquet --geo-metadata --json
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('data.parquet')
+
+    # Get full metadata as dictionary
+    meta = table.metadata()
+
+    # Access specific metadata
+    print(meta['geoparquet_version'])
+    print(meta['geometry_column'])
+    print(meta['crs'])
+    print(meta['bounds'])
+
+    # Get full geo metadata (from 'geo' key)
+    geo_meta = meta.get('geo_metadata', {})
+    print(geo_meta.get('columns', {}).get('geometry', {}))
+
+    # Include raw Parquet schema metadata
+    full_meta = table.metadata(include_parquet_metadata=True)
+    ```
 
 The human-readable format shows:
 - GeoParquet version
@@ -139,16 +203,34 @@ gpio inspect data.parquet --json | jq '.file_info.rows'
 
 ## Inspecting Partitioned Data
 
-When inspecting a directory containing partitioned data, you can aggregate information across all files:
+=== "CLI"
 
-```bash
-# By default, inspects first file with a notice
-gpio inspect partitions/
-# Output: Inspecting first file (of 4 total). Use --check-all to aggregate all files.
+    When inspecting a directory containing partitioned data, you can aggregate information across all files:
 
-# Aggregate info from all files in partition
-gpio inspect partitions/ --check-all
-```
+    ```bash
+    # By default, inspects first file with a notice
+    gpio inspect partitions/
+    # Output: Inspecting first file (of 4 total). Use --check-all to aggregate all files.
+
+    # Aggregate info from all files in partition
+    gpio inspect partitions/ --check-all
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Read all partitions into a single Table
+    table = gpio.read_partition('partitions/')
+
+    # Get info about combined data
+    table.info()
+
+    # Access properties
+    print(f"Total rows: {table.num_rows}")
+    print(f"Bounds: {table.bounds}")
+    ```
 
 The `--check-all` option shows:
 
