@@ -123,67 +123,59 @@ def cli(ctx, timestamps):
 
 
 # Check commands group - use custom command class for default subcommand
-class DefaultGroup(click.Group):
-    """Custom Group that invokes a default command when no subcommand is provided."""
+def create_default_group(default_subcommand: str, description: str) -> type:
+    """Factory to create a click.Group subclass that defaults to a specific subcommand.
 
-    def parse_args(self, ctx, args):
-        # Special case: if --help is in args and no subcommand, show group help
-        if "--help" in args and (not args or args[0] not in self.commands):
-            # Remove --help and let the group handle it
-            return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
+    Args:
+        default_subcommand: The subcommand to invoke when none is provided
+        description: The docstring for the generated class
 
-        # Check if first arg (if it exists and doesn't start with -) is a known subcommand
-        if args and not args[0].startswith("-") and args[0] in self.commands:
-            # Normal subcommand - use default parsing
-            return super().parse_args(ctx, args)
-
-        # No subcommand or unknown subcommand - default to 'all'
-        # Insert 'all' as the subcommand
-        return super().parse_args(ctx, ["all"] + args)
-
-
-class ConvertDefaultGroup(click.Group):
-    """Custom Group that invokes 'geoparquet' when no subcommand is provided.
-
-    This allows backwards compatibility:
-    - gpio convert input.shp output.parquet  -> invokes geoparquet
-    - gpio convert geoparquet input.shp output.parquet -> explicit
-    - gpio convert reproject input.parquet output.parquet -> subcommand
+    Returns:
+        A click.Group subclass with the configured default behavior
     """
 
-    def parse_args(self, ctx, args):
-        # Handle --help for group
-        if "--help" in args and (not args or args[0] not in self.commands):
-            return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
+    class _DefaultGroup(click.Group):
+        def parse_args(self, ctx, args):
+            # Handle --help for group
+            if "--help" in args and (not args or args[0] not in self.commands):
+                return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
 
-        # If first arg is a known subcommand, use it
-        if args and not args[0].startswith("-") and args[0] in self.commands:
-            return super().parse_args(ctx, args)
+            # If first arg is a known subcommand, use it
+            if args and not args[0].startswith("-") and args[0] in self.commands:
+                return super().parse_args(ctx, args)
 
-        # Default to 'geoparquet' subcommand for backwards compat
-        return super().parse_args(ctx, ["geoparquet"] + args)
+            # Default to configured subcommand
+            return super().parse_args(ctx, [default_subcommand] + args)
+
+    _DefaultGroup.__doc__ = description
+    return _DefaultGroup
 
 
-class ExtractDefaultGroup(click.Group):
+# Create default group classes using the factory
+DefaultGroup = create_default_group(
+    "all",
+    "Custom Group that invokes a default command when no subcommand is provided.",
+)
+
+ConvertDefaultGroup = create_default_group(
+    "geoparquet",
     """Custom Group that invokes 'geoparquet' when no subcommand is provided.
 
-    This allows backwards compatibility:
-    - gpio extract input.parquet output.parquet  -> invokes geoparquet
-    - gpio extract geoparquet input.parquet output.parquet -> explicit
-    - gpio extract bigquery project.dataset.table output.parquet -> subcommand
-    """
+This allows backwards compatibility:
+- gpio convert input.shp output.parquet  -> invokes geoparquet
+- gpio convert geoparquet input.shp output.parquet -> explicit
+- gpio convert reproject input.parquet output.parquet -> subcommand""",
+)
 
-    def parse_args(self, ctx, args):
-        # Handle --help for group
-        if "--help" in args and (not args or args[0] not in self.commands):
-            return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
+ExtractDefaultGroup = create_default_group(
+    "geoparquet",
+    """Custom Group that invokes 'geoparquet' when no subcommand is provided.
 
-        # If first arg is a known subcommand, use it
-        if args and not args[0].startswith("-") and args[0] in self.commands:
-            return super().parse_args(ctx, args)
-
-        # Default to 'geoparquet' subcommand for backwards compat
-        return super().parse_args(ctx, ["geoparquet"] + args)
+This allows backwards compatibility:
+- gpio extract input.parquet output.parquet  -> invokes geoparquet
+- gpio extract geoparquet input.parquet output.parquet -> explicit
+- gpio extract bigquery project.dataset.table output.parquet -> subcommand""",
+)
 
 
 class InspectDefaultGroup(click.Group):

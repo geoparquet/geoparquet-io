@@ -316,12 +316,18 @@ class TestBigQueryIntegration:
         # Check geo metadata for spherical edges
         pf = pq.ParquetFile(output_file)
         metadata = pf.schema_arrow.metadata
-        if b"geo" in metadata:
-            geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-            columns = geo_meta.get("columns", {})
-            for _col_name, col_meta in columns.items():
-                if "edges" in col_meta:
-                    assert col_meta["edges"] == "spherical"
+        assert b"geo" in metadata, "Expected geo metadata in BigQuery-extracted Parquet"
+
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+        columns = geo_meta.get("columns", {})
+        assert columns, "Expected at least one geometry column in geo metadata"
+
+        # Verify all geometry columns have spherical edges
+        for col_name, col_meta in columns.items():
+            if "edges" in col_meta:
+                assert col_meta["edges"] == "spherical", (
+                    f"Expected spherical edges for column {col_name}, got {col_meta['edges']}"
+                )
 
     def test_python_api_from_bigquery(self, bq_table_id):
         """Test Table.from_bigquery() method."""
