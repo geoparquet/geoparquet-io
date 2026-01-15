@@ -278,6 +278,9 @@ def read_bigquery(
     project: str | None = None,
     credentials_file: str | None = None,
     where: str | None = None,
+    bbox: str | None = None,
+    bbox_mode: str = "auto",
+    bbox_threshold: int = 500000,
     limit: int | None = None,
     columns: list[str] | None = None,
     exclude_columns: list[str] | None = None,
@@ -296,6 +299,9 @@ def read_bigquery(
         project: GCP project ID (overrides project in table_id if set)
         credentials_file: Path to service account JSON file
         where: SQL WHERE clause for filtering (BigQuery SQL syntax)
+        bbox: Bounding box for spatial filter as "minx,miny,maxx,maxy"
+        bbox_mode: Filtering mode - "auto" (default), "server", or "local"
+        bbox_threshold: Row count threshold for auto mode (default: 500000)
         limit: Maximum rows to extract
         columns: Columns to include (None = all)
         exclude_columns: Columns to exclude
@@ -330,6 +336,9 @@ def read_bigquery(
         project=project,
         credentials_file=credentials_file,
         where=where,
+        bbox=bbox,
+        bbox_mode=bbox_mode,
+        bbox_threshold=bbox_threshold,
         limit=limit,
         include_cols=include_cols,
         exclude_cols=exclude_cols,

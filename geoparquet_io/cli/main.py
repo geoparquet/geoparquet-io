@@ -2169,6 +2169,25 @@ def extract_geoparquet(
     help="SQL WHERE clause for filtering (BigQuery SQL syntax)",
 )
 @click.option(
+    "--bbox",
+    help="Bounding box for spatial filter as minx,miny,maxx,maxy",
+    type=str,
+)
+@click.option(
+    "--bbox-mode",
+    type=click.Choice(["auto", "server", "local"]),
+    default="auto",
+    help="Bbox filter mode: 'auto' (default) chooses based on table size, "
+    "'server' forces BigQuery-side filtering, 'local' forces DuckDB-side filtering",
+)
+@click.option(
+    "--bbox-threshold",
+    type=int,
+    default=500000,
+    help="Row count threshold for auto bbox mode. Tables with more rows use "
+    "server-side filtering. Default: 500000",
+)
+@click.option(
     "--limit",
     type=int,
     help="Maximum number of rows to extract",
@@ -2191,6 +2210,9 @@ def extract_bigquery_cmd(
     include_cols,
     exclude_cols,
     where,
+    bbox,
+    bbox_mode,
+    bbox_threshold,
     limit,
     geography_column,
     compression,
@@ -2280,6 +2302,9 @@ def extract_bigquery_cmd(
             project=project,
             credentials_file=credentials_file,
             where=where,
+            bbox=bbox,
+            bbox_mode=bbox_mode,
+            bbox_threshold=bbox_threshold,
             limit=limit,
             include_cols=include_cols,
             exclude_cols=exclude_cols,
