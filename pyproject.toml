@@ -41,6 +41,7 @@ dependencies = [
     "geoarrow-pyarrow>=0.1.0",  # Required for CRS handling in Parquet native geo types
     "pyproj>=3.0.0",  # Required for CRS handling and PROJJSON generation
     "mercantile>=1.2.0",  # Required for quadkey generation
+    "httpx>=0.25.0",  # Required for ArcGIS REST API requests
 ]
 
 [project.scripts]

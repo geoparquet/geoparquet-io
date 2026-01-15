@@ -290,6 +290,71 @@ def convert(
     return Table(arrow_table, geometry_column=geom_col)
 
 
+def convert_arcgis(
+    service_url: str,
+    *,
+    token: str | None = None,
+    token_file: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    portal_url: str | None = None,
+    where: str = "1=1",
+) -> Table:
+    """
+    Convert an ArcGIS Feature Service to a Table.
+
+    Downloads all features from an ArcGIS REST Feature Service URL
+    and creates a Table for further processing.
+
+    Unlike the CLI convert command, this does NOT apply Hilbert sorting by default.
+    Chain .sort_hilbert() explicitly if you want spatial ordering.
+
+    Args:
+        service_url: ArcGIS Feature Service URL with layer ID
+            (e.g., https://services.arcgis.com/.../FeatureServer/0)
+        token: Pre-generated authentication token
+        token_file: Path to file containing token
+        username: ArcGIS Online/Enterprise username
+        password: ArcGIS Online/Enterprise password
+        portal_url: Enterprise portal URL for token generation
+        where: SQL WHERE clause to filter features (default: "1=1" = all)
+
+    Returns:
+        Table for chaining operations
+
+    Example:
+        >>> import geoparquet_io as gpio
+        >>> gpio.convert_arcgis('https://services.arcgis.com/.../FeatureServer/0') \\
+        ...     .sort_hilbert() \\
+        ...     .write('output.parquet')
+        >>>
+        >>> # With authentication
+        >>> gpio.convert_arcgis(url, username='user', password='pass') \\
+        ...     .add_bbox() \\
+        ...     .write('output.parquet')
+    """
+    from geoparquet_io.core.arcgis import ArcGISAuth, arcgis_to_table
+
+    auth = None
+    if any([token, token_file, username, password]):
+        auth = ArcGISAuth(
+            token=token,
+            token_file=token_file,
+            username=username,
+            password=password,
+            portal_url=portal_url,
+        )
+
+    arrow_table = arcgis_to_table(
+        service_url=service_url,
+        auth=auth,
+        where=where,
+        verbose=False,
+    )
+
+    return Table(arrow_table, geometry_column="geometry")
+
+
 class Table:
     """
     Fluent wrapper around PyArrow Table for GeoParquet operations.

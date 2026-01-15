@@ -1368,6 +1368,133 @@ def convert_geojson(
         raise click.ClickException(str(e)) from e
 
 
+@convert.command(name="arcgis", cls=SingleFileCommand)
+@click.argument("service_url")
+@click.argument("output_file", type=click.Path())
+@click.option(
+    "--token",
+    help="ArcGIS authentication token",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(exists=True),
+    help="Path to file containing authentication token",
+)
+@click.option(
+    "--username",
+    help="ArcGIS Online/Enterprise username (requires --password)",
+)
+@click.option(
+    "--password",
+    help="ArcGIS Online/Enterprise password (requires --username)",
+)
+@click.option(
+    "--portal-url",
+    help="Enterprise portal URL for token generation (default: ArcGIS Online)",
+)
+@click.option(
+    "--where",
+    default="1=1",
+    help="SQL WHERE clause to filter features (default: '1=1' = all features)",
+)
+@click.option(
+    "--skip-hilbert",
+    is_flag=True,
+    help="Skip Hilbert spatial ordering (faster but less optimal for spatial queries)",
+)
+@geoparquet_version_option
+@verbose_option
+@compression_options
+@any_extension_option
+@profile_option
+def convert_arcgis(
+    service_url,
+    output_file,
+    token,
+    token_file,
+    username,
+    password,
+    portal_url,
+    where,
+    skip_hilbert,
+    geoparquet_version,
+    verbose,
+    compression,
+    compression_level,
+    any_extension,
+    profile,
+):
+    """
+    Convert ArcGIS Feature Service to GeoParquet.
+
+    Downloads all features from an ArcGIS REST Feature Service and converts
+    them to an optimized GeoParquet file with ZSTD compression, bbox metadata,
+    and Hilbert spatial ordering.
+
+    SERVICE_URL must be a full ArcGIS Feature Service layer URL including the
+    layer ID (e.g., .../FeatureServer/0).
+
+    \b
+    Authentication options (in priority order):
+      --token          Direct token string
+      --token-file     Path to file containing token
+      --username/password  Generate token via ArcGIS REST API
+
+    \b
+    Examples:
+      # Public service (no auth)
+      gpio convert arcgis https://services.arcgis.com/.../FeatureServer/0 out.parquet
+
+      \b
+      # With token
+      gpio convert arcgis https://... out.parquet --token YOUR_TOKEN
+
+      \b
+      # With username/password
+      gpio convert arcgis https://... out.parquet --username user --password pass
+
+      \b
+      # Filter features
+      gpio convert arcgis https://... out.parquet --where "state='CA'"
+
+      \b
+      # Upload to S3
+      gpio convert arcgis https://... s3://bucket/out.parquet --profile my-profile
+    """
+    from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+    from geoparquet_io.core.common import validate_parquet_extension
+
+    configure_verbose(verbose)
+
+    # Validate auth options
+    if (username and not password) or (password and not username):
+        raise click.BadParameter("Both --username and --password are required together")
+
+    # Validate output extension
+    if not any_extension:
+        validate_parquet_extension(output_file)
+
+    try:
+        convert_arcgis_to_geoparquet(
+            service_url=service_url,
+            output_file=output_file,
+            token=token,
+            token_file=token_file,
+            username=username,
+            password=password,
+            portal_url=portal_url,
+            where=where,
+            skip_hilbert=skip_hilbert,
+            compression=compression.upper(),
+            compression_level=compression_level,
+            verbose=verbose,
+            geoparquet_version=geoparquet_version,
+            profile=profile,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
 # Deprecated reproject command
 @cli.command(hidden=True)  # Deprecated: use 'gpio convert reproject' instead
 @click.argument("input_file")

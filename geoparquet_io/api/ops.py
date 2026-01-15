@@ -334,3 +334,33 @@ def convert_to_geojson(
         # Clean up temp file
         if temp_input.exists():
             temp_input.unlink()
+
+
+def from_arcgis(
+    service_url: str,
+    token: str | None = None,
+    where: str = "1=1",
+) -> pa.Table:
+    """
+    Fetch ArcGIS Feature Service as a PyArrow Table.
+
+    Lower-level function for users who want direct Arrow table access.
+
+    Args:
+        service_url: ArcGIS Feature Service URL with layer ID
+        token: Optional authentication token
+        where: SQL WHERE clause to filter features (default: "1=1" = all)
+
+    Returns:
+        PyArrow Table with WKB geometry column
+
+    Example:
+        >>> from geoparquet_io.api import ops
+        >>> table = ops.from_arcgis('https://services.arcgis.com/.../FeatureServer/0')
+        >>> table = ops.add_bbox(table)
+        >>> table = ops.sort_hilbert(table)
+    """
+    from geoparquet_io.core.arcgis import ArcGISAuth, arcgis_to_table
+
+    auth = ArcGISAuth(token=token) if token else None
+    return arcgis_to_table(service_url, auth=auth, where=where, verbose=False)
