@@ -26,8 +26,8 @@ from geoparquet_io.core.logging_config import (
 # Regex patterns for GCP resource validation
 # Project IDs: 6-30 chars, lowercase letters, digits, hyphens, must start with letter
 _PROJECT_ID_PATTERN = r"^[a-z][a-z0-9\-]{5,29}$"
-# Table IDs: project.dataset.table format, each part is alphanumeric with underscores
-_TABLE_ID_PATTERN = r"^[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$"
+# Table ID parts: alphanumeric with underscores and hyphens
+_TABLE_PART_PATTERN = r"^[a-zA-Z0-9_\-]+$"
 
 
 def _validate_project_id(project: str) -> str:
@@ -53,33 +53,86 @@ def _validate_project_id(project: str) -> str:
     return project
 
 
-def _validate_table_id(table_id: str) -> str:
-    """Validate BigQuery table ID to prevent SQL injection.
+def _validate_table_part(part: str, part_name: str) -> str:
+    """Validate a single part of a BigQuery table ID.
 
     Args:
-        table_id: Fully qualified table ID (project.dataset.table)
+        part: Part to validate (project, dataset, or table name)
+        part_name: Name of the part for error messages
 
     Returns:
-        The validated table ID
+        The validated part
 
     Raises:
-        ValueError: If table ID doesn't match expected format
+        ValueError: If part contains invalid characters
     """
     import re
 
-    if not re.match(_TABLE_ID_PATTERN, table_id):
+    if not re.match(_TABLE_PART_PATTERN, part):
+        raise ValueError(
+            f"Invalid BigQuery {part_name}: '{part}'. "
+            "Must contain only alphanumeric characters, underscores, and hyphens."
+        )
+    return part
+
+
+def _normalize_table_id(table_id: str, project: str | None = None) -> str:
+    """Normalize and validate BigQuery table ID.
+
+    Supports both 2-part (dataset.table) and 3-part (project.dataset.table) formats.
+    When project is provided, it overrides any project in the table_id.
+
+    Args:
+        table_id: BigQuery table ID (dataset.table or project.dataset.table)
+        project: Optional project ID to use (overrides table_id project)
+
+    Returns:
+        Fully qualified table ID (project.dataset.table)
+
+    Raises:
+        ValueError: If table_id format is invalid or project is missing when needed
+    """
+    parts = table_id.split(".")
+
+    if len(parts) == 3:
+        # project.dataset.table format
+        table_project, dataset, table = parts
+        _validate_table_part(table_project, "project")
+        _validate_table_part(dataset, "dataset")
+        _validate_table_part(table, "table")
+
+        # Project override takes precedence
+        if project:
+            _validate_project_id(project)
+            return f"{project}.{dataset}.{table}"
+        return table_id
+
+    elif len(parts) == 2:
+        # dataset.table format - requires project parameter
+        dataset, table = parts
+        _validate_table_part(dataset, "dataset")
+        _validate_table_part(table, "table")
+
+        if not project:
+            raise ValueError(
+                f"Table ID '{table_id}' uses dataset.table format but no project was specified. "
+                "Either use project.dataset.table format or provide --project."
+            )
+        _validate_project_id(project)
+        return f"{project}.{dataset}.{table}"
+
+    else:
         raise ValueError(
             f"Invalid BigQuery table ID: '{table_id}'. "
-            "Expected format: project.dataset.table with alphanumeric characters, "
-            "underscores, and hyphens only."
+            "Expected format: dataset.table or project.dataset.table"
         )
-    return table_id
 
 
 class BigQueryConnection:
     """Context manager for DuckDB connection with BigQuery extension.
 
     Handles proper cleanup of environment variables and connection resources.
+    Safely restores state even if setup fails partway through.
     """
 
     def __init__(
@@ -93,54 +146,72 @@ class BigQueryConnection:
         self.geography_as_geometry = geography_as_geometry
         self._original_creds: str | None = None
         self._creds_was_set: bool = False
+        self._creds_modified: bool = False
         self._con: duckdb.DuckDBPyConnection | None = None
 
-    def __enter__(self) -> duckdb.DuckDBPyConnection:
-        # Save original credentials state
-        self._original_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        self._creds_was_set = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
-
-        self._con = duckdb.connect()
-
-        # CRITICAL ORDER: Load spatial FIRST, then BigQuery
-        self._con.execute("INSTALL spatial;")
-        self._con.execute("LOAD spatial;")
-
-        self._con.execute("INSTALL bigquery FROM community;")
-        self._con.execute("LOAD bigquery;")
-
-        # Configure authentication via environment variable if credentials file provided
-        if self.credentials_file:
-            # Expand user paths like ~/
-            expanded_path = os.path.expanduser(self.credentials_file)
-            if not os.path.exists(expanded_path):
-                raise FileNotFoundError(f"Credentials file not found: {expanded_path}")
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = expanded_path
-
-        # Set geography conversion AFTER spatial is loaded
-        if self.geography_as_geometry:
-            self._con.execute("SET bq_geography_as_geometry=true;")
-
-        # Set project if provided (validated)
-        if self.project:
-            validated_project = _validate_project_id(self.project)
-            self._con.execute(f"SET bq_project_id='{validated_project}';")
-
-        return self._con
-
-    def __exit__(self, _exc_type, _exc_val, _exc_tb):
-        # Close connection
-        if self._con:
-            self._con.close()
-
-        # Restore original credentials state
+    def _restore_credentials(self) -> None:
+        """Restore original GOOGLE_APPLICATION_CREDENTIALS state."""
+        if not self._creds_modified:
+            return
         if self._creds_was_set:
             if self._original_creds is not None:
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self._original_creds
         else:
-            # Original was not set, remove if we set it
             os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        self._creds_modified = False
 
+    def _cleanup(self) -> None:
+        """Clean up connection and credentials."""
+        if self._con:
+            try:
+                self._con.close()
+            except Exception:
+                pass  # Ignore close errors during cleanup
+            self._con = None
+        self._restore_credentials()
+
+    def __enter__(self) -> duckdb.DuckDBPyConnection:
+        # Save original credentials state before any modifications
+        self._original_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        self._creds_was_set = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
+
+        try:
+            # Use get_duckdb_connection for consistent setup (spatial extension)
+            from geoparquet_io.core.common import get_duckdb_connection
+
+            self._con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+
+            # Layer BigQuery extension on top
+            # CRITICAL: spatial must be loaded BEFORE bigquery for geography conversion
+            self._con.execute("INSTALL bigquery FROM community;")
+            self._con.execute("LOAD bigquery;")
+
+            # Configure authentication via environment variable if credentials file provided
+            if self.credentials_file:
+                expanded_path = os.path.expanduser(self.credentials_file)
+                if not os.path.exists(expanded_path):
+                    raise FileNotFoundError(f"Credentials file not found: {expanded_path}")
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = expanded_path
+                self._creds_modified = True
+
+            # Set geography conversion AFTER spatial is loaded
+            if self.geography_as_geometry:
+                self._con.execute("SET bq_geography_as_geometry=true;")
+
+            # Set project if provided (validated)
+            if self.project:
+                validated_project = _validate_project_id(self.project)
+                self._con.execute(f"SET bq_project_id='{validated_project}';")
+
+            return self._con
+
+        except Exception:
+            # Clean up any partial state on failure
+            self._cleanup()
+            raise
+
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
+        self._cleanup()
         return False  # Don't suppress exceptions
 
 
@@ -166,12 +237,13 @@ def get_bigquery_connection(
     Returns:
         Configured DuckDB connection with BigQuery extension
     """
-    con = duckdb.connect()
+    from geoparquet_io.core.common import get_duckdb_connection
 
-    # CRITICAL ORDER: Load spatial FIRST, then BigQuery
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
+    # Use get_duckdb_connection for consistent setup (spatial extension)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
 
+    # Layer BigQuery extension on top
+    # CRITICAL: spatial must be loaded BEFORE bigquery for geography conversion
     con.execute("INSTALL bigquery FROM community;")
     con.execute("LOAD bigquery;")
 
@@ -617,9 +689,12 @@ def extract_bigquery(
     spherical edges (edges: "spherical" in metadata).
 
     Args:
-        table_id: Fully qualified BigQuery table ID (project.dataset.table)
+        table_id: BigQuery table ID. Supports both formats:
+            - project.dataset.table (fully qualified)
+            - dataset.table (requires --project parameter)
         output_parquet: Output GeoParquet file path (None = return table only)
-        project: GCP project ID (overrides table_id project if set)
+        project: GCP project ID. Required for dataset.table format.
+            Overrides project in table_id if both are specified.
         credentials_file: Path to service account JSON file
         where: SQL WHERE clause for filtering (BigQuery SQL syntax)
         bbox: Bounding box for spatial filter as "minx,miny,maxx,maxy"
@@ -642,13 +717,17 @@ def extract_bigquery(
         PyArrow Table if output_parquet is None, otherwise None
 
     Raises:
-        ValueError: If table_id or project is invalid
-        click.ClickException: If BigQuery query fails
+        ValueError: If table_id format is invalid, project is missing when needed,
+            or project ID doesn't match GCP naming rules
     """
     configure_verbose(verbose)
 
-    # Validate table_id to prevent SQL injection
-    validated_table_id = _validate_table_id(table_id)
+    # Normalize table_id early - validates format and applies project override
+    # This ensures validated_table_id is always project.dataset.table format
+    validated_table_id = _normalize_table_id(table_id, project)
+
+    # Extract project from normalized table_id for connection setup
+    normalized_project = validated_table_id.split(".")[0]
 
     # Parse column lists
     include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
@@ -664,7 +743,7 @@ def extract_bigquery(
     # Execute the actual BigQuery extraction
     return _execute_bigquery_extraction(
         validated_table_id=validated_table_id,
-        project=project,
+        project=normalized_project,
         credentials_file=credentials_file,
         geography_column=geography_column,
         include_list=include_list,

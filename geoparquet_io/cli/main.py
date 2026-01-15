@@ -12,6 +12,7 @@ from geoparquet_io.cli.decorators import (
     geoparquet_version_option,
     output_format_options,
     overwrite_option,
+    parse_row_group_options,
     partition_input_options,
     partition_options,
     profile_option,
@@ -2092,20 +2093,8 @@ def extract_geoparquet(
     # Validate .parquet extension
     validate_parquet_extension(output_file, any_extension)
 
-    # Validate mutually exclusive row group options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse row group size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     try:
         extract_impl(
@@ -2272,20 +2261,8 @@ def extract_bigquery_cmd(
     # Validate .parquet extension
     validate_parquet_extension(output_file, any_extension)
 
-    # Validate mutually exclusive row group options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse row group size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     try:
         extract_bigquery(
@@ -2430,20 +2407,8 @@ def hilbert_order(
     # Validate .parquet extension
     validate_parquet_extension(output_parquet, any_extension)
 
-    # Validate mutually exclusive options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     try:
         hilbert_impl(
@@ -2507,20 +2472,8 @@ def sort_column(
     # Validate .parquet extension
     validate_parquet_extension(output_parquet, any_extension)
 
-    # Validate mutually exclusive options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     try:
         sort_by_column_impl(
@@ -2600,20 +2553,8 @@ def sort_quadkey(
     # Validate .parquet extension
     validate_parquet_extension(output_parquet, any_extension)
 
-    # Validate mutually exclusive options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     sort_by_quadkey_impl(
         input_parquet,
@@ -2733,20 +2674,8 @@ def add_country_codes(
     # Validate .parquet extension
     validate_parquet_extension(output_parquet, any_extension)
 
-    # Validate mutually exclusive options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     # Use new multi-dataset implementation
     from geoparquet_io.core.add_admin_divisions_multi import add_admin_divisions_multi
@@ -2847,20 +2776,8 @@ def add_bbox(
     # Validate .parquet extension
     validate_parquet_extension(output_parquet, any_extension)
 
-    # Validate mutually exclusive options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     from geoparquet_io.core.streaming import StreamingError
 
@@ -2959,20 +2876,8 @@ def add_h3(
     # Validate .parquet extension
     validate_parquet_extension(output_parquet, any_extension)
 
-    # Validate mutually exclusive options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     try:
         add_h3_column_impl(
@@ -3108,20 +3013,8 @@ def add_kdtree(
         iterations = int(math.log2(partitions))
         auto_target = None
 
-    # Validate mutually exclusive options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     add_kdtree_column_impl(
         input_parquet,
@@ -3205,20 +3098,8 @@ def add_quadkey(
     # Validate .parquet extension
     validate_parquet_extension(output_parquet, any_extension)
 
-    # Validate mutually exclusive options
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
-
-    # Parse size string if provided
-    from geoparquet_io.core.common import parse_size_string
-
-    row_group_mb = None
-    if row_group_size_mb:
-        try:
-            size_bytes = parse_size_string(row_group_size_mb)
-            row_group_mb = size_bytes / (1024 * 1024)
-        except ValueError as e:
-            raise click.UsageError(f"Invalid row group size: {e}") from e
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
     try:
         add_quadkey_column_impl(

@@ -8,6 +8,43 @@ and reduce code duplication.
 import click
 
 
+def parse_row_group_options(
+    row_group_size: int | None,
+    row_group_size_mb: str | None,
+) -> float | None:
+    """
+    Parse and validate row group size options.
+
+    Enforces mutual exclusivity between --row-group-size and --row-group-size-mb,
+    and converts the size string to MB if provided.
+
+    Args:
+        row_group_size: Exact number of rows per row group (from --row-group-size)
+        row_group_size_mb: Target size string like '256MB', '1GB' (from --row-group-size-mb)
+
+    Returns:
+        Row group size in MB as a float, or None if neither option provided.
+        Note: When row_group_size (rows) is provided, this returns None since
+        the caller should use row_group_size directly for row-based sizing.
+
+    Raises:
+        click.UsageError: If both options are provided or if size string is invalid
+    """
+    if row_group_size and row_group_size_mb:
+        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+
+    if not row_group_size_mb:
+        return None
+
+    from geoparquet_io.core.common import parse_size_string
+
+    try:
+        size_bytes = parse_size_string(row_group_size_mb)
+        return size_bytes / (1024 * 1024)
+    except ValueError as e:
+        raise click.UsageError(f"Invalid row group size: {e}") from e
+
+
 def compression_options(func):
     """
     Add compression-related options to a command.
