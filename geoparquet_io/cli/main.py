@@ -164,6 +164,28 @@ class ConvertDefaultGroup(click.Group):
         return super().parse_args(ctx, ["geoparquet"] + args)
 
 
+class ExtractDefaultGroup(click.Group):
+    """Custom Group that invokes 'file' when no subcommand is provided.
+
+    This allows backwards compatibility:
+    - gpio extract data.parquet output.parquet    -> invokes file (default)
+    - gpio extract file data.parquet out.parquet  -> explicit subcommand
+    - gpio extract arcgis https://... out.parquet -> arcgis subcommand
+    """
+
+    def parse_args(self, ctx, args):
+        # Handle --help for group
+        if "--help" in args and (not args or args[0] not in self.commands):
+            return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
+
+        # If first arg is a known subcommand, use it
+        if args and not args[0].startswith("-") and args[0] in self.commands:
+            return super().parse_args(ctx, args)
+
+        # Default to 'file' subcommand for backwards compat
+        return super().parse_args(ctx, ["file"] + args)
+
+
 class InspectDefaultGroup(click.Group):
     """Custom Group that runs 'summary' when no subcommand is provided.
 
@@ -1368,140 +1390,6 @@ def convert_geojson(
         raise click.ClickException(str(e)) from e
 
 
-@convert.command(name="arcgis", cls=SingleFileCommand)
-@click.argument("service_url")
-@click.argument("output_file", type=click.Path())
-@click.option(
-    "--token",
-    help="ArcGIS authentication token",
-)
-@click.option(
-    "--token-file",
-    type=click.Path(exists=True),
-    help="Path to file containing authentication token",
-)
-@click.option(
-    "--username",
-    help="ArcGIS Online/Enterprise username (requires --password)",
-)
-@click.option(
-    "--password",
-    help="ArcGIS Online/Enterprise password (requires --username)",
-)
-@click.option(
-    "--portal-url",
-    help="Enterprise portal URL for token generation (default: ArcGIS Online)",
-)
-@click.option(
-    "--where",
-    default="1=1",
-    help="SQL WHERE clause to filter features (default: '1=1' = all features)",
-)
-@click.option(
-    "--skip-hilbert",
-    is_flag=True,
-    help="Skip Hilbert spatial ordering (faster but less optimal for spatial queries)",
-)
-@click.option(
-    "--skip-bbox",
-    is_flag=True,
-    help="Skip adding bbox column (bbox enables faster spatial filtering on remote files)",
-)
-@geoparquet_version_option
-@verbose_option
-@compression_options
-@any_extension_option
-@profile_option
-def convert_arcgis(
-    service_url,
-    output_file,
-    token,
-    token_file,
-    username,
-    password,
-    portal_url,
-    where,
-    skip_hilbert,
-    skip_bbox,
-    geoparquet_version,
-    verbose,
-    compression,
-    compression_level,
-    any_extension,
-    profile,
-):
-    """
-    Convert ArcGIS Feature Service to GeoParquet.
-
-    Downloads all features from an ArcGIS REST Feature Service and converts
-    them to an optimized GeoParquet file with ZSTD compression, bbox metadata,
-    and Hilbert spatial ordering.
-
-    SERVICE_URL must be a full ArcGIS Feature Service layer URL including the
-    layer ID (e.g., .../FeatureServer/0).
-
-    \b
-    Authentication options (in priority order):
-      --token          Direct token string
-      --token-file     Path to file containing token
-      --username/password  Generate token via ArcGIS REST API
-
-    \b
-    Examples:
-      # Public service (no auth)
-      gpio convert arcgis https://services.arcgis.com/.../FeatureServer/0 out.parquet
-
-      \b
-      # With token
-      gpio convert arcgis https://... out.parquet --token YOUR_TOKEN
-
-      \b
-      # With username/password
-      gpio convert arcgis https://... out.parquet --username user --password pass
-
-      \b
-      # Filter features
-      gpio convert arcgis https://... out.parquet --where "state='CA'"
-
-      \b
-      # Upload to S3
-      gpio convert arcgis https://... s3://bucket/out.parquet --profile my-profile
-    """
-    from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
-    from geoparquet_io.core.common import validate_parquet_extension
-
-    configure_verbose(verbose)
-
-    # Validate auth options
-    if (username and not password) or (password and not username):
-        raise click.BadParameter("Both --username and --password are required together")
-
-    # Validate output extension
-    if not any_extension:
-        validate_parquet_extension(output_file)
-
-    try:
-        convert_arcgis_to_geoparquet(
-            service_url=service_url,
-            output_file=output_file,
-            token=token,
-            token_file=token_file,
-            username=username,
-            password=password,
-            portal_url=portal_url,
-            where=where,
-            skip_hilbert=skip_hilbert,
-            skip_bbox=skip_bbox,
-            compression=compression.upper(),
-            compression_level=compression_level,
-            verbose=verbose,
-            geoparquet_version=geoparquet_version,
-            profile=profile,
-        )
-    except Exception as e:
-        raise click.ClickException(str(e)) from e
-
-
 # Deprecated reproject command
 @cli.command(hidden=True)  # Deprecated: use 'gpio convert reproject' instead
 @click.argument("input_file")
@@ -2034,8 +1922,26 @@ def inspect_legacy(
         raise click.ClickException(str(e)) from e
 
 
-# Extract command
-@cli.command(cls=GlobAwareCommand)
+# Extract commands group
+@cli.group(cls=ExtractDefaultGroup)
+@click.pass_context
+def extract(ctx):
+    """Extract data from files and services to GeoParquet.
+
+    By default, extracts from GeoParquet files. Use subcommands for other sources.
+
+    \b
+    Examples:
+        gpio extract data.parquet output.parquet --bbox -122,37,-121,38
+        gpio extract file data.parquet output.parquet --where "pop > 1000"
+        gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 out.parquet
+    """
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+
+
+@extract.command(name="file", cls=GlobAwareCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
@@ -2082,7 +1988,7 @@ def inspect_legacy(
 @verbose_option
 @profile_option
 @any_extension_option
-def extract(
+def extract_file(
     input_file,
     output_file,
     include_cols,
@@ -2231,6 +2137,190 @@ def extract(
             geoparquet_version=geoparquet_version,
             allow_schema_diff=allow_schema_diff,
             hive_input=hive_input,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@extract.command(name="arcgis", cls=SingleFileCommand)
+@click.argument("service_url")
+@click.argument("output_file", type=click.Path())
+@click.option(
+    "--token",
+    help="ArcGIS authentication token",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(exists=True),
+    help="Path to file containing authentication token",
+)
+@click.option(
+    "--username",
+    help="ArcGIS Online/Enterprise username (requires --password)",
+)
+@click.option(
+    "--password",
+    help="ArcGIS Online/Enterprise password (requires --username)",
+)
+@click.option(
+    "--portal-url",
+    help="Enterprise portal URL for token generation (default: ArcGIS Online)",
+)
+@click.option(
+    "--where",
+    default="1=1",
+    help="SQL WHERE clause to filter features (pushed to server, default: '1=1' = all)",
+)
+@click.option(
+    "--bbox",
+    help="Bounding box filter: xmin,ymin,xmax,ymax in WGS84 (pushed to server)",
+)
+@click.option(
+    "--include-cols",
+    help="Comma-separated columns to include (pushed to server for efficiency)",
+)
+@click.option(
+    "--exclude-cols",
+    help="Comma-separated columns to exclude (applied after download)",
+)
+@click.option(
+    "--limit",
+    type=int,
+    help="Maximum number of features to extract",
+)
+@click.option(
+    "--skip-hilbert",
+    is_flag=True,
+    help="Skip Hilbert spatial ordering (faster but less optimal for spatial queries)",
+)
+@click.option(
+    "--skip-bbox",
+    is_flag=True,
+    help="Skip adding bbox column (bbox enables faster spatial filtering on remote files)",
+)
+@geoparquet_version_option
+@verbose_option
+@compression_options
+@any_extension_option
+@profile_option
+def extract_arcgis(
+    service_url,
+    output_file,
+    token,
+    token_file,
+    username,
+    password,
+    portal_url,
+    where,
+    bbox,
+    include_cols,
+    exclude_cols,
+    limit,
+    skip_hilbert,
+    skip_bbox,
+    geoparquet_version,
+    verbose,
+    compression,
+    compression_level,
+    any_extension,
+    profile,
+):
+    """
+    Extract features from ArcGIS Feature Service to GeoParquet.
+
+    Downloads features from an ArcGIS REST Feature Service and converts
+    them to an optimized GeoParquet file with ZSTD compression, bbox metadata,
+    and Hilbert spatial ordering.
+
+    SERVICE_URL must be a full ArcGIS Feature Service layer URL including the
+    layer ID (e.g., .../FeatureServer/0).
+
+    \b
+    Filtering options (pushed to server for efficiency):
+      --where          SQL WHERE clause for attribute filtering
+      --bbox           Spatial bounding box filter (xmin,ymin,xmax,ymax)
+      --include-cols   Select specific columns to download
+      --limit          Maximum number of features to return
+
+    \b
+    Authentication options (in priority order):
+      --token          Direct token string
+      --token-file     Path to file containing token
+      --username/password  Generate token via ArcGIS REST API
+
+    \b
+    Examples:
+      # Public service (no auth)
+      gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 out.parquet
+
+      \b
+      # Filter by bounding box (server-side)
+      gpio extract arcgis https://... out.parquet --bbox -122.5,37.5,-122.0,38.0
+
+      \b
+      # Filter by SQL WHERE clause (server-side)
+      gpio extract arcgis https://... out.parquet --where "state='CA'"
+
+      \b
+      # Extract only specific columns (server-side)
+      gpio extract arcgis https://... out.parquet --include-cols name,population
+
+      \b
+      # Limit number of features
+      gpio extract arcgis https://... out.parquet --limit 1000
+
+      \b
+      # Combined filters
+      gpio extract arcgis https://... out.parquet \\
+          --bbox -122.5,37.5,-122.0,38.0 \\
+          --where "population > 10000" \\
+          --limit 500
+    """
+    from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+    from geoparquet_io.core.common import validate_parquet_extension
+
+    configure_verbose(verbose)
+
+    # Validate auth options
+    if (username and not password) or (password and not username):
+        raise click.BadParameter("Both --username and --password are required together")
+
+    # Validate output extension
+    if not any_extension:
+        validate_parquet_extension(output_file)
+
+    # Parse bbox string if provided
+    bbox_tuple = None
+    if bbox:
+        try:
+            parts = [float(x.strip()) for x in bbox.split(",")]
+            if len(parts) != 4:
+                raise ValueError("bbox must have exactly 4 values")
+            bbox_tuple = tuple(parts)
+        except ValueError as e:
+            raise click.BadParameter(f"Invalid bbox format: {e}. Use xmin,ymin,xmax,ymax") from e
+
+    try:
+        convert_arcgis_to_geoparquet(
+            service_url=service_url,
+            output_file=output_file,
+            token=token,
+            token_file=token_file,
+            username=username,
+            password=password,
+            portal_url=portal_url,
+            where=where,
+            bbox=bbox_tuple,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
+            limit=limit,
+            skip_hilbert=skip_hilbert,
+            skip_bbox=skip_bbox,
+            compression=compression.upper(),
+            compression_level=compression_level,
+            verbose=verbose,
+            geoparquet_version=geoparquet_version,
+            profile=profile,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e

@@ -290,7 +290,7 @@ def convert(
     return Table(arrow_table, geometry_column=geom_col)
 
 
-def convert_arcgis(
+def extract_arcgis(
     service_url: str,
     *,
     token: str | None = None,
@@ -299,14 +299,24 @@ def convert_arcgis(
     password: str | None = None,
     portal_url: str | None = None,
     where: str = "1=1",
+    bbox: tuple[float, float, float, float] | None = None,
+    include_cols: str | None = None,
+    exclude_cols: str | None = None,
+    limit: int | None = None,
 ) -> Table:
     """
-    Convert an ArcGIS Feature Service to a Table.
+    Extract features from an ArcGIS Feature Service to a Table.
 
-    Downloads all features from an ArcGIS REST Feature Service URL
+    Downloads features from an ArcGIS REST Feature Service URL
     and creates a Table for further processing.
 
-    Unlike the CLI convert command, this does NOT apply Hilbert sorting by default.
+    Server-side filtering is applied for efficiency:
+    - where: SQL WHERE clause pushed to server
+    - bbox: Spatial filter pushed to server
+    - include_cols: Field selection pushed to server
+    - limit: Row limit applied during pagination
+
+    Unlike the CLI extract command, this does NOT apply Hilbert sorting by default.
     Chain .sort_hilbert() explicitly if you want spatial ordering.
 
     Args:
@@ -318,18 +328,23 @@ def convert_arcgis(
         password: ArcGIS Online/Enterprise password
         portal_url: Enterprise portal URL for token generation
         where: SQL WHERE clause to filter features (default: "1=1" = all)
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
+        include_cols: Comma-separated column names to include (server-side)
+        exclude_cols: Comma-separated column names to exclude (client-side)
+        limit: Maximum number of features to return
 
     Returns:
         Table for chaining operations
 
     Example:
         >>> import geoparquet_io as gpio
-        >>> gpio.convert_arcgis('https://services.arcgis.com/.../FeatureServer/0') \\
+        >>> # Extract all features
+        >>> gpio.extract_arcgis('https://services.arcgis.com/.../FeatureServer/0') \\
         ...     .sort_hilbert() \\
         ...     .write('output.parquet')
         >>>
-        >>> # With authentication
-        >>> gpio.convert_arcgis(url, username='user', password='pass') \\
+        >>> # Extract with server-side filtering
+        >>> gpio.extract_arcgis(url, bbox=(-122.5, 37.5, -122.0, 38.0), limit=1000) \\
         ...     .add_bbox() \\
         ...     .write('output.parquet')
     """
@@ -349,6 +364,10 @@ def convert_arcgis(
         service_url=service_url,
         auth=auth,
         where=where,
+        bbox=bbox,
+        include_cols=include_cols,
+        exclude_cols=exclude_cols,
+        limit=limit,
         verbose=False,
     )
 

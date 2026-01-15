@@ -271,7 +271,7 @@ class TestCLI:
         result = runner.invoke(
             cli,
             [
-                "convert",
+                "extract",
                 "arcgis",
                 "https://example.com/FeatureServer/0",
                 output_file,
@@ -287,7 +287,7 @@ class TestCLI:
         result = runner.invoke(
             cli,
             [
-                "convert",
+                "extract",
                 "arcgis",
                 "https://example.com/FeatureServer/0",
             ],
@@ -301,7 +301,7 @@ class TestCLI:
         result = runner.invoke(
             cli,
             [
-                "convert",
+                "extract",
                 "arcgis",
                 "https://example.com/FeatureServer/0",
                 output_file,
@@ -318,15 +318,15 @@ class TestPythonAPI:
     """Tests for Python API functions."""
 
     @patch("geoparquet_io.core.arcgis.arcgis_to_table")
-    def test_convert_arcgis_function(self, mock_arcgis_to_table):
-        """Test convert_arcgis API function."""
-        from geoparquet_io.api.table import convert_arcgis
+    def test_extract_arcgis_function(self, mock_arcgis_to_table):
+        """Test extract_arcgis API function."""
+        from geoparquet_io.api.table import extract_arcgis
 
         # Create mock table
         mock_table = pa.table({"geometry": [b"test"], "name": ["Point 1"]})
         mock_arcgis_to_table.return_value = mock_table
 
-        result = convert_arcgis("https://example.com/FeatureServer/0")
+        result = extract_arcgis("https://example.com/FeatureServer/0")
 
         assert result.num_rows == 1
         mock_arcgis_to_table.assert_called_once()
@@ -579,12 +579,12 @@ class TestNetworkIntegration:
         assert pf.metadata.num_rows >= 0
 
     def test_cli_full_conversion(self, output_file):
-        """Test CLI full conversion of public service."""
+        """Test CLI full extraction from public service."""
         runner = CliRunner()
         result = runner.invoke(
             cli,
             [
-                "convert",
+                "extract",
                 "arcgis",
                 self.SMALL_SERVICE,
                 output_file,
@@ -599,9 +599,9 @@ class TestNetworkIntegration:
             assert Path(output_file).exists()
 
     def test_python_api_conversion(self, output_file):
-        """Test Python API conversion."""
+        """Test Python API extraction."""
         import geoparquet_io as gpio
 
-        table = gpio.convert_arcgis(self.SMALL_SERVICE)
+        table = gpio.extract_arcgis(self.SMALL_SERVICE)
         assert table.num_rows >= 0
         assert "geometry" in table.column_names

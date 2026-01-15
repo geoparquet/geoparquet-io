@@ -340,16 +340,25 @@ def from_arcgis(
     service_url: str,
     token: str | None = None,
     where: str = "1=1",
+    bbox: tuple[float, float, float, float] | None = None,
+    include_cols: str | None = None,
+    exclude_cols: str | None = None,
+    limit: int | None = None,
 ) -> pa.Table:
     """
     Fetch ArcGIS Feature Service as a PyArrow Table.
 
     Lower-level function for users who want direct Arrow table access.
+    Supports server-side filtering for efficient data transfer.
 
     Args:
         service_url: ArcGIS Feature Service URL with layer ID
         token: Optional authentication token
         where: SQL WHERE clause to filter features (default: "1=1" = all)
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
+        include_cols: Comma-separated column names to include (server-side)
+        exclude_cols: Comma-separated column names to exclude (client-side)
+        limit: Maximum number of features to return
 
     Returns:
         PyArrow Table with WKB geometry column
@@ -359,8 +368,20 @@ def from_arcgis(
         >>> table = ops.from_arcgis('https://services.arcgis.com/.../FeatureServer/0')
         >>> table = ops.add_bbox(table)
         >>> table = ops.sort_hilbert(table)
+        >>>
+        >>> # With server-side filtering
+        >>> table = ops.from_arcgis(url, bbox=(-122.5, 37.5, -122.0, 38.0), limit=1000)
     """
     from geoparquet_io.core.arcgis import ArcGISAuth, arcgis_to_table
 
     auth = ArcGISAuth(token=token) if token else None
-    return arcgis_to_table(service_url, auth=auth, where=where, verbose=False)
+    return arcgis_to_table(
+        service_url,
+        auth=auth,
+        where=where,
+        bbox=bbox,
+        include_cols=include_cols,
+        exclude_cols=exclude_cols,
+        limit=limit,
+        verbose=False,
+    )

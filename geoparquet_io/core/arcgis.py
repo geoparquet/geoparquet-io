@@ -116,7 +116,19 @@ def _make_request(
                 time.sleep(retry_delay * (attempt + 1))
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
-            if status == 401:
+            # Retry on 429 (rate limited) or 5xx (server errors)
+            if status == 429 or (500 <= status < 600):
+                last_exception = e
+                if attempt < max_retries - 1:
+                    # Honor Retry-After header if present
+                    retry_after = e.response.headers.get("Retry-After")
+                    if retry_after and retry_after.isdigit():
+                        delay = float(retry_after)
+                    else:
+                        delay = retry_delay * (attempt + 1)
+                    time.sleep(delay)
+                    continue
+            elif status == 401:
                 raise click.ClickException(
                     "Authentication required. Use --token or --username/--password."
                 ) from None
@@ -125,7 +137,9 @@ def _make_request(
                     "Access denied. Check your credentials and service permissions."
                 ) from None
             elif status == 404:
-                raise click.ClickException(f"Service not found (404). Check the URL: {url}") from None
+                raise click.ClickException(
+                    f"Service not found (404). Check the URL: {url}"
+                ) from None
             raise click.ClickException(f"HTTP error {status}: {e}") from e
 
     raise click.ClickException(f"Request failed after {max_retries} attempts: {last_exception}")
@@ -140,7 +154,9 @@ def _handle_arcgis_response(data: dict, context: str) -> dict:
         details = error.get("details", [])
 
         if code in (498, 499):
-            raise click.ClickException(f"{context}: Invalid or expired token. Please re-authenticate.")
+            raise click.ClickException(
+                f"{context}: Invalid or expired token. Please re-authenticate."
+            )
         else:
             detail_str = "; ".join(details) if details else ""
             raise click.ClickException(f"{context}: Error {code} - {message}. {detail_str}")
@@ -226,7 +242,9 @@ def resolve_token(
         if verbose:
             debug(f"Reading token from file: {auth.token_file}")
         try:
-            with open(auth.token_file) as f:
+            import fsspec
+
+            with fsspec.open(auth.token_file, mode="rt") as f:
                 return f.read().strip()
         except OSError as e:
             raise click.ClickException(f"Failed to read token file: {e}") from e
@@ -316,6 +334,8 @@ def validate_arcgis_url(url: str) -> tuple[str, int | None]:
 def get_layer_info(
     service_url: str,
     token: str | None = None,
+    where: str = "1=1",
+    bbox: tuple[float, float, float, float] | None = None,
     verbose: bool = False,
 ) -> ArcGISLayerInfo:
     """
@@ -324,6 +344,8 @@ def get_layer_info(
     Args:
         service_url: Full layer URL (e.g., .../FeatureServer/0)
         token: Optional authentication token
+        where: SQL WHERE clause for counting features (default: "1=1" = all)
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
         verbose: Whether to print debug output
 
     Returns:
@@ -336,8 +358,8 @@ def get_layer_info(
     data = _make_request("GET", service_url, params=params)
     data = _handle_arcgis_response(data, "Layer info")
 
-    # Get feature count
-    count = get_feature_count(service_url, token=token, verbose=verbose)
+    # Get feature count (using the WHERE and bbox filters)
+    count = get_feature_count(service_url, where=where, bbox=bbox, token=token, verbose=verbose)
 
     return ArcGISLayerInfo(
         name=data.get("name", "Unknown"),
@@ -352,6 +374,7 @@ def get_layer_info(
 def get_feature_count(
     service_url: str,
     where: str = "1=1",
+    bbox: tuple[float, float, float, float] | None = None,
     token: str | None = None,
     verbose: bool = False,
 ) -> int:
@@ -361,6 +384,7 @@ def get_feature_count(
     Args:
         service_url: Full layer URL
         where: WHERE clause filter
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
         token: Optional authentication token
         verbose: Whether to print debug output
 
@@ -368,14 +392,21 @@ def get_feature_count(
         Feature count
     """
     query_url = f"{service_url}/query"
-    params = _add_token_to_params(
-        {
-            "where": where,
-            "returnCountOnly": "true",
-            "f": "json",
-        },
-        token,
-    )
+    params = {
+        "where": where,
+        "returnCountOnly": "true",
+        "f": "json",
+    }
+
+    # Add bbox filter if provided
+    if bbox:
+        xmin, ymin, xmax, ymax = bbox
+        params["geometry"] = f"{xmin},{ymin},{xmax},{ymax}"
+        params["geometryType"] = "esriGeometryEnvelope"
+        params["spatialRel"] = "esriSpatialRelIntersects"
+        params["inSR"] = "4326"
+
+    params = _add_token_to_params(params, token)
 
     data = _make_request("GET", query_url, params=params)
     data = _handle_arcgis_response(data, "Feature count")
@@ -392,6 +423,8 @@ def fetch_features_page(
     offset: int,
     limit: int,
     where: str = "1=1",
+    bbox: tuple[float, float, float, float] | None = None,
+    out_fields: str = "*",
     token: str | None = None,
     verbose: bool = False,
 ) -> dict:
@@ -403,6 +436,8 @@ def fetch_features_page(
         offset: Starting position for results (0-based)
         limit: Number of records to return
         where: WHERE clause filter
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
+        out_fields: Comma-separated field names or "*" for all
         token: Optional authentication token
         verbose: Whether to print debug output
 
@@ -410,17 +445,24 @@ def fetch_features_page(
         GeoJSON FeatureCollection dict
     """
     query_url = f"{service_url}/query"
-    params = _add_token_to_params(
-        {
-            "where": where,
-            "outFields": "*",
-            "returnGeometry": "true",
-            "f": "geojson",
-            "resultOffset": str(offset),
-            "resultRecordCount": str(limit),
-        },
-        token,
-    )
+    params = {
+        "where": where,
+        "outFields": out_fields,
+        "returnGeometry": "true",
+        "f": "geojson",
+        "resultOffset": str(offset),
+        "resultRecordCount": str(limit),
+    }
+
+    # Add bbox filter if provided (spatial query)
+    if bbox:
+        xmin, ymin, xmax, ymax = bbox
+        params["geometry"] = f"{xmin},{ymin},{xmax},{ymax}"
+        params["geometryType"] = "esriGeometryEnvelope"
+        params["spatialRel"] = "esriSpatialRelIntersects"
+        params["inSR"] = "4326"  # WGS84
+
+    params = _add_token_to_params(params, token)
 
     data = _make_request("GET", query_url, params=params)
 
@@ -436,6 +478,9 @@ def fetch_all_features(
     service_url: str,
     layer_info: ArcGISLayerInfo,
     where: str = "1=1",
+    bbox: tuple[float, float, float, float] | None = None,
+    out_fields: str = "*",
+    max_features: int | None = None,
     token: str | None = None,
     batch_size: int | None = None,
     verbose: bool = False,
@@ -449,6 +494,9 @@ def fetch_all_features(
         service_url: Full layer URL
         layer_info: Layer metadata
         where: WHERE clause filter
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
+        out_fields: Comma-separated field names or "*" for all
+        max_features: Maximum total features to return (limit)
         token: Optional authentication token
         batch_size: Custom batch size (default: server's maxRecordCount)
         verbose: Whether to print debug output
@@ -462,16 +510,31 @@ def fetch_all_features(
         layer_info.max_record_count or DEFAULT_PAGE_SIZE,
     )
 
+    # Apply user limit to total
     total = layer_info.total_count
+    if max_features is not None:
+        total = min(total, max_features)
+
     offset = 0
     fetched = 0
 
     while offset < total:
-        end = min(offset + max_batch, total)
+        # Adjust batch size for last page if limit applies
+        remaining = total - offset
+        current_batch = min(max_batch, remaining)
+
+        end = min(offset + current_batch, total)
         progress(f"Fetching features {offset + 1}-{end} of {total}...")
 
         page = fetch_features_page(
-            service_url, offset, max_batch, where, token=token, verbose=verbose
+            service_url,
+            offset,
+            current_batch,
+            where,
+            bbox=bbox,
+            out_fields=out_fields,
+            token=token,
+            verbose=verbose,
         )
 
         features = page.get("features", [])
@@ -481,11 +544,15 @@ def fetch_all_features(
         yield page
 
         fetched += len(features)
-        offset += max_batch
+        offset += current_batch
 
         # Safety check: if server returned fewer than expected, adjust
-        if len(features) < max_batch and offset < total:
+        if len(features) < current_batch and offset < total:
             offset = fetched
+
+        # Stop if we've hit the user limit
+        if max_features is not None and fetched >= max_features:
+            break
 
     if verbose:
         debug(f"Fetched {fetched} features total")
@@ -512,7 +579,7 @@ def _extract_crs_from_spatial_reference(spatial_ref: dict) -> dict | None:
 
 def _geojson_page_to_table(
     features: list[dict],
-) -> pa.Table:
+) -> pa.Table | None:
     """
     Convert a page of GeoJSON features to PyArrow Table with WKB geometry.
 
@@ -524,16 +591,18 @@ def _geojson_page_to_table(
         features: List of GeoJSON feature dicts (typically one page)
 
     Returns:
-        PyArrow Table with WKB geometry column
+        PyArrow Table with WKB geometry column, or None if no features
     """
     if not features:
         return None
 
     # Create a temporary GeoJSON string for DuckDB to parse
-    geojson_collection = json.dumps({
-        "type": "FeatureCollection",
-        "features": features,
-    })
+    geojson_collection = json.dumps(
+        {
+            "type": "FeatureCollection",
+            "features": features,
+        }
+    )
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     temp_file = tempfile.gettempdir() + f"/arcgis_page_{uuid.uuid4()}.geojson"
@@ -564,6 +633,9 @@ def _stream_features_to_parquet(
     layer_info: ArcGISLayerInfo,
     output_path: str,
     where: str = "1=1",
+    bbox: tuple[float, float, float, float] | None = None,
+    out_fields: str = "*",
+    max_features: int | None = None,
     token: str | None = None,
     batch_size: int | None = None,
     verbose: bool = False,
@@ -580,6 +652,9 @@ def _stream_features_to_parquet(
         layer_info: Layer metadata
         output_path: Path to write the parquet file
         where: SQL WHERE clause filter
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
+        out_fields: Comma-separated field names or "*" for all
+        max_features: Maximum total features to return (limit)
         token: Optional authentication token
         batch_size: Custom batch size for pagination
         verbose: Whether to print debug output
@@ -593,7 +668,15 @@ def _stream_features_to_parquet(
 
     try:
         for page in fetch_all_features(
-            service_url, layer_info, where, token, batch_size, verbose
+            service_url,
+            layer_info,
+            where,
+            bbox=bbox,
+            out_fields=out_fields,
+            max_features=max_features,
+            token=token,
+            batch_size=batch_size,
+            verbose=verbose,
         ):
             features = page.get("features", [])
             if not features:
@@ -629,6 +712,10 @@ def arcgis_to_table(
     service_url: str,
     auth: ArcGISAuth | None = None,
     where: str = "1=1",
+    bbox: tuple[float, float, float, float] | None = None,
+    include_cols: str | None = None,
+    exclude_cols: str | None = None,
+    limit: int | None = None,
     batch_size: int | None = None,
     verbose: bool = False,
 ) -> pa.Table:
@@ -642,10 +729,20 @@ def arcgis_to_table(
     This keeps memory usage low during download (only one page at a time),
     while still producing a complete Arrow table for further processing.
 
+    Server-side filtering is applied to minimize data transfer:
+    - where: SQL WHERE clause pushed to server
+    - bbox: Spatial filter pushed to server
+    - include_cols: Field selection pushed to server (outFields)
+    - limit: Row limit applied during pagination
+
     Args:
         service_url: ArcGIS Feature Service URL (with layer ID)
         auth: Optional authentication configuration
         where: SQL WHERE clause filter
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
+        include_cols: Comma-separated column names to include (server-side)
+        exclude_cols: Comma-separated column names to exclude (client-side after download)
+        limit: Maximum number of features to return
         batch_size: Custom batch size for pagination
         verbose: Whether to print debug output
 
@@ -660,16 +757,33 @@ def arcgis_to_table(
     # Resolve authentication
     token = resolve_token(auth, service_url, verbose) if auth else None
 
-    # Get layer info
-    layer_info = get_layer_info(service_url, token, verbose)
+    # Get layer info (with WHERE and bbox filters applied to count)
+    layer_info = get_layer_info(service_url, token=token, where=where, bbox=bbox, verbose=verbose)
     debug(f"Layer: {layer_info.name}")
     debug(f"Geometry type: {layer_info.geometry_type}")
-    debug(f"Total features: {layer_info.total_count}")
+    debug(f"Total features matching filter: {layer_info.total_count}")
 
     if layer_info.total_count == 0:
-        warn("Layer has no features")
+        filters_applied = where != "1=1" or bbox is not None
+        if filters_applied:
+            filter_desc = []
+            if where != "1=1":
+                filter_desc.append(f"where='{where}'")
+            if bbox:
+                filter_desc.append(f"bbox={bbox}")
+            warn(f"No features match filter: {', '.join(filter_desc)}")
+        else:
+            warn("Layer has no features")
         # Return empty table with geometry column
         return pa.table({"geometry": pa.array([], type=pa.binary())})
+
+    # Determine outFields for server-side column selection
+    out_fields = "*"
+    if include_cols:
+        # Always include geometry-related fields
+        fields = [f.strip() for f in include_cols.split(",")]
+        out_fields = ",".join(fields)
+        debug(f"Requesting fields: {out_fields}")
 
     # Pass 1: Stream features to temp parquet file (memory-efficient)
     temp_parquet = tempfile.gettempdir() + f"/arcgis_stream_{uuid.uuid4()}.parquet"
@@ -681,6 +795,9 @@ def arcgis_to_table(
             layer_info=layer_info,
             output_path=temp_parquet,
             where=where,
+            bbox=bbox,
+            out_fields=out_fields,
+            max_features=limit,
             token=token,
             batch_size=batch_size,
             verbose=verbose,
@@ -693,6 +810,15 @@ def arcgis_to_table(
         progress("Reading temp file...")
         table = pq.read_table(temp_parquet)
 
+        # Apply client-side column exclusion if specified
+        if exclude_cols:
+            cols_to_exclude = {c.strip() for c in exclude_cols.split(",")}
+            # Keep geometry column unless explicitly excluded
+            cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
+            if cols_to_keep:
+                table = table.select(cols_to_keep)
+                debug(f"Excluded columns: {cols_to_exclude}")
+
         # Add CRS to metadata
         crs = _extract_crs_from_spatial_reference(layer_info.spatial_reference)
         if crs:
@@ -703,7 +829,9 @@ def arcgis_to_table(
                     "geometry": {
                         "encoding": "WKB",
                         "crs": crs,
-                        "geometry_types": [ARCGIS_GEOM_TYPES.get(layer_info.geometry_type, "Geometry")],
+                        "geometry_types": [
+                            ARCGIS_GEOM_TYPES.get(layer_info.geometry_type, "Geometry")
+                        ],
                     }
                 },
             }
@@ -731,6 +859,10 @@ def convert_arcgis_to_geoparquet(
     password: str | None = None,
     portal_url: str | None = None,
     where: str = "1=1",
+    bbox: tuple[float, float, float, float] | None = None,
+    include_cols: str | None = None,
+    exclude_cols: str | None = None,
+    limit: int | None = None,
     skip_hilbert: bool = False,
     skip_bbox: bool = False,
     compression: str = "ZSTD",
@@ -744,6 +876,12 @@ def convert_arcgis_to_geoparquet(
 
     Main CLI entry point for ArcGIS to GeoParquet conversion.
 
+    Server-side filtering options (pushed to ArcGIS for efficiency):
+    - where: SQL WHERE clause
+    - bbox: Spatial bounding box filter
+    - include_cols: Select specific fields to download
+    - limit: Maximum number of features to download
+
     Args:
         service_url: ArcGIS Feature Service URL
         output_file: Output file path (local or remote)
@@ -752,7 +890,11 @@ def convert_arcgis_to_geoparquet(
         username: ArcGIS username (requires password)
         password: ArcGIS password (requires username)
         portal_url: Enterprise portal URL for token generation
-        where: SQL WHERE clause filter
+        where: SQL WHERE clause filter (pushed to server)
+        bbox: Bounding box filter (xmin,ymin,xmax,ymax in WGS84, pushed to server)
+        include_cols: Comma-separated columns to include (pushed to server)
+        exclude_cols: Comma-separated columns to exclude (applied client-side)
+        limit: Maximum number of features to return
         skip_hilbert: Skip Hilbert spatial ordering
         skip_bbox: Skip adding bbox column for spatial query optimization
         compression: Compression codec (ZSTD, GZIP, etc.)
@@ -777,11 +919,15 @@ def convert_arcgis_to_geoparquet(
             portal_url=portal_url,
         )
 
-    # Convert to Arrow table
+    # Convert to Arrow table with server-side filtering
     table = arcgis_to_table(
         service_url=service_url,
         auth=auth,
         where=where,
+        bbox=bbox,
+        include_cols=include_cols,
+        exclude_cols=exclude_cols,
+        limit=limit,
         verbose=verbose,
     )
 

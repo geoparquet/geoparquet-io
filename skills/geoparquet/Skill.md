@@ -188,6 +188,7 @@ First, determine what you're working with:
 - **Supported formats**: GeoJSON, Shapefile (.shp), FlatGeobuf (.fgb), GeoPackage (.gpkg), CSV with geometry, existing Parquet
 
 For URLs, you may need to download first:
+
 ```bash
 curl -L -o data.geojson "https://example.com/data.geojson"
 ```
@@ -309,6 +310,7 @@ gpio inspect https://example.com/data.parquet
 ```
 
 For S3 writes, ensure AWS credentials are configured:
+
 ```bash
 export AWS_PROFILE=my-profile
 # or
@@ -320,7 +322,7 @@ export AWS_SECRET_ACCESS_KEY=...
 
 ## Example Session
 
-User: "I want to work with this dataset: https://data.source.coop/example/buildings.fgb"
+User: "I want to work with this dataset: <https://data.source.coop/example/buildings.fgb>"
 
 Your approach:
 1. Download the file (if needed) or check if gpio can read it directly
