@@ -1,0 +1,43 @@
+# Validated ArcGIS Feature Service Test URLs
+# Format: URL|Description|GeometryType|Source
+# Last validated: 2025-01-15
+# Total: 25 working URLs
+
+# === ESRI Sample Server 6 - Wildfire ===
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/Wildfire/FeatureServer/0|Wildfire Points|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/Wildfire/FeatureServer/1|Wildfire Lines|Line|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/Wildfire/FeatureServer/2|Wildfire Polygons|Polygon|ESRI Sample
+
+# === ESRI Sample Server 6 - Emergency/Assessment ===
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/DamageAssessment/FeatureServer/0|Damage Assessment|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/DamageAssessmentStatePlane/FeatureServer/0|Damage Assessment StatePlane|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/CommercialDamageAssessment/FeatureServer/0|Commercial Damage|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/EmergencyFacilities/FeatureServer/0|Emergency Facilities|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/RedlandsEmergencyVehicles/FeatureServer/0|Emergency Vehicles|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/NapervilleShelters/FeatureServer/0|Naperville Shelters|Point|ESRI Sample
+
+# === ESRI Sample Server 6 - Government/Community ===
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/CommunityAddressing/FeatureServer/0|Community Addressing|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/ServiceRequest/FeatureServer/0|Service Requests|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/SF311/FeatureServer/0|SF 311 Requests|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/PoolPermits/FeatureServer/0|Pool Permits|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/PhoneIncidents/FeatureServer/0|Phone Incidents|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Events/FeatureServer/0|Local Events|Point|ESRI Sample
+
+# === ESRI Sample Server 6 - Recreation/Land ===
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/Recreation/FeatureServer/0|Recreation Areas|Polygon|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/0|Recreation Facilities|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/OilSandsProjectBoundaries/FeatureServer/0|Oil Sands Boundaries|Polygon|ESRI Sample
+
+# === ESRI Sample Server 6 - Science/Natural ===
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/Earthquakes_Since1970/FeatureServer/0|Earthquakes Since 1970|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/Energy/Geology/FeatureServer/0|Energy Geology|Polygon|ESRI Sample
+
+# === ESRI Sample Server 6 - Other ===
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/Notes/FeatureServer/0|Notes|Point|ESRI Sample
+https://sampleserver6.arcgisonline.com/arcgis/rest/services/VerticalLines/FeatureServer/0|Vertical Lines|Line|ESRI Sample
+
+# === Federal Government ===
+https://services7.arcgis.com/n1YM8pTrFmm7L4hs/ArcGIS/rest/services/DistrictLocator/FeatureServer/0|USACE Districts|Polygon|Federal
+https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/FeatureServer/0|NWS Weather Alerts|Polygon|Federal
+https://gis.fema.gov/arcgis/rest/services/NSS/FEMA_NSS/FeatureServer/0|FEMA Shelters|Point|Federal
