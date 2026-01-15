@@ -39,7 +39,7 @@ print(f"Geometry column: {table.geometry_column}")
 
 ### Reading from BigQuery
 
-Use `Table.from_bigquery()` to read directly from BigQuery tables:
+Use `Table.from_bigquery()` to read directly from BigQuery tables. The `table_id` parameter accepts fully-qualified `"project.dataset.table"` format or `"dataset.table"` when a separate `project` argument is provided (or when using your default gcloud project). When using `bbox`, provide coordinates as `"minx,miny,maxx,maxy"` representing longitude,latitude in EPSG:4326 degrees (e.g., `"-122.52,37.70,-122.35,37.82"`).
 
 ```python
 import geoparquet_io as gpio

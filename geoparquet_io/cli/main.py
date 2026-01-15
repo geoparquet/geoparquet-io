@@ -2174,15 +2174,15 @@ def extract_geoparquet(
 )
 @click.option(
     "--bbox-threshold",
-    type=int,
+    type=click.IntRange(0, None),
     default=500000,
     help="Row count threshold for auto bbox mode. Tables with more rows use "
-    "server-side filtering. Default: 500000",
+    "server-side filtering. Must be non-negative. Default: 500000",
 )
 @click.option(
     "--limit",
-    type=int,
-    help="Maximum number of rows to extract",
+    type=click.IntRange(0, None),
+    help="Maximum number of rows to extract. Must be non-negative.",
 )
 @click.option(
     "--geography-column",

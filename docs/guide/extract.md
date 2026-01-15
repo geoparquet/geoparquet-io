@@ -524,6 +524,9 @@ Filter data spatially using a bounding box:
     )
     ```
 
+!!! note "Bbox format differences"
+    `Table.from_bigquery()` accepts `bbox` as a string (e.g., `"-122.52,37.70,-122.35,37.82"`), while `Table.extract()` expects a tuple (e.g., `(-122.52, 37.70, -122.35, 37.82)`).
+
 ### Bbox Filtering Mode: Server vs Local
 
 When you specify a `--bbox`, the spatial filter can be applied in two places:

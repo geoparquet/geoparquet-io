@@ -329,6 +329,21 @@ def read_bigquery(
     include_cols = ",".join(columns) if columns else None
     exclude_cols = ",".join(exclude_columns) if exclude_columns else None
 
+    # Validate bbox_mode
+    valid_bbox_modes = {"auto", "server", "local"}
+    if bbox_mode not in valid_bbox_modes:
+        raise ValueError(
+            f"Invalid bbox_mode '{bbox_mode}' for table '{table_id}'. "
+            f"Must be one of: {', '.join(sorted(valid_bbox_modes))}"
+        )
+
+    # Validate bbox_threshold
+    if not isinstance(bbox_threshold, int) or bbox_threshold < 0:
+        raise ValueError(
+            f"Invalid bbox_threshold '{bbox_threshold}' for table '{table_id}'. "
+            "Must be an integer >= 0."
+        )
+
     # Get PyArrow table (don't write to file)
     arrow_table = extract_bigquery(
         table_id=table_id,

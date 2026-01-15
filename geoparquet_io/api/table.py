@@ -408,7 +408,13 @@ class Table:
         )
 
         if arrow_table is None:
-            raise RuntimeError(f"Failed to read from BigQuery table: {table_id}")
+            raise RuntimeError(
+                f"Failed to read from BigQuery table: {table_id}. "
+                "Possible causes: (1) Authentication/credentials issue - verify your service "
+                "account has BigQuery Data Viewer role or check gcloud auth; "
+                "(2) Table not found - verify the table_id format (project.dataset.table); "
+                "(3) Views or external tables are not supported by the BigQuery Storage Read API."
+            )
 
         return cls(arrow_table)
 

@@ -287,13 +287,20 @@ def extract_bigquery_table(
 
     Args:
         table: Input PyArrow Table (already loaded from BigQuery)
-        limit: Maximum rows to return
+        limit: Maximum rows to return (0 returns empty table)
         columns: Columns to include (None = all)
         exclude_columns: Columns to exclude
 
     Returns:
         Filtered PyArrow Table
+
+    Raises:
+        ValueError: If limit is negative
     """
+    # Validate limit
+    if limit is not None and limit < 0:
+        raise ValueError(f"limit must be non-negative, got {limit}")
+
     result = table
 
     # Apply column selection
@@ -310,8 +317,8 @@ def extract_bigquery_table(
         keep_cols = [c for c in result.column_names if c not in exclude_columns]
         result = result.select(keep_cols)
 
-    # Apply limit
-    if limit and result.num_rows > limit:
+    # Apply limit (limit=0 returns empty table)
+    if limit is not None and result.num_rows > limit:
         result = result.slice(0, limit)
 
     return result
@@ -331,7 +338,11 @@ def _detect_geometry_column_from_schema(
         geography_column: Explicit column name (if provided, validates it exists)
 
     Returns:
-        Name of detected geometry column, or None
+        Name of detected geometry column, or None if no geometry column found
+        and no explicit geography_column was requested
+
+    Raises:
+        ValueError: If geography_column is provided but not found in the table
     """
     # Query schema to find GEOMETRY columns
     schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
@@ -354,7 +365,14 @@ def _detect_geometry_column_from_schema(
         lower_map = {c.lower(): c for c in all_cols}
         if geography_column.lower() in lower_map:
             return lower_map[geography_column.lower()]
-        return None
+        # Column not found - raise error with helpful message
+        geom_hint = ""
+        if geometry_cols:
+            geom_hint = f" Detected geometry columns: {geometry_cols}."
+        raise ValueError(
+            f"Geography column '{geography_column}' not found in table '{table_id}'. "
+            f"Available columns: {all_cols}.{geom_hint}"
+        )
 
     # Return first geometry column found
     if geometry_cols:
@@ -407,6 +425,163 @@ def _build_select_with_wkb(
             select_parts.append(f'"{col}"')
 
     return ", ".join(select_parts), columns
+
+
+def _handle_dry_run(
+    validated_table_id: str,
+    include_list: list[str] | None,
+    bbox: str | None,
+    bbox_mode: str,
+    bbox_threshold: int,
+    where: str | None,
+    limit: int | None,
+) -> None:
+    """Handle dry_run mode by printing the SQL query without executing."""
+    if include_list:
+        select_cols = ", ".join(f'"{c}"' for c in include_list)
+    else:
+        select_cols = "*"
+
+    query = _build_dry_run_query(validated_table_id, select_cols, bbox, bbox_mode, bbox_threshold)
+
+    # Add DuckDB-side conditions
+    if where:
+        if "WHERE" in query:
+            query += f" AND ({where})"
+        else:
+            query += f" WHERE ({where})"
+    if limit is not None:
+        query += f" LIMIT {limit}"
+
+    progress(f"SQL: {query}")
+    progress("(Actual query will use ST_AsWKB for geometry columns)")
+
+
+def _build_dry_run_query(
+    table_id: str,
+    select_cols: str,
+    bbox: str | None,
+    bbox_mode: str,
+    bbox_threshold: int,
+) -> str:
+    """Build a dry run query string for display."""
+    if not bbox:
+        return f"SELECT {select_cols} FROM bigquery_scan('{table_id}')"
+
+    # Show bbox mode info
+    if bbox_mode == "auto":
+        progress(f"Bbox mode: auto (threshold: {bbox_threshold:,} rows)")
+        progress("(Will check table size to determine server vs local filtering)")
+    else:
+        progress(f"Bbox mode: {bbox_mode}")
+
+    xmin, ymin, xmax, ymax = parse_bbox(bbox)
+    wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
+
+    if bbox_mode == "local":
+        query = f"SELECT {select_cols} FROM bigquery_scan('{table_id}')"
+        query += f" WHERE ST_Intersects(<geometry_column>, ST_GeomFromText('{wkt}'))"
+    else:
+        # Server or auto mode - show server-side as example
+        bq_filter = f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT(''{wkt}''))"
+        query = f"SELECT {select_cols} FROM bigquery_scan('{table_id}', filter='{bq_filter}')"
+
+    return query
+
+
+def _build_column_list(
+    con: duckdb.DuckDBPyConnection,
+    table_id: str,
+    include_list: list[str] | None,
+    exclude_list: list[str] | None,
+    geom_col: str | None,
+) -> list[str] | None:
+    """
+    Build the column list for SELECT based on include/exclude lists.
+
+    Returns:
+        List of columns to select, or None for all columns
+    """
+    if include_list is not None:
+        # Ensure geometry column is included unless explicitly excluded
+        cols_to_select = list(include_list)
+        if geom_col and geom_col not in cols_to_select:
+            if exclude_list is None or geom_col not in exclude_list:
+                cols_to_select.append(geom_col)
+        return cols_to_select
+
+    if exclude_list is not None:
+        # Push down exclusions: get all columns, then remove excluded ones
+        schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
+        schema_result = con.execute(schema_query).fetchall()
+        all_schema_cols = [row[0] for row in schema_result]
+        return [c for c in all_schema_cols if c not in exclude_list]
+
+    return None  # All columns
+
+
+def _determine_bbox_strategy(
+    con: duckdb.DuckDBPyConnection,
+    table_id: str,
+    bbox_mode: str,
+    bbox_threshold: int,
+) -> bool:
+    """
+    Determine whether to use server-side bbox filtering.
+
+    Returns:
+        True if server-side filtering should be used, False for local filtering
+    """
+    if bbox_mode == "server":
+        debug("Using server-side bbox filter (forced by --bbox-mode server)")
+        return True
+    if bbox_mode == "local":
+        debug("Using local bbox filter (forced by --bbox-mode local)")
+        return False
+
+    # Auto mode - decide based on row count
+    row_count = _get_table_row_count(con, table_id)
+    if row_count is not None:
+        use_server = row_count >= bbox_threshold
+        debug(f"Table has {row_count:,} rows, threshold is {bbox_threshold:,}")
+        if use_server:
+            debug("Using server-side bbox filter (table exceeds threshold)")
+        else:
+            debug("Using local bbox filter (table below threshold)")
+        return use_server
+
+    # Fallback to local if we can't get row count
+    debug("Could not determine row count, defaulting to local filter")
+    return False
+
+
+def _build_bbox_filters(
+    bbox: str,
+    geom_col: str,
+    use_server_side: bool,
+) -> tuple[list[str], list[str]]:
+    """
+    Build bbox filter strings for server-side and local filtering.
+
+    Returns:
+        Tuple of (bq_filters list, local_conditions list)
+    """
+    xmin, ymin, xmax, ymax = parse_bbox(bbox)
+    wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
+
+    bq_filters = []
+    local_conditions = []
+
+    if use_server_side:
+        bbox_filter = f"ST_INTERSECTS({geom_col}, ST_GEOGFROMTEXT(''{wkt}''))"
+        bq_filters.append(bbox_filter)
+        debug(f"BigQuery filter: {bbox_filter}")
+    else:
+        bbox_filter = f"ST_Intersects(\"{geom_col}\", ST_GeomFromText('{wkt}'))"
+        local_conditions.append(bbox_filter)
+        debug(f"DuckDB filter: {bbox_filter}")
+
+    return bq_filters, local_conditions
 
 
 def extract_bigquery(
@@ -480,61 +655,59 @@ def extract_bigquery(
     exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
 
     # Handle dry_run without connecting to BigQuery
-    # (can't detect geometry column or row count without connecting, so show info about mode)
     if dry_run:
-        if include_list:
-            select_cols = ", ".join(f'"{c}"' for c in include_list)
-        else:
-            select_cols = "*"
-
-        # Show bbox mode info
-        if bbox:
-            if bbox_mode == "auto":
-                progress(f"Bbox mode: auto (threshold: {bbox_threshold:,} rows)")
-                progress("(Will check table size to determine server vs local filtering)")
-            else:
-                progress(f"Bbox mode: {bbox_mode}")
-
-            xmin, ymin, xmax, ymax = parse_bbox(bbox)
-            wkt = (
-                f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, "
-                f"{xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
-            )
-
-            if bbox_mode == "server":
-                # Show server-side filter syntax
-                bq_filter = f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT(''{wkt}''))"
-                query = (
-                    f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}', "
-                    f"filter='{bq_filter}')"
-                )
-            elif bbox_mode == "local":
-                # Show local filter syntax
-                query = f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}')"
-                query += f" WHERE ST_Intersects(<geometry_column>, ST_GeomFromText('{wkt}'))"
-            else:
-                # Auto mode - show server-side as example
-                bq_filter = f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT(''{wkt}''))"
-                query = (
-                    f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}', "
-                    f"filter='{bq_filter}')"
-                )
-        else:
-            query = f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}')"
-
-        # Add DuckDB-side conditions
-        if where:
-            if "WHERE" in query:
-                query += f" AND ({where})"
-            else:
-                query += f" WHERE ({where})"
-        if limit:
-            query += f" LIMIT {limit}"
-        progress(f"SQL: {query}")
-        progress("(Actual query will use ST_AsWKB for geometry columns)")
+        _handle_dry_run(
+            validated_table_id, include_list, bbox, bbox_mode, bbox_threshold, where, limit
+        )
         return None
 
-    # Use context manager for proper cleanup of connection and environment variables
+    # Execute the actual BigQuery extraction
+    return _execute_bigquery_extraction(
+        validated_table_id=validated_table_id,
+        project=project,
+        credentials_file=credentials_file,
+        geography_column=geography_column,
+        include_list=include_list,
+        exclude_list=exclude_list,
+        bbox=bbox,
+        bbox_mode=bbox_mode,
+        bbox_threshold=bbox_threshold,
+        where=where,
+        limit=limit,
+        show_sql=show_sql,
+        output_parquet=output_parquet,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
+        geoparquet_version=geoparquet_version,
+        verbose=verbose,
+    )
+
+
+def _execute_bigquery_extraction(
+    *,
+    validated_table_id: str,
+    project: str | None,
+    credentials_file: str | None,
+    geography_column: str | None,
+    include_list: list[str] | None,
+    exclude_list: list[str] | None,
+    bbox: str | None,
+    bbox_mode: str,
+    bbox_threshold: int,
+    where: str | None,
+    limit: int | None,
+    show_sql: bool,
+    output_parquet: str | None,
+    compression: str,
+    compression_level: int | None,
+    row_group_size_mb: float | None,
+    row_group_rows: int | None,
+    geoparquet_version: str | None,
+    verbose: bool,
+) -> pa.Table | None:
+    """Execute the BigQuery extraction with the given parameters."""
     debug("Connecting to BigQuery...")
     with BigQueryConnection(
         project=project,
@@ -548,78 +721,24 @@ def extract_bigquery(
         else:
             warn("No geometry column detected - output may not be valid GeoParquet")
 
-        # Build SELECT clause with ST_AsWKB for proper WKB output
-        # (DuckDB GEOMETRY uses internal binary format, not standard WKB)
-        select_cols, all_columns = _build_select_with_wkb(
-            include_list, geom_col, con, validated_table_id
+        # Build column list and SELECT clause
+        cols_to_select = _build_column_list(
+            con, validated_table_id, include_list, exclude_list, geom_col
         )
+        select_cols, _ = _build_select_with_wkb(cols_to_select, geom_col, con, validated_table_id)
 
-        # Determine bbox filtering strategy based on mode and table size
-        bq_filters = []  # Server-side filters (pushed to BigQuery)
-        local_conditions = []  # Local filters (applied in DuckDB)
-
-        use_server_side_bbox = False
-        if bbox and geom_col:
-            if bbox_mode == "server":
-                use_server_side_bbox = True
-                debug("Using server-side bbox filter (forced by --bbox-mode server)")
-            elif bbox_mode == "local":
-                use_server_side_bbox = False
-                debug("Using local bbox filter (forced by --bbox-mode local)")
-            else:  # auto mode
-                row_count = _get_table_row_count(con, validated_table_id)
-                if row_count is not None:
-                    use_server_side_bbox = row_count >= bbox_threshold
-                    debug(f"Table has {row_count:,} rows, threshold is {bbox_threshold:,}")
-                    if use_server_side_bbox:
-                        debug("Using server-side bbox filter (table exceeds threshold)")
-                    else:
-                        debug("Using local bbox filter (table below threshold)")
-                else:
-                    # Fallback to local if we can't get row count (safer/faster for unknown)
-                    use_server_side_bbox = False
-                    debug("Could not determine row count, defaulting to local filter")
-
-            # Build the bbox filter
-            xmin, ymin, xmax, ymax = parse_bbox(bbox)
-            wkt = (
-                f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, "
-                f"{xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
-            )
-
-            if use_server_side_bbox:
-                # BigQuery native filter via bigquery_scan filter parameter
-                bbox_filter = f"ST_INTERSECTS({geom_col}, ST_GEOGFROMTEXT(''{wkt}''))"
-                bq_filters.append(bbox_filter)
-                debug(f"BigQuery filter: {bbox_filter}")
-            else:
-                # DuckDB local filter in WHERE clause
-                bbox_filter = f"ST_Intersects(\"{geom_col}\", ST_GeomFromText('{wkt}'))"
-                local_conditions.append(bbox_filter)
-                debug(f"DuckDB filter: {bbox_filter}")
-        elif bbox and not geom_col:
-            warn("--bbox specified but no geometry column detected; ignoring spatial filter")
-
-        # Build query using bigquery_scan with optional filter parameter
-        if bq_filters:
-            filter_str = " AND ".join(bq_filters)
-            query = (
-                f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}', "
-                f"filter='{filter_str}')"
-            )
-        else:
-            query = f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}')"
-
-        # Add DuckDB-side WHERE clause for local conditions and user-provided where
-        conditions = local_conditions.copy()
-        if where:
-            conditions.append(f"({where})")
-
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-
-        if limit:
-            query += f" LIMIT {limit}"
+        # Build query with bbox and where filters
+        query = _build_bigquery_query(
+            con=con,
+            validated_table_id=validated_table_id,
+            select_cols=select_cols,
+            bbox=bbox,
+            bbox_mode=bbox_mode,
+            bbox_threshold=bbox_threshold,
+            geom_col=geom_col,
+            where=where,
+            limit=limit,
+        )
 
         if show_sql:
             progress(f"SQL: {query}")
@@ -631,26 +750,73 @@ def extract_bigquery(
         row_count = result.num_rows
         progress(f"Retrieved {row_count:,} rows from BigQuery")
 
-        # Handle column exclusion after fetch (can't push down to BQ for *)
-        if exclude_list:
-            keep_cols = [c for c in result.column_names if c not in exclude_list]
-            result = result.select(keep_cols)
+        # Determine if geometry column is in the final result
+        final_geom_col = geom_col if geom_col and geom_col in result.column_names else None
 
         # Write output if path provided
         if output_parquet:
             write_geoparquet_table(
                 result,
                 output_parquet,
-                geometry_column=geom_col,
+                geometry_column=final_geom_col,
                 compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,
                 row_group_rows=row_group_rows,
                 geoparquet_version=geoparquet_version,
                 verbose=verbose,
-                edges="spherical",  # BigQuery GEOGRAPHY uses spherical edges
+                edges="spherical" if final_geom_col else None,
             )
             success(f"Extracted {row_count:,} rows to {output_parquet}")
             return None
-        else:
-            return result
+
+        return result
+
+
+def _build_bigquery_query(
+    *,
+    con: duckdb.DuckDBPyConnection,
+    validated_table_id: str,
+    select_cols: str,
+    bbox: str | None,
+    bbox_mode: str,
+    bbox_threshold: int,
+    geom_col: str | None,
+    where: str | None,
+    limit: int | None,
+) -> str:
+    """Build the BigQuery query with filters applied."""
+    bq_filters: list[str] = []
+    local_conditions: list[str] = []
+
+    # Handle bbox filtering
+    if bbox and geom_col:
+        use_server_side = _determine_bbox_strategy(
+            con, validated_table_id, bbox_mode, bbox_threshold
+        )
+        bq_filters, local_conditions = _build_bbox_filters(bbox, geom_col, use_server_side)
+    elif bbox and not geom_col:
+        warn("--bbox specified but no geometry column detected; ignoring spatial filter")
+
+    # Build base query
+    if bq_filters:
+        filter_str = " AND ".join(bq_filters)
+        query = (
+            f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}', "
+            f"filter='{filter_str}')"
+        )
+    else:
+        query = f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}')"
+
+    # Add WHERE clause
+    conditions = local_conditions.copy()
+    if where:
+        conditions.append(f"({where})")
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    # Add LIMIT
+    if limit is not None:
+        query += f" LIMIT {limit}"
+
+    return query
