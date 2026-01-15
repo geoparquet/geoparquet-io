@@ -159,7 +159,7 @@ class TestValidateArcgisUrl:
 
         from geoparquet_io.core.arcgis import validate_arcgis_url
 
-        with pytest.raises(click.ClickException, match="URL must end with a layer ID"):
+        with pytest.raises(click.ClickException, match="Missing layer ID in URL"):
             validate_arcgis_url("https://example.com/rest/services/Test/FeatureServer")
 
 

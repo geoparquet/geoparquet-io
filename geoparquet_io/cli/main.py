@@ -1402,6 +1402,11 @@ def convert_geojson(
     is_flag=True,
     help="Skip Hilbert spatial ordering (faster but less optimal for spatial queries)",
 )
+@click.option(
+    "--skip-bbox",
+    is_flag=True,
+    help="Skip adding bbox column (bbox enables faster spatial filtering on remote files)",
+)
 @geoparquet_version_option
 @verbose_option
 @compression_options
@@ -1417,6 +1422,7 @@ def convert_arcgis(
     portal_url,
     where,
     skip_hilbert,
+    skip_bbox,
     geoparquet_version,
     verbose,
     compression,
@@ -1485,6 +1491,7 @@ def convert_arcgis(
             portal_url=portal_url,
             where=where,
             skip_hilbert=skip_hilbert,
+            skip_bbox=skip_bbox,
             compression=compression.upper(),
             compression_level=compression_level,
             verbose=verbose,

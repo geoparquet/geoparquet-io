@@ -658,6 +658,7 @@ def convert_arcgis_to_geoparquet(
     portal_url: str | None = None,
     where: str = "1=1",
     skip_hilbert: bool = False,
+    skip_bbox: bool = False,
     compression: str = "ZSTD",
     compression_level: int = 15,
     verbose: bool = False,
@@ -679,6 +680,7 @@ def convert_arcgis_to_geoparquet(
         portal_url: Enterprise portal URL for token generation
         where: SQL WHERE clause filter
         skip_hilbert: Skip Hilbert spatial ordering
+        skip_bbox: Skip adding bbox column for spatial query optimization
         compression: Compression codec (ZSTD, GZIP, etc.)
         compression_level: Compression level
         verbose: Whether to print verbose output
@@ -715,6 +717,13 @@ def convert_arcgis_to_geoparquet(
         from geoparquet_io.core.hilbert_order import hilbert_order_table
 
         table = hilbert_order_table(table)
+
+    # Add bbox column for spatial query optimization
+    if not skip_bbox and table.num_rows > 0:
+        progress("Adding bbox column for spatial query optimization...")
+        from geoparquet_io.core.add_bbox_column import add_bbox_table
+
+        table = add_bbox_table(table, bbox_column_name="bbox", geometry_column="geometry")
 
     # Write to GeoParquet
     progress(f"Writing to {output_file}...")
