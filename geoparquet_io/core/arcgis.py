@@ -14,7 +14,6 @@ import time
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import click
 import pyarrow as pa
@@ -27,9 +26,6 @@ from geoparquet_io.core.common import (
     write_geoparquet_table,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
-
-if TYPE_CHECKING:
-    pass
 
 # ArcGIS Online token endpoint
 ARCGIS_ONLINE_TOKEN_URL = "https://www.arcgis.com/sharing/rest/generateToken"
