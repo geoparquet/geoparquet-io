@@ -500,6 +500,143 @@ Apply filters that are pushed down to BigQuery for efficient querying:
     )
     ```
 
+### Spatial Filtering with Bounding Box
+
+Filter data spatially using a bounding box:
+
+=== "CLI"
+
+    ```bash
+    # Filter to San Francisco area
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Filter to San Francisco area
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.buildings',
+        bbox="-122.52,37.70,-122.35,37.82"
+    )
+    ```
+
+### Bbox Filtering Mode: Server vs Local
+
+When you specify a `--bbox`, the spatial filter can be applied in two places:
+
+1. **Server-side (BigQuery)**: The filter is pushed to BigQuery using `ST_INTERSECTS()`, so only matching rows are transferred
+2. **Local (DuckDB)**: All data is fetched from BigQuery, then filtered locally in DuckDB
+
+The `--bbox-mode` option controls this behavior:
+
+| Mode | Description |
+|------|-------------|
+| `auto` | (Default) Automatically chooses based on table size |
+| `server` | Always push spatial filter to BigQuery |
+| `local` | Always filter locally in DuckDB |
+
+#### Understanding the Tradeoffs
+
+**Server-side filtering** is better for large tables because:
+
+- Only matching rows are transferred, reducing data movement
+- BigQuery's spatial indexing can accelerate the query
+- Less memory usage locally
+
+**Local filtering** is better for smaller tables because:
+
+- Avoids the overhead of BigQuery's spatial function execution
+- Uses DuckDB's efficient geometry routines once data is local
+- More predictable performance for small datasets
+
+The `--bbox-threshold` option sets the row count where `auto` mode switches from local to server filtering (default: 500,000 rows).
+
+#### How Auto Mode Works
+
+In `auto` mode, gpio checks the table's row count from BigQuery metadata:
+
+- Tables **below** the threshold use local filtering
+- Tables **at or above** the threshold use server-side filtering
+
+This heuristic balances the overhead of spatial function execution against data transfer costs.
+
+#### Examples
+
+=== "CLI"
+
+    ```bash
+    # Force server-side filtering (good for very large tables)
+    gpio extract bigquery myproject.geodata.global_buildings output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82 \
+      --bbox-mode server
+
+    # Force local filtering (good for small tables with complex geometries)
+    gpio extract bigquery myproject.geodata.city_parks output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82 \
+      --bbox-mode local
+
+    # Adjust the threshold for auto mode (use server for tables > 100K rows)
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82 \
+      --bbox-threshold 100000
+
+    # Higher threshold (use server only for very large tables > 1M rows)
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82 \
+      --bbox-threshold 1000000
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Force server-side filtering
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.global_buildings',
+        bbox="-122.52,37.70,-122.35,37.82",
+        bbox_mode="server"
+    )
+
+    # Force local filtering
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.city_parks',
+        bbox="-122.52,37.70,-122.35,37.82",
+        bbox_mode="local"
+    )
+
+    # Custom threshold
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.buildings',
+        bbox="-122.52,37.70,-122.35,37.82",
+        bbox_threshold=100000
+    )
+    ```
+
+#### When to Change the Defaults
+
+Consider using `--bbox-mode server` when:
+
+- Your table has millions of rows
+- You're filtering to a small geographic area (high selectivity)
+- Network bandwidth is limited
+
+Consider using `--bbox-mode local` when:
+
+- Your table has fewer than 500K rows
+- You're filtering to a large area (low selectivity)
+- The table contains complex geometries that are slow to test server-side
+
+Consider adjusting `--bbox-threshold` when:
+
+- You consistently work with tables of a certain size
+- You've benchmarked and found a different crossover point for your data
+- Your BigQuery pricing tier or network conditions differ from typical
+
 ### Authentication
 
 The command uses Google Cloud credentials in this order:

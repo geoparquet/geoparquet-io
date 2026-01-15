@@ -38,6 +38,9 @@ gpio extract bigquery PROJECT.DATASET.TABLE output.parquet
 - `--include-cols` - Comma-separated columns to include
 - `--exclude-cols` - Comma-separated columns to exclude
 - `--where` - SQL WHERE clause (BigQuery SQL syntax)
+- `--bbox` - Bounding box filter: `minx,miny,maxx,maxy`
+- `--bbox-mode` - Filter mode: `auto` (default), `server`, or `local`
+- `--bbox-threshold` - Row count threshold for auto mode (default: 500000)
 - `--limit` - Maximum rows to extract
 - `--geography-column` - GEOGRAPHY column name (auto-detected if not set)
 - `--dry-run` - Show SQL without executing
@@ -48,6 +51,16 @@ gpio extract bigquery PROJECT.DATASET.TABLE output.parquet
 1. `--credentials-file`: Path to service account JSON
 2. `GOOGLE_APPLICATION_CREDENTIALS` environment variable
 3. `gcloud auth application-default` credentials
+
+**Bbox Filtering Modes:**
+
+The `--bbox-mode` option controls where spatial filtering occurs:
+
+- `auto` (default): Uses table row count to decide. Tables ≥ threshold use server-side, smaller tables use local
+- `server`: Always push filter to BigQuery using `ST_INTERSECTS()` - best for large tables
+- `local`: Always filter locally in DuckDB after fetch - best for small tables
+
+The `--bbox-threshold` sets the row count where `auto` switches to server-side filtering. Default is 500,000 rows. See the [User Guide](../guide/extract.md#bbox-filtering-mode-server-vs-local) for detailed tradeoff analysis.
 
 !!! warning "Limitations"
     **Cannot read BigQuery views or external tables** - this is a limitation of the BigQuery Storage Read API. BIGNUMERIC columns are not supported (exceeds DuckDB's precision).
