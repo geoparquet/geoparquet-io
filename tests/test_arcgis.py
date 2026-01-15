@@ -5,11 +5,10 @@ Tests use mocked HTTP responses to avoid network dependencies.
 Network tests are marked separately for optional integration testing.
 """
 
-import json
 import tempfile
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -18,7 +17,6 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from tests.conftest import safe_unlink
-
 
 # --- Mock Data Fixtures ---
 
@@ -346,6 +344,193 @@ class TestPythonAPI:
 
         assert isinstance(result, pa.Table)
         assert result.num_rows == 1
+
+
+class TestStreamingConversion:
+    """Tests for memory-efficient streaming conversion."""
+
+    @pytest.fixture
+    def output_file(self):
+        """Create temp output file path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_arcgis_stream_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        safe_unlink(tmp_path)
+
+    def test_geojson_page_to_table(self):
+        """Test converting a single page of GeoJSON features to Arrow table."""
+        from geoparquet_io.core.arcgis import _geojson_page_to_table
+
+        features = MOCK_FEATURES_PAGE["features"]
+        table = _geojson_page_to_table(features)
+
+        assert table is not None
+        assert table.num_rows == 3
+        assert "geometry" in table.column_names
+
+    def test_geojson_page_to_table_empty(self):
+        """Test empty features returns None."""
+        from geoparquet_io.core.arcgis import _geojson_page_to_table
+
+        result = _geojson_page_to_table([])
+        assert result is None
+
+    @patch("geoparquet_io.core.arcgis.fetch_all_features")
+    def test_stream_features_to_parquet_single_page(self, mock_fetch, output_file):
+        """Test streaming a single page to parquet."""
+        from geoparquet_io.core.arcgis import ArcGISLayerInfo, _stream_features_to_parquet
+
+        # Mock single page
+        mock_fetch.return_value = iter([MOCK_FEATURES_PAGE])
+
+        layer_info = ArcGISLayerInfo(
+            name="Test",
+            geometry_type="esriGeometryPoint",
+            spatial_reference={"wkid": 4326},
+            fields=[],
+            max_record_count=1000,
+            total_count=3,
+        )
+
+        total = _stream_features_to_parquet(
+            service_url="https://example.com/FeatureServer/0",
+            layer_info=layer_info,
+            output_path=output_file,
+        )
+
+        assert total == 3
+        assert Path(output_file).exists()
+
+        # Verify parquet content
+        table = pq.read_table(output_file)
+        assert table.num_rows == 3
+        assert "geometry" in table.column_names
+
+    @patch("geoparquet_io.core.arcgis.fetch_all_features")
+    def test_stream_features_to_parquet_multi_page(self, mock_fetch, output_file):
+        """Test streaming multiple pages to parquet."""
+        from geoparquet_io.core.arcgis import ArcGISLayerInfo, _stream_features_to_parquet
+
+        # Create two pages of features
+        page1 = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [-122.4, 37.8]},
+                    "properties": {"OBJECTID": 1, "name": "Point 1"},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [-122.5, 37.9]},
+                    "properties": {"OBJECTID": 2, "name": "Point 2"},
+                },
+            ],
+        }
+        page2 = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [-122.6, 38.0]},
+                    "properties": {"OBJECTID": 3, "name": "Point 3"},
+                },
+            ],
+        }
+
+        mock_fetch.return_value = iter([page1, page2])
+
+        layer_info = ArcGISLayerInfo(
+            name="Test",
+            geometry_type="esriGeometryPoint",
+            spatial_reference={"wkid": 4326},
+            fields=[],
+            max_record_count=2,
+            total_count=3,
+        )
+
+        total = _stream_features_to_parquet(
+            service_url="https://example.com/FeatureServer/0",
+            layer_info=layer_info,
+            output_path=output_file,
+        )
+
+        assert total == 3
+
+        # Verify all rows are present
+        table = pq.read_table(output_file)
+        assert table.num_rows == 3
+
+    @patch("geoparquet_io.core.arcgis.fetch_all_features")
+    def test_stream_features_handles_empty_pages(self, mock_fetch, output_file):
+        """Test streaming handles pages with no features."""
+        from geoparquet_io.core.arcgis import ArcGISLayerInfo, _stream_features_to_parquet
+
+        # First page has features, second is empty
+        page1 = MOCK_FEATURES_PAGE
+        page2 = {"type": "FeatureCollection", "features": []}
+
+        mock_fetch.return_value = iter([page1, page2])
+
+        layer_info = ArcGISLayerInfo(
+            name="Test",
+            geometry_type="esriGeometryPoint",
+            spatial_reference={"wkid": 4326},
+            fields=[],
+            max_record_count=1000,
+            total_count=3,
+        )
+
+        total = _stream_features_to_parquet(
+            service_url="https://example.com/FeatureServer/0",
+            layer_info=layer_info,
+            output_path=output_file,
+        )
+
+        assert total == 3  # Only features from page1
+
+    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
+    @patch("geoparquet_io.core.arcgis.get_layer_info")
+    @patch("geoparquet_io.core.arcgis.validate_arcgis_url")
+    def test_arcgis_to_table_cleans_temp_file(self, mock_validate, mock_layer_info, mock_stream):
+        """Test that temp file is cleaned up after conversion."""
+        import glob
+        import os
+
+        from geoparquet_io.core.arcgis import ArcGISLayerInfo, arcgis_to_table
+
+        mock_validate.return_value = ("https://example.com/FeatureServer/0", 0)
+        mock_layer_info.return_value = ArcGISLayerInfo(
+            name="Test",
+            geometry_type="esriGeometryPoint",
+            spatial_reference={"wkid": 4326},
+            fields=[],
+            max_record_count=1000,
+            total_count=3,
+        )
+
+        # Create a real temp file that stream would create
+        temp_dir = tempfile.gettempdir()
+
+        def mock_stream_impl(service_url, layer_info, output_path, **kwargs):
+            # Write a minimal parquet file
+            table = pa.table({"geometry": [b"test1", b"test2", b"test3"], "name": ["a", "b", "c"]})
+            pq.write_table(table, output_path)
+            return 3
+
+        mock_stream.side_effect = mock_stream_impl
+
+        # Count temp files before
+        temp_files_before = set(glob.glob(os.path.join(temp_dir, "arcgis_stream_*.parquet")))
+
+        # Run conversion
+        result = arcgis_to_table("https://example.com/FeatureServer/0")
+
+        # Count temp files after
+        temp_files_after = set(glob.glob(os.path.join(temp_dir, "arcgis_stream_*.parquet")))
+
+        # Should have same number (temp file cleaned up)
+        assert temp_files_before == temp_files_after
+        assert result.num_rows == 3
 
 
 @pytest.mark.network
