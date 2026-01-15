@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import json
 import time
-import urllib.parse
+from collections.abc import Generator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING
 
 import click
 import pyarrow as pa
@@ -78,10 +78,10 @@ def _get_http_client():
         import httpx
 
         return httpx.Client(timeout=60.0, follow_redirects=True)
-    except ImportError:
+    except ImportError as e:
         raise click.ClickException(
             "httpx is required for ArcGIS conversion. Install with: pip install httpx"
-        )
+        ) from e
 
 
 def _make_request(
@@ -119,14 +119,14 @@ def _make_request(
             if status == 401:
                 raise click.ClickException(
                     "Authentication required. Use --token or --username/--password."
-                )
+                ) from None
             elif status == 403:
                 raise click.ClickException(
                     "Access denied. Check your credentials and service permissions."
-                )
+                ) from None
             elif status == 404:
-                raise click.ClickException(f"Service not found (404). Check the URL: {url}")
-            raise click.ClickException(f"HTTP error {status}: {e}")
+                raise click.ClickException(f"Service not found (404). Check the URL: {url}") from None
+            raise click.ClickException(f"HTTP error {status}: {e}") from e
 
     raise click.ClickException(f"Request failed after {max_retries} attempts: {last_exception}")
 
@@ -229,7 +229,7 @@ def resolve_token(
             with open(auth.token_file) as f:
                 return f.read().strip()
         except OSError as e:
-            raise click.ClickException(f"Failed to read token file: {e}")
+            raise click.ClickException(f"Failed to read token file: {e}") from e
 
     # Priority 3: Username/password
     if auth.username and auth.password:
