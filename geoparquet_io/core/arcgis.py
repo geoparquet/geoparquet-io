@@ -8,13 +8,17 @@ endpoints (FeatureServer/MapServer) and convert them to GeoParquet format.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
+import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import click
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
     get_duckdb_connection,
@@ -510,24 +514,24 @@ def _extract_crs_from_spatial_reference(spatial_ref: dict) -> dict | None:
     return parse_crs_string_to_projjson("EPSG:4326")
 
 
-def _geojson_features_to_table(
+def _geojson_page_to_table(
     features: list[dict],
-    verbose: bool = False,
 ) -> pa.Table:
     """
-    Convert GeoJSON features to PyArrow Table with WKB geometry.
+    Convert a page of GeoJSON features to PyArrow Table with WKB geometry.
 
     Uses DuckDB's spatial extension for geometry conversion.
+    This function is designed to handle a single page (~2000 features)
+    to keep memory usage low.
 
     Args:
-        features: List of GeoJSON feature dicts
-        verbose: Whether to print debug output
+        features: List of GeoJSON feature dicts (typically one page)
 
     Returns:
         PyArrow Table with WKB geometry column
     """
     if not features:
-        raise click.ClickException("No features to convert")
+        return None
 
     # Create a temporary GeoJSON string for DuckDB to parse
     geojson_collection = json.dumps({
@@ -536,37 +540,93 @@ def _geojson_features_to_table(
     })
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    temp_file = tempfile.gettempdir() + f"/arcgis_page_{uuid.uuid4()}.geojson"
 
     try:
-        # Use DuckDB's ST_Read to parse GeoJSON and convert geometry to WKB
-        # Write to temp file because ST_Read expects a file path
-        import tempfile
-        import uuid
+        with open(temp_file, "w") as f:
+            f.write(geojson_collection)
 
-        temp_file = tempfile.gettempdir() + f"/arcgis_temp_{uuid.uuid4()}.geojson"
+        # Read GeoJSON and convert geometry to WKB
+        query = f"""
+            SELECT
+                ST_AsWKB(geom) as geometry,
+                * EXCLUDE (geom)
+            FROM ST_Read('{temp_file}')
+        """
 
-        try:
-            with open(temp_file, "w") as f:
-                f.write(geojson_collection)
-
-            # Read GeoJSON and convert geometry to WKB
-            query = f"""
-                SELECT
-                    ST_AsWKB(geom) as geometry,
-                    * EXCLUDE (geom)
-                FROM ST_Read('{temp_file}')
-            """
-
-            table = con.execute(query).fetch_arrow_table()
-            return table
-
-        finally:
-            import os
-            if os.path.exists(temp_file):
-                os.unlink(temp_file)
+        table = con.execute(query).fetch_arrow_table()
+        return table
 
     finally:
         con.close()
+        if os.path.exists(temp_file):
+            os.unlink(temp_file)
+
+
+def _stream_features_to_parquet(
+    service_url: str,
+    layer_info: ArcGISLayerInfo,
+    output_path: str,
+    where: str = "1=1",
+    token: str | None = None,
+    batch_size: int | None = None,
+    verbose: bool = False,
+) -> int:
+    """
+    Stream features from ArcGIS to a Parquet file page by page.
+
+    This is memory-efficient as it only keeps one page (~2000 features)
+    in memory at a time. The output is a raw parquet file without
+    Hilbert ordering or bbox column (those are applied in a second pass).
+
+    Args:
+        service_url: ArcGIS Feature Service URL
+        layer_info: Layer metadata
+        output_path: Path to write the parquet file
+        where: SQL WHERE clause filter
+        token: Optional authentication token
+        batch_size: Custom batch size for pagination
+        verbose: Whether to print debug output
+
+    Returns:
+        Number of features written
+    """
+    writer = None
+    total_rows = 0
+    page_count = 0
+
+    try:
+        for page in fetch_all_features(
+            service_url, layer_info, where, token, batch_size, verbose
+        ):
+            features = page.get("features", [])
+            if not features:
+                continue
+
+            # Convert this page to Arrow table
+            page_table = _geojson_page_to_table(features)
+            if page_table is None:
+                continue
+
+            page_count += 1
+
+            # Initialize writer with schema from first page
+            if writer is None:
+                writer = pq.ParquetWriter(output_path, page_table.schema)
+
+            # Write this page
+            writer.write_table(page_table)
+            total_rows += page_table.num_rows
+
+            # Free memory from this page
+            del page_table
+
+        debug(f"Streamed {total_rows} features in {page_count} pages to temp file")
+        return total_rows
+
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 def arcgis_to_table(
@@ -579,7 +639,12 @@ def arcgis_to_table(
     """
     Convert ArcGIS Feature Service to PyArrow Table.
 
-    Main function for converting ArcGIS services to in-memory Arrow tables.
+    Uses a memory-efficient two-pass approach:
+    1. Stream features page-by-page to a temp parquet file
+    2. Read the parquet file back as an Arrow table
+
+    This keeps memory usage low during download (only one page at a time),
+    while still producing a complete Arrow table for further processing.
 
     Args:
         service_url: ArcGIS Feature Service URL (with layer ID)
@@ -610,42 +675,55 @@ def arcgis_to_table(
         # Return empty table with geometry column
         return pa.table({"geometry": pa.array([], type=pa.binary())})
 
-    # Fetch all features (paginated)
-    all_features = []
-    for page in fetch_all_features(
-        service_url, layer_info, where, token, batch_size, verbose
-    ):
-        all_features.extend(page.get("features", []))
+    # Pass 1: Stream features to temp parquet file (memory-efficient)
+    temp_parquet = tempfile.gettempdir() + f"/arcgis_stream_{uuid.uuid4()}.parquet"
 
-    if not all_features:
-        raise click.ClickException("No features returned from service")
+    try:
+        progress("Streaming features to temp file...")
+        total_rows = _stream_features_to_parquet(
+            service_url=service_url,
+            layer_info=layer_info,
+            output_path=temp_parquet,
+            where=where,
+            token=token,
+            batch_size=batch_size,
+            verbose=verbose,
+        )
 
-    # Convert to Arrow table
-    progress("Converting to Arrow table...")
-    table = _geojson_features_to_table(all_features, verbose)
+        if total_rows == 0:
+            raise click.ClickException("No features returned from service")
 
-    # Add CRS to metadata
-    crs = _extract_crs_from_spatial_reference(layer_info.spatial_reference)
-    if crs:
-        geo_metadata = {
-            "version": "1.1.0",
-            "primary_column": "geometry",
-            "columns": {
-                "geometry": {
-                    "encoding": "WKB",
-                    "crs": crs,
-                    "geometry_types": [ARCGIS_GEOM_TYPES.get(layer_info.geometry_type, "Geometry")],
-                }
-            },
-        }
+        # Pass 2: Read temp parquet file back as Arrow table
+        progress("Reading temp file...")
+        table = pq.read_table(temp_parquet)
 
-        # Update table schema with geo metadata
-        existing_metadata = table.schema.metadata or {}
-        new_metadata = {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
-        table = table.replace_schema_metadata(new_metadata)
+        # Add CRS to metadata
+        crs = _extract_crs_from_spatial_reference(layer_info.spatial_reference)
+        if crs:
+            geo_metadata = {
+                "version": "1.1.0",
+                "primary_column": "geometry",
+                "columns": {
+                    "geometry": {
+                        "encoding": "WKB",
+                        "crs": crs,
+                        "geometry_types": [ARCGIS_GEOM_TYPES.get(layer_info.geometry_type, "Geometry")],
+                    }
+                },
+            }
 
-    success(f"Converted {table.num_rows} features")
-    return table
+            # Update table schema with geo metadata
+            existing_metadata = table.schema.metadata or {}
+            new_metadata = {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
+            table = table.replace_schema_metadata(new_metadata)
+
+        success(f"Converted {table.num_rows} features")
+        return table
+
+    finally:
+        # Clean up temp file
+        if os.path.exists(temp_parquet):
+            os.unlink(temp_parquet)
 
 
 def convert_arcgis_to_geoparquet(
