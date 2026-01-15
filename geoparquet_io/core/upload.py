@@ -1,10 +1,10 @@
 """Upload GeoParquet files to cloud object storage."""
 
-import asyncio
 import configparser
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import obstore as obs
@@ -219,23 +219,6 @@ def check_credentials(destination: str, profile: str | None = None) -> tuple[boo
         return True, ""
 
 
-async def _upload_file_with_progress(store, source: Path, target_key: str, **kwargs) -> None:
-    """Upload a single file and report results."""
-    file_size = source.stat().st_size
-    size_mb = file_size / (1024 * 1024)
-
-    print(f"⬆ Uploading {source.name} ({size_mb:.2f} MB) → {target_key}")
-
-    start_time = time.time()
-    await obs.put_async(
-        store, target_key, source, max_concurrency=kwargs.get("max_concurrency", 12)
-    )
-    elapsed = time.time() - start_time
-
-    speed_mbps = size_mb / elapsed if elapsed > 0 else 0
-    print(f"✓ Upload complete ({speed_mbps:.2f} MB/s)")
-
-
 def _print_single_file_dry_run(
     source: Path, destination: str, target_key: str, size_mb: float, profile: str | None
 ) -> None:
@@ -360,6 +343,88 @@ def _setup_store_and_kwargs(
     return store, kwargs
 
 
+def _upload_file_sync(store, source: Path, target_key: str, **kwargs) -> None:
+    """Upload a single file synchronously and report progress."""
+    file_size = source.stat().st_size
+    size_mb = file_size / (1024 * 1024)
+
+    print(f"⬆ Uploading {source.name} ({size_mb:.2f} MB) → {target_key}")
+
+    start_time = time.time()
+    obs.put(store, target_key, source, max_concurrency=kwargs.get("max_concurrency", 12))
+    elapsed = time.time() - start_time
+
+    speed_mbps = size_mb / elapsed if elapsed > 0 else 0
+    print(f"✓ Upload complete ({speed_mbps:.2f} MB/s)")
+
+
+def _upload_one_file(
+    store, file_path: Path, source: Path, prefix: str, **kwargs
+) -> tuple[Path, Exception | None]:
+    """Upload a single file and return result tuple for parallel processing."""
+    target_key = _build_target_key(file_path, source, prefix)
+    file_size = file_path.stat().st_size
+    size_mb = file_size / (1024 * 1024)
+
+    try:
+        print(f"⬆ Uploading {file_path.name} ({size_mb:.2f} MB) → {target_key}")
+        start_time = time.time()
+
+        obs.put(store, target_key, file_path, max_concurrency=kwargs.get("max_concurrency", 12))
+
+        elapsed = time.time() - start_time
+        speed_mbps = size_mb / elapsed if elapsed > 0 else 0
+
+        print(f"✓ {file_path.name} ({speed_mbps:.2f} MB/s)")
+        return file_path, None
+    except Exception as e:
+        print(f"✗ {file_path.name}: {e}")
+        return file_path, e
+
+
+def _upload_directory_sync(
+    store,
+    source: Path,
+    prefix: str,
+    files: list[Path],
+    max_files: int,
+    fail_fast: bool,
+    **kwargs,
+) -> None:
+    """Upload all files in a directory with parallel uploads using threads.
+
+    Args:
+        store: obstore ObjectStore instance
+        source: Source directory path
+        prefix: S3/GCS/Azure prefix for uploaded files
+        files: List of files to upload
+        max_files: Max number of concurrent file uploads
+        fail_fast: Stop on first error if True
+        **kwargs: Additional arguments passed to obs.put
+    """
+    total_size = sum(f.stat().st_size for f in files)
+    total_size_mb = total_size / (1024 * 1024)
+    print(f"Found {len(files)} file(s) to upload ({total_size_mb:.2f} MB total)")
+    print()
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_files) as executor:
+        futures = {
+            executor.submit(_upload_one_file, store, f, source, prefix, **kwargs): f for f in files
+        }
+
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            if fail_fast and result[1] is not None:
+                # Cancel remaining futures on first error
+                for f in futures:
+                    f.cancel()
+                break
+
+    _print_upload_summary(results, len(files))
+
+
 def _upload_single_file(
     source: Path,
     destination: str,
@@ -385,7 +450,7 @@ def _upload_single_file(
     store, kwargs = _setup_store_and_kwargs(
         bucket_url, profile, chunk_concurrency, chunk_size, s3_endpoint, s3_region, s3_use_ssl
     )
-    asyncio.run(_upload_file_with_progress(store, source, target_key, **kwargs))
+    _upload_file_sync(store, source, target_key, **kwargs)
 
 
 def _upload_directory(
@@ -424,16 +489,14 @@ def _upload_directory(
     store, kwargs = _setup_store_and_kwargs(
         bucket_url, profile, chunk_concurrency, chunk_size, s3_endpoint, s3_region, s3_use_ssl
     )
-    asyncio.run(
-        upload_directory_async(
-            store=store,
-            source=source,
-            prefix=prefix,
-            pattern=pattern,
-            max_files=max_files,
-            fail_fast=fail_fast,
-            **kwargs,
-        )
+    _upload_directory_sync(
+        store=store,
+        source=source,
+        prefix=prefix,
+        files=files,
+        max_files=max_files,
+        fail_fast=fail_fast,
+        **kwargs,
     )
 
 
@@ -520,65 +583,12 @@ def upload(
         )
 
 
-async def upload_file_async(
-    store, source: Path, target_key: str, **kwargs
-) -> tuple[Path, Exception | None]:
-    """Upload a single file asynchronously.
-
-    Returns:
-        Tuple of (source_path, error). Error is None on success.
-    """
-    file_size = source.stat().st_size
-    size_mb = file_size / (1024 * 1024)
-
-    try:
-        print(f"⬆ Uploading {source.name} ({size_mb:.2f} MB) → {target_key}")
-        start_time = time.time()
-
-        await obs.put_async(store, target_key, source, **kwargs)
-
-        elapsed = time.time() - start_time
-        speed_mbps = size_mb / elapsed if elapsed > 0 else 0
-
-        print(f"✓ {source.name} ({speed_mbps:.2f} MB/s)")
-        return source, None
-    except Exception as e:
-        print(f"✗ {source.name}: {e}")
-        return source, e
-
-
-def _find_files(source: Path, pattern: str | None) -> list[Path]:
-    """Find all files in directory matching pattern."""
-    files = list(source.rglob(pattern) if pattern else source.rglob("*"))
-    return [f for f in files if f.is_file()]
-
-
 def _build_target_key(file_path: Path, source: Path, prefix: str) -> str:
     """Build target key preserving directory structure."""
     rel_path = file_path.relative_to(source)
     if prefix:
         return f"{prefix.rstrip('/')}/{rel_path}"
     return str(rel_path)
-
-
-async def _upload_files_parallel(
-    store, files: list[Path], source: Path, prefix: str, max_files: int, fail_fast: bool, **kwargs
-):
-    """Upload files in parallel with semaphore."""
-    semaphore = asyncio.Semaphore(max_files)
-
-    async def upload_with_semaphore(file_path: Path):
-        async with semaphore:
-            target_key = _build_target_key(file_path, source, prefix)
-            return await upload_file_async(store, file_path, target_key, **kwargs)
-
-    if fail_fast:
-        results = await asyncio.gather(*[upload_with_semaphore(f) for f in files])
-    else:
-        results = await asyncio.gather(
-            *[upload_with_semaphore(f) for f in files], return_exceptions=False
-        )
-    return results
 
 
 def _print_upload_summary(results: list, total_files: int) -> None:
@@ -590,43 +600,6 @@ def _print_upload_summary(results: list, total_files: int) -> None:
     print(f"✓ {success_count}/{total_files} file(s) uploaded successfully")
     if errors:
         print(f"✗ {len(errors)} file(s) failed")
-
-
-async def upload_directory_async(
-    store,
-    source: Path,
-    prefix: str,
-    pattern: str | None,
-    max_files: int,
-    fail_fast: bool,
-    **kwargs,
-):
-    """Upload all files in a directory with parallel uploads.
-
-    Args:
-        store: obstore ObjectStore instance
-        source: Source directory path
-        prefix: S3/GCS/Azure prefix for uploaded files
-        pattern: Optional glob pattern (e.g., "*.parquet", "**/*.json")
-        max_files: Max number of concurrent file uploads
-        fail_fast: Stop on first error if True
-        **kwargs: Additional arguments passed to obs.put_async
-    """
-    files = _find_files(source, pattern)
-
-    if not files:
-        print(f"No files found in {source}")
-        return
-
-    total_size = sum(f.stat().st_size for f in files)
-    total_size_mb = total_size / (1024 * 1024)
-    print(f"Found {len(files)} file(s) to upload ({total_size_mb:.2f} MB total)")
-    print()
-
-    results = await _upload_files_parallel(
-        store, files, source, prefix, max_files, fail_fast, **kwargs
-    )
-    _print_upload_summary(results, len(files))
 
 
 def _get_target_key(source: Path, prefix: str, is_dir_destination: bool) -> str:

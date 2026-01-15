@@ -433,3 +433,67 @@ class TestUploadCLIS3Options:
 
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
+
+
+class TestUploadEventLoopCompatibility:
+    """Test suite for event loop compatibility (issue #157)."""
+
+    def test_upload_from_running_event_loop(self, places_test_file):
+        """Test that upload works when called from within a running event loop.
+
+        This verifies the fix for issue #157: asyncio.run() cannot be called
+        from a running event loop.
+        """
+        import asyncio
+
+        async def call_upload_from_async():
+            # This should NOT raise RuntimeError about asyncio.run()
+            runner = CliRunner()
+            with patch.object(main_module, "check_credentials", return_value=(True, "")):
+                result = runner.invoke(
+                    cli,
+                    [
+                        "publish",
+                        "upload",
+                        places_test_file,
+                        "s3://bucket/test.parquet",
+                        "--dry-run",
+                    ],
+                )
+            return result
+
+        # Run the test from within an event loop
+        result = asyncio.run(call_upload_from_async())
+        assert result.exit_code == 0
+        assert "DRY RUN MODE" in result.output
+
+    def test_directory_upload_from_running_event_loop(self, temp_output_dir):
+        """Test that directory upload works when called from within a running event loop."""
+        import asyncio
+        from pathlib import Path
+
+        # Create some test files
+        test_dir = Path(temp_output_dir) / "test_files"
+        test_dir.mkdir()
+        for i in range(3):
+            (test_dir / f"file_{i}.parquet").write_text(f"test content {i}")
+
+        async def call_upload_from_async():
+            runner = CliRunner()
+            with patch.object(main_module, "check_credentials", return_value=(True, "")):
+                result = runner.invoke(
+                    cli,
+                    [
+                        "publish",
+                        "upload",
+                        str(test_dir),
+                        "s3://bucket/dataset/",
+                        "--dry-run",
+                    ],
+                )
+            return result
+
+        result = asyncio.run(call_upload_from_async())
+        assert result.exit_code == 0
+        assert "DRY RUN MODE" in result.output
+        assert "Would upload 3 file(s)" in result.output
