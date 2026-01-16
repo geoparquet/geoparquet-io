@@ -85,6 +85,17 @@ gpio.read('data.parquet') \
 
 The Python API keeps data in memory as Arrow tables, providing up to 5x better performance than CLI operations. See the [Python API documentation](https://geoparquet.org/geoparquet-io/api/python-api/) for full details.
 
+## Claude Code Integration
+
+Use gpio with [Claude Code](https://claude.ai/code) for AI-assisted spatial data workflows.
+
+Install the skill from `skills/geoparquet/` or download it from:
+```
+https://github.com/geoparquet/geoparquet-io/tree/main/skills/geoparquet
+```
+
+The skill teaches Claude how to help you convert spatial data to optimized GeoParquet, validate files, recommend partitioning strategies, and publish to cloud storage.
+
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](docs/contributing.md) for development setup, coding standards, and how to submit changes.
