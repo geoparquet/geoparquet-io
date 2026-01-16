@@ -435,6 +435,288 @@ gpio extract s3://my-bucket/data.parquet output.parquet \
   --bbox 0,0,10,10
 ```
 
+## Extracting from BigQuery
+
+Extract data directly from BigQuery tables to GeoParquet. BigQuery `GEOGRAPHY` columns are automatically converted to GeoParquet geometry with spherical edges.
+
+### Basic Usage
+
+=== "CLI"
+
+    ```bash
+    # Extract entire table
+    gpio extract bigquery myproject.geodata.buildings output.parquet
+
+    # Extract with row limit
+    gpio extract bigquery myproject.geodata.buildings output.parquet --limit 10000
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Read from BigQuery
+    table = gpio.Table.from_bigquery('myproject.geodata.buildings')
+    table.write('output.parquet')
+
+    # With limit
+    table = gpio.Table.from_bigquery('myproject.geodata.buildings', limit=10000)
+    ```
+
+### Filtering Data
+
+Apply filters that are pushed down to BigQuery for efficient querying:
+
+=== "CLI"
+
+    ```bash
+    # WHERE filter (BigQuery SQL syntax)
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --where "area_sqm > 1000 AND building_type = 'commercial'"
+
+    # Select specific columns
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --include-cols "id,name,geography,area_sqm"
+
+    # Combined filters
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --include-cols "id,name,geography" \
+      --where "updated_date > '2024-01-01'" \
+      --limit 50000
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # With filtering
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.buildings',
+        where="area_sqm > 1000",
+        columns=['id', 'name', 'geography', 'area_sqm'],
+        limit=50000
+    )
+    ```
+
+### Spatial Filtering with Bounding Box
+
+Filter data spatially using a bounding box:
+
+=== "CLI"
+
+    ```bash
+    # Filter to San Francisco area
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Filter to San Francisco area
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.buildings',
+        bbox="-122.52,37.70,-122.35,37.82"
+    )
+    ```
+
+!!! note "Bbox format differences"
+    `Table.from_bigquery()` accepts `bbox` as a string (e.g., `"-122.52,37.70,-122.35,37.82"`), while `Table.extract()` expects a tuple (e.g., `(-122.52, 37.70, -122.35, 37.82)`).
+
+### Bbox Filtering Mode: Server vs Local
+
+When you specify a `--bbox`, the spatial filter can be applied in two places:
+
+1. **Server-side (BigQuery)**: The filter is pushed to BigQuery using `ST_INTERSECTS()`, so only matching rows are transferred
+2. **Local (DuckDB)**: All data is fetched from BigQuery, then filtered locally in DuckDB
+
+The `--bbox-mode` option controls this behavior:
+
+| Mode | Description |
+|------|-------------|
+| `auto` | (Default) Automatically chooses based on table size |
+| `server` | Always push spatial filter to BigQuery |
+| `local` | Always filter locally in DuckDB |
+
+#### Understanding the Tradeoffs
+
+**Server-side filtering** is better for large tables because:
+
+- Only matching rows are transferred, reducing data movement
+- BigQuery's spatial indexing can accelerate the query
+- Less memory usage locally
+
+**Local filtering** is better for smaller tables because:
+
+- Avoids the overhead of BigQuery's spatial function execution
+- Uses DuckDB's efficient geometry routines once data is local
+- More predictable performance for small datasets
+
+The `--bbox-threshold` option sets the row count where `auto` mode switches from local to server filtering (default: 500,000 rows).
+
+#### How Auto Mode Works
+
+In `auto` mode, gpio checks the table's row count from BigQuery metadata:
+
+- Tables **below** the threshold use local filtering
+- Tables **at or above** the threshold use server-side filtering
+
+This heuristic balances the overhead of spatial function execution against data transfer costs.
+
+#### Examples
+
+=== "CLI"
+
+    ```bash
+    # Force server-side filtering (good for very large tables)
+    gpio extract bigquery myproject.geodata.global_buildings output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82 \
+      --bbox-mode server
+
+    # Force local filtering (good for small tables with complex geometries)
+    gpio extract bigquery myproject.geodata.city_parks output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82 \
+      --bbox-mode local
+
+    # Adjust the threshold for auto mode (use server for tables > 100K rows)
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82 \
+      --bbox-threshold 100000
+
+    # Higher threshold (use server only for very large tables > 1M rows)
+    gpio extract bigquery myproject.geodata.buildings output.parquet \
+      --bbox -122.52,37.70,-122.35,37.82 \
+      --bbox-threshold 1000000
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Force server-side filtering
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.global_buildings',
+        bbox="-122.52,37.70,-122.35,37.82",
+        bbox_mode="server"
+    )
+
+    # Force local filtering
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.city_parks',
+        bbox="-122.52,37.70,-122.35,37.82",
+        bbox_mode="local"
+    )
+
+    # Custom threshold
+    table = gpio.Table.from_bigquery(
+        'myproject.geodata.buildings',
+        bbox="-122.52,37.70,-122.35,37.82",
+        bbox_threshold=100000
+    )
+    ```
+
+#### When to Change the Defaults
+
+Consider using `--bbox-mode server` when:
+
+- Your table has millions of rows
+- You're filtering to a small geographic area (high selectivity)
+- Network bandwidth is limited
+
+Consider using `--bbox-mode local` when:
+
+- Your table has fewer than 500K rows
+- You're filtering to a large area (low selectivity)
+- The table contains complex geometries that are slow to test server-side
+
+Consider adjusting `--bbox-threshold` when:
+
+- You consistently work with tables of a certain size
+- You've benchmarked and found a different crossover point for your data
+- Your BigQuery pricing tier or network conditions differ from typical
+
+### Authentication
+
+The command uses Google Cloud credentials in this order:
+
+1. **--credentials-file**: Explicit service account JSON file
+2. **GOOGLE_APPLICATION_CREDENTIALS**: Environment variable pointing to JSON file
+3. **gcloud auth**: Application default credentials from `gcloud auth application-default login`
+
+```bash
+# Using service account file
+gpio extract bigquery myproject.geodata.table output.parquet \
+  --credentials-file /path/to/service-account.json
+
+# Using environment variable
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+gpio extract bigquery myproject.geodata.table output.parquet
+
+# Using gcloud auth (for development)
+gcloud auth application-default login
+gpio extract bigquery myproject.geodata.table output.parquet
+```
+
+### GEOGRAPHY Column Handling
+
+BigQuery `GEOGRAPHY` columns are automatically converted to GeoParquet geometry:
+
+- GEOGRAPHY data is returned in WGS84 (EPSG:4326)
+- The geometry column is auto-detected by common names (`geography`, `geom`, `geometry`)
+- Use `--geography-column` to specify explicitly if needed
+
+```bash
+# Explicit geography column
+gpio extract bigquery myproject.geodata.parcels output.parquet \
+  --geography-column "parcel_boundary"
+```
+
+### Spherical Edges
+
+BigQuery GEOGRAPHY uses **spherical geodesic edges** (S2-based), meaning lines between points follow the shortest path on a sphere rather than planar straight lines. This is automatically reflected in the output GeoParquet metadata:
+
+```json
+{
+  "columns": {
+    "geometry": {
+      "edges": "spherical",
+      "orientation": "counterclockwise"
+    }
+  }
+}
+```
+
+This ensures downstream tools correctly interpret the geometry edges. Most GIS tools assume planar edges by default, so the `edges: "spherical"` metadata is important for accurate analysis.
+
+### Limitations
+
+!!! warning "Important Limitations"
+
+    **Views and External Tables Not Supported**
+
+    The BigQuery Storage Read API cannot read from:
+
+    - Logical views
+    - Materialized views
+    - External tables (e.g., tables backed by Cloud Storage)
+
+    You must extract from native BigQuery tables. If you need data from a view,
+    create a table from the view first:
+
+    ```sql
+    CREATE TABLE mydataset.mytable AS SELECT * FROM mydataset.myview;
+    ```
+
+Other limitations:
+
+- **BIGNUMERIC columns**: Not supported (76-digit precision exceeds DuckDB's 38-digit limit)
+- **Large results**: Consider using `--limit` and `--where` to reduce data transfer
+
 ## Working with Partitioned Input Data
 
 The `extract` command can read from partitioned GeoParquet datasets, including directories containing multiple parquet files and hive-style partitions.

@@ -409,6 +409,99 @@ class Table:
 
         return find_geometry_column_from_table(self._table)
 
+    @classmethod
+    def from_bigquery(
+        cls,
+        table_id: str,
+        *,
+        project: str | None = None,
+        credentials_file: str | None = None,
+        where: str | None = None,
+        bbox: str | None = None,
+        bbox_mode: str = "auto",
+        bbox_threshold: int = 500000,
+        limit: int | None = None,
+        columns: list[str] | None = None,
+        exclude_columns: list[str] | None = None,
+    ) -> Table:
+        """
+        Read data from a BigQuery table.
+
+        Uses DuckDB's BigQuery extension with the Storage Read API for
+        efficient Arrow-based scanning with filter pushdown.
+
+        BigQuery GEOGRAPHY columns are automatically converted to GeoParquet
+        geometry with spherical edges (edges: "spherical" in metadata).
+
+        Args:
+            table_id: Fully qualified BigQuery table ID (project.dataset.table)
+            project: GCP project ID (overrides project in table_id if set)
+            credentials_file: Path to service account JSON file
+            where: SQL WHERE clause for filtering (BigQuery SQL syntax)
+            bbox: Bounding box for spatial filter as "minx,miny,maxx,maxy"
+            bbox_mode: Filtering mode - "auto" (default), "server", or "local"
+            bbox_threshold: Row count threshold for auto mode (default: 500000)
+            limit: Maximum rows to extract
+            columns: Columns to include (None = all)
+            exclude_columns: Columns to exclude
+
+        Returns:
+            Table for chaining operations
+
+        Raises:
+            FileNotFoundError: If credentials_file doesn't exist
+            RuntimeError: If BigQuery query fails
+
+        Note:
+            **Cannot read BigQuery views or external tables** - this is a
+            limitation of the BigQuery Storage Read API.
+
+        Example:
+            >>> import geoparquet_io as gpio
+            >>> table = gpio.Table.from_bigquery('myproject.geodata.buildings')
+            >>> table.write('output.parquet')
+
+            >>> # With filtering
+            >>> table = gpio.Table.from_bigquery(
+            ...     'myproject.geodata.buildings',
+            ...     where="area_sqm > 1000",
+            ...     columns=['id', 'name', 'geography'],
+            ...     limit=10000
+            ... )
+        """
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        # Convert columns list to comma-separated string for the core function
+        include_cols = ",".join(columns) if columns else None
+        exclude_cols = ",".join(exclude_columns) if exclude_columns else None
+
+        # Get PyArrow table (don't write to file)
+        arrow_table = extract_bigquery(
+            table_id=table_id,
+            output_parquet=None,  # Return table instead of writing
+            project=project,
+            credentials_file=credentials_file,
+            where=where,
+            bbox=bbox,
+            bbox_mode=bbox_mode,
+            bbox_threshold=bbox_threshold,
+            limit=limit,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
+            verbose=False,
+        )
+
+        if arrow_table is None:
+            raise RuntimeError(
+                f"Failed to read from BigQuery table: {table_id}. "
+                "Possible causes: (1) Authentication/credentials issue - verify your service "
+                "account has BigQuery Data Viewer role or check gcloud auth; "
+                "(2) Table not found - verify the table_id format (project.dataset.table); "
+                "(3) Views or external tables are not supported by the BigQuery Storage Read API."
+            )
+
+        return cls(arrow_table)
+
     def _format_crs_display(self, crs: dict | str | None) -> str:
         """Format CRS for human-readable display."""
         if crs is None:
