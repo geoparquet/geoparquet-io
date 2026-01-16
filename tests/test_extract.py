@@ -877,7 +877,16 @@ class TestExtractCLI:
         from geoparquet_io.cli.main import extract as extract_cmd
 
         runner = CliRunner()
+
+        # Test group help
         result = runner.invoke(extract_cmd, ["--help"])
+        assert result.exit_code == 0
+        assert "Extract data from files and services" in result.output
+        assert "file" in result.output
+        assert "arcgis" in result.output
+
+        # Test file subcommand help for specific options
+        result = runner.invoke(extract_cmd, ["file", "--help"])
         assert result.exit_code == 0
         assert "Extract columns and rows" in result.output
         assert "--include-cols" in result.output
