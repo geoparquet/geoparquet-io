@@ -430,6 +430,63 @@ def convert_to_geojson(
             temp_input.unlink()
 
 
+def _table_to_temp_parquet_and_convert(
+    table: pa.Table,
+    output_path: str,
+    writer_func,
+    prefix: str,
+    **writer_kwargs,
+) -> str:
+    """
+    Helper function to convert PyArrow Table to a format via temp parquet file.
+
+    Eliminates repetitive temp file handling across all conversion functions.
+
+    Args:
+        table: Input PyArrow Table
+        output_path: Output file path
+        writer_func: Writer function from format_writers module
+        prefix: Prefix for temp file name
+        **writer_kwargs: Keyword arguments to pass to writer function
+
+    Returns:
+        Output path
+
+    Raises:
+        TypeError: If table is not a PyArrow Table
+    """
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    if not isinstance(table, pa.Table):
+        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
+
+    # Write table to temp parquet file for processing
+    temp_dir = Path(tempfile.gettempdir())
+    temp_input = temp_dir / f"gpio_{prefix}_{uuid.uuid4()}.parquet"
+
+    try:
+        import pyarrow.parquet as pq
+
+        pq.write_table(table, str(temp_input))
+
+        # Call writer function
+        writer_func(
+            input_path=str(temp_input),
+            output_path=output_path,
+            verbose=False,
+            **writer_kwargs,
+        )
+
+        return output_path
+
+    finally:
+        # Clean up temp file
+        if temp_input.exists():
+            temp_input.unlink()
+
+
 def convert_to_geopackage(
     table: pa.Table,
     output_path: str,
@@ -452,40 +509,17 @@ def convert_to_geopackage(
     Returns:
         Output path
     """
-    import tempfile
-    import uuid
-    from pathlib import Path
-
     from geoparquet_io.core.format_writers import write_geopackage
 
-    if not isinstance(table, pa.Table):
-        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
-
-    # Write table to temp parquet file for processing
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_geopackage_{uuid.uuid4()}.parquet"
-
-    try:
-        import pyarrow.parquet as pq
-
-        pq.write_table(table, str(temp_input))
-
-        # Call core function
-        write_geopackage(
-            input_path=str(temp_input),
-            output_path=output_path,
-            overwrite=overwrite,
-            layer_name=layer_name,
-            verbose=False,
-            profile=profile,
-        )
-
-        return output_path
-
-    finally:
-        # Clean up temp file
-        if temp_input.exists():
-            temp_input.unlink()
+    return _table_to_temp_parquet_and_convert(
+        table,
+        output_path,
+        write_geopackage,
+        "geopackage",
+        overwrite=overwrite,
+        layer_name=layer_name,
+        profile=profile,
+    )
 
 
 def convert_to_flatgeobuf(
@@ -506,38 +540,15 @@ def convert_to_flatgeobuf(
     Returns:
         Output path
     """
-    import tempfile
-    import uuid
-    from pathlib import Path
-
     from geoparquet_io.core.format_writers import write_flatgeobuf
 
-    if not isinstance(table, pa.Table):
-        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
-
-    # Write table to temp parquet file for processing
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_flatgeobuf_{uuid.uuid4()}.parquet"
-
-    try:
-        import pyarrow.parquet as pq
-
-        pq.write_table(table, str(temp_input))
-
-        # Call core function
-        write_flatgeobuf(
-            input_path=str(temp_input),
-            output_path=output_path,
-            verbose=False,
-            profile=profile,
-        )
-
-        return output_path
-
-    finally:
-        # Clean up temp file
-        if temp_input.exists():
-            temp_input.unlink()
+    return _table_to_temp_parquet_and_convert(
+        table,
+        output_path,
+        write_flatgeobuf,
+        "flatgeobuf",
+        profile=profile,
+    )
 
 
 def convert_to_csv(
@@ -563,40 +574,17 @@ def convert_to_csv(
     Returns:
         Output path
     """
-    import tempfile
-    import uuid
-    from pathlib import Path
-
     from geoparquet_io.core.format_writers import write_csv
 
-    if not isinstance(table, pa.Table):
-        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
-
-    # Write table to temp parquet file for processing
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_csv_{uuid.uuid4()}.parquet"
-
-    try:
-        import pyarrow.parquet as pq
-
-        pq.write_table(table, str(temp_input))
-
-        # Call core function
-        write_csv(
-            input_path=str(temp_input),
-            output_path=output_path,
-            include_wkt=include_wkt,
-            include_bbox=include_bbox,
-            verbose=False,
-            profile=profile,
-        )
-
-        return output_path
-
-    finally:
-        # Clean up temp file
-        if temp_input.exists():
-            temp_input.unlink()
+    return _table_to_temp_parquet_and_convert(
+        table,
+        output_path,
+        write_csv,
+        "csv",
+        include_wkt=include_wkt,
+        include_bbox=include_bbox,
+        profile=profile,
+    )
 
 
 def convert_to_shapefile(
@@ -625,37 +613,14 @@ def convert_to_shapefile(
     Returns:
         Output path
     """
-    import tempfile
-    import uuid
-    from pathlib import Path
-
     from geoparquet_io.core.format_writers import write_shapefile
 
-    if not isinstance(table, pa.Table):
-        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
-
-    # Write table to temp parquet file for processing
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_shapefile_{uuid.uuid4()}.parquet"
-
-    try:
-        import pyarrow.parquet as pq
-
-        pq.write_table(table, str(temp_input))
-
-        # Call core function
-        write_shapefile(
-            input_path=str(temp_input),
-            output_path=output_path,
-            overwrite=overwrite,
-            encoding=encoding,
-            verbose=False,
-            profile=profile,
-        )
-
-        return output_path
-
-    finally:
-        # Clean up temp file
-        if temp_input.exists():
-            temp_input.unlink()
+    return _table_to_temp_parquet_and_convert(
+        table,
+        output_path,
+        write_shapefile,
+        "shapefile",
+        overwrite=overwrite,
+        encoding=encoding,
+        profile=profile,
+    )

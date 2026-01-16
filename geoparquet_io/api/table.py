@@ -605,6 +605,8 @@ class Table:
         precision: int = 7,
         write_bbox: bool = False,
         id_field: str | None = None,
+        pretty: bool = False,
+        keep_crs: bool = False,
     ) -> Path:
         """
         Write the table to any format (GeoParquet, GeoPackage, FlatGeobuf, CSV, Shapefile, GeoJSON).
@@ -630,6 +632,8 @@ class Table:
             precision: Coordinate precision for GeoJSON (default: 7)
             write_bbox: Include bbox property for GeoJSON features (default: False)
             id_field: Field to use as feature 'id' for GeoJSON
+            pretty: Pretty-print GeoJSON output (default: False)
+            keep_crs: Keep original CRS for GeoJSON instead of WGS84 (default: False)
 
         Returns:
             Path to written file (local temp path if uploaded to cloud)
@@ -637,6 +641,7 @@ class Table:
         Examples:
             >>> table.write('output.parquet')              # GeoParquet (auto-detect)
             >>> table.write('output.gpkg')                 # GeoPackage (auto-detect)
+            >>> table.write('output.geojson')              # GeoJSON (auto-detect)
             >>> table.write('s3://bucket/output.fgb')      # FlatGeobuf to S3
             >>> table.write('output.dat', format='csv')    # Explicit format
         """
@@ -669,6 +674,8 @@ class Table:
             precision=precision,
             write_bbox=write_bbox,
             id_field=id_field,
+            pretty=pretty,
+            keep_crs=keep_crs,
         )
 
     @staticmethod
@@ -793,14 +800,16 @@ class Table:
                     profile=profile,
                 )
             elif format == "geojson":
-                from geoparquet_io.core.geojson_stream import convert_to_geojson
+                from geoparquet_io.core.format_writers import write_geojson
 
-                convert_to_geojson(
+                write_geojson(
                     str(temp_parquet),
                     str(output_path),
                     precision=format_options.get("precision", 7),
                     write_bbox=format_options.get("write_bbox", False),
                     id_field=format_options.get("id_field"),
+                    pretty=format_options.get("pretty", False),
+                    keep_crs=format_options.get("keep_crs", False),
                     verbose=False,
                     profile=profile,
                 )
