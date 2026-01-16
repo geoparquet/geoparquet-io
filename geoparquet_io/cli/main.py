@@ -4783,6 +4783,171 @@ def raster_convert(
         raise click.ClickException(str(e)) from e
 
 
+@raster.command(name="convert-imageserver", cls=SingleFileCommand)
+@click.argument("service_url")
+@click.argument("output_parquet")
+@click.option(
+    "--token",
+    help="ArcGIS authentication token",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(exists=True),
+    help="Path to file containing authentication token",
+)
+@click.option(
+    "--username",
+    help="ArcGIS Online/Enterprise username (requires --password)",
+)
+@click.option(
+    "--password",
+    help="ArcGIS Online/Enterprise password (requires --username)",
+)
+@click.option(
+    "--portal-url",
+    help="Enterprise portal URL for token generation (default: ArcGIS Online)",
+)
+@click.option(
+    "--bbox",
+    help="Bounding box filter: xmin,ymin,xmax,ymax in WGS84",
+)
+@click.option(
+    "--block-size",
+    type=click.Choice(["256", "512"]),
+    default="256",
+    help="Block/tile size in pixels (default: 256)",
+)
+@click.option(
+    "--block-compression",
+    type=click.Choice(["gzip", "none"]),
+    default="gzip",
+    help="Compression for pixel data within blocks (default: gzip)",
+)
+@click.option(
+    "--resolution",
+    type=click.IntRange(0, 26),
+    default=None,
+    help="Target QUADBIN pixel resolution (auto-detect if not specified)",
+)
+@click.option(
+    "--no-skip-empty",
+    is_flag=True,
+    help="Include blocks containing only nodata values (default: skip them)",
+)
+@click.option("--no-stats", is_flag=True, help="Skip calculating band statistics")
+@compression_options
+@overwrite_option
+@verbose_option
+def raster_convert_imageserver(
+    service_url,
+    output_parquet,
+    token,
+    token_file,
+    username,
+    password,
+    portal_url,
+    bbox,
+    block_size,
+    block_compression,
+    resolution,
+    no_skip_empty,
+    no_stats,
+    compression,
+    compression_level,
+    overwrite,
+    verbose,
+):
+    """Convert an ArcGIS ImageServer to raquet parquet format.
+
+    Downloads raster tiles from an ArcGIS ImageServer REST service,
+    reprojects to Web Mercator (EPSG:3857), and stores as a raquet parquet file
+    with QUADBIN spatial indexing.
+
+    \b
+    Examples:
+      gpio raster convert-imageserver \\
+        "https://server.com/arcgis/rest/services/Imagery/ImageServer" \\
+        output.parquet
+
+      gpio raster convert-imageserver \\
+        "https://server.com/arcgis/rest/services/Imagery/ImageServer" \\
+        output.parquet --bbox "-122.5,37.5,-122.0,38.0"
+
+      gpio raster convert-imageserver \\
+        "https://server.com/arcgis/rest/services/Imagery/ImageServer" \\
+        output.parquet --token YOUR_TOKEN --resolution 15
+    """
+    from pathlib import Path as PathLib
+
+    from geoparquet_io.core.arcgis import ArcGISAuth, resolve_token
+    from geoparquet_io.core.common import validate_output_path
+    from geoparquet_io.core.logging_config import success
+    from geoparquet_io.core.raquet import imageserver_to_raquet
+
+    configure_verbose(verbose)
+
+    # Validate authentication options
+    if username and not password:
+        raise click.ClickException("--password is required when using --username")
+    if password and not username:
+        raise click.ClickException("--username is required when using --password")
+
+    # Check if output exists and handle overwrite
+    output_path = PathLib(output_parquet)
+    if output_path.exists() and not overwrite:
+        raise click.ClickException(
+            f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+        )
+
+    validate_output_path(output_parquet)
+
+    # Resolve authentication token
+    auth = ArcGISAuth(
+        token=token,
+        token_file=token_file,
+        username=username,
+        password=password,
+        portal_url=portal_url,
+    )
+    resolved_token = resolve_token(auth, service_url, verbose)
+
+    # Parse bbox if provided
+    bbox_tuple = None
+    if bbox:
+        try:
+            parts = [float(x.strip()) for x in bbox.split(",")]
+            if len(parts) != 4:
+                raise ValueError("Expected 4 values")
+            bbox_tuple = tuple(parts)
+        except ValueError as e:
+            raise click.ClickException(
+                f"Invalid bbox format: {bbox}\nExpected: xmin,ymin,xmax,ymax (e.g., -122.5,37.5,-122.0,38.0)"
+            ) from e
+
+    block_comp = None if block_compression == "none" else block_compression
+
+    try:
+        result = imageserver_to_raquet(
+            service_url,
+            output_parquet,
+            token=resolved_token,
+            bbox=bbox_tuple,
+            block_size=int(block_size),
+            compression=block_comp,
+            parquet_compression=compression or "ZSTD",
+            target_resolution=resolution,
+            skip_empty_blocks=not no_skip_empty,
+            calculate_stats=not no_stats,
+            verbose=verbose,
+        )
+
+        success(f"Converted to raquet: {result['num_blocks']} blocks, {result['num_bands']} bands")
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
 @raster.command(name="export", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_geotiff")

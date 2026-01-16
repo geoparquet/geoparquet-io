@@ -405,6 +405,94 @@ class TestRasterPythonAPI:
         assert result["width"] > 0
 
 
+class TestImageServerMetadata:
+    """Tests for ImageServer metadata functions."""
+
+    def test_get_crs_from_spatial_reference_wkid(self):
+        """Test CRS extraction with WKID."""
+        from geoparquet_io.core.raquet import _get_crs_from_spatial_reference
+
+        spatial_ref = {"wkid": 3857}
+        assert _get_crs_from_spatial_reference(spatial_ref) == "EPSG:3857"
+
+    def test_get_crs_from_spatial_reference_web_mercator_variant(self):
+        """Test CRS extraction with Web Mercator variant WKID."""
+        from geoparquet_io.core.raquet import _get_crs_from_spatial_reference
+
+        spatial_ref = {"wkid": 102100}
+        assert _get_crs_from_spatial_reference(spatial_ref) == "EPSG:3857"
+
+    def test_get_crs_from_spatial_reference_wkt(self):
+        """Test CRS extraction with WKT."""
+        from geoparquet_io.core.raquet import _get_crs_from_spatial_reference
+
+        wkt = 'PROJCS["UTM_Zone_15",GEOGCS["GRS80"]]'
+        spatial_ref = {"wkt": wkt}
+        assert _get_crs_from_spatial_reference(spatial_ref) == wkt
+
+    def test_get_crs_from_spatial_reference_default(self):
+        """Test CRS extraction defaults to WGS84."""
+        from geoparquet_io.core.raquet import _get_crs_from_spatial_reference
+
+        spatial_ref = {}
+        assert _get_crs_from_spatial_reference(spatial_ref) == "EPSG:4326"
+
+
+class TestImageServerCLI:
+    """Tests for ImageServer CLI commands."""
+
+    def test_convert_imageserver_help(self, runner):
+        """Test that convert-imageserver shows help."""
+        result = runner.invoke(cli, ["raster", "convert-imageserver", "--help"])
+
+        assert result.exit_code == 0
+        assert "ArcGIS ImageServer" in result.output
+        assert "--token" in result.output
+        assert "--bbox" in result.output
+
+    def test_convert_imageserver_missing_args(self, runner):
+        """Test that convert-imageserver requires arguments."""
+        result = runner.invoke(cli, ["raster", "convert-imageserver"])
+
+        assert result.exit_code != 0
+        assert "Missing argument" in result.output
+
+    def test_convert_imageserver_invalid_bbox(self, runner, temp_output_parquet):
+        """Test that invalid bbox is rejected."""
+        result = runner.invoke(
+            cli,
+            [
+                "raster",
+                "convert-imageserver",
+                "https://example.com/ImageServer",
+                temp_output_parquet,
+                "--bbox",
+                "invalid",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "Invalid bbox format" in result.output
+
+
+class TestImageServerPythonAPI:
+    """Tests for ImageServer Python API."""
+
+    def test_convert_imageserver_function_exists(self):
+        """Test that convert_imageserver function is exported."""
+        from geoparquet_io.api import raster
+
+        assert hasattr(raster, "convert_imageserver")
+        assert callable(raster.convert_imageserver)
+
+    def test_imageserver_to_table_function_exists(self):
+        """Test that imageserver_to_table function is exported."""
+        from geoparquet_io.api import raster
+
+        assert hasattr(raster, "imageserver_to_table")
+        assert callable(raster.imageserver_to_table)
+
+
 class TestExampleRaquet:
     """Tests using the example raquet file from the raquet repo."""
 
@@ -423,3 +511,26 @@ class TestExampleRaquet:
         metadata = read_raquet_metadata(example_path)
         assert metadata is not None
         assert metadata.version is not None
+
+
+@pytest.mark.network
+class TestImageServerNetwork:
+    """Network tests for ImageServer (skipped by default)."""
+
+    USDA_IMAGESERVER = (
+        "https://pdi.scinet.usda.gov/image/rest/services/Calcium_subsurface_Final/ImageServer"
+    )
+
+    def test_get_imageserver_metadata(self):
+        """Test fetching metadata from a real ImageServer."""
+        from geoparquet_io.core.raquet import get_imageserver_metadata
+
+        metadata = get_imageserver_metadata(self.USDA_IMAGESERVER)
+
+        assert metadata.name == "Calcium_subsurface_Final"
+        assert metadata.band_count == 1
+        assert metadata.pixel_type == "float32"
+        assert metadata.pixel_size_x == 3
+        assert metadata.pixel_size_y == 3
+        assert metadata.columns > 0
+        assert metadata.rows > 0

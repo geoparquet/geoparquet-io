@@ -32,6 +32,8 @@ from geoparquet_io.core.raquet import (
     geotiff_to_raquet,
     geotiff_to_raquet_table,
     get_band_columns,
+    imageserver_to_raquet,
+    imageserver_to_raquet_table,
     is_raquet_file,
     raquet_to_geotiff,
     read_raquet_metadata,
@@ -274,6 +276,108 @@ def export_geotiff(
     )
 
 
+def imageserver_to_table(
+    service_url: str,
+    *,
+    token: str | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    block_size: int = 256,
+    compression: str | None = "gzip",
+    target_resolution: int | None = None,
+    skip_empty_blocks: bool = True,
+    calculate_stats: bool = True,
+    verbose: bool = False,
+) -> pa.Table:
+    """
+    Convert an ArcGIS ImageServer to a raquet PyArrow Table.
+
+    Fetches raster tiles from the ImageServer, reprojects to Web Mercator
+    (EPSG:3857), and creates a raquet table with QUADBIN spatial indexing.
+
+    Args:
+        service_url: ImageServer REST URL (e.g., .../ImageServer)
+        token: Optional authentication token
+        bbox: Optional bounding box filter (xmin, ymin, xmax, ymax) in WGS84
+        block_size: Tile size in pixels (256 or 512, must be divisible by 16)
+        compression: Block compression ("gzip" or None)
+        target_resolution: QUADBIN pixel resolution 0-26 (auto if None)
+        skip_empty_blocks: Skip blocks with all nodata values
+        calculate_stats: Calculate per-band statistics
+        verbose: Print progress
+
+    Returns:
+        PyArrow Table with raquet structure
+    """
+    return imageserver_to_raquet_table(
+        service_url,
+        token=token,
+        bbox=bbox,
+        block_size=block_size,
+        compression=compression,
+        target_resolution=target_resolution,
+        skip_empty_blocks=skip_empty_blocks,
+        calculate_stats=calculate_stats,
+        verbose=verbose,
+    )
+
+
+def convert_imageserver(
+    service_url: str,
+    output_parquet: str,
+    *,
+    token: str | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    block_size: int = 256,
+    compression: str | None = "gzip",
+    parquet_compression: str = "ZSTD",
+    target_resolution: int | None = None,
+    skip_empty_blocks: bool = True,
+    calculate_stats: bool = True,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    """
+    Convert an ArcGIS ImageServer to raquet parquet file.
+
+    Downloads raster tiles from an ArcGIS ImageServer REST service,
+    reprojects to Web Mercator (EPSG:3857), and stores as a raquet parquet
+    file with QUADBIN spatial indexing.
+
+    Args:
+        service_url: ImageServer REST URL (e.g., .../ImageServer)
+        output_parquet: Path for output parquet file
+        token: Optional authentication token
+        bbox: Optional bounding box filter (xmin, ymin, xmax, ymax) in WGS84
+        block_size: Tile size in pixels (256 or 512)
+        compression: Block compression ("gzip" or None)
+        parquet_compression: Parquet file compression (ZSTD, GZIP, etc.)
+        target_resolution: QUADBIN pixel resolution 0-26 (auto if None)
+        skip_empty_blocks: Skip blocks with all nodata values
+        calculate_stats: Calculate per-band statistics
+        verbose: Print progress
+
+    Returns:
+        dict with conversion stats:
+        - num_blocks: Number of blocks written
+        - num_bands: Number of bands
+        - num_pixels: Total pixel count
+        - block_size: Block size used
+        - compression: Compression used
+    """
+    return imageserver_to_raquet(
+        service_url,
+        output_parquet,
+        token=token,
+        bbox=bbox,
+        block_size=block_size,
+        compression=compression,
+        parquet_compression=parquet_compression,
+        target_resolution=target_resolution,
+        skip_empty_blocks=skip_empty_blocks,
+        calculate_stats=calculate_stats,
+        verbose=verbose,
+    )
+
+
 # Re-export the metadata class for type hints
 __all__ = [
     "RaquetMetadata",
@@ -282,6 +386,8 @@ __all__ = [
     "get_bands",
     "geotiff_to_table",
     "convert_geotiff",
+    "imageserver_to_table",
+    "convert_imageserver",
     "to_array",
     "export_geotiff",
 ]
