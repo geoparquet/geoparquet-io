@@ -731,7 +731,8 @@ class Table:
         """
 
         # Detect format from extension if not explicitly provided
-        detected_format = format or self._detect_format(path)
+        # Normalize to lowercase for case-insensitive comparison
+        detected_format = format.lower() if format else self._detect_format(path)
 
         # Handle GeoParquet format
         if detected_format == "parquet":
@@ -836,6 +837,9 @@ class Table:
         else:
             output_path = PathLib(path)
 
+        # Initialize temp_parquet before try block for cleanup in finally
+        temp_parquet = None
+
         try:
             # Write table to temp parquet first
             temp_parquet = self._table_to_temp_parquet()
@@ -908,12 +912,15 @@ class Table:
                     destination=path_str,
                     profile=profile,
                 )
+                # Return remote path, not local temp path
+                return PathLib(path_str)
 
             return output_path
 
         finally:
             # Clean up temp parquet
-            temp_parquet.unlink(missing_ok=True)
+            if temp_parquet:
+                temp_parquet.unlink(missing_ok=True)
             # Clean up temp output if remote
             if is_remote and output_path.exists():
                 output_path.unlink(missing_ok=True)

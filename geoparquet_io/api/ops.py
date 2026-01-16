@@ -492,7 +492,6 @@ def convert_to_geopackage(
     output_path: str,
     overwrite: bool = False,
     layer_name: str = "features",
-    profile: str | None = None,
 ) -> str:
     """
     Convert a GeoParquet table to GeoPackage format.
@@ -504,7 +503,6 @@ def convert_to_geopackage(
         output_path: Output file path (must be local, not cloud URL)
         overwrite: Overwrite existing file (default: False)
         layer_name: Layer name in GeoPackage (default: 'features')
-        profile: AWS profile for S3 input files
 
     Returns:
         Output path
@@ -518,14 +516,12 @@ def convert_to_geopackage(
         "geopackage",
         overwrite=overwrite,
         layer_name=layer_name,
-        profile=profile,
     )
 
 
 def convert_to_flatgeobuf(
     table: pa.Table,
     output_path: str,
-    profile: str | None = None,
 ) -> str:
     """
     Convert a GeoParquet table to FlatGeobuf format.
@@ -535,7 +531,6 @@ def convert_to_flatgeobuf(
     Args:
         table: Input PyArrow Table with geometry column
         output_path: Output file path (must be local, not cloud URL)
-        profile: AWS profile for S3 input files
 
     Returns:
         Output path
@@ -547,7 +542,6 @@ def convert_to_flatgeobuf(
         output_path,
         write_flatgeobuf,
         "flatgeobuf",
-        profile=profile,
     )
 
 
@@ -556,7 +550,6 @@ def convert_to_csv(
     output_path: str,
     include_wkt: bool = True,
     include_bbox: bool = True,
-    profile: str | None = None,
 ) -> str:
     """
     Convert a GeoParquet table to CSV format.
@@ -569,7 +562,6 @@ def convert_to_csv(
         output_path: Output file path (must be local, not cloud URL)
         include_wkt: Include WKT geometry column (default: True)
         include_bbox: Include bbox column if present (default: True)
-        profile: AWS profile for S3 input files
 
     Returns:
         Output path
@@ -583,7 +575,6 @@ def convert_to_csv(
         "csv",
         include_wkt=include_wkt,
         include_bbox=include_bbox,
-        profile=profile,
     )
 
 
@@ -592,7 +583,6 @@ def convert_to_shapefile(
     output_path: str,
     overwrite: bool = False,
     encoding: str = "UTF-8",
-    profile: str | None = None,
 ) -> str:
     """
     Convert a GeoParquet table to Shapefile format.
@@ -608,7 +598,6 @@ def convert_to_shapefile(
         output_path: Output file path (must be local, not cloud URL)
         overwrite: Overwrite existing file (default: False)
         encoding: Character encoding (default: 'UTF-8')
-        profile: AWS profile for S3 input files
 
     Returns:
         Output path
@@ -622,7 +611,6 @@ def convert_to_shapefile(
         "shapefile",
         overwrite=overwrite,
         encoding=encoding,
-        profile=profile,
     )
 
 

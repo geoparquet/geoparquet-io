@@ -178,14 +178,14 @@ All formats support cloud destinations via upload:
 === "Python"
 
     ```python
-    from geoparquet_io import Table, upload
+    import geoparquet_io as gpio
 
     # Write locally first
-    table = Table.read('data.parquet')
+    table = gpio.read('data.parquet')
     table.write('local.gpkg')
 
     # Upload to cloud
-    upload('local.gpkg', 's3://bucket/output.gpkg')
+    gpio.upload('local.gpkg', 's3://bucket/output.gpkg')
     ```
 
 ## Remote Files

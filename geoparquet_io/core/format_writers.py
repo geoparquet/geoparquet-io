@@ -145,8 +145,12 @@ def write_gdal_format(
 
         # GDAL formats don't support complex types (STRUCT, LIST, MAP), so select only compatible columns
         # Read schema to filter out incompatible columns
-        pf = pq.ParquetFile(input_url)
-        schema = pf.schema_arrow
+        # Use fsspec to support remote URLs (HTTP/HTTPS)
+        import fsspec
+
+        with fsspec.open(input_url, "rb") as f:
+            pf = pq.ParquetFile(f)
+            schema = pf.schema_arrow
         compatible_cols = []
         for field in schema:
             # Skip complex types that GDAL can't handle
@@ -234,9 +238,13 @@ def write_csv(
         input_url = safe_file_url(input_path, verbose)
 
         # Read parquet to inspect schema
-        pf = pq.ParquetFile(input_url)
-        schema = pf.schema_arrow
-        columns = [field.name for field in schema]
+        # Use fsspec to support remote URLs (HTTP/HTTPS)
+        import fsspec
+
+        with fsspec.open(input_url, "rb") as f:
+            pf = pq.ParquetFile(f)
+            schema = pf.schema_arrow
+            columns = [field.name for field in schema]
 
         # Find geometry column
         geom_col = next(

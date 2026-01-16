@@ -182,8 +182,10 @@ class TestFlatGeobufWriter:
         # FlatGeobuf files start with magic bytes: 0x6667623300
         with open(output_file, "rb") as f:
             magic = f.read(8)
-            # Check for FlatGeobuf signature
-            assert len(magic) >= 4
+            # Check for FlatGeobuf signature (fgb3 + null byte)
+            assert magic.startswith(b"\x66\x67\x62\x33\x00"), (
+                f"Invalid FlatGeobuf magic bytes: {magic[:5].hex()}"
+            )
 
 
 class TestCSVWriter:
@@ -356,7 +358,7 @@ class TestShapefileWriter:
         except Exception as e:
             # Should be encoding error, not SQL error
             error_msg = str(e).lower()
-            assert "sql" not in error_msg or "syntax" not in error_msg
+            assert "sql" not in error_msg and "syntax" not in error_msg
 
 
 class TestCLIConvertSubcommands:

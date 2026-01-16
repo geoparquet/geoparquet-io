@@ -1447,11 +1447,7 @@ def convert_geojson(
 @convert.command(name="geopackage", cls=SingleFileCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
-@click.option(
-    "--overwrite",
-    is_flag=True,
-    help="Overwrite existing file",
-)
+@overwrite_option
 @click.option(
     "--layer-name",
     default="features",
@@ -1621,11 +1617,7 @@ def convert_csv(
 @convert.command(name="shapefile", cls=SingleFileCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
-@click.option(
-    "--overwrite",
-    is_flag=True,
-    help="Overwrite existing file",
-)
+@overwrite_option
 @click.option(
     "--encoding",
     default="UTF-8",
