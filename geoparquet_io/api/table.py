@@ -907,13 +907,36 @@ class Table:
             # Upload to remote if needed
             if is_remote:
                 setup_aws_profile_if_needed(profile, path_str)
-                upload(
-                    source=output_path,
-                    destination=path_str,
-                    profile=profile,
-                )
-                # Return remote path, not local temp path
-                return PathLib(path_str)
+
+                # Special handling for shapefiles: zip all sidecars into .shp.zip
+                if format == "shapefile":
+                    from geoparquet_io.core.common import create_shapefile_zip
+
+                    # Create zip archive with all sidecar files
+                    zip_path = create_shapefile_zip(output_path, verbose=False)
+
+                    # Upload the zip file with .shp.zip extension
+                    remote_zip_path = path_str.replace(".shp", ".shp.zip")
+                    upload(
+                        source=zip_path,
+                        destination=remote_zip_path,
+                        profile=profile,
+                    )
+
+                    # Clean up zip file
+                    zip_path.unlink(missing_ok=True)
+
+                    # Return remote zip path
+                    return PathLib(remote_zip_path)
+                else:
+                    # Normal single-file upload
+                    upload(
+                        source=output_path,
+                        destination=path_str,
+                        profile=profile,
+                    )
+                    # Return remote path, not local temp path
+                    return PathLib(path_str)
 
             return output_path
 
@@ -924,6 +947,13 @@ class Table:
             # Clean up temp output if remote
             if is_remote and output_path.exists():
                 output_path.unlink(missing_ok=True)
+            # Clean up shapefile sidecars if remote
+            if is_remote and format == "shapefile":
+                # Remove all sidecar files (.shx, .dbf, .prj, etc.)
+                stem = output_path.stem
+                parent = output_path.parent
+                for sidecar in parent.glob(f"{stem}.*"):
+                    sidecar.unlink(missing_ok=True)
 
     def _table_to_temp_parquet(self) -> Path:
         """Write table to temporary parquet file for format conversion."""

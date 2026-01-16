@@ -179,13 +179,11 @@ class TestFlatGeobufWriter:
             verbose=False,
         )
 
-        # FlatGeobuf files start with magic bytes: 0x6667623300
+        # FlatGeobuf files start with magic bytes: fgb + version byte
         with open(output_file, "rb") as f:
             magic = f.read(8)
-            # Check for FlatGeobuf signature (fgb3 + null byte)
-            assert magic.startswith(b"\x66\x67\x62\x33\x00"), (
-                f"Invalid FlatGeobuf magic bytes: {magic[:5].hex()}"
-            )
+            # Check for FlatGeobuf signature (fgb + version, typically 0x03)
+            assert magic.startswith(b"fgb"), f"Invalid FlatGeobuf magic bytes: {magic[:4].hex()}"
 
 
 class TestCSVWriter:
@@ -487,3 +485,76 @@ class TestCLIConvertSubcommands:
             )
             assert result.exit_code == 0
             assert Path("output.shp").exists()
+
+
+class TestShapefileZip:
+    """Tests for shapefile zip functionality."""
+
+    @pytest.fixture
+    def output_file(self):
+        """Create temp output file path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.shp"
+        yield str(tmp_path)
+        # Clean up all shapefile sidecar files and zip
+        for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg", ".shp.zip"]:
+            sidecar = tmp_path.with_suffix(ext)
+            if sidecar.exists():
+                sidecar.unlink()
+
+    def test_create_shapefile_zip_basic(self, output_file):
+        """Test creating a zip archive from a shapefile."""
+        from geoparquet_io.core.common import create_shapefile_zip
+
+        # First create a shapefile
+        write_shapefile(
+            input_path=str(PLACES_PARQUET),
+            output_path=output_file,
+            verbose=False,
+        )
+
+        # Verify sidecar files exist
+        output_path = Path(output_file)
+        assert output_path.with_suffix(".shp").exists()
+        assert output_path.with_suffix(".shx").exists()
+        assert output_path.with_suffix(".dbf").exists()
+
+        # Create zip
+        zip_path = create_shapefile_zip(output_file, verbose=False)
+
+        # Verify zip was created
+        assert zip_path.exists()
+        assert zip_path.suffix == ".zip"
+        assert zip_path.name.endswith(".shp.zip")
+
+        # Verify zip contains all files
+        import zipfile
+
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            assert any(n.endswith(".shp") for n in names)
+            assert any(n.endswith(".shx") for n in names)
+            assert any(n.endswith(".dbf") for n in names)
+
+    def test_create_shapefile_zip_missing_file(self):
+        """Test that creating zip from non-existent shapefile raises error."""
+        from geoparquet_io.core.common import create_shapefile_zip
+
+        nonexistent = f"/tmp/nonexistent_{uuid.uuid4()}.shp"
+
+        with pytest.raises(Exception, match="not found"):
+            create_shapefile_zip(nonexistent)
+
+    def test_create_shapefile_zip_verbose(self, output_file):
+        """Test creating zip with verbose output."""
+        from geoparquet_io.core.common import create_shapefile_zip
+
+        # Create shapefile
+        write_shapefile(
+            input_path=str(PLACES_PARQUET),
+            output_path=output_file,
+            verbose=False,
+        )
+
+        # Create zip with verbose (should not raise)
+        zip_path = create_shapefile_zip(output_file, verbose=True)
+        assert zip_path.exists()

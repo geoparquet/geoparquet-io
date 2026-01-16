@@ -206,16 +206,22 @@ class ConvertDefaultGroup(click.Group):
         return super().parse_args(ctx, [subcommand] + args)
 
     def _detect_format_from_args(self, args):
-        """Extract output file from args and detect format from extension."""
+        """Extract output file from args and detect format from extension.
+
+        Scans backwards through args to find the output file (last positional argument).
+        This approach correctly handles options with values interspersed with positional args.
+        """
         from pathlib import Path
 
-        # Find second positional argument (OUTPUT_FILE after INPUT_FILE)
-        positional_args = [arg for arg in args if not arg.startswith("-")]
+        # Scan backwards to find first argument with a recognized extension
+        # Skip tokens starting with "-" to avoid treating option values as file paths
+        for arg in reversed(args):
+            if arg.startswith("-"):
+                continue
 
-        if len(positional_args) >= 2:
-            output_file = positional_args[1]
-            ext = Path(output_file).suffix.lower()
-            return self.EXTENSION_TO_SUBCOMMAND.get(ext, "geoparquet")
+            ext = Path(arg).suffix.lower()
+            if ext in self.EXTENSION_TO_SUBCOMMAND:
+                return self.EXTENSION_TO_SUBCOMMAND[ext]
 
         return "geoparquet"  # Default fallback
 

@@ -134,6 +134,18 @@ gpio convert data.parquet output.shp --overwrite
     - Creates multiple files (.shp, .shx, .dbf, .prj)
     - Consider using GeoPackage or FlatGeobuf instead
 
+!!! info "Remote Shapefile Storage"
+    When writing shapefiles to remote storage (S3, GCS, Azure), all sidecar files (.shp, .shx, .dbf, .prj, etc.) are automatically packaged into a single `.shp.zip` archive before upload. This ensures atomic uploads and avoids incomplete multi-file uploads.
+
+    ```bash
+    # Local: Creates output.shp, output.shx, output.dbf, etc.
+    gpio convert data.parquet output.shp
+
+    # Remote: Uploads output.shp.zip containing all files
+    gpio convert data.parquet s3://bucket/output.shp
+    # → Creates s3://bucket/output.shp.zip
+    ```
+
 **CSV:**
 
 ```bash

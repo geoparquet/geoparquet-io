@@ -3358,3 +3358,70 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
         if os.path.exists(temp_file):
             os.remove(temp_file)
         raise click.ClickException(f"Failed to add bbox: {str(e)}") from e
+
+
+def create_shapefile_zip(shapefile_path: str | Path, verbose: bool = False) -> Path:
+    """
+    Create a zip archive containing a shapefile and all its sidecar files.
+
+    Shapefiles consist of multiple files with different extensions (.shp, .shx, .dbf, .prj, .cpg).
+    This function creates a single .shp.zip archive containing all related files.
+
+    Args:
+        shapefile_path: Path to the main .shp file
+        verbose: Print verbose output
+
+    Returns:
+        Path to the created .shp.zip file
+
+    Raises:
+        click.ClickException: If shapefile or required sidecars are missing
+    """
+    import zipfile
+
+    shapefile_path = Path(shapefile_path)
+
+    if not shapefile_path.exists():
+        raise click.ClickException(f"Shapefile not found: {shapefile_path}")
+
+    # Shapefile extensions: .shp (main), .shx (index), .dbf (attributes) are required
+    # Optional: .prj (projection), .cpg (encoding), .sbn/.sbx (spatial index)
+    stem = shapefile_path.stem
+    parent = shapefile_path.parent
+
+    # Find all files with the same stem
+    sidecar_files = list(parent.glob(f"{stem}.*"))
+
+    # Filter to only shapefile-related extensions
+    shapefile_extensions = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx"}
+    sidecar_files = [f for f in sidecar_files if f.suffix.lower() in shapefile_extensions]
+
+    if not sidecar_files:
+        raise click.ClickException(f"No shapefile components found for: {shapefile_path}")
+
+    # Verify required files exist
+    required_extensions = {".shp", ".shx", ".dbf"}
+    found_extensions = {f.suffix.lower() for f in sidecar_files}
+    missing = required_extensions - found_extensions
+
+    if missing:
+        raise click.ClickException(f"Missing required shapefile components: {', '.join(missing)}")
+
+    # Create zip file
+    zip_path = parent / f"{stem}.shp.zip"
+
+    if verbose:
+        debug(f"Creating shapefile archive: {zip_path}")
+        debug(f"Including {len(sidecar_files)} files: {[f.name for f in sidecar_files]}")
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for sidecar in sidecar_files:
+            zipf.write(sidecar, sidecar.name)
+            if verbose:
+                debug(f"  Added: {sidecar.name}")
+
+    if verbose:
+        zip_size = zip_path.stat().st_size
+        success(f"Created shapefile archive: {zip_path} ({format_size(zip_size)})")
+
+    return zip_path
