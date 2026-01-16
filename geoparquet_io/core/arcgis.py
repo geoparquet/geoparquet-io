@@ -170,8 +170,8 @@ def _normalize_token_url(portal_url: str) -> str:
 
     Handles various input formats:
     - Full token URL: returns as-is
-    - ArcGIS Portal base URL: appends /sharing/rest/generateToken
-    - ArcGIS Enterprise base URL (with /arcgis/): appends /tokens/generateToken
+    - ArcGIS Portal base URL (no /arcgis/ path): appends /sharing/rest/generateToken
+    - ArcGIS Enterprise base URL (with /arcgis/ path): appends /arcgis/tokens/generateToken
 
     Args:
         portal_url: User-provided portal URL (may be base URL or full endpoint)
@@ -179,24 +179,35 @@ def _normalize_token_url(portal_url: str) -> str:
     Returns:
         Normalized token generation endpoint URL
     """
+    import re
+    from urllib.parse import urlparse
+
     url = portal_url.rstrip("/")
 
     # Already a full token endpoint
     if url.endswith("/generateToken"):
         return url
 
-    # Enterprise server pattern: has /arcgis/ in path
-    if "/arcgis" in url.lower():
-        # Extract base up to and including /arcgis
-        import re
+    # Parse URL to separate domain from path
+    parsed = urlparse(url)
+    path = parsed.path.lower()
 
+    # Enterprise server pattern: has /arcgis/ or ends with /arcgis in the PATH (not domain)
+    # This avoids matching "arcgis.com" in the domain
+    if "/arcgis/" in path or path.endswith("/arcgis"):
+        # Extract base up to and including /arcgis
         match = re.match(r"(https?://[^/]+/arcgis)", url, re.IGNORECASE)
         if match:
             return f"{match.group(1)}/tokens/generateToken"
-        # If regex fails but /arcgis exists, append tokens path
+        # If regex fails but /arcgis exists in path, try to find it
+        # Handle nested paths like /portal/arcgis/
+        arcgis_match = re.search(r"(https?://[^/]+(?:/[^/]+)*/arcgis)", url, re.IGNORECASE)
+        if arcgis_match:
+            return f"{arcgis_match.group(1)}/tokens/generateToken"
+        # Fallback: append tokens path
         return f"{url}/tokens/generateToken"
 
-    # ArcGIS Portal (Online or Portal without /arcgis/)
+    # ArcGIS Portal (Online or Portal without /arcgis/ in path)
     return f"{url}/sharing/rest/generateToken"
 
 
@@ -854,12 +865,21 @@ def arcgis_to_table(
         # Apply client-side column exclusion if specified
         if exclude_cols:
             cols_to_exclude = {c.strip() for c in exclude_cols.split(",")}
+            # Detect the geometry column name from the table (usually "geometry")
+            geom_col = None
+            for col_name in table.column_names:
+                if col_name.lower() == "geometry":
+                    geom_col = col_name
+                    break
             # Prevent excluding the geometry column (breaks Hilbert/bbox and GeoParquet metadata)
-            if "geometry" in cols_to_exclude:
-                raise ValueError(
-                    "Cannot exclude 'geometry' column: it is required for GeoParquet output. "
-                    "Remove 'geometry' from --exclude-cols."
-                )
+            if geom_col:
+                # Check case-insensitively for the geometry column in exclusion list
+                cols_to_exclude_lower = {c.lower() for c in cols_to_exclude}
+                if geom_col.lower() in cols_to_exclude_lower:
+                    raise ValueError(
+                        f"Cannot exclude '{geom_col}' column: it is required for GeoParquet "
+                        f"output. Remove '{geom_col}' from --exclude-cols."
+                    )
             cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
             if cols_to_keep:
                 table = table.select(cols_to_keep)
