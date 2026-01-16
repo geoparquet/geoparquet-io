@@ -37,6 +37,76 @@ print(f"Columns: {table.column_names}")
 print(f"Geometry column: {table.geometry_column}")
 ```
 
+### Reading from BigQuery
+
+Use `Table.from_bigquery()` to read directly from BigQuery tables. The `table_id` parameter accepts fully-qualified `"project.dataset.table"` format or `"dataset.table"` when a separate `project` argument is provided (or when using your default gcloud project). When using `bbox`, provide coordinates as `"minx,miny,maxx,maxy"` representing longitude,latitude in EPSG:4326 degrees (e.g., `"-122.52,37.70,-122.35,37.82"`).
+
+```python
+import geoparquet_io as gpio
+
+# Basic read
+table = gpio.Table.from_bigquery('myproject.geodata.buildings')
+
+# With filtering
+table = gpio.Table.from_bigquery(
+    'myproject.geodata.buildings',
+    where="area_sqm > 1000",
+    columns=['id', 'name', 'geography'],
+    limit=10000
+)
+
+# With spatial filtering (bbox)
+table = gpio.Table.from_bigquery(
+    'myproject.geodata.buildings',
+    bbox="-122.52,37.70,-122.35,37.82"
+)
+
+# With explicit credentials
+table = gpio.Table.from_bigquery(
+    'myproject.geodata.buildings',
+    credentials_file='/path/to/service-account.json'
+)
+
+# Chain with other operations
+gpio.Table.from_bigquery('myproject.geodata.buildings', limit=10000) \
+    .add_bbox() \
+    .sort_hilbert() \
+    .write('output.parquet')
+```
+
+**Bbox filtering modes:**
+
+When using `bbox`, control where filtering happens with `bbox_mode`:
+
+```python
+# Server-side filtering (best for large tables)
+table = gpio.Table.from_bigquery(
+    'myproject.geodata.global_buildings',
+    bbox="-122.52,37.70,-122.35,37.82",
+    bbox_mode="server"
+)
+
+# Local filtering (best for small tables)
+table = gpio.Table.from_bigquery(
+    'myproject.geodata.city_parks',
+    bbox="-122.52,37.70,-122.35,37.82",
+    bbox_mode="local"
+)
+
+# Custom threshold for auto mode (default: 500000)
+table = gpio.Table.from_bigquery(
+    'myproject.geodata.buildings',
+    bbox="-122.52,37.70,-122.35,37.82",
+    bbox_threshold=100000  # Use server for tables > 100K rows
+)
+```
+
+See the [Extract Guide](../guide/extract.md#bbox-filtering-mode-server-vs-local) for detailed tradeoff analysis.
+
+!!! warning "BigQuery Limitations"
+    - **Cannot read views or external tables** (Storage Read API limitation)
+    - BIGNUMERIC columns are not supported
+
 ## Table Class
 
 The `Table` class wraps a PyArrow Table and provides chainable transformation methods.
@@ -575,6 +645,7 @@ pq.write_table(table, 'output.parquet')
 | `ops.sort_quadkey(table, column_name='quadkey', resolution=13, use_centroid=False, remove_column=False)` | Sort by quadkey |
 | `ops.reproject(table, target_crs='EPSG:4326', source_crs=None, geometry_column=None)` | Reproject geometry |
 | `ops.extract(table, columns=None, exclude_columns=None, bbox=None, where=None, limit=None, geometry_column=None)` | Filter columns/rows |
+| `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table |
 
 ## Pipeline Composition
 

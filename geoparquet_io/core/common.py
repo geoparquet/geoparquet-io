@@ -1589,6 +1589,7 @@ def create_geo_metadata(
     custom_metadata=None,
     verbose=False,
     version="1.1.0",
+    edges=None,
 ):
     """
     Create or update GeoParquet metadata with spatial index covering information.
@@ -1600,6 +1601,8 @@ def create_geo_metadata(
         custom_metadata: Optional dict with custom metadata (e.g., H3 info)
         verbose: Whether to print verbose output
         version: GeoParquet version string (e.g., "1.0.0", "1.1.0", "2.0.0")
+        edges: Edge interpretation, "spherical" or "planar" (default None = planar).
+               Use "spherical" for data from BigQuery or other S2-based sources.
 
     Returns:
         dict: Updated geo metadata
@@ -1610,6 +1613,13 @@ def create_geo_metadata(
     # Add encoding if not present (required by GeoParquet spec)
     if "encoding" not in geo_meta["columns"][geom_col]:
         geo_meta["columns"][geom_col]["encoding"] = "WKB"
+
+    # Add edges if specified (for spherical geometry from BigQuery, etc.)
+    if edges:
+        geo_meta["columns"][geom_col]["edges"] = edges
+        # When spherical, orientation should be counterclockwise per GeoParquet spec
+        if edges == "spherical":
+            geo_meta["columns"][geom_col]["orientation"] = "counterclockwise"
 
     # Add bbox covering if needed
     _add_bbox_covering(geo_meta, geom_col, bbox_info, verbose)
@@ -2097,6 +2107,7 @@ def _compute_geometry_types(table, geometry_column: str, verbose: bool) -> list[
         list: List of GeoParquet geometry type names (e.g., ["Point", "Polygon"])
     """
     import geoarrow.pyarrow as ga
+    import pyarrow.compute as pc
 
     # Skip for empty tables (geoarrow crashes on empty arrays)
     if table.num_rows == 0:
@@ -2104,6 +2115,20 @@ def _compute_geometry_types(table, geometry_column: str, verbose: bool) -> list[
 
     try:
         geom_col = table.column(geometry_column)
+
+        # Filter out NULL values to avoid geoarrow errors on invalid geometries
+        # This handles cases where BigQuery returns NULL or empty geometries
+        non_null_mask = pc.is_valid(geom_col)
+        if pc.any(non_null_mask).as_py():
+            geom_col = pc.filter(geom_col, non_null_mask)
+        else:
+            # All values are NULL
+            return []
+
+        # Skip if no valid geometries remain after filtering
+        if len(geom_col) == 0:
+            return []
+
         wkb_arr = ga.as_wkb(geom_col)
         types_struct = ga.unique_geometry_types(wkb_arr)
 
@@ -2121,7 +2146,9 @@ def _compute_geometry_types(table, geometry_column: str, verbose: bool) -> list[
             debug(f"Computed geometry_types from data: {type_names}")
         return type_names
 
-    except (TypeError, ValueError, AttributeError) as e:
+    except Exception as e:
+        # Catch all exceptions including geoarrow C++ errors
+        # (e.g., "Expected valid geometry type code but found 0")
         if verbose:
             debug(f"Could not compute geometry_types: {e}")
         # Return empty list as fallback (allowed by spec - means any type)
@@ -2149,6 +2176,19 @@ def _compute_bbox_from_data(table, geometry_column: str, verbose: bool) -> list[
 
     try:
         geom_col = table.column(geometry_column)
+
+        # Filter out NULL values to avoid geoarrow errors on invalid geometries
+        non_null_mask = pc.is_valid(geom_col)
+        if pc.any(non_null_mask).as_py():
+            geom_col = pc.filter(geom_col, non_null_mask)
+        else:
+            # All values are NULL
+            return None
+
+        # Skip if no valid geometries remain after filtering
+        if len(geom_col) == 0:
+            return None
+
         wkb_arr = ga.as_wkb(geom_col)
         box_arr = ga.box(wkb_arr)
 
@@ -2167,7 +2207,8 @@ def _compute_bbox_from_data(table, geometry_column: str, verbose: bool) -> list[
                 debug(f"Computed bbox from data: [{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]")
             return [xmin, ymin, xmax, ymax]
 
-    except (TypeError, ValueError, AttributeError) as e:
+    except Exception as e:
+        # Catch all exceptions including geoarrow C++ errors
         if verbose:
             debug(f"Could not compute bbox: {e}")
 
@@ -2235,6 +2276,7 @@ def _apply_geoparquet_metadata(
     input_crs: dict | None = None,
     custom_metadata: dict | None = None,
     verbose: bool = False,
+    edges: str | None = None,
 ):
     """
     Apply GeoParquet metadata to an Arrow Table based on version.
@@ -2252,6 +2294,8 @@ def _apply_geoparquet_metadata(
         input_crs: PROJJSON dict with CRS
         custom_metadata: Custom metadata (e.g., H3 covering info)
         verbose: Whether to print verbose output
+        edges: Edge interpretation, "spherical" or "planar" (default None = planar).
+               Use "spherical" for data from BigQuery or other S2-based sources.
 
     Returns:
         pa.Table: Table with GeoParquet metadata applied
@@ -2295,6 +2339,7 @@ def _apply_geoparquet_metadata(
         custom_metadata,
         verbose,
         version=metadata_version,
+        edges=edges,
     )
 
     # Ensure geometry_types is set (required by GeoParquet spec)
@@ -2624,6 +2669,7 @@ def write_geoparquet_table(
     geoparquet_version: str | None = None,
     verbose: bool = False,
     profile: str | None = None,
+    edges: str | None = None,
 ) -> None:
     """
     Write a PyArrow Table to a GeoParquet file with proper metadata.
@@ -2642,6 +2688,8 @@ def write_geoparquet_table(
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0)
         verbose: Whether to print verbose output
         profile: AWS profile name (S3 only, optional)
+        edges: Edge interpretation, "spherical" or "planar" (default None = planar).
+               Use "spherical" for data from BigQuery or other S2-based sources.
     """
     # Setup AWS profile if needed
     setup_aws_profile_if_needed(profile, output_file)
@@ -2704,6 +2752,7 @@ def write_geoparquet_table(
                 input_crs=input_crs,
                 custom_metadata=None,
                 verbose=verbose,
+                edges=edges,
             )
 
         # Write to disk with proper settings
