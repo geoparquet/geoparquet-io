@@ -428,3 +428,234 @@ def convert_to_geojson(
         # Clean up temp file
         if temp_input.exists():
             temp_input.unlink()
+
+
+def convert_to_geopackage(
+    table: pa.Table,
+    output_path: str,
+    overwrite: bool = False,
+    layer_name: str = "features",
+    profile: str | None = None,
+) -> str:
+    """
+    Convert a GeoParquet table to GeoPackage format.
+
+    Writes to file and creates spatial index automatically.
+
+    Args:
+        table: Input PyArrow Table with geometry column
+        output_path: Output file path (must be local, not cloud URL)
+        overwrite: Overwrite existing file (default: False)
+        layer_name: Layer name in GeoPackage (default: 'features')
+        profile: AWS profile for S3 input files
+
+    Returns:
+        Output path
+    """
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from geoparquet_io.core.format_writers import write_geopackage
+
+    if not isinstance(table, pa.Table):
+        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
+
+    # Write table to temp parquet file for processing
+    temp_dir = Path(tempfile.gettempdir())
+    temp_input = temp_dir / f"gpio_geopackage_{uuid.uuid4()}.parquet"
+
+    try:
+        import pyarrow.parquet as pq
+
+        pq.write_table(table, str(temp_input))
+
+        # Call core function
+        write_geopackage(
+            input_path=str(temp_input),
+            output_path=output_path,
+            overwrite=overwrite,
+            layer_name=layer_name,
+            verbose=False,
+            profile=profile,
+        )
+
+        return output_path
+
+    finally:
+        # Clean up temp file
+        if temp_input.exists():
+            temp_input.unlink()
+
+
+def convert_to_flatgeobuf(
+    table: pa.Table,
+    output_path: str,
+    profile: str | None = None,
+) -> str:
+    """
+    Convert a GeoParquet table to FlatGeobuf format.
+
+    Writes to file and creates spatial index automatically.
+
+    Args:
+        table: Input PyArrow Table with geometry column
+        output_path: Output file path (must be local, not cloud URL)
+        profile: AWS profile for S3 input files
+
+    Returns:
+        Output path
+    """
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from geoparquet_io.core.format_writers import write_flatgeobuf
+
+    if not isinstance(table, pa.Table):
+        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
+
+    # Write table to temp parquet file for processing
+    temp_dir = Path(tempfile.gettempdir())
+    temp_input = temp_dir / f"gpio_flatgeobuf_{uuid.uuid4()}.parquet"
+
+    try:
+        import pyarrow.parquet as pq
+
+        pq.write_table(table, str(temp_input))
+
+        # Call core function
+        write_flatgeobuf(
+            input_path=str(temp_input),
+            output_path=output_path,
+            verbose=False,
+            profile=profile,
+        )
+
+        return output_path
+
+    finally:
+        # Clean up temp file
+        if temp_input.exists():
+            temp_input.unlink()
+
+
+def convert_to_csv(
+    table: pa.Table,
+    output_path: str,
+    include_wkt: bool = True,
+    include_bbox: bool = True,
+    profile: str | None = None,
+) -> str:
+    """
+    Convert a GeoParquet table to CSV format.
+
+    Converts geometry to WKT text representation.
+    Complex types (STRUCT, LIST, MAP) are JSON-encoded.
+
+    Args:
+        table: Input PyArrow Table with geometry column
+        output_path: Output file path (must be local, not cloud URL)
+        include_wkt: Include WKT geometry column (default: True)
+        include_bbox: Include bbox column if present (default: True)
+        profile: AWS profile for S3 input files
+
+    Returns:
+        Output path
+    """
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from geoparquet_io.core.format_writers import write_csv
+
+    if not isinstance(table, pa.Table):
+        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
+
+    # Write table to temp parquet file for processing
+    temp_dir = Path(tempfile.gettempdir())
+    temp_input = temp_dir / f"gpio_csv_{uuid.uuid4()}.parquet"
+
+    try:
+        import pyarrow.parquet as pq
+
+        pq.write_table(table, str(temp_input))
+
+        # Call core function
+        write_csv(
+            input_path=str(temp_input),
+            output_path=output_path,
+            include_wkt=include_wkt,
+            include_bbox=include_bbox,
+            verbose=False,
+            profile=profile,
+        )
+
+        return output_path
+
+    finally:
+        # Clean up temp file
+        if temp_input.exists():
+            temp_input.unlink()
+
+
+def convert_to_shapefile(
+    table: pa.Table,
+    output_path: str,
+    overwrite: bool = False,
+    encoding: str = "UTF-8",
+    profile: str | None = None,
+) -> str:
+    """
+    Convert a GeoParquet table to Shapefile format.
+
+    Note: Shapefiles have significant limitations:
+    - Column names truncated to 10 characters
+    - File size limit of 2GB
+    - Limited data type support
+    - Creates multiple files (.shp, .shx, .dbf, .prj)
+
+    Args:
+        table: Input PyArrow Table with geometry column
+        output_path: Output file path (must be local, not cloud URL)
+        overwrite: Overwrite existing file (default: False)
+        encoding: Character encoding (default: 'UTF-8')
+        profile: AWS profile for S3 input files
+
+    Returns:
+        Output path
+    """
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from geoparquet_io.core.format_writers import write_shapefile
+
+    if not isinstance(table, pa.Table):
+        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
+
+    # Write table to temp parquet file for processing
+    temp_dir = Path(tempfile.gettempdir())
+    temp_input = temp_dir / f"gpio_shapefile_{uuid.uuid4()}.parquet"
+
+    try:
+        import pyarrow.parquet as pq
+
+        pq.write_table(table, str(temp_input))
+
+        # Call core function
+        write_shapefile(
+            input_path=str(temp_input),
+            output_path=output_path,
+            overwrite=overwrite,
+            encoding=encoding,
+            verbose=False,
+            profile=profile,
+        )
+
+        return output_path
+
+    finally:
+        # Clean up temp file
+        if temp_input.exists():
+            temp_input.unlink()

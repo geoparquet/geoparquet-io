@@ -158,15 +158,66 @@ DefaultGroup = create_default_group(
     "Custom Group that invokes a default command when no subcommand is provided.",
 )
 
-ConvertDefaultGroup = create_default_group(
-    "geoparquet",
-    """Custom Group that invokes 'geoparquet' when no subcommand is provided.
 
-This allows backwards compatibility:
-- gpio convert input.shp output.parquet  -> invokes geoparquet
-- gpio convert geoparquet input.shp output.parquet -> explicit
-- gpio convert reproject input.parquet output.parquet -> subcommand""",
-)
+class ConvertDefaultGroup(click.Group):
+    """
+    Custom Group for convert command with format auto-detection.
+
+    Auto-detects output format from file extension when no subcommand is specified.
+    Falls back to 'geoparquet' if extension is not recognized.
+
+    Supported auto-detection:
+    - .parquet -> geoparquet
+    - .gpkg -> geopackage
+    - .fgb -> flatgeobuf
+    - .csv -> csv
+    - .shp -> shapefile
+    - .geojson, .json -> geojson
+
+    Examples:
+    - gpio convert input.parquet output.gpkg -> auto-detects 'geopackage'
+    - gpio convert input.parquet output.fgb -> auto-detects 'flatgeobuf'
+    - gpio convert geopackage input.parquet output.gpkg -> explicit subcommand
+    """
+
+    # Extension to subcommand mapping
+    EXTENSION_TO_SUBCOMMAND = {
+        ".parquet": "geoparquet",
+        ".gpkg": "geopackage",
+        ".fgb": "flatgeobuf",
+        ".csv": "csv",
+        ".shp": "shapefile",
+        ".geojson": "geojson",
+        ".json": "geojson",
+    }
+
+    def parse_args(self, ctx, args):
+        # Handle --help for group
+        if "--help" in args and (not args or args[0] not in self.commands):
+            return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
+
+        # If first arg is a known subcommand, use it
+        if args and not args[0].startswith("-") and args[0] in self.commands:
+            return super().parse_args(ctx, args)
+
+        # Try to auto-detect format from output file extension
+        # Look for second positional arg (OUTPUT_FILE after INPUT_FILE)
+        detected_subcommand = "geoparquet"  # Default fallback
+
+        # Find output file argument (second non-option argument)
+        positional_args = [arg for arg in args if not arg.startswith("-")]
+        if len(positional_args) >= 2:
+            output_file = positional_args[1]
+            # Extract extension and check mapping
+            from pathlib import Path
+
+            ext = Path(output_file).suffix.lower()
+            if ext in self.EXTENSION_TO_SUBCOMMAND:
+                detected_subcommand = self.EXTENSION_TO_SUBCOMMAND[ext]
+
+        # Invoke detected or default subcommand
+        return super().parse_args(ctx, [detected_subcommand] + args)
+
 
 ExtractDefaultGroup = create_default_group(
     "geoparquet",
@@ -957,12 +1008,21 @@ def check_row_group_cmd(
 def convert(ctx):
     """Convert between formats and coordinate systems.
 
-    By default, converts to optimized GeoParquet. Use subcommands for specific operations.
+    Auto-detects output format from file extension. Supports GeoParquet, GeoPackage,
+    FlatGeobuf, CSV, Shapefile, and GeoJSON.
 
     \b
-    Examples:
-        gpio convert input.shp output.parquet                    # To GeoParquet (default)
-        gpio convert geoparquet input.shp output.parquet         # Explicit subcommand
+    Auto-detection examples:
+        gpio convert input.shp output.parquet                    # → GeoParquet
+        gpio convert data.parquet output.gpkg                    # → GeoPackage
+        gpio convert data.parquet output.fgb                     # → FlatGeobuf
+        gpio convert data.parquet output.csv                     # → CSV with WKT
+        gpio convert data.parquet output.geojson                 # → GeoJSON
+
+    \b
+    Explicit subcommands:
+        gpio convert geoparquet input.shp output.parquet         # Force GeoParquet
+        gpio convert geopackage data.parquet output.gpkg         # Force GeoPackage
         gpio convert reproject input.parquet out.parquet -d EPSG:32610
         gpio convert geojson data.parquet | tippecanoe -P -o tiles.pmtiles
     """
@@ -1379,6 +1439,250 @@ def convert_geojson(
 
         if output_file:
             click.echo(f"Converted {feature_count:,} features to {output_file}")
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@convert.command(name="geopackage", cls=SingleFileCommand)
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Overwrite existing file",
+)
+@click.option(
+    "--layer-name",
+    default="features",
+    show_default=True,
+    help="Layer name in GeoPackage",
+)
+@verbose_option
+@profile_option
+def convert_geopackage(
+    input_file,
+    output_file,
+    overwrite,
+    layer_name,
+    verbose,
+    profile,
+):
+    """
+    Convert GeoParquet to GeoPackage format.
+
+    GeoPackage is an OGC standard based on SQLite, supporting spatial indexing
+    and multiple layers. Output includes a spatial index by default.
+
+    \b
+    Examples:
+      # Convert to GeoPackage
+      gpio convert geopackage data.parquet output.gpkg
+
+      # With custom layer name
+      gpio convert geopackage data.parquet output.gpkg --layer-name buildings
+
+      # Overwrite existing file
+      gpio convert geopackage data.parquet output.gpkg --overwrite
+
+      # Auto-detection (no subcommand needed)
+      gpio convert data.parquet output.gpkg
+    """
+    from geoparquet_io.core.format_writers import write_geopackage
+
+    configure_verbose(verbose)
+
+    if output_file is None:
+        # Generate output filename
+        output_file = Path(input_file).stem + ".gpkg"
+
+    try:
+        write_geopackage(
+            input_path=input_file,
+            output_path=output_file,
+            overwrite=overwrite,
+            layer_name=layer_name,
+            verbose=verbose,
+            profile=profile,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@convert.command(name="flatgeobuf", cls=SingleFileCommand)
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@verbose_option
+@profile_option
+def convert_flatgeobuf(
+    input_file,
+    output_file,
+    verbose,
+    profile,
+):
+    """
+    Convert GeoParquet to FlatGeobuf format.
+
+    FlatGeobuf is a cloud-native format with built-in spatial indexing, designed
+    for efficient streaming and HTTP range requests. Spatial index is created
+    automatically.
+
+    \b
+    Examples:
+      # Convert to FlatGeobuf
+      gpio convert flatgeobuf data.parquet output.fgb
+
+      # Auto-detection (no subcommand needed)
+      gpio convert data.parquet output.fgb
+    """
+    from geoparquet_io.core.format_writers import write_flatgeobuf
+
+    configure_verbose(verbose)
+
+    if output_file is None:
+        # Generate output filename
+        output_file = Path(input_file).stem + ".fgb"
+
+    try:
+        write_flatgeobuf(
+            input_path=input_file,
+            output_path=output_file,
+            verbose=verbose,
+            profile=profile,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@convert.command(name="csv", cls=SingleFileCommand)
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--no-wkt",
+    is_flag=True,
+    help="Exclude WKT geometry column (only non-spatial attributes)",
+)
+@click.option(
+    "--no-bbox",
+    is_flag=True,
+    help="Exclude bbox column if present in input",
+)
+@verbose_option
+@profile_option
+def convert_csv(
+    input_file,
+    output_file,
+    no_wkt,
+    no_bbox,
+    verbose,
+    profile,
+):
+    """
+    Convert GeoParquet to CSV format with optional WKT geometry.
+
+    By default, includes geometry as WKT (Well-Known Text) and bbox column if present.
+    Complex types (STRUCT, LIST, MAP) are JSON-encoded.
+
+    \b
+    Examples:
+      # Convert to CSV with WKT geometry
+      gpio convert csv data.parquet output.csv
+
+      # Export only attributes (no geometry)
+      gpio convert csv data.parquet output.csv --no-wkt
+
+      # Exclude bbox column
+      gpio convert csv data.parquet output.csv --no-bbox
+
+      # Auto-detection (no subcommand needed)
+      gpio convert data.parquet output.csv
+    """
+    from geoparquet_io.core.format_writers import write_csv
+
+    configure_verbose(verbose)
+
+    if output_file is None:
+        # Generate output filename
+        output_file = Path(input_file).stem + ".csv"
+
+    try:
+        write_csv(
+            input_path=input_file,
+            output_path=output_file,
+            include_wkt=not no_wkt,
+            include_bbox=not no_bbox,
+            verbose=verbose,
+            profile=profile,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@convert.command(name="shapefile", cls=SingleFileCommand)
+@click.argument("input_file")
+@click.argument("output_file", type=click.Path(), required=False, default=None)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Overwrite existing file",
+)
+@click.option(
+    "--encoding",
+    default="UTF-8",
+    show_default=True,
+    help="Character encoding for attribute data",
+)
+@verbose_option
+@profile_option
+def convert_shapefile(
+    input_file,
+    output_file,
+    overwrite,
+    encoding,
+    verbose,
+    profile,
+):
+    """
+    Convert GeoParquet to Shapefile format.
+
+    Note: Shapefiles have significant limitations:
+    - Column names truncated to 10 characters
+    - File size limit of 2GB
+    - Limited data type support
+    - Creates multiple files (.shp, .shx, .dbf, .prj)
+
+    Consider using GeoPackage or FlatGeobuf instead for modern workflows.
+
+    \b
+    Examples:
+      # Convert to Shapefile
+      gpio convert shapefile data.parquet output.shp
+
+      # With custom encoding
+      gpio convert shapefile data.parquet output.shp --encoding Latin1
+
+      # Overwrite existing file
+      gpio convert shapefile data.parquet output.shp --overwrite
+
+      # Auto-detection (no subcommand needed)
+      gpio convert data.parquet output.shp
+    """
+    from geoparquet_io.core.format_writers import write_shapefile
+
+    configure_verbose(verbose)
+
+    if output_file is None:
+        # Generate output filename
+        output_file = Path(input_file).stem + ".shp"
+
+    try:
+        write_shapefile(
+            input_path=input_file,
+            output_path=output_file,
+            overwrite=overwrite,
+            encoding=encoding,
+            verbose=verbose,
+            profile=profile,
+        )
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
