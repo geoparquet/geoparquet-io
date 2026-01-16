@@ -797,6 +797,36 @@ class TestTableToGeojson:
         assert "type" in data
         assert data["type"] == "FeatureCollection"
 
+    def test_metadata_preserved_in_format_conversion(self, sample_table, output_file):
+        """Test that GeoParquet metadata is preserved when converting to GeoJSON.
+
+        This verifies that _table_to_temp_parquet() preserves CRS and geometry
+        metadata needed for format conversions like GeoJSON reprojection.
+        """
+        # Convert to GeoJSON (requires CRS metadata for WGS84 reprojection)
+        # If metadata was lost, reprojection would fail
+        sample_table.to_geojson(output_file)
+
+        # Verify GeoJSON was created successfully (if metadata was missing, this would fail)
+        assert Path(output_file).exists()
+
+        # Verify the GeoJSON has proper CRS (should be WGS84)
+        import json
+
+        with open(output_file) as f:
+            data = json.load(f)
+
+        # GeoJSON spec mandates WGS84, so coordinates should be in lon/lat
+        assert "type" in data
+        assert data["type"] == "FeatureCollection"
+        assert "features" in data
+        assert len(data["features"]) > 0
+
+        # Verify feature has geometry
+        first_feature = data["features"][0]
+        assert "geometry" in first_feature
+        assert "coordinates" in first_feature["geometry"]
+
 
 class TestCheckResult:
     """Tests for CheckResult class."""

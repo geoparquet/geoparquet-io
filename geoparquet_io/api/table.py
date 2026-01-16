@@ -956,16 +956,34 @@ class Table:
                     sidecar.unlink(missing_ok=True)
 
     def _table_to_temp_parquet(self) -> Path:
-        """Write table to temporary parquet file for format conversion."""
+        """Write table to temporary parquet file for format conversion.
+
+        Uses write_geoparquet_table to preserve GeoParquet metadata (CRS, geometry column).
+        This is critical for format conversions that need metadata (e.g., GeoJSON reprojection).
+        """
         import tempfile
         import uuid
         from pathlib import Path as PathLib
 
-        import pyarrow.parquet as pq
+        from geoparquet_io.core.common import write_geoparquet_table
 
         temp_dir = PathLib(tempfile.gettempdir())
         temp_path = temp_dir / f"gpio_table_{uuid.uuid4()}.parquet"
-        pq.write_table(self._table, str(temp_path))
+
+        # Use write_geoparquet_table to preserve metadata
+        write_geoparquet_table(
+            self._table,
+            output_file=str(temp_path),
+            geometry_column=self._geometry_column,
+            compression="ZSTD",
+            compression_level=15,
+            row_group_size_mb=None,
+            row_group_rows=None,
+            geoparquet_version=None,  # Use existing version from table
+            verbose=False,
+            profile=None,
+        )
+
         return temp_path
 
     def add_bbox(self, column_name: str = "bbox") -> Table:
