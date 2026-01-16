@@ -3379,6 +3379,7 @@ def create_shapefile_zip(shapefile_path: str | Path, verbose: bool = False) -> P
     """
     import zipfile
 
+    configure_verbose(verbose)
     shapefile_path = Path(shapefile_path)
 
     if not shapefile_path.exists():

@@ -837,8 +837,9 @@ class Table:
         else:
             output_path = PathLib(path)
 
-        # Initialize temp_parquet before try block for cleanup in finally
+        # Initialize temp files before try block for cleanup in finally
         temp_parquet = None
+        zip_path = None
 
         try:
             # Write table to temp parquet first
@@ -923,10 +924,7 @@ class Table:
                         profile=profile,
                     )
 
-                    # Clean up zip file
-                    zip_path.unlink(missing_ok=True)
-
-                    # Return remote zip path
+                    # Return remote zip path (cleanup happens in finally)
                     return PathLib(remote_zip_path)
                 else:
                     # Normal single-file upload
@@ -944,6 +942,9 @@ class Table:
             # Clean up temp parquet
             if temp_parquet:
                 temp_parquet.unlink(missing_ok=True)
+            # Clean up zip file if created
+            if zip_path:
+                zip_path.unlink(missing_ok=True)
             # Clean up temp output if remote
             if is_remote and output_path.exists():
                 output_path.unlink(missing_ok=True)

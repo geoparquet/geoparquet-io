@@ -184,7 +184,7 @@ All formats support cloud destinations via upload:
     ```bash
     # Write local then upload
     gpio convert data.parquet local.gpkg
-    gpio upload local.gpkg s3://bucket/output.gpkg
+    gpio publish upload local.gpkg s3://bucket/output.gpkg
     ```
 
 === "Python"
