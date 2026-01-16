@@ -121,16 +121,47 @@ def write_gdal_format(
         # Build layer creation options
         lco_parts = []
         if config.get("layer_option"):
-            lco_parts.append(f"{config['layer_option']}={layer_name}")
+            # Escape single quotes in layer name to prevent SQL injection
+            safe_layer_name = layer_name.replace("'", "''")
+            lco_parts.append(f"{config['layer_option']}={safe_layer_name}")
         if config.get("encoding_option"):
-            lco_parts.append(f"{config['encoding_option']}={encoding}")
+            # Escape single quotes in encoding to prevent SQL injection
+            safe_encoding = encoding.replace("'", "''")
+            lco_parts.append(f"{config['encoding_option']}={safe_encoding}")
 
         lco_clause = f", LAYER_CREATION_OPTIONS '{' '.join(lco_parts)}'" if lco_parts else ""
 
-        # Execute write
+        # Execute write with SQL-escaped paths
+        # Note: DuckDB's COPY statement doesn't support parameterized paths,
+        # so we use SQL standard escaping (double single quotes)
+        safe_input_url = input_url.replace("'", "''")
+        safe_output_path = output_path.replace("'", "''")
+
+        # GDAL formats don't support complex types (STRUCT, LIST, MAP), so select only compatible columns
+        # Read schema to filter out incompatible columns
+        pf = pq.ParquetFile(input_url)
+        schema = pf.schema_arrow
+        compatible_cols = []
+        for field in schema:
+            # Skip complex types that GDAL can't handle
+            if not (
+                pa.types.is_struct(field.type)
+                or pa.types.is_list(field.type)
+                or pa.types.is_map(field.type)
+            ):
+                compatible_cols.append(f'"{field.name}"')
+
+        if not compatible_cols:
+            raise click.ClickException(
+                f"No compatible columns for {config['description']} format. "
+                "All columns are complex types (STRUCT, LIST, MAP)."
+            )
+
+        select_clause = ", ".join(compatible_cols)
+
         query = f"""
-            COPY (SELECT * FROM read_parquet('{input_url}'))
-            TO '{output_path}'
+            COPY (SELECT {select_clause} FROM read_parquet('{safe_input_url}'))
+            TO '{safe_output_path}'
             WITH (FORMAT GDAL, DRIVER '{config["driver"]}'{lco_clause})
         """
 
@@ -238,13 +269,18 @@ def write_csv(
         if not select_cols:
             raise click.ClickException("No columns to export after filtering geometry.")
 
-        # Write to CSV
+        # Write to CSV with SQL-escaped paths
+        # Note: DuckDB's COPY statement doesn't support parameterized paths,
+        # so we use SQL standard escaping (double single quotes)
+        safe_input_url = input_url.replace("'", "''")
+        safe_output_path = output_path.replace("'", "''")
+
         query = f"""
             COPY (
                 SELECT {", ".join(select_cols)}
-                FROM read_parquet('{input_url}')
+                FROM read_parquet('{safe_input_url}')
             )
-            TO '{output_path}'
+            TO '{safe_output_path}'
             WITH (HEADER TRUE, DELIMITER ',')
         """
 

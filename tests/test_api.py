@@ -432,7 +432,7 @@ class TestTableMetadataProperties:
         """Test crs property returns CRS or None."""
         crs = sample_table.crs
         # Can be None (OGC:CRS84 default) or a dict/string
-        assert crs is None or isinstance(crs, (dict, str))
+        assert crs is None or isinstance(crs, dict | str)
 
     def test_bounds_property(self, sample_table):
         """Test bounds property returns tuple."""
@@ -983,3 +983,156 @@ class TestTopLevelExports:
 
         assert generate_stac is not None
         assert validate_stac is not None
+
+
+class TestTableWriteFormats:
+    """Tests for Table.write() with multiple output formats."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Table from test data."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return read(PLACES_PARQUET)
+
+    def test_write_geopackage(self, sample_table):
+        """Test Table.write() with GeoPackage format."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.gpkg"
+        try:
+            sample_table.write(output_path)
+            assert output_path.exists()
+            assert output_path.stat().st_size > 0
+        finally:
+            safe_unlink(output_path)
+
+    def test_write_flatgeobuf(self, sample_table):
+        """Test Table.write() with FlatGeobuf format."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.fgb"
+        try:
+            sample_table.write(output_path)
+            assert output_path.exists()
+            assert output_path.stat().st_size > 0
+        finally:
+            safe_unlink(output_path)
+
+    def test_write_csv(self, sample_table):
+        """Test Table.write() with CSV format."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.csv"
+        try:
+            sample_table.write(output_path)
+            assert output_path.exists()
+            assert output_path.stat().st_size > 0
+
+            # Verify CSV has WKT column
+            import csv
+
+            with open(output_path) as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+                assert len(rows) > 0
+                assert "wkt" in rows[0]
+        finally:
+            safe_unlink(output_path)
+
+    def test_write_shapefile(self, sample_table):
+        """Test Table.write() with Shapefile format."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.shp"
+        try:
+            sample_table.write(output_path)
+            assert output_path.exists()
+            # Check sidecar files
+            assert output_path.with_suffix(".shx").exists()
+            assert output_path.with_suffix(".dbf").exists()
+        finally:
+            # Clean up all shapefile files
+            for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
+                safe_unlink(output_path.with_suffix(ext))
+
+    def test_write_explicit_format(self, sample_table):
+        """Test Table.write() with explicit format parameter."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.dat"
+        try:
+            # Write as CSV even though extension is .dat
+            sample_table.write(output_path, format="csv")
+            assert output_path.exists()
+        finally:
+            safe_unlink(output_path)
+
+    def test_write_format_options(self, sample_table):
+        """Test Table.write() with format-specific options."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.gpkg"
+        try:
+            sample_table.write(
+                output_path,
+                layer_name="custom_layer",
+                overwrite=True,
+            )
+            assert output_path.exists()
+        finally:
+            safe_unlink(output_path)
+
+
+class TestOpsConversionFunctions:
+    """Tests for ops.convert_to_*() functions."""
+
+    @pytest.fixture
+    def sample_table(self):
+        """Create a sample Arrow table."""
+        if not PLACES_PARQUET.exists():
+            pytest.skip("Test data not available")
+        return pq.read_table(str(PLACES_PARQUET))
+
+    def test_convert_to_geopackage(self, sample_table):
+        """Test ops.convert_to_geopackage()."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.gpkg"
+        try:
+            result = ops.convert_to_geopackage(sample_table, str(output_path))
+            assert result == str(output_path)
+            assert output_path.exists()
+        finally:
+            safe_unlink(output_path)
+
+    def test_convert_to_flatgeobuf(self, sample_table):
+        """Test ops.convert_to_flatgeobuf()."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.fgb"
+        try:
+            result = ops.convert_to_flatgeobuf(sample_table, str(output_path))
+            assert result == str(output_path)
+            assert output_path.exists()
+        finally:
+            safe_unlink(output_path)
+
+    def test_convert_to_csv(self, sample_table):
+        """Test ops.convert_to_csv()."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.csv"
+        try:
+            result = ops.convert_to_csv(sample_table, str(output_path))
+            assert result == str(output_path)
+            assert output_path.exists()
+        finally:
+            safe_unlink(output_path)
+
+    def test_convert_to_shapefile(self, sample_table):
+        """Test ops.convert_to_shapefile()."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.shp"
+        try:
+            result = ops.convert_to_shapefile(sample_table, str(output_path))
+            assert result == str(output_path)
+            assert output_path.exists()
+        finally:
+            for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
+                safe_unlink(output_path.with_suffix(ext))
+
+    def test_convert_with_options(self, sample_table):
+        """Test ops conversion functions with format-specific options."""
+        output_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.gpkg"
+        try:
+            ops.convert_to_geopackage(
+                sample_table,
+                str(output_path),
+                layer_name="test_layer",
+                overwrite=True,
+            )
+            assert output_path.exists()
+        finally:
+            safe_unlink(output_path)
