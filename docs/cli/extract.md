@@ -65,6 +65,85 @@ The `--bbox-threshold` sets the row count where `auto` switches to server-side f
 !!! warning "Limitations"
     **Cannot read BigQuery views or external tables** - this is a limitation of the BigQuery Storage Read API. BIGNUMERIC columns are not supported (exceeds DuckDB's precision).
 
+### extract arcgis
+
+Extract from ArcGIS Feature Services to GeoParquet.
+
+```bash
+gpio extract arcgis SERVICE_URL OUTPUT_FILE
+```
+
+**Arguments:**
+
+- `SERVICE_URL` - ArcGIS Feature Service layer URL (must include layer ID like /0)
+- `OUTPUT_FILE` - Output GeoParquet file path
+
+**Authentication Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--token` | ArcGIS authentication token |
+| `--token-file` | Path to file containing token (local or remote) |
+| `--username` | ArcGIS Online/Enterprise username (requires `--password`) |
+| `--password` | ArcGIS Online/Enterprise password (requires `--username`) |
+| `--portal-url` | Enterprise portal URL for token generation (default: ArcGIS Online) |
+
+**Filtering Options (server-side):**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--where` | `1=1` | SQL WHERE clause (pushed to server) |
+| `--bbox` | - | Bounding box: `xmin,ymin,xmax,ymax` in WGS84 |
+| `--include-cols` | - | Comma-separated columns to include (server-side) |
+| `--limit` | - | Maximum features to extract |
+
+**Client-side Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--exclude-cols` | Comma-separated columns to exclude (applied after download) |
+
+**Output Options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--skip-hilbert` | false | Skip Hilbert spatial ordering |
+| `--skip-bbox` | false | Skip adding bbox column |
+| `--geoparquet-version` | - | GeoParquet version (1.0 or 1.1) |
+| `--compression` | ZSTD | Compression codec |
+| `--compression-level` | 15 | Compression level |
+| `--profile` | - | AWS profile for S3 output |
+
+**Examples:**
+
+```bash
+# Public service (no auth)
+gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 out.parquet
+
+# Filter by bounding box
+gpio extract arcgis https://... out.parquet --bbox -122.5,37.5,-122.0,38.0
+
+# Filter by SQL WHERE clause
+gpio extract arcgis https://... out.parquet --where "state='CA'"
+
+# Extract only specific columns
+gpio extract arcgis https://... out.parquet --include-cols name,population
+
+# Limit number of features
+gpio extract arcgis https://... out.parquet --limit 1000
+
+# With authentication
+gpio extract arcgis https://... out.parquet --username user@email.com --password secret
+
+# Combined filters
+gpio extract arcgis https://... out.parquet \
+    --bbox -122.5,37.5,-122.0,38.0 \
+    --where "population > 10000" \
+    --limit 500
+```
+
+For detailed usage and examples, see the [Extract Guide: ArcGIS](../guide/extract.md#extracting-from-arcgis-feature-services).
+
 ## Options
 
 ### Column Selection

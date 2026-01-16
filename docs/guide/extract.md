@@ -717,6 +717,347 @@ Other limitations:
 - **BIGNUMERIC columns**: Not supported (76-digit precision exceeds DuckDB's 38-digit limit)
 - **Large results**: Consider using `--limit` and `--where` to reduce data transfer
 
+## Extracting from ArcGIS Feature Services
+
+Extract data directly from ArcGIS REST Feature Services to GeoParquet. Features are downloaded with server-side filtering for efficiency and automatically converted with proper CRS detection.
+
+### Basic Usage
+
+=== "CLI"
+
+    ```bash
+    # Extract from public service (no authentication required)
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract from public service
+    gpio.extract_arcgis('https://services.arcgis.com/.../FeatureServer/0') \
+        .sort_hilbert() \
+        .write('output.parquet')
+    ```
+
+### URL Format
+
+`SERVICE_URL` must be a full ArcGIS Feature Service layer URL including the layer ID:
+
+```
+https://services.arcgis.com/XXXXX/arcgis/rest/services/ServiceName/FeatureServer/0
+```
+
+The `/0` at the end is the layer index (0, 1, 2, etc.). Both FeatureServer and MapServer endpoints are supported.
+
+!!! note "ImageServer not supported"
+    ImageServer endpoints (raster/imagery services) are not supported—only vector layers from FeatureServer or MapServer can be converted to GeoParquet.
+
+### Server-Side Filtering
+
+Filters are pushed to the ArcGIS server for efficiency—only matching features are downloaded. This reduces bandwidth and speeds up extraction.
+
+#### WHERE Filter
+
+Filter features by attribute values using SQL WHERE syntax:
+
+=== "CLI"
+
+    ```bash
+    # Filter by attribute
+    gpio extract arcgis https://... out.parquet --where "state='CA'"
+
+    # Multiple conditions
+    gpio extract arcgis https://... out.parquet --where "population > 10000 AND status = 'active'"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Filter by attribute
+    gpio.extract_arcgis(url, where="state='CA'").write('output.parquet')
+
+    # Multiple conditions
+    gpio.extract_arcgis(url, where="population > 10000 AND status = 'active'").write('output.parquet')
+    ```
+
+#### Bounding Box Filter
+
+Filter features by spatial extent:
+
+=== "CLI"
+
+    ```bash
+    # Filter to San Francisco area (WGS84 coordinates)
+    gpio extract arcgis https://... out.parquet --bbox -122.5,37.5,-122.0,38.0
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Filter to San Francisco area
+    gpio.extract_arcgis(url, bbox=(-122.5, 37.5, -122.0, 38.0)).write('output.parquet')
+    ```
+
+!!! note "Bbox format"
+    The bbox is specified as `xmin,ymin,xmax,ymax` in WGS84 (EPSG:4326) coordinates.
+
+#### Column Selection
+
+Select specific columns to download (reduces bandwidth):
+
+=== "CLI"
+
+    ```bash
+    # Include only specific columns (server-side)
+    gpio extract arcgis https://... out.parquet --include-cols name,population,area
+
+    # Exclude columns (client-side, applied after download)
+    gpio extract arcgis https://... out.parquet --exclude-cols internal_id,temp_field
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Include only specific columns
+    gpio.extract_arcgis(url, include_cols='name,population,area').write('output.parquet')
+
+    # Exclude columns
+    gpio.extract_arcgis(url, exclude_cols='internal_id,temp_field').write('output.parquet')
+    ```
+
+!!! info "Server vs Client filtering"
+    `--include-cols` is pushed to the server (more efficient), while `--exclude-cols` is applied after download.
+
+#### Feature Limit
+
+Limit the number of features downloaded:
+
+=== "CLI"
+
+    ```bash
+    # Extract first 1000 features
+    gpio extract arcgis https://... out.parquet --limit 1000
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Extract first 1000 features
+    gpio.extract_arcgis(url, limit=1000).write('output.parquet')
+    ```
+
+### Authentication
+
+Four authentication methods are supported, in priority order:
+
+| Method | Option | Description |
+|--------|--------|-------------|
+| 1. Token | `--token` | Direct token string |
+| 2. Token file | `--token-file` | Path to file containing token |
+| 3. Credentials | `--username`/`--password` | Generate token via ArcGIS REST API |
+| 4. Enterprise | `--portal-url` | Custom portal URL for enterprise servers |
+
+=== "CLI"
+
+    ```bash
+    # Direct token
+    gpio extract arcgis https://... out.parquet --token "your-token-here"
+
+    # Token from file
+    gpio extract arcgis https://... out.parquet --token-file /path/to/token.txt
+
+    # Username/password (ArcGIS Online)
+    gpio extract arcgis https://... out.parquet --username user@email.com --password mypassword
+
+    # Enterprise portal
+    gpio extract arcgis https://... out.parquet \
+        --username user --password pass \
+        --portal-url https://enterprise.example.com/portal/sharing/rest/generateToken
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Direct token
+    gpio.extract_arcgis(url, token="your-token-here").write('output.parquet')
+
+    # Token from file
+    gpio.extract_arcgis(url, token_file='/path/to/token.txt').write('output.parquet')
+
+    # Username/password
+    gpio.extract_arcgis(url, username='user@email.com', password='mypassword').write('output.parquet')
+
+    # Enterprise portal
+    gpio.extract_arcgis(
+        url,
+        username='user',
+        password='pass',
+        portal_url='https://enterprise.example.com/portal/sharing/rest/generateToken'
+    ).write('output.parquet')
+    ```
+
+!!! tip "Enterprise portal detection"
+    For enterprise servers, the tool automatically detects the token URL from service URLs containing `/arcgis/` if no `--portal-url` is specified.
+
+### Output Optimization
+
+By default, the CLI applies optimizations for better query performance:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--skip-hilbert` | false | Skip Hilbert spatial ordering |
+| `--skip-bbox` | false | Skip adding bbox column |
+| Compression | ZSTD | ZSTD compression with level 15 |
+
+=== "CLI"
+
+    ```bash
+    # Skip Hilbert ordering (faster conversion, less optimal queries)
+    gpio extract arcgis https://... out.parquet --skip-hilbert
+
+    # Skip bbox column
+    gpio extract arcgis https://... out.parquet --skip-bbox
+
+    # Custom compression
+    gpio extract arcgis https://... out.parquet --compression GZIP --compression-level 9
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Python API does NOT apply Hilbert sorting by default
+    # Add it explicitly if needed
+    gpio.extract_arcgis(url) \
+        .add_bbox() \
+        .sort_hilbert() \
+        .write('output.parquet')
+    ```
+
+!!! note "Python API differences"
+    Unlike the CLI, the Python API does NOT apply Hilbert sorting or add bbox by default. Chain `.add_bbox()` and `.sort_hilbert()` explicitly if you want these optimizations.
+
+### CRS Handling
+
+The tool automatically converts ArcGIS WKID (Well-Known ID) codes to EPSG codes:
+
+| ArcGIS WKID | EPSG Code | Description |
+|-------------|-----------|-------------|
+| 4326 | EPSG:4326 | WGS84 (Geographic) |
+| 102100 | EPSG:3857 | Web Mercator |
+| 102113 | EPSG:3785 | Legacy Web Mercator |
+
+For other WKIDs, the tool maps directly to EPSG codes. WKT-based spatial references are also supported.
+
+### Memory-Efficient Streaming
+
+Features are downloaded in pages (typically ~2000 features per page) to keep memory usage low. The tool:
+
+1. Streams features page-by-page to a temporary parquet file
+2. Reads the complete file for post-processing (Hilbert ordering, bbox)
+3. Writes the final optimized GeoParquet
+
+This allows extracting large datasets without running out of memory.
+
+### Common Patterns
+
+#### Extract Public Parks Data
+
+```bash
+# Extract parks from a public ArcGIS service
+gpio extract arcgis \
+    https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_Parks/FeatureServer/0 \
+    usa_parks.parquet
+```
+
+#### Extract with Combined Filters
+
+=== "CLI"
+
+    ```bash
+    # Combine bbox, WHERE, and limit
+    gpio extract arcgis https://... out.parquet \
+        --bbox -122.5,37.5,-122.0,38.0 \
+        --where "population > 10000" \
+        --include-cols name,population,geometry \
+        --limit 500
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.extract_arcgis(
+        url,
+        bbox=(-122.5, 37.5, -122.0, 38.0),
+        where="population > 10000",
+        include_cols='name,population',
+        limit=500
+    ).add_bbox().sort_hilbert().write('output.parquet')
+    ```
+
+#### Extract from Secured Enterprise Service
+
+```bash
+# Enterprise server with credentials
+gpio extract arcgis \
+    https://gis.enterprise.com/arcgis/rest/services/Parcels/FeatureServer/0 \
+    parcels.parquet \
+    --username jsmith \
+    --password secret123
+```
+
+### Error Handling
+
+#### Authentication Errors
+
+```bash
+# 401 Unauthorized
+gpio extract arcgis https://secured-service/... out.parquet
+# Error: Authentication required. Use --token or --username/--password.
+
+# 403 Forbidden
+gpio extract arcgis https://... out.parquet --token expired_token
+# Error: Access denied. Check your credentials and service permissions.
+```
+
+#### Invalid URL
+
+```bash
+# Missing layer ID
+gpio extract arcgis https://services.arcgis.com/.../FeatureServer out.parquet
+# Error: Missing layer ID in URL. You must specify which layer to download.
+# For example: https://services.arcgis.com/.../FeatureServer/0
+```
+
+#### Empty Results
+
+```bash
+# No features match filters
+gpio extract arcgis https://... out.parquet --where "population > 999999999"
+# Warning: No features match filter: where='population > 999999999'
+```
+
+### See Also
+
+- [CLI Reference](../cli/extract.md#extract-arcgis) - Complete option reference
+- [Extracting from BigQuery](#extracting-from-bigquery) - Similar workflow for BigQuery
+- [Remote Files Guide](remote-files.md) - Working with S3 output
+
 ## Working with Partitioned Input Data
 
 The `extract` command can read from partitioned GeoParquet datasets, including directories containing multiple parquet files and hive-style partitions.
