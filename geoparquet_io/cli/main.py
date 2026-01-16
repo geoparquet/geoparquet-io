@@ -192,31 +192,32 @@ class ConvertDefaultGroup(click.Group):
     }
 
     def parse_args(self, ctx, args):
+        """Parse args with format auto-detection from output file extension."""
         # Handle --help for group
         if "--help" in args and (not args or args[0] not in self.commands):
             return super().parse_args(ctx, [a for a in args if a != "--help"] + ["--help"])
 
-        # If first arg is a known subcommand, use it
+        # If first arg is a known subcommand, use it directly
         if args and not args[0].startswith("-") and args[0] in self.commands:
             return super().parse_args(ctx, args)
 
-        # Try to auto-detect format from output file extension
-        # Look for second positional arg (OUTPUT_FILE after INPUT_FILE)
-        detected_subcommand = "geoparquet"  # Default fallback
+        # Auto-detect format from output file extension
+        subcommand = self._detect_format_from_args(args)
+        return super().parse_args(ctx, [subcommand] + args)
 
-        # Find output file argument (second non-option argument)
+    def _detect_format_from_args(self, args):
+        """Extract output file from args and detect format from extension."""
+        from pathlib import Path
+
+        # Find second positional argument (OUTPUT_FILE after INPUT_FILE)
         positional_args = [arg for arg in args if not arg.startswith("-")]
+
         if len(positional_args) >= 2:
             output_file = positional_args[1]
-            # Extract extension and check mapping
-            from pathlib import Path
-
             ext = Path(output_file).suffix.lower()
-            if ext in self.EXTENSION_TO_SUBCOMMAND:
-                detected_subcommand = self.EXTENSION_TO_SUBCOMMAND[ext]
+            return self.EXTENSION_TO_SUBCOMMAND.get(ext, "geoparquet")
 
-        # Invoke detected or default subcommand
-        return super().parse_args(ctx, [detected_subcommand] + args)
+        return "geoparquet"  # Default fallback
 
 
 ExtractDefaultGroup = create_default_group(

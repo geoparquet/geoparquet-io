@@ -25,6 +25,15 @@ from geoparquet_io.core.common import (
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 
+# Error message templates for consistency
+ERROR_REMOTE_OUTPUT = "{format} output path must be local. Use upload() for cloud destinations."
+ERROR_FILE_EXISTS = "{format} file already exists: {path}\nUse --overwrite to replace it."
+ERROR_CONVERSION_FAILED = "Failed to create {format}: {error}"
+ERROR_NO_GEOMETRY = "No geometry column found. Expected 'geometry', 'geom', or 'wkb_geometry'."
+ERROR_NO_COMPATIBLE_COLUMNS = (
+    "No compatible columns for {format} format. All columns are complex types (STRUCT, LIST, MAP)."
+)
+
 # Format configuration for GDAL-based writers
 GDAL_FORMATS = {
     "geopackage": {
@@ -92,10 +101,7 @@ def write_gdal_format(
 
     # Validate inputs
     if is_remote_url(output_path):
-        raise click.ClickException(
-            f"{config['description']} output path must be local. "
-            "Use upload() for cloud destinations."
-        )
+        raise click.ClickException(ERROR_REMOTE_OUTPUT.format(format=config["description"]))
 
     validate_profile_for_urls(profile, input_path)
     setup_aws_profile_if_needed(profile, input_path)
@@ -106,7 +112,7 @@ def write_gdal_format(
     output_file = Path(output_path)
     if config["check_overwrite"] and output_file.exists() and not overwrite:
         raise click.ClickException(
-            f"Output file already exists: {output_path}\nUse --overwrite to replace existing file."
+            ERROR_FILE_EXISTS.format(format=config["description"], path=output_path)
         )
 
     validate_output_path(output_path, verbose)
@@ -153,8 +159,7 @@ def write_gdal_format(
 
         if not compatible_cols:
             raise click.ClickException(
-                f"No compatible columns for {config['description']} format. "
-                "All columns are complex types (STRUCT, LIST, MAP)."
+                ERROR_NO_COMPATIBLE_COLUMNS.format(format=config["description"])
             )
 
         select_clause = ", ".join(compatible_cols)
@@ -175,10 +180,11 @@ def write_gdal_format(
         error_msg = str(e)
         if "already exists" in error_msg.lower():
             raise click.ClickException(
-                f"{config['description']} file already exists: {output_path}\n"
-                "Use --overwrite to replace it."
+                ERROR_FILE_EXISTS.format(format=config["description"], path=output_path)
             ) from e
-        raise click.ClickException(f"Failed to create {config['description']}: {error_msg}") from e
+        raise click.ClickException(
+            ERROR_CONVERSION_FAILED.format(format=config["description"], error=error_msg)
+        ) from e
     finally:
         con.close()
 
@@ -214,9 +220,7 @@ def write_csv(
     configure_verbose(verbose)
 
     if is_remote_url(output_path):
-        raise click.ClickException(
-            "CSV output path must be local. Use upload() for cloud destinations."
-        )
+        raise click.ClickException(ERROR_REMOTE_OUTPUT.format(format="CSV"))
 
     validate_profile_for_urls(profile, input_path)
     setup_aws_profile_if_needed(profile, input_path)
@@ -241,9 +245,7 @@ def write_csv(
         )
 
         if not geom_col:
-            raise click.ClickException(
-                "No geometry column found. Expected 'geometry', 'geom', or 'wkb_geometry'."
-            )
+            raise click.ClickException(ERROR_NO_GEOMETRY)
 
         # Build column list
         select_cols = []
@@ -291,7 +293,9 @@ def write_csv(
         return output_path
 
     except Exception as e:
-        raise click.ClickException(f"Failed to create CSV: {str(e)}") from e
+        raise click.ClickException(
+            ERROR_CONVERSION_FAILED.format(format="CSV", error=str(e))
+        ) from e
     finally:
         con.close()
 
