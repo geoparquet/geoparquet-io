@@ -30,6 +30,7 @@ from geoparquet_io.core.check_spatial_order import check_spatial_order as check_
 from geoparquet_io.core.common import validate_parquet_extension
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.extract import extract as extract_impl
+from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
 from geoparquet_io.core.inspect import (
     display_metadata,
@@ -2273,15 +2274,7 @@ def extract_arcgis(
         validate_parquet_extension(output_file)
 
     # Parse bbox string if provided
-    bbox_tuple = None
-    if bbox:
-        try:
-            parts = [float(x.strip()) for x in bbox.split(",")]
-            if len(parts) != 4:
-                raise ValueError("bbox must have exactly 4 values")
-            bbox_tuple = tuple(parts)
-        except ValueError as e:
-            raise click.BadParameter(f"Invalid bbox format: {e}. Use xmin,ymin,xmax,ymax") from e
+    bbox_tuple = parse_bbox(bbox) if bbox else None
 
     try:
         convert_arcgis_to_geoparquet(

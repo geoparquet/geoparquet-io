@@ -348,30 +348,19 @@ def extract_arcgis(
         ...     .add_bbox() \\
         ...     .write('output.parquet')
     """
-    from geoparquet_io.core.arcgis import ArcGISAuth, arcgis_to_table
-
-    auth = None
-    if any([token, token_file, username, password]):
-        auth = ArcGISAuth(
-            token=token,
-            token_file=token_file,
-            username=username,
-            password=password,
-            portal_url=portal_url,
-        )
-
-    arrow_table = arcgis_to_table(
-        service_url=service_url,
-        auth=auth,
+    return Table.from_arcgis(
+        service_url,
+        token=token,
+        token_file=token_file,
+        username=username,
+        password=password,
+        portal_url=portal_url,
         where=where,
         bbox=bbox,
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         limit=limit,
-        verbose=False,
     )
-
-    return Table(arrow_table, geometry_column="geometry")
 
 
 class Table:
@@ -501,6 +490,91 @@ class Table:
             )
 
         return cls(arrow_table)
+
+    @classmethod
+    def from_arcgis(
+        cls,
+        service_url: str,
+        *,
+        token: str | None = None,
+        token_file: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        portal_url: str | None = None,
+        where: str = "1=1",
+        bbox: tuple[float, float, float, float] | None = None,
+        include_cols: str | None = None,
+        exclude_cols: str | None = None,
+        limit: int | None = None,
+    ) -> Table:
+        """
+        Extract features from an ArcGIS Feature Service to a Table.
+
+        Downloads features from an ArcGIS REST Feature Service URL
+        and creates a Table for further processing.
+
+        Server-side filtering is applied for efficiency:
+        - where: SQL WHERE clause pushed to server
+        - bbox: Spatial filter pushed to server
+        - include_cols: Field selection pushed to server
+        - limit: Row limit applied during pagination
+
+        Unlike the CLI extract command, this does NOT apply Hilbert sorting by default.
+        Chain .sort_hilbert() explicitly if you want spatial ordering.
+
+        Args:
+            service_url: ArcGIS Feature Service URL with layer ID
+                (e.g., https://services.arcgis.com/.../FeatureServer/0)
+            token: Pre-generated authentication token
+            token_file: Path to file containing token
+            username: ArcGIS Online/Enterprise username
+            password: ArcGIS Online/Enterprise password
+            portal_url: Enterprise portal URL for token generation
+            where: SQL WHERE clause to filter features (default: "1=1" = all)
+            bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
+            include_cols: Comma-separated column names to include (server-side)
+            exclude_cols: Comma-separated column names to exclude (client-side)
+            limit: Maximum number of features to return
+
+        Returns:
+            Table for chaining operations
+
+        Example:
+            >>> import geoparquet_io as gpio
+            >>> # Extract all features
+            >>> gpio.Table.from_arcgis('https://services.arcgis.com/.../FeatureServer/0') \\
+            ...     .sort_hilbert() \\
+            ...     .write('output.parquet')
+            >>>
+            >>> # Extract with server-side filtering
+            >>> gpio.Table.from_arcgis(url, bbox=(-122.5, 37.5, -122.0, 38.0), limit=1000) \\
+            ...     .add_bbox() \\
+            ...     .write('output.parquet')
+        """
+        from geoparquet_io.core.arcgis import ArcGISAuth, arcgis_to_table
+
+        auth = None
+        if any([token, token_file, username, password]):
+            auth = ArcGISAuth(
+                token=token,
+                token_file=token_file,
+                username=username,
+                password=password,
+                portal_url=portal_url,
+            )
+
+        arrow_table = arcgis_to_table(
+            service_url=service_url,
+            auth=auth,
+            where=where,
+            bbox=bbox,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
+            limit=limit,
+            verbose=False,
+        )
+
+        return cls(arrow_table, geometry_column="geometry")
 
     def _format_crs_display(self, crs: dict | str | None) -> str:
         """Format CRS for human-readable display."""

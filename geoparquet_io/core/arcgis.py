@@ -164,6 +164,42 @@ def _handle_arcgis_response(data: dict, context: str) -> dict:
     return data
 
 
+def _normalize_token_url(portal_url: str) -> str:
+    """
+    Normalize a portal URL to the correct token generation endpoint.
+
+    Handles various input formats:
+    - Full token URL: returns as-is
+    - ArcGIS Portal base URL: appends /sharing/rest/generateToken
+    - ArcGIS Enterprise base URL (with /arcgis/): appends /tokens/generateToken
+
+    Args:
+        portal_url: User-provided portal URL (may be base URL or full endpoint)
+
+    Returns:
+        Normalized token generation endpoint URL
+    """
+    url = portal_url.rstrip("/")
+
+    # Already a full token endpoint
+    if url.endswith("/generateToken"):
+        return url
+
+    # Enterprise server pattern: has /arcgis/ in path
+    if "/arcgis" in url.lower():
+        # Extract base up to and including /arcgis
+        import re
+
+        match = re.match(r"(https?://[^/]+/arcgis)", url, re.IGNORECASE)
+        if match:
+            return f"{match.group(1)}/tokens/generateToken"
+        # If regex fails but /arcgis exists, append tokens path
+        return f"{url}/tokens/generateToken"
+
+    # ArcGIS Portal (Online or Portal without /arcgis/)
+    return f"{url}/sharing/rest/generateToken"
+
+
 def generate_token(
     username: str,
     password: str,
@@ -185,7 +221,10 @@ def generate_token(
     Raises:
         click.ClickException: If token generation fails
     """
-    token_url = portal_url or ARCGIS_ONLINE_TOKEN_URL
+    if portal_url:
+        token_url = _normalize_token_url(portal_url)
+    else:
+        token_url = ARCGIS_ONLINE_TOKEN_URL
 
     if verbose:
         debug(f"Generating token from {token_url}")
@@ -255,14 +294,14 @@ def resolve_token(
         portal_url = auth.portal_url
         if not portal_url and "/arcgis/" in service_url.lower():
             # Enterprise server pattern: https://server.example.com/arcgis/rest/services/...
-            # Token URL: https://server.example.com/arcgis/tokens/generateToken
+            # Extract base URL up to /arcgis, let generate_token normalize it
             import re
 
             match = re.match(r"(https?://[^/]+/arcgis)", service_url, re.IGNORECASE)
             if match:
-                portal_url = f"{match.group(1)}/tokens/generateToken"
+                portal_url = match.group(1)
                 if verbose:
-                    debug(f"Detected enterprise portal: {portal_url}")
+                    debug(f"Detected enterprise portal base: {portal_url}")
 
         return generate_token(auth.username, auth.password, portal_url, verbose)
 
@@ -815,7 +854,12 @@ def arcgis_to_table(
         # Apply client-side column exclusion if specified
         if exclude_cols:
             cols_to_exclude = {c.strip() for c in exclude_cols.split(",")}
-            # Keep geometry column unless explicitly excluded
+            # Prevent excluding the geometry column (breaks Hilbert/bbox and GeoParquet metadata)
+            if "geometry" in cols_to_exclude:
+                raise ValueError(
+                    "Cannot exclude 'geometry' column: it is required for GeoParquet output. "
+                    "Remove 'geometry' from --exclude-cols."
+                )
             cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
             if cols_to_keep:
                 table = table.select(cols_to_keep)
