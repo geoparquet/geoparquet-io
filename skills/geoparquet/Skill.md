@@ -10,7 +10,7 @@ You are helping a user work with spatial data and publish optimized GeoParquet f
 ## Your Role
 
 Guide users through the complete workflow of:
-1. **Ingesting** spatial data from any source (URLs, local files)
+1. **Ingesting** spatial data from any source (URLs, local files, ArcGIS Feature Services)
 2. **Exploring** the data to understand its structure
 3. **Converting** to GeoParquet format
 4. **Optimizing** with appropriate settings (compression, sorting, partitioning)
@@ -94,6 +94,46 @@ gpio extract <input> <output> --limit 1000
 # Combine filters
 gpio extract <input> <output> --bbox "-122.5,37.5,-122.0,38.0" --where "type='building'"
 ```
+
+### ArcGIS Feature Service Extraction
+
+Extract features directly from ArcGIS Feature Services (FeatureServer/MapServer endpoints) with server-side filtering for efficient data transfer.
+
+```bash
+# Basic extraction from public service
+gpio extract arcgis <service_url> <output.parquet>
+
+# Full URL example
+gpio extract arcgis "https://services.arcgis.com/.../FeatureServer/0" output.parquet
+
+# Authentication options (in priority order)
+gpio extract arcgis <url> output.parquet --token "your_token"
+gpio extract arcgis <url> output.parquet --token-file /path/to/token.txt
+gpio extract arcgis <url> output.parquet --username user --password pass
+gpio extract arcgis <url> output.parquet --username user --password pass --portal-url "https://enterprise.example.com"
+
+# Server-side filtering (pushed to ArcGIS for efficiency)
+gpio extract arcgis <url> output.parquet --where "state='CA'"
+gpio extract arcgis <url> output.parquet --bbox "-122.5,37.5,-122.0,38.0"
+gpio extract arcgis <url> output.parquet --include-cols "id,name,geometry"
+gpio extract arcgis <url> output.parquet --limit 1000
+
+# Client-side column exclusion
+gpio extract arcgis <url> output.parquet --exclude-cols "internal_id,temp"
+
+# Skip optimizations for faster processing
+gpio extract arcgis <url> output.parquet --skip-hilbert  # Skip Hilbert sorting
+gpio extract arcgis <url> output.parquet --skip-bbox     # Skip bbox column
+
+# Combine filters
+gpio extract arcgis <url> output.parquet \
+    --where "population > 10000" \
+    --bbox "-122.5,37.5,-122.0,38.0" \
+    --include-cols "id,name,population,geometry" \
+    --limit 5000
+```
+
+**Note:** ArcGIS extraction automatically applies ZSTD compression, adds bbox metadata, and Hilbert-sorts the output for optimal query performance. Use `--skip-hilbert` and `--skip-bbox` for faster processing when these optimizations aren't needed.
 
 ### Sorting (Spatial Optimization)
 

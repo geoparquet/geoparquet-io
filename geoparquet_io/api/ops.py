@@ -433,6 +433,10 @@ def convert_to_geojson(
 def from_arcgis(
     service_url: str,
     token: str | None = None,
+    token_file: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    portal_url: str | None = None,
     where: str = "1=1",
     bbox: tuple[float, float, float, float] | None = None,
     include_cols: str | None = None,
@@ -447,7 +451,11 @@ def from_arcgis(
 
     Args:
         service_url: ArcGIS Feature Service URL with layer ID
-        token: Optional authentication token
+        token: Optional authentication token (highest priority)
+        token_file: Path to file containing authentication token
+        username: ArcGIS Online/Enterprise username (requires password)
+        password: ArcGIS Online/Enterprise password (requires username)
+        portal_url: Enterprise portal URL for token generation (default: ArcGIS Online)
         where: SQL WHERE clause to filter features (default: "1=1" = all)
         bbox: Bounding box filter (xmin, ymin, xmax, ymax) in WGS84
         include_cols: Comma-separated column names to include (server-side)
@@ -465,10 +473,24 @@ def from_arcgis(
         >>>
         >>> # With server-side filtering
         >>> table = ops.from_arcgis(url, bbox=(-122.5, 37.5, -122.0, 38.0), limit=1000)
+        >>>
+        >>> # With authentication
+        >>> table = ops.from_arcgis(url, token="your_token")
+        >>> table = ops.from_arcgis(url, username="user", password="pass")
     """
     from geoparquet_io.core.arcgis import ArcGISAuth, arcgis_to_table
 
-    auth = ArcGISAuth(token=token) if token else None
+    # Create auth config if any auth options provided
+    auth = None
+    if any([token, token_file, username, password]):
+        auth = ArcGISAuth(
+            token=token,
+            token_file=token_file,
+            username=username,
+            password=password,
+            portal_url=portal_url,
+        )
+
     return arcgis_to_table(
         service_url,
         auth=auth,

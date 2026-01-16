@@ -804,7 +804,9 @@ def arcgis_to_table(
         )
 
         if total_rows == 0:
-            raise click.ClickException("No features returned from service")
+            warn("No features returned from service")
+            # Return empty table with geometry column (consistent with earlier handling)
+            return pa.table({"geometry": pa.array([], type=pa.binary())})
 
         # Pass 2: Read temp parquet file back as Arrow table
         progress("Reading temp file...")

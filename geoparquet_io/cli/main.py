@@ -2134,8 +2134,8 @@ def extract_geoparquet(
 )
 @click.option(
     "--token-file",
-    type=click.Path(exists=True),
-    help="Path to file containing authentication token",
+    type=click.Path(),
+    help="Path to file containing authentication token (local or remote)",
 )
 @click.option(
     "--username",
