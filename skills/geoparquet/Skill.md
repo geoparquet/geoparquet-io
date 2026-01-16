@@ -185,7 +185,7 @@ First, determine what you're working with:
 
 - **URL to remote file**: Download it first or access directly if gpio supports it
 - **Local file**: Work with it directly
-- **Supported formats**: GeoJSON, Shapefile (.shp), FlatGeobuf (.fgb), GeoPackage (.gpkg), CSV with geometry, existing Parquet
+- **Supported formats**: GeoJSON, Shapefile (.shp), FlatGeobuf (.fgb), GeoPackage (.gpkg), CSV with geometry, existing Parquet, ArcGIS Feature Services
 
 For URLs, you may need to download first:
 
