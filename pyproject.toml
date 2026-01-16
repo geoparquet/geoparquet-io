@@ -42,6 +42,8 @@ dependencies = [
     "pyproj>=3.0.0",  # Required for CRS handling and PROJJSON generation
     "mercantile>=1.2.0",  # Required for quadkey generation
     "httpx>=0.25.0",  # Required for ArcGIS REST API requests
+    "rasterio>=1.3.0",  # Required for raquet (raster parquet) GeoTIFF support
+    "quadbin>=0.2.0",  # Required for raquet QUADBIN spatial indexing
 ]
 
 [project.scripts]

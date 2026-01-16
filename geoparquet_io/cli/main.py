@@ -4611,5 +4611,254 @@ def validate(
         raise click.ClickException(str(e)) from e
 
 
+# === RASTER (RAQUET) COMMAND GROUP ===
+
+
+@cli.group()
+@click.pass_context
+def raster(ctx):
+    """Commands for working with raquet (raster parquet) files.
+
+    Raquet is a specification for storing raster data in Parquet format
+    using QUADBIN spatial indexing. See https://github.com/CartoDB/raquet
+
+    \b
+    Subcommands:
+      inspect   Display raquet metadata
+      convert   Convert GeoTIFF to raquet
+      export    Export raquet to GeoTIFF
+    """
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+
+
+@raster.command(name="inspect", cls=GlobAwareCommand)
+@click.argument("parquet_file")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+@verbose_option
+@profile_option
+def raster_inspect(parquet_file, json_output, verbose, profile):
+    """Display raquet metadata from a parquet file.
+
+    Shows version, bounds, resolution, bands info, compression, and statistics.
+
+    \b
+    Examples:
+      gpio raster inspect raster.parquet
+      gpio raster inspect raster.parquet --json
+      gpio raster inspect raster.parquet --verbose
+    """
+    import json as json_module
+    from dataclasses import asdict
+
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_profile_for_urls,
+    )
+    from geoparquet_io.core.raquet import (
+        format_raquet_metadata,
+        is_raquet_file,
+        read_raquet_metadata,
+    )
+
+    configure_verbose(verbose)
+    validate_profile_for_urls(profile, parquet_file)
+    setup_aws_profile_if_needed(profile, parquet_file)
+
+    if not is_raquet_file(parquet_file):
+        raise click.ClickException(
+            f"File is not a valid raquet file: {parquet_file}\n"
+            "Expected: 'block' column and 'metadata' column with block=0 metadata row."
+        )
+
+    metadata = read_raquet_metadata(parquet_file)
+    if metadata is None:
+        raise click.ClickException(f"Could not read metadata from: {parquet_file}")
+
+    if json_output:
+        click.echo(json_module.dumps(asdict(metadata), indent=2))
+    else:
+        format_raquet_metadata(metadata, verbose=verbose)
+
+
+@raster.command(name="convert", cls=SingleFileCommand)
+@click.argument("input_geotiff")
+@click.argument("output_parquet")
+@click.option(
+    "--block-size",
+    type=click.Choice(["256", "512"]),
+    default="256",
+    help="Block/tile size in pixels (default: 256)",
+)
+@click.option(
+    "--block-compression",
+    type=click.Choice(["gzip", "none"]),
+    default="gzip",
+    help="Compression for pixel data within blocks (default: gzip)",
+)
+@click.option(
+    "--resolution",
+    type=click.IntRange(0, 26),
+    default=None,
+    help="Target QUADBIN pixel resolution (auto-detect if not specified)",
+)
+@click.option(
+    "--include-overviews",
+    is_flag=True,
+    help="Include overview pyramids for multi-resolution queries (not yet implemented)",
+)
+@click.option(
+    "--no-skip-empty",
+    is_flag=True,
+    help="Include blocks containing only nodata values (default: skip them)",
+)
+@click.option("--no-stats", is_flag=True, help="Skip calculating band statistics")
+@compression_options
+@overwrite_option
+@verbose_option
+def raster_convert(
+    input_geotiff,
+    output_parquet,
+    block_size,
+    block_compression,
+    resolution,
+    include_overviews,
+    no_skip_empty,
+    no_stats,
+    compression,
+    compression_level,
+    overwrite,
+    verbose,
+):
+    """Convert a GeoTIFF to raquet parquet format.
+
+    Reprojects the input to Web Mercator (EPSG:3857), tiles it using QUADBIN,
+    and stores the result as a raquet parquet file.
+
+    \b
+    Examples:
+      gpio raster convert input.tif output.parquet
+      gpio raster convert input.tif output.parquet --block-size 512
+      gpio raster convert input.tif output.parquet --resolution 15
+      gpio raster convert input.tif output.parquet --compression gzip
+    """
+    from pathlib import Path as PathLib
+
+    from geoparquet_io.core.common import validate_output_path
+    from geoparquet_io.core.logging_config import success
+    from geoparquet_io.core.raquet import geotiff_to_raquet
+
+    configure_verbose(verbose)
+
+    # Check if output exists and handle overwrite
+    output_path = PathLib(output_parquet)
+    if output_path.exists() and not overwrite:
+        raise click.ClickException(
+            f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+        )
+
+    validate_output_path(output_parquet)
+
+    block_comp = None if block_compression == "none" else block_compression
+
+    try:
+        result = geotiff_to_raquet(
+            input_geotiff,
+            output_parquet,
+            block_size=int(block_size),
+            compression=block_comp,
+            parquet_compression=compression or "ZSTD",
+            target_resolution=resolution,
+            include_overviews=include_overviews,
+            skip_empty_blocks=not no_skip_empty,
+            calculate_stats=not no_stats,
+            verbose=verbose,
+        )
+
+        success(f"Converted to raquet: {result['num_blocks']} blocks, {result['num_bands']} bands")
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@raster.command(name="export", cls=SingleFileCommand)
+@click.argument("input_parquet")
+@click.argument("output_geotiff")
+@click.option(
+    "--bands",
+    help="Comma-separated band names to export (default: all)",
+)
+@click.option(
+    "--resolution",
+    type=click.IntRange(0, 26),
+    default=None,
+    help="Resolution level to export (default: max resolution)",
+)
+@overwrite_option
+@verbose_option
+@profile_option
+def raster_export(
+    input_parquet,
+    output_geotiff,
+    bands,
+    resolution,
+    overwrite,
+    verbose,
+    profile,
+):
+    """Export a raquet parquet file to GeoTIFF format.
+
+    \b
+    Examples:
+      gpio raster export raster.parquet output.tif
+      gpio raster export raster.parquet output.tif --bands band_1,band_2
+      gpio raster export raster.parquet output.tif --resolution 10
+    """
+    from pathlib import Path as PathLib
+
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_output_path,
+        validate_profile_for_urls,
+    )
+    from geoparquet_io.core.logging_config import success
+    from geoparquet_io.core.raquet import is_raquet_file, raquet_to_geotiff
+
+    configure_verbose(verbose)
+    validate_profile_for_urls(profile, input_parquet)
+    setup_aws_profile_if_needed(profile, input_parquet)
+
+    if not is_raquet_file(input_parquet):
+        raise click.ClickException(f"File is not a valid raquet file: {input_parquet}")
+
+    # Check if output exists and handle overwrite
+    output_path = PathLib(output_geotiff)
+    if output_path.exists() and not overwrite:
+        raise click.ClickException(
+            f"Output file already exists: {output_geotiff}\nUse --overwrite to replace it."
+        )
+
+    validate_output_path(output_geotiff)
+
+    band_list = bands.split(",") if bands else None
+
+    try:
+        result = raquet_to_geotiff(
+            input_parquet,
+            output_geotiff,
+            bands=band_list,
+            resolution=resolution,
+            verbose=verbose,
+        )
+
+        success(f"Exported to GeoTIFF: {result['width']}x{result['height']} pixels")
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
 if __name__ == "__main__":
     cli()
