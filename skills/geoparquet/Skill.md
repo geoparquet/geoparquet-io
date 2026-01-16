@@ -323,6 +323,7 @@ export AWS_SECRET_ACCESS_KEY=...
 ## Example Session
 
 User: "I want to work with this dataset: <https://data.source.coop/example/buildings.fgb>"
+User: "I want to work with this dataset: https://data.source.coop/example/buildings.fgb"
 
 Your approach:
 1. Download the file (if needed) or check if gpio can read it directly
