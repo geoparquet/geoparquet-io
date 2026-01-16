@@ -2220,11 +2220,11 @@ def inspect_legacy(
         raise click.ClickException(str(e)) from e
 
 
-# Extract command
+# Extract commands group
 @cli.group(cls=ExtractDefaultGroup)
 @click.pass_context
 def extract(ctx):
-    """Extract data from GeoParquet files or BigQuery tables.
+    """Extract data from files and services to GeoParquet.
 
     By default, extracts from GeoParquet files. Use subcommands for other sources.
 
@@ -2232,6 +2232,7 @@ def extract(ctx):
     Examples:
         gpio extract data.parquet output.parquet --bbox -122,37,-121,38
         gpio extract geoparquet data.parquet output.parquet  # Explicit
+        gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 out.parquet
         gpio extract bigquery project.dataset.table output.parquet
     """
     # Ensure logging is set up (in case this group is invoked directly in tests)
@@ -2424,6 +2425,190 @@ def extract_geoparquet(
             geoparquet_version=geoparquet_version,
             allow_schema_diff=allow_schema_diff,
             hive_input=hive_input,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@extract.command(name="arcgis", cls=SingleFileCommand)
+@click.argument("service_url")
+@click.argument("output_file", type=click.Path())
+@click.option(
+    "--token",
+    help="ArcGIS authentication token",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(exists=True),
+    help="Path to file containing authentication token",
+)
+@click.option(
+    "--username",
+    help="ArcGIS Online/Enterprise username (requires --password)",
+)
+@click.option(
+    "--password",
+    help="ArcGIS Online/Enterprise password (requires --username)",
+)
+@click.option(
+    "--portal-url",
+    help="Enterprise portal URL for token generation (default: ArcGIS Online)",
+)
+@click.option(
+    "--where",
+    default="1=1",
+    help="SQL WHERE clause to filter features (pushed to server, default: '1=1' = all)",
+)
+@click.option(
+    "--bbox",
+    help="Bounding box filter: xmin,ymin,xmax,ymax in WGS84 (pushed to server)",
+)
+@click.option(
+    "--include-cols",
+    help="Comma-separated columns to include (pushed to server for efficiency)",
+)
+@click.option(
+    "--exclude-cols",
+    help="Comma-separated columns to exclude (applied after download)",
+)
+@click.option(
+    "--limit",
+    type=int,
+    help="Maximum number of features to extract",
+)
+@click.option(
+    "--skip-hilbert",
+    is_flag=True,
+    help="Skip Hilbert spatial ordering (faster but less optimal for spatial queries)",
+)
+@click.option(
+    "--skip-bbox",
+    is_flag=True,
+    help="Skip adding bbox column (bbox enables faster spatial filtering on remote files)",
+)
+@geoparquet_version_option
+@verbose_option
+@compression_options
+@any_extension_option
+@profile_option
+def extract_arcgis(
+    service_url,
+    output_file,
+    token,
+    token_file,
+    username,
+    password,
+    portal_url,
+    where,
+    bbox,
+    include_cols,
+    exclude_cols,
+    limit,
+    skip_hilbert,
+    skip_bbox,
+    geoparquet_version,
+    verbose,
+    compression,
+    compression_level,
+    any_extension,
+    profile,
+):
+    """
+    Extract features from ArcGIS Feature Service to GeoParquet.
+
+    Downloads features from an ArcGIS REST Feature Service and converts
+    them to an optimized GeoParquet file with ZSTD compression, bbox metadata,
+    and Hilbert spatial ordering.
+
+    SERVICE_URL must be a full ArcGIS Feature Service layer URL including the
+    layer ID (e.g., .../FeatureServer/0).
+
+    \b
+    Filtering options (pushed to server for efficiency):
+      --where          SQL WHERE clause for attribute filtering
+      --bbox           Spatial bounding box filter (xmin,ymin,xmax,ymax)
+      --include-cols   Select specific columns to download
+      --limit          Maximum number of features to return
+
+    \b
+    Authentication options (in priority order):
+      --token          Direct token string
+      --token-file     Path to file containing token
+      --username/password  Generate token via ArcGIS REST API
+
+    \b
+    Examples:
+      # Public service (no auth)
+      gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 out.parquet
+
+      \b
+      # Filter by bounding box (server-side)
+      gpio extract arcgis https://... out.parquet --bbox -122.5,37.5,-122.0,38.0
+
+      \b
+      # Filter by SQL WHERE clause (server-side)
+      gpio extract arcgis https://... out.parquet --where "state='CA'"
+
+      \b
+      # Extract only specific columns (server-side)
+      gpio extract arcgis https://... out.parquet --include-cols name,population
+
+      \b
+      # Limit number of features
+      gpio extract arcgis https://... out.parquet --limit 1000
+
+      \b
+      # Combined filters
+      gpio extract arcgis https://... out.parquet \\
+          --bbox -122.5,37.5,-122.0,38.0 \\
+          --where "population > 10000" \\
+          --limit 500
+    """
+    from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+    from geoparquet_io.core.common import validate_parquet_extension
+
+    configure_verbose(verbose)
+
+    # Validate auth options
+    if (username and not password) or (password and not username):
+        raise click.BadParameter("Both --username and --password are required together")
+
+    # Validate output extension
+    if not any_extension:
+        validate_parquet_extension(output_file)
+
+    # Parse bbox string if provided
+    bbox_tuple = None
+    if bbox:
+        try:
+            parts = [float(x.strip()) for x in bbox.split(",")]
+            if len(parts) != 4:
+                raise ValueError("bbox must have exactly 4 values")
+            bbox_tuple = tuple(parts)
+        except ValueError as e:
+            raise click.BadParameter(f"Invalid bbox format: {e}. Use xmin,ymin,xmax,ymax") from e
+
+    try:
+        convert_arcgis_to_geoparquet(
+            service_url=service_url,
+            output_file=output_file,
+            token=token,
+            token_file=token_file,
+            username=username,
+            password=password,
+            portal_url=portal_url,
+            where=where,
+            bbox=bbox_tuple,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
+            limit=limit,
+            skip_hilbert=skip_hilbert,
+            skip_bbox=skip_bbox,
+            compression=compression.upper(),
+            compression_level=compression_level,
+            verbose=verbose,
+            geoparquet_version=geoparquet_version,
+            profile=profile,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -4779,6 +4964,420 @@ def validate(
         elif result.warning_count > 0:
             raise click.exceptions.Exit(2)
         # Exit 0 is implicit when no exception is raised
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+# === RASTER (RAQUET) COMMAND GROUP ===
+
+
+@cli.group()
+@click.pass_context
+def raster(ctx):
+    """Commands for working with raquet (raster parquet) files.
+
+    Raquet is a specification for storing raster data in Parquet format
+    using QUADBIN spatial indexing. See https://github.com/CartoDB/raquet
+
+    \b
+    Subcommands:
+      inspect   Display raquet metadata
+      convert   Convert GeoTIFF to raquet
+      export    Export raquet to GeoTIFF
+    """
+    ctx.ensure_object(dict)
+    timestamps = ctx.obj.get("timestamps", False)
+    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+
+
+@raster.command(name="inspect", cls=GlobAwareCommand)
+@click.argument("parquet_file")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+@verbose_option
+@profile_option
+def raster_inspect(parquet_file, json_output, verbose, profile):
+    """Display raquet metadata from a parquet file.
+
+    Shows version, bounds, resolution, bands info, compression, and statistics.
+
+    \b
+    Examples:
+      gpio raster inspect raster.parquet
+      gpio raster inspect raster.parquet --json
+      gpio raster inspect raster.parquet --verbose
+    """
+    import json as json_module
+    from dataclasses import asdict
+
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_profile_for_urls,
+    )
+    from geoparquet_io.core.raquet import (
+        format_raquet_metadata,
+        is_raquet_file,
+        read_raquet_metadata,
+    )
+
+    configure_verbose(verbose)
+    validate_profile_for_urls(profile, parquet_file)
+    setup_aws_profile_if_needed(profile, parquet_file)
+
+    if not is_raquet_file(parquet_file):
+        raise click.ClickException(
+            f"File is not a valid raquet file: {parquet_file}\n"
+            "Expected: 'block' column and 'metadata' column with block=0 metadata row."
+        )
+
+    metadata = read_raquet_metadata(parquet_file)
+    if metadata is None:
+        raise click.ClickException(f"Could not read metadata from: {parquet_file}")
+
+    if json_output:
+        click.echo(json_module.dumps(asdict(metadata), indent=2))
+    else:
+        format_raquet_metadata(metadata, verbose=verbose)
+
+
+@raster.command(name="convert", cls=SingleFileCommand)
+@click.argument("input_geotiff")
+@click.argument("output_parquet")
+@click.option(
+    "--block-size",
+    type=click.Choice(["256", "512"]),
+    default="256",
+    help="Block/tile size in pixels (default: 256)",
+)
+@click.option(
+    "--block-compression",
+    type=click.Choice(["gzip", "none"]),
+    default="gzip",
+    help="Compression for pixel data within blocks (default: gzip)",
+)
+@click.option(
+    "--resolution",
+    type=click.IntRange(0, 26),
+    default=None,
+    help="Target QUADBIN pixel resolution (auto-detect if not specified)",
+)
+@click.option(
+    "--include-overviews",
+    is_flag=True,
+    help="Include overview pyramids for multi-resolution queries (not yet implemented)",
+)
+@click.option(
+    "--no-skip-empty",
+    is_flag=True,
+    help="Include blocks containing only nodata values (default: skip them)",
+)
+@click.option("--no-stats", is_flag=True, help="Skip calculating band statistics")
+@compression_options
+@overwrite_option
+@verbose_option
+def raster_convert(
+    input_geotiff,
+    output_parquet,
+    block_size,
+    block_compression,
+    resolution,
+    include_overviews,
+    no_skip_empty,
+    no_stats,
+    compression,
+    compression_level,
+    overwrite,
+    verbose,
+):
+    """Convert a GeoTIFF to raquet parquet format.
+
+    Reprojects the input to Web Mercator (EPSG:3857), tiles it using QUADBIN,
+    and stores the result as a raquet parquet file.
+
+    \b
+    Examples:
+      gpio raster convert input.tif output.parquet
+      gpio raster convert input.tif output.parquet --block-size 512
+      gpio raster convert input.tif output.parquet --resolution 15
+      gpio raster convert input.tif output.parquet --compression gzip
+    """
+    from pathlib import Path as PathLib
+
+    from geoparquet_io.core.common import validate_output_path
+    from geoparquet_io.core.logging_config import success
+    from geoparquet_io.core.raquet import geotiff_to_raquet
+
+    configure_verbose(verbose)
+
+    # Check if output exists and handle overwrite
+    output_path = PathLib(output_parquet)
+    if output_path.exists() and not overwrite:
+        raise click.ClickException(
+            f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+        )
+
+    validate_output_path(output_parquet)
+
+    block_comp = None if block_compression == "none" else block_compression
+
+    try:
+        result = geotiff_to_raquet(
+            input_geotiff,
+            output_parquet,
+            block_size=int(block_size),
+            compression=block_comp,
+            parquet_compression=compression or "ZSTD",
+            target_resolution=resolution,
+            include_overviews=include_overviews,
+            skip_empty_blocks=not no_skip_empty,
+            calculate_stats=not no_stats,
+            verbose=verbose,
+        )
+
+        success(f"Converted to raquet: {result['num_blocks']} blocks, {result['num_bands']} bands")
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@raster.command(name="convert-imageserver", cls=SingleFileCommand)
+@click.argument("service_url")
+@click.argument("output_parquet")
+@click.option(
+    "--token",
+    help="ArcGIS authentication token",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(exists=True),
+    help="Path to file containing authentication token",
+)
+@click.option(
+    "--username",
+    help="ArcGIS Online/Enterprise username (requires --password)",
+)
+@click.option(
+    "--password",
+    help="ArcGIS Online/Enterprise password (requires --username)",
+)
+@click.option(
+    "--portal-url",
+    help="Enterprise portal URL for token generation (default: ArcGIS Online)",
+)
+@click.option(
+    "--bbox",
+    help="Bounding box filter: xmin,ymin,xmax,ymax in WGS84",
+)
+@click.option(
+    "--block-size",
+    type=click.Choice(["256", "512"]),
+    default="256",
+    help="Block/tile size in pixels (default: 256)",
+)
+@click.option(
+    "--block-compression",
+    type=click.Choice(["gzip", "none"]),
+    default="gzip",
+    help="Compression for pixel data within blocks (default: gzip)",
+)
+@click.option(
+    "--resolution",
+    type=click.IntRange(0, 26),
+    default=None,
+    help="Target QUADBIN pixel resolution (auto-detect if not specified)",
+)
+@click.option(
+    "--no-skip-empty",
+    is_flag=True,
+    help="Include blocks containing only nodata values (default: skip them)",
+)
+@click.option("--no-stats", is_flag=True, help="Skip calculating band statistics")
+@compression_options
+@overwrite_option
+@verbose_option
+def raster_convert_imageserver(
+    service_url,
+    output_parquet,
+    token,
+    token_file,
+    username,
+    password,
+    portal_url,
+    bbox,
+    block_size,
+    block_compression,
+    resolution,
+    no_skip_empty,
+    no_stats,
+    compression,
+    compression_level,
+    overwrite,
+    verbose,
+):
+    """Convert an ArcGIS ImageServer to raquet parquet format.
+
+    Downloads raster tiles from an ArcGIS ImageServer REST service,
+    reprojects to Web Mercator (EPSG:3857), and stores as a raquet parquet file
+    with QUADBIN spatial indexing.
+
+    \b
+    Examples:
+      gpio raster convert-imageserver \\
+        "https://server.com/arcgis/rest/services/Imagery/ImageServer" \\
+        output.parquet
+
+      gpio raster convert-imageserver \\
+        "https://server.com/arcgis/rest/services/Imagery/ImageServer" \\
+        output.parquet --bbox "-122.5,37.5,-122.0,38.0"
+
+      gpio raster convert-imageserver \\
+        "https://server.com/arcgis/rest/services/Imagery/ImageServer" \\
+        output.parquet --token YOUR_TOKEN --resolution 15
+    """
+    from pathlib import Path as PathLib
+
+    from geoparquet_io.core.arcgis import ArcGISAuth, resolve_token
+    from geoparquet_io.core.common import validate_output_path
+    from geoparquet_io.core.logging_config import success
+    from geoparquet_io.core.raquet import imageserver_to_raquet
+
+    configure_verbose(verbose)
+
+    # Validate authentication options
+    if username and not password:
+        raise click.ClickException("--password is required when using --username")
+    if password and not username:
+        raise click.ClickException("--username is required when using --password")
+
+    # Check if output exists and handle overwrite
+    output_path = PathLib(output_parquet)
+    if output_path.exists() and not overwrite:
+        raise click.ClickException(
+            f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+        )
+
+    validate_output_path(output_parquet)
+
+    # Resolve authentication token
+    auth = ArcGISAuth(
+        token=token,
+        token_file=token_file,
+        username=username,
+        password=password,
+        portal_url=portal_url,
+    )
+    resolved_token = resolve_token(auth, service_url, verbose)
+
+    # Parse bbox if provided
+    bbox_tuple = None
+    if bbox:
+        try:
+            parts = [float(x.strip()) for x in bbox.split(",")]
+            if len(parts) != 4:
+                raise ValueError("Expected 4 values")
+            bbox_tuple = tuple(parts)
+        except ValueError as e:
+            raise click.ClickException(
+                f"Invalid bbox format: {bbox}\nExpected: xmin,ymin,xmax,ymax (e.g., -122.5,37.5,-122.0,38.0)"
+            ) from e
+
+    block_comp = None if block_compression == "none" else block_compression
+
+    try:
+        result = imageserver_to_raquet(
+            service_url,
+            output_parquet,
+            token=resolved_token,
+            bbox=bbox_tuple,
+            block_size=int(block_size),
+            compression=block_comp,
+            parquet_compression=compression or "ZSTD",
+            target_resolution=resolution,
+            skip_empty_blocks=not no_skip_empty,
+            calculate_stats=not no_stats,
+            verbose=verbose,
+        )
+
+        success(f"Converted to raquet: {result['num_blocks']} blocks, {result['num_bands']} bands")
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@raster.command(name="export", cls=SingleFileCommand)
+@click.argument("input_parquet")
+@click.argument("output_geotiff")
+@click.option(
+    "--bands",
+    help="Comma-separated band names to export (default: all)",
+)
+@click.option(
+    "--resolution",
+    type=click.IntRange(0, 26),
+    default=None,
+    help="Resolution level to export (default: max resolution)",
+)
+@overwrite_option
+@verbose_option
+@profile_option
+def raster_export(
+    input_parquet,
+    output_geotiff,
+    bands,
+    resolution,
+    overwrite,
+    verbose,
+    profile,
+):
+    """Export a raquet parquet file to GeoTIFF format.
+
+    \b
+    Examples:
+      gpio raster export raster.parquet output.tif
+      gpio raster export raster.parquet output.tif --bands band_1,band_2
+      gpio raster export raster.parquet output.tif --resolution 10
+    """
+    from pathlib import Path as PathLib
+
+    from geoparquet_io.core.common import (
+        setup_aws_profile_if_needed,
+        validate_output_path,
+        validate_profile_for_urls,
+    )
+    from geoparquet_io.core.logging_config import success
+    from geoparquet_io.core.raquet import is_raquet_file, raquet_to_geotiff
+
+    configure_verbose(verbose)
+    validate_profile_for_urls(profile, input_parquet)
+    setup_aws_profile_if_needed(profile, input_parquet)
+
+    if not is_raquet_file(input_parquet):
+        raise click.ClickException(f"File is not a valid raquet file: {input_parquet}")
+
+    # Check if output exists and handle overwrite
+    output_path = PathLib(output_geotiff)
+    if output_path.exists() and not overwrite:
+        raise click.ClickException(
+            f"Output file already exists: {output_geotiff}\nUse --overwrite to replace it."
+        )
+
+    validate_output_path(output_geotiff)
+
+    band_list = bands.split(",") if bands else None
+
+    try:
+        result = raquet_to_geotiff(
+            input_parquet,
+            output_geotiff,
+            bands=band_list,
+            resolution=resolution,
+            verbose=verbose,
+        )
+
+        success(f"Exported to GeoTIFF: {result['width']}x{result['height']} pixels")
     except click.exceptions.Exit:
         raise
     except Exception as e:
