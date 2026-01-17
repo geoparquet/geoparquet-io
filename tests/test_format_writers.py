@@ -132,7 +132,9 @@ class TestGeoPackageWriter:
         #  Try SQL injection in output path
         # Single quotes in filenames are valid on Linux, so test actually succeeds
         # which proves escaping is working (file is created, no SQL error)
-        malicious_path = f"/tmp/test_{uuid.uuid4()}'; DROP TABLE features; --.gpkg"
+        malicious_path = str(
+            Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}'; DROP TABLE features; --.gpkg"
+        )
 
         try:
             # Should succeed with escaped path (proves no SQL injection)
@@ -211,7 +213,7 @@ class TestCSVWriter:
         # Verify CSV structure
         import csv
 
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             assert len(rows) > 0
@@ -236,7 +238,7 @@ class TestCSVWriter:
         # Verify no 'wkt' column
         import csv
 
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             assert "wkt" not in rows[0]
@@ -249,7 +251,7 @@ class TestCSVWriter:
             verbose=False,
         )
 
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             first_line = f.readline().strip()
             # Should have comma-separated headers
             assert "," in first_line
@@ -258,7 +260,9 @@ class TestCSVWriter:
         """Test that SQL injection in output path is escaped."""
         # Single quotes in filenames are valid on Linux, so test actually succeeds
         # which proves escaping is working (file is created, no SQL error)
-        malicious_path = f"/tmp/test_{uuid.uuid4()}'; DROP TABLE data; --.csv"
+        malicious_path = str(
+            Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}'; DROP TABLE data; --.csv"
+        )
 
         try:
             # Should succeed with escaped path (proves no SQL injection)
@@ -539,7 +543,7 @@ class TestShapefileZip:
         """Test that creating zip from non-existent shapefile raises error."""
         from geoparquet_io.core.common import create_shapefile_zip
 
-        nonexistent = f"/tmp/nonexistent_{uuid.uuid4()}.shp"
+        nonexistent = str(Path(tempfile.gettempdir()) / f"nonexistent_{uuid.uuid4()}.shp")
 
         with pytest.raises(Exception, match="not found"):
             create_shapefile_zip(nonexistent)

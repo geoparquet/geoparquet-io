@@ -1056,7 +1056,7 @@ class TestTableWriteFormats:
             # Verify CSV has WKT column
             import csv
 
-            with open(output_path) as f:
+            with open(output_path, encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
                 assert len(rows) > 0
