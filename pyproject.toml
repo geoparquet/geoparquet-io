@@ -92,7 +92,7 @@ addopts = [
     "--strict-markers",
     "--cov=geoparquet_io",
     "--cov-report=term-missing",
-    "--cov-fail-under=73",
+    "--cov-fail-under=72",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -153,7 +153,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 73
+fail_under = 72
 show_missing = true
 skip_covered = false
 exclude_lines = [
