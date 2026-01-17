@@ -440,15 +440,14 @@ tests/
 ```
 
 ### Running Tests
+
+**Fast tests (default for development - runs in parallel):**
 ```bash
-# All tests
-pytest
+# Fast tests only (recommended for local development)
+pytest -n auto -m "not slow and not network"
 
-# Skip slow tests
-pytest -m "not slow"
-
-# Skip network tests
-pytest -m "not network"
+# All tests including slow (runs in parallel)
+pytest -n auto
 
 # Specific module
 pytest tests/test_extract.py -v
@@ -456,6 +455,25 @@ pytest tests/test_extract.py -v
 # Single test
 pytest tests/test_extract.py::TestParseBbox::test_valid_bbox -v
 ```
+
+**Slow tests (conversion, streaming, reprojection):**
+```bash
+# Run slow tests only
+pytest -n auto -m "slow"
+
+# Run network tests only
+pytest -n auto -m "network"
+
+# Run all slow and network tests
+pytest -n auto -m "slow or network"
+```
+
+**Important:** Slow tests are **not run automatically** in CI on pull requests. They run:
+- Nightly at 2:15 AM UTC via scheduled workflow
+- On-demand when commit message contains `[test-slow]`
+- Manually when you run them locally
+
+This keeps PR feedback fast while ensuring comprehensive testing happens regularly.
 
 ### Test Patterns Used
 
@@ -481,10 +499,22 @@ def output_file(self):
 
 **3. Markers for conditional tests**
 ```python
-@pytest.mark.slow
+@pytest.mark.slow  # For tests taking >5s or doing expensive operations
+class TestConversionRoundTrips:
+    """Tests for format conversions."""
+
+@pytest.mark.network  # For tests requiring network access
 class TestRemoteFiles:
     """Tests requiring network access."""
 ```
+
+**When to mark tests as slow:**
+- Full format conversions (GeoJSON → Parquet, Shapefile → GeoParquet)
+- Tests processing large files (>100KB)
+- Reprojection operations
+- Streaming operations
+- Tests taking >5 seconds to complete
+- Network requests (use `@pytest.mark.network` instead)
 
 **4. CLI testing with CliRunner**
 ```python
