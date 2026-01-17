@@ -430,6 +430,190 @@ def convert_to_geojson(
             temp_input.unlink()
 
 
+def _table_to_temp_parquet_and_convert(
+    table: pa.Table,
+    output_path: str,
+    writer_func,
+    prefix: str,
+    **writer_kwargs,
+) -> str:
+    """
+    Helper function to convert PyArrow Table to a format via temp parquet file.
+
+    Eliminates repetitive temp file handling across all conversion functions.
+
+    Args:
+        table: Input PyArrow Table
+        output_path: Output file path
+        writer_func: Writer function from format_writers module
+        prefix: Prefix for temp file name
+        **writer_kwargs: Keyword arguments to pass to writer function
+
+    Returns:
+        Output path
+
+    Raises:
+        TypeError: If table is not a PyArrow Table
+    """
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    if not isinstance(table, pa.Table):
+        raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
+
+    # Write table to temp parquet file for processing
+    temp_dir = Path(tempfile.gettempdir())
+    temp_input = temp_dir / f"gpio_{prefix}_{uuid.uuid4()}.parquet"
+
+    try:
+        import pyarrow.parquet as pq
+
+        pq.write_table(table, str(temp_input))
+
+        # Call writer function
+        writer_func(
+            input_path=str(temp_input),
+            output_path=output_path,
+            verbose=False,
+            **writer_kwargs,
+        )
+
+        return output_path
+
+    finally:
+        # Clean up temp file
+        if temp_input.exists():
+            temp_input.unlink()
+
+
+def convert_to_geopackage(
+    table: pa.Table,
+    output_path: str,
+    overwrite: bool = False,
+    layer_name: str = "features",
+) -> str:
+    """
+    Convert a GeoParquet table to GeoPackage format.
+
+    Writes to file and creates spatial index automatically.
+
+    Args:
+        table: Input PyArrow Table with geometry column
+        output_path: Output file path (must be local, not cloud URL)
+        overwrite: Overwrite existing file (default: False)
+        layer_name: Layer name in GeoPackage (default: 'features')
+
+    Returns:
+        Output path
+    """
+    from geoparquet_io.core.format_writers import write_geopackage
+
+    return _table_to_temp_parquet_and_convert(
+        table,
+        output_path,
+        write_geopackage,
+        "geopackage",
+        overwrite=overwrite,
+        layer_name=layer_name,
+    )
+
+
+def convert_to_flatgeobuf(
+    table: pa.Table,
+    output_path: str,
+) -> str:
+    """
+    Convert a GeoParquet table to FlatGeobuf format.
+
+    Writes to file and creates spatial index automatically.
+
+    Args:
+        table: Input PyArrow Table with geometry column
+        output_path: Output file path (must be local, not cloud URL)
+
+    Returns:
+        Output path
+    """
+    from geoparquet_io.core.format_writers import write_flatgeobuf
+
+    return _table_to_temp_parquet_and_convert(
+        table,
+        output_path,
+        write_flatgeobuf,
+        "flatgeobuf",
+    )
+
+
+def convert_to_csv(
+    table: pa.Table,
+    output_path: str,
+    include_wkt: bool = True,
+    include_bbox: bool = True,
+) -> str:
+    """
+    Convert a GeoParquet table to CSV format.
+
+    Converts geometry to WKT text representation.
+    Complex types (STRUCT, LIST, MAP) are JSON-encoded.
+
+    Args:
+        table: Input PyArrow Table with geometry column
+        output_path: Output file path (must be local, not cloud URL)
+        include_wkt: Include WKT geometry column (default: True)
+        include_bbox: Include bbox column if present (default: True)
+
+    Returns:
+        Output path
+    """
+    from geoparquet_io.core.format_writers import write_csv
+
+    return _table_to_temp_parquet_and_convert(
+        table,
+        output_path,
+        write_csv,
+        "csv",
+        include_wkt=include_wkt,
+        include_bbox=include_bbox,
+    )
+
+
+def convert_to_shapefile(
+    table: pa.Table,
+    output_path: str,
+    overwrite: bool = False,
+    encoding: str = "UTF-8",
+) -> str:
+    """
+    Convert a GeoParquet table to Shapefile format.
+
+    Note: Shapefiles have significant limitations:
+    - Column names truncated to 10 characters
+    - File size limit of 2GB
+    - Limited data type support
+    - Creates multiple files (.shp, .shx, .dbf, .prj)
+
+    Args:
+        table: Input PyArrow Table with geometry column
+        output_path: Output file path (must be local, not cloud URL)
+        overwrite: Overwrite existing file (default: False)
+        encoding: Character encoding (default: 'UTF-8')
+
+    Returns:
+        Output path
+    """
+    from geoparquet_io.core.format_writers import write_shapefile
+
+    return _table_to_temp_parquet_and_convert(
+        table,
+        output_path,
+        write_shapefile,
+        "shapefile",
+        overwrite=overwrite,
+        encoding=encoding,
+    )
+
+
 def from_arcgis(
     service_url: str,
     token: str | None = None,

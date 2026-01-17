@@ -545,6 +545,8 @@ table.upload('gs://bucket/data.parquet')
 
 ## Converting Other Formats
 
+### Reading Other Formats (to GeoParquet)
+
 Use `gpio.convert()` to load GeoPackage, Shapefile, GeoJSON, FlatGeobuf, or CSV files:
 
 ```python
@@ -577,6 +579,93 @@ gpio.convert('data.shp') \
     .add_bbox() \
     .sort_hilbert() \
     .write('output.parquet')
+```
+
+### Writing to Other Formats (from GeoParquet)
+
+The `Table.write()` method supports multiple output formats with automatic format detection:
+
+```python
+import geoparquet_io as gpio
+
+# Read GeoParquet
+table = gpio.read('data.parquet')
+
+# Write to different formats (auto-detected from extension)
+table.write('output.gpkg')      # GeoPackage
+table.write('output.fgb')       # FlatGeobuf
+table.write('output.csv')       # CSV with WKT
+table.write('output.shp')       # Shapefile
+table.write('output.geojson')   # GeoJSON
+
+# Or specify format explicitly
+table.write('output.dat', format='csv')
+```
+
+#### Format-Specific Options
+
+**GeoPackage:**
+
+```python
+table.write('output.gpkg',
+           layer_name='buildings',  # Custom layer name
+           overwrite=True)          # Overwrite existing file
+```
+
+**Shapefile:**
+
+```python
+table.write('output.shp',
+           encoding='ISO-8859-1',  # Custom encoding (default: UTF-8)
+           overwrite=True)
+```
+
+!!! warning "Shapefile Limitations"
+    Shapefiles have significant limitations:
+
+    - Column names truncated to 10 characters
+    - File size limit of 2GB
+    - Limited data type support
+    - Creates multiple files (.shp, .shx, .dbf, .prj)
+
+    Consider using GeoPackage or FlatGeobuf for new projects.
+
+**CSV:**
+
+```python
+table.write('output.csv',
+           include_wkt=True,    # Include WKT geometry (default)
+           include_bbox=False)  # Exclude bbox column
+```
+
+**GeoJSON:**
+
+```python
+table.write('output.geojson',
+           precision=5,             # Coordinate precision (default: 7)
+           write_bbox=True,         # Include bbox for each feature
+           id_field='osm_id',       # Use field as feature ID
+           pretty=True,             # Pretty-print JSON
+           keep_crs=False)          # Reproject to WGS84 (default)
+```
+
+#### Using ops Functions for Format Conversion
+
+For functional-style programming, use `ops.convert_to_*()` functions:
+
+```python
+from geoparquet_io import ops
+import pyarrow.parquet as pq
+
+# Read Arrow table
+table = pq.read_table('data.parquet')
+
+# Convert to various formats
+ops.convert_to_geopackage(table, 'output.gpkg', layer_name='features')
+ops.convert_to_flatgeobuf(table, 'output.fgb')
+ops.convert_to_csv(table, 'output.csv', include_wkt=True)
+ops.convert_to_shapefile(table, 'output.shp', encoding='UTF-8')
+ops.convert_to_geojson(table, 'output.geojson', precision=7)
 ```
 
 ## Reading Partitioned Data
