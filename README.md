@@ -1,13 +1,13 @@
 # geoparquet-io
 
-[![Tests](https://github.com/cholmes/geoparquet-io/actions/workflows/tests.yml/badge.svg)](https://github.com/cholmes/geoparquet-io/actions/workflows/tests.yml)
-[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/cholmes/geoparquet-io)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/cholmes/geoparquet-io/blob/main/LICENSE)
+[![Tests](https://github.com/geoparquet/geoparquet-io/actions/workflows/tests.yml/badge.svg)](https://github.com/geoparquet/geoparquet-io/actions/workflows/tests.yml)
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/geoparquet/geoparquet-io)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/geoparquet/geoparquet-io/blob/main/LICENSE)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
-**📚 [Full Documentation](https://geoparquet.org/geoparquet-io/)** | **[Quick Start Tutorial](https://geoparquet.org/geoparquet-io/getting-started/quickstart/)**
+**📚 [Full Documentation](https://geoparquet.io/)** | **[Quick Start Tutorial](https://geoparquet.io/getting-started/quickstart/)**
 
 ## Features
 
@@ -27,7 +27,7 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 pip install geoparquet-io
 ```
 
-See the [Installation Guide](https://geoparquet.org/geoparquet-io/getting-started/installation/) for other options (uv, from source) and requirements.
+See the [Installation Guide](https://geoparquet.io/getting-started/installation/) for other options (uv, from source) and requirements.
 
 ## Quick Start
 
@@ -56,7 +56,7 @@ gpio sort hilbert https://example.com/data.parquet s3://bucket/sorted.parquet
 gpio extract --bbox "-122.5,37.5,-122.0,38.0" input.parquet | gpio add bbox - | gpio sort hilbert - output.parquet
 ```
 
-For more examples and detailed usage, see the [Quick Start Tutorial](https://geoparquet.org/geoparquet-io/getting-started/quickstart/) and [User Guide](https://geoparquet.org/geoparquet-io/guide/inspect/).
+For more examples and detailed usage, see the [Quick Start Tutorial](https://geoparquet.io/getting-started/quickstart/) and [User Guide](https://geoparquet.io/guide/inspect/).
 
 ## Python API
 
@@ -83,7 +83,7 @@ gpio.read('data.parquet') \
     .upload('s3://bucket/filtered.parquet')
 ```
 
-The Python API keeps data in memory as Arrow tables, providing up to 5x better performance than CLI operations. See the [Python API documentation](https://geoparquet.org/geoparquet-io/api/python-api/) for full details.
+The Python API keeps data in memory as Arrow tables, providing up to 5x better performance than CLI operations. See the [Python API documentation](https://geoparquet.io/api/python-api/) for full details.
 
 ## Claude Code Integration
 
@@ -102,9 +102,9 @@ Contributions are welcome! See [CONTRIBUTING.md](docs/contributing.md) for devel
 
 ## Links
 
-- **Documentation**: [https://geoparquet.org/geoparquet-io/](https://geoparquet.org/geoparquet-io/)
+- **Documentation**: [https://geoparquet.io/](https://geoparquet.io/)
 - **PyPI**: [https://pypi.org/project/geoparquet-io/](https://pypi.org/project/geoparquet-io/)
-- **Issues**: [https://github.com/cholmes/geoparquet-io/issues](https://github.com/cholmes/geoparquet-io/issues)
+- **Issues**: [https://github.com/geoparquet/geoparquet-io/issues](https://github.com/geoparquet/geoparquet-io/issues)
 
 ## License
 

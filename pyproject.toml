@@ -51,10 +51,10 @@ gpio = "geoparquet_io:cli"
 gt = "geoparquet_io:cli"  # Legacy alias for backwards compatibility
 
 [project.urls]
-"Homepage" = "https://github.com/cholmes/geoparquet-io"
-"Bug Tracker" = "https://github.com/cholmes/geoparquet-io/issues"
-"Documentation" = "https://github.com/cholmes/geoparquet-io#readme"
-"Source" = "https://github.com/cholmes/geoparquet-io"
+"Homepage" = "https://github.com/geoparquet/geoparquet-io"
+"Bug Tracker" = "https://github.com/geoparquet/geoparquet-io/issues"
+"Documentation" = "https://geoparquet.io/"
+"Source" = "https://github.com/geoparquet/geoparquet-io"
 
 [project.optional-dependencies]
 dev = [

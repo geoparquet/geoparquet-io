@@ -1,8 +1,8 @@
 # geoparquet-io
 
-[![Tests](https://github.com/cholmes/geoparquet-io/actions/workflows/tests.yml/badge.svg)](https://github.com/cholmes/geoparquet-io/actions/workflows/tests.yml)
-[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/cholmes/geoparquet-io)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/cholmes/geoparquet-io/blob/main/LICENSE)
+[![Tests](https://github.com/geoparquet/geoparquet-io/actions/workflows/tests.yml/badge.svg)](https://github.com/geoparquet/geoparquet-io/actions/workflows/tests.yml)
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/geoparquet/geoparquet-io)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/geoparquet/geoparquet-io/blob/main/LICENSE)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
@@ -105,10 +105,10 @@ gpio.read('input.parquet') \
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/cholmes/geoparquet-io/issues)
-- **Source Code**: [GitHub Repository](https://github.com/cholmes/geoparquet-io)
+- **Issues**: [GitHub Issues](https://github.com/geoparquet/geoparquet-io/issues)
+- **Source Code**: [GitHub Repository](https://github.com/geoparquet/geoparquet-io)
 - **Contributing**: See our [Contributing Guide](contributing.md)
 
 ## License
 
-Apache 2.0 - See [LICENSE](https://github.com/cholmes/geoparquet-io/blob/main/LICENSE) for details.
+Apache 2.0 - See [LICENSE](https://github.com/geoparquet/geoparquet-io/blob/main/LICENSE) for details.

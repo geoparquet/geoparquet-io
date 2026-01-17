@@ -9,7 +9,7 @@
 uv pip install geoparquet-io
 
 # Or install from source
-git clone https://github.com/cholmes/geoparquet-io.git
+git clone https://github.com/geoparquet/geoparquet-io.git
 cd geoparquet-io
 uv sync --all-extras
 ```
@@ -27,7 +27,7 @@ pip install geoparquet-io
 For the latest development version:
 
 ```bash
-git clone https://github.com/cholmes/geoparquet-io.git
+git clone https://github.com/geoparquet/geoparquet-io.git
 cd geoparquet-io
 uv sync  # recommended
 # or

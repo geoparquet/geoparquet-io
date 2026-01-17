@@ -21,7 +21,7 @@ We take the security of geoparquet-io seriously. If you believe you have found a
 ### Please DO:
 
 1. **Report via GitHub Security Advisories** (preferred):
-   - Go to the [Security tab](https://github.com/cholmes/geoparquet-io/security/advisories)
+   - Go to the [Security tab](https://github.com/geoparquet/geoparquet-io/security/advisories)
    - Click "Report a vulnerability"
    - Fill in the details
 
