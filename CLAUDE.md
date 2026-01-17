@@ -440,15 +440,14 @@ tests/
 ```
 
 ### Running Tests
+
+**Fast tests (default for development - runs in parallel):**
 ```bash
-# All tests
-pytest
+# Fast tests only (recommended for local development)
+pytest -n auto -m "not slow and not network"
 
-# Skip slow tests
-pytest -m "not slow"
-
-# Skip network tests
-pytest -m "not network"
+# All tests including slow (runs in parallel)
+pytest -n auto
 
 # Specific module
 pytest tests/test_extract.py -v
@@ -456,6 +455,67 @@ pytest tests/test_extract.py -v
 # Single test
 pytest tests/test_extract.py::TestParseBbox::test_valid_bbox -v
 ```
+
+**Slow tests (conversion, streaming, reprojection):**
+```bash
+# Run slow tests only
+pytest -n auto -m "slow"
+
+# Run network tests only
+pytest -n auto -m "network"
+
+# Run all slow and network tests
+pytest -n auto -m "slow or network"
+```
+
+**Important:** Slow tests are **not run automatically** in CI on pull requests. They run:
+- Nightly at 2:15 AM UTC via scheduled workflow
+- On-demand when commit message contains `[test-slow]`
+- Manually when you run them locally
+
+This keeps PR feedback fast while ensuring comprehensive testing happens regularly.
+
+### Test Markers
+
+**Available markers:**
+- `@pytest.mark.slow` - Tests >5 seconds or heavy I/O (file conversions, reprojection)
+- `@pytest.mark.network` - Requires external network access (HTTP, S3)
+- `@pytest.mark.integration` - End-to-end integration tests
+
+**When to mark tests as slow:**
+Mark a test as slow if it meets ANY of these criteria:
+- Execution time >5 seconds consistently
+- Full file format conversions (GeoJSON/Shapefile/GPKG → GeoParquet)
+- Reprojection with coordinate transformation
+- Round-trip version conversion tests
+- Streaming operations with multiple partitions
+- Reading/writing files >10MB
+
+**When NOT to mark as slow:**
+- Simple unit tests (<1 second)
+- Metadata parsing/validation
+- Schema inspection tests
+- Small fixture-based tests (<100 rows)
+
+**Marking guidelines:**
+- **Class level:** Use when most methods in the class are slow
+  ```python
+  @pytest.mark.slow
+  class TestGeoJSONConversions:
+      # All methods inherit the marker
+  ```
+- **Method level:** Use for individual slow tests in a fast class
+  ```python
+  class TestValidation:
+      def test_fast_check(self): ...  # Fast
+
+      @pytest.mark.slow
+      def test_full_conversion(self): ...  # Slow
+  ```
+- **Finding slow tests:** Run `pytest --durations=20` to see slowest tests
+- **Borderline tests (4-6s):** Mark as slow to be safe - keeps fast suite fast
+
+**Why this matters:** Fast tests run on every PR (target: <12min). Slow tests run nightly. Proper categorization keeps PR feedback fast while ensuring comprehensive testing happens regularly.
 
 ### Test Patterns Used
 
@@ -481,10 +541,22 @@ def output_file(self):
 
 **3. Markers for conditional tests**
 ```python
-@pytest.mark.slow
+@pytest.mark.slow  # For tests taking >5s or doing expensive operations
+class TestConversionRoundTrips:
+    """Tests for format conversions."""
+
+@pytest.mark.network  # For tests requiring network access
 class TestRemoteFiles:
     """Tests requiring network access."""
 ```
+
+**When to mark tests as slow:**
+- Full format conversions (GeoJSON → Parquet, Shapefile → GeoParquet)
+- Tests processing large files (>100KB)
+- Reprojection operations
+- Streaming operations
+- Tests taking >5 seconds to complete
+- Network requests (use `@pytest.mark.network` instead)
 
 **4. CLI testing with CliRunner**
 ```python

@@ -96,6 +96,7 @@ def verify_duckdb_readable(parquet_file):
 # Test classes
 
 
+@pytest.mark.slow
 class TestGeoJSONConversions:
     """Test GeoJSON to all GeoParquet versions."""
 
@@ -127,6 +128,7 @@ class TestGeoJSONConversions:
         assert verify_duckdb_readable(temp_output_file)
 
 
+@pytest.mark.slow
 class TestGPKGConversions:
     """Test GeoPackage to all GeoParquet versions."""
 
@@ -183,6 +185,7 @@ class TestGPKGConversions:
             assert assert_crs_equivalent(geo_crs, "EPSG:6933")
 
 
+@pytest.mark.slow
 class TestShapefileConversions:
     """Test Shapefile to all GeoParquet versions."""
 

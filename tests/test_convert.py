@@ -99,6 +99,7 @@ def csv_mixed_geoms_input(test_data_dir):
     return str(test_data_dir / "mixed_geometries.csv")
 
 
+@pytest.mark.slow
 class TestConvertCore:
     """Test core convert_to_geoparquet function."""
 

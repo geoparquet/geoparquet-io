@@ -313,6 +313,7 @@ class TestGeometryColumnDetection:
         assert find_geometry_column_from_table(table) is None
 
 
+@pytest.mark.slow
 class TestStreamIO:
     """Tests for stream_io.py high-level abstractions."""
 
