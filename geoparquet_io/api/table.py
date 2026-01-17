@@ -673,37 +673,129 @@ class Table:
     def write(
         self,
         path: str | Path,
+        format: str | None = None,
         compression: str = "ZSTD",
         compression_level: int | None = None,
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
+        profile: str | None = None,
+        # Format-specific options
+        overwrite: bool = False,
+        layer_name: str = "features",
+        include_wkt: bool = True,
+        include_bbox: bool = True,
+        encoding: str = "UTF-8",
+        precision: int = 7,
+        write_bbox: bool = False,
+        id_field: str | None = None,
+        pretty: bool = False,
+        keep_crs: bool = False,
     ) -> Path:
         """
-        Write the table to a GeoParquet file.
+        Write the table to any format (GeoParquet, GeoPackage, FlatGeobuf, CSV, Shapefile, GeoJSON).
+
+        Supports both local paths and cloud URLs (s3://, gs://, etc.).
+        Format is auto-detected from file extension unless explicitly specified.
 
         Args:
-            path: Output file path
-            compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
-            compression_level: Compression level
-            row_group_size_mb: Target row group size in MB
-            row_group_rows: Exact rows per row group
+            path: Output file path (local or cloud URL)
+            format: Override format detection ('parquet', 'geopackage', 'flatgeobuf',
+                    'csv', 'shapefile', 'geojson'). Default: auto-detect from extension
+            compression: Compression type for GeoParquet (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+            compression_level: Compression level for GeoParquet
+            row_group_size_mb: Target row group size in MB for GeoParquet
+            row_group_rows: Exact rows per row group for GeoParquet
             geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, or None to preserve)
+            profile: AWS profile for S3 operations
+            overwrite: Overwrite existing file (GeoPackage, Shapefile)
+            layer_name: Layer name for GeoPackage (default: 'features')
+            include_wkt: Include WKT geometry column for CSV (default: True)
+            include_bbox: Include bbox column for CSV (default: True)
+            encoding: Character encoding for Shapefile (default: 'UTF-8')
+            precision: Coordinate precision for GeoJSON (default: 7)
+            write_bbox: Include bbox property for GeoJSON features (default: False)
+            id_field: Field to use as feature 'id' for GeoJSON
+            pretty: Pretty-print GeoJSON output (default: False)
+            keep_crs: Keep original CRS for GeoJSON instead of WGS84 (default: False)
 
         Returns:
-            Path: The output file path
+            Path to written file (local temp path if uploaded to cloud)
 
-        Example:
-            >>> path = table.write('output.parquet')
-            >>> print(f"Wrote to {path}")
+        Examples:
+            >>> table.write('output.parquet')              # GeoParquet (auto-detect)
+            >>> table.write('output.gpkg')                 # GeoPackage (auto-detect)
+            >>> table.write('output.geojson')              # GeoJSON (auto-detect)
+            >>> table.write('s3://bucket/output.fgb')      # FlatGeobuf to S3
+            >>> table.write('output.dat', format='csv')    # Explicit format
         """
+
+        # Detect format from extension if not explicitly provided
+        # Normalize to lowercase for case-insensitive comparison
+        detected_format = format.lower() if format else self._detect_format(path)
+
+        # Handle GeoParquet format
+        if detected_format == "parquet":
+            return self._write_geoparquet(
+                path,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                geoparquet_version=geoparquet_version,
+                profile=profile,
+            )
+
+        # Handle other formats
+        return self._write_format(
+            path,
+            detected_format,
+            profile=profile,
+            overwrite=overwrite,
+            layer_name=layer_name,
+            include_wkt=include_wkt,
+            include_bbox=include_bbox,
+            encoding=encoding,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+            pretty=pretty,
+            keep_crs=keep_crs,
+        )
+
+    @staticmethod
+    def _detect_format(path: str | Path) -> str:
+        """Detect output format from file extension."""
+        from pathlib import Path as PathLib
+
+        ext = PathLib(path).suffix.lower()
+        EXTENSION_MAP = {
+            ".parquet": "parquet",
+            ".gpkg": "geopackage",
+            ".fgb": "flatgeobuf",
+            ".csv": "csv",
+            ".shp": "shapefile",
+            ".geojson": "geojson",
+            ".json": "geojson",
+        }
+        return EXTENSION_MAP.get(ext, "parquet")  # Default to parquet
+
+    def _write_geoparquet(
+        self,
+        path: str | Path,
+        compression: str,
+        compression_level: int | None,
+        row_group_size_mb: float | None,
+        row_group_rows: int | None,
+        geoparquet_version: str | None,
+        profile: str | None,
+    ) -> Path:
+        """Write table to GeoParquet format (supports local and cloud)."""
         from pathlib import Path as PathLib
 
         output_path = PathLib(path)
 
-        # Use write_geoparquet_table for proper metadata preservation
-        # It handles compression normalization, row group size estimation,
-        # and GeoParquet metadata (bbox, version, geo metadata) correctly
+        # Use write_geoparquet_table which handles both local and remote
         write_geoparquet_table(
             self._table,
             output_file=str(output_path),
@@ -714,9 +806,186 @@ class Table:
             row_group_rows=row_group_rows,
             geoparquet_version=geoparquet_version,
             verbose=False,
+            profile=profile,
         )
 
         return output_path
+
+    def _write_format(
+        self,
+        path: str | Path,
+        format: str,
+        profile: str | None,
+        **format_options,
+    ) -> Path:
+        """Write table to non-parquet format (handles local and cloud)."""
+        import tempfile
+        import uuid
+        from pathlib import Path as PathLib
+
+        from geoparquet_io.core.common import is_remote_url, setup_aws_profile_if_needed
+        from geoparquet_io.core.upload import upload
+
+        # Check if destination is remote
+        path_str = str(path)
+        is_remote = is_remote_url(path_str)
+
+        # Determine output path (temp file for remote, direct for local)
+        if is_remote:
+            temp_dir = PathLib(tempfile.gettempdir())
+            output_path = temp_dir / f"gpio_write_{uuid.uuid4()}{PathLib(path).suffix}"
+        else:
+            output_path = PathLib(path)
+
+        # Initialize temp files before try block for cleanup in finally
+        temp_parquet = None
+        zip_path = None
+
+        try:
+            # Write table to temp parquet first
+            temp_parquet = self._table_to_temp_parquet()
+
+            # Convert to target format
+            if format == "geopackage":
+                from geoparquet_io.core.format_writers import write_geopackage
+
+                write_geopackage(
+                    str(temp_parquet),
+                    str(output_path),
+                    overwrite=format_options.get("overwrite", False),
+                    layer_name=format_options.get("layer_name", "features"),
+                    verbose=False,
+                    profile=profile,
+                )
+            elif format == "flatgeobuf":
+                from geoparquet_io.core.format_writers import write_flatgeobuf
+
+                write_flatgeobuf(
+                    str(temp_parquet),
+                    str(output_path),
+                    verbose=False,
+                    profile=profile,
+                )
+            elif format == "csv":
+                from geoparquet_io.core.format_writers import write_csv
+
+                write_csv(
+                    str(temp_parquet),
+                    str(output_path),
+                    include_wkt=format_options.get("include_wkt", True),
+                    include_bbox=format_options.get("include_bbox", True),
+                    verbose=False,
+                    profile=profile,
+                )
+            elif format == "shapefile":
+                from geoparquet_io.core.format_writers import write_shapefile
+
+                write_shapefile(
+                    str(temp_parquet),
+                    str(output_path),
+                    overwrite=format_options.get("overwrite", False),
+                    encoding=format_options.get("encoding", "UTF-8"),
+                    verbose=False,
+                    profile=profile,
+                )
+            elif format == "geojson":
+                from geoparquet_io.core.format_writers import write_geojson
+
+                write_geojson(
+                    str(temp_parquet),
+                    str(output_path),
+                    precision=format_options.get("precision", 7),
+                    write_bbox=format_options.get("write_bbox", False),
+                    id_field=format_options.get("id_field"),
+                    pretty=format_options.get("pretty", False),
+                    keep_crs=format_options.get("keep_crs", False),
+                    verbose=False,
+                    profile=profile,
+                )
+            else:
+                raise ValueError(f"Unsupported format: {format}")
+
+            # Upload to remote if needed
+            if is_remote:
+                setup_aws_profile_if_needed(profile, path_str)
+
+                # Special handling for shapefiles: zip all sidecars into .shp.zip
+                if format == "shapefile":
+                    from geoparquet_io.core.common import create_shapefile_zip
+
+                    # Create zip archive with all sidecar files
+                    zip_path = create_shapefile_zip(output_path, verbose=False)
+
+                    # Upload the zip file with .shp.zip extension
+                    remote_zip_path = path_str.replace(".shp", ".shp.zip")
+                    upload(
+                        source=zip_path,
+                        destination=remote_zip_path,
+                        profile=profile,
+                    )
+
+                    # Return remote zip path (cleanup happens in finally)
+                    return PathLib(remote_zip_path)
+                else:
+                    # Normal single-file upload
+                    upload(
+                        source=output_path,
+                        destination=path_str,
+                        profile=profile,
+                    )
+                    # Return remote path, not local temp path
+                    return PathLib(path_str)
+
+            return output_path
+
+        finally:
+            # Clean up temp parquet
+            if temp_parquet:
+                temp_parquet.unlink(missing_ok=True)
+            # Clean up zip file if created
+            if zip_path:
+                zip_path.unlink(missing_ok=True)
+            # Clean up temp output if remote
+            if is_remote and output_path.exists():
+                output_path.unlink(missing_ok=True)
+            # Clean up shapefile sidecars if remote
+            if is_remote and format == "shapefile":
+                # Remove all sidecar files (.shx, .dbf, .prj, etc.)
+                stem = output_path.stem
+                parent = output_path.parent
+                for sidecar in parent.glob(f"{stem}.*"):
+                    sidecar.unlink(missing_ok=True)
+
+    def _table_to_temp_parquet(self) -> Path:
+        """Write table to temporary parquet file for format conversion.
+
+        Uses write_geoparquet_table to preserve GeoParquet metadata (CRS, geometry column).
+        This is critical for format conversions that need metadata (e.g., GeoJSON reprojection).
+        """
+        import tempfile
+        import uuid
+        from pathlib import Path as PathLib
+
+        from geoparquet_io.core.common import write_geoparquet_table
+
+        temp_dir = PathLib(tempfile.gettempdir())
+        temp_path = temp_dir / f"gpio_table_{uuid.uuid4()}.parquet"
+
+        # Use write_geoparquet_table to preserve metadata
+        write_geoparquet_table(
+            self._table,
+            output_file=str(temp_path),
+            geometry_column=self._geometry_column,
+            compression="ZSTD",
+            compression_level=15,
+            row_group_size_mb=None,
+            row_group_rows=None,
+            geoparquet_version=None,  # Use existing version from table
+            verbose=False,
+            profile=None,
+        )
+
+        return temp_path
 
     def add_bbox(self, column_name: str = "bbox") -> Table:
         """

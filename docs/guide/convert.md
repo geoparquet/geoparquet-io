@@ -1,6 +1,6 @@
-# Converting to GeoParquet
+# Converting Between Formats
 
-The `convert` command transforms vector formats into optimized GeoParquet files with all best practices applied automatically.
+The `convert` command transforms between GeoParquet and other vector formats with automatic format detection and optimization.
 
 !!! note "CLI vs Python Behavior"
     The CLI `gpio convert` applies Hilbert sorting by default for optimal spatial queries.
@@ -34,17 +34,171 @@ The `convert` command transforms vector formats into optimized GeoParquet files 
     gpio.convert('input.shp').write('output.parquet')
     ```
 
-## Supported Input Formats
+## Supported Formats
+
+### Input Formats (to GeoParquet)
 
 Auto-detected by file extension:
 
 - **Shapefile** (.shp)
 - **GeoJSON** (.geojson, .json)
 - **GeoPackage** (.gpkg)
+- **FlatGeobuf** (.fgb)
 - **File Geodatabase** (.gdb)
 - **CSV/TSV** (.csv, .tsv, .txt) - See [CSV/TSV Support](#csvtsv-support) below
 
-Any format supported by DuckDB's spatial extension can be read.
+Any format supported by DuckDB's spatial extension (50+ formats) can be read.
+
+### Output Formats (from GeoParquet)
+
+Auto-detected from output file extension:
+
+- **GeoParquet** (.parquet) - Optimized cloud-native format
+- **GeoPackage** (.gpkg) - SQLite-based OGC standard
+- **FlatGeobuf** (.fgb) - Cloud-native streaming format
+- **CSV** (.csv) - Tabular with WKT geometry
+- **Shapefile** (.shp) - Legacy ESRI format
+- **GeoJSON** (.geojson, .json) - Web-friendly JSON format
+
+## Converting FROM GeoParquet
+
+Convert GeoParquet to other formats with automatic format detection:
+
+=== "CLI Auto-Detection"
+
+    ```bash
+    # Auto-detects format from extension
+    gpio convert data.parquet output.gpkg      # → GeoPackage
+    gpio convert data.parquet output.fgb       # → FlatGeobuf
+    gpio convert data.parquet output.csv       # → CSV with WKT
+    gpio convert data.parquet output.shp       # → Shapefile
+    gpio convert data.parquet output.geojson   # → GeoJSON
+    ```
+
+=== "CLI Explicit Format"
+
+    ```bash
+    # Use explicit subcommand
+    gpio convert geopackage data.parquet output.gpkg
+    gpio convert flatgeobuf data.parquet output.fgb
+    gpio convert csv data.parquet output.csv
+    gpio convert shapefile data.parquet output.shp
+    gpio convert geojson data.parquet output.geojson
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Load and convert
+    table = gpio.read('data.parquet')
+
+    # Auto-detects from extension
+    table.write('output.gpkg')      # → GeoPackage
+    table.write('output.fgb')       # → FlatGeobuf
+    table.write('output.csv')       # → CSV with WKT
+    table.write('output.shp')       # → Shapefile
+    table.write('output.geojson')   # → GeoJSON
+
+    # Or use explicit format
+    table.write('output.dat', format='csv')
+    ```
+
+### Format-Specific Options
+
+**GeoPackage:**
+
+```bash
+# Custom layer name
+gpio convert data.parquet output.gpkg --layer-name buildings
+
+# Overwrite existing
+gpio convert data.parquet output.gpkg --overwrite
+```
+
+**Shapefile:**
+
+```bash
+# Custom encoding (default: UTF-8)
+gpio convert data.parquet output.shp --encoding ISO-8859-1
+
+# Overwrite existing
+gpio convert data.parquet output.shp --overwrite
+```
+
+!!! warning "Shapefile Limitations"
+    - Column names truncated to 10 characters
+    - File size limit of 2GB
+    - Limited data type support
+    - Creates multiple files (.shp, .shx, .dbf, .prj)
+    - Consider using GeoPackage or FlatGeobuf instead
+
+!!! info "Remote Shapefile Storage"
+    When writing shapefiles to remote storage (S3, GCS, Azure), all sidecar files (.shp, .shx, .dbf, .prj, etc.) are automatically packaged into a single `.shp.zip` archive before upload. This ensures atomic uploads and avoids incomplete multi-file uploads.
+
+    ```bash
+    # Local: Creates output.shp, output.shx, output.dbf, etc.
+    gpio convert data.parquet output.shp
+
+    # Remote: Uploads output.shp.zip containing all files
+    gpio convert data.parquet s3://bucket/output.shp
+    # → Creates s3://bucket/output.shp.zip
+    ```
+
+**CSV:**
+
+```bash
+# Include WKT geometry (default)
+gpio convert data.parquet output.csv
+
+# Exclude geometry
+gpio convert data.parquet output.csv --no-wkt
+
+# Exclude bbox column
+gpio convert data.parquet output.csv --no-bbox
+```
+
+**GeoJSON:**
+
+```bash
+# Custom precision (default: 7)
+gpio convert data.parquet output.geojson --precision 5
+
+# Include bbox for each feature
+gpio convert data.parquet output.geojson --write-bbox
+
+# Use specific field as feature ID
+gpio convert data.parquet output.geojson --id-field osm_id
+
+# Pretty-print JSON
+gpio convert data.parquet output.geojson --pretty
+```
+
+### Cloud Output Support
+
+All formats support cloud destinations via upload:
+
+=== "CLI"
+
+    ```bash
+    # Write local then upload
+    gpio convert data.parquet local.gpkg
+    gpio publish upload local.gpkg s3://bucket/output.gpkg
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Write locally first
+    table = gpio.read('data.parquet')
+    table.write('local.gpkg')
+
+    # Upload to cloud
+    gpio.upload('local.gpkg', 's3://bucket/output.gpkg')
+    ```
 
 ## Remote Files
 
@@ -56,6 +210,9 @@ gpio convert https://example.com/data.geojson local.parquet
 
 # Convert from S3
 gpio convert s3://bucket/input.parquet local-optimized.parquet
+
+# Convert remote to local format
+gpio convert s3://bucket/data.parquet local.gpkg
 ```
 
 See [Remote Files Guide](remote-files.md) for authentication setup.
