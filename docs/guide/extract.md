@@ -772,6 +772,43 @@ Filters are pushed to the ArcGIS server for efficient querying—only matching d
       --limit 500
     ```
 
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # WHERE filter (server-side)
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        where="STATE_NAME = 'California'"
+    )
+    table.write("output.parquet")
+
+    # Bounding box filter (server-side)
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        bbox=(-122.5, 37.5, -122.0, 38.0)
+    )
+    table.write("output.parquet")
+
+    # Select specific columns (server-side)
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        include_cols="NAME,POPULATION,STATE_NAME"
+    )
+    table.write("output.parquet")
+
+    # Combined filters
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        bbox=(-122.5, 37.5, -122.0, 38.0),
+        where="POPULATION > 100000",
+        include_cols="NAME,POPULATION",
+        limit=500
+    )
+    table.write("output.parquet")
+    ```
+
 ### Authentication
 
 For protected services, provide credentials:
@@ -840,6 +877,9 @@ For protected services, provide credentials:
 
 By default, ArcGIS extracts include bbox metadata and Hilbert spatial ordering for optimal query performance:
 
+=== "CLI"
+
+    ```bash
     # Skip Hilbert ordering (faster extraction, less optimal queries)
     gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
       --skip-hilbert
@@ -852,6 +892,35 @@ By default, ArcGIS extracts include bbox metadata and Hilbert spatial ordering f
     gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
       --compression GZIP \
       --compression-level 6
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Python API does NOT apply Hilbert sorting by default
+    # Chain .sort_hilbert() explicitly if you want spatial ordering
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0"
+    )
+    # Add Hilbert ordering for optimal spatial queries
+    table = table.sort_hilbert()
+    table.write("output.parquet")
+
+    # Skip bbox column (smaller file, slower spatial filtering)
+    # Simply don't call .add_bbox() - Python API doesn't add it by default
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0"
+    )
+    table.write("output.parquet")
+
+    # Custom compression
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0"
+    )
+    table.write("output.parquet", compression="GZIP", compression_level=6)
+    ```
 
 ### Finding Service URLs
 

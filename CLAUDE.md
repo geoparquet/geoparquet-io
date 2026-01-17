@@ -279,23 +279,17 @@ This project serves two audiences equally: CLI users and Python API users. Every
 
 Use Material for MkDocs tabbed content for all examples:
 
-```markdown
-=== "CLI"
+    === "CLI"
 
-    ```bash
-    gpio extract input.parquet output.parquet --bbox -122.5,37.5,-122.0,38.0
-    ```
+        gpio extract input.parquet output.parquet --bbox -122.5,37.5,-122.0,38.0
 
-=== "Python"
+    === "Python"
 
-    ```python
-    import geoparquet_io as gpio
+        import geoparquet_io as gpio
 
-    table = gpio.read("input.parquet")
-    filtered = table.extract(bbox=(-122.5, 37.5, -122.0, 38.0))
-    filtered.write("output.parquet")
-    ```
-```
+        table = gpio.read("input.parquet")
+        filtered = table.extract(bbox=(-122.5, 37.5, -122.0, 38.0))
+        filtered.write("output.parquet")
 
 ### Documentation Checklist
 
