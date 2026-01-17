@@ -740,9 +740,9 @@ Extract data directly from ArcGIS REST Feature Services to GeoParquet. Features 
 
     # Read from ArcGIS Feature Service
     table = gpio.extract_arcgis(
-        'https://services.arcgis.com/.../FeatureServer/0',
-        'output.parquet'
+        service_url='https://services.arcgis.com/.../FeatureServer/0'
     )
+    table.write('output.parquet')
     ```
 
 ### Server-Side Filtering
@@ -803,27 +803,24 @@ For protected services, provide credentials:
 
 By default, ArcGIS extracts include bbox metadata and Hilbert spatial ordering for optimal query performance:
 
-```bash
-# Skip Hilbert ordering (faster extraction, less optimal queries)
-gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
-  --skip-hilbert
+    # Skip Hilbert ordering (faster extraction, less optimal queries)
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --skip-hilbert
 
-# Skip bbox column (smaller file, slower spatial filtering)
-gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
-  --skip-bbox
+    # Skip bbox column (smaller file, slower spatial filtering)
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --skip-bbox
 
-# Custom compression
-gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
-  --compression GZIP \
-  --compression-level 6
-```
+    # Custom compression
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --compression GZIP \
+      --compression-level 6
 
 ### Finding Service URLs
 
 ArcGIS Feature Service URLs follow this pattern:
-```
-https://<server>/arcgis/rest/services/<folder>/<service>/FeatureServer/<layer_id>
-```
+
+    https://<server>/arcgis/rest/services/<folder>/<service>/FeatureServer/<layer_id>
 
 To find service URLs:
 
