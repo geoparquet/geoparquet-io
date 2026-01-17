@@ -21,6 +21,7 @@ geoparquet-io (gpio) is a Python CLI tool for fast I/O and transformation of Geo
 3. **Identify affected files** - Map out what needs to change
 4. **Check for utilities** - Review `core/common.py` and `cli/decorators.py` for reusable code
 5. **Understand test requirements** - Look at existing tests for the area you're modifying
+6. **Plan documentation updates** - Identify which docs need updating (see Documentation Standards)
 
 ### Research Commands
 
@@ -46,6 +47,7 @@ pytest tests/test_<area>.py -v
 3. How do similar features handle errors?
 4. What's the test coverage expectation?
 5. Are there edge cases mentioned in similar code?
+6. What documentation needs to be updated for this feature?
 
 ---
 
@@ -253,6 +255,66 @@ Follow the template in `.github/pull_request_template.md` exactly:
 2. **Technical Details**: Implementation notes for reviewers
 3. **Related Issue(s)**: Link with `#<number>`
 4. **Checklist**: Verify formatting and tests
+
+### Documentation Requirement
+
+**CRITICAL: Every pull request must include documentation updates.**
+
+If your PR adds or modifies functionality:
+1. Update the relevant guide in `docs/guide/` (e.g., `extract.md`, `convert.md`)
+2. Update API documentation in `docs/api/python-api.md` if Python API changed
+3. Add examples for both CLI and Python usage (see Documentation Standards below)
+
+PRs without documentation for new features will be incomplete.
+
+---
+
+## Documentation Standards
+
+**All documentation must include both CLI and Python examples.**
+
+This project serves two audiences equally: CLI users and Python API users. Every feature, option, and workflow must be documented for both.
+
+### Tabbed Examples Format
+
+Use Material for MkDocs tabbed content for all examples:
+
+```markdown
+=== "CLI"
+
+    ```bash
+    gpio extract input.parquet output.parquet --bbox -122.5,37.5,-122.0,38.0
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read("input.parquet")
+    filtered = table.extract(bbox=(-122.5, 37.5, -122.0, 38.0))
+    filtered.write("output.parquet")
+    ```
+```
+
+### Documentation Checklist
+
+When documenting a feature:
+
+1. **CLI tab first** - Show the command-line usage
+2. **Python tab second** - Show equivalent Python API usage
+3. **Mirror the examples** - Both tabs should demonstrate the same functionality
+4. **Use realistic examples** - Show actual parameter values, not placeholders
+5. **Include all options** - If CLI has `--token`, `--username`, etc., Python must show `token=`, `username=`, etc.
+
+### Where to Add Documentation
+
+| Change Type | Documentation Location |
+|-------------|----------------------|
+| New command | `docs/guide/<command>.md` + `docs/api/python-api.md` |
+| New option | Relevant section in existing guide |
+| New Python API method | `docs/api/python-api.md` + relevant guide |
+| Bug fix | Usually none, unless behavior change |
 
 ---
 

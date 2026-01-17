@@ -799,6 +799,43 @@ For protected services, provide credentials:
       --portal-url https://enterprise.example.com/portal
     ```
 
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Using direct token
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        token="your_arcgis_token"
+    )
+    table.write("output.parquet")
+
+    # Using token file
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        token_file="/path/to/token.txt"
+    )
+    table.write("output.parquet")
+
+    # Using username/password (generates token via ArcGIS REST API)
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        username="myuser",
+        password="mypassword"
+    )
+    table.write("output.parquet")
+
+    # Enterprise portal authentication
+    table = gpio.extract_arcgis(
+        service_url="https://enterprise.example.com/arcgis/rest/services/.../FeatureServer/0",
+        username="myuser",
+        password="mypassword",
+        portal_url="https://enterprise.example.com/portal"
+    )
+    table.write("output.parquet")
+    ```
+
 ### Output Optimization
 
 By default, ArcGIS extracts include bbox metadata and Hilbert spatial ordering for optimal query performance:
