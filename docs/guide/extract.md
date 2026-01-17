@@ -719,7 +719,7 @@ Other limitations:
 
 ## Extracting from ArcGIS Feature Services
 
-Extract data directly from ArcGIS REST Feature Services to GeoParquet. Features are downloaded with server-side filtering and converted to optimized GeoParquet with ZSTD compression, bbox metadata, and Hilbert spatial ordering.
+Extract data directly from ArcGIS REST Feature Services to GeoParquet. Features are downloaded with server-side filtering; CLI outputs default to ZSTD compression, bbox metadata, and Hilbert spatial ordering, while Python defaults are described below under Output Optimization.
 
 ### Basic Usage
 
