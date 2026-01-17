@@ -899,28 +899,31 @@ By default, ArcGIS extracts include bbox metadata and Hilbert spatial ordering f
     ```python
     import geoparquet_io as gpio
 
-    # Python API does NOT apply Hilbert sorting by default
-    # Chain .sort_hilbert() explicitly if you want spatial ordering
+    # Skip Hilbert ordering (faster extraction, less optimal queries)
+    # Python API does not apply Hilbert sorting by default - just don't chain .sort_hilbert()
     table = gpio.extract_arcgis(
         service_url="https://services.arcgis.com/.../FeatureServer/0"
     )
-    # Add Hilbert ordering for optimal spatial queries
-    table = table.sort_hilbert()
     table.write("output.parquet")
 
     # Skip bbox column (smaller file, slower spatial filtering)
-    # Simply don't call .add_bbox() - Python API doesn't add it by default
+    # Python API does not add bbox by default - just don't chain .add_bbox()
     table = gpio.extract_arcgis(
         service_url="https://services.arcgis.com/.../FeatureServer/0"
     )
     table.write("output.parquet")
 
-    # Custom compression
+    # Custom compression (equivalent to --compression GZIP --compression-level 6)
+    # Pass compression and compression_level to table.write()
     table = gpio.extract_arcgis(
         service_url="https://services.arcgis.com/.../FeatureServer/0"
     )
     table.write("output.parquet", compression="GZIP", compression_level=6)
     ```
+
+    !!! note "CLI vs Python API Defaults"
+        The CLI applies Hilbert sorting and bbox by default (use `--skip-hilbert` and `--skip-bbox` to disable).
+        The Python API does NOT apply these by default—chain `.sort_hilbert()` and `.add_bbox()` explicitly if needed.
 
 ### Finding Service URLs
 
