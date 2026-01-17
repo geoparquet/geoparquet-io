@@ -748,18 +748,31 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None, use_s3_auth=False
 
     # Always load spatial extension by default (core use case)
     if load_spatial:
-        con.execute("INSTALL spatial;")
+        try:
+            con.execute("INSTALL spatial;")
+        except Exception:
+            # Ignore race conditions during parallel extension installation
+            # See: https://github.com/duckdb/duckdb/issues/12589
+            pass
         con.execute("LOAD spatial;")
 
     # Load httpfs for cloud storage support
     if load_httpfs:
-        con.execute("INSTALL httpfs;")
+        try:
+            con.execute("INSTALL httpfs;")
+        except Exception:
+            # Ignore race conditions during parallel extension installation
+            pass
         con.execute("LOAD httpfs;")
 
         # Only configure AWS credentials if explicitly requested (for private buckets)
         # Public buckets work without any secret - DuckDB handles them automatically
         if use_s3_auth:
-            con.execute("INSTALL aws;")
+            try:
+                con.execute("INSTALL aws;")
+            except Exception:
+                # Ignore race conditions during parallel extension installation
+                pass
             con.execute("LOAD aws;")
             con.execute("""
                 CREATE OR REPLACE SECRET (

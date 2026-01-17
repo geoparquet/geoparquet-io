@@ -370,6 +370,7 @@ class TestVersionCLI:
         assert "2.0" in result.output
 
 
+@pytest.mark.slow
 class TestVersionRoundTrip:
     """Test reading/writing round-trip for each version."""
 
@@ -862,6 +863,7 @@ class TestConvertSkipsBbox:
         assert result_count == original_count
 
 
+@pytest.mark.slow
 class TestComprehensiveRoundTrips:
     """Comprehensive round-trip conversion tests between all version combinations."""
 
