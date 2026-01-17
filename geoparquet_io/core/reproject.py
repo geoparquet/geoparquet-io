@@ -132,7 +132,8 @@ def reproject_table(
         # Create view with geometry conversion if needed
         source_table = "__input_table"
         if geom_is_blob:
-            other_cols = [c for c in table.column_names if c != geom_col]
+            # Quote all column names to handle special characters (colons, spaces, etc.)
+            other_cols = [f'"{c}"' for c in table.column_names if c != geom_col]
             col_defs = other_cols + [f'ST_GeomFromWKB("{geom_col}") AS "{geom_col}"']
             view_query = (
                 f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
@@ -141,14 +142,17 @@ def reproject_table(
             source_table = "__input_view"
 
         # Build reprojection query
+        # Use ST_AsWKB to convert back to WKB format for GeoParquet compatibility
         query = f"""
             SELECT
                 * EXCLUDE ("{geom_col}"),
-                ST_Transform(
-                    "{geom_col}",
-                    '{effective_source_crs}',
-                    '{target_crs}',
-                    always_xy := true
+                ST_AsWKB(
+                    ST_Transform(
+                        "{geom_col}",
+                        '{effective_source_crs}',
+                        '{target_crs}',
+                        always_xy := true
+                    )
                 ) AS "{geom_col}"
             FROM {source_table}
         """
@@ -306,7 +310,8 @@ def reproject_impl(
             exclude_cols.append(bbox_col)
             if verbose:
                 debug(f"Excluding bbox column '{bbox_col}' (will be regenerated)")
-        exclude_clause = ", ".join(exclude_cols)
+        # Quote column names to handle special characters (colons, spaces, etc.)
+        exclude_clause = ", ".join(f'"{c}"' for c in exclude_cols)
 
         # Build SQL query with ST_Transform
         # Use always_xy := true since GeoParquet uses lon/lat (x/y) axis order
@@ -315,11 +320,11 @@ def reproject_impl(
             SELECT
                 * EXCLUDE ({exclude_clause}),
                 ST_Transform(
-                    {geom_col},
+                    "{geom_col}",
                     '{effective_source_crs}',
                     '{target_crs}',
                     always_xy := true
-                ) AS {geom_col}
+                ) AS "{geom_col}"
             FROM '{input_url}'
         """
 
@@ -467,18 +472,19 @@ def _reproject_streaming(
             exclude_cols = [geom_col]
             if bbox_col:
                 exclude_cols.append(bbox_col)
-            exclude_clause = ", ".join(exclude_cols)
+            # Quote column names to handle special characters (colons, spaces, etc.)
+            exclude_clause = ", ".join(f'"{c}"' for c in exclude_cols)
 
             # Build reprojection query
             query = f"""
                 SELECT
                     * EXCLUDE ({exclude_clause}),
                     ST_Transform(
-                        {geom_col},
+                        "{geom_col}",
                         '{effective_source_crs}',
                         '{target_crs}',
                         always_xy := true
-                    ) AS {geom_col}
+                    ) AS "{geom_col}"
                 FROM '{working_url}'
             """
 

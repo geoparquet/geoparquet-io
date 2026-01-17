@@ -65,7 +65,8 @@ def hilbert_order_table(
         geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
 
         if geom_is_blob and geom_col in table.column_names:
-            other_cols = [c for c in table.column_names if c != geom_col]
+            # Quote column names to handle special characters (colons, spaces, etc.)
+            other_cols = [f'"{c}"' for c in table.column_names if c != geom_col]
             col_defs = other_cols + [f'ST_GeomFromWKB("{geom_col}") AS "{geom_col}"']
             view_query = (
                 f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
