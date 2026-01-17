@@ -10,35 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2025-11-17
 
 ### Added
-- `gpio convert` command for optimized GeoParquet conversion from vector formats (Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV) ([#56](https://github.com/cholmes/geoparquet-io/pull/56))
-- `gpio stac` command for STAC Item and Collection generation ([#57](https://github.com/cholmes/geoparquet-io/pull/57))
-- `gpio check stac` command for STAC validation ([#57](https://github.com/cholmes/geoparquet-io/pull/57))
-- `--prefix` option for partition commands to customize output filenames ([#62](https://github.com/cholmes/geoparquet-io/pull/62))
+- `gpio convert` command for optimized GeoParquet conversion from vector formats (Shapefile, GeoJSON, GeoPackage, GDB, CSV/TSV) ([#56](https://github.com/geoparquet/geoparquet-io/pull/56))
+- `gpio stac` command for STAC Item and Collection generation ([#57](https://github.com/geoparquet/geoparquet-io/pull/57))
+- `gpio check stac` command for STAC validation ([#57](https://github.com/geoparquet/geoparquet-io/pull/57))
+- `--prefix` option for partition commands to customize output filenames ([#62](https://github.com/geoparquet/geoparquet-io/pull/62))
 
 ### Changed
-- Documentation consolidated with snippets system ([#55](https://github.com/cholmes/geoparquet-io/pull/55))
+- Documentation consolidated with snippets system ([#55](https://github.com/geoparquet/geoparquet-io/pull/55))
 
 ## [0.3.0] - 2025-11-06
 
 ### Added
-- `gpio meta` command for deep inspection of Parquet and GeoParquet metadata ([#46](https://github.com/cholmes/geoparquet-io/pull/46))
-- Multi-level admin boundary partitioning with GAUL and Overture Maps datasets ([#38](https://github.com/cholmes/geoparquet-io/pull/38))
-- Code quality checks with vulture and xenon to CI workflow ([#48](https://github.com/cholmes/geoparquet-io/pull/48), [#49](https://github.com/cholmes/geoparquet-io/pull/49), [#50](https://github.com/cholmes/geoparquet-io/pull/50))
+- `gpio meta` command for deep inspection of Parquet and GeoParquet metadata ([#46](https://github.com/geoparquet/geoparquet-io/pull/46))
+- Multi-level admin boundary partitioning with GAUL and Overture Maps datasets ([#38](https://github.com/geoparquet/geoparquet-io/pull/38))
+- Code quality checks with vulture and xenon to CI workflow ([#48](https://github.com/geoparquet/geoparquet-io/pull/48), [#49](https://github.com/geoparquet/geoparquet-io/pull/49), [#50](https://github.com/geoparquet/geoparquet-io/pull/50))
 
 ### Changed
-- GitHub Actions dependency updates ([#39](https://github.com/cholmes/geoparquet-io/pull/39), [#40](https://github.com/cholmes/geoparquet-io/pull/40), [#41](https://github.com/cholmes/geoparquet-io/pull/41), [#42](https://github.com/cholmes/geoparquet-io/pull/42))
+- GitHub Actions dependency updates ([#39](https://github.com/geoparquet/geoparquet-io/pull/39), [#40](https://github.com/geoparquet/geoparquet-io/pull/40), [#41](https://github.com/geoparquet/geoparquet-io/pull/41), [#42](https://github.com/geoparquet/geoparquet-io/pull/42))
 
 ## [0.2.0] - 2025-10-24
 
 ### Added
-- MkDocs documentation site with GitHub Pages deployment ([#35](https://github.com/cholmes/geoparquet-io/pull/35))
+- MkDocs documentation site with GitHub Pages deployment ([#35](https://github.com/geoparquet/geoparquet-io/pull/35))
   - Comprehensive user guide and CLI reference
   - API documentation
   - Real-world examples
-  - Published at https://cholmes.github.io/geoparquet-io/
+  - Published at https://geoparquet.io/
 
 ### Changed
-- Consolidated 177 lines of duplicated CLI option definitions into reusable decorators ([#36](https://github.com/cholmes/geoparquet-io/pull/36))
+- Consolidated 177 lines of duplicated CLI option definitions into reusable decorators ([#36](https://github.com/geoparquet/geoparquet-io/pull/36))
 
 ## [0.1.0] - 2025-10-19
 
@@ -69,15 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Core Features
 - **Spatial Sorting**: Hilbert curve ordering for optimal spatial locality
 - **Bbox Operations**: Add bbox columns and metadata for query performance
-- **H3 Support**: H3 hexagonal cell ID support via DuckDB H3 extension ([#23](https://github.com/cholmes/geoparquet-io/pull/23))
+- **H3 Support**: H3 hexagonal cell ID support via DuckDB H3 extension ([#23](https://github.com/geoparquet/geoparquet-io/pull/23))
   - `gpio add h3` and `gpio partition h3` commands
   - H3 columns excluded from partition output by default (configurable)
   - Enhanced metadata system for custom covering metadata (bbox + H3) in GeoParquet 1.1 spec
-- **KD-tree Partitioning**: Balanced spatial partitioning support ([#30](https://github.com/cholmes/geoparquet-io/pull/30))
+- **KD-tree Partitioning**: Balanced spatial partitioning support ([#30](https://github.com/geoparquet/geoparquet-io/pull/30))
   - `gpio add kdtree` and `gpio partition kdtree` commands
   - Auto-select partitions targeting ~120k rows using approximate mode
   - Exact computation mode available for deterministic results
-- **Inspect Command**: Fast metadata inspection ([#31](https://github.com/cholmes/geoparquet-io/pull/31))
+- **Inspect Command**: Fast metadata inspection ([#31](https://github.com/geoparquet/geoparquet-io/pull/31))
   - Optional data preview with `--head`/`--tail` flags
   - Column statistics with `--stats` flag
   - JSON output support with `--json` flag
@@ -130,9 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release as `geoparquet-tools` with basic functionality.
 
-[Unreleased]: https://github.com/cholmes/geoparquet-io/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/cholmes/geoparquet-io/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/cholmes/geoparquet-io/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/cholmes/geoparquet-io/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/cholmes/geoparquet-io/releases/tag/v0.1.0
+[Unreleased]: https://github.com/geoparquet/geoparquet-io/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/geoparquet/geoparquet-io/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/geoparquet/geoparquet-io/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/geoparquet/geoparquet-io/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/geoparquet/geoparquet-io/releases/tag/v0.1.0
 [0.0.1]: https://github.com/cholmes/geoparquet-tools/releases/tag/v0.0.1

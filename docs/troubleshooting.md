@@ -222,4 +222,4 @@ When reporting issues, include:
 4. Python version: `python --version`
 5. Operating system
 
-File issues at: [GitHub Issues](https://github.com/cholmes/geoparquet-io/issues)
+File issues at: [GitHub Issues](https://github.com/geoparquet/geoparquet-io/issues)

@@ -13,7 +13,7 @@ Thank you for your interest in contributing to geoparquet-io! This document prov
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/cholmes/geoparquet-io.git
+   git clone https://github.com/geoparquet/geoparquet-io.git
    cd geoparquet-io
    ```
 

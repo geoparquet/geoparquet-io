@@ -1,9 +1,9 @@
 site_name: geoparquet-io
 site_description: Fast I/O and transformation tools for GeoParquet files
 site_author: Chris Holmes
-site_url: https://cholmes.github.io/geoparquet-io/
-repo_name: cholmes/geoparquet-io
-repo_url: https://github.com/cholmes/geoparquet-io
+site_url: https://geoparquet.io/
+repo_name: geoparquet/geoparquet-io
+repo_url: https://github.com/geoparquet/geoparquet-io
 edit_uri: edit/main/docs/
 
 theme:
