@@ -107,6 +107,66 @@ See the [Extract Guide](../guide/extract.md#bbox-filtering-mode-server-vs-local)
     - **Cannot read views or external tables** (Storage Read API limitation)
     - BIGNUMERIC columns are not supported
 
+### Reading from ArcGIS Feature Services
+
+Use `gpio.extract_arcgis()` to download features from ArcGIS REST Feature Services. Server-side filtering is applied for efficient data transfer.
+
+```python
+import geoparquet_io as gpio
+
+# Basic read from public service
+table = gpio.extract_arcgis(
+    'https://services.arcgis.com/.../FeatureServer/0'
+)
+
+# With server-side filtering
+table = gpio.extract_arcgis(
+    'https://services.arcgis.com/.../FeatureServer/0',
+    where="STATE_NAME = 'California'",
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    include_cols='NAME,POPULATION,STATE_NAME',
+    limit=10000
+)
+
+# With authentication
+table = gpio.extract_arcgis(
+    'https://services.arcgis.com/.../FeatureServer/0',
+    token='your_arcgis_token'
+)
+
+# With username/password authentication
+table = gpio.extract_arcgis(
+    'https://services.arcgis.com/.../FeatureServer/0',
+    username='myuser',
+    password='mypassword'
+)
+
+# Chain with other operations
+gpio.extract_arcgis(
+    'https://services.arcgis.com/.../FeatureServer/0',
+    limit=10000
+).add_bbox().sort_hilbert().write('output.parquet')
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `service_url` | str | ArcGIS Feature Service URL with layer ID |
+| `token` | str | Direct authentication token |
+| `token_file` | str | Path to file containing token |
+| `username` | str | ArcGIS Online/Enterprise username |
+| `password` | str | ArcGIS password (requires username) |
+| `portal_url` | str | Enterprise portal URL for token generation |
+| `where` | str | SQL WHERE clause (default: "1=1" = all) |
+| `bbox` | tuple | Bounding box filter (xmin, ymin, xmax, ymax) in WGS84 |
+| `include_cols` | str | Comma-separated columns to include |
+| `exclude_cols` | str | Comma-separated columns to exclude |
+| `limit` | int | Maximum number of features |
+
+!!! note "No automatic Hilbert sorting"
+    Unlike the CLI `gpio extract arcgis` command, the Python API does NOT apply Hilbert sorting by default. Chain `.sort_hilbert()` explicitly if you want spatial ordering.
+
 ## Table Class
 
 The `Table` class wraps a PyArrow Table and provides chainable transformation methods.
@@ -735,6 +795,7 @@ pq.write_table(table, 'output.parquet')
 | `ops.reproject(table, target_crs='EPSG:4326', source_crs=None, geometry_column=None)` | Reproject geometry |
 | `ops.extract(table, columns=None, exclude_columns=None, bbox=None, where=None, limit=None, geometry_column=None)` | Filter columns/rows |
 | `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table |
+| `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None)` | Fetch ArcGIS Feature Service |
 
 ## Pipeline Composition
 
