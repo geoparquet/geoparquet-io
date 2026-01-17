@@ -562,3 +562,154 @@ class TestShapefileZip:
         # Create zip with verbose (should not raise)
         zip_path = create_shapefile_zip(output_file, verbose=True)
         assert zip_path.exists()
+
+
+class TestCRSPreservation:
+    """Test CRS preservation in GDAL format exports."""
+
+    # Test file with EPSG:5070 (NAD83 / Conus Albers)
+    CRS_TEST_FILE = TEST_DATA_DIR / "fields_gpq2_5070_brotli.parquet"
+
+    @pytest.fixture
+    def shapefile_output(self):
+        """Create temp shapefile output path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.shp"
+        yield str(tmp_path)
+        # Clean up all shapefile sidecar files
+        for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
+            sidecar = tmp_path.with_suffix(ext)
+            if sidecar.exists():
+                sidecar.unlink()
+
+    @pytest.fixture
+    def flatgeobuf_output(self):
+        """Create temp FlatGeobuf output path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.fgb"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    @pytest.fixture
+    def geopackage_output(self):
+        """Create temp GeoPackage output path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.gpkg"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    def test_shapefile_includes_prj_file(self, shapefile_output):
+        """Shapefile export should create .prj sidecar with CRS."""
+        write_shapefile(
+            input_path=str(self.CRS_TEST_FILE),
+            output_path=shapefile_output,
+            verbose=True,
+        )
+
+        # Verify .prj file was created
+        prj_file = Path(shapefile_output).with_suffix(".prj")
+        assert prj_file.exists(), "Shapefile should have .prj sidecar file"
+
+        # Verify .prj contains CRS information
+        prj_content = prj_file.read_text()
+        assert len(prj_content) > 0, ".prj file should contain CRS definition"
+        assert "PROJCS" in prj_content or "GEOGCS" in prj_content, ".prj should contain WKT"
+
+    def test_flatgeobuf_embeds_crs(self, flatgeobuf_output):
+        """FlatGeobuf should embed CRS in file."""
+        write_flatgeobuf(
+            input_path=str(self.CRS_TEST_FILE),
+            output_path=flatgeobuf_output,
+            verbose=True,
+        )
+
+        # Read back with DuckDB and verify CRS
+        from geoparquet_io.core.common import get_duckdb_connection
+
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            # Use ST_Read_Meta to get metadata including CRS
+            result = con.execute(f"""
+                SELECT * FROM ST_Read_Meta('{flatgeobuf_output}')
+            """).fetchone()
+
+            assert result is not None, "Should be able to read FlatGeobuf metadata"
+            layers = result[3]  # List of layer dicts
+            assert len(layers) > 0, "FlatGeobuf should have at least one layer"
+
+            layer = layers[0]
+            geometry_fields = layer.get("geometry_fields", [])
+            assert len(geometry_fields) > 0, "Layer should have geometry fields"
+
+            crs_info = geometry_fields[0].get("crs", {})
+            # Check for EPSG code
+            auth_name = crs_info.get("auth_name")
+            auth_code = crs_info.get("auth_code")
+
+            assert auth_name == "EPSG", f"Expected EPSG authority, got {auth_name}"
+            # auth_code can be string or int depending on DuckDB version
+            assert str(auth_code) == "5070", f"Expected EPSG:5070, got {auth_name}:{auth_code}"
+        finally:
+            con.close()
+
+    def test_geopackage_embeds_crs(self, geopackage_output):
+        """GeoPackage should embed CRS in database."""
+        write_geopackage(
+            input_path=str(self.CRS_TEST_FILE),
+            output_path=geopackage_output,
+            verbose=True,
+        )
+
+        # Read back with DuckDB and verify CRS
+        from geoparquet_io.core.common import get_duckdb_connection
+
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            # Use ST_Read_Meta to get metadata including CRS
+            result = con.execute(f"""
+                SELECT * FROM ST_Read_Meta('{geopackage_output}')
+            """).fetchone()
+
+            assert result is not None, "Should be able to read GeoPackage metadata"
+            layers = result[3]  # List of layer dicts
+            assert len(layers) > 0, "GeoPackage should have at least one layer"
+
+            layer = layers[0]
+            geometry_fields = layer.get("geometry_fields", [])
+            assert len(geometry_fields) > 0, "Layer should have geometry fields"
+
+            crs_info = geometry_fields[0].get("crs", {})
+            # Check for EPSG code
+            auth_name = crs_info.get("auth_name")
+            auth_code = crs_info.get("auth_code")
+
+            assert auth_name == "EPSG", f"Expected EPSG authority, got {auth_name}"
+            # auth_code can be string or int depending on DuckDB version
+            assert str(auth_code) == "5070", f"Expected EPSG:5070, got {auth_name}:{auth_code}"
+        finally:
+            con.close()
+
+    def test_default_crs_handled(self, shapefile_output):
+        """Files with default CRS (EPSG:4326) should still export successfully."""
+        # Use a file with default CRS
+        default_crs_file = TEST_DATA_DIR / "places_test.parquet"
+
+        write_shapefile(
+            input_path=str(default_crs_file),
+            output_path=shapefile_output,
+            verbose=True,
+        )
+
+        # Should succeed - .prj may or may not be created (GDAL's default is 4326)
+        assert Path(shapefile_output).exists()
+
+    def test_missing_crs_handled_gracefully(self, geopackage_output):
+        """Files without CRS should export without error."""
+        # Most test files have CRS, but export should work even if missing
+        write_geopackage(
+            input_path=str(BUILDINGS_PARQUET),
+            output_path=geopackage_output,
+            verbose=True,
+        )
+
+        # Should succeed without error
+        assert Path(geopackage_output).exists()

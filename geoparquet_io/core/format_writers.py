@@ -10,12 +10,16 @@ All writers use DuckDB's spatial extension for maximum compatibility.
 Writers handle local file output only; remote uploads are handled by the upload module.
 """
 
+import json
+
 import click
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
+    extract_crs_from_parquet,
     get_duckdb_connection,
+    is_default_crs,
     is_remote_url,
     needs_httpfs,
     safe_file_url,
@@ -56,6 +60,40 @@ GDAL_FORMATS = {
         "encoding_option": "ENCODING",
     },
 }
+
+
+def _get_srs_parameter(input_path: str, verbose: bool = False) -> str | None:
+    """
+    Extract CRS from GeoParquet and format for DuckDB GDAL SRS parameter.
+
+    Priority:
+    1. Extract EPSG code if available (e.g., "EPSG:4326")
+    2. Fall back to serialized PROJJSON string
+    3. Return None if no CRS or default CRS
+
+    Args:
+        input_path: Path to GeoParquet file
+        verbose: Whether to log debug info
+
+    Returns:
+        SRS string for GDAL, or None if no CRS needed
+    """
+    from geoparquet_io.core.common import _extract_crs_identifier
+
+    crs = extract_crs_from_parquet(input_path, verbose)
+    if not crs or is_default_crs(crs):
+        return None
+
+    # Try EPSG code first (preferred format)
+    epsg_info = _extract_crs_identifier(crs)
+    if epsg_info:
+        authority, code = epsg_info
+        # Sanitize: authority should be alphanumeric, code should be int
+        if authority.isalnum() and isinstance(code, int):
+            return f"{authority}:{code}"  # e.g., "EPSG:4326"
+
+    # Fallback to PROJJSON - serialize and it will be escaped later
+    return json.dumps(crs)
 
 
 def write_gdal_format(
@@ -124,6 +162,17 @@ def write_gdal_format(
     try:
         input_url = safe_file_url(input_path, verbose)
 
+        # Extract CRS for SRS parameter
+        srs_param = _get_srs_parameter(input_path, verbose)
+        if srs_param:
+            # SQL-escape the SRS parameter
+            safe_srs = srs_param.replace("'", "''")
+            srs_clause = f", SRS '{safe_srs}'"
+            debug(f"Setting SRS: {srs_param}")
+        else:
+            srs_clause = ""
+            debug("No CRS metadata found or using default CRS")
+
         # Build layer creation options
         lco_parts = []
         if config.get("layer_option"):
@@ -171,7 +220,7 @@ def write_gdal_format(
         query = f"""
             COPY (SELECT {select_clause} FROM read_parquet('{safe_input_url}'))
             TO '{safe_output_path}'
-            WITH (FORMAT GDAL, DRIVER '{config["driver"]}'{lco_clause})
+            WITH (FORMAT GDAL, DRIVER '{config["driver"]}'{lco_clause}{srs_clause})
         """
 
         debug(f"Executing: {query}")
