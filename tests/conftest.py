@@ -10,17 +10,9 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-# Configure DuckDB extension directory BEFORE importing duckdb
-# This must happen before any DuckDB connections are created
-# Get worker ID if running with pytest-xdist
-_worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
-_ext_dir = Path(tempfile.gettempdir()) / f"duckdb_extensions_{_worker_id}"
-_ext_dir.mkdir(parents=True, exist_ok=True)
-os.environ["DUCKDB_EXTENSION_DIRECTORY"] = str(_ext_dir)
-
-import duckdb  # noqa: E402
-import pyarrow.parquet as pq  # noqa: E402
-import pytest  # noqa: E402
+import duckdb
+import pyarrow.parquet as pq
+import pytest
 
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent / "data"

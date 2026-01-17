@@ -65,8 +65,14 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run fast tests with pytest (parallel)
+        shell: bash
         run: |
-          uv run pytest -n auto -m "not slow and not network" -v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-report=xml
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            # Use loadfile distribution on Windows to reduce DuckDB extension conflicts
+            uv run pytest -n auto --dist=loadfile -m "not slow and not network" -v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-report=xml
+          else
+            uv run pytest -n auto -m "not slow and not network" -v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-report=xml
+          fi
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
