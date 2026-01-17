@@ -58,6 +58,7 @@ gt = "geoparquet_io:cli"  # Legacy alias for backwards compatibility
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-xdist>=3.5.0",
     "nbmake>=1.5.0",
     "ruff>=0.8.0",
     "pre-commit>=4.3.0",
@@ -85,10 +86,18 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short --cov=geoparquet_io --cov-report=term-missing --cov-fail-under=73"
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--cov=geoparquet_io",
+    "--cov-report=term-missing",
+    "--cov-fail-under=73",
+]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "network: marks tests requiring network access (deselect with '-m \"not network\"')",
+    "integration: marks end-to-end integration tests",
 ]
 
 [tool.ruff]

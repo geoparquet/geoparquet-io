@@ -67,6 +67,7 @@ def create_geoparquet(tmp_path, duckdb_conn):
     return _create
 
 
+@pytest.mark.slow
 class TestReprojectCore:
     """Tests for the core reproject_impl function."""
 
