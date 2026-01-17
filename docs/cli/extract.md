@@ -65,6 +65,57 @@ The `--bbox-threshold` sets the row count where `auto` switches to server-side f
 !!! warning "Limitations"
     **Cannot read BigQuery views or external tables** - this is a limitation of the BigQuery Storage Read API. BIGNUMERIC columns are not supported (exceeds DuckDB's precision).
 
+### extract arcgis
+
+Extract from ArcGIS Feature Services to GeoParquet.
+
+```bash
+gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet
+```
+
+**Options:**
+
+- `--token` - Direct ArcGIS authentication token
+- `--token-file` - Path to file containing authentication token
+- `--username` - ArcGIS Online/Enterprise username (requires --password)
+- `--password` - ArcGIS Online/Enterprise password (requires --username)
+- `--portal-url` - Enterprise portal URL for token generation
+- `--where` - SQL WHERE clause (pushed to server, default: `1=1`)
+- `--bbox` - Bounding box filter: `xmin,ymin,xmax,ymax` in WGS84 (pushed to server)
+- `--include-cols` - Comma-separated columns to include (pushed to server)
+- `--exclude-cols` - Comma-separated columns to exclude (applied after download)
+- `--limit` - Maximum number of features to extract
+- `--skip-hilbert` - Skip Hilbert spatial ordering
+- `--skip-bbox` - Skip adding bbox column
+
+**Authentication (in order of precedence):**
+
+1. `--token`: Direct token string
+2. `--token-file`: Path to file containing token
+3. `--username`/`--password`: Generate token via ArcGIS REST API
+
+**Examples:**
+
+```bash
+# Public service (no auth needed)
+gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet
+
+# With bounding box filter (server-side)
+gpio extract arcgis https://... output.parquet --bbox -122.5,37.5,-122.0,38.0
+
+# With SQL WHERE filter (server-side)
+gpio extract arcgis https://... output.parquet --where "state='CA'"
+
+# Select specific columns (server-side)
+gpio extract arcgis https://... output.parquet --include-cols name,population
+
+# With authentication
+gpio extract arcgis https://... output.parquet --username user --password pass
+```
+
+!!! note "Server-Side Filtering"
+    The `--where`, `--bbox`, `--include-cols`, and `--limit` options are pushed to the ArcGIS server for efficient filtering. Only matching data is downloaded.
+
 ## Options
 
 ### Column Selection

@@ -717,6 +717,124 @@ Other limitations:
 - **BIGNUMERIC columns**: Not supported (76-digit precision exceeds DuckDB's 38-digit limit)
 - **Large results**: Consider using `--limit` and `--where` to reduce data transfer
 
+## Extracting from ArcGIS Feature Services
+
+Extract data directly from ArcGIS REST Feature Services to GeoParquet. Features are downloaded with server-side filtering and converted to optimized GeoParquet with ZSTD compression, bbox metadata, and Hilbert spatial ordering.
+
+### Basic Usage
+
+=== "CLI"
+
+    ```bash
+    # Extract from public ArcGIS Feature Service
+    gpio extract arcgis https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_Counties/FeatureServer/0 counties.parquet
+
+    # Extract with row limit
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet --limit 1000
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Read from ArcGIS Feature Service
+    table = gpio.extract_arcgis(
+        'https://services.arcgis.com/.../FeatureServer/0',
+        'output.parquet'
+    )
+    ```
+
+### Server-Side Filtering
+
+Filters are pushed to the ArcGIS server for efficient querying—only matching data is downloaded:
+
+=== "CLI"
+
+    ```bash
+    # WHERE filter (server-side)
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --where "STATE_NAME = 'California'"
+
+    # Bounding box filter (server-side)
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --bbox -122.5,37.5,-122.0,38.0
+
+    # Select specific columns (server-side)
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --include-cols NAME,POPULATION,STATE_NAME
+
+    # Combined filters
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --bbox -122.5,37.5,-122.0,38.0 \
+      --where "POPULATION > 100000" \
+      --include-cols NAME,POPULATION \
+      --limit 500
+    ```
+
+### Authentication
+
+For protected services, provide credentials:
+
+=== "CLI"
+
+    ```bash
+    # Using direct token
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --token "your_arcgis_token"
+
+    # Using token file
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --token-file /path/to/token.txt
+
+    # Using username/password (generates token via ArcGIS REST API)
+    gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+      --username myuser \
+      --password mypassword
+
+    # Enterprise portal authentication
+    gpio extract arcgis https://enterprise.example.com/arcgis/rest/services/.../FeatureServer/0 output.parquet \
+      --username myuser \
+      --password mypassword \
+      --portal-url https://enterprise.example.com/portal
+    ```
+
+### Output Optimization
+
+By default, ArcGIS extracts include bbox metadata and Hilbert spatial ordering for optimal query performance:
+
+```bash
+# Skip Hilbert ordering (faster extraction, less optimal queries)
+gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+  --skip-hilbert
+
+# Skip bbox column (smaller file, slower spatial filtering)
+gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+  --skip-bbox
+
+# Custom compression
+gpio extract arcgis https://services.arcgis.com/.../FeatureServer/0 output.parquet \
+  --compression GZIP \
+  --compression-level 6
+```
+
+### Finding Service URLs
+
+ArcGIS Feature Service URLs follow this pattern:
+```
+https://<server>/arcgis/rest/services/<folder>/<service>/FeatureServer/<layer_id>
+```
+
+To find service URLs:
+
+1. Go to the ArcGIS REST Services Directory (usually `https://server/arcgis/rest/services`)
+2. Navigate to the feature service
+3. Click on a specific layer (0, 1, 2, etc.)
+4. Copy the URL from your browser
+
+!!! note "Layer ID Required"
+    The URL must include the layer ID (e.g., `/FeatureServer/0`). Services often have multiple layers—use the REST directory to find the correct one.
+
 ## Working with Partitioned Input Data
 
 The `extract` command can read from partitioned GeoParquet datasets, including directories containing multiple parquet files and hive-style partitions.
