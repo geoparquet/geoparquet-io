@@ -10,6 +10,8 @@ from pathlib import Path
 import obstore as obs
 from obstore.store import S3Store
 
+from geoparquet_io.core.logging_config import error, progress, success
+
 
 def _load_aws_credentials_from_profile(
     profile: str = "default",
@@ -348,37 +350,37 @@ def _upload_file_sync(store, source: Path, target_key: str, **kwargs) -> None:
     file_size = source.stat().st_size
     size_mb = file_size / (1024 * 1024)
 
-    print(f"⬆ Uploading {source.name} ({size_mb:.2f} MB) → {target_key}")
+    progress(f"Uploading {source.name} ({size_mb:.2f} MB) → {target_key}")
 
     start_time = time.time()
     obs.put(store, target_key, source, max_concurrency=kwargs.get("max_concurrency", 12))
     elapsed = time.time() - start_time
 
     speed_mbps = size_mb / elapsed if elapsed > 0 else 0
-    print(f"✓ Upload complete ({speed_mbps:.2f} MB/s)")
+    success(f"Upload complete ({speed_mbps:.2f} MB/s)")
 
 
 def _upload_one_file(
     store, file_path: Path, source: Path, prefix: str, **kwargs
 ) -> tuple[Path, Exception | None]:
     """Upload a single file and return result tuple for parallel processing."""
-    target_key = _build_target_key(file_path, source, prefix)
-    file_size = file_path.stat().st_size
-    size_mb = file_size / (1024 * 1024)
-
     try:
-        print(f"⬆ Uploading {file_path.name} ({size_mb:.2f} MB) → {target_key}")
+        target_key = _build_target_key(file_path, source, prefix)
+        file_size = file_path.stat().st_size
+        size_mb = file_size / (1024 * 1024)
         start_time = time.time()
+
+        progress(f"Uploading {file_path.name} ({size_mb:.2f} MB) → {target_key}")
 
         obs.put(store, target_key, file_path, max_concurrency=kwargs.get("max_concurrency", 12))
 
         elapsed = time.time() - start_time
         speed_mbps = size_mb / elapsed if elapsed > 0 else 0
 
-        print(f"✓ {file_path.name} ({speed_mbps:.2f} MB/s)")
+        success(f"{file_path.name} ({speed_mbps:.2f} MB/s)")
         return file_path, None
     except Exception as e:
-        print(f"✗ {file_path.name}: {e}")
+        error(f"{file_path.name}: {e}")
         return file_path, e
 
 
@@ -398,14 +400,16 @@ def _upload_directory_sync(
         source: Source directory path
         prefix: S3/GCS/Azure prefix for uploaded files
         files: List of files to upload
-        max_files: Max number of concurrent file uploads
+        max_files: Max number of concurrent file uploads (must be >= 1)
         fail_fast: Stop on first error if True
         **kwargs: Additional arguments passed to obs.put
     """
+    # Ensure max_files is at least 1 to avoid ThreadPoolExecutor ValueError
+    max_files = max(1, max_files)
+
     total_size = sum(f.stat().st_size for f in files)
     total_size_mb = total_size / (1024 * 1024)
-    print(f"Found {len(files)} file(s) to upload ({total_size_mb:.2f} MB total)")
-    print()
+    progress(f"Found {len(files)} file(s) to upload ({total_size_mb:.2f} MB total)")
 
     results = []
     with ThreadPoolExecutor(max_workers=max_files) as executor:
