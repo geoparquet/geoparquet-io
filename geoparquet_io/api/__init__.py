@@ -26,7 +26,7 @@ Also provides pure table-centric functions:
     table = ops.sort_hilbert(table)
 """
 
-from geoparquet_io.api import ops, raster
+from geoparquet_io.api import ops
 from geoparquet_io.api.ops import read_bigquery
 from geoparquet_io.api.pipeline import pipe
 from geoparquet_io.api.table import Table, convert, extract_arcgis, read, read_partition
@@ -40,5 +40,4 @@ __all__ = [
     "extract_arcgis",
     "pipe",
     "ops",
-    "raster",
 ]
