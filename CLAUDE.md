@@ -475,6 +475,48 @@ pytest -n auto -m "slow or network"
 
 This keeps PR feedback fast while ensuring comprehensive testing happens regularly.
 
+### Test Markers
+
+**Available markers:**
+- `@pytest.mark.slow` - Tests >5 seconds or heavy I/O (file conversions, reprojection)
+- `@pytest.mark.network` - Requires external network access (HTTP, S3)
+- `@pytest.mark.integration` - End-to-end integration tests
+
+**When to mark tests as slow:**
+Mark a test as slow if it meets ANY of these criteria:
+- Execution time >5 seconds consistently
+- Full file format conversions (GeoJSON/Shapefile/GPKG → GeoParquet)
+- Reprojection with coordinate transformation
+- Round-trip version conversion tests
+- Streaming operations with multiple partitions
+- Reading/writing files >10MB
+
+**When NOT to mark as slow:**
+- Simple unit tests (<1 second)
+- Metadata parsing/validation
+- Schema inspection tests
+- Small fixture-based tests (<100 rows)
+
+**Marking guidelines:**
+- **Class level:** Use when most methods in the class are slow
+  ```python
+  @pytest.mark.slow
+  class TestGeoJSONConversions:
+      # All methods inherit the marker
+  ```
+- **Method level:** Use for individual slow tests in a fast class
+  ```python
+  class TestValidation:
+      def test_fast_check(self): ...  # Fast
+
+      @pytest.mark.slow
+      def test_full_conversion(self): ...  # Slow
+  ```
+- **Finding slow tests:** Run `pytest --durations=20` to see slowest tests
+- **Borderline tests (4-6s):** Mark as slow to be safe - keeps fast suite fast
+
+**Why this matters:** Fast tests run on every PR (target: <12min). Slow tests run nightly. Proper categorization keeps PR feedback fast while ensuring comprehensive testing happens regularly.
+
 ### Test Patterns Used
 
 **1. Class-based organization**

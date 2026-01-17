@@ -21,6 +21,19 @@ BUILDINGS_TEST_FILE = TEST_DATA_DIR / "buildings_test.parquet"
 COUNTRY_PARTITION_DIR = TEST_DATA_DIR / "country_partition"
 
 
+def pytest_configure(config):
+    """Configure pytest with worker-specific DuckDB extension directories."""
+    # Get worker ID if running with pytest-xdist
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
+
+    # Create worker-specific extension directory to avoid file locking on Windows
+    ext_dir = Path(tempfile.gettempdir()) / f"duckdb_extensions_{worker_id}"
+    ext_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set DuckDB extension directory for this worker
+    os.environ["DUCKDB_EXTENSION_DIRECTORY"] = str(ext_dir)
+
+
 @pytest.fixture
 def test_data_dir():
     """Return the path to the test data directory."""

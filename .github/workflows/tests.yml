@@ -15,6 +15,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
 
       - name: Set up Python
         run: uv python install 3.11
@@ -53,6 +55,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -80,6 +84,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
 
       - name: Set up Python
         run: uv python install 3.11
@@ -94,7 +100,7 @@ jobs:
   slow-tests:
     runs-on: ${{ matrix.os }}
     # Only run on schedule (nightly) or when explicitly requested
-    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[test-slow]')
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[test-slow]') || (github.event_name == 'pull_request' && contains(github.event.pull_request.body, '[test-slow]'))
     strategy:
       fail-fast: false
       matrix:
@@ -116,4 +122,12 @@ jobs:
 
       - name: Run slow and network tests (parallel)
         run: |
-          uv run pytest -n auto -m "slow or network" -v --tb=short --no-cov
+          uv run pytest -n auto -m "slow or network" -v --tb=short --cov=geoparquet_io --cov-report=xml
+
+      - name: Upload slow test coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          file: ./coverage.xml
+          flags: slowtests
+          name: codecov-slow
+          fail_ci_if_error: false
