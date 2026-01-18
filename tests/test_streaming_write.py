@@ -101,11 +101,12 @@ class TestWriteGeoparquetStreaming:
 
     def test_streaming_write_with_crs_dict(self, temp_output_file):
         """Test streaming write with CRS specified as PROJJSON dict."""
+        # Use non-default CRS (EPSG:4326 is skipped as it's the default)
         crs_projjson = {
             "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
-            "type": "GeographicCRS",
-            "name": "WGS 84",
-            "id": {"authority": "EPSG", "code": 4326},
+            "type": "ProjectedCRS",
+            "name": "NAD83 / UTM zone 10N",
+            "id": {"authority": "EPSG", "code": 26910},
         }
 
         with duckdb_connection() as con:

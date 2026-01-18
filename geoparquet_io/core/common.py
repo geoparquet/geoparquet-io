@@ -2490,6 +2490,7 @@ def write_geoparquet_via_arrow(
     profile: str | None = None,
     geoparquet_version: str | None = None,
     input_crs: dict | None = None,
+    streaming: bool = True,
 ) -> None:
     """
     Write a GeoParquet file using Arrow as the internal transfer format.
@@ -2559,40 +2560,76 @@ def write_geoparquet_via_arrow(
             info("\n-- Arrow query (with WKB conversion):" if has_geometry else "\n-- Arrow query:")
             progress(final_query)
 
-        # Fetch as Arrow table
-        if verbose:
-            debug("Fetching query results as Arrow table...")
+        # Use streaming path for memory efficiency when geometry exists
+        # Note: Streaming only supports GeoParquet 1.0/1.1 (WKB format)
+        # GeoParquet 2.0 and parquet-geo-only require native Parquet geometry types
+        # Custom metadata (e.g., H3 covering) requires eager path for proper handling
+        use_streaming = (
+            streaming
+            and has_geometry
+            and geoparquet_version not in ("2.0", "parquet-geo-only")
+            and custom_metadata is None  # Fall back to eager for custom metadata
+        )
+        if use_streaming:
+            if verbose:
+                debug("Using streaming write for memory efficiency...")
 
-        result = con.execute(final_query)
-        table = result.fetch_arrow_table()
+            # Extract CRS from original metadata or input_crs
+            crs = input_crs
+            if crs is None and original_metadata:
+                geo_meta = original_metadata.get("geo")
+                if geo_meta and geometry_column in geo_meta.get("columns", {}):
+                    crs = geo_meta["columns"][geometry_column].get("crs")
 
-        if verbose:
-            debug(f"Fetched {table.num_rows:,} rows, {len(table.column_names)} columns")
-
-        # Apply GeoParquet metadata only if geometry column exists
-        if has_geometry:
-            table = _apply_geoparquet_metadata(
-                table,
+            # Pass original query - streaming function handles its own WKB conversion
+            write_geoparquet_streaming(
+                con,
+                query,  # Use original query, not final_query (avoids double WKB conversion)
+                actual_output,
                 geometry_column=geometry_column,
+                crs=crs,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size=row_group_rows or 100000,
                 geoparquet_version=geoparquet_version,
-                original_metadata=original_metadata,
-                input_crs=input_crs,
-                custom_metadata=custom_metadata,
+                verbose=verbose,
+                profile=profile,
+            )
+        else:
+            # Eager path: fetch all data into memory
+            if verbose:
+                debug("Fetching query results as Arrow table...")
+
+            result = con.execute(final_query)
+            table = result.fetch_arrow_table()
+
+            if verbose:
+                debug(f"Fetched {table.num_rows:,} rows, {len(table.column_names)} columns")
+
+            # Apply GeoParquet metadata only if geometry column exists
+            if has_geometry:
+                table = _apply_geoparquet_metadata(
+                    table,
+                    geometry_column=geometry_column,
+                    geoparquet_version=geoparquet_version,
+                    original_metadata=original_metadata,
+                    input_crs=input_crs,
+                    custom_metadata=custom_metadata,
+                    verbose=verbose,
+                )
+
+            # Write to disk
+            _write_table_with_settings(
+                table,
+                actual_output,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_rows=row_group_rows,
+                row_group_size_mb=row_group_size_mb,
+                geoparquet_version=geoparquet_version,
+                geometry_column=geometry_column,
                 verbose=verbose,
             )
-
-        # Write to disk
-        _write_table_with_settings(
-            table,
-            actual_output,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_rows=row_group_rows,
-            row_group_size_mb=row_group_size_mb,
-            geoparquet_version=geoparquet_version,
-            geometry_column=geometry_column,
-            verbose=verbose,
-        )
 
         # Upload to remote if needed
         if is_remote:
@@ -2739,11 +2776,34 @@ def write_geoparquet_streaming(
         actual_output,
         is_remote,
     ):
+        # Check if the geometry column needs WKB conversion by looking at DuckDB's internal type
+        # Execute a LIMIT 1 query to check the actual type using TYPEOF()
+        quoted_geom = geometry_column.replace('"', '""')
+        type_result = connection.execute(
+            f'SELECT TYPEOF("{quoted_geom}") FROM ({sql}) LIMIT 1'
+        ).fetchone()
+
+        # If GEOMETRY type, we need to convert to WKB for portable output
+        # If WKB_BLOB type, it's already in WKB format
+        duckdb_type = type_result[0] if type_result else None
+        needs_wkb_conversion = duckdb_type == "GEOMETRY"
+
+        if verbose:
+            if needs_wkb_conversion:
+                debug(f"Geometry column is {duckdb_type}, wrapping with WKB conversion")
+            else:
+                debug(f"Geometry column is {duckdb_type}, no conversion needed")
+
+        # Wrap query with WKB conversion if needed
+        final_sql = sql
+        if needs_wkb_conversion:
+            final_sql = _wrap_query_with_wkb_conversion(sql, geometry_column)
+
         # Execute query and get record batch reader
         if verbose:
             debug(f"Executing query: {sql[:100]}...")
 
-        result = connection.execute(sql)
+        result = connection.execute(final_sql)
         reader = result.fetch_record_batch(rows_per_batch=row_group_size)
         schema = reader.schema
 
@@ -2788,18 +2848,12 @@ def write_geoparquet_streaming(
             edges=edges,
         )
 
-        # Add CRS to geo metadata if provided
-        if input_crs:
+        # Add CRS to geo metadata if provided (skip default CRS per project convention)
+        if input_crs and not is_default_crs(input_crs):
             geo_meta["columns"][geometry_column]["crs"] = input_crs
 
         # Add encoding
         geo_meta["columns"][geometry_column]["encoding"] = "WKB"
-
-        # Build schema with geo metadata
-        schema_metadata = schema.metadata or {}
-        schema_metadata = dict(schema_metadata)  # Make mutable copy
-        schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-        schema_with_meta = schema.with_metadata(schema_metadata)
 
         # Configure ParquetWriter
         writer_kwargs = {
@@ -2808,16 +2862,50 @@ def write_geoparquet_streaming(
         if validated_level is not None and validated_compression:
             writer_kwargs["compression_level"] = validated_level
 
+        if verbose:
+            progress(f"Streaming to {actual_output}...")
+
+        # Read first batch to detect geometry types before opening writer
+        first_batch = None
+        try:
+            first_batch = next(iter(reader))
+        except StopIteration:
+            # Empty result set - write empty file with basic schema
+            schema_metadata = schema.metadata or {}
+            schema_metadata = dict(schema_metadata)
+            geo_meta["columns"][geometry_column]["geometry_types"] = []
+            schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+            schema_with_meta = schema.with_metadata(schema_metadata)
+            with pq.ParquetWriter(actual_output, schema_with_meta, **writer_kwargs) as writer:
+                pass  # Empty file
+            if verbose:
+                success("Wrote 0 rows (empty result)")
+            return Path(output_file)
+
+        # Detect geometry types from first batch
+        temp_table = pa.Table.from_batches([first_batch], schema=schema)
+        geom_types = _compute_geometry_types(temp_table, geometry_column, verbose)
+        geo_meta["columns"][geometry_column]["geometry_types"] = geom_types
+
+        # Build schema with geo metadata
+        schema_metadata = schema.metadata or {}
+        schema_metadata = dict(schema_metadata)  # Make mutable copy
+        schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+        schema_with_meta = schema.with_metadata(schema_metadata)
+
         # Write batches
         rows_written = 0
         batches_written = 0
 
-        if verbose:
-            progress(f"Streaming to {actual_output}...")
-
         with pq.ParquetWriter(actual_output, schema_with_meta, **writer_kwargs) as writer:
+            # Write first batch
+            table_batch = pa.Table.from_batches([first_batch], schema=schema_with_meta)
+            writer.write_table(table_batch)
+            rows_written += first_batch.num_rows
+            batches_written += 1
+
+            # Write remaining batches
             for batch in reader:
-                # Write as a row group
                 table_batch = pa.Table.from_batches([batch], schema=schema_with_meta)
                 writer.write_table(table_batch)
                 rows_written += batch.num_rows
