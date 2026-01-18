@@ -2671,6 +2671,177 @@ def write_parquet_with_metadata(
     )
 
 
+def write_geoparquet_streaming(
+    connection: duckdb.DuckDBPyConnection,
+    sql: str,
+    output_file: str,
+    geometry_column: str = "geometry",
+    crs: dict | str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
+    row_group_size: int = 100000,
+    geoparquet_version: str | None = None,
+    verbose: bool = False,
+    profile: str | None = None,
+    edges: str | None = None,
+) -> Path:
+    """
+    Stream DuckDB query results to GeoParquet without full materialization.
+
+    This function executes a SQL query and streams the results directly to a
+    Parquet file, avoiding the memory spike of materializing the full result
+    as an Arrow table. Memory usage is bounded by row_group_size.
+
+    Args:
+        connection: DuckDB connection to execute the query on
+        sql: SQL query to execute
+        output_file: Path to output file (local path or remote URL)
+        geometry_column: Name of geometry column (default: 'geometry')
+        crs: Coordinate Reference System as PROJJSON dict or string (e.g., 'EPSG:4326')
+        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
+        compression_level: Compression level (varies by format)
+        row_group_size: Number of rows per row group / batch (default: 100000)
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0)
+        verbose: Whether to print verbose output
+        profile: AWS profile name (S3 only, optional)
+        edges: Edge interpretation, 'spherical' or 'planar' (default None = planar)
+
+    Returns:
+        Path to the written file
+
+    Example:
+        >>> con = duckdb.connect()
+        >>> con.execute("INSTALL spatial; LOAD spatial")
+        >>> sql = "SELECT *, ST_AsWKB(geom) as geometry FROM ST_Read('input.gpkg')"
+        >>> write_geoparquet_streaming(con, sql, 'output.parquet')
+    """
+    import pyarrow as pa
+
+    configure_verbose(verbose)
+
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, output_file)
+
+    # Validate and normalize compression settings
+    validated_compression, validated_level, _ = validate_compression_settings(
+        compression or "ZSTD", compression_level, verbose
+    )
+    if validated_compression == "UNCOMPRESSED":
+        validated_compression = None
+
+    # Get version config
+    version_config = GEOPARQUET_VERSIONS.get(
+        geoparquet_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
+    )
+    metadata_version = version_config["metadata_version"]
+
+    with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
+        actual_output,
+        is_remote,
+    ):
+        # Execute query and get record batch reader
+        if verbose:
+            debug(f"Executing query: {sql[:100]}...")
+
+        result = connection.execute(sql)
+        reader = result.fetch_record_batch(rows_per_batch=row_group_size)
+        schema = reader.schema
+
+        # Check if geometry column exists
+        if geometry_column not in schema.names:
+            raise click.ClickException(
+                f"Geometry column '{geometry_column}' not found in query result. "
+                f"Available columns: {schema.names}"
+            )
+
+        # Parse CRS if provided as string
+        input_crs = crs
+        if isinstance(crs, str) and crs:
+            input_crs = parse_crs_string_to_projjson(crs, connection)
+
+        # Build geo metadata for schema
+        # Note: We can't compute geometry_types or file-level bbox without scanning
+        # all data, so we leave those out for streaming (or use a sample)
+        bbox_info = {"has_bbox_column": False, "bbox_column_name": None}
+
+        # Check for bbox column in schema
+        for name in schema.names:
+            if name in ["bbox", "bounds", "extent"] or name.endswith("_bbox"):
+                # Verify it's a struct with xmin/ymin/xmax/ymax
+                field = schema.field(name)
+                if hasattr(field.type, "names") and set(field.type.names) >= {
+                    "xmin",
+                    "ymin",
+                    "xmax",
+                    "ymax",
+                }:
+                    bbox_info = {"has_bbox_column": True, "bbox_column_name": name}
+                    break
+
+        geo_meta = create_geo_metadata(
+            original_metadata=None,
+            geom_col=geometry_column,
+            bbox_info=bbox_info,
+            custom_metadata=None,
+            verbose=verbose,
+            version=metadata_version,
+            edges=edges,
+        )
+
+        # Add CRS to geo metadata if provided
+        if input_crs:
+            geo_meta["columns"][geometry_column]["crs"] = input_crs
+
+        # Add encoding
+        geo_meta["columns"][geometry_column]["encoding"] = "WKB"
+
+        # Build schema with geo metadata
+        schema_metadata = schema.metadata or {}
+        schema_metadata = dict(schema_metadata)  # Make mutable copy
+        schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+        schema_with_meta = schema.with_metadata(schema_metadata)
+
+        # Configure ParquetWriter
+        writer_kwargs = {
+            "compression": validated_compression or "NONE",
+        }
+        if validated_level is not None and validated_compression:
+            writer_kwargs["compression_level"] = validated_level
+
+        # Write batches
+        rows_written = 0
+        batches_written = 0
+
+        if verbose:
+            progress(f"Streaming to {actual_output}...")
+
+        with pq.ParquetWriter(actual_output, schema_with_meta, **writer_kwargs) as writer:
+            for batch in reader:
+                # Write as a row group
+                table_batch = pa.Table.from_batches([batch], schema=schema_with_meta)
+                writer.write_table(table_batch)
+                rows_written += batch.num_rows
+                batches_written += 1
+
+                if verbose and batches_written % 10 == 0:
+                    debug(f"Written {rows_written:,} rows in {batches_written} batches...")
+
+        if verbose:
+            success(f"Wrote {rows_written:,} rows in {batches_written} row groups")
+
+        # Upload to remote if needed
+        if is_remote:
+            upload_if_remote(
+                actual_output,
+                output_file,
+                profile=profile,
+                is_directory=False,
+                verbose=verbose,
+            )
+
+    return Path(output_file)
+
+
 def write_geoparquet_table(
     table,
     output_file: str,
