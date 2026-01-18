@@ -89,6 +89,7 @@ def test_build_gpio_commands_simple():
         precision=6,
         verbose=False,
         profile=None,
+        src_crs=None,
     )
 
     assert len(commands) == 1
@@ -111,6 +112,7 @@ def test_build_gpio_commands_with_filters():
         precision=5,
         verbose=True,
         profile="my-profile",
+        src_crs=None,
     )
 
     assert len(commands) == 2
@@ -178,3 +180,166 @@ def test_build_tippecanoe_command_with_zoom():
     assert "14" in cmd
     assert "-zg" not in cmd  # No auto detection when explicit
     assert "--progress-interval=1" in cmd  # Verbose mode
+
+
+# Path validation tests
+
+
+def test_validate_path_valid():
+    """Test path validation with valid paths."""
+    from gpio_pmtiles.core import _validate_path
+
+    # Should not raise for normal paths
+    _validate_path("/path/to/file.parquet")
+    _validate_path("relative/path.parquet")
+    _validate_path("file_with_underscores.parquet")
+    _validate_path("file-with-dashes.parquet")
+    _validate_path("file.with.dots.parquet")
+    _validate_path("/path with spaces/file.parquet")  # Spaces are ok
+
+
+def test_validate_path_shell_injection():
+    """Test that path validation rejects shell metacharacters."""
+    from gpio_pmtiles.core import _validate_path
+
+    dangerous_paths = [
+        "file.parquet; rm -rf /",
+        "file.parquet | cat",
+        "file.parquet && echo pwned",
+        "file.parquet$malicious",
+        "file.parquet`whoami`",
+        "file.parquet\nrm -rf /",
+        "file.parquet\rrm -rf /",
+    ]
+
+    for path in dangerous_paths:
+        with pytest.raises(ValueError, match="dangerous character"):
+            _validate_path(path)
+
+
+def test_create_pmtiles_rejects_dangerous_input_path():
+    """Test that create_pmtiles rejects input paths with shell metacharacters."""
+    from gpio_pmtiles.core import create_pmtiles_from_geoparquet
+
+    with pytest.raises(ValueError, match="dangerous character"):
+        create_pmtiles_from_geoparquet(
+            input_path="input.parquet; rm -rf /",
+            output_path="output.pmtiles",
+        )
+
+
+def test_create_pmtiles_rejects_dangerous_output_path():
+    """Test that create_pmtiles rejects output paths with shell metacharacters."""
+    from gpio_pmtiles.core import create_pmtiles_from_geoparquet
+
+    with pytest.raises(ValueError, match="dangerous character"):
+        create_pmtiles_from_geoparquet(
+            input_path="input.parquet",
+            output_path="output.pmtiles | cat",
+        )
+
+
+# Integration tests
+
+
+@pytest.mark.skipif(not has_gpio(), reason="gpio not installed")
+@pytest.mark.skipif(not has_tippecanoe(), reason="tippecanoe not installed")
+@pytest.mark.slow
+def test_create_pmtiles_basic(tmp_path):
+    """Test basic PMTiles creation from test data."""
+    from pathlib import Path
+
+    # Find test data from main project
+    test_data_dir = Path(__file__).parent.parent.parent.parent / "tests" / "data"
+    if not test_data_dir.exists():
+        pytest.skip("Test data directory not found")
+
+    input_file = test_data_dir / "places_test.parquet"
+    if not input_file.exists():
+        pytest.skip(f"Test file not found: {input_file}")
+
+    output_file = tmp_path / "output.pmtiles"
+
+    # Import and run the function
+    from gpio_pmtiles.core import create_pmtiles_from_geoparquet
+
+    create_pmtiles_from_geoparquet(
+        input_path=str(input_file),
+        output_path=str(output_file),
+        layer="places",
+        verbose=True,
+    )
+
+    # Verify output file was created
+    assert output_file.exists()
+    assert output_file.stat().st_size > 0
+
+
+@pytest.mark.skipif(not has_gpio(), reason="gpio not installed")
+@pytest.mark.skipif(not has_tippecanoe(), reason="tippecanoe not installed")
+@pytest.mark.slow
+def test_create_pmtiles_with_filters(tmp_path):
+    """Test PMTiles creation with filtering options."""
+    from pathlib import Path
+
+    # Find test data
+    test_data_dir = Path(__file__).parent.parent.parent.parent / "tests" / "data"
+    if not test_data_dir.exists():
+        pytest.skip("Test data directory not found")
+
+    input_file = test_data_dir / "places_test.parquet"
+    if not input_file.exists():
+        pytest.skip(f"Test file not found: {input_file}")
+
+    output_file = tmp_path / "filtered.pmtiles"
+
+    from gpio_pmtiles.core import create_pmtiles_from_geoparquet
+
+    # Create with filters
+    create_pmtiles_from_geoparquet(
+        input_path=str(input_file),
+        output_path=str(output_file),
+        layer="filtered_places",
+        bbox="-180,-90,180,90",  # Full world bbox (all data)
+        precision=5,  # Lower precision
+        verbose=True,
+    )
+
+    # Verify output
+    assert output_file.exists()
+    assert output_file.stat().st_size > 0
+
+
+@pytest.mark.skipif(not has_gpio(), reason="gpio not installed")
+@pytest.mark.skipif(not has_tippecanoe(), reason="tippecanoe not installed")
+@pytest.mark.slow
+def test_create_pmtiles_with_zoom_levels(tmp_path):
+    """Test PMTiles creation with explicit zoom levels."""
+    from pathlib import Path
+
+    # Find test data
+    test_data_dir = Path(__file__).parent.parent.parent.parent / "tests" / "data"
+    if not test_data_dir.exists():
+        pytest.skip("Test data directory not found")
+
+    input_file = test_data_dir / "places_test.parquet"
+    if not input_file.exists():
+        pytest.skip(f"Test file not found: {input_file}")
+
+    output_file = tmp_path / "zoomed.pmtiles"
+
+    from gpio_pmtiles.core import create_pmtiles_from_geoparquet
+
+    # Create with explicit zoom levels
+    create_pmtiles_from_geoparquet(
+        input_path=str(input_file),
+        output_path=str(output_file),
+        layer="zoomed_places",
+        min_zoom=0,
+        max_zoom=10,
+        verbose=True,
+    )
+
+    # Verify output
+    assert output_file.exists()
+    assert output_file.stat().st_size > 0

@@ -21,6 +21,23 @@ class TippecanoeNotFoundError(Exception):
         )
 
 
+def _validate_path(path: str) -> None:
+    """
+    Validate file path to prevent shell injection.
+
+    Raises:
+        ValueError: If path contains shell metacharacters
+    """
+    # Check for shell metacharacters that could be dangerous
+    dangerous_chars = [";", "|", "&", "$", "`", "\n", "\r"]
+    for char in dangerous_chars:
+        if char in path:
+            raise ValueError(
+                f"Path contains dangerous character '{char}': {path}\n"
+                "File paths must not contain shell metacharacters."
+            )
+
+
 def _get_gpio_executable() -> str:
     """Get the path to the gpio executable in the current Python environment."""
     # Get the directory where the current Python interpreter is located
@@ -289,8 +306,13 @@ def create_pmtiles_from_geoparquet(
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
+        ValueError: If paths contain shell metacharacters
         RuntimeError: If any subprocess fails
     """
+    # Validate paths to prevent shell injection
+    _validate_path(input_path)
+    _validate_path(output_path)
+
     # Check tippecanoe availability
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()
