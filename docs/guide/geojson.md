@@ -49,19 +49,49 @@ pip install gpio-pmtiles
 
 The plugin provides integrated PMTiles generation with better defaults and built-in CRS handling:
 
-```bash
-# Basic usage
-gpio pmtiles create buildings.parquet buildings.pmtiles
+=== "CLI"
 
-# With filtering (no manual piping needed)
-gpio pmtiles create data.parquet tiles.pmtiles \
-  --bbox "-122.5,37.5,-122.0,38.0" \
-  --where "population > 10000" \
-  --include-cols name,type,height
+    ```bash
+    # Basic usage
+    gpio pmtiles create buildings.parquet buildings.pmtiles
 
-# With CRS override (for incorrect metadata)
-gpio pmtiles create data.parquet tiles.pmtiles --src-crs EPSG:3857
-```
+    # With filtering (no manual piping needed)
+    gpio pmtiles create data.parquet tiles.pmtiles \
+      --bbox "-122.5,37.5,-122.0,38.0" \
+      --where "population > 10000" \
+      --include-cols name,type,height
+
+    # With CRS override (for incorrect metadata)
+    gpio pmtiles create data.parquet tiles.pmtiles --src-crs EPSG:3857
+    ```
+
+=== "Python"
+
+    ```python
+    from gpio_pmtiles import create_pmtiles_from_geoparquet
+
+    # Basic usage
+    create_pmtiles_from_geoparquet(
+        input_path="buildings.parquet",
+        output_path="buildings.pmtiles"
+    )
+
+    # With filtering (no manual piping needed)
+    create_pmtiles_from_geoparquet(
+        input_path="data.parquet",
+        output_path="tiles.pmtiles",
+        bbox="-122.5,37.5,-122.0,38.0",
+        where="population > 10000",
+        include_cols="name,type,height"
+    )
+
+    # With CRS override (for incorrect metadata)
+    create_pmtiles_from_geoparquet(
+        input_path="data.parquet",
+        output_path="tiles.pmtiles",
+        src_crs="EPSG:3857"
+    )
+    ```
 
 The plugin handles the entire pipeline internally (reprojection → filtering → conversion → tippecanoe) with optimal settings. See the [plugin README](https://github.com/geoparquet/geoparquet-io/blob/main/plugins/gpio-pmtiles/README.md) for details.
 
@@ -117,10 +147,25 @@ gpio convert reproject data.parquet - --dst-crs EPSG:4326 | \
 
 **Note:** If you have `gpio-pmtiles` installed, reprojection is built-in:
 
-```bash
-# Automatically reproject from EPSG:3857 to WGS84
-gpio pmtiles create data.parquet tiles.pmtiles --src-crs EPSG:3857
-```
+=== "CLI"
+
+    ```bash
+    # Automatically reproject from EPSG:3857 to WGS84
+    gpio pmtiles create data.parquet tiles.pmtiles --src-crs EPSG:3857
+    ```
+
+=== "Python"
+
+    ```python
+    from gpio_pmtiles import create_pmtiles_from_geoparquet
+
+    # Automatically reproject from EPSG:3857 to WGS84
+    create_pmtiles_from_geoparquet(
+        input_path="data.parquet",
+        output_path="tiles.pmtiles",
+        src_crs="EPSG:3857"
+    )
+    ```
 
 ## Writing to File
 

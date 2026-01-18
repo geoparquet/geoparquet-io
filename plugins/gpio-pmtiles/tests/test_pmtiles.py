@@ -140,6 +140,49 @@ def test_build_gpio_commands_with_filters():
     assert "5" in convert_cmd
 
 
+def test_build_gpio_commands_with_reprojection():
+    """Test building gpio commands with CRS reprojection."""
+    from gpio_pmtiles.core import _build_gpio_commands
+
+    commands = _build_gpio_commands(
+        input_path="input.parquet",
+        bbox=None,
+        where=None,
+        include_cols=None,
+        precision=6,
+        verbose=True,
+        profile="my-profile",
+        src_crs="EPSG:3857",
+    )
+
+    # Should have reproject + convert
+    assert len(commands) == 2
+
+    # Reproject command
+    reproject_cmd = commands[0]
+    assert "convert" in reproject_cmd
+    assert "reproject" in reproject_cmd
+    assert "input.parquet" in reproject_cmd
+    assert "--dst-crs" in reproject_cmd
+    assert "EPSG:4326" in reproject_cmd
+    assert "--src-crs" in reproject_cmd
+    assert "EPSG:3857" in reproject_cmd
+    assert "--verbose" in reproject_cmd
+    assert "--profile" in reproject_cmd
+    assert "my-profile" in reproject_cmd
+
+    # Convert command should also have verbose and profile
+    convert_cmd = commands[1]
+    assert "convert" in convert_cmd
+    assert "geojson" in convert_cmd
+    assert "-" in convert_cmd  # Reading from stdin
+    assert "--precision" in convert_cmd
+    assert "6" in convert_cmd
+    assert "--verbose" in convert_cmd  # Should be present
+    assert "--profile" in convert_cmd  # Should be present
+    assert "my-profile" in convert_cmd
+
+
 def test_build_tippecanoe_command_basic():
     """Test building basic tippecanoe command."""
     from gpio_pmtiles.core import _build_tippecanoe_command

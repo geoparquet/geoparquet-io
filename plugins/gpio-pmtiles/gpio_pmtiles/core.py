@@ -134,6 +134,13 @@ def _build_gpio_commands(
 
         # Final step: convert to GeoJSON
         convert_cmd = [gpio_exe, "convert", "geojson", next_input, "--precision", str(precision)]
+
+        # Add verbose and profile flags to match direct conversion path
+        if verbose:
+            convert_cmd.append("--verbose")
+        if profile:
+            convert_cmd.extend(["--profile", profile])
+
         commands.append(convert_cmd)
 
         return commands
