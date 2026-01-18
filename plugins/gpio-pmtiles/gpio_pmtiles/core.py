@@ -227,9 +227,7 @@ def _run_pipeline(
 
         # Check for errors in the pipeline
         if tippecanoe_proc.returncode != 0:
-            raise RuntimeError(
-                f"tippecanoe failed with exit code {tippecanoe_proc.returncode}"
-            )
+            raise RuntimeError(f"tippecanoe failed with exit code {tippecanoe_proc.returncode}")
 
         # Check earlier processes in the pipeline
         for proc in processes[:-1]:  # Skip tippecanoe (already checked)
@@ -302,9 +300,7 @@ def create_pmtiles_from_geoparquet(
         input_path, bbox, where, include_cols, precision, verbose, profile, src_crs
     )
 
-    tippecanoe_cmd = _build_tippecanoe_command(
-        output_path, layer, min_zoom, max_zoom, verbose
-    )
+    tippecanoe_cmd = _build_tippecanoe_command(output_path, layer, min_zoom, max_zoom, verbose)
 
     # Run the pipeline
     _run_pipeline(gpio_commands, tippecanoe_cmd, verbose)

@@ -1,8 +1,8 @@
+from importlib.metadata import entry_points
 from pathlib import Path
 
 import click
 from click_plugins import with_plugins
-from importlib.metadata import entry_points
 
 from geoparquet_io.cli.decorators import (
     GlobAwareCommand,

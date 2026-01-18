@@ -131,4 +131,4 @@ def create(
             src_crs=src_crs,
         )
     except Exception as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
