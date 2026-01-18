@@ -1015,6 +1015,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "click" },
+    { name = "click-plugins" },
     { name = "duckdb" },
     { name = "fsspec" },
     { name = "geoarrow-pyarrow" },
@@ -1056,10 +1057,17 @@ docs = [
     { name = "mkdocstrings", extra = ["python"] },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.8.0" },
     { name = "click", specifier = ">=8.0.0" },
+    { name = "click-plugins", specifier = ">=1.1.1" },
     { name = "duckdb", specifier = ">=1.4.1" },
     { name = "fiona", marker = "extra == 'benchmark'", specifier = ">=1.9.0" },
     { name = "fsspec", specifier = ">=2023.9.0" },
@@ -1092,6 +1100,12 @@ requires-dist = [
     { name = "xenon", marker = "extra == 'dev'", specifier = ">=0.9.3" },
 ]
 provides-extras = ["dev", "docs", "benchmark"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.1" },
+    { name = "pytest-cov", specifier = ">=7.0.0" },
+]
 
 [[package]]
 name = "ghp-import"

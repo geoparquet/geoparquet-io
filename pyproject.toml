@@ -27,6 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "click>=8.0.0",
+    "click-plugins>=1.1.1",  # Plugin system for extending CLI
     "pyarrow>=12.0.0,<23.0.0",  # v22+ has ABI incompatibility with abseil on some systems
     "duckdb>=1.4.1",
     "pandas>=1.0.0",
@@ -160,4 +161,10 @@ exclude_lines = [
     "pragma: no cover",
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+    "pytest-cov>=7.0.0",
 ]

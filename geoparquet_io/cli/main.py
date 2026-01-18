@@ -1,6 +1,8 @@
 from pathlib import Path
 
 import click
+from click_plugins import with_plugins
+from importlib.metadata import entry_points
 
 from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
@@ -111,6 +113,7 @@ class OptionalIntCommand(GlobAwareCommand):
         return super().make_context(info_name, args, parent=parent, **extra)
 
 
+@with_plugins(entry_points(group="gpio.plugins"))
 @click.group()
 @click.version_option(version=__version__, prog_name="geoparquet-io")
 @click.option("--timestamps", is_flag=True, help="Show timestamps in output messages")
