@@ -69,7 +69,7 @@ from geoparquet_io.core.partition_by_quadkey import (
 from geoparquet_io.core.partition_by_string import (
     partition_by_string as partition_by_string_impl,
 )
-from geoparquet_io.core.reproject import reproject_impl
+from geoparquet_io.core.reproject import reproject as reproject_core
 from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_impl
 from geoparquet_io.core.upload import check_credentials
@@ -1237,7 +1237,7 @@ def _reproject_impl_cli(
     validate_profile_for_urls(profile, input_file, output_file)
 
     try:
-        result = reproject_impl(
+        result = reproject_core(
             input_parquet=input_file,
             output_parquet=output_file,
             target_crs=dst_crs,
@@ -1250,10 +1250,12 @@ def _reproject_impl_cli(
             geoparquet_version=geoparquet_version,
         )
 
-        click.echo(f"\nReprojected {result.feature_count:,} features")
-        click.echo(f"  Source CRS: {result.source_crs}")
-        click.echo(f"  Destination CRS: {result.target_crs}")
-        click.echo(f"  Output: {result.output_path}")
+        # result is None for streaming mode (stdout)
+        if result:
+            click.echo(f"\nReprojected {result.feature_count:,} features")
+            click.echo(f"  Source CRS: {result.source_crs}")
+            click.echo(f"  Destination CRS: {result.target_crs}")
+            click.echo(f"  Output: {result.output_path}")
     except Exception as e:
         raise click.ClickException(str(e)) from e
 

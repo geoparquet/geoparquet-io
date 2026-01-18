@@ -493,8 +493,16 @@ def _reproject_streaming(
 
             metadata, _ = get_parquet_metadata(working_file, verbose=False)
 
-            # Get target CRS projjson for metadata
+            # Update metadata with target CRS
             target_crs_projjson = parse_crs_string_to_projjson(target_crs, con)
+            if metadata and b"geo" in metadata:
+                try:
+                    geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+                    if geom_col in geo_meta.get("columns", {}):
+                        geo_meta["columns"][geom_col]["crs"] = target_crs_projjson
+                    metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+                except (json.JSONDecodeError, KeyError):
+                    pass
 
             # Write output using stream_io
             write_output(
@@ -507,7 +515,6 @@ def _reproject_streaming(
                 verbose=verbose,
                 profile=profile,
                 geoparquet_version=geoparquet_version,
-                input_crs=target_crs_projjson,
             )
 
             if not should_stream_output(output_path):
