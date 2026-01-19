@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed (Breaking Changes)
+
+- **Deprecated CLI commands removed** - The following deprecated commands have been removed. Use the replacements shown below:
+  - `gpio reproject` → Use `gpio convert reproject` instead
+  - `gpio meta` → Use `gpio inspect meta` instead
+  - `gpio stac` → Use `gpio publish stac` instead
+  - `gpio upload` → Use `gpio publish upload` instead
+  - `gpio validate` → Use `gpio check spec` instead
+
+  **Migration Guide**: Update your scripts and workflows to use the new command names. The new commands have the same functionality and options as the deprecated versions.
+
 ## [0.4.0] - 2025-11-17
 
 ### Added
