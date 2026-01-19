@@ -3,6 +3,7 @@ Tests for upload functionality.
 """
 
 import importlib
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,9 @@ from click.testing import CliRunner
 main_module = importlib.import_module("geoparquet_io.cli.main")
 cli = main_module.cli
 from geoparquet_io.core.upload import (  # noqa: E402
+    _check_azure_credentials,
+    _check_gcs_credentials,
+    _check_s3_credentials,
     _setup_store_and_kwargs,
     _try_infer_region_from_bucket,
     check_credentials,
@@ -497,3 +501,123 @@ class TestUploadEventLoopCompatibility:
         assert result.exit_code == 0
         assert "DRY RUN MODE" in result.output
         assert "Would upload 3 file(s)" in result.output
+
+
+class TestCredentialValidationFunctions:
+    """Tests for cloud credential validation functions."""
+
+    def test_check_s3_credentials_with_env_vars(self):
+        """Test S3 credential detection from environment variables."""
+        with patch.dict(
+            os.environ, {"AWS_ACCESS_KEY_ID": "test_key", "AWS_SECRET_ACCESS_KEY": "test_secret"}
+        ):
+            found, hint = _check_s3_credentials()
+            assert found is True
+            assert hint == ""
+
+    def test_check_s3_credentials_missing_no_profile(self):
+        """Test S3 credential check fails with helpful hint when no credentials."""
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "geoparquet_io.core.upload._load_aws_credentials_from_profile",
+                return_value=(None, None, None),
+            ):
+                found, hint = _check_s3_credentials()
+                assert found is False
+                assert "S3 credentials not found" in hint
+                assert "AWS_ACCESS_KEY_ID" in hint
+                assert "aws configure" in hint
+
+    def test_check_s3_credentials_with_profile_found(self):
+        """Test S3 credential check with valid profile."""
+        with patch(
+            "geoparquet_io.core.upload._load_aws_credentials_from_profile",
+            return_value=("access_key", "secret_key", "us-west-2"),
+        ):
+            found, hint = _check_s3_credentials(profile="myprofile")
+            assert found is True
+            assert hint == ""
+
+    def test_check_s3_credentials_with_profile_not_found(self):
+        """Test S3 credential check fails with profile-specific hint."""
+        with patch(
+            "geoparquet_io.core.upload._load_aws_credentials_from_profile",
+            return_value=(None, None, None),
+        ):
+            found, hint = _check_s3_credentials(profile="myprofile")
+            assert found is False
+            assert "myprofile" in hint
+            assert "~/.aws/credentials" in hint
+            assert "[myprofile]" in hint
+
+    def test_check_s3_credentials_falls_back_to_default_profile(self):
+        """Test S3 credential check falls back to default profile."""
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "geoparquet_io.core.upload._load_aws_credentials_from_profile",
+                return_value=("default_key", "default_secret", None),
+            ):
+                found, hint = _check_s3_credentials()
+                assert found is True
+                assert hint == ""
+
+    def test_check_gcs_credentials_with_service_account_key(self):
+        """Test GCS credential detection with service account key file."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            key_file = f.name
+
+        try:
+            with patch.dict(os.environ, {"GOOGLE_APPLICATION_CREDENTIALS": key_file}):
+                found, hint = _check_gcs_credentials()
+                assert found is True
+                assert hint == ""
+        finally:
+            Path(key_file).unlink(missing_ok=True)
+
+    def test_check_gcs_credentials_missing(self):
+        """Test GCS credential check fails with helpful hint."""
+        with patch.dict(os.environ, {}, clear=True):
+            found, hint = _check_gcs_credentials()
+            assert found is False
+            assert "GCS credentials not found" in hint
+            assert "GOOGLE_APPLICATION_CREDENTIALS" in hint
+            assert "gcloud auth" in hint
+
+    def test_check_gcs_credentials_file_doesnt_exist(self):
+        """Test GCS credential check fails when file doesn't exist."""
+        with patch.dict(os.environ, {"GOOGLE_APPLICATION_CREDENTIALS": "/nonexistent/key.json"}):
+            found, hint = _check_gcs_credentials()
+            assert found is False
+            assert "GCS credentials not found" in hint
+
+    def test_check_azure_credentials_with_account_key(self):
+        """Test Azure credential detection with storage account key."""
+        with patch.dict(os.environ, {"AZURE_STORAGE_ACCOUNT_KEY": "test_key"}):
+            found, hint = _check_azure_credentials()
+            assert found is True
+            assert hint == ""
+
+    def test_check_azure_credentials_with_sas_token(self):
+        """Test Azure credential detection with SAS token."""
+        with patch.dict(os.environ, {"AZURE_STORAGE_SAS_TOKEN": "test_token"}):
+            found, hint = _check_azure_credentials()
+            assert found is True
+            assert hint == ""
+
+    def test_check_azure_credentials_with_client_id(self):
+        """Test Azure credential detection with client ID."""
+        with patch.dict(os.environ, {"AZURE_CLIENT_ID": "test_client_id"}):
+            found, hint = _check_azure_credentials()
+            assert found is True
+            assert hint == ""
+
+    def test_check_azure_credentials_missing(self):
+        """Test Azure credential check fails with helpful hint."""
+        with patch.dict(os.environ, {}, clear=True):
+            found, hint = _check_azure_credentials()
+            assert found is False
+            assert "Azure credentials not found" in hint
+            assert "AZURE_STORAGE_ACCOUNT_KEY" in hint
+            assert "az login" in hint

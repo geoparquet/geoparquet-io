@@ -33,6 +33,10 @@ from geoparquet_io.core.common import (
 )
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.metadata_utils import parse_geometry_type_from_schema
+from geoparquet_io.core.reproject import (
+    _detect_crs_from_table,
+    _detect_geometry_column_from_table,
+)
 
 # Helper functions for CRS testing
 
@@ -660,3 +664,107 @@ class TestAdditionalCRSEdgeCases:
         assert parquet_epsg == geo_epsg, (
             f"CRS mismatch: schema has {parquet_epsg}, metadata has {geo_epsg}"
         )
+
+
+class TestCRSDetectionHelpers:
+    """Tests for CRS detection helper functions from reproject module."""
+
+    def test_detect_geometry_column_from_table_with_primary_column(self):
+        """Test geometry column detection when primary_column is specified."""
+        import pyarrow as pa
+
+        # Create table with geo metadata specifying primary_column
+        geo_meta = {
+            "version": "1.0.0",
+            "primary_column": "geom",
+            "columns": {"geom": {"encoding": "WKB", "crs": None}},
+        }
+        schema = pa.schema([pa.field("geom", pa.binary())]).with_metadata(
+            {b"geo": json.dumps(geo_meta).encode("utf-8")}
+        )
+        table = pa.table({"geom": [b""]}, schema=schema)
+
+        geom_col = _detect_geometry_column_from_table(table)
+        assert geom_col == "geom"
+
+    def test_detect_geometry_column_from_table_defaults_to_geometry(self):
+        """Test geometry column detection defaults to 'geometry' when no metadata."""
+        import pyarrow as pa
+
+        schema = pa.schema([pa.field("some_geom", pa.binary())])
+        table = pa.table({"some_geom": [b""]}, schema=schema)
+
+        geom_col = _detect_geometry_column_from_table(table)
+        assert geom_col == "geometry"
+
+    def test_detect_geometry_column_from_table_handles_invalid_json(self):
+        """Test geometry column detection handles invalid JSON gracefully."""
+        import pyarrow as pa
+
+        schema = pa.schema([pa.field("geom", pa.binary())]).with_metadata({b"geo": b"invalid json"})
+        table = pa.table({"geom": [b""]}, schema=schema)
+
+        geom_col = _detect_geometry_column_from_table(table)
+        assert geom_col == "geometry"
+
+    def test_detect_crs_from_table_with_epsg_code(self):
+        """Test CRS detection from table metadata with EPSG code."""
+        import pyarrow as pa
+
+        geo_meta = {
+            "version": "1.0.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "crs": {"id": {"authority": "EPSG", "code": 3857}},
+                }
+            },
+        }
+        schema = pa.schema([pa.field("geometry", pa.binary())]).with_metadata(
+            {b"geo": json.dumps(geo_meta).encode("utf-8")}
+        )
+        table = pa.table({"geometry": [b""]}, schema=schema)
+
+        crs = _detect_crs_from_table(table, "geometry")
+        assert crs == "EPSG:3857"
+
+    def test_detect_crs_from_table_defaults_to_4326(self):
+        """Test CRS detection defaults to EPSG:4326 when no metadata."""
+        import pyarrow as pa
+
+        schema = pa.schema([pa.field("geometry", pa.binary())])
+        table = pa.table({"geometry": [b""]}, schema=schema)
+
+        crs = _detect_crs_from_table(table, "geometry")
+        assert crs == "EPSG:4326"
+
+    def test_detect_crs_from_table_handles_missing_column(self):
+        """Test CRS detection when geometry column not in metadata."""
+        import pyarrow as pa
+
+        geo_meta = {
+            "version": "1.0.0",
+            "primary_column": "geom",
+            "columns": {"geom": {"encoding": "WKB", "crs": None}},
+        }
+        schema = pa.schema([pa.field("geometry", pa.binary())]).with_metadata(
+            {b"geo": json.dumps(geo_meta).encode("utf-8")}
+        )
+        table = pa.table({"geometry": [b""]}, schema=schema)
+
+        # Looking for 'geometry' but metadata only has 'geom'
+        crs = _detect_crs_from_table(table, "geometry")
+        assert crs == "EPSG:4326"
+
+    def test_detect_crs_from_table_handles_invalid_json(self):
+        """Test CRS detection handles invalid JSON gracefully."""
+        import pyarrow as pa
+
+        schema = pa.schema([pa.field("geometry", pa.binary())]).with_metadata(
+            {b"geo": b"invalid json"}
+        )
+        table = pa.table({"geometry": [b""]}, schema=schema)
+
+        crs = _detect_crs_from_table(table, "geometry")
+        assert crs == "EPSG:4326"
