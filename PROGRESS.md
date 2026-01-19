@@ -9,7 +9,7 @@
 |----|-------|--------|---------|-------|
 | PR1 | C4: Remove deprecated commands | ✅ Complete | PR #174 - Merged | Issue #154 (M4/Issue #115 was already fixed) |
 | PR2 | C1: Refactor inspect_legacy | ✅ Complete | PR #176 - Merged | Grade E → C (removed deprecated code) |
-| PR3 | C2: Test coverage 75%+ | ⏳ Not started | - | 72.78% → 75%+ |
+| PR3 | C2: Test coverage 75%+ | 🔄 In progress | Branch: cleanup/pr3-test-coverage | 67.0% → 67.73% (target: 75%+) |
 | PR4 | C3: CLI consistency | ⏳ Not started | - | Issue #120 |
 | PR5 | H1 + H3: Error handling + profile cleanup | ⏳ Not started | - | Issues #140, #150 |
 | PR6 | H2: Grade D refactoring (top 3) | ⏳ Not started | - | extract, convert, inspect |
@@ -40,3 +40,11 @@
   - Updated CHANGELOG.md with breaking change documentation
   - All remaining tests pass (54 tests)
   - Coverage threshold lowered to 67% after code removal
+- **PR3 In Progress** (Branch: cleanup/pr3-test-coverage):
+  - Initial commit: Added 10 comprehensive tests for CheckResult methods
+  - Coverage improvements:
+    - api/check.py: 40% → 83% (+43%)
+    - Overall project: 67.0% → 67.73% (+0.73%)
+  - Tests cover warnings(), recommendations(), check_type property, and __repr__()
+  - Both single check and aggregated "all" check scenarios tested
+  - All 1312 fast tests passing
