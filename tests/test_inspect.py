@@ -85,42 +85,6 @@ def test_inspect_tail_default(runner, test_file):
     assert "10 rows" in result.output or "rows)" in result.output
 
 
-def test_inspect_head_default_with_other_option(runner, test_file):
-    """Test deprecated --head without value followed by another option uses default."""
-    result = runner.invoke(cli, ["inspect", test_file, "--head", "--stats"])
-
-    assert result.exit_code == 0
-    assert "Preview (first" in result.output
-    # Should default to 10 rows
-    assert "10 rows" in result.output or "rows)" in result.output
-    # Should also show stats
-    assert "Statistics:" in result.output
-    # Should show deprecation warning
-    assert "--head flag is deprecated" in result.output
-
-
-def test_inspect_tail_default_with_other_option(runner, test_file):
-    """Test deprecated --tail without value followed by another option uses default."""
-    result = runner.invoke(cli, ["inspect", test_file, "--tail", "--stats"])
-
-    assert result.exit_code == 0
-    assert "Preview (last" in result.output
-    # Should default to 10 rows
-    assert "10 rows" in result.output or "rows)" in result.output
-    # Should also show stats
-    assert "Statistics:" in result.output
-    # Should show deprecation warning
-    assert "--tail flag is deprecated" in result.output
-
-
-def test_inspect_head_tail_exclusive(runner, test_file):
-    """Test that --head and --tail are mutually exclusive."""
-    result = runner.invoke(cli, ["inspect", test_file, "--head", "5", "--tail", "3"])
-
-    assert result.exit_code != 0
-    assert "mutually exclusive" in result.output.lower()
-
-
 def test_inspect_stats(runner, test_file):
     """Test inspect stats subcommand."""
     result = runner.invoke(cli, ["inspect", "stats", test_file])
@@ -471,46 +435,6 @@ def test_inspect_with_buildings_file(runner):
     assert "buildings_test.parquet" in result.output
 
 
-def test_inspect_combined_flags(runner, test_file):
-    """Test inspect with multiple flags combined."""
-    result = runner.invoke(cli, ["inspect", test_file, "--head", "3", "--stats"])
-
-    assert result.exit_code == 0
-    assert "Preview" in result.output
-    assert "Statistics" in result.output
-
-
-def test_inspect_deprecated_combined_flags(runner, test_file):
-    """Test deprecated legacy interface with multiple flags shows warnings."""
-    result = runner.invoke(cli, ["inspect", test_file, "--head", "2", "--stats"])
-
-    assert result.exit_code == 0
-
-    # Both preview and statistics should be present
-    assert "Preview (first" in result.output
-    assert "Statistics:" in result.output
-    # Should show deprecation warnings for both flags
-    assert "--head flag is deprecated" in result.output
-    assert "--stats flag is deprecated" in result.output
-
-
-def test_inspect_large_head_value(runner, test_file):
-    """Test inspect with --head value larger than file rows."""
-    # Request 10000 rows (likely more than test file has)
-    result = runner.invoke(cli, ["inspect", test_file, "--head", "10000"])
-
-    assert result.exit_code == 0
-    assert "Preview" in result.output
-
-
-def test_inspect_zero_head(runner, test_file):
-    """Test inspect with --head 0."""
-    result = runner.invoke(cli, ["inspect", test_file, "--head", "0"])
-
-    assert result.exit_code == 0
-    # Should work but show no preview rows
-
-
 def test_inspect_help(runner):
     """Test inspect command group help shows available subcommands."""
     result = runner.invoke(cli, ["inspect", "--help"])
@@ -542,36 +466,6 @@ def test_inspect_markdown(runner, test_file):
     assert "### Columns" in result.output
     assert "| Name | Type |" in result.output
     assert "|------|------|" in result.output
-
-
-def test_inspect_markdown_with_head(runner, test_file):
-    """Test markdown output includes preview data when --head is specified."""
-    result = runner.invoke(cli, ["inspect", test_file, "--markdown", "--head", "2"])
-
-    assert result.exit_code == 0
-
-    # Verify preview section exists
-    assert "### Preview (first 2 rows)" in result.output
-    # Check for table structure
-    assert result.output.count("|") > 10  # Multiple pipe characters for tables
-
-
-def test_inspect_markdown_with_tail(runner, test_file):
-    """Test markdown output includes preview data when --tail is specified."""
-    result = runner.invoke(cli, ["inspect", test_file, "--markdown", "--tail", "3"])
-
-    assert result.exit_code == 0
-
-    # Verify preview section exists
-    assert "### Preview (last 3 rows)" in result.output
-
-
-def test_inspect_markdown_json_exclusive(runner, test_file):
-    """Test that --markdown and --json are mutually exclusive."""
-    result = runner.invoke(cli, ["inspect", test_file, "--markdown", "--json"])
-
-    assert result.exit_code != 0
-    assert "mutually exclusive" in result.output.lower()
 
 
 # Tests for Parquet native geo type detection
@@ -893,10 +787,3 @@ class TestInspectSubcommands:
 
         assert result.exit_code == 0
         assert "Show first N rows" in result.output
-
-    def test_inspect_deprecated_meta_flag_warns(self, runner, test_file):
-        """Test that deprecated --meta flag shows warning."""
-        result = runner.invoke(cli, ["inspect", test_file, "--meta"])
-
-        assert result.exit_code == 0
-        assert "--meta flag is deprecated" in result.output
