@@ -875,6 +875,133 @@ class TestCheckResult:
         failing = CheckResult({"passed": False}, check_type="test")
         assert not bool(failing)
 
+    def test_check_result_warnings_empty(self):
+        """Test CheckResult.warnings() returns empty list when no warnings."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult({"passed": True}, check_type="compression")
+        assert result.warnings() == []
+
+    def test_check_result_warnings_single_check(self):
+        """Test CheckResult.warnings() returns warnings from single check."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult(
+            {"passed": True, "warnings": ["Warning 1", "Warning 2"]}, check_type="compression"
+        )
+        assert len(result.warnings()) == 2
+        assert "Warning 1" in result.warnings()
+        assert "Warning 2" in result.warnings()
+
+    def test_check_result_warnings_includes_issues_when_passed(self):
+        """Test CheckResult.warnings() includes issues as warnings when check passed."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult(
+            {"passed": True, "issues": ["Info message 1", "Info message 2"]}, check_type="test"
+        )
+        # For single checks, issues are NOT included in warnings (only in failures when failed)
+        # This behavior is only for "all" checks
+        assert result.warnings() == []
+
+    def test_check_result_warnings_all_check_aggregates(self):
+        """Test CheckResult.warnings() aggregates warnings from all check categories."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult(
+            {
+                "compression": {"passed": True, "warnings": ["SNAPPY used"]},
+                "bbox": {"passed": True, "issues": ["No bbox"]},
+                "spatial": {"passed": True},
+            },
+            check_type="all",
+        )
+        warnings = result.warnings()
+        assert len(warnings) == 2
+        assert "[compression] SNAPPY used" in warnings
+        assert "[bbox] No bbox" in warnings
+
+    def test_check_result_warnings_all_check_empty(self):
+        """Test CheckResult.warnings() returns empty list for all checks with no warnings."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult(
+            {
+                "compression": {"passed": True},
+                "bbox": {"passed": True},
+            },
+            check_type="all",
+        )
+        assert result.warnings() == []
+
+    def test_check_result_recommendations_empty(self):
+        """Test CheckResult.recommendations() returns empty list when none."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult({"passed": True}, check_type="test")
+        assert result.recommendations() == []
+
+    def test_check_result_recommendations_single_check(self):
+        """Test CheckResult.recommendations() returns recommendations from single check."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult(
+            {"passed": False, "recommendations": ["Add bbox column", "Use ZSTD"]},
+            check_type="bbox",
+        )
+        assert len(result.recommendations()) == 2
+        assert "Add bbox column" in result.recommendations()
+        assert "Use ZSTD" in result.recommendations()
+
+    def test_check_result_recommendations_all_check_aggregates(self):
+        """Test CheckResult.recommendations() aggregates with category prefixes."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult(
+            {
+                "compression": {"passed": False, "recommendations": ["Use ZSTD compression"]},
+                "bbox": {"passed": False, "recommendations": ["Add bbox column"]},
+                "spatial": {"passed": True},
+            },
+            check_type="all",
+        )
+        recs = result.recommendations()
+        assert len(recs) == 2
+        assert "[compression] Use ZSTD compression" in recs
+        assert "[bbox] Add bbox column" in recs
+
+    def test_check_result_check_type_property(self):
+        """Test CheckResult.check_type property returns the check type."""
+        from geoparquet_io.api.check import CheckResult
+
+        result = CheckResult({"passed": True}, check_type="compression")
+        assert result.check_type == "compression"
+
+        result_all = CheckResult({}, check_type="all")
+        assert result_all.check_type == "all"
+
+    def test_check_result_repr(self):
+        """Test CheckResult.__repr__() string representation."""
+        from geoparquet_io.api.check import CheckResult
+
+        # Passing check
+        result = CheckResult({"passed": True}, check_type="test")
+        repr_str = repr(result)
+        assert "test" in repr_str
+        assert "passed" in repr_str
+        assert "failures=0" in repr_str
+        assert "warnings=0" in repr_str
+
+        # Failing check with issues and warnings
+        result = CheckResult(
+            {"passed": False, "issues": ["Issue 1"], "warnings": ["Warn 1"]}, check_type="bbox"
+        )
+        repr_str = repr(result)
+        assert "bbox" in repr_str
+        assert "failed" in repr_str
+        assert "failures=1" in repr_str
+        assert "warnings=1" in repr_str
+
 
 class TestTableCheck:
     """Tests for Table check methods."""
