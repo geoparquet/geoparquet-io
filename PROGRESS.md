@@ -41,10 +41,12 @@
   - All remaining tests pass (54 tests)
   - Coverage threshold lowered to 67% after code removal
 - **PR3 In Progress** (Branch: cleanup/pr3-test-coverage):
-  - Initial commit: Added 10 comprehensive tests for CheckResult methods
-  - Coverage improvements:
+  - Commit 1: Added 10 comprehensive tests for CheckResult methods
     - api/check.py: 40% → 83% (+43%)
-    - Overall project: 67.0% → 67.73% (+0.73%)
-  - Tests cover warnings(), recommendations(), check_type property, and __repr__()
-  - Both single check and aggregated "all" check scenarios tested
-  - All 1312 fast tests passing
+  - Commit 2: Added 12 tests for S3/GCS/Azure credential validation + 7 CRS detection tests
+    - core/upload.py: 62% → 75% (+13%)
+    - core/reproject.py: 13% → 24% (+11%)
+  - Total coverage improvement: 67.0% → 68.12% (+1.12%)
+  - Status: Not yet at 75% target (need ~580 more tested lines across multiple modules)
+  - All 1327 fast tests passing
+  - Tests validate real error paths users hit: credential failures, CRS auto-detection
