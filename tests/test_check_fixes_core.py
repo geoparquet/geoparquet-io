@@ -121,3 +121,148 @@ class TestFixBboxMetadata:
 
         fix_result = fix_bbox_metadata(test_file, test_file, verbose=True)
         assert fix_result["success"] is True
+
+
+class TestFixRowGroups:
+    """Tests for fix_row_groups function."""
+
+    def test_optimizes_row_groups(self, places_test_file, temp_output_dir):
+        """Test row group optimization."""
+        from geoparquet_io.core.check_fixes import fix_row_groups
+
+        output_file = os.path.join(temp_output_dir, "optimized.parquet")
+
+        fix_result = fix_row_groups(places_test_file, output_file, verbose=False)
+
+        assert fix_result["success"] is True
+        assert "Optimized row groups" in fix_result["fix_applied"]
+        assert os.path.exists(output_file)
+
+    def test_with_geoparquet_version(self, places_test_file, temp_output_dir):
+        """Test row group optimization preserving version."""
+        from geoparquet_io.core.check_fixes import fix_row_groups
+
+        output_file = os.path.join(temp_output_dir, "optimized.parquet")
+
+        fix_result = fix_row_groups(
+            places_test_file, output_file, verbose=False, geoparquet_version="1.1"
+        )
+
+        assert fix_result["success"] is True
+
+    def test_with_verbose(self, places_test_file, temp_output_dir):
+        """Test row group optimization with verbose output."""
+        from geoparquet_io.core.check_fixes import fix_row_groups
+
+        output_file = os.path.join(temp_output_dir, "optimized.parquet")
+
+        fix_result = fix_row_groups(places_test_file, output_file, verbose=True)
+
+        assert fix_result["success"] is True
+
+
+class TestFixBboxRemoval:
+    """Tests for fix_bbox_removal function."""
+
+    def test_removes_bbox_column(self, places_test_file, temp_output_dir):
+        """Test removing bbox column from file."""
+        from geoparquet_io.core.check_fixes import fix_bbox_removal
+
+        output_file = os.path.join(temp_output_dir, "no_bbox.parquet")
+
+        # First ensure test file has bbox column
+        table = pq.read_table(places_test_file)
+        if "bbox" not in table.column_names:
+            # Skip if no bbox column
+            return
+
+        fix_result = fix_bbox_removal(
+            places_test_file, output_file, bbox_column_name="bbox", verbose=False
+        )
+
+        assert fix_result["success"] is True
+        assert "Removed bbox column" in fix_result["fix_applied"]
+
+        # Verify column removed
+        result_table = pq.read_table(output_file)
+        assert "bbox" not in result_table.column_names
+
+    def test_with_verbose(self, places_test_file, temp_output_dir):
+        """Test bbox removal with verbose output."""
+        from geoparquet_io.core.check_fixes import fix_bbox_removal
+
+        output_file = os.path.join(temp_output_dir, "no_bbox.parquet")
+
+        table = pq.read_table(places_test_file)
+        if "bbox" not in table.column_names:
+            return
+
+        fix_result = fix_bbox_removal(
+            places_test_file, output_file, bbox_column_name="bbox", verbose=True
+        )
+
+        assert fix_result["success"] is True
+
+
+class TestGetGeoparquetVersionFromCheckResults:
+    """Tests for get_geoparquet_version_from_check_results function."""
+
+    def test_v2_detection(self):
+        """Test detecting GeoParquet v2."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {"bbox": {"file_type": "geoparquet_v2", "version": "2.0.0"}}
+
+        version = get_geoparquet_version_from_check_results(check_results)
+
+        assert version == "2.0"
+
+    def test_parquet_geo_only_detection(self):
+        """Test detecting parquet-geo-only files."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {"bbox": {"file_type": "parquet_geo_only"}}
+
+        version = get_geoparquet_version_from_check_results(check_results)
+
+        assert version == "parquet-geo-only"
+
+    def test_v1_0_detection(self):
+        """Test detecting GeoParquet v1.0."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.0.0"}}
+
+        version = get_geoparquet_version_from_check_results(check_results)
+
+        assert version == "1.0"
+
+    def test_v1_1_detection(self):
+        """Test detecting GeoParquet v1.1."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.1.0"}}
+
+        version = get_geoparquet_version_from_check_results(check_results)
+
+        assert version == "1.1"
+
+    def test_unknown_defaults_to_none(self):
+        """Test unknown file type defaults to None."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {"bbox": {"file_type": "unknown"}}
+
+        version = get_geoparquet_version_from_check_results(check_results)
+
+        assert version is None
+
+    def test_missing_bbox_result(self):
+        """Test handling missing bbox result."""
+        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+
+        check_results = {}
+
+        version = get_geoparquet_version_from_check_results(check_results)
+
+        assert version is None

@@ -3,7 +3,9 @@
 import pytest
 
 from geoparquet_io.core.common import (
+    _extract_crs_identifier,
     _get_geometry_type_name,
+    calculate_row_group_size,
     check_bbox_structure,
     detect_geoparquet_file_type,
     find_primary_geometry_column,
@@ -12,14 +14,19 @@ from geoparquet_io.core.common import (
     get_crs_display_name,
     get_duckdb_connection,
     get_parquet_metadata,
+    get_remote_error_hint,
     has_glob_pattern,
     is_azure_url,
+    is_default_crs,
     is_gcs_url,
     is_geographic_crs,
+    is_partition_path,
     is_remote_url,
     is_s3_url,
     needs_httpfs,
+    parse_crs_string_to_projjson,
     parse_size_string,
+    safe_file_url,
     should_skip_bbox,
     validate_compression_settings,
     validate_parquet_extension,
@@ -666,3 +673,269 @@ class TestValidateParquetExtension:
         """Test that remote URLs with any_extension bypass validation."""
         validate_parquet_extension("s3://bucket/path/file.geojson", any_extension=True)
         validate_parquet_extension("gs://bucket/path/file.json", any_extension=True)
+
+
+class TestSafeFileUrl:
+    """Tests for safe_file_url function."""
+
+    def test_http_url_encoding(self):
+        """Test that HTTP URLs with special characters are encoded properly."""
+
+        # URL with spaces and special chars
+        result = safe_file_url("https://example.com/path with spaces/file.parquet")
+        assert "path%20with%20spaces" in result
+        assert "example.com" in result
+
+    def test_http_preserves_duckdb_safe_chars(self):
+        """Test that DuckDB-safe chars like * ? [ ] are preserved."""
+
+        # Glob patterns should be preserved
+        result = safe_file_url("https://example.com/data/*.parquet")
+        assert "/*.parquet" in result  # Asterisk should not be encoded
+
+        result = safe_file_url("https://example.com/file[0-9].parquet")
+        assert "[0-9]" in result  # Brackets should not be encoded
+
+    def test_s3_url_passthrough(self):
+        """Test that S3 URLs are passed through without encoding."""
+
+        s3_url = "s3://bucket/path/file.parquet"
+        result = safe_file_url(s3_url)
+        assert result == s3_url
+
+    def test_local_file_not_found_raises_error(self):
+        """Test that non-existent local file raises BadParameter."""
+        import click
+
+        with pytest.raises(click.BadParameter) as exc_info:
+            safe_file_url("/nonexistent/path/file.parquet")
+        assert "not found" in str(exc_info.value).lower()
+
+    def test_local_file_with_glob_skips_validation(self):
+        """Test that local glob patterns skip existence check."""
+
+        # Should not raise even if path doesn't exist
+        result = safe_file_url("/some/path/*.parquet")
+        assert result == "/some/path/*.parquet"
+
+
+class TestGetRemoteErrorHint:
+    """Tests for get_remote_error_hint function."""
+
+    def test_s3_403_error(self):
+        """Test S3 403 error returns AWS credential hint."""
+
+        hint = get_remote_error_hint("403 Forbidden", "s3://bucket/file.parquet")
+        assert "AWS_ACCESS_KEY_ID" in hint
+        assert "AWS_SECRET_ACCESS_KEY" in hint
+
+    def test_azure_access_denied(self):
+        """Test Azure access denied returns Azure credential hint."""
+
+        hint = get_remote_error_hint("Access Denied", "az://container/file.parquet")
+        assert "AZURE_STORAGE_ACCOUNT_NAME" in hint
+        assert "AZURE_STORAGE_ACCOUNT_KEY" in hint
+
+    def test_gcs_forbidden(self):
+        """Test GCS forbidden error returns GCP credential hint."""
+
+        hint = get_remote_error_hint("403", "gs://bucket/file.parquet")
+        assert "GOOGLE_APPLICATION_CREDENTIALS" in hint
+
+    def test_404_error(self):
+        """Test 404 error returns file not found hint."""
+
+        hint = get_remote_error_hint("404 Not Found", "s3://bucket/missing.parquet")
+        assert "not found" in hint.lower()
+        assert "Verify the URL" in hint
+
+    def test_timeout_error(self):
+        """Test timeout error returns network hint."""
+
+        hint = get_remote_error_hint(
+            "Connection timed out", "https://slow.example.com/data.parquet"
+        )
+        assert "timed out" in hint.lower()
+        assert "network connectivity" in hint.lower()
+
+    def test_connection_error(self):
+        """Test connection error returns connectivity hint."""
+
+        hint = get_remote_error_hint(
+            "Unable to connect", "https://invalid.example.com/file.parquet"
+        )
+        assert "connect" in hint.lower()
+        assert "network connectivity" in hint.lower()
+
+    def test_generic_error(self):
+        """Test generic error returns fallback hint."""
+
+        hint = get_remote_error_hint("Unknown error occurred", "s3://bucket/file.parquet")
+        assert "Remote file access failed" in hint
+        assert "network connectivity" in hint.lower()
+
+
+class TestExtractCrsIdentifier:
+    """Tests for _extract_crs_identifier function."""
+
+    def test_projjson_with_id(self):
+        """Test extracting CRS from PROJJSON dict with id."""
+
+        crs = {"id": {"authority": "EPSG", "code": 4326}}
+        result = _extract_crs_identifier(crs)
+        assert result == ("EPSG", 4326)
+
+    def test_projjson_with_string_code(self):
+        """Test PROJJSON with non-numeric code."""
+
+        crs = {"id": {"authority": "OGC", "code": "CRS84"}}
+        result = _extract_crs_identifier(crs)
+        assert result == ("OGC", "CRS84")
+
+    def test_string_epsg_code(self):
+        """Test string EPSG:CODE format."""
+
+        result = _extract_crs_identifier("EPSG:4326")
+        assert result == ("EPSG", 4326)
+
+        result = _extract_crs_identifier("epsg:4326")  # Case insensitive
+        assert result == ("EPSG", 4326)
+
+    def test_string_ogc_crs84(self):
+        """Test string OGC:CRS84 format."""
+
+        result = _extract_crs_identifier("OGC:CRS84")
+        assert result == ("OGC", "CRS84")
+
+    def test_urn_format(self):
+        """Test URN format CRS string."""
+
+        result = _extract_crs_identifier("urn:ogc:def:crs:EPSG::4326")
+        assert result == ("EPSG", 4326)
+
+    def test_projjson_without_id_returns_none(self):
+        """Test PROJJSON without id returns None."""
+
+        crs = {"name": "WGS 84", "type": "GeographicCRS"}
+        result = _extract_crs_identifier(crs)
+        assert result is None
+
+    def test_invalid_string_returns_none(self):
+        """Test invalid CRS string returns None."""
+
+        result = _extract_crs_identifier("invalid")
+        assert result is None
+
+        result = _extract_crs_identifier("")
+        assert result is None
+
+
+class TestIsDefaultCrs:
+    """Tests for is_default_crs function."""
+
+    def test_none_is_default(self):
+        """Test that None is considered default CRS."""
+
+        assert is_default_crs(None) is True
+
+    def test_epsg_4326_is_default(self):
+        """Test that EPSG:4326 is default."""
+
+        assert is_default_crs({"id": {"authority": "EPSG", "code": 4326}}) is True
+        assert is_default_crs("EPSG:4326") is True
+
+    def test_ogc_crs84_is_default(self):
+        """Test that OGC:CRS84 is default."""
+
+        assert is_default_crs({"id": {"authority": "OGC", "code": "CRS84"}}) is True
+        assert is_default_crs("OGC:CRS84") is True
+
+    def test_projected_crs_not_default(self):
+        """Test that projected CRS is not default."""
+
+        assert is_default_crs({"id": {"authority": "EPSG", "code": 3857}}) is False
+        assert is_default_crs("EPSG:32610") is False
+
+
+class TestCalculateRowGroupSize:
+    """Tests for calculate_row_group_size function."""
+
+    def test_with_exact_row_count(self):
+        """Test that exact row count is used when specified."""
+
+        # If target_row_group_rows is specified, use it
+        result = calculate_row_group_size(1000, 1024 * 1024, target_row_group_rows=500)
+        assert result == 500
+
+    def test_with_target_mb_size(self):
+        """Test calculating row groups based on target MB size."""
+
+        # 1000 rows, 1MB total = 1KB per row
+        # Target 10MB = should get 10240 rows, but capped at 1000
+        result = calculate_row_group_size(1000, 1024 * 1024, target_row_group_size_mb=10)
+        assert result == 1000
+
+    def test_default_row_group_size(self):
+        """Test default row group size calculation (130MB)."""
+
+        # 10000 rows, 10MB total = 1KB per row
+        # Default 130MB target = 133120 rows, but capped at 10000
+        result = calculate_row_group_size(10000, 10 * 1024 * 1024)
+        assert result == 10000
+
+    def test_minimum_one_row(self):
+        """Test that result is at least 1 row."""
+
+        # Even with tiny target, should return at least 1
+        result = calculate_row_group_size(1000, 1024 * 1024 * 1024, target_row_group_size_mb=0.001)
+        assert result >= 1
+
+
+class TestIsPartitionPath:
+    """Tests for is_partition_path function."""
+
+    def test_detects_remote_hive_partitioning(self):
+        """Test detection of Hive-style partitioning in remote URLs."""
+
+        # Remote URLs with hive-style partitioning (key=value before final file)
+        assert is_partition_path("s3://bucket/data/country=USA/file.parquet") is True
+        assert is_partition_path("s3://bucket/year=2023/month=01/data.parquet") is True
+
+    def test_regular_file_not_partition(self):
+        """Test that regular files are not detected as partitions."""
+
+        assert is_partition_path("s3://bucket/data.parquet") is False
+        # Local files (non-directories) without globs
+        assert is_partition_path("/data/file.parquet") is False
+
+    def test_glob_pattern_is_partition(self):
+        """Test that glob patterns are detected as partitions."""
+
+        assert is_partition_path("/data/*.parquet") is True
+        assert is_partition_path("/data/**/*.parquet") is True
+        assert is_partition_path("s3://bucket/data/*.parquet") is True
+
+
+class TestParseCrsStringToProjjson:
+    """Tests for parse_crs_string_to_projjson function."""
+
+    def test_valid_epsg_code(self):
+        """Test parsing valid EPSG code to PROJJSON."""
+
+        result = parse_crs_string_to_projjson("EPSG:4326")
+        assert isinstance(result, dict)
+        # Should contain either full PROJJSON or at least id dict
+        assert "id" in result or "name" in result
+
+    def test_invalid_crs_string_returns_none(self):
+        """Test that invalid CRS string returns None."""
+
+        result = parse_crs_string_to_projjson("invalid")
+        assert result is None
+
+    def test_ogc_crs84(self):
+        """Test parsing OGC:CRS84."""
+
+        result = parse_crs_string_to_projjson("OGC:CRS84")
+        assert isinstance(result, dict)
+        assert "id" in result
