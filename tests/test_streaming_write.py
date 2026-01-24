@@ -570,3 +570,122 @@ class TestWriteIntegration:
         # Should be point bbox, not original [-180, -90, 180, 90]
         assert bbox[0] == pytest.approx(-122.4, rel=1e-6)
         assert bbox[1] == pytest.approx(37.8, rel=1e-6)
+
+
+class TestOutputComparison:
+    """Tests comparing Arrow and streaming output."""
+
+    @pytest.fixture
+    def arrow_output(self):
+        """Create temp file for Arrow path output."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_arrow_out_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    @pytest.fixture
+    def streaming_output(self):
+        """Create temp file for streaming path output."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_streaming_out_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    def test_streaming_matches_arrow_output(self, arrow_output, streaming_output):
+        """Verify streaming and Arrow paths produce equivalent output."""
+        import duckdb
+
+        from geoparquet_io.core.common import write_parquet_with_metadata
+
+        # 1. Create sample input data with geo metadata
+        # Note: Arrow path always recalculates bbox from actual data
+        # Streaming path respects preserve_bbox flag
+        # Use preserve_bbox=False to ensure both paths recalculate from data
+        original_metadata = {
+            b"geo": json.dumps(
+                {
+                    "version": "1.1.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["Point"],
+                            "bbox": [-180, -90, 180, 90],  # Will be recalculated
+                        }
+                    },
+                }
+            ).encode("utf-8")
+        }
+
+        query = """
+            SELECT 1 as id, ST_Point(-122.4, 37.8) as geometry
+            UNION ALL
+            SELECT 2 as id, ST_Point(-122.1, 37.9) as geometry
+            UNION ALL
+            SELECT 3 as id, ST_Point(-122.3, 37.7) as geometry
+        """
+
+        # 2. Write via Arrow path (use_streaming=False)
+        # Arrow path always computes bbox from actual data
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+            write_parquet_with_metadata(
+                con=con,
+                query=query,
+                output_file=arrow_output,
+                original_metadata=original_metadata,
+                use_streaming=False,
+                verbose=False,
+            )
+        finally:
+            con.close()
+
+        # 3. Write via streaming path (use_streaming=True)
+        # Use preserve_bbox=False to force recalculation (matches Arrow behavior)
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+            write_parquet_with_metadata(
+                con=con,
+                query=query,
+                output_file=streaming_output,
+                original_metadata=original_metadata,
+                use_streaming=True,
+                preserve_bbox=False,
+                preserve_geometry_types=False,
+                verbose=False,
+            )
+        finally:
+            con.close()
+
+        # 4. Compare outputs
+        arrow_pf = pq.ParquetFile(arrow_output)
+        streaming_pf = pq.ParquetFile(streaming_output)
+
+        # Row count should match
+        assert arrow_pf.metadata.num_rows == streaming_pf.metadata.num_rows
+        assert arrow_pf.metadata.num_rows == 3
+
+        # Parse geo metadata from both
+        arrow_geo = json.loads(arrow_pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+        streaming_geo = json.loads(streaming_pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+
+        # geo metadata version should match
+        assert arrow_geo["version"] == streaming_geo["version"]
+        assert arrow_geo["version"] == "1.1.0"
+
+        # geometry_types should match
+        assert (
+            arrow_geo["columns"]["geometry"]["geometry_types"]
+            == streaming_geo["columns"]["geometry"]["geometry_types"]
+        )
+        assert arrow_geo["columns"]["geometry"]["geometry_types"] == ["Point"]
+
+        # bbox should match (use pytest.approx for floats)
+        # Both paths should have computed the same bbox from actual data
+        arrow_bbox = arrow_geo["columns"]["geometry"]["bbox"]
+        streaming_bbox = streaming_geo["columns"]["geometry"]["bbox"]
+        assert len(arrow_bbox) == len(streaming_bbox)
+        for i in range(len(arrow_bbox)):
+            assert arrow_bbox[i] == pytest.approx(streaming_bbox[i], rel=1e-6)
