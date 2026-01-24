@@ -1089,6 +1089,7 @@ def convert_to_geoparquet(
             use_streaming=True,  # Use streaming write for memory efficiency
             preserve_bbox=False,  # Compute bbox from data
             preserve_geometry_types=False,  # Compute geometry types from data
+            memory_limit="2GB",  # Limit memory for streaming (requires single thread)
         )
 
         # Report results

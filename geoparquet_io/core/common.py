@@ -395,6 +395,7 @@ def write_geoparquet_via_duckdb(
     compression: str = "zstd",
     compression_level: int = 15,
     verbose: bool = False,
+    memory_limit: str | None = None,
 ) -> None:
     """
     Write GeoParquet using DuckDB COPY TO + footer rewrite.
@@ -418,8 +419,16 @@ def write_geoparquet_via_duckdb(
         compression: Compression codec (zstd, gzip, snappy, lz4, none)
         compression_level: Compression level (not used by DuckDB, kept for API compat)
         verbose: Whether to print verbose output
+        memory_limit: Optional memory limit for DuckDB (e.g., '2GB', '4GB').
+            When set, also forces single-threaded execution for memory control.
     """
     configure_verbose(verbose)
+
+    # Limit threads and memory for streaming operations (see DuckDB #8270)
+    # Single-threaded execution is required for COPY TO to respect memory limits
+    if memory_limit:
+        con.execute("SET threads = 1")
+        con.execute(f"SET memory_limit = '{memory_limit}'")
 
     # Handle remote output via temp file
     if is_remote_url(output_path):
@@ -1026,6 +1035,9 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None, use_s3_auth=False
         duckdb.DuckDBPyConnection: Configured connection with extensions loaded
     """
     con = duckdb.connect()
+
+    # Enable large buffer size for Arrow exports (handles strings > 2GB)
+    con.execute("SET arrow_large_buffer_size=true")
 
     # Always load spatial extension by default (core use case)
     if load_spatial:
@@ -2904,6 +2916,7 @@ def write_parquet_with_metadata(
     use_streaming=False,
     preserve_bbox=True,
     preserve_geometry_types=True,
+    memory_limit=None,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
@@ -2937,6 +2950,9 @@ def write_parquet_with_metadata(
         preserve_geometry_types: Whether to preserve geometry_types from input
             metadata (default True). Only applies when use_streaming=True.
             When False, geometry_types are recalculated.
+        memory_limit: Optional memory limit for DuckDB streaming (e.g., '2GB').
+            Only applies when use_streaming=True. When set, forces single-threaded
+            execution for proper memory control.
 
     Returns:
         None
@@ -2959,6 +2975,7 @@ def write_parquet_with_metadata(
             compression=compression,
             compression_level=compression_level,
             verbose=verbose,
+            memory_limit=memory_limit,
         )
         return
 
