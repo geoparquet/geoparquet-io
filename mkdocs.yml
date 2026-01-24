@@ -76,6 +76,7 @@ nav:
     - Remote Files & Authentication: guide/remote-files.md
     - Uploading to Cloud Storage: guide/upload.md
     - STAC Generation: guide/stac.md
+    - Streaming Write: guide/streaming-write.md
   - CLI Reference:
     - Overview: cli/overview.md
     - convert: cli/convert.md

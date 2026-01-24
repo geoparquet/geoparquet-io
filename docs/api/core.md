@@ -63,3 +63,9 @@ Auto-generated API reference for core functions.
 ### write_parquet_with_metadata
 
 ::: geoparquet_io.core.common.write_parquet_with_metadata
+
+### write_geoparquet_via_duckdb
+
+::: geoparquet_io.core.common.write_geoparquet_via_duckdb
+
+See [Streaming Write Guide](../guide/streaming-write.md) for usage examples and when to use streaming writes.
