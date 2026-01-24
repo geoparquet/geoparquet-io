@@ -327,6 +327,61 @@ def compute_geometry_types_via_sql(
     return sorted(set(types))
 
 
+def prepare_geo_metadata_for_streaming(
+    original_metadata: dict | None,
+    geometry_column: str,
+    geoparquet_version: str,
+    preserve_bbox: bool,
+    preserve_geometry_types: bool,
+    input_crs: dict | None,
+) -> dict:
+    """
+    Prepare GeoParquet metadata for streaming write.
+
+    Extracts metadata from input and prepares it for the output file.
+    When preserve flags are False, the corresponding fields are removed
+    so they can be recomputed via SQL.
+
+    Args:
+        original_metadata: Metadata dict from input file
+        geometry_column: Name of geometry column
+        geoparquet_version: Target GeoParquet version (1.0, 1.1, 2.0)
+        preserve_bbox: Whether to preserve bbox from input
+        preserve_geometry_types: Whether to preserve geometry_types from input
+        input_crs: CRS dict to add to output (optional)
+
+    Returns:
+        Prepared geo metadata dict
+    """
+    # Get version config
+    version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+    metadata_version = version_config.get("metadata_version", "1.1.0")
+
+    # Parse existing geo metadata or create new
+    geo_meta = _parse_existing_geo_metadata(original_metadata)
+    geo_meta = _initialize_geo_metadata(geo_meta, geometry_column, version=metadata_version)
+
+    # Ensure encoding is set
+    if "encoding" not in geo_meta["columns"][geometry_column]:
+        geo_meta["columns"][geometry_column]["encoding"] = "WKB"
+
+    col_meta = geo_meta["columns"][geometry_column]
+
+    # Handle bbox preservation
+    if not preserve_bbox and "bbox" in col_meta:
+        del col_meta["bbox"]
+
+    # Handle geometry_types preservation
+    if not preserve_geometry_types and "geometry_types" in col_meta:
+        del col_meta["geometry_types"]
+
+    # Add CRS if provided and not default
+    if input_crs and not is_default_crs(input_crs):
+        col_meta["crs"] = input_crs
+
+    return geo_meta
+
+
 def has_glob_pattern(path: str) -> bool:
     """
     Check if path contains glob wildcards.

@@ -127,3 +127,150 @@ class TestSQLMetadataComputation:
             assert len(types) == 2
         finally:
             con.close()
+
+
+class TestMetadataPreparation:
+    """Tests for preparing geo metadata from input."""
+
+    def test_prepare_geo_metadata_preserves_from_input(self):
+        """Test that metadata is preserved from input when flags are True."""
+        from geoparquet_io.core.common import prepare_geo_metadata_for_streaming
+
+        original_metadata = {
+            b"geo": json.dumps(
+                {
+                    "version": "1.1.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["Point", "Polygon"],
+                            "bbox": [-180, -90, 180, 90],
+                        }
+                    },
+                }
+            ).encode("utf-8")
+        }
+
+        result = prepare_geo_metadata_for_streaming(
+            original_metadata=original_metadata,
+            geometry_column="geometry",
+            geoparquet_version="1.1",
+            preserve_bbox=True,
+            preserve_geometry_types=True,
+            input_crs=None,
+        )
+
+        assert result["version"] == "1.1.0"
+        assert result["columns"]["geometry"]["bbox"] == [-180, -90, 180, 90]
+        assert result["columns"]["geometry"]["geometry_types"] == ["Point", "Polygon"]
+
+    def test_prepare_geo_metadata_clears_bbox_when_not_preserved(self):
+        """Test that bbox is cleared when preserve_bbox=False."""
+        from geoparquet_io.core.common import prepare_geo_metadata_for_streaming
+
+        original_metadata = {
+            b"geo": json.dumps(
+                {
+                    "version": "1.1.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["Point"],
+                            "bbox": [-180, -90, 180, 90],
+                        }
+                    },
+                }
+            ).encode("utf-8")
+        }
+
+        result = prepare_geo_metadata_for_streaming(
+            original_metadata=original_metadata,
+            geometry_column="geometry",
+            geoparquet_version="1.1",
+            preserve_bbox=False,
+            preserve_geometry_types=True,
+            input_crs=None,
+        )
+
+        # bbox should not be present (needs recomputation)
+        assert "bbox" not in result["columns"]["geometry"]
+        # geometry_types should still be preserved
+        assert result["columns"]["geometry"]["geometry_types"] == ["Point"]
+
+    def test_prepare_geo_metadata_adds_crs(self):
+        """Test that CRS is added when provided."""
+        from geoparquet_io.core.common import prepare_geo_metadata_for_streaming
+
+        input_crs = {
+            "type": "GeographicCRS",
+            "name": "NAD83",
+            "id": {"authority": "EPSG", "code": 4269},
+        }
+
+        result = prepare_geo_metadata_for_streaming(
+            original_metadata=None,
+            geometry_column="geometry",
+            geoparquet_version="1.1",
+            preserve_bbox=True,
+            preserve_geometry_types=True,
+            input_crs=input_crs,
+        )
+
+        assert result["columns"]["geometry"]["crs"] == input_crs
+
+    def test_prepare_geo_metadata_clears_geometry_types_when_not_preserved(self):
+        """Test that geometry_types is cleared when preserve_geometry_types=False."""
+        from geoparquet_io.core.common import prepare_geo_metadata_for_streaming
+
+        original_metadata = {
+            b"geo": json.dumps(
+                {
+                    "version": "1.1.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["Point", "Polygon"],
+                            "bbox": [-180, -90, 180, 90],
+                        }
+                    },
+                }
+            ).encode("utf-8")
+        }
+
+        result = prepare_geo_metadata_for_streaming(
+            original_metadata=original_metadata,
+            geometry_column="geometry",
+            geoparquet_version="1.1",
+            preserve_bbox=True,
+            preserve_geometry_types=False,
+            input_crs=None,
+        )
+
+        # geometry_types should not be present (needs recomputation)
+        assert "geometry_types" not in result["columns"]["geometry"]
+        # bbox should still be preserved
+        assert result["columns"]["geometry"]["bbox"] == [-180, -90, 180, 90]
+
+    def test_prepare_geo_metadata_skips_default_crs(self):
+        """Test that default CRS (EPSG:4326) is not added."""
+        from geoparquet_io.core.common import prepare_geo_metadata_for_streaming
+
+        default_crs = {
+            "type": "GeographicCRS",
+            "name": "WGS 84",
+            "id": {"authority": "EPSG", "code": 4326},
+        }
+
+        result = prepare_geo_metadata_for_streaming(
+            original_metadata=None,
+            geometry_column="geometry",
+            geoparquet_version="1.1",
+            preserve_bbox=True,
+            preserve_geometry_types=True,
+            input_crs=default_crs,
+        )
+
+        assert "crs" not in result["columns"]["geometry"]
