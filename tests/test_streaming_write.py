@@ -689,3 +689,60 @@ class TestOutputComparison:
         assert len(arrow_bbox) == len(streaming_bbox)
         for i in range(len(arrow_bbox)):
             assert arrow_bbox[i] == pytest.approx(streaming_bbox[i], rel=1e-6)
+
+
+@pytest.mark.slow
+class TestLargeFileStreaming:
+    """Tests for streaming write with large files."""
+
+    @pytest.fixture
+    def output_file(self):
+        """Create temp output path for large file test."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_large_out_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    def test_large_file_streaming_write(self, output_file):
+        """Test streaming write with japan.parquet (~large file)."""
+        import duckdb
+
+        from geoparquet_io.core.common import (
+            get_parquet_metadata,
+            write_geoparquet_via_duckdb,
+        )
+
+        input_file = "/Users/cholmes/geodata/parquet-test-data/japan.parquet"
+
+        # Skip if file doesn't exist
+        if not Path(input_file).exists():
+            pytest.skip("Large test file not available")
+
+        # Get input row count and metadata
+        input_pf = pq.ParquetFile(input_file)
+        input_rows = input_pf.metadata.num_rows
+        original_metadata, _ = get_parquet_metadata(input_file)
+
+        # Write via streaming path
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+            query = f"SELECT * FROM read_parquet('{input_file}')"
+
+            write_geoparquet_via_duckdb(
+                con=con,
+                query=query,
+                output_path=output_file,
+                geometry_column="geometry",
+                original_metadata=original_metadata,
+                geoparquet_version="1.1",
+                preserve_bbox=True,
+                preserve_geometry_types=True,
+            )
+        finally:
+            con.close()
+
+        # Verify output
+        output_pf = pq.ParquetFile(output_file)
+        assert output_pf.metadata.num_rows == input_rows
+        assert b"geo" in output_pf.schema_arrow.metadata
