@@ -299,6 +299,11 @@ def _create_all_partitions(
     profile,
     original_cols,
     geoparquet_version=None,
+    compression="ZSTD",
+    compression_level=15,
+    row_group_size_mb=None,
+    row_group_rows=None,
+    memory_limit=None,
 ):
     """Create all partition files."""
     partition_count = 0
@@ -318,6 +323,11 @@ def _create_all_partitions(
             profile,
             original_cols,
             geoparquet_version,
+            compression,
+            compression_level,
+            row_group_size_mb,
+            row_group_rows,
+            memory_limit,
         ):
             partition_count += 1
     return partition_count
@@ -338,6 +348,11 @@ def _create_partition_file(
     profile,
     original_cols,
     geoparquet_version=None,
+    compression="ZSTD",
+    compression_level=15,
+    row_group_size_mb=None,
+    row_group_rows=None,
+    memory_limit=None,
 ):
     """Create a single partition file."""
     # Build nested folder path
@@ -391,11 +406,14 @@ def _create_partition_file(
         partition_query,
         output_file,
         original_metadata=metadata,
-        compression="ZSTD",
-        compression_level=15,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
         verbose=False,
         profile=profile,
         geoparquet_version=geoparquet_version,
+        memory_limit=memory_limit,
     )
 
     return True
@@ -416,6 +434,11 @@ def partition_by_admin_hierarchical(
     filename_prefix: str | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int = 15,
+    row_group_size_mb: int | None = None,
+    row_group_rows: int | None = None,
+    memory_limit: str | None = None,
 ) -> int:
     """
     Partition a GeoParquet file by administrative boundaries.
@@ -439,6 +462,14 @@ def partition_by_admin_hierarchical(
         verbose: Enable verbose output
         force: Force partitioning even if analysis detects issues
         skip_analysis: Skip partition strategy analysis
+        filename_prefix: Prefix for output filenames
+        profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version to write
+        compression: Compression codec (default: ZSTD)
+        compression_level: Compression level (default: 15)
+        row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
+        row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
+        memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
 
     Returns:
         Number of partitions created
@@ -563,6 +594,11 @@ def partition_by_admin_hierarchical(
                 profile,
                 original_cols,
                 geoparquet_version,
+                compression,
+                compression_level,
+                row_group_size_mb,
+                row_group_rows,
+                memory_limit,
             )
 
         success(f"\n✓ Created {partition_count} partition(s) in {output_folder}")

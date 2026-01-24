@@ -7,6 +7,8 @@ and reduce code duplication.
 
 import click
 
+from geoparquet_io.core.common import ParquetWriteSettings
+
 
 def parse_row_group_options(
     row_group_size: int | None,
@@ -74,12 +76,18 @@ def row_group_options(func):
     Add row group sizing options to a command.
 
     Adds:
-    - --row-group-size: Exact number of rows per row group
+    - --row-group-size: Exact number of rows per row group (default if neither option set)
     - --row-group-size-mb: Target row group size in MB or with units (e.g., '256MB', '1GB')
+
+    These options are mutually exclusive. If neither is set, row_group_size defaults to
+    ParquetWriteSettings.DEFAULT_ROW_GROUP_ROWS.
     """
-    func = click.option("--row-group-size", type=int, help="Exact number of rows per row group")(
-        func
-    )
+    func = click.option(
+        "--row-group-size",
+        type=int,
+        default=None,
+        help=f"Exact number of rows per row group (default: {ParquetWriteSettings.DEFAULT_ROW_GROUP_ROWS} if --row-group-size-mb not set)",
+    )(func)
     func = click.option(
         "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
     )(func)

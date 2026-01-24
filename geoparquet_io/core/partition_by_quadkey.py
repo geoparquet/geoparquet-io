@@ -138,6 +138,11 @@ def partition_by_quadkey(
     filename_prefix: str | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int = 15,
+    row_group_size_mb: int | None = None,
+    row_group_rows: int | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """
     Partition a GeoParquet file by quadkey cells.
@@ -198,6 +203,11 @@ def partition_by_quadkey(
                 filename_prefix=filename_prefix,
                 profile=profile,
                 geoparquet_version=geoparquet_version,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                memory_limit=memory_limit,
             )
 
             total_size_mb, avg_size_mb = calculate_partition_stats(output_folder, num_partitions)
