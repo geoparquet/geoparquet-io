@@ -1067,6 +1067,11 @@ def convert(ctx):
     is_flag=True,
     help="CSV/TSV: Skip rows with invalid geometries instead of failing",
 )
+@click.option(
+    "--memory-limit",
+    default=None,
+    help="DuckDB memory limit (e.g., '4GB', '8GB', 'unlimited'). Default: 50%% of system RAM.",
+)
 @geoparquet_version_option
 @verbose_option
 @compression_options
@@ -1082,6 +1087,7 @@ def convert_to_geoparquet_cmd(
     delimiter,
     crs,
     skip_invalid,
+    memory_limit,
     geoparquet_version,
     verbose,
     compression,
@@ -1153,6 +1159,7 @@ def convert_to_geoparquet_cmd(
             skip_invalid=skip_invalid,
             profile=profile,
             geoparquet_version=geoparquet_version,
+            memory_limit=memory_limit,
         )
 
 

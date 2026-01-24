@@ -942,6 +942,7 @@ def convert_to_geoparquet(
     skip_invalid=False,
     profile=None,
     geoparquet_version=None,
+    memory_limit=None,
 ):
     """
     Convert vector format to optimized GeoParquet.
@@ -969,6 +970,10 @@ def convert_to_geoparquet(
         skip_invalid: Skip rows with invalid geometries instead of failing
         profile: AWS profile name for S3 operations
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
+        memory_limit: Memory limit for DuckDB streaming. Options:
+            - None (default): Use 50% of system RAM
+            - 'unlimited': No memory limit
+            - '2GB', '4GB', etc.: Specific limit
 
     Raises:
         click.ClickException: If input file not found or conversion fails
@@ -1089,7 +1094,7 @@ def convert_to_geoparquet(
             use_streaming=True,  # Use streaming write for memory efficiency
             preserve_bbox=False,  # Compute bbox from data
             preserve_geometry_types=False,  # Compute geometry types from data
-            memory_limit="2GB",  # Limit memory for streaming (requires single thread)
+            memory_limit=memory_limit,  # Default: 50% of system RAM
         )
 
         # Report results

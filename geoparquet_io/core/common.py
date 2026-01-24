@@ -10,6 +10,7 @@ from pathlib import Path
 
 import click
 import duckdb
+import psutil
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.logging_config import (
@@ -47,6 +48,19 @@ def _needs_s3_auth(exception: Exception) -> bool:
     # 403 without credentials means we need to authenticate
     auth_indicators = ["403", "forbidden", "access denied", "unauthorized"]
     return any(ind in error_str for ind in auth_indicators)
+
+
+def get_default_memory_limit() -> str:
+    """
+    Get default memory limit for streaming operations (50% of system RAM).
+
+    Returns:
+        str: Memory limit string for DuckDB (e.g., '8GB')
+    """
+    total_ram = psutil.virtual_memory().total
+    limit_bytes = total_ram // 2  # 50% of RAM
+    limit_gb = max(1, limit_bytes // (1024**3))  # At least 1GB, rounded down
+    return f"{limit_gb}GB"
 
 
 # GeoParquet version configuration
@@ -419,16 +433,23 @@ def write_geoparquet_via_duckdb(
         compression: Compression codec (zstd, gzip, snappy, lz4, none)
         compression_level: Compression level (not used by DuckDB, kept for API compat)
         verbose: Whether to print verbose output
-        memory_limit: Optional memory limit for DuckDB (e.g., '2GB', '4GB').
-            When set, also forces single-threaded execution for memory control.
+        memory_limit: Memory limit for DuckDB streaming. Options:
+            - None: Use default (50% of system RAM)
+            - 'unlimited': No memory limit
+            - '2GB', '4GB', etc.: Specific limit
     """
     configure_verbose(verbose)
 
-    # Limit threads and memory for streaming operations (see DuckDB #8270)
-    # Single-threaded execution is required for COPY TO to respect memory limits
-    if memory_limit:
-        con.execute("SET threads = 1")
-        con.execute(f"SET memory_limit = '{memory_limit}'")
+    # Always use single-threaded execution for streaming (faster + respects memory limits)
+    # See DuckDB issue #8270 for why threads=1 is required for memory control
+    con.execute("SET threads = 1")
+
+    # Set memory limit (default to 50% of system RAM)
+    if memory_limit != "unlimited":
+        effective_limit = memory_limit or get_default_memory_limit()
+        con.execute(f"SET memory_limit = '{effective_limit}'")
+        if verbose:
+            debug(f"DuckDB memory limit: {effective_limit}")
 
     # Handle remote output via temp file
     if is_remote_url(output_path):
@@ -2950,9 +2971,11 @@ def write_parquet_with_metadata(
         preserve_geometry_types: Whether to preserve geometry_types from input
             metadata (default True). Only applies when use_streaming=True.
             When False, geometry_types are recalculated.
-        memory_limit: Optional memory limit for DuckDB streaming (e.g., '2GB').
-            Only applies when use_streaming=True. When set, forces single-threaded
-            execution for proper memory control.
+        memory_limit: Memory limit for DuckDB streaming. Only applies when
+            use_streaming=True. Options:
+            - None (default): Use 50% of system RAM
+            - 'unlimited': No memory limit
+            - '2GB', '4GB', etc.: Specific limit
 
     Returns:
         None
