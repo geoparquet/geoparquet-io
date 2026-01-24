@@ -382,6 +382,129 @@ def prepare_geo_metadata_for_streaming(
     return geo_meta
 
 
+def write_geoparquet_via_duckdb(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    output_path: str,
+    geometry_column: str,
+    original_metadata: dict | None = None,
+    geoparquet_version: str = "1.1",
+    preserve_bbox: bool = True,
+    preserve_geometry_types: bool = True,
+    input_crs: dict | None = None,
+    compression: str = "zstd",
+    compression_level: int = 15,
+    verbose: bool = False,
+) -> None:
+    """
+    Write GeoParquet using DuckDB COPY TO + footer rewrite.
+
+    This streaming approach is memory-efficient for large datasets:
+    1. Prepares geo metadata (preserving from input or marking for recompute)
+    2. Runs SQL metadata queries if recalculation needed
+    3. Uses DuckDB COPY TO for streaming write
+    4. Rewrites footer to add GeoParquet metadata
+
+    Args:
+        con: DuckDB connection with spatial extension loaded
+        query: SQL SELECT query to execute
+        output_path: Path to output file (local only for now)
+        geometry_column: Name of geometry column
+        original_metadata: Metadata dict from input file (kv_metadata)
+        geoparquet_version: Target version (1.0, 1.1, 2.0, parquet-geo-only)
+        preserve_bbox: Whether to preserve bbox from input
+        preserve_geometry_types: Whether to preserve geometry_types from input
+        input_crs: CRS dict to add to output
+        compression: Compression codec (zstd, gzip, snappy, lz4, none)
+        compression_level: Compression level (not used by DuckDB, kept for API compat)
+        verbose: Whether to print verbose output
+    """
+    configure_verbose(verbose)
+
+    # Handle remote output via temp file
+    if is_remote_url(output_path):
+        local_path = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+        upload_after = True
+    else:
+        local_path = output_path
+        upload_after = False
+
+    try:
+        # 1. Prepare geo metadata
+        geo_meta = prepare_geo_metadata_for_streaming(
+            original_metadata=original_metadata,
+            geometry_column=geometry_column,
+            geoparquet_version=geoparquet_version,
+            preserve_bbox=preserve_bbox,
+            preserve_geometry_types=preserve_geometry_types,
+            input_crs=input_crs,
+        )
+
+        # 2. Compute missing metadata via SQL if needed
+        col_meta = geo_meta["columns"][geometry_column]
+
+        if not preserve_bbox or "bbox" not in col_meta:
+            if verbose:
+                debug("Computing bbox via SQL...")
+            bbox = compute_bbox_via_sql(con, query, geometry_column)
+            if bbox:
+                col_meta["bbox"] = bbox
+
+        if not preserve_geometry_types or "geometry_types" not in col_meta:
+            if verbose:
+                debug("Computing geometry types via SQL...")
+            types = compute_geometry_types_via_sql(con, query, geometry_column)
+            col_meta["geometry_types"] = types
+
+        # 3. Wrap query with WKB conversion
+        final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+
+        # 4. DuckDB COPY TO (streaming)
+        # Map compression to DuckDB format
+        compression_map = {
+            "zstd": "ZSTD",
+            "gzip": "GZIP",
+            "snappy": "SNAPPY",
+            "lz4": "LZ4",
+            "none": "UNCOMPRESSED",
+            "uncompressed": "UNCOMPRESSED",
+        }
+        duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
+
+        # Escape path for SQL
+        escaped_path = local_path.replace("'", "''")
+
+        copy_query = f"""
+            COPY ({final_query})
+            TO '{escaped_path}'
+            (FORMAT PARQUET, COMPRESSION {duckdb_compression})
+        """
+
+        if verbose:
+            debug(f"Writing via DuckDB COPY TO with {duckdb_compression} compression...")
+
+        con.execute(copy_query)
+
+        # 5. Rewrite footer with geo metadata
+        if verbose:
+            debug("Rewriting footer with GeoParquet metadata...")
+
+        rewrite_footer_with_geo_metadata(local_path, geo_meta)
+
+        if verbose:
+            pf = pq.ParquetFile(local_path)
+            success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
+
+        # 6. Upload if remote
+        if upload_after:
+            upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
+
+    finally:
+        # Clean up temp file if used
+        if upload_after and Path(local_path).exists():
+            Path(local_path).unlink()
+
+
 def has_glob_pattern(path: str) -> bool:
     """
     Check if path contains glob wildcards.

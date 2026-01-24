@@ -274,3 +274,139 @@ class TestMetadataPreparation:
         )
 
         assert "crs" not in result["columns"]["geometry"]
+
+
+class TestStreamingWrite:
+    """Tests for write_geoparquet_via_duckdb function."""
+
+    @pytest.fixture
+    def output_file(self):
+        """Create temp output path."""
+        tmp_path = Path(tempfile.gettempdir()) / f"test_streaming_out_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    @pytest.fixture
+    def sample_input(self):
+        """Create sample input parquet with geo metadata."""
+        import duckdb
+        import pyarrow.parquet as pq
+
+        tmp_path = Path(tempfile.gettempdir()) / f"test_streaming_in_{uuid.uuid4()}.parquet"
+
+        # Create via DuckDB
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+            table = con.execute("""
+                SELECT
+                    1 as id,
+                    ST_AsWKB(ST_Point(-122.4, 37.8)) as geometry
+                UNION ALL
+                SELECT
+                    2 as id,
+                    ST_AsWKB(ST_Point(-122.0, 38.0)) as geometry
+            """).fetch_arrow_table()
+        finally:
+            con.close()
+
+        # Add geo metadata
+        geo_meta = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": ["Point"],
+                    "bbox": [-122.4, 37.8, -122.0, 38.0],
+                }
+            },
+        }
+        new_meta = {b"geo": json.dumps(geo_meta).encode("utf-8")}
+        table = table.replace_schema_metadata(new_meta)
+        pq.write_table(table, str(tmp_path))
+
+        yield str(tmp_path)
+
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    def test_streaming_write_basic(self, sample_input, output_file):
+        """Test basic streaming write preserves data and metadata."""
+        import duckdb
+
+        from geoparquet_io.core.common import (
+            get_parquet_metadata,
+            write_geoparquet_via_duckdb,
+        )
+
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+
+            original_metadata, _ = get_parquet_metadata(sample_input)
+            query = f"SELECT * FROM read_parquet('{sample_input}')"
+
+            write_geoparquet_via_duckdb(
+                con=con,
+                query=query,
+                output_path=output_file,
+                geometry_column="geometry",
+                original_metadata=original_metadata,
+                geoparquet_version="1.1",
+                preserve_bbox=True,
+                preserve_geometry_types=True,
+            )
+        finally:
+            con.close()
+
+        # Verify output
+        pf = pq.ParquetFile(output_file)
+        assert pf.metadata.num_rows == 2
+
+        metadata = pf.schema_arrow.metadata
+        assert b"geo" in metadata
+
+        geo = json.loads(metadata[b"geo"].decode("utf-8"))
+        assert geo["version"] == "1.1.0"
+        assert geo["columns"]["geometry"]["bbox"] == [-122.4, 37.8, -122.0, 38.0]
+
+    def test_streaming_write_recalculates_bbox(self, sample_input, output_file):
+        """Test that bbox is recalculated when preserve_bbox=False."""
+        import duckdb
+
+        from geoparquet_io.core.common import (
+            get_parquet_metadata,
+            write_geoparquet_via_duckdb,
+        )
+
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+
+            original_metadata, _ = get_parquet_metadata(sample_input)
+            # Filter to just one point
+            query = f"SELECT * FROM read_parquet('{sample_input}') WHERE id = 1"
+
+            write_geoparquet_via_duckdb(
+                con=con,
+                query=query,
+                output_path=output_file,
+                geometry_column="geometry",
+                original_metadata=original_metadata,
+                geoparquet_version="1.1",
+                preserve_bbox=False,  # Force recalculation
+                preserve_geometry_types=True,
+            )
+        finally:
+            con.close()
+
+        # Verify bbox was recalculated (should be smaller, just one point)
+        pf = pq.ParquetFile(output_file)
+        geo = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+        bbox = geo["columns"]["geometry"]["bbox"]
+
+        # Should be point bbox, not original [-122.4, 37.8, -122.0, 38.0]
+        assert bbox[0] == pytest.approx(-122.4, rel=1e-6)
+        assert bbox[2] == pytest.approx(-122.4, rel=1e-6)  # xmax == xmin for single point
