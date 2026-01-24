@@ -322,6 +322,7 @@ class TestConvert:
         yield str(tmp_path)
         safe_unlink(tmp_path)
 
+    @pytest.mark.slow
     def test_convert_geopackage_returns_table(self, gpkg_file):
         """Test that convert() returns a Table for GeoPackage input."""
         table = convert(gpkg_file)
@@ -340,6 +341,7 @@ class TestConvert:
         assert isinstance(table, Table)
         assert "geometry" in table.column_names
 
+    @pytest.mark.slow
     def test_convert_detects_geometry_column(self, gpkg_file):
         """Test that convert() detects geometry column."""
         table = convert(gpkg_file)

@@ -24,7 +24,48 @@ from geoparquet_io.core.check_parquet_structure import (
     get_row_group_stats,
 )
 from geoparquet_io.core.common import get_parquet_metadata, parse_geo_metadata
-from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.convert import (
+    _is_geopackage_file,
+    _is_linux_python310,
+    _warn_linux_python310_geopackage,
+    convert_to_geoparquet,
+)
+
+
+class TestLinuxPython310Warning:
+    """Tests for Linux/Python 3.10 GeoPackage warning."""
+
+    def test_is_geopackage_file_true(self):
+        """Test detection of GeoPackage files."""
+        assert _is_geopackage_file("test.gpkg") is True
+        assert _is_geopackage_file("/path/to/file.gpkg") is True
+        assert _is_geopackage_file("file.GPKG") is True
+
+    def test_is_geopackage_file_false(self):
+        """Test non-GeoPackage files are not detected."""
+        assert _is_geopackage_file("test.parquet") is False
+        assert _is_geopackage_file("test.geojson") is False
+        assert _is_geopackage_file("test.shp") is False
+        assert _is_geopackage_file("test.csv") is False
+
+    def test_is_geopackage_file_with_query_params(self):
+        """Test GeoPackage detection with URL query params."""
+        assert _is_geopackage_file("s3://bucket/test.gpkg?token=abc") is True
+        assert _is_geopackage_file("https://example.com/test.gpkg?v=1") is True
+
+    def test_is_linux_python310_returns_bool(self):
+        """Test that platform detection returns a boolean."""
+        result = _is_linux_python310()
+        assert isinstance(result, bool)
+        # The actual value depends on the test environment
+        expected = sys.platform.startswith("linux") and sys.version_info[:2] == (3, 10)
+        assert result == expected
+
+    def test_warn_function_exists(self):
+        """Test that warning function is callable."""
+        # Just verify it doesn't crash - the warning is only shown on Linux/3.10
+        _warn_linux_python310_geopackage("test.gpkg")
+        _warn_linux_python310_geopackage("test.parquet")  # Should not warn
 
 
 @pytest.fixture

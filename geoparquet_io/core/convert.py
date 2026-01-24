@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import os
+import platform
+import sys
 import time
 
 import click
@@ -28,6 +30,29 @@ from geoparquet_io.core.common import (
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.partition_reader import require_single_file
 from geoparquet_io.core.stream_io import _quote_identifier
+
+
+def _is_linux_python310():
+    """Check if running on Linux with Python 3.10."""
+    return platform.system() == "Linux" and sys.version_info[:2] == (3, 10)
+
+
+def _is_geopackage_file(input_file):
+    """Check if input file is a GeoPackage."""
+    path = input_file.split("?")[0]  # Handle URLs with query params
+    ext = os.path.splitext(path)[1].lower()
+    return ext == ".gpkg"
+
+
+def _warn_linux_python310_geopackage(input_file):
+    """Warn about known segfault with GeoPackage on Linux/Python 3.10."""
+    if _is_linux_python310() and _is_geopackage_file(input_file):
+        warn(
+            "Warning: GeoPackage reading on Linux with Python 3.10 has a known issue "
+            "that can cause crashes (segfault) in DuckDB's spatial extension.\n"
+            "If you experience crashes, upgrade to Python 3.11+ or use a different format.\n"
+            "See: https://github.com/geoparquet/geoparquet-io/issues/171"
+        )
 
 
 def _detect_geometry_column(con, input_file, verbose, is_parquet=False):
@@ -783,6 +808,10 @@ def read_spatial_to_arrow(
     if is_parquet and is_partition_path(input_file):
         require_single_file(input_file, "read_spatial_to_arrow")
 
+    # Warn about known issue with GeoPackage on Linux/Python 3.10
+    if not is_csv and not is_parquet:
+        _warn_linux_python310_geopackage(input_file)
+
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
 
     # Determine CRS
@@ -1004,6 +1033,10 @@ def convert_to_geoparquet(
     # Check for partitioned parquet input (not supported)
     if is_parquet and is_partition_path(input_file):
         require_single_file(input_file, "convert")
+
+    # Warn about known issue with GeoPackage on Linux/Python 3.10
+    if not is_csv and not is_parquet:
+        _warn_linux_python310_geopackage(input_file)
 
     # Determine effective CRS for output
     # --crs parameter is ONLY valid for CSV/TSV files
