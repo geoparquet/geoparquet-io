@@ -72,3 +72,58 @@ class TestFooterRewrite:
 
         with pytest.raises(ValueError, match="only works on local files"):
             rewrite_footer_with_geo_metadata("s3://bucket/file.parquet", geo_meta)
+
+
+class TestSQLMetadataComputation:
+    """Tests for computing metadata via SQL queries."""
+
+    def test_compute_bbox_via_sql(self):
+        """Test bbox computation using DuckDB SQL."""
+        import duckdb
+
+        from geoparquet_io.core.common import compute_bbox_via_sql
+
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+
+            query = """
+                SELECT ST_Point(-122.4, 37.8) as geometry
+                UNION ALL
+                SELECT ST_Point(-122.0, 38.0) as geometry
+            """
+
+            bbox = compute_bbox_via_sql(con, query, "geometry")
+
+            assert bbox is not None
+            assert len(bbox) == 4
+            assert bbox[0] == pytest.approx(-122.4, rel=1e-6)  # xmin
+            assert bbox[1] == pytest.approx(37.8, rel=1e-6)  # ymin
+            assert bbox[2] == pytest.approx(-122.0, rel=1e-6)  # xmax
+            assert bbox[3] == pytest.approx(38.0, rel=1e-6)  # ymax
+        finally:
+            con.close()
+
+    def test_compute_geometry_types_via_sql(self):
+        """Test geometry type computation using DuckDB SQL."""
+        import duckdb
+
+        from geoparquet_io.core.common import compute_geometry_types_via_sql
+
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+
+            query = """
+                SELECT ST_Point(-122.4, 37.8) as geometry
+                UNION ALL
+                SELECT ST_GeomFromText('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))') as geometry
+            """
+
+            types = compute_geometry_types_via_sql(con, query, "geometry")
+
+            assert "Point" in types
+            assert "Polygon" in types
+            assert len(types) == 2
+        finally:
+            con.close()

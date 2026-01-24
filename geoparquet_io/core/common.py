@@ -249,6 +249,84 @@ def rewrite_footer_with_geo_metadata(file_path: str, geo_meta: dict) -> None:
     )
 
 
+def compute_bbox_via_sql(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    geometry_column: str,
+) -> list[float] | None:
+    """
+    Compute bounding box from query using DuckDB spatial functions.
+
+    Args:
+        con: DuckDB connection with spatial extension loaded
+        query: SQL query containing geometry column
+        geometry_column: Name of geometry column
+
+    Returns:
+        [xmin, ymin, xmax, ymax] or None if query returns no rows
+    """
+    # Escape column name for SQL (double any embedded quotes)
+    escaped_col = geometry_column.replace('"', '""')
+    bbox_query = f"""
+        SELECT
+            MIN(ST_XMin("{escaped_col}")) as xmin,
+            MIN(ST_YMin("{escaped_col}")) as ymin,
+            MAX(ST_XMax("{escaped_col}")) as xmax,
+            MAX(ST_YMax("{escaped_col}")) as ymax
+        FROM ({query})
+    """
+    result = con.execute(bbox_query).fetchone()
+
+    if result and all(v is not None for v in result):
+        return list(result)
+    return None
+
+
+def compute_geometry_types_via_sql(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    geometry_column: str,
+) -> list[str]:
+    """
+    Compute distinct geometry types from query using DuckDB.
+
+    Args:
+        con: DuckDB connection with spatial extension loaded
+        query: SQL query containing geometry column
+        geometry_column: Name of geometry column
+
+    Returns:
+        List of geometry type names (e.g., ["Point", "Polygon"])
+    """
+    # Escape column name for SQL (double any embedded quotes)
+    escaped_col = geometry_column.replace('"', '""')
+    types_query = f"""
+        SELECT DISTINCT ST_GeometryType("{escaped_col}") as geom_type
+        FROM ({query})
+        WHERE "{escaped_col}" IS NOT NULL
+    """
+    results = con.execute(types_query).fetchall()
+
+    # DuckDB returns types like "POINT", "POLYGON" - convert to GeoParquet format
+    type_map = {
+        "POINT": "Point",
+        "LINESTRING": "LineString",
+        "POLYGON": "Polygon",
+        "MULTIPOINT": "MultiPoint",
+        "MULTILINESTRING": "MultiLineString",
+        "MULTIPOLYGON": "MultiPolygon",
+        "GEOMETRYCOLLECTION": "GeometryCollection",
+    }
+
+    types = []
+    for (geom_type,) in results:
+        if geom_type:
+            normalized = type_map.get(geom_type.upper(), geom_type)
+            types.append(normalized)
+
+    return sorted(set(types))
+
+
 def has_glob_pattern(path: str) -> bool:
     """
     Check if path contains glob wildcards.
