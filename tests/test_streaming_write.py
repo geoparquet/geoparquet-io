@@ -410,3 +410,163 @@ class TestStreamingWrite:
         # Should be point bbox, not original [-122.4, 37.8, -122.0, 38.0]
         assert bbox[0] == pytest.approx(-122.4, rel=1e-6)
         assert bbox[2] == pytest.approx(-122.4, rel=1e-6)  # xmax == xmin for single point
+
+
+class TestWriteIntegration:
+    """Tests for write_parquet_with_metadata streaming integration."""
+
+    @pytest.fixture
+    def output_file(self):
+        tmp_path = Path(tempfile.gettempdir()) / f"test_integration_{uuid.uuid4()}.parquet"
+        yield str(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    def test_use_streaming_flag_routes_correctly(self, output_file):
+        """Test that use_streaming=True uses DuckDB path."""
+        import duckdb
+
+        from geoparquet_io.core.common import write_parquet_with_metadata
+
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+
+            query = "SELECT 1 as id, ST_Point(-122.4, 37.8) as geometry"
+
+            write_parquet_with_metadata(
+                con=con,
+                query=query,
+                output_file=output_file,
+                use_streaming=True,
+                verbose=False,
+            )
+        finally:
+            con.close()
+
+        # Verify output has geo metadata
+        pf = pq.ParquetFile(output_file)
+        assert pf.metadata.num_rows == 1
+        assert b"geo" in pf.schema_arrow.metadata
+
+    def test_use_streaming_false_uses_arrow_path(self, output_file):
+        """Test that use_streaming=False (default) uses Arrow path."""
+        import duckdb
+
+        from geoparquet_io.core.common import write_parquet_with_metadata
+
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+
+            query = "SELECT 1 as id, ST_Point(-122.4, 37.8) as geometry"
+
+            # Default is use_streaming=False
+            write_parquet_with_metadata(
+                con=con,
+                query=query,
+                output_file=output_file,
+                verbose=False,
+            )
+        finally:
+            con.close()
+
+        # Verify output has geo metadata
+        pf = pq.ParquetFile(output_file)
+        assert pf.metadata.num_rows == 1
+        assert b"geo" in pf.schema_arrow.metadata
+
+    def test_streaming_preserves_metadata_from_input(self, output_file):
+        """Test that streaming path preserves metadata from input."""
+        import duckdb
+
+        from geoparquet_io.core.common import write_parquet_with_metadata
+
+        original_metadata = {
+            b"geo": json.dumps(
+                {
+                    "version": "1.1.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["Point"],
+                            "bbox": [-180, -90, 180, 90],
+                        }
+                    },
+                }
+            ).encode("utf-8")
+        }
+
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+
+            query = "SELECT 1 as id, ST_Point(-122.4, 37.8) as geometry"
+
+            write_parquet_with_metadata(
+                con=con,
+                query=query,
+                output_file=output_file,
+                original_metadata=original_metadata,
+                use_streaming=True,
+                preserve_bbox=True,
+                preserve_geometry_types=True,
+                verbose=False,
+            )
+        finally:
+            con.close()
+
+        # Verify metadata was preserved
+        pf = pq.ParquetFile(output_file)
+        geo = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+        assert geo["columns"]["geometry"]["bbox"] == [-180, -90, 180, 90]
+        assert geo["columns"]["geometry"]["geometry_types"] == ["Point"]
+
+    def test_streaming_recalculates_bbox_when_not_preserved(self, output_file):
+        """Test that streaming path recalculates bbox when preserve_bbox=False."""
+        import duckdb
+
+        from geoparquet_io.core.common import write_parquet_with_metadata
+
+        original_metadata = {
+            b"geo": json.dumps(
+                {
+                    "version": "1.1.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["Point"],
+                            "bbox": [-180, -90, 180, 90],  # Original bbox
+                        }
+                    },
+                }
+            ).encode("utf-8")
+        }
+
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+
+            query = "SELECT 1 as id, ST_Point(-122.4, 37.8) as geometry"
+
+            write_parquet_with_metadata(
+                con=con,
+                query=query,
+                output_file=output_file,
+                original_metadata=original_metadata,
+                use_streaming=True,
+                preserve_bbox=False,  # Force recalculation
+                verbose=False,
+            )
+        finally:
+            con.close()
+
+        # Verify bbox was recalculated to point bounds
+        pf = pq.ParquetFile(output_file)
+        geo = json.loads(pf.schema_arrow.metadata[b"geo"].decode("utf-8"))
+        bbox = geo["columns"]["geometry"]["bbox"]
+        # Should be point bbox, not original [-180, -90, 180, 90]
+        assert bbox[0] == pytest.approx(-122.4, rel=1e-6)
+        assert bbox[1] == pytest.approx(37.8, rel=1e-6)

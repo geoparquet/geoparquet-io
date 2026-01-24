@@ -2901,6 +2901,9 @@ def write_parquet_with_metadata(
     profile=None,
     geoparquet_version=None,
     input_crs=None,
+    use_streaming=False,
+    preserve_bbox=True,
+    preserve_geometry_types=True,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
@@ -2927,10 +2930,38 @@ def write_parquet_with_metadata(
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         input_crs: PROJJSON dict with CRS from input file
+        use_streaming: If True, use DuckDB COPY TO with footer rewrite (memory-efficient
+            for large datasets). If False (default), use Arrow-based path.
+        preserve_bbox: Whether to preserve bbox from input metadata (default True).
+            Only applies when use_streaming=True. When False, bbox is recalculated.
+        preserve_geometry_types: Whether to preserve geometry_types from input
+            metadata (default True). Only applies when use_streaming=True.
+            When False, geometry_types are recalculated.
 
     Returns:
         None
     """
+    # Use streaming DuckDB path if requested
+    if use_streaming:
+        # Detect geometry column for streaming path
+        geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
+
+        write_geoparquet_via_duckdb(
+            con=con,
+            query=query,
+            output_path=output_file,
+            geometry_column=geometry_column,
+            original_metadata=original_metadata,
+            geoparquet_version=geoparquet_version or "1.1",
+            preserve_bbox=preserve_bbox,
+            preserve_geometry_types=preserve_geometry_types,
+            input_crs=input_crs,
+            compression=compression,
+            compression_level=compression_level,
+            verbose=verbose,
+        )
+        return
+
     # Delegate to the Arrow-based implementation
     # Bounds are always computed from actual table data during metadata application
     write_geoparquet_via_arrow(
