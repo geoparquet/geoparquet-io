@@ -2705,122 +2705,47 @@ def write_parquet_with_metadata(
     )
 
 
-def _compute_batch_bbox(batch, geometry_column: str):
+def _compute_bbox_via_duckdb(
+    connection, sql: str, geometry_column: str, verbose: bool = False
+) -> list[float] | None:
     """
-    Compute bounding box from a single record batch.
+    Compute bounding box via DuckDB aggregation query.
+
+    This is more efficient than streaming all data through Python because
+    DuckDB computes the bbox natively without loading data into Python memory.
 
     Args:
-        batch: PyArrow RecordBatch containing the geometry column
+        connection: DuckDB connection
+        sql: The source SQL query
         geometry_column: Name of the geometry column
+        verbose: Whether to print debug output
 
     Returns:
-        tuple: (xmin, ymin, xmax, ymax) or None if computation fails
+        [xmin, ymin, xmax, ymax] or None if computation fails
     """
-    import geoarrow.pyarrow as ga
-    import pyarrow.compute as pc
-
-    if batch.num_rows == 0:
-        return None
+    quoted_geom = geometry_column.replace('"', '""')
+    bbox_sql = f"""
+        SELECT
+            MIN(ST_XMin("{quoted_geom}")) as xmin,
+            MIN(ST_YMin("{quoted_geom}")) as ymin,
+            MAX(ST_XMax("{quoted_geom}")) as xmax,
+            MAX(ST_YMax("{quoted_geom}")) as ymax
+        FROM ({sql}) AS _bbox_source
+        WHERE "{quoted_geom}" IS NOT NULL
+    """
 
     try:
-        col_index = batch.schema.get_field_index(geometry_column)
-        geom_col = batch.column(col_index)
-
-        # Filter out NULL values
-        non_null_mask = pc.is_valid(geom_col)
-        if not pc.any(non_null_mask).as_py():
-            return None
-
-        geom_col = pc.filter(geom_col, non_null_mask)
-        if len(geom_col) == 0:
-            return None
-
-        wkb_arr = ga.as_wkb(geom_col)
-        box_arr = ga.box(wkb_arr)
-
-        # Get storage (underlying struct array)
-        storage = box_arr.storage if hasattr(box_arr, "storage") else box_arr
-
-        # Extract struct fields and compute min/max
-        xmin = pc.min(pc.struct_field(storage, "xmin")).as_py()
-        ymin = pc.min(pc.struct_field(storage, "ymin")).as_py()
-        xmax = pc.max(pc.struct_field(storage, "xmax")).as_py()
-        ymax = pc.max(pc.struct_field(storage, "ymax")).as_py()
-
-        if all(v is not None for v in [xmin, ymin, xmax, ymax]):
-            return (xmin, ymin, xmax, ymax)
-    except Exception:
-        pass
+        result = connection.execute(bbox_sql).fetchone()
+        if result and all(v is not None for v in result):
+            bbox = [result[0], result[1], result[2], result[3]]
+            if verbose:
+                debug(f"Pre-computed bbox via DuckDB: {bbox}")
+            return bbox
+    except Exception as e:
+        if verbose:
+            debug(f"Failed to compute bbox via DuckDB: {e}")
 
     return None
-
-
-def _update_parquet_geo_metadata(
-    file_path: str,
-    geometry_column: str,
-    bbox: list[float],
-    compression: str | None = None,
-    compression_level: int | None = None,
-    row_group_size: int | None = None,
-):
-    """
-    Update the geo metadata in a Parquet file with computed bbox.
-
-    This reads the file, updates the geo metadata, and rewrites the file.
-    Used after streaming write to add file-level bbox.
-
-    Args:
-        file_path: Path to the Parquet file
-        geometry_column: Name of the geometry column
-        bbox: [xmin, ymin, xmax, ymax] bounding box
-        compression: Compression to use when rewriting
-        compression_level: Compression level to use
-        row_group_size: Row group size to use when rewriting
-    """
-    import pyarrow.parquet as pq
-
-    # Read existing file metadata to preserve settings
-    pf = pq.ParquetFile(file_path)
-    existing_compression = None
-    existing_row_group_size = None
-    if pf.metadata.num_row_groups > 0:
-        existing_compression = pf.metadata.row_group(0).column(0).compression
-        existing_row_group_size = pf.metadata.row_group(0).num_rows
-
-    # Read the existing file
-    table = pq.read_table(file_path)
-
-    # Get and update geo metadata
-    schema_metadata = dict(table.schema.metadata or {})
-    if b"geo" in schema_metadata:
-        geo_meta = json.loads(schema_metadata[b"geo"].decode("utf-8"))
-        if geometry_column in geo_meta.get("columns", {}):
-            geo_meta["columns"][geometry_column]["bbox"] = bbox
-            schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-
-            # Create new schema with updated metadata
-            new_schema = table.schema.with_metadata(schema_metadata)
-            table = table.cast(new_schema)
-
-            # Determine compression to use (prefer passed value, then existing)
-            final_compression = compression or existing_compression or "ZSTD"
-            if final_compression == "NONE":
-                final_compression = None
-
-            # Determine row group size (prefer passed value, then existing)
-            final_row_group_size = row_group_size or existing_row_group_size
-
-            # Build write kwargs
-            write_kwargs = {}
-            if final_compression:
-                write_kwargs["compression"] = final_compression
-                if compression_level is not None:
-                    write_kwargs["compression_level"] = compression_level
-            if final_row_group_size:
-                write_kwargs["row_group_size"] = final_row_group_size
-
-            # Rewrite the file preserving compression and row group size
-            pq.write_table(table, file_path, **write_kwargs)
 
 
 def _build_streaming_schema(
@@ -3024,7 +2949,24 @@ def write_geoparquet_streaming(
         if needs_wkb_conversion:
             final_sql = _wrap_query_with_wkb_conversion(sql, geometry_column)
 
+        # Parse CRS if provided as string
+        input_crs = crs
+        if isinstance(crs, str) and crs:
+            input_crs = parse_crs_string_to_projjson(crs, connection)
+
+        # Determine if we need native geometry types (geoarrow extension types)
+        use_native_geometry = geoparquet_version in ("2.0", "parquet-geo-only")
+        should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
+
+        # Pre-compute bbox for v2.0 via DuckDB aggregation (efficient, no Python memory)
+        # This avoids needing to rewrite the file after streaming
+        # IMPORTANT: Must be done BEFORE executing the main query, as it uses the connection
+        precomputed_bbox = None
+        if use_native_geometry and should_add_geo_metadata:
+            precomputed_bbox = _compute_bbox_via_duckdb(connection, sql, geometry_column, verbose)
+
         # Execute query and get record batch reader
+        # NOTE: This must come after bbox computation since it holds the cursor
         if verbose:
             debug(f"Executing query: {sql[:100]}...")
 
@@ -3039,20 +2981,9 @@ def write_geoparquet_streaming(
                 f"Available columns: {schema.names}"
             )
 
-        # Parse CRS if provided as string
-        input_crs = crs
-        if isinstance(crs, str) and crs:
-            input_crs = parse_crs_string_to_projjson(crs, connection)
-
-        # Determine if we need native geometry types (geoarrow extension types)
-        use_native_geometry = geoparquet_version in ("2.0", "parquet-geo-only")
-        should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
-
         # Build geo metadata for schema (only for v1.x and v2.0)
         geo_meta = None
         if should_add_geo_metadata:
-            # Note: We can't compute geometry_types or file-level bbox without scanning
-            # all data, so we leave those out for streaming (or use a sample)
             bbox_info = {"has_bbox_column": False, "bbox_column_name": None}
 
             # Check for bbox column in schema
@@ -3085,6 +3016,10 @@ def write_geoparquet_streaming(
 
             # Add encoding
             geo_meta["columns"][geometry_column]["encoding"] = "WKB"
+
+            # Add precomputed bbox for v2.0 (computed via DuckDB before streaming)
+            if precomputed_bbox is not None:
+                geo_meta["columns"][geometry_column]["bbox"] = precomputed_bbox
 
         # Configure ParquetWriter
         writer_kwargs = {
@@ -3140,23 +3075,11 @@ def write_geoparquet_streaming(
             col_index = schema_with_meta.get_field_index(geometry_column)
             geoarrow_type = schema_with_meta.field(col_index).type
 
-        # Write batches with incremental bbox tracking
+        # Write batches (bbox is pre-computed via DuckDB for v2.0)
         rows_written = 0
         batches_written = 0
-        overall_bbox = [float("inf"), float("inf"), float("-inf"), float("-inf")]
-
-        def update_bbox(batch_bbox):
-            """Update overall bbox with batch bbox."""
-            if batch_bbox:
-                overall_bbox[0] = min(overall_bbox[0], batch_bbox[0])  # xmin
-                overall_bbox[1] = min(overall_bbox[1], batch_bbox[1])  # ymin
-                overall_bbox[2] = max(overall_bbox[2], batch_bbox[2])  # xmax
-                overall_bbox[3] = max(overall_bbox[3], batch_bbox[3])  # ymax
 
         with pq.ParquetWriter(actual_output, schema_with_meta, **writer_kwargs) as writer:
-            # Compute bbox from first batch (before geoarrow conversion)
-            update_bbox(_compute_batch_bbox(first_batch, geometry_column))
-
             # Write first batch
             if use_native_geometry:
                 first_batch = _convert_batch_to_geoarrow(
@@ -3169,9 +3092,6 @@ def write_geoparquet_streaming(
 
             # Write remaining batches
             for batch in reader:
-                # Compute bbox before geoarrow conversion
-                update_bbox(_compute_batch_bbox(batch, geometry_column))
-
                 if use_native_geometry:
                     batch = _convert_batch_to_geoarrow(
                         batch, geometry_column, geoarrow_type, schema_with_meta
@@ -3186,21 +3106,6 @@ def write_geoparquet_streaming(
 
         if verbose:
             success(f"Wrote {rows_written:,} rows in {batches_written} row groups")
-
-        # Update file metadata with computed bbox for v2.0
-        # (v1.x doesn't require bbox in metadata, and rewriting can break dictionary encoding)
-        if use_native_geometry and geo_meta is not None and overall_bbox[0] != float("inf"):
-            final_bbox = list(overall_bbox)
-            if verbose:
-                debug(f"Computed file bbox: {final_bbox}")
-            _update_parquet_geo_metadata(
-                actual_output,
-                geometry_column,
-                final_bbox,
-                compression=validated_compression,
-                compression_level=validated_level,
-                row_group_size=row_group_size,
-            )
 
         # Upload to remote if needed
         if is_remote:
