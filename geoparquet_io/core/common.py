@@ -746,6 +746,12 @@ def get_duckdb_connection(load_spatial=True, load_httpfs=None, use_s3_auth=False
     """
     con = duckdb.connect()
 
+    # Enable large buffer size for Arrow export to handle datasets with >2GB of
+    # string/binary data (e.g., large WKB geometry columns). Without this,
+    # DuckDB fails with "Arrow Appender: The maximum total string size for
+    # regular string buffers is 2147483647" errors.
+    con.execute("SET arrow_large_buffer_size = true;")
+
     # Always load spatial extension by default (core use case)
     if load_spatial:
         try:
@@ -2474,6 +2480,48 @@ def _write_table_with_settings(
         success(f"Wrote {table.num_rows:,} rows to {output_path}")
 
 
+def _normalize_arrow_large_types(table):
+    """
+    Convert large Arrow types to standard types for Parquet compatibility.
+
+    DuckDB with arrow_large_buffer_size=true exports strings as large_string
+    (LargeUtf8) and binaries as large_binary (LargeBinary). While this allows
+    handling >2GB buffers in memory, it causes compatibility issues when:
+    - Reading Hive-partitioned datasets (partition columns inferred as string)
+    - Merging schemas from different sources
+
+    This function casts large types back to standard types before writing to
+    Parquet. The Parquet format itself handles large values fine - the 2GB
+    limit is only for Arrow's in-memory representation.
+
+    Args:
+        table: PyArrow table potentially containing large types
+
+    Returns:
+        Table with large_string → string and large_binary → binary
+    """
+    import pyarrow as pa
+
+    new_fields = []
+    needs_cast = False
+
+    for field in table.schema:
+        if pa.types.is_large_string(field.type):
+            new_fields.append(pa.field(field.name, pa.string(), field.nullable, field.metadata))
+            needs_cast = True
+        elif pa.types.is_large_binary(field.type):
+            new_fields.append(pa.field(field.name, pa.binary(), field.nullable, field.metadata))
+            needs_cast = True
+        else:
+            new_fields.append(field)
+
+    if not needs_cast:
+        return table
+
+    new_schema = pa.schema(new_fields, metadata=table.schema.metadata)
+    return table.cast(new_schema)
+
+
 def write_geoparquet_via_arrow(
     con,
     query: str,
@@ -2565,6 +2613,9 @@ def write_geoparquet_via_arrow(
 
         result = con.execute(final_query)
         table = result.fetch_arrow_table()
+
+        # Normalize large_string/large_binary back to string/binary for Parquet compatibility
+        table = _normalize_arrow_large_types(table)
 
         if verbose:
             debug(f"Fetched {table.num_rows:,} rows, {len(table.column_names)} columns")
@@ -2750,6 +2801,9 @@ def write_geoparquet_table(
     # Handle UNCOMPRESSED - pass None for compression when uncompressed
     if validated_compression == "UNCOMPRESSED":
         validated_compression = None
+
+    # Normalize large_string/large_binary back to string/binary for Parquet compatibility
+    table = _normalize_arrow_large_types(table)
 
     with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
         actual_output,
