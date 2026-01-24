@@ -1086,6 +1086,9 @@ def convert_to_geoparquet(
             profile=profile,
             geoparquet_version=geoparquet_version,
             input_crs=effective_crs,
+            use_streaming=True,  # Use streaming write for memory efficiency
+            preserve_bbox=False,  # Compute bbox from data
+            preserve_geometry_types=False,  # Compute geometry types from data
         )
 
         # Report results
