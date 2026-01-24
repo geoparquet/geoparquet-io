@@ -224,6 +224,31 @@ def is_remote_url(path):
     return any(path.startswith(scheme) for scheme in remote_schemes)
 
 
+def rewrite_footer_with_geo_metadata(file_path: str, geo_meta: dict) -> None:
+    """
+    Rewrite parquet file footer to add GeoParquet metadata.
+
+    Uses fastparquet to update only the footer section without rewriting data.
+    This is efficient for large files as it only modifies the last few KB.
+
+    Args:
+        file_path: Path to local parquet file
+        geo_meta: GeoParquet metadata dict to add
+
+    Raises:
+        ValueError: If file_path is a remote URL (not supported)
+    """
+    from fastparquet import update_file_custom_metadata
+
+    if is_remote_url(file_path):
+        raise ValueError(f"Footer rewrite only works on local files, got: {file_path}")
+
+    update_file_custom_metadata(
+        path=file_path,
+        custom_metadata={"geo": json.dumps(geo_meta)},
+    )
+
+
 def has_glob_pattern(path: str) -> bool:
     """
     Check if path contains glob wildcards.
