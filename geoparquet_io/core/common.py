@@ -238,31 +238,6 @@ def is_remote_url(path):
     return any(path.startswith(scheme) for scheme in remote_schemes)
 
 
-def rewrite_footer_with_geo_metadata(file_path: str, geo_meta: dict) -> None:
-    """
-    Rewrite parquet file footer to add GeoParquet metadata.
-
-    Uses fastparquet to update only the footer section without rewriting data.
-    This is efficient for large files as it only modifies the last few KB.
-
-    Args:
-        file_path: Path to local parquet file
-        geo_meta: GeoParquet metadata dict to add
-
-    Raises:
-        ValueError: If file_path is a remote URL (not supported)
-    """
-    from fastparquet import update_file_custom_metadata
-
-    if is_remote_url(file_path):
-        raise ValueError(f"Footer rewrite only works on local files, got: {file_path}")
-
-    update_file_custom_metadata(
-        path=file_path,
-        custom_metadata={"geo": json.dumps(geo_meta)},
-    )
-
-
 def compute_bbox_via_sql(
     con: duckdb.DuckDBPyConnection,
     query: str,
@@ -486,10 +461,25 @@ def write_geoparquet_via_duckdb(
             types = compute_geometry_types_via_sql(con, query, geometry_column)
             col_meta["geometry_types"] = types
 
+        # 2b. Check for bbox column and add covering metadata if present
+        # Execute a LIMIT 0 query to get schema and check for bbox column
+        schema_result = con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow()
+        if "bbox" in schema_result.schema.names:
+            col_meta["covering"] = {
+                "bbox": {
+                    "xmin": ["bbox", "xmin"],
+                    "ymin": ["bbox", "ymin"],
+                    "xmax": ["bbox", "xmax"],
+                    "ymax": ["bbox", "ymax"],
+                }
+            }
+            if verbose:
+                debug("Added bbox covering metadata")
+
         # 3. Wrap query with WKB conversion
         final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
 
-        # 4. DuckDB COPY TO (streaming)
+        # 4. DuckDB COPY TO (streaming) with KV_METADATA for geo metadata
         # Map compression to DuckDB format
         compression_map = {
             "zstd": "ZSTD",
@@ -504,10 +494,15 @@ def write_geoparquet_via_duckdb(
         # Escape path for SQL
         escaped_path = local_path.replace("'", "''")
 
+        # Serialize geo metadata as JSON for KV_METADATA
+        geo_meta_json = json.dumps(geo_meta)
+        # Escape single quotes in JSON for SQL embedding
+        geo_meta_escaped = geo_meta_json.replace("'", "''")
+
         copy_query = f"""
             COPY ({final_query})
             TO '{escaped_path}'
-            (FORMAT PARQUET, COMPRESSION {duckdb_compression})
+            (FORMAT PARQUET, COMPRESSION {duckdb_compression}, KV_METADATA {{geo: '{geo_meta_escaped}'}})
         """
 
         if verbose:
@@ -515,17 +510,11 @@ def write_geoparquet_via_duckdb(
 
         con.execute(copy_query)
 
-        # 5. Rewrite footer with geo metadata
-        if verbose:
-            debug("Rewriting footer with GeoParquet metadata...")
-
-        rewrite_footer_with_geo_metadata(local_path, geo_meta)
-
         if verbose:
             pf = pq.ParquetFile(local_path)
             success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
 
-        # 6. Upload if remote
+        # 5. Upload if remote
         if upload_after:
             upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 

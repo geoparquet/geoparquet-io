@@ -69,12 +69,14 @@ def get_kv_metadata(parquet_file: str, con=None) -> dict[bytes, bytes]:
         """).fetchall()
 
         # Convert to dict with bytes keys for backward compatibility
+        # Note: Keep first occurrence of each key (DuckDB may write duplicate geo keys
+        # when KV_METADATA is used with spatial extension - ours comes first)
         kv_dict = {}
         for k, v in result:
             # Handle both bytes and string types
             key_bytes = k if isinstance(k, bytes) else k.encode("utf-8") if k else None
             val_bytes = v if isinstance(v, bytes) else v.encode("utf-8") if v else None
-            if key_bytes:
+            if key_bytes and key_bytes not in kv_dict:
                 kv_dict[key_bytes] = val_bytes
         return kv_dict
     finally:
