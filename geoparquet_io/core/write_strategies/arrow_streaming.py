@@ -56,8 +56,10 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         input_crs: dict | None,
         verbose: bool,
         custom_metadata: dict | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write query results to GeoParquet using streaming RecordBatch approach."""
+        # memory_limit is accepted for interface compatibility but not used by this strategy
         from geoparquet_io.core.common import (
             GEOPARQUET_VERSIONS,
             _wrap_query_with_wkb_conversion,
@@ -250,6 +252,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         from geoparquet_io.core.common import (
             GEOPARQUET_VERSIONS,
             _compute_geometry_types,
+            _detect_version_from_table,
             create_geo_metadata,
             is_default_crs,
             validate_compression_settings,
@@ -264,12 +267,17 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         if validated_compression == "UNCOMPRESSED":
             validated_compression = None
 
-        version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+        # Auto-detect version from table schema metadata if not specified
+        effective_version = geoparquet_version
+        if effective_version is None:
+            effective_version = _detect_version_from_table(table, verbose)
+
+        version_config = GEOPARQUET_VERSIONS.get(effective_version, GEOPARQUET_VERSIONS["1.1"])
         metadata_version = version_config["metadata_version"]
 
         batch_size = row_group_rows or DEFAULT_BATCH_SIZE
-        use_native_geometry = geoparquet_version in ("2.0", "parquet-geo-only")
-        should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
+        use_native_geometry = effective_version in ("2.0", "parquet-geo-only")
+        should_add_geo_metadata = effective_version != "parquet-geo-only"
 
         geo_meta = None
         if should_add_geo_metadata:

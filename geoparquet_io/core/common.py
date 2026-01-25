@@ -2008,6 +2008,75 @@ def _rebuild_array_with_type(
     return pa.chunked_array(new_chunks, type=new_type)
 
 
+def _detect_version_from_table(table, verbose: bool = False) -> str | None:
+    """
+    Detect GeoParquet version from table's schema metadata.
+
+    Checks the table's schema metadata for existing geo metadata and extracts
+    the version. This allows preserving v2.0 or parquet-geo-only formats when
+    writing a table that was read from such a source.
+
+    Also checks for native geoarrow extension types which indicate v2.0 or
+    parquet-geo-only format.
+
+    Args:
+        table: PyArrow Table to check
+        verbose: Whether to print verbose output
+
+    Returns:
+        Version string (e.g., "1.1", "2.0", "parquet-geo-only") or None if not detected
+    """
+    import json
+
+    from geoparquet_io.core.streaming import is_geoarrow_type
+
+    # Check for native geoarrow extension types (indicates v2.0 or parquet-geo-only)
+    has_native_geo = False
+    for field in table.schema:
+        if is_geoarrow_type(field.type):
+            has_native_geo = True
+            break
+
+    # Check schema metadata for geo version
+    metadata = table.schema.metadata
+    if not metadata:
+        if has_native_geo:
+            # Native geo types but no metadata suggests parquet-geo-only
+            if verbose:
+                debug("Detected parquet-geo-only format from native geo types")
+            return "parquet-geo-only"
+        return None
+
+    if b"geo" not in metadata:
+        if has_native_geo:
+            # Native geo types but no geo metadata = parquet-geo-only
+            if verbose:
+                debug("Detected parquet-geo-only format (native types, no geo metadata)")
+            return "parquet-geo-only"
+        return None
+
+    try:
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+        if isinstance(geo_meta, dict):
+            version = geo_meta.get("version")
+            if version:
+                parts = version.split(".")
+                if len(parts) >= 2:
+                    major = parts[0]
+                    if major == "2":
+                        if verbose:
+                            debug("Detected GeoParquet version 2.0 from table metadata")
+                        return "2.0"
+                    # Upgrade all 1.x versions to 1.1 (backwards compatible)
+                    if major == "1":
+                        if verbose:
+                            debug("Detected GeoParquet version 1.x from table metadata")
+                        return "1.1"
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
 def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
     """
     Detect bbox struct column from Arrow table schema.
@@ -2395,10 +2464,15 @@ def _apply_geoparquet_metadata(
     - v2.0: Apply CRS to schema type AND geo metadata
     - parquet-geo-only: Apply CRS to schema type only, no geo metadata
 
+    When geoparquet_version is None, the function will detect the version from
+    the table's existing schema metadata, preserving v2.0 or parquet-geo-only
+    formats when present.
+
     Args:
         table: PyArrow Table to modify
         geometry_column: Name of the geometry column
-        geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, parquet-geo-only)
+        geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, parquet-geo-only),
+            or None to auto-detect from existing table metadata
         original_metadata: Original metadata to preserve
         input_crs: PROJJSON dict with CRS
         custom_metadata: Custom metadata (e.g., H3 covering info)
@@ -2409,14 +2483,19 @@ def _apply_geoparquet_metadata(
     Returns:
         pa.Table: Table with GeoParquet metadata applied
     """
+    # Auto-detect version from table schema metadata if not specified
+    effective_version = geoparquet_version
+    if effective_version is None:
+        effective_version = _detect_version_from_table(table, verbose)
+
     version_config = GEOPARQUET_VERSIONS.get(
-        geoparquet_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
+        effective_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
     )
     metadata_version = version_config["metadata_version"]
-    should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
+    should_add_geo_metadata = effective_version != "parquet-geo-only"
 
     if verbose:
-        debug(f"Applying GeoParquet metadata for version: {geoparquet_version or 'default (1.1)'}")
+        debug(f"Applying GeoParquet metadata for version: {effective_version or 'default (1.1)'}")
 
     # Check if geometry column exists in table
     if geometry_column not in table.column_names:
@@ -2426,7 +2505,7 @@ def _apply_geoparquet_metadata(
 
     # Step 1: Handle geometry column based on version
     table = _process_geometry_column_for_version(
-        table, geometry_column, geoparquet_version, input_crs, verbose
+        table, geometry_column, effective_version, input_crs, verbose
     )
 
     # Step 2: Build and apply geo metadata (unless parquet-geo-only)
@@ -2752,6 +2831,7 @@ def _plain_copy_to(
     output_path: str,
     compression: str = "ZSTD",
     verbose: bool = False,
+    geoparquet_version: str = "1.1",
 ) -> None:
     """
     Execute a plain DuckDB COPY TO without geo metadata manipulation.
@@ -2765,6 +2845,7 @@ def _plain_copy_to(
         output_path: Path to output file
         compression: Compression type
         verbose: Whether to print verbose output
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
     """
     compression_map = {
         "zstd": "ZSTD",
@@ -2777,11 +2858,15 @@ def _plain_copy_to(
     }
     duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
 
+    # Map version to DuckDB GEOPARQUET_VERSION parameter
+    version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+    duckdb_version = version_config.get("duckdb_param", "V1")
+
     escaped_path = output_path.replace("'", "''")
     copy_query = f"""
         COPY ({query})
         TO '{escaped_path}'
-        (FORMAT PARQUET, COMPRESSION {duckdb_compression})
+        (FORMAT PARQUET, COMPRESSION {duckdb_compression}, GEOPARQUET_VERSION '{duckdb_version}')
     """
 
     if verbose:
@@ -2891,6 +2976,7 @@ def write_parquet_with_metadata(
                 output_path=actual_output,
                 compression=compression,
                 verbose=verbose,
+                geoparquet_version=effective_version,
             )
         else:
             # Metadata rewrite needed - use strategy pattern

@@ -827,7 +827,7 @@ class Table:
                 table=self._table,
                 output_path=str(local_path),
                 geometry_column=self._geometry_column,
-                geoparquet_version=geoparquet_version or "1.1",
+                geoparquet_version=geoparquet_version,
                 compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,

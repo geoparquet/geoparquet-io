@@ -302,8 +302,15 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         """Write Arrow table to GeoParquet using DuckDB COPY TO with KV_METADATA."""
         import duckdb
 
+        from geoparquet_io.core.common import _detect_version_from_table
+
         configure_verbose(verbose)
         self._validate_output_path(output_path)
+
+        # Auto-detect version from table schema metadata if not specified
+        effective_version = geoparquet_version
+        if effective_version is None:
+            effective_version = _detect_version_from_table(table, verbose)
 
         con = duckdb.connect()
         try:
@@ -323,7 +330,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 output_path=output_path,
                 geometry_column=geometry_column,
                 original_metadata=None,
-                geoparquet_version=geoparquet_version,
+                geoparquet_version=effective_version,
                 compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,

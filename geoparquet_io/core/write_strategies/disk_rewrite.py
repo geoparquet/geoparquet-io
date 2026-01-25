@@ -55,8 +55,10 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         input_crs: dict | None,
         verbose: bool,
         custom_metadata: dict | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite."""
+        # memory_limit is accepted for interface compatibility but not used by this strategy
         from geoparquet_io.core.common import (
             _wrap_query_with_wkb_conversion,
             compute_bbox_via_sql,
@@ -167,8 +169,15 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         """Write Arrow table to GeoParquet using temporary file and rewrite."""
         import duckdb
 
+        from geoparquet_io.core.common import _detect_version_from_table
+
         configure_verbose(verbose)
         self._validate_output_path(output_path)
+
+        # Auto-detect version from table schema metadata if not specified
+        effective_version = geoparquet_version
+        if effective_version is None:
+            effective_version = _detect_version_from_table(table, verbose)
 
         con = duckdb.connect()
         try:
@@ -188,7 +197,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 output_path=output_path,
                 geometry_column=geometry_column,
                 original_metadata=None,
-                geoparquet_version=geoparquet_version,
+                geoparquet_version=effective_version,
                 compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,

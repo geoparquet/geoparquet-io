@@ -316,7 +316,7 @@ def _write_stream_output(
         geometry_column = find_geometry_column_from_metadata(original_metadata)
 
     # Convert geometry to WKB (DuckDB's fetch_arrow_table exports native format)
-    stream_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
+    stream_query = _wrap_query_with_wkb_conversion(query, geometry_column)
 
     result = con.execute(stream_query)
     table = result.fetch_arrow_table()
