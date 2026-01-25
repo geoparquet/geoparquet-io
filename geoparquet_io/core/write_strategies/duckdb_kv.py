@@ -14,6 +14,7 @@ Reliability: Atomic write - either succeeds completely or fails
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -166,7 +167,9 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
         is_remote = is_remote_url(output_path)
         if is_remote:
-            local_path = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+            # Create temp file and close it immediately so DuckDB can write to it (Windows)
+            fd, local_path = tempfile.mkstemp(suffix=".parquet")
+            os.close(fd)
         else:
             local_path = output_path
 

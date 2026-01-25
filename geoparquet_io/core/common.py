@@ -2832,6 +2832,8 @@ def _plain_copy_to(
     compression: str = "ZSTD",
     verbose: bool = False,
     geoparquet_version: str = "1.1",
+    compression_level: int | None = None,
+    row_group_rows: int | None = None,
 ) -> None:
     """
     Execute a plain DuckDB COPY TO without geo metadata manipulation.
@@ -2846,6 +2848,8 @@ def _plain_copy_to(
         compression: Compression type
         verbose: Whether to print verbose output
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
+        compression_level: Compression level (codec-specific)
+        row_group_rows: Target number of rows per row group
     """
     compression_map = {
         "zstd": "ZSTD",
@@ -2863,10 +2867,22 @@ def _plain_copy_to(
     duckdb_version = version_config.get("duckdb_param", "V1")
 
     escaped_path = output_path.replace("'", "''")
+
+    # Build options list
+    options = [
+        "FORMAT PARQUET",
+        f"COMPRESSION {duckdb_compression}",
+        f"GEOPARQUET_VERSION '{duckdb_version}'",
+    ]
+    if compression_level is not None:
+        options.append(f"COMPRESSION_LEVEL {compression_level}")
+    if row_group_rows is not None:
+        options.append(f"ROW_GROUP_SIZE {row_group_rows}")
+
     copy_query = f"""
         COPY ({query})
         TO '{escaped_path}'
-        (FORMAT PARQUET, COMPRESSION {duckdb_compression}, GEOPARQUET_VERSION '{duckdb_version}')
+        ({", ".join(options)})
     """
 
     if verbose:

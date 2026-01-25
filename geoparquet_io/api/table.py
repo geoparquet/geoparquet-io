@@ -837,7 +837,7 @@ class Table:
 
             # Upload to remote if needed
             if is_remote:
-                upload(str(local_path), path_str, profile=profile)
+                upload(local_path, path_str, profile=profile)
                 return PathLib(path)
 
             return local_path
