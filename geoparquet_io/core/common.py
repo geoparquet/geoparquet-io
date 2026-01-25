@@ -2983,25 +2983,36 @@ def write_parquet_with_metadata(
             strategy_enum = WriteStrategy(write_strategy)
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
+            # Validate memory_limit is only used with duckdb-kv strategy
+            if memory_limit is not None and strategy_enum != WriteStrategy.DUCKDB_KV:
+                raise ValueError(
+                    f"--write-memory is only supported with the 'duckdb-kv' strategy, "
+                    f"not '{write_strategy}'"
+                )
+
             if verbose:
                 debug(f"Using write strategy: {strategy.name}")
 
-            strategy.write_from_query(
-                con=con,
-                query=query,
-                output_path=actual_output,
-                geometry_column=geometry_column or "geometry",
-                original_metadata=original_metadata,
-                geoparquet_version=effective_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                input_crs=input_crs,
-                verbose=verbose,
-                custom_metadata=custom_metadata,
-                memory_limit=memory_limit,
-            )
+            # Build kwargs - only pass memory_limit for duckdb-kv
+            write_kwargs = {
+                "con": con,
+                "query": query,
+                "output_path": actual_output,
+                "geometry_column": geometry_column or "geometry",
+                "original_metadata": original_metadata,
+                "geoparquet_version": effective_version,
+                "compression": compression,
+                "compression_level": compression_level,
+                "row_group_size_mb": row_group_size_mb,
+                "row_group_rows": row_group_rows,
+                "input_crs": input_crs,
+                "verbose": verbose,
+                "custom_metadata": custom_metadata,
+            }
+            if strategy_enum == WriteStrategy.DUCKDB_KV:
+                write_kwargs["memory_limit"] = memory_limit
+
+            strategy.write_from_query(**write_kwargs)
 
         if is_remote:
             upload_if_remote(

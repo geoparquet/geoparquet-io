@@ -204,7 +204,6 @@ class BaseWriteStrategy(ABC):
         input_crs: dict | None,
         verbose: bool,
         custom_metadata: dict | None = None,
-        memory_limit: str | None = None,
     ) -> None:
         """
         Write query results to GeoParquet file.
@@ -223,8 +222,6 @@ class BaseWriteStrategy(ABC):
             input_crs: CRS dict from input file
             verbose: Enable verbose logging
             custom_metadata: Optional dict with custom metadata (e.g., H3 covering info)
-            memory_limit: DuckDB memory limit (e.g., '2GB', '512MB'). If None,
-                auto-detects based on available system/container memory.
         """
         ...
 

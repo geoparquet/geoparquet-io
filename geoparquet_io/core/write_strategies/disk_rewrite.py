@@ -55,10 +55,8 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         input_crs: dict | None,
         verbose: bool,
         custom_metadata: dict | None = None,
-        memory_limit: str | None = None,
     ) -> None:
         """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite."""
-        # memory_limit is accepted for interface compatibility but not used by this strategy
         from geoparquet_io.core.common import (
             _wrap_query_with_wkb_conversion,
             compute_bbox_via_sql,
