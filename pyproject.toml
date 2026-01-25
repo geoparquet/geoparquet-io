@@ -44,7 +44,6 @@ dependencies = [
     "mercantile>=1.2.0",  # Required for quadkey generation
     "httpx>=0.25.0",  # Required for ArcGIS REST API requests
     "click-plugins>=1.1.1",  # Required for plugin system
-    "fastparquet>=2024.2.0",  # Required for footer metadata rewrite
 ]
 
 [project.scripts]

@@ -6,8 +6,8 @@ Write large GeoParquet files with minimal memory usage by streaming data through
 
 When writing large GeoParquet files, loading the entire dataset into memory can exhaust available RAM and cause out-of-memory errors. The streaming write approach solves this by:
 
-1. Using DuckDB's `COPY TO` command to stream data directly to Parquet format
-2. Rewriting only the Parquet footer to add GeoParquet metadata
+1. Computing GeoParquet metadata (bbox, geometry_types) via efficient SQL aggregations
+2. Using DuckDB's `COPY TO` command with `KV_METADATA` to stream data and metadata directly to Parquet format
 
 This allows processing datasets larger than available memory while still producing valid GeoParquet files with proper metadata.
 
@@ -24,19 +24,18 @@ For smaller files or when maximum write performance is needed, the default Arrow
 
 ## How It Works
 
-The streaming write process has four main steps:
+The streaming write process has three main steps:
 
-1. **Prepare metadata** - Extract or compute GeoParquet metadata (bbox, geometry_types, CRS)
-2. **Compute missing metadata via SQL** - If metadata needs recalculation, run aggregate queries
-3. **Stream write with DuckDB COPY TO** - Write Parquet without loading all data into memory
-4. **Rewrite footer** - Add GeoParquet metadata to the file footer using fastparquet
+1. **Prepare metadata** - Extract or compute GeoParquet metadata (bbox, geometry_types, CRS) via SQL aggregations
+2. **Serialize metadata** - Convert metadata to JSON for embedding in Parquet file
+3. **Stream write with DuckDB COPY TO + KV_METADATA** - Write Parquet with embedded GeoParquet metadata in a single pass
 
 ```
-Input Query → DuckDB COPY TO → Parquet File → Footer Rewrite → GeoParquet
-                (streaming)                    (metadata only)
+Input Query → Metadata SQL → DuckDB COPY TO (with KV_METADATA) → GeoParquet
+               (aggregation)            (streaming + metadata)
 ```
 
-The footer rewrite only modifies the last few KB of the file, making it efficient even for multi-GB files.
+The metadata is computed via efficient SQL aggregations before streaming begins, then embedded directly during the write using DuckDB's `KV_METADATA` option.
 
 ## Python API
 
@@ -226,14 +225,13 @@ Specify the target GeoParquet version:
 
 ## Limitations
 
-### Local Files Only for Footer Rewrite
+### Remote Outputs Use Temporary Files
 
-The footer rewrite operation requires direct filesystem access. For remote outputs (S3, GCS, Azure):
+For remote outputs (S3, GCS, Azure), streaming write:
 
-1. Data is written to a local temporary file
-2. Footer is rewritten with GeoParquet metadata
-3. File is uploaded to the remote destination
-4. Temporary file is cleaned up
+1. Writes data to a local temporary file
+2. Uploads the file to the remote destination
+3. Cleans up the temporary file
 
 This means remote writes still work, but require temporary local disk space equal to the output file size.
 
