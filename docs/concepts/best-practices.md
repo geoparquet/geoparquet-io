@@ -226,9 +226,52 @@ time duckdb -c "
 
 Typical improvements: 5-20x faster for spatial queries.
 
+## Large File Processing
+
+gpio handles larger-than-memory files efficiently through its write strategy system.
+
+### Default Behavior
+
+The default `duckdb-kv` strategy uses constant memory regardless of file size:
+
+```bash
+# Process a 100GB file on a 8GB machine - just works
+gpio extract huge_file.parquet filtered.parquet --bbox -122.5,37.5,-122.0,38.0
+```
+
+### Memory Configuration
+
+gpio automatically detects available memory and uses 50% of it for streaming operations. This is container-aware, respecting Docker/Kubernetes memory limits.
+
+For explicit control:
+
+```bash
+# Limit memory in constrained environments
+gpio extract input.parquet output.parquet --write-memory 512MB
+```
+
+### Strategy Selection
+
+| Use Case | Recommended Approach |
+|----------|---------------------|
+| Production workloads | Use default (`duckdb-kv`) |
+| Container deployments | Default + explicit `--write-memory` if needed |
+| Debugging output issues | Use `--write-strategy in-memory` to verify |
+| DuckDB compatibility issues | Try `--write-strategy streaming` |
+
+### Tips for Large Files
+
+1. **Skip Hilbert for faster writes**: `--skip-hilbert` during initial conversion
+2. **Use bbox column**: Enables row group pruning for spatial queries
+3. **Appropriate row group sizes**: Target 50-100 MB compressed per row group
+4. **Process locally when possible**: Download remote files for very large datasets (>50GB)
+
+See the [Write Strategies Guide](../guide/write-strategies.md) for detailed information.
+
 ## See Also
 
 - [What is GeoParquet?](geoparquet-overview.md) - Format overview
 - [Sorting Data](../guide/sort.md) - Hilbert ordering details
 - [Adding Spatial Indices](../guide/add.md) - Bbox and other indices
 - [Checking Best Practices](../guide/check.md) - Validation and auto-fix
+- [Write Strategies Guide](../guide/write-strategies.md) - Large file handling and memory configuration

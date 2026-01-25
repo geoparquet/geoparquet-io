@@ -2812,6 +2812,7 @@ def write_parquet_with_metadata(
     geoparquet_version=None,
     input_crs=None,
     write_strategy: str = "duckdb-kv",
+    memory_limit: str | None = None,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
@@ -2843,6 +2844,8 @@ def write_parquet_with_metadata(
             - "in-memory": Load entire dataset into memory
             - "streaming": Stream Arrow RecordBatches
             - "disk-rewrite": Write with DuckDB, then rewrite with PyArrow
+        memory_limit: DuckDB memory limit for streaming writes (e.g., '2GB', '512MB').
+            If None, auto-detects based on available system/container memory.
 
     Returns:
         None
@@ -2911,6 +2914,7 @@ def write_parquet_with_metadata(
                 input_crs=input_crs,
                 verbose=verbose,
                 custom_metadata=custom_metadata,
+                memory_limit=memory_limit,
             )
 
         if is_remote:

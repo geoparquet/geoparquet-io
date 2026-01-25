@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-import click
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -61,8 +60,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         """Write query results to GeoParquet using streaming RecordBatch approach."""
         from geoparquet_io.core.common import (
             GEOPARQUET_VERSIONS,
-            _compute_geometry_types,
             _wrap_query_with_wkb_conversion,
+            compute_geometry_types_via_sql,
             create_geo_metadata,
             is_default_crs,
             validate_compression_settings,
@@ -103,8 +102,18 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
 
         precomputed_bbox = None
-        if use_native_geometry and should_add_geo_metadata:
-            precomputed_bbox = self._compute_bbox_via_duckdb(con, query, geometry_column, verbose)
+        precomputed_geom_types = []
+
+        if should_add_geo_metadata:
+            # Pre-compute geometry types via SQL to get accurate types across all rows
+            if verbose:
+                debug("Pre-computing geometry types via SQL...")
+            precomputed_geom_types = compute_geometry_types_via_sql(con, query, geometry_column)
+
+            if use_native_geometry:
+                precomputed_bbox = self._compute_bbox_via_duckdb(
+                    con, query, geometry_column, verbose
+                )
 
         if verbose:
             debug(f"Executing query with batch size {batch_size:,}...")
@@ -114,7 +123,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         schema = reader.schema
 
         if geometry_column not in schema.names:
-            raise click.ClickException(
+            raise ValueError(
                 f"Geometry column '{geometry_column}' not found in query result. "
                 f"Available columns: {schema.names}"
             )
@@ -148,6 +157,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 geo_meta["columns"][geometry_column]["crs"] = input_crs
 
             geo_meta["columns"][geometry_column]["encoding"] = "WKB"
+            geo_meta["columns"][geometry_column]["geometry_types"] = precomputed_geom_types
 
             if precomputed_bbox is not None:
                 geo_meta["columns"][geometry_column]["bbox"] = precomputed_bbox
@@ -178,18 +188,13 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 success("Wrote 0 rows (empty result)")
             return
 
-        temp_table = pa.Table.from_batches([first_batch], schema=schema)
-        geom_types = _compute_geometry_types(temp_table, geometry_column, verbose)
-        if geo_meta is not None:
-            geo_meta["columns"][geometry_column]["geometry_types"] = geom_types
-
         schema_with_meta = self._build_streaming_schema(
             schema=schema,
             geometry_column=geometry_column,
             geo_meta=geo_meta,
             use_native_geometry=use_native_geometry,
             input_crs=input_crs,
-            geom_types=geom_types,
+            geom_types=precomputed_geom_types,
             verbose=verbose,
         )
 
@@ -238,12 +243,15 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         row_group_size_mb: int | None,
         row_group_rows: int | None,
         verbose: bool,
+        input_crs: dict | None = None,
+        custom_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using batch streaming."""
         from geoparquet_io.core.common import (
             GEOPARQUET_VERSIONS,
             _compute_geometry_types,
             create_geo_metadata,
+            is_default_crs,
             validate_compression_settings,
         )
 
@@ -272,19 +280,22 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 original_metadata=None,
                 geom_col=geometry_column,
                 bbox_info=bbox_info,
-                custom_metadata=None,
+                custom_metadata=custom_metadata,
                 verbose=verbose,
                 version=metadata_version,
             )
             geo_meta["columns"][geometry_column]["encoding"] = "WKB"
             geo_meta["columns"][geometry_column]["geometry_types"] = geom_types
 
+            if input_crs and not is_default_crs(input_crs):
+                geo_meta["columns"][geometry_column]["crs"] = input_crs
+
         schema_with_meta = self._build_streaming_schema(
             schema=table.schema,
             geometry_column=geometry_column,
             geo_meta=geo_meta,
             use_native_geometry=use_native_geometry,
-            input_crs=None,
+            input_crs=input_crs,
             geom_types=geo_meta["columns"][geometry_column]["geometry_types"] if geo_meta else [],
             verbose=verbose,
         )

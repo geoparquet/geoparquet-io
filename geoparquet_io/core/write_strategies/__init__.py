@@ -33,6 +33,7 @@ from .base import (
     BaseWriteStrategy,
     WriteStrategy,
     atomic_write,
+    build_geo_metadata,
     needs_metadata_rewrite,
 )
 
@@ -107,5 +108,6 @@ __all__ = [
     "WriteStrategyFactory",
     "BaseWriteStrategy",
     "atomic_write",
+    "build_geo_metadata",
     "needs_metadata_rewrite",
 ]

@@ -8,16 +8,128 @@ varying memory and performance characteristics.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tempfile
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import duckdb
     import pyarrow as pa
+
+
+def build_geo_metadata(
+    geometry_column: str,
+    geoparquet_version: str,
+    original_metadata: dict | None = None,
+    input_crs: dict | None = None,
+    custom_metadata: dict | None = None,
+    bbox: list[float] | None = None,
+    geometry_types: list[str] | None = None,
+) -> dict:
+    """
+    Build GeoParquet metadata - single source of truth for all strategies.
+
+    This helper consolidates the metadata building logic that was previously
+    duplicated across strategies.
+
+    Args:
+        geometry_column: Name of the geometry column
+        geoparquet_version: Target GeoParquet version (1.0, 1.1, 2.0)
+        original_metadata: Original file metadata to parse for existing geo metadata
+        input_crs: PROJJSON dict with CRS to apply
+        custom_metadata: Custom metadata (e.g., H3 covering info)
+        bbox: Bounding box [xmin, ymin, xmax, ymax]
+        geometry_types: List of geometry types (e.g., ["Point", "MultiPoint"])
+
+    Returns:
+        dict: Complete geo metadata structure ready for embedding in Parquet
+    """
+    from geoparquet_io.core.common import GEOPARQUET_VERSIONS, is_default_crs
+
+    version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+    metadata_version = version_config.get("metadata_version", "1.1.0")
+
+    # Parse existing geo metadata if provided
+    geo_meta = _parse_existing_geo_metadata(original_metadata)
+
+    # Initialize or update structure
+    geo_meta = _initialize_geo_metadata(geo_meta, geometry_column, metadata_version)
+
+    col_meta = geo_meta["columns"][geometry_column]
+
+    # Encoding (required by GeoParquet spec)
+    if "encoding" not in col_meta:
+        col_meta["encoding"] = "WKB"
+
+    # Geometry types
+    if geometry_types is not None:
+        col_meta["geometry_types"] = geometry_types
+
+    # Bounding box
+    if bbox is not None:
+        col_meta["bbox"] = bbox
+
+    # CRS (only if non-default)
+    if input_crs and not is_default_crs(input_crs):
+        col_meta["crs"] = input_crs
+
+    # Merge custom metadata into geometry column
+    if custom_metadata:
+        for key, value in custom_metadata.items():
+            col_meta[key] = value
+
+    return geo_meta
+
+
+def _parse_existing_geo_metadata(original_metadata: dict | None) -> dict | None:
+    """Parse existing geo metadata from file metadata."""
+    if not original_metadata:
+        return None
+
+    if isinstance(original_metadata, dict):
+        if "geo" in original_metadata:
+            geo_data = original_metadata["geo"]
+            if isinstance(geo_data, str):
+                return json.loads(geo_data)
+            return geo_data
+        if b"geo" in original_metadata:
+            geo_data = original_metadata[b"geo"]
+            if isinstance(geo_data, bytes):
+                return json.loads(geo_data.decode("utf-8"))
+            if isinstance(geo_data, str):
+                return json.loads(geo_data)
+            return geo_data
+
+    return None
+
+
+def _initialize_geo_metadata(geo_meta: dict | None, geometry_column: str, version: str) -> dict:
+    """Initialize geo metadata structure with column entry."""
+    if geo_meta is None:
+        return {
+            "version": version,
+            "primary_column": geometry_column,
+            "columns": {geometry_column: {}},
+        }
+
+    # Work with a copy to avoid mutation
+    geo_meta = dict(geo_meta)
+    # Always use the target version, not the original
+    geo_meta["version"] = version
+    if "primary_column" not in geo_meta:
+        geo_meta["primary_column"] = geometry_column
+    if "columns" not in geo_meta:
+        geo_meta["columns"] = {}
+    if geometry_column not in geo_meta["columns"]:
+        geo_meta["columns"][geometry_column] = {}
+
+    return geo_meta
 
 
 class WriteStrategy(str, Enum):
@@ -92,6 +204,7 @@ class BaseWriteStrategy(ABC):
         input_crs: dict | None,
         verbose: bool,
         custom_metadata: dict | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """
         Write query results to GeoParquet file.
@@ -110,6 +223,8 @@ class BaseWriteStrategy(ABC):
             input_crs: CRS dict from input file
             verbose: Enable verbose logging
             custom_metadata: Optional dict with custom metadata (e.g., H3 covering info)
+            memory_limit: DuckDB memory limit (e.g., '2GB', '512MB'). If None,
+                auto-detects based on available system/container memory.
         """
         ...
 
@@ -125,6 +240,8 @@ class BaseWriteStrategy(ABC):
         row_group_size_mb: int | None,
         row_group_rows: int | None,
         verbose: bool,
+        input_crs: dict | None = None,
+        custom_metadata: dict | None = None,
     ) -> None:
         """
         Write Arrow table to GeoParquet file.
@@ -139,6 +256,8 @@ class BaseWriteStrategy(ABC):
             row_group_size_mb: Target row group size in MB
             row_group_rows: Exact number of rows per row group
             verbose: Enable verbose logging
+            input_crs: CRS dict to apply to geometry column
+            custom_metadata: Optional dict with custom metadata (e.g., H3 covering info)
         """
         ...
 
@@ -146,17 +265,28 @@ class BaseWriteStrategy(ABC):
         """
         Validate output path for security concerns.
 
-        Prevents path traversal attacks by checking for ".." components.
+        Prevents path traversal attacks, symlink attacks, and SQL injection vectors.
 
         Args:
             output_path: Path to validate
 
         Raises:
-            ValueError: If path contains directory traversal attempts
+            ValueError: If path contains security concerns
         """
-        normalized = os.path.normpath(output_path)
-        if ".." in normalized.split(os.sep):
+        # Check for dangerous characters that could break SQL or cause issues
+        if re.search(r"[;\x00]", output_path):
+            raise ValueError(f"Invalid characters in output path: {output_path}")
+
+        # Check for directory traversal in the original path (before resolution)
+        normalized_input = os.path.normpath(output_path)
+        if ".." in normalized_input.split(os.sep):
             raise ValueError(f"Invalid output path (directory traversal detected): {output_path}")
+
+        # Resolve symlinks and normalize for robust path handling
+        try:
+            Path(output_path).resolve()
+        except (OSError, ValueError) as e:
+            raise ValueError(f"Invalid output path: {output_path}") from e
 
 
 def needs_metadata_rewrite(

@@ -128,6 +128,8 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         row_group_size_mb: int | None,
         row_group_rows: int | None,
         verbose: bool,
+        input_crs: dict | None = None,
+        custom_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet file."""
         from geoparquet_io.core.common import (
@@ -156,8 +158,8 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
                 geometry_column=geometry_column,
                 geoparquet_version=geoparquet_version,
                 original_metadata=None,
-                input_crs=None,
-                custom_metadata=None,
+                input_crs=input_crs,
+                custom_metadata=custom_metadata,
                 verbose=verbose,
             )
 

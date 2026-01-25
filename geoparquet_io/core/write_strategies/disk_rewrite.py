@@ -20,7 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
-from geoparquet_io.core.write_strategies.base import BaseWriteStrategy
+from geoparquet_io.core.write_strategies.base import BaseWriteStrategy, build_geo_metadata
 
 if TYPE_CHECKING:
     import duckdb
@@ -58,7 +58,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
     ) -> None:
         """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite."""
         from geoparquet_io.core.common import (
-            GEOPARQUET_VERSIONS,
             _wrap_query_with_wkb_conversion,
             compute_bbox_via_sql,
             compute_geometry_types_via_sql,
@@ -84,9 +83,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         validated_compression, validated_level, _ = validate_compression_settings(
             compression, compression_level, verbose
         )
-
-        version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
-        metadata_version = version_config.get("metadata_version", "1.1.0")
 
         is_remote = is_remote_url(output_path)
         work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_")
@@ -123,14 +119,14 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                     f"DuckDB wrote {pf.metadata.num_rows:,} rows, {pf.metadata.num_row_groups} row groups"
                 )
 
-            geo_meta = self._build_geo_metadata(
-                original_metadata=original_metadata,
+            geo_meta = build_geo_metadata(
                 geometry_column=geometry_column,
-                metadata_version=metadata_version,
-                bbox=bbox,
-                geometry_types=geometry_types,
+                geoparquet_version=geoparquet_version,
+                original_metadata=original_metadata,
                 input_crs=input_crs,
                 custom_metadata=custom_metadata,
+                bbox=bbox,
+                geometry_types=geometry_types,
             )
 
             self._rewrite_with_metadata(
@@ -165,6 +161,8 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         row_group_size_mb: int | None,
         row_group_rows: int | None,
         verbose: bool,
+        input_crs: dict | None = None,
+        custom_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using temporary file and rewrite."""
         import duckdb
@@ -173,70 +171,34 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         self._validate_output_path(output_path)
 
         con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial")
+        try:
+            con.execute("INSTALL spatial; LOAD spatial")
+            con.register("input_table", table)
 
-        con.register("input_table", table)
+            # Convert WKB bytes to GEOMETRY for proper spatial processing
+            escaped_geom = geometry_column.replace('"', '""')
+            query = f"""
+                SELECT * REPLACE (ST_GeomFromWKB("{escaped_geom}") AS "{escaped_geom}")
+                FROM input_table
+            """
 
-        # Convert WKB bytes to GEOMETRY for proper spatial processing
-        escaped_geom = geometry_column.replace('"', '""')
-        query = f"""
-            SELECT * REPLACE (ST_GeomFromWKB("{escaped_geom}") AS "{escaped_geom}")
-            FROM input_table
-        """
-
-        self.write_from_query(
-            con=con,
-            query=query,
-            output_path=output_path,
-            geometry_column=geometry_column,
-            original_metadata=None,
-            geoparquet_version=geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            input_crs=None,
-            verbose=verbose,
-        )
-
-        con.close()
-
-    def _build_geo_metadata(
-        self,
-        original_metadata: dict | None,
-        geometry_column: str,
-        metadata_version: str,
-        bbox: list[float] | None,
-        geometry_types: list[str],
-        input_crs: dict | None,
-        custom_metadata: dict | None = None,
-    ) -> dict:
-        """Build complete geo metadata for the output file."""
-        from geoparquet_io.core.common import is_default_crs
-
-        geo_meta = {
-            "version": metadata_version,
-            "primary_column": geometry_column,
-            "columns": {
-                geometry_column: {
-                    "encoding": "WKB",
-                    "geometry_types": geometry_types or [],
-                }
-            },
-        }
-
-        if bbox:
-            geo_meta["columns"][geometry_column]["bbox"] = bbox
-
-        if input_crs and not is_default_crs(input_crs):
-            geo_meta["columns"][geometry_column]["crs"] = input_crs
-
-        # Merge custom metadata (e.g., H3 covering info) into geometry column
-        if custom_metadata:
-            for key, value in custom_metadata.items():
-                geo_meta["columns"][geometry_column][key] = value
-
-        return geo_meta
+            self.write_from_query(
+                con=con,
+                query=query,
+                output_path=output_path,
+                geometry_column=geometry_column,
+                original_metadata=None,
+                geoparquet_version=geoparquet_version,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                input_crs=input_crs,
+                verbose=verbose,
+                custom_metadata=custom_metadata,
+            )
+        finally:
+            con.close()
 
     def _rewrite_with_metadata(
         self,

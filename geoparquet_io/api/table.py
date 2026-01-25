@@ -681,6 +681,7 @@ class Table:
         geoparquet_version: str | None = None,
         write_strategy: str = "duckdb-kv",
         profile: str | None = None,
+        verbose: bool = False,
         # Format-specific options
         overwrite: bool = False,
         layer_name: str = "features",
@@ -748,6 +749,7 @@ class Table:
                 geoparquet_version=geoparquet_version,
                 write_strategy=write_strategy,
                 profile=profile,
+                verbose=verbose,
             )
 
         # Handle other formats
@@ -794,31 +796,55 @@ class Table:
         geoparquet_version: str | None,
         write_strategy: str,
         profile: str | None,
+        verbose: bool = False,
     ) -> Path:
         """Write table to GeoParquet format (supports local and cloud)."""
+        import tempfile
+        import uuid
         from pathlib import Path as PathLib
 
+        from geoparquet_io.core.common import is_remote_url, setup_aws_profile_if_needed
+        from geoparquet_io.core.upload import upload
         from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
 
-        output_path = PathLib(path)
+        path_str = str(path)
+        is_remote = is_remote_url(path_str)
 
-        # Get the appropriate write strategy
-        strategy_enum = WriteStrategy(write_strategy)
-        strategy = WriteStrategyFactory.get_strategy(strategy_enum)
+        # For remote destinations, write to temp file first
+        if is_remote:
+            setup_aws_profile_if_needed(profile, path_str)
+            temp_dir = PathLib(tempfile.gettempdir())
+            local_path = temp_dir / f"gpio_write_{uuid.uuid4()}.parquet"
+        else:
+            local_path = PathLib(path)
 
-        strategy.write_from_table(
-            table=self._table,
-            output_path=str(output_path),
-            geometry_column=self._geometry_column,
-            geoparquet_version=geoparquet_version or "1.1",
-            compression=compression,
-            compression_level=compression_level or 15,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            verbose=False,
-        )
+        try:
+            # Get the appropriate write strategy
+            strategy_enum = WriteStrategy(write_strategy)
+            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
-        return output_path
+            strategy.write_from_table(
+                table=self._table,
+                output_path=str(local_path),
+                geometry_column=self._geometry_column,
+                geoparquet_version=geoparquet_version or "1.1",
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                verbose=verbose,
+            )
+
+            # Upload to remote if needed
+            if is_remote:
+                upload(str(local_path), path_str, profile=profile)
+                return PathLib(path)
+
+            return local_path
+        finally:
+            # Clean up temp file for remote writes
+            if is_remote and local_path.exists():
+                local_path.unlink()
 
     def _write_format(
         self,

@@ -124,9 +124,75 @@ gpio inspect "C:\Users\My Name\data file.parquet"
 
 **Solutions**:
 
-1. Process in chunks using partitioning
-2. Increase system swap space
-3. Use a machine with more RAM
+1. **Use the default write strategy** - gpio automatically streams data with constant memory:
+   ```bash
+   gpio extract large_file.parquet output.parquet --bbox -122.5,37.5,-122.0,38.0
+   ```
+
+2. **Set explicit memory limit** - For containerized environments or tight constraints:
+   ```bash
+   gpio extract input.parquet output.parquet --write-memory 512MB
+   ```
+
+3. **Try streaming strategy** - Alternative if default still uses too much memory:
+   ```bash
+   gpio extract input.parquet output.parquet --write-strategy streaming --write-memory 256MB
+   ```
+
+4. **Process in chunks using partitioning** - For extremely large datasets:
+   ```bash
+   gpio partition input.parquet output/ --by-quadkey --quadkey-resolution 4
+   ```
+
+5. Increase system swap space or use a machine with more RAM
+
+### Slow Writes in Containers
+
+**Symptom**: Write operations are slow in Docker or Kubernetes.
+
+**Cause**: gpio may not correctly detect container memory limits in some configurations.
+
+**Solutions**:
+
+1. **Set explicit memory limit** - Tell gpio exactly how much memory to use:
+   ```bash
+   gpio extract input.parquet output.parquet --write-memory 1GB
+   ```
+
+2. **Verify container memory limits** - Ensure your container has enough memory:
+   ```bash
+   docker run -m 4g my-gpio-image gpio extract input.parquet output.parquet
+   ```
+
+3. **Check cgroup version** - gpio supports both cgroup v1 and v2. Verify your container runtime is configured correctly.
+
+### Write Strategy Selection
+
+**Symptom**: Need to choose between different write strategies.
+
+**When to use each strategy**:
+
+| Scenario | Strategy | Command |
+|----------|----------|---------|
+| Default (any file size) | `duckdb-kv` | (no flag needed) |
+| Verify output correctness | `in-memory` | `--write-strategy in-memory` |
+| DuckDB has issues | `streaming` | `--write-strategy streaming` |
+| Maximum compatibility | `disk-rewrite` | `--write-strategy disk-rewrite` |
+
+**Example - Debugging output differences**:
+```bash
+# 1. Write with default
+gpio extract input.parquet output_default.parquet --bbox 0,0,10,10
+
+# 2. Write with in-memory to verify
+gpio extract input.parquet output_verify.parquet --bbox 0,0,10,10 --write-strategy in-memory
+
+# 3. Compare
+gpio inspect output_default.parquet --stats
+gpio inspect output_verify.parquet --stats
+```
+
+See the [Write Strategies Guide](guide/write-strategies.md) for detailed information
 
 ## GeoParquet Issues
 

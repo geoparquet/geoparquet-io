@@ -88,12 +88,14 @@ def row_group_options(func):
 
 def output_format_options(func):
     """
-    Add all output format options (compression + row groups).
+    Add all output format options (compression + row groups + memory limit).
 
-    This is a convenience decorator that combines compression_options and row_group_options.
+    This is a convenience decorator that combines compression_options, row_group_options,
+    and write_memory_option.
     """
     func = compression_options(func)
     func = row_group_options(func)
+    func = write_memory_option(func)
     return func
 
 
@@ -139,6 +141,23 @@ def overwrite_option(func):
     Allows overwriting existing files without prompting.
     """
     return click.option("--overwrite", is_flag=True, help="Overwrite existing files")(func)
+
+
+def write_memory_option(func):
+    """
+    Add --write-memory option to a command.
+
+    Allows specifying the DuckDB memory limit for streaming writes.
+    When set, DuckDB uses single-threaded mode for memory control.
+    Accepts values like '512MB', '2GB', '4GB'.
+    """
+    return click.option(
+        "--write-memory",
+        type=str,
+        default=None,
+        help="Memory limit for streaming writes (e.g., '512MB', '2GB'). "
+        "Default: 50%% of available RAM (container-aware).",
+    )(func)
 
 
 def any_extension_option(func):
