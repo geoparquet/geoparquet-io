@@ -20,6 +20,7 @@ from geoparquet_io.cli.decorators import (
     profile_option,
     show_sql_option,
     verbose_option,
+    write_strategy_option,
 )
 from geoparquet_io.cli.fix_helpers import handle_fix_common
 from geoparquet_io.core.add_bbox_column import add_bbox_column as add_bbox_column_impl
@@ -1981,6 +1982,7 @@ def extract(ctx):
 )
 @output_format_options
 @geoparquet_version_option
+@write_strategy_option
 @partition_input_options
 @dry_run_option
 @show_sql_option
@@ -2003,6 +2005,7 @@ def extract_geoparquet(
     row_group_size,
     row_group_size_mb,
     geoparquet_version,
+    write_strategy,
     allow_schema_diff,
     hive_input,
     dry_run,
@@ -2124,6 +2127,7 @@ def extract_geoparquet(
             geoparquet_version=geoparquet_version,
             allow_schema_diff=allow_schema_diff,
             hive_input=hive_input,
+            write_strategy=write_strategy,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e

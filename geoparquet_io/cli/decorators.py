@@ -215,6 +215,30 @@ def geoparquet_version_option(func):
     )(func)
 
 
+def write_strategy_option(func):
+    """
+    Add --write-strategy option to a command.
+
+    Allows specifying the write strategy for GeoParquet output:
+    - auto (default): Auto-select based on file size and available memory
+    - in-memory: Load entire dataset into memory, apply metadata, write once
+    - streaming: Stream Arrow RecordBatches for constant memory usage
+    - duckdb-kv: Use DuckDB COPY TO with native KV_METADATA for geo metadata
+    - disk-rewrite: Write with DuckDB, then rewrite with PyArrow for metadata
+    """
+    return click.option(
+        "--write-strategy",
+        type=click.Choice(["auto", "in-memory", "streaming", "duckdb-kv", "disk-rewrite"]),
+        default="auto",
+        help="Write strategy for output file. "
+        "auto (default): auto-select based on file size. "
+        "in-memory: load full dataset (fast, needs memory). "
+        "streaming: constant memory usage. "
+        "duckdb-kv: DuckDB native metadata (very large files). "
+        "disk-rewrite: most reliable fallback.",
+    )(func)
+
+
 def partition_options(func):
     """
     Add standard partitioning options to a command.

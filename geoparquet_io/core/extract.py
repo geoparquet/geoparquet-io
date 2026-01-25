@@ -928,6 +928,7 @@ def _execute_extraction(
     row_group_rows: int | None,
     profile: str | None,
     geoparquet_version: str | None = None,
+    write_strategy: str = "auto",
 ) -> None:
     """Execute the extraction query and write output."""
     if verbose:
@@ -981,6 +982,7 @@ def _execute_extraction(
             show_sql=show_sql,
             profile=profile,
             geoparquet_version=geoparquet_version,
+            write_strategy=write_strategy,
         )
 
         # Get extracted row count from output file metadata (fast - reads footer only)
@@ -1019,6 +1021,7 @@ def extract(
     geoparquet_version: str | None = None,
     allow_schema_diff: bool = False,
     hive_input: bool = False,
+    write_strategy: str = "auto",
 ) -> None:
     """
     Extract columns and rows from GeoParquet files.
@@ -1054,6 +1057,7 @@ def extract(
         geoparquet_version,
         allow_schema_diff,
         hive_input,
+        write_strategy,
     )
 
 
@@ -1079,6 +1083,7 @@ def _extract_impl(
     geoparquet_version: str | None,
     allow_schema_diff: bool = False,
     hive_input: bool = False,
+    write_strategy: str = "auto",
 ) -> None:
     """Internal implementation of extract with auto-detecting S3 access."""
     # Parse column lists
@@ -1209,4 +1214,5 @@ def _extract_impl(
             row_group_rows,
             profile,
             geoparquet_version,
+            write_strategy,
         )

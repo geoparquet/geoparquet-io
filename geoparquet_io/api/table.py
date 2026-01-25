@@ -679,6 +679,7 @@ class Table:
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
+        write_strategy: str = "auto",
         profile: str | None = None,
         # Format-specific options
         overwrite: bool = False,
@@ -707,6 +708,8 @@ class Table:
             row_group_size_mb: Target row group size in MB for GeoParquet
             row_group_rows: Exact rows per row group for GeoParquet
             geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, or None to preserve)
+            write_strategy: Write strategy for GeoParquet ('auto', 'in-memory', 'streaming',
+                           'duckdb-kv', 'disk-rewrite'). Default: 'auto'
             profile: AWS profile for S3 operations
             overwrite: Overwrite existing file (GeoPackage, Shapefile)
             layer_name: Layer name for GeoPackage (default: 'features')
@@ -743,6 +746,7 @@ class Table:
                 row_group_size_mb=row_group_size_mb,
                 row_group_rows=row_group_rows,
                 geoparquet_version=geoparquet_version,
+                write_strategy=write_strategy,
                 profile=profile,
             )
 
@@ -788,25 +792,33 @@ class Table:
         row_group_size_mb: float | None,
         row_group_rows: int | None,
         geoparquet_version: str | None,
+        write_strategy: str,
         profile: str | None,
     ) -> Path:
         """Write table to GeoParquet format (supports local and cloud)."""
         from pathlib import Path as PathLib
 
+        from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
+
         output_path = PathLib(path)
 
-        # Use write_geoparquet_table which handles both local and remote
-        write_geoparquet_table(
-            self._table,
-            output_file=str(output_path),
+        # Get the appropriate write strategy
+        strategy_enum = WriteStrategy(write_strategy)
+        if strategy_enum == WriteStrategy.AUTO:
+            strategy = WriteStrategyFactory.get_strategy(WriteStrategy.ARROW_MEMORY)
+        else:
+            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
+
+        strategy.write_from_table(
+            table=self._table,
+            output_path=str(output_path),
             geometry_column=self._geometry_column,
+            geoparquet_version=geoparquet_version or "1.1",
             compression=compression,
-            compression_level=compression_level,
+            compression_level=compression_level or 15,
             row_group_size_mb=row_group_size_mb,
             row_group_rows=row_group_rows,
-            geoparquet_version=geoparquet_version,
             verbose=False,
-            profile=profile,
         )
 
         return output_path

@@ -1891,6 +1891,84 @@ def _wrap_query_with_wkb_conversion(query: str, geometry_column: str) -> str:
     """
 
 
+def compute_bbox_via_sql(
+    con,
+    query: str,
+    geometry_column: str,
+) -> list[float] | None:
+    """
+    Compute bounding box from query using DuckDB spatial functions.
+
+    Args:
+        con: DuckDB connection with spatial extension loaded
+        query: SQL query containing geometry column
+        geometry_column: Name of geometry column
+
+    Returns:
+        [xmin, ymin, xmax, ymax] or None if query returns no rows
+    """
+    # Escape column name for SQL (double any embedded quotes)
+    escaped_col = geometry_column.replace('"', '""')
+    bbox_query = f"""
+        SELECT
+            MIN(ST_XMin("{escaped_col}")) as xmin,
+            MIN(ST_YMin("{escaped_col}")) as ymin,
+            MAX(ST_XMax("{escaped_col}")) as xmax,
+            MAX(ST_YMax("{escaped_col}")) as ymax
+        FROM ({query})
+    """
+    result = con.execute(bbox_query).fetchone()
+
+    if result and all(v is not None for v in result):
+        return list(result)
+    return None
+
+
+def compute_geometry_types_via_sql(
+    con,
+    query: str,
+    geometry_column: str,
+) -> list[str]:
+    """
+    Compute distinct geometry types from query using DuckDB.
+
+    Args:
+        con: DuckDB connection with spatial extension loaded
+        query: SQL query containing geometry column
+        geometry_column: Name of geometry column
+
+    Returns:
+        List of geometry type names (e.g., ["Point", "Polygon"])
+    """
+    # Escape column name for SQL (double any embedded quotes)
+    escaped_col = geometry_column.replace('"', '""')
+    types_query = f"""
+        SELECT DISTINCT ST_GeometryType("{escaped_col}") as geom_type
+        FROM ({query})
+        WHERE "{escaped_col}" IS NOT NULL
+    """
+    results = con.execute(types_query).fetchall()
+
+    # DuckDB returns types like "POINT", "POLYGON" - convert to GeoParquet format
+    type_map = {
+        "POINT": "Point",
+        "LINESTRING": "LineString",
+        "POLYGON": "Polygon",
+        "MULTIPOINT": "MultiPoint",
+        "MULTILINESTRING": "MultiLineString",
+        "MULTIPOLYGON": "MultiPolygon",
+        "GEOMETRYCOLLECTION": "GeometryCollection",
+    }
+
+    types = []
+    for (geom_type,) in results:
+        if geom_type:
+            normalized = type_map.get(geom_type.upper(), geom_type)
+            types.append(normalized)
+
+    return sorted(set(types))
+
+
 def _rebuild_array_with_type(
     chunked_array,
     new_type,
@@ -2671,13 +2749,14 @@ def write_parquet_with_metadata(
     profile=None,
     geoparquet_version=None,
     input_crs=None,
+    write_strategy: str = "auto",
 ):
     """
     Write a parquet file with proper compression and metadata handling.
 
-    Uses Arrow as the internal transfer format for efficiency - fetches DuckDB
-    query results directly as an Arrow table, applies metadata in memory, and
-    writes once to disk (no intermediate file rewrites).
+    Supports multiple write strategies with different memory and performance
+    characteristics. The default "auto" strategy selects the best approach
+    based on file size and available memory.
 
     Supports both local and remote outputs (S3, GCS, Azure). Remote outputs
     are written to a temporary local file, then uploaded.
@@ -2697,29 +2776,85 @@ def write_parquet_with_metadata(
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         input_crs: PROJJSON dict with CRS from input file
+        write_strategy: Write strategy to use. Options:
+            - "auto" (default): Auto-select based on file size and memory
+            - "in-memory": Load entire dataset into memory
+            - "streaming": Stream Arrow RecordBatches
+            - "duckdb-kv": Use DuckDB COPY TO with KV_METADATA
+            - "disk-rewrite": Write with DuckDB, then rewrite with PyArrow
 
     Returns:
         None
     """
-    # Delegate to the Arrow-based implementation
-    # Bounds are always computed from actual table data during metadata application
-    write_geoparquet_via_arrow(
-        con=con,
-        query=query,
-        output_file=output_file,
-        geometry_column=None,  # Auto-detect
-        original_metadata=original_metadata,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        custom_metadata=custom_metadata,
-        verbose=verbose,
-        show_sql=show_sql,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        input_crs=input_crs,
+    from geoparquet_io.core.write_strategies import (
+        WriteContext,
+        WriteStrategy,
+        WriteStrategyFactory,
     )
+
+    configure_verbose(verbose)
+
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, output_file)
+
+    # Auto-detect geometry column and version if not provided
+    geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
+
+    if geoparquet_version is None:
+        geoparquet_version = extract_version_from_metadata(original_metadata)
+
+    # Build context for strategy selection
+    context = WriteContext(
+        output_path=output_file,
+        is_remote=is_remote_url(output_file),
+        geoparquet_version=geoparquet_version or "1.1",
+        has_geometry=geometry_column is not None,
+        needs_metadata_rewrite=True,
+    )
+
+    # Select or get strategy
+    strategy_enum = WriteStrategy(write_strategy)
+    if strategy_enum == WriteStrategy.AUTO:
+        strategy = WriteStrategyFactory.select_strategy(context)
+        if verbose:
+            debug(f"Auto-selected write strategy: {strategy.name}")
+    else:
+        strategy = WriteStrategyFactory.get_strategy(strategy_enum)
+        if verbose:
+            info(f"Using write strategy: {strategy.name}")
+
+    if show_sql:
+        info("\n-- Query:")
+        progress(query)
+
+    with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
+        actual_output,
+        is_remote,
+    ):
+        strategy.write_from_query(
+            con=con,
+            query=query,
+            output_path=actual_output,
+            geometry_column=geometry_column or "geometry",
+            original_metadata=original_metadata,
+            geoparquet_version=geoparquet_version or "1.1",
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            input_crs=input_crs,
+            verbose=verbose,
+            custom_metadata=custom_metadata,
+        )
+
+        if is_remote:
+            upload_if_remote(
+                actual_output,
+                output_file,
+                profile=profile,
+                is_directory=False,
+                verbose=verbose,
+            )
 
 
 def write_geoparquet_table(
