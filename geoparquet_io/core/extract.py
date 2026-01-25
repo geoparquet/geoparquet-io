@@ -928,7 +928,7 @@ def _execute_extraction(
     row_group_rows: int | None,
     profile: str | None,
     geoparquet_version: str | None = None,
-    write_strategy: str = "auto",
+    write_strategy: str = "duckdb-kv",
 ) -> None:
     """Execute the extraction query and write output."""
     if verbose:
@@ -1021,7 +1021,7 @@ def extract(
     geoparquet_version: str | None = None,
     allow_schema_diff: bool = False,
     hive_input: bool = False,
-    write_strategy: str = "auto",
+    write_strategy: str = "duckdb-kv",
 ) -> None:
     """
     Extract columns and rows from GeoParquet files.
@@ -1083,7 +1083,7 @@ def _extract_impl(
     geoparquet_version: str | None,
     allow_schema_diff: bool = False,
     hive_input: bool = False,
-    write_strategy: str = "auto",
+    write_strategy: str = "duckdb-kv",
 ) -> None:
     """Internal implementation of extract with auto-detecting S3 access."""
     # Parse column lists

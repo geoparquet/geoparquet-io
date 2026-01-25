@@ -97,7 +97,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         final_sql = query
         if needs_wkb_conversion:
-            final_sql = _wrap_query_with_wkb_conversion(query, geometry_column)
+            final_sql = _wrap_query_with_wkb_conversion(query, geometry_column, con)
 
         use_native_geometry = geoparquet_version in ("2.0", "parquet-geo-only")
         should_add_geo_metadata = geoparquet_version != "parquet-geo-only"

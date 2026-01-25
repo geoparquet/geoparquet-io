@@ -103,7 +103,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 debug("Computing geometry types via SQL...")
             geometry_types = compute_geometry_types_via_sql(con, query, geometry_column)
 
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
 
             escaped_temp = temp_path.replace("'", "''")
             copy_query = f"""

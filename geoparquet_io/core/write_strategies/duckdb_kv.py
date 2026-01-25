@@ -109,6 +109,34 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             local_path = output_path
 
         try:
+            # For parquet-geo-only, strip geo metadata entirely
+            if geoparquet_version == "parquet-geo-only":
+                if verbose:
+                    debug("Writing parquet-geo-only (no geo metadata)...")
+
+                # Use PyArrow to write without geo metadata
+                final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
+                result = con.execute(final_query).arrow()
+                # Handle both Table and RecordBatchReader
+                table = result.read_all() if hasattr(result, "read_all") else result
+
+                # Strip geo metadata if present
+                metadata = table.schema.metadata or {}
+                if b"geo" in metadata:
+                    new_metadata = {k: v for k, v in metadata.items() if k != b"geo"}
+                    new_schema = table.schema.with_metadata(new_metadata)
+                    table = table.cast(new_schema)
+
+                pq.write_table(table, local_path, compression=compression_upper.lower())
+
+                if verbose:
+                    success(f"Wrote {table.num_rows:,} rows to {output_path}")
+
+                if is_remote:
+                    upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
+
+                return
+
             geo_meta = self._prepare_geo_metadata(
                 original_metadata=original_metadata,
                 geometry_column=geometry_column,
@@ -145,7 +173,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 if verbose:
                     debug("Added bbox covering metadata")
 
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
 
             escaped_path = local_path.replace("'", "''")
 
@@ -288,8 +316,8 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             }
         else:
             geo_meta = dict(geo_meta)
-            if "version" not in geo_meta:
-                geo_meta["version"] = version
+            # Always use the target version, not the original
+            geo_meta["version"] = version
             if "primary_column" not in geo_meta:
                 geo_meta["primary_column"] = geometry_column
             if "columns" not in geo_meta:

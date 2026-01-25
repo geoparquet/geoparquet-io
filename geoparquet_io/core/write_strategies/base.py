@@ -183,10 +183,33 @@ def needs_metadata_rewrite(
     version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
 
     if geoparquet_version == "parquet-geo-only":
+        # For parquet-geo-only, we need to strip any existing geo metadata
+        # Check if input has geo metadata that needs to be stripped
+        if original_metadata:
+            has_geo = "geo" in original_metadata or b"geo" in original_metadata
+            if has_geo:
+                return True  # Need rewrite to strip the metadata
         return False
 
     if geoparquet_version == "2.0":
         if operation in ("columns_only", "sort"):
             return False
+        # For 2.0 output, check if input has different version that needs updating
+        if original_metadata:
+            import json
+
+            geo_data = original_metadata.get("geo") or original_metadata.get(b"geo")
+            if geo_data:
+                if isinstance(geo_data, bytes):
+                    geo_data = geo_data.decode("utf-8")
+                if isinstance(geo_data, str):
+                    geo_meta = json.loads(geo_data)
+                else:
+                    geo_meta = geo_data
+                input_version = geo_meta.get("version", "")
+                # Need rewrite if input version is not 2.x
+                if not input_version.startswith("2."):
+                    return True
+        return False
 
     return version_config.get("rewrite_metadata", True)

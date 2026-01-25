@@ -679,7 +679,7 @@ class Table:
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
-        write_strategy: str = "auto",
+        write_strategy: str = "duckdb-kv",
         profile: str | None = None,
         # Format-specific options
         overwrite: bool = False,
@@ -708,8 +708,8 @@ class Table:
             row_group_size_mb: Target row group size in MB for GeoParquet
             row_group_rows: Exact rows per row group for GeoParquet
             geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, or None to preserve)
-            write_strategy: Write strategy for GeoParquet ('auto', 'in-memory', 'streaming',
-                           'duckdb-kv', 'disk-rewrite'). Default: 'auto'
+            write_strategy: Write strategy for GeoParquet ('in-memory', 'streaming',
+                           'duckdb-kv', 'disk-rewrite'). Default: 'duckdb-kv'
             profile: AWS profile for S3 operations
             overwrite: Overwrite existing file (GeoPackage, Shapefile)
             layer_name: Layer name for GeoPackage (default: 'features')

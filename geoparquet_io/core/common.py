@@ -1866,7 +1866,7 @@ def _detect_geometry_from_query(
     return "geometry"
 
 
-def _wrap_query_with_wkb_conversion(query: str, geometry_column: str) -> str:
+def _wrap_query_with_wkb_conversion(query: str, geometry_column: str, con=None) -> str:
     """
     Wrap query to convert geometry column to WKB for Arrow export.
 
@@ -1877,10 +1877,22 @@ def _wrap_query_with_wkb_conversion(query: str, geometry_column: str) -> str:
     Args:
         query: Original SQL SELECT query
         geometry_column: Name of the geometry column to convert
+        con: Optional DuckDB connection to verify column exists
 
     Returns:
-        str: Wrapped query with WKB conversion
+        str: Wrapped query with WKB conversion, or original query if column doesn't exist
     """
+    # If connection provided, check if geometry column exists in query output
+    if con is not None:
+        try:
+            schema_result = con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow()
+            if geometry_column not in schema_result.schema.names:
+                # Geometry column was excluded, return original query
+                return query
+        except Exception:
+            # If check fails, try the conversion anyway
+            pass
+
     # Quote column name to handle special characters
     quoted_geom = geometry_column.replace('"', '""')
 
@@ -2673,7 +2685,7 @@ def write_geoparquet_via_arrow(
 
         # Wrap query with WKB conversion only if geometry column exists
         if has_geometry:
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
         else:
             final_query = query
             if verbose:
@@ -2799,14 +2811,14 @@ def write_parquet_with_metadata(
     profile=None,
     geoparquet_version=None,
     input_crs=None,
-    write_strategy: str = "auto",
+    write_strategy: str = "duckdb-kv",
 ):
     """
     Write a parquet file with proper compression and metadata handling.
 
     Supports multiple write strategies with different memory and performance
-    characteristics. The default "auto" strategy selects the best approach
-    based on file size and available memory.
+    characteristics. The default "duckdb-kv" strategy uses DuckDB's native
+    KV_METADATA for fast streaming writes.
 
     Supports both local and remote outputs (S3, GCS, Azure). Remote outputs
     are written to a temporary local file, then uploaded.
@@ -2827,10 +2839,9 @@ def write_parquet_with_metadata(
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         input_crs: PROJJSON dict with CRS from input file
         write_strategy: Write strategy to use. Options:
-            - "auto" (default): Auto-select based on file size and memory
+            - "duckdb-kv" (default): Use DuckDB COPY TO with KV_METADATA
             - "in-memory": Load entire dataset into memory
             - "streaming": Stream Arrow RecordBatches
-            - "duckdb-kv": Use DuckDB COPY TO with KV_METADATA
             - "disk-rewrite": Write with DuckDB, then rewrite with PyArrow
 
     Returns:

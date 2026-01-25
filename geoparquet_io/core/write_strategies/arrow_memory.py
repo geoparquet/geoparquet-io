@@ -75,7 +75,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
             debug(f"Using GeoParquet version: {geoparquet_version}")
 
         if has_geometry:
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
         else:
             final_query = query
             if verbose:
