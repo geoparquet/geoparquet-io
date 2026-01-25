@@ -19,7 +19,6 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
@@ -27,6 +26,7 @@ from geoparquet_io.core.write_strategies.base import BaseWriteStrategy
 
 if TYPE_CHECKING:
     import duckdb
+    import pyarrow as pa
 
 # Valid compression values whitelist (prevents injection via compression param)
 VALID_COMPRESSIONS = frozenset({"ZSTD", "SNAPPY", "GZIP", "LZ4", "UNCOMPRESSED"})
@@ -109,28 +109,25 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             local_path = output_path
 
         try:
-            # For parquet-geo-only, strip geo metadata entirely
+            # For parquet-geo-only, use DuckDB's native option to skip geo metadata
             if geoparquet_version == "parquet-geo-only":
                 if verbose:
                     debug("Writing parquet-geo-only (no geo metadata)...")
 
-                # Use PyArrow to write without geo metadata
                 final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
-                result = con.execute(final_query).arrow()
-                # Handle both Table and RecordBatchReader
-                table = result.read_all() if hasattr(result, "read_all") else result
+                escaped_path = local_path.replace("'", "''")
 
-                # Strip geo metadata if present
-                metadata = table.schema.metadata or {}
-                if b"geo" in metadata:
-                    new_metadata = {k: v for k, v in metadata.items() if k != b"geo"}
-                    new_schema = table.schema.with_metadata(new_metadata)
-                    table = table.cast(new_schema)
+                copy_query = f"""
+                    COPY ({final_query})
+                    TO '{escaped_path}'
+                    (FORMAT PARQUET, COMPRESSION {compression_upper}, GEOPARQUET_VERSION 'NONE')
+                """
 
-                pq.write_table(table, local_path, compression=compression_upper.lower())
+                con.execute(copy_query)
 
                 if verbose:
-                    success(f"Wrote {table.num_rows:,} rows to {output_path}")
+                    pf = pq.ParquetFile(local_path)
+                    success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
 
                 if is_remote:
                     upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
