@@ -2913,7 +2913,8 @@ def _plain_copy_to(
         f"COMPRESSION {duckdb_compression}",
         f"GEOPARQUET_VERSION '{duckdb_version}'",
     ]
-    if compression_level is not None:
+    # Only add compression level for codecs that support it (ZSTD, GZIP, BROTLI)
+    if compression_level is not None and duckdb_compression in ("ZSTD", "GZIP", "BROTLI"):
         options.append(f"COMPRESSION_LEVEL {compression_level}")
     if row_group_rows is not None:
         options.append(f"ROW_GROUP_SIZE {row_group_rows}")

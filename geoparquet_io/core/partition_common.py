@@ -654,6 +654,57 @@ def _build_select_clause(con, input_url, column_name, keep_partition_column):
     return ", ".join(columns_to_select)
 
 
+def _strip_bbox_from_metadata(metadata: dict | None) -> dict | None:
+    """
+    Strip bbox from metadata so it will be recomputed for each partition.
+
+    When writing partitions, we must NOT use the original file's bbox since each
+    partition contains only a subset of the data with different bounds.
+
+    Args:
+        metadata: Original metadata dict (may contain 'geo' or b'geo' key)
+
+    Returns:
+        Copy of metadata with bbox stripped from geo columns, or None
+    """
+    if not metadata:
+        return None
+
+    import copy
+    import json
+
+    metadata_copy = copy.deepcopy(metadata)
+
+    # Handle both string and bytes keys
+    for geo_key in ("geo", b"geo"):
+        if geo_key in metadata_copy:
+            geo_data = metadata_copy[geo_key]
+
+            # Parse if needed
+            if isinstance(geo_data, bytes):
+                geo_dict = json.loads(geo_data.decode("utf-8"))
+            elif isinstance(geo_data, str):
+                geo_dict = json.loads(geo_data)
+            else:
+                geo_dict = copy.deepcopy(geo_data)
+
+            # Strip bbox from each geometry column
+            if "columns" in geo_dict:
+                for _col_name, col_meta in geo_dict["columns"].items():
+                    if "bbox" in col_meta:
+                        del col_meta["bbox"]
+
+            # Re-encode back to original format
+            if isinstance(geo_data, bytes):
+                metadata_copy[geo_key] = json.dumps(geo_dict).encode("utf-8")
+            elif isinstance(geo_data, str):
+                metadata_copy[geo_key] = json.dumps(geo_dict)
+            else:
+                metadata_copy[geo_key] = geo_dict
+
+    return metadata_copy
+
+
 def _process_partition_value(
     con,
     input_url,
@@ -698,12 +749,15 @@ def _process_partition_value(
         WHERE {where_clause}
     """
 
+    # Strip bbox from metadata so it gets recomputed for this partition's data
+    partition_metadata = _strip_bbox_from_metadata(metadata)
+
     # Write partition
     write_parquet_with_metadata(
         con,
         partition_query,
         output_filename,
-        original_metadata=metadata,
+        original_metadata=partition_metadata,
         compression="ZSTD",
         compression_level=15,
         verbose=False,
