@@ -142,6 +142,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
     ) -> None:
         """Write query results to GeoParquet using DuckDB COPY TO with KV_METADATA."""
         from geoparquet_io.core.common import (
+            _wrap_query_with_blob_conversion,
             _wrap_query_with_wkb_conversion,
             compute_bbox_via_sql,
             compute_geometry_types_via_sql,
@@ -199,6 +200,24 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
                 con.execute(copy_query)
 
+                # Apply CRS to Parquet schema if non-default CRS is provided
+                if input_crs:
+                    from geoparquet_io.core.common import apply_crs_to_parquet, is_default_crs
+
+                    if not is_default_crs(input_crs):
+                        if verbose:
+                            debug("Applying CRS to Parquet schema...")
+                        apply_crs_to_parquet(
+                            local_path,
+                            input_crs,
+                            geometry_column=geometry_column,
+                            compression=compression,
+                            compression_level=compression_level,
+                            row_group_rows=row_group_rows,
+                            add_to_geo_metadata=False,  # parquet-geo-only has no geo metadata
+                            verbose=verbose,
+                        )
+
                 if verbose:
                     pf = pq.ParquetFile(local_path)
                     success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
@@ -250,7 +269,13 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 if verbose:
                     debug(f"Added bbox covering metadata for column '{bbox_col_name}'")
 
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
+            # For v1.x: Cast to plain BLOB to avoid geoarrow extension types
+            # For v2.0: Keep geoarrow extension type for native types
+            if geoparquet_version in ("1.0", "1.1"):
+                # Cast to BLOB to produce plain binary WKB (no geoarrow extension type)
+                final_query = _wrap_query_with_blob_conversion(query, geometry_column, con)
+            else:
+                final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
 
             escaped_path = local_path.replace("'", "''")
 
@@ -258,9 +283,12 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             geo_meta_escaped = geo_meta_json.replace("'", "''")
 
             # Build COPY TO options
+            # Use GEOPARQUET_VERSION 'NONE' to disable DuckDB's automatic geo metadata
+            # since we're providing our own via KV_METADATA with the correct version
             copy_options = [
                 "FORMAT PARQUET",
                 f"COMPRESSION {compression_upper}",
+                "GEOPARQUET_VERSION 'NONE'",
                 f"KV_METADATA {{geo: '{geo_meta_escaped}'}}",
             ]
             if row_group_rows:
@@ -276,6 +304,25 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 debug(f"Writing via DuckDB COPY TO with {compression_upper} compression...")
 
             con.execute(copy_query)
+
+            # For GeoParquet 2.0 with non-default CRS, apply CRS to Parquet schema
+            # (geo metadata already has CRS from build_geo_metadata)
+            if geoparquet_version == "2.0" and input_crs:
+                from geoparquet_io.core.common import apply_crs_to_parquet, is_default_crs
+
+                if not is_default_crs(input_crs):
+                    if verbose:
+                        debug("Applying CRS to Parquet schema for GeoParquet 2.0...")
+                    apply_crs_to_parquet(
+                        local_path,
+                        input_crs,
+                        geometry_column=geometry_column,
+                        compression=compression,
+                        compression_level=compression_level,
+                        row_group_rows=row_group_rows,
+                        add_to_geo_metadata=False,  # CRS already in geo metadata from KV_METADATA
+                        verbose=verbose,
+                    )
 
             if verbose:
                 pf = pq.ParquetFile(local_path)

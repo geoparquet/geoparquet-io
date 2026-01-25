@@ -1903,6 +1903,45 @@ def _wrap_query_with_wkb_conversion(query: str, geometry_column: str, con=None) 
     """
 
 
+def _wrap_query_with_blob_conversion(query: str, geometry_column: str, con=None) -> str:
+    """
+    Wrap query to convert geometry column to plain binary BLOB.
+
+    Unlike _wrap_query_with_wkb_conversion which produces WKB that DuckDB still
+    recognizes as spatial, this casts to BLOB to produce truly plain binary data.
+    Used for GeoParquet v1.x where we need plain binary WKB without geoarrow
+    extension types in the Parquet schema.
+
+    Args:
+        query: Original SQL SELECT query
+        geometry_column: Name of the geometry column to convert
+        con: Optional DuckDB connection to verify column exists
+
+    Returns:
+        str: Wrapped query with BLOB conversion, or original query if column doesn't exist
+    """
+    # If connection provided, check if geometry column exists in query output
+    if con is not None:
+        try:
+            schema_result = con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow()
+            if geometry_column not in schema_result.schema.names:
+                # Geometry column was excluded, return original query
+                return query
+        except Exception:
+            # If check fails, try the conversion anyway
+            pass
+
+    # Quote column name to handle special characters
+    quoted_geom = geometry_column.replace('"', '""')
+
+    # Cast to BLOB to produce plain binary without geoarrow extension type
+    return f"""
+        WITH __arrow_source AS ({query})
+        SELECT * REPLACE (ST_AsWKB("{quoted_geom}")::BLOB AS "{quoted_geom}")
+        FROM __arrow_source
+    """
+
+
 def compute_bbox_via_sql(
     con,
     query: str,
@@ -2984,6 +3023,7 @@ def write_parquet_with_metadata(
         if not rewrite_needed:
             # Fast path: plain DuckDB COPY TO without geo metadata manipulation
             if verbose:
+                debug(f"Writing GeoParquet version: {effective_version}")
                 debug(f"No metadata rewrite needed for {effective_version} - using plain COPY TO")
 
             _plain_copy_to(
@@ -2991,9 +3031,25 @@ def write_parquet_with_metadata(
                 query=query,
                 output_path=actual_output,
                 compression=compression,
+                compression_level=compression_level,
+                row_group_rows=row_group_rows,
                 verbose=verbose,
                 geoparquet_version=effective_version,
             )
+
+            # For 2.0 and parquet-geo-only with non-default CRS, apply CRS to schema
+            if input_crs and not is_default_crs(input_crs):
+                if effective_version in ("2.0", "parquet-geo-only"):
+                    apply_crs_to_parquet(
+                        actual_output,
+                        input_crs,
+                        geometry_column=geometry_column or "geometry",
+                        compression=compression,
+                        compression_level=compression_level,
+                        row_group_rows=row_group_rows,
+                        add_to_geo_metadata=(effective_version == "2.0"),
+                        verbose=verbose,
+                    )
         else:
             # Metadata rewrite needed - use strategy pattern
             strategy_enum = WriteStrategy(write_strategy)
@@ -3007,6 +3063,7 @@ def write_parquet_with_metadata(
                 )
 
             if verbose:
+                debug(f"Writing GeoParquet version: {effective_version}")
                 debug(f"Using write strategy: {strategy.name}")
 
             # Build kwargs - only pass memory_limit for duckdb-kv
