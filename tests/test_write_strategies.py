@@ -3,7 +3,6 @@ Tests for write strategy implementations.
 
 Tests the Strategy Pattern for GeoParquet writes including:
 - Factory methods
-- Auto-selection logic
 - Individual strategy implementations
 - Security validations
 """
@@ -19,9 +18,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.write_strategies import (
-    MEMORY_RESERVED_BUFFER_MB,
-    MEMORY_THRESHOLD_RATIO,
-    WriteContext,
     WriteStrategy,
     WriteStrategyFactory,
     atomic_write,
@@ -34,7 +30,6 @@ class TestWriteStrategy:
 
     def test_enum_values(self):
         """All expected strategy values exist."""
-        assert WriteStrategy.AUTO.value == "auto"
         assert WriteStrategy.ARROW_MEMORY.value == "in-memory"
         assert WriteStrategy.ARROW_STREAMING.value == "streaming"
         assert WriteStrategy.DUCKDB_KV.value == "duckdb-kv"
@@ -42,33 +37,10 @@ class TestWriteStrategy:
 
     def test_enum_from_string(self):
         """Enum can be created from string values."""
-        assert WriteStrategy("auto") == WriteStrategy.AUTO
         assert WriteStrategy("in-memory") == WriteStrategy.ARROW_MEMORY
         assert WriteStrategy("streaming") == WriteStrategy.ARROW_STREAMING
         assert WriteStrategy("duckdb-kv") == WriteStrategy.DUCKDB_KV
         assert WriteStrategy("disk-rewrite") == WriteStrategy.DISK_REWRITE
-
-
-class TestWriteContext:
-    """Tests for WriteContext dataclass."""
-
-    def test_defaults(self):
-        """Context has correct defaults."""
-        context = WriteContext()
-        assert context.estimated_rows is None
-        assert context.estimated_bytes is None
-        assert context.output_path == ""
-        assert context.is_remote is False
-        assert context.geoparquet_version == "1.1"
-        assert context.has_geometry is True
-        assert context.needs_metadata_rewrite is True
-        assert context.available_memory_bytes is None
-
-    def test_immutability(self):
-        """Context is immutable (frozen dataclass)."""
-        context = WriteContext(output_path="test.parquet")
-        with pytest.raises(AttributeError):
-            context.output_path = "other.parquet"
 
 
 class TestWriteStrategyFactory:
@@ -99,15 +71,9 @@ class TestWriteStrategyFactory:
         assert strategy.name == "disk-rewrite"
         assert strategy.supports_streaming is False
 
-    def test_get_strategy_auto_raises(self):
-        """AUTO requires select_strategy instead."""
-        with pytest.raises(ValueError, match="Use select_strategy"):
-            WriteStrategyFactory.get_strategy(WriteStrategy.AUTO)
-
     def test_list_strategies(self):
         """List all available strategies."""
         strategies = WriteStrategyFactory.list_strategies()
-        assert "auto" in strategies
         assert "in-memory" in strategies
         assert "streaming" in strategies
         assert "duckdb-kv" in strategies
@@ -117,73 +83,6 @@ class TestWriteStrategyFactory:
         """Cache can be cleared."""
         WriteStrategyFactory.get_strategy(WriteStrategy.ARROW_MEMORY)
         WriteStrategyFactory.clear_cache()
-
-
-class TestAutoSelection:
-    """Tests for automatic strategy selection."""
-
-    def test_auto_select_small_file_local(self):
-        """Small local file uses in-memory."""
-        context = WriteContext(
-            estimated_bytes=100_000_000,  # 100MB
-            available_memory_bytes=8_000_000_000,  # 8GB
-            is_remote=False,
-        )
-        strategy = WriteStrategyFactory.select_strategy(context)
-        assert strategy.name == "in-memory"
-
-    def test_auto_select_large_file_local(self):
-        """Large local file uses duckdb-kv."""
-        context = WriteContext(
-            estimated_bytes=10_000_000_000,  # 10GB
-            available_memory_bytes=8_000_000_000,  # 8GB
-            is_remote=False,
-        )
-        strategy = WriteStrategyFactory.select_strategy(context)
-        assert strategy.name == "duckdb-kv"
-
-    def test_auto_select_remote_prefers_memory(self):
-        """Remote output prefers in-memory."""
-        context = WriteContext(
-            estimated_bytes=10_000_000_000,
-            is_remote=True,
-        )
-        strategy = WriteStrategyFactory.select_strategy(context)
-        assert strategy.name == "in-memory"
-
-    def test_auto_select_no_metadata_rewrite(self):
-        """No metadata rewrite uses in-memory."""
-        context = WriteContext(
-            needs_metadata_rewrite=False,
-            estimated_bytes=10_000_000_000,
-            available_memory_bytes=1_000_000,
-        )
-        strategy = WriteStrategyFactory.select_strategy(context)
-        assert strategy.name == "in-memory"
-
-    def test_memory_threshold_calculation(self):
-        """Memory threshold is properly calculated."""
-        available = 8_000_000_000  # 8GB
-        reserved = MEMORY_RESERVED_BUFFER_MB * 1024 * 1024
-        threshold = (available - reserved) * MEMORY_THRESHOLD_RATIO
-
-        # File just under threshold
-        context = WriteContext(
-            estimated_bytes=int(threshold * 0.9),
-            available_memory_bytes=available,
-            is_remote=False,
-        )
-        strategy = WriteStrategyFactory.select_strategy(context)
-        assert strategy.name == "in-memory"
-
-        # File just over threshold
-        context = WriteContext(
-            estimated_bytes=int(threshold * 1.1),
-            available_memory_bytes=available,
-            is_remote=False,
-        )
-        strategy = WriteStrategyFactory.select_strategy(context)
-        assert strategy.name == "duckdb-kv"
 
 
 class TestAtomicWrite:

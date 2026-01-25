@@ -219,23 +219,24 @@ def write_strategy_option(func):
     """
     Add --write-strategy option to a command.
 
-    Allows specifying the write strategy for GeoParquet output:
-    - auto (default): Auto-select based on file size and available memory
+    Allows specifying the write strategy for GeoParquet metadata writes:
+    - duckdb-kv (default): Use DuckDB COPY TO with native KV_METADATA (fastest)
     - in-memory: Load entire dataset into memory, apply metadata, write once
     - streaming: Stream Arrow RecordBatches for constant memory usage
-    - duckdb-kv: Use DuckDB COPY TO with native KV_METADATA for geo metadata
     - disk-rewrite: Write with DuckDB, then rewrite with PyArrow for metadata
+
+    Note: When no metadata rewrite is needed (parquet-geo-only, some 2.0 ops),
+    a plain DuckDB COPY TO is used regardless of this setting.
     """
     return click.option(
         "--write-strategy",
-        type=click.Choice(["auto", "in-memory", "streaming", "duckdb-kv", "disk-rewrite"]),
-        default="auto",
-        help="Write strategy for output file. "
-        "auto (default): auto-select based on file size. "
-        "in-memory: load full dataset (fast, needs memory). "
+        type=click.Choice(["duckdb-kv", "in-memory", "streaming", "disk-rewrite"]),
+        default="duckdb-kv",
+        help="Write strategy for geo metadata. "
+        "duckdb-kv (default): DuckDB COPY with native metadata (fastest). "
+        "in-memory: load full dataset into memory. "
         "streaming: constant memory usage. "
-        "duckdb-kv: DuckDB native metadata (very large files). "
-        "disk-rewrite: most reliable fallback.",
+        "disk-rewrite: reliable fallback.",
     )(func)
 
 

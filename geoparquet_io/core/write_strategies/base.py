@@ -12,7 +12,6 @@ import os
 import tempfile
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -22,32 +21,12 @@ if TYPE_CHECKING:
 
 
 class WriteStrategy(str, Enum):
-    """Available write strategies for GeoParquet output."""
+    """Available write strategies for GeoParquet metadata writes."""
 
-    AUTO = "auto"
     ARROW_MEMORY = "in-memory"
     ARROW_STREAMING = "streaming"
     DUCKDB_KV = "duckdb-kv"
     DISK_REWRITE = "disk-rewrite"
-
-
-@dataclass(frozen=True)
-class WriteContext:
-    """
-    Context for write operation decision-making.
-
-    Immutable dataclass (frozen=True) for thread safety.
-    Used by WriteStrategyFactory to auto-select the best strategy.
-    """
-
-    estimated_rows: int | None = None
-    estimated_bytes: int | None = None
-    output_path: str = ""
-    is_remote: bool = False
-    geoparquet_version: str = "1.1"
-    has_geometry: bool = True
-    needs_metadata_rewrite: bool = True
-    available_memory_bytes: int | None = None
 
 
 @contextmanager
@@ -162,21 +141,6 @@ class BaseWriteStrategy(ABC):
             verbose: Enable verbose logging
         """
         ...
-
-    @classmethod
-    def can_handle(cls, context: WriteContext) -> bool:
-        """
-        Check if this strategy can handle the given context.
-
-        Override in subclasses to implement strategy-specific constraints.
-
-        Args:
-            context: Write context with file and system information
-
-        Returns:
-            True if this strategy can handle the context
-        """
-        return True
 
     def _validate_output_path(self, output_path: str) -> None:
         """

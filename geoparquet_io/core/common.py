@@ -2734,6 +2734,56 @@ def write_geoparquet_via_arrow(
             )
 
 
+def _plain_copy_to(
+    con,
+    query: str,
+    output_path: str,
+    compression: str = "ZSTD",
+    verbose: bool = False,
+) -> None:
+    """
+    Execute a plain DuckDB COPY TO without geo metadata manipulation.
+
+    Used when no metadata rewrite is needed (parquet-geo-only, 2.0 passthrough).
+    This is the fastest possible write path.
+
+    Args:
+        con: DuckDB connection
+        query: SQL query to execute
+        output_path: Path to output file
+        compression: Compression type
+        verbose: Whether to print verbose output
+    """
+    compression_map = {
+        "zstd": "ZSTD",
+        "gzip": "GZIP",
+        "snappy": "SNAPPY",
+        "lz4": "LZ4",
+        "none": "UNCOMPRESSED",
+        "uncompressed": "UNCOMPRESSED",
+        "brotli": "BROTLI",
+    }
+    duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
+
+    escaped_path = output_path.replace("'", "''")
+    copy_query = f"""
+        COPY ({query})
+        TO '{escaped_path}'
+        (FORMAT PARQUET, COMPRESSION {duckdb_compression})
+    """
+
+    if verbose:
+        debug(f"Executing plain COPY TO with {duckdb_compression} compression...")
+
+    con.execute(copy_query)
+
+    if verbose:
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(output_path)
+        success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
+
+
 def write_parquet_with_metadata(
     con,
     query,
@@ -2787,9 +2837,9 @@ def write_parquet_with_metadata(
         None
     """
     from geoparquet_io.core.write_strategies import (
-        WriteContext,
         WriteStrategy,
         WriteStrategyFactory,
+        needs_metadata_rewrite,
     )
 
     configure_verbose(verbose)
@@ -2803,25 +2853,10 @@ def write_parquet_with_metadata(
     if geoparquet_version is None:
         geoparquet_version = extract_version_from_metadata(original_metadata)
 
-    # Build context for strategy selection
-    context = WriteContext(
-        output_path=output_file,
-        is_remote=is_remote_url(output_file),
-        geoparquet_version=geoparquet_version or "1.1",
-        has_geometry=geometry_column is not None,
-        needs_metadata_rewrite=True,
-    )
+    effective_version = geoparquet_version or "1.1"
 
-    # Select or get strategy
-    strategy_enum = WriteStrategy(write_strategy)
-    if strategy_enum == WriteStrategy.AUTO:
-        strategy = WriteStrategyFactory.select_strategy(context)
-        if verbose:
-            debug(f"Auto-selected write strategy: {strategy.name}")
-    else:
-        strategy = WriteStrategyFactory.get_strategy(strategy_enum)
-        if verbose:
-            info(f"Using write strategy: {strategy.name}")
+    # Check if we need to add/rewrite geo metadata
+    rewrite_needed = needs_metadata_rewrite(effective_version, original_metadata)
 
     if show_sql:
         info("\n-- Query:")
@@ -2831,21 +2866,41 @@ def write_parquet_with_metadata(
         actual_output,
         is_remote,
     ):
-        strategy.write_from_query(
-            con=con,
-            query=query,
-            output_path=actual_output,
-            geometry_column=geometry_column or "geometry",
-            original_metadata=original_metadata,
-            geoparquet_version=geoparquet_version or "1.1",
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            input_crs=input_crs,
-            verbose=verbose,
-            custom_metadata=custom_metadata,
-        )
+        if not rewrite_needed:
+            # Fast path: plain DuckDB COPY TO without geo metadata manipulation
+            if verbose:
+                debug(f"No metadata rewrite needed for {effective_version} - using plain COPY TO")
+
+            _plain_copy_to(
+                con=con,
+                query=query,
+                output_path=actual_output,
+                compression=compression,
+                verbose=verbose,
+            )
+        else:
+            # Metadata rewrite needed - use strategy pattern
+            strategy_enum = WriteStrategy(write_strategy)
+            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
+
+            if verbose:
+                debug(f"Using write strategy: {strategy.name}")
+
+            strategy.write_from_query(
+                con=con,
+                query=query,
+                output_path=actual_output,
+                geometry_column=geometry_column or "geometry",
+                original_metadata=original_metadata,
+                geoparquet_version=effective_version,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                input_crs=input_crs,
+                verbose=verbose,
+                custom_metadata=custom_metadata,
+            )
 
         if is_remote:
             upload_if_remote(

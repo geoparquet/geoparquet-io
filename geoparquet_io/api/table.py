@@ -804,10 +804,7 @@ class Table:
 
         # Get the appropriate write strategy
         strategy_enum = WriteStrategy(write_strategy)
-        if strategy_enum == WriteStrategy.AUTO:
-            strategy = WriteStrategyFactory.get_strategy(WriteStrategy.ARROW_MEMORY)
-        else:
-            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
+        strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
         strategy.write_from_table(
             table=self._table,
