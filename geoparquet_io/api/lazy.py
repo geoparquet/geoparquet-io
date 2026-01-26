@@ -20,20 +20,61 @@ is called.
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-if TYPE_CHECKING:
-    pass
-
 # Type alias for SQL transform functions
 # Each transform takes (inner_sql, geometry_column, **kwargs) and returns wrapped SQL
 SQLTransform = Callable[[str, str], str]
+
+# Regex pattern for validating CRS format (e.g., "EPSG:4326", "OGC:CRS84")
+_CRS_PATTERN = re.compile(r"^[A-Za-z]+:\d+$")
+
+
+def _quote_identifier(name: str) -> str:
+    """
+    Quote a SQL identifier for safe use in DuckDB queries.
+
+    Escapes embedded double quotes by doubling them, then wraps in double quotes.
+    This prevents SQL injection through column/table names.
+
+    Args:
+        name: The identifier to quote
+
+    Returns:
+        Safely quoted identifier string
+    """
+    escaped = name.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _validate_crs_format(crs: str) -> None:
+    """
+    Validate that a CRS string matches the expected format.
+
+    Args:
+        crs: CRS string to validate (e.g., "EPSG:4326")
+
+    Raises:
+        ValueError: If CRS format is invalid
+    """
+    if not _CRS_PATTERN.match(crs):
+        raise ValueError(
+            f"Invalid CRS format: '{crs}'. Expected format like 'EPSG:4326' or 'OGC:CRS84'."
+        )
+
+
+def _validate_positive_int(value: int | None, name: str) -> None:
+    """Validate that a value is a positive integer if provided."""
+    if value is not None and (not isinstance(value, int) or value <= 0):
+        raise ValueError(f"{name} must be a positive integer, got: {value}")
 
 
 class LazyTable:
@@ -98,6 +139,8 @@ class LazyTable:
         self,
         transform_name: str,
         transform_fn: SQLTransform,
+        *,
+        crs_override: dict | None = None,
         **kwargs: Any,
     ) -> LazyTable:
         """
@@ -105,6 +148,12 @@ class LazyTable:
 
         This implements the immutable pattern - each transform returns
         a new instance rather than mutating the current one.
+
+        Args:
+            transform_name: Name of the transform (for debugging)
+            transform_fn: SQL transform function
+            crs_override: Optional new CRS for transforms that change projection
+            **kwargs: Arguments passed to transform function
         """
         new_transforms = self._transforms.copy()
         new_transforms.append((transform_name, transform_fn, kwargs))
@@ -113,7 +162,7 @@ class LazyTable:
             source=self._source,
             connection=self._connection,
             geometry_column=self._geometry_column,
-            crs=self._crs,
+            crs=crs_override if crs_override is not None else self._crs,
             _transforms=new_transforms,
             _owns_connection=False,  # Child doesn't own the connection
         )
@@ -179,10 +228,12 @@ class LazyTable:
         Returns:
             New LazyTable with the transform added
         """
+        # Use quoted identifier to prevent SQL injection
+        safe_column_name = _quote_identifier(column_name)
         return self._copy_with_transform(
             "add_bbox",
             _add_bbox_transform,
-            column_name=column_name,
+            column_name=safe_column_name,
         )
 
     def extract(
@@ -198,12 +249,26 @@ class LazyTable:
         Args:
             columns: Column names to select (None = all columns)
             bbox: Bounding box filter (xmin, ymin, xmax, ymax)
-            where: SQL WHERE clause (without the WHERE keyword)
-            limit: Maximum rows to return
+            where: SQL WHERE clause (without the WHERE keyword). Must not contain
+                   dangerous SQL keywords (DROP, DELETE, INSERT, etc.)
+            limit: Maximum rows to return (must be positive integer)
 
         Returns:
             New LazyTable with the transform added
+
+        Raises:
+            click.ClickException: If WHERE clause contains dangerous SQL keywords
+            ValueError: If limit is not a positive integer
         """
+        # Validate WHERE clause for SQL injection prevention
+        if where:
+            from geoparquet_io.core.extract import validate_where_clause
+
+            validate_where_clause(where)
+
+        # Validate limit is positive
+        _validate_positive_int(limit, "limit")
+
         return self._copy_with_transform(
             "extract",
             _extract_transform,
@@ -235,10 +300,12 @@ class LazyTable:
         Returns:
             New LazyTable with the transform added
         """
+        # Use quoted identifier to prevent SQL injection
+        safe_column = _quote_identifier(column)
         return self._copy_with_transform(
             "sort_column",
             _column_sort_transform,
-            column=column,
+            column=safe_column,
             descending=descending,
         )
 
@@ -251,15 +318,21 @@ class LazyTable:
 
         Returns:
             New LazyTable with the transform added and CRS updated
+
+        Raises:
+            ValueError: If target_crs format is invalid
         """
-        new_table = self._copy_with_transform(
+        # Validate CRS format to prevent SQL injection
+        _validate_crs_format(target_crs)
+
+        # Use crs_override to update CRS immutably
+        new_crs = _crs_from_epsg(target_crs)
+        return self._copy_with_transform(
             "reproject",
             _reproject_transform,
+            crs_override=new_crs,
             target_crs=target_crs,
         )
-        # Update CRS on the new table
-        new_table._crs = _crs_from_epsg(target_crs)
-        return new_table
 
     # =========================================================================
     # Terminal Operations
@@ -286,49 +359,65 @@ class LazyTable:
             compression: Compression codec (default: "zstd")
             compression_level: Compression level (default: codec-specific)
             row_group_size: Rows per row group (default: 100000)
-            write_strategy: Write strategy to use (default: "duckdb-kv")
-            write_memory: Memory limit for writing (e.g., "2GB")
+            write_strategy: Write strategy ("duckdb-kv", "streaming", "in-memory", "disk-rewrite")
+            write_memory: Memory limit for writing (e.g., "2GB"). Only valid with "duckdb-kv".
             geoparquet_version: GeoParquet version (default: "1.1")
 
         Returns:
             Path to the written file
+
+        Raises:
+            ValueError: If write_strategy is invalid or write_memory used with wrong strategy
         """
         from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
 
         output_path = Path(path)
         sql = self._build_sql()
 
-        # Map string strategy to enum
-        strategy_map = {
-            "duckdb-kv": WriteStrategy.DUCKDB_KV,
-            "streaming": WriteStrategy.ARROW_STREAMING,
-            "in-memory": WriteStrategy.ARROW_MEMORY,
-            "disk-rewrite": WriteStrategy.DISK_REWRITE,
-        }
-        strategy_enum = strategy_map.get(write_strategy or "duckdb-kv", WriteStrategy.DUCKDB_KV)
+        # Use WriteStrategy enum directly (validates input)
+        strategy_value = write_strategy or "duckdb-kv"
+        try:
+            strategy_enum = WriteStrategy(strategy_value)
+        except ValueError:
+            valid_strategies = [s.value for s in WriteStrategy]
+            raise ValueError(
+                f"Invalid write_strategy: '{strategy_value}'. Valid options: {valid_strategies}"
+            ) from None
+
+        # Validate write_memory is only used with duckdb-kv strategy
+        if write_memory and strategy_enum != WriteStrategy.DUCKDB_KV:
+            raise ValueError(
+                f"write_memory is only supported with 'duckdb-kv' strategy, not '{strategy_value}'"
+            )
+
         strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
         # Default compression level based on codec
         if compression_level is None:
             compression_level = 3 if compression.lower() == "zstd" else 6
 
-        # Write using the strategy
-        strategy.write_from_query(
-            con=self._connection,
-            query=sql,
-            output_path=str(output_path),
-            geometry_column=self._geometry_column,
-            original_metadata=None,
-            geoparquet_version=geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=None,
-            row_group_rows=row_group_size or 100000,
-            input_crs=self._crs,
-            verbose=False,
-            custom_metadata=None,
-            memory_limit=write_memory,
-        )
+        # Build kwargs - only pass memory_limit to strategies that support it
+        write_kwargs = {
+            "con": self._connection,
+            "query": sql,
+            "output_path": str(output_path),
+            "geometry_column": self._geometry_column,
+            "original_metadata": None,
+            "geoparquet_version": geoparquet_version,
+            "compression": compression,
+            "compression_level": compression_level,
+            "row_group_size_mb": None,
+            "row_group_rows": row_group_size or 100000,
+            "input_crs": self._crs,
+            "verbose": False,
+            "custom_metadata": None,
+        }
+
+        # Only pass memory_limit to duckdb-kv strategy
+        if strategy_enum == WriteStrategy.DUCKDB_KV:
+            write_kwargs["memory_limit"] = write_memory
+
+        strategy.write_from_query(**write_kwargs)
 
         return output_path
 
@@ -339,19 +428,11 @@ class LazyTable:
         This is a terminal operation that materializes the full result
         into memory. For large datasets, prefer write() instead.
 
-        The returned table has GeoArrow extension types applied to
-        the geometry column for interoperability with other tools.
-
         Returns:
-            Arrow table with GeoArrow extension types
+            Arrow table with geometry as WKB binary column
         """
         sql = self._build_sql()
-        table = self._connection.execute(sql).fetch_arrow_table()
-
-        # Apply GeoArrow extension type to geometry column
-        table = self._apply_geoarrow_metadata(table)
-
-        return table
+        return self._connection.execute(sql).fetch_arrow_table()
 
     def count(self) -> int:
         """
@@ -388,21 +469,15 @@ class LazyTable:
         if isinstance(self._source, str):
             return self._source
         else:
-            # DuckDBPyRelation - need to convert geometry to WKB before exporting
-            # DuckDB's internal GEOMETRY format is not the same as standard WKB
-            geom_col = self._geometry_column
+            # DuckDBPyRelation - register as a view to avoid full materialization
+            # Use unique name to prevent collisions
+            view_name = f"__lazy_source_{uuid.uuid4().hex[:8]}"
 
-            # Create a view that converts the geometry to proper WKB
-            # Then export that as Arrow
-            wkb_rel = self._source.project(f'* REPLACE (ST_AsWKB("{geom_col}") AS "{geom_col}")')
-            arrow_table = wkb_rel.arrow()
-            self._connection.register("__lazy_source", arrow_table)
+            # Register the relation as a view (no materialization)
+            self._connection.register(view_name, self._source)
 
-            # Now convert WKB back to GEOMETRY for spatial operations
-            return f'''
-                SELECT * REPLACE (ST_GeomFromWKB("{geom_col}") AS "{geom_col}")
-                FROM __lazy_source
-            '''
+            # Return SQL that uses the registered view
+            return f"SELECT * FROM {_quote_identifier(view_name)}"
 
     def _build_sql(self) -> str:
         """Compile all transforms into final SQL."""
@@ -412,29 +487,6 @@ class LazyTable:
             sql = transform_fn(sql, self._geometry_column, **kwargs)
 
         return sql
-
-    def _build_geo_metadata(self) -> dict:
-        """Build GeoParquet metadata dict."""
-        # Default to WGS84 if no CRS specified
-        crs = self._crs or _default_wgs84_crs()
-
-        return {
-            "version": "1.1.0",
-            "primary_column": self._geometry_column,
-            "columns": {
-                self._geometry_column: {
-                    "encoding": "WKB",
-                    "crs": crs,
-                    "geometry_types": [],  # Will be populated by write strategy
-                }
-            },
-        }
-
-    def _apply_geoarrow_metadata(self, table: pa.Table) -> pa.Table:
-        """Apply GeoArrow extension metadata to geometry column."""
-        # For now, return table as-is
-        # TODO: Apply proper GeoArrow extension types
-        return table
 
 
 # =============================================================================
@@ -449,13 +501,15 @@ def _add_bbox_transform(
     column_name: str = "bbox",
 ) -> str:
     """Transform that adds a bbox struct column."""
+    geom_col = _quote_identifier(geometry_column)
+    # column_name is already quoted by the caller
     return f"""
         SELECT *,
             {{
-                'xmin': ST_XMin("{geometry_column}"),
-                'ymin': ST_YMin("{geometry_column}"),
-                'xmax': ST_XMax("{geometry_column}"),
-                'ymax': ST_YMax("{geometry_column}")
+                'xmin': ST_XMin({geom_col}),
+                'ymin': ST_YMin({geom_col}),
+                'xmax': ST_XMax({geom_col}),
+                'ymax': ST_YMax({geom_col})
             }} AS {column_name}
         FROM ({inner_sql}) AS __add_bbox
     """
@@ -469,15 +523,18 @@ def _extract_transform(
     bbox: tuple[float, float, float, float] | None = None,
     where: str | None = None,
     limit: int | None = None,
+    **_kwargs: Any,  # Accept extra kwargs for future compatibility
 ) -> str:
     """Transform that filters rows and selects columns."""
-    # Column selection
+    geom_col = _quote_identifier(geometry_column)
+
+    # Column selection with proper quoting
     if columns:
         # Ensure geometry column is included
         cols = list(columns)
         if geometry_column not in cols:
             cols.append(geometry_column)
-        select = ", ".join(f'"{c}"' for c in cols)
+        select = ", ".join(_quote_identifier(c) for c in cols)
     else:
         select = "*"
 
@@ -486,9 +543,10 @@ def _extract_transform(
     if bbox:
         xmin, ymin, xmax, ymax = bbox
         conditions.append(
-            f'ST_Intersects("{geometry_column}", ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))'
+            f"ST_Intersects({geom_col}, ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
         )
     if where:
+        # WHERE clause is validated by extract() method before reaching here
         conditions.append(f"({where})")
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -506,17 +564,21 @@ def _hilbert_sort_transform(
     inner_sql: str,
     geometry_column: str,
 ) -> str:
-    """Transform that orders by Hilbert curve for spatial locality."""
-    # Use ST_Extent to get BOX_2D (not GEOMETRY) for ST_Hilbert
+    """Transform that orders by Hilbert curve for spatial locality.
+
+    Uses window function to compute extent in a single scan instead of
+    scanning the data twice (once for extent, once for the data).
+    """
+    geom_col = _quote_identifier(geometry_column)
+    # Use window function for single-scan extent computation
     return f"""
-        WITH __bounds AS (
-            SELECT ST_Extent("{geometry_column}") as extent
-            FROM ({inner_sql}) AS __bounds_src
-        ),
-        __data AS ({inner_sql})
-        SELECT __data.*
-        FROM __data, __bounds
-        ORDER BY ST_Hilbert("{geometry_column}", __bounds.extent)
+        SELECT * EXCLUDE(__extent)
+        FROM (
+            SELECT *,
+                ST_Extent({geom_col}) OVER () as __extent
+            FROM ({inner_sql}) AS __hilbert_src
+        ) AS __hilbert_with_extent
+        ORDER BY ST_Hilbert({geom_col}, __extent)
     """
 
 
@@ -528,11 +590,12 @@ def _column_sort_transform(
     descending: bool = False,
 ) -> str:
     """Transform that orders by a column."""
+    # column is already quoted by the caller
     direction = "DESC" if descending else "ASC"
     return f"""
         SELECT *
         FROM ({inner_sql}) AS __sort
-        ORDER BY "{column}" {direction}
+        ORDER BY {column} {direction}
     """
 
 
@@ -541,12 +604,15 @@ def _reproject_transform(
     geometry_column: str,
     *,
     target_crs: str,
+    **_kwargs: Any,  # Accept crs_override from _copy_with_transform
 ) -> str:
     """Transform that reprojects geometry to a target CRS."""
+    geom_col = _quote_identifier(geometry_column)
+    # CRS is validated by reproject() method before reaching here
     return f"""
         SELECT
-            * EXCLUDE("{geometry_column}"),
-            ST_Transform("{geometry_column}", '{target_crs}') AS "{geometry_column}"
+            * EXCLUDE({geom_col}),
+            ST_Transform({geom_col}, '{target_crs}') AS {geom_col}
         FROM ({inner_sql}) AS __reproject
     """
 
@@ -598,12 +664,51 @@ def _crs_from_epsg(epsg_string: str) -> dict:
 
     For full PROJJSON, you would use pyproj, but this provides
     a simple placeholder that includes the EPSG code.
+
+    Raises:
+        ValueError: If the EPSG code is not a valid integer
     """
     # Extract code from "EPSG:4326" format
-    if ":" in epsg_string:
-        authority, code = epsg_string.split(":", 1)
-        return {"id": {"authority": authority.upper(), "code": int(code)}}
-    return {"id": {"authority": "EPSG", "code": int(epsg_string)}}
+    try:
+        if ":" in epsg_string:
+            authority, code = epsg_string.split(":", 1)
+            return {"id": {"authority": authority.upper(), "code": int(code)}}
+        return {"id": {"authority": "EPSG", "code": int(epsg_string)}}
+    except ValueError as e:
+        raise ValueError(f"Invalid EPSG code in '{epsg_string}': {e}") from e
+
+
+def _resolve_crs(
+    crs: dict | str | None,
+    context: str = "data",
+    fallback_fn: Any | None = None,
+) -> dict | None:
+    """
+    Resolve CRS from various input formats to a dict.
+
+    This is the single source of truth for CRS resolution logic.
+
+    Args:
+        crs: CRS as PROJJSON dict, EPSG string, or None
+        context: Description of the data source for warning messages
+        fallback_fn: Optional function to call if crs is None (e.g., extract from Arrow)
+
+    Returns:
+        CRS dict or None
+    """
+    from geoparquet_io.core.logging_config import warn
+
+    if crs is None:
+        if fallback_fn is not None:
+            result = fallback_fn()
+            if result is not None:
+                return result
+        warn(f"No CRS specified for {context}. Defaulting to WGS84 (EPSG:4326).")
+        return _default_wgs84_crs()
+    elif isinstance(crs, str):
+        return _crs_from_epsg(crs)
+    else:
+        return crs
 
 
 # =============================================================================
@@ -666,10 +771,11 @@ def convert_lazy(
     Convert a geospatial file to LazyTable.
 
     Supports: GeoPackage, GeoJSON, Shapefile, FlatGeobuf, and other
-    formats supported by DuckDB's ST_Read function.
+    formats supported by DuckDB's ST_Read function. Also supports
+    remote files (S3, HTTP) when appropriate credentials are configured.
 
     Args:
-        path: Path to input file
+        path: Path to input file (local or remote URL)
         geometry_column: Name for geometry column in output
 
     Returns:
@@ -679,17 +785,19 @@ def convert_lazy(
         >>> import geoparquet_io as gpio
         >>> gpio.convert_lazy('data.geojson').sort_hilbert().write('output.parquet')
     """
-    from geoparquet_io.core.common import get_duckdb_connection
+    from geoparquet_io.core.common import get_duckdb_connection, needs_httpfs
 
     path_str = str(path)
 
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    # Enable httpfs extension for remote files (S3, HTTP, etc.)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path_str))
 
     # Use ST_Read for vector formats
     # ST_Read produces a 'geom' column as GEOMETRY type
     # Rename it to the target geometry column name
+    geom_col_quoted = _quote_identifier(geometry_column)
     source_sql = f"""
-        SELECT * EXCLUDE(geom), geom AS "{geometry_column}"
+        SELECT * EXCLUDE(geom), geom AS {geom_col_quoted}
         FROM ST_Read('{path_str}')
     """
 
@@ -731,17 +839,10 @@ def from_table(
         >>> con.execute("CREATE TABLE processed AS SELECT * FROM ...")
         >>> gpio.from_table("processed", con).sort_hilbert().write('output.parquet')
     """
-    from geoparquet_io.core.logging_config import warn
+    crs_dict = _resolve_crs(crs, context=f"table '{name}'")
 
-    if crs is None:
-        warn(f"No CRS specified for table '{name}'. Defaulting to WGS84 (EPSG:4326).")
-        crs_dict = _default_wgs84_crs()
-    elif isinstance(crs, str):
-        crs_dict = _crs_from_epsg(crs)
-    else:
-        crs_dict = crs
-
-    source_sql = f'SELECT * FROM "{name}"'
+    # Use proper identifier quoting to prevent SQL injection
+    source_sql = f"SELECT * FROM {_quote_identifier(name)}"
 
     return LazyTable(
         source=source_sql,
@@ -754,6 +855,7 @@ def from_table(
 
 def from_relation(
     relation: duckdb.DuckDBPyRelation,
+    connection: duckdb.DuckDBPyConnection,
     *,
     geometry_column: str = "geometry",
     crs: dict | str | None = None,
@@ -764,8 +866,13 @@ def from_relation(
     Use this to hand off any DuckDB query result to gpio for
     finalization. The relation stays lazy until a terminal operation.
 
+    Note: The connection must be the same one used to create the relation,
+    with the spatial extension already loaded.
+
     Args:
         relation: DuckDB Relation object
+        connection: DuckDB connection that created the relation. Must have
+            the spatial extension loaded.
         geometry_column: Name of geometry column
         crs: CRS as PROJJSON dict or EPSG string. If None, defaults to WGS84.
 
@@ -776,27 +883,20 @@ def from_relation(
         >>> import duckdb
         >>> import geoparquet_io as gpio
         >>> con = duckdb.connect()
+        >>> con.install_extension("spatial")
+        >>> con.load_extension("spatial")
         >>> rel = con.sql("SELECT * FROM read_parquet('data.parquet') WHERE area > 100")
-        >>> gpio.from_relation(rel).sort_hilbert().write('output.parquet')
+        >>> gpio.from_relation(rel, con).sort_hilbert().write('output.parquet')
     """
-    from geoparquet_io.core.logging_config import warn
+    crs_dict = _resolve_crs(crs, context="relation")
 
-    if crs is None:
-        warn("No CRS specified for relation. Defaulting to WGS84 (EPSG:4326).")
-        crs_dict = _default_wgs84_crs()
-    elif isinstance(crs, str):
-        crs_dict = _crs_from_epsg(crs)
-    else:
-        crs_dict = crs
-
-    # Relations use the connection they were created from
-    # We pass the relation as source; _source_sql will handle it
+    # Use the provided connection - it must be the same one that created the relation
     return LazyTable(
         source=relation,
-        connection=None,  # Will be created if needed
+        connection=connection,
         geometry_column=geometry_column,
         crs=crs_dict,
-        _owns_connection=True,  # We'll create a new connection
+        _owns_connection=False,  # We don't own the user's connection
     )
 
 
@@ -839,23 +939,24 @@ def from_arrow(
     if not geom_col:
         geom_col = "geometry"  # Fallback
 
-    # Handle CRS
-    if crs is None:
-        crs_dict = _extract_crs_from_arrow(table, geom_col)
-    elif isinstance(crs, str):
-        crs_dict = _crs_from_epsg(crs)
-    else:
-        crs_dict = crs
+    # Handle CRS with fallback to GeoArrow extraction
+    crs_dict = _resolve_crs(
+        crs,
+        context="Arrow table",
+        fallback_fn=lambda: _extract_crs_from_arrow(table, geom_col),
+    )
 
-    # Create connection and register table
+    # Create connection and register table with unique name
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-    con.register("__arrow_input", table)
+    table_name = f"__arrow_input_{uuid.uuid4().hex[:8]}"
+    con.register(table_name, table)
 
     # Convert WKB to GEOMETRY for spatial operations
-    source_sql = f'''
-        SELECT * REPLACE (ST_GeomFromWKB("{geom_col}") AS "{geom_col}")
-        FROM __arrow_input
-    '''
+    geom_col_quoted = _quote_identifier(geom_col)
+    source_sql = f"""
+        SELECT * REPLACE (ST_GeomFromWKB({geom_col_quoted}) AS {geom_col_quoted})
+        FROM {_quote_identifier(table_name)}
+    """
 
     return LazyTable(
         source=source_sql,
@@ -890,7 +991,8 @@ def _read_geoparquet_metadata(path: str) -> tuple[str, dict | None]:
 
             return primary_col, crs
 
-    except Exception:
+    except (OSError, KeyError, json.JSONDecodeError, AttributeError):
+        # File not found, not a parquet file, no geo metadata, or malformed JSON
         pass
 
     return "geometry", None
@@ -911,7 +1013,8 @@ def _extract_crs_from_arrow(table: pa.Table, geometry_column: str) -> dict | Non
                 ext_meta = json.loads(field.metadata[b"ARROW:extension:metadata"])
                 if "crs" in ext_meta:
                     return ext_meta["crs"]
-    except Exception:
+    except (KeyError, json.JSONDecodeError, AttributeError):
+        # Column not found, no metadata, or malformed JSON
         pass
 
     return None

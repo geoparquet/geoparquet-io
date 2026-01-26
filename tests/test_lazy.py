@@ -276,25 +276,27 @@ class TestFromRelation:
     """Tests for from_relation() entry point."""
 
     @pytest.fixture
-    def duckdb_relation(self):
-        """Create a DuckDB relation from test data."""
+    def duckdb_relation_and_conn(self):
+        """Create a DuckDB relation and connection from test data."""
         if not BUILDINGS_PARQUET.exists():
             pytest.skip("Test data not available")
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial")
         rel = con.sql(f"SELECT * FROM read_parquet('{BUILDINGS_PARQUET}')")
-        yield rel
+        yield rel, con
         con.close()
 
-    def test_from_relation_returns_lazy_table(self, duckdb_relation):
+    def test_from_relation_returns_lazy_table(self, duckdb_relation_and_conn):
         """Test that from_relation() returns LazyTable."""
-        table = from_relation(duckdb_relation)
+        rel, con = duckdb_relation_and_conn
+        table = from_relation(rel, con)
         assert isinstance(table, LazyTable)
 
-    def test_from_relation_collect(self, duckdb_relation):
+    def test_from_relation_collect(self, duckdb_relation_and_conn):
         """Test collect() from from_relation()."""
-        table = from_relation(duckdb_relation)
+        rel, con = duckdb_relation_and_conn
+        table = from_relation(rel, con)
         result = table.collect()
         assert isinstance(result, pa.Table)
         assert result.num_rows > 0
