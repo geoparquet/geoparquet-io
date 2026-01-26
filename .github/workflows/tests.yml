@@ -136,7 +136,7 @@ jobs:
 
       - name: Run slow and network tests (parallel)
         run: |
-          uv run pytest -n auto -m "slow or network" -v --tb=short --cov=geoparquet_io --cov-report=xml
+          uv run pytest -n auto -m "slow or network" -v --tb=short --cov=geoparquet_io --cov-report=xml --cov-report=term-missing --cov-fail-under=0
 
       - name: Upload slow test coverage to Codecov
         uses: codecov/codecov-action@v5
