@@ -27,11 +27,20 @@ Also provides pure table-centric functions:
 """
 
 from geoparquet_io.api import ops
+from geoparquet_io.api.lazy import (
+    LazyTable,
+    convert_lazy,
+    from_arrow,
+    from_relation,
+    from_table,
+    read_lazy,
+)
 from geoparquet_io.api.ops import read_bigquery
 from geoparquet_io.api.pipeline import pipe
 from geoparquet_io.api.table import Table, convert, extract_arcgis, read, read_partition
 
 __all__ = [
+    # Eager API
     "Table",
     "read",
     "read_partition",
@@ -40,4 +49,11 @@ __all__ = [
     "extract_arcgis",
     "pipe",
     "ops",
+    # Lazy API
+    "LazyTable",
+    "read_lazy",
+    "convert_lazy",
+    "from_table",
+    "from_relation",
+    "from_arrow",
 ]
