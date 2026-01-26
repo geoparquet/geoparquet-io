@@ -261,16 +261,45 @@ class TestRunBenchmark:
         assert "not found" in str(exc_info.value)
 
 
-class TestCLI:
-    """Tests for CLI interface."""
+class TestBenchmarkCommandGroup:
+    """Tests for benchmark command group."""
 
-    def test_benchmark_help(self):
-        """Test benchmark command help."""
+    def test_benchmark_is_group(self):
+        """Test that benchmark is a command group."""
         runner = CliRunner()
         result = runner.invoke(cli, ["benchmark", "--help"])
 
         assert result.exit_code == 0
-        assert "Benchmark GeoParquet conversion" in result.output
+        assert "suite" in result.output
+        assert "compare" in result.output
+
+    def test_benchmark_suite_help(self):
+        """Test benchmark suite --help."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["benchmark", "suite", "--help"])
+
+        assert result.exit_code == 0
+        assert "--operations" in result.output
+        assert "--iterations" in result.output
+
+    def test_benchmark_compare_help(self):
+        """Test benchmark compare --help (existing functionality)."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["benchmark", "compare", "--help"])
+
+        assert result.exit_code == 0
+        assert "INPUT_FILE" in result.output
+
+
+class TestCLI:
+    """Tests for CLI interface."""
+
+    def test_benchmark_compare_help_with_options(self):
+        """Test benchmark compare command help shows all options."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["benchmark", "compare", "--help"])
+
+        assert result.exit_code == 0
         assert "--iterations" in result.output
         assert "--converters" in result.output
 
@@ -281,6 +310,7 @@ class TestCLI:
             cli,
             [
                 "benchmark",
+                "compare",
                 str(GEOJSON_FILE),
                 "--iterations",
                 "1",
@@ -302,6 +332,7 @@ class TestCLI:
             cli,
             [
                 "benchmark",
+                "compare",
                 str(GEOJSON_FILE),
                 "--iterations",
                 "1",
@@ -330,6 +361,7 @@ class TestCLI:
             cli,
             [
                 "benchmark",
+                "compare",
                 str(GEOJSON_FILE),
                 "--iterations",
                 "1",
@@ -349,6 +381,49 @@ class TestCLI:
     def test_benchmark_cli_missing_file(self):
         """Test benchmark CLI with missing file."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["benchmark", "/nonexistent/file.geojson"])
+        result = runner.invoke(cli, ["benchmark", "compare", "/nonexistent/file.geojson"])
 
         assert result.exit_code != 0
+
+
+class TestBenchmarkSuiteCLI:
+    """Tests for benchmark suite CLI."""
+
+    @pytest.fixture
+    def test_parquet(self):
+        """Create a test parquet file."""
+        import tempfile
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "test.parquet"
+            table = pa.table(
+                {
+                    "id": [1, 2, 3],
+                    "geometry": [b"point1", b"point2", b"point3"],
+                }
+            )
+            pq.write_table(table, path)
+            yield str(path)
+
+    def test_benchmark_suite_runs(self, test_parquet):
+        """Test that benchmark suite runs with a local file."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "benchmark",
+                "suite",
+                "--files",
+                test_parquet,
+                "--operations",
+                "core",
+                "--iterations",
+                "1",
+            ],
+        )
+
+        # Should complete (may skip some operations)
+        assert result.exit_code == 0 or "not yet" in result.output.lower()

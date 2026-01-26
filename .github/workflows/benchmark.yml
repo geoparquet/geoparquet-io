@@ -1,0 +1,138 @@
+# Benchmark Suite Workflow
+# Runs performance benchmarks on demand or when 'benchmark' label is added to PRs
+name: Benchmark Suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      operations:
+        description: 'Operation set (core or full)'
+        required: false
+        default: 'core'
+        type: choice
+        options:
+          - core
+          - full
+      files:
+        description: 'File sizes to test (comma-separated: tiny,small,medium,large,xlarge)'
+        required: false
+        default: 'tiny,small,medium'
+      profile:
+        description: 'Profile level'
+        required: false
+        default: 'standard'
+        type: choice
+        options:
+          - standard
+          - comprehensive
+
+  pull_request:
+    types: [labeled]
+
+jobs:
+  check-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.label.name }}" == "benchmark" ]]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+  benchmark:
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_run == 'true'
+    strategy:
+      matrix:
+        include:
+          - name: constrained-512mb
+            memory: 512m
+          - name: normal-4gb
+            memory: 4g
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Pre-install DuckDB extensions
+        run: |
+          uv run python -c "import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL h3 FROM community')"
+
+      - name: Create results directory
+        run: mkdir -p benchmarks/results
+
+      - name: Download benchmark files
+        run: |
+          mkdir -p benchmarks/data
+          # TODO: Download files from source.coop
+          echo "Would download benchmark files here"
+
+      - name: Run benchmarks
+        run: |
+          # Run in Docker with memory limit
+          docker run --rm \
+            --memory=${{ matrix.memory }} \
+            -v $(pwd):/app \
+            -w /app \
+            python:3.11-slim \
+            bash -c "pip install -e . && gpio benchmark suite --output benchmarks/results/${{ matrix.name }}.json"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.name }}
+          path: benchmarks/results/${{ matrix.name }}.json
+
+  aggregate:
+    needs: benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          path: benchmarks/results
+
+      - name: Merge results
+        run: |
+          echo "Would merge results and generate report here"
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '## Benchmark Results\n\nResults will be posted here after implementation.'
+            })

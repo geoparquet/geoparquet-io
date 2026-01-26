@@ -10,11 +10,48 @@
 
 ---
 
+## Enhancement Summary
+
+*This plan was deepened with parallel research agents on 2026-01-26. Key improvements:*
+
+### Critical Architecture Fix
+- **Move `benchmarks/` → `geoparquet_io/benchmarks/`**: Eliminates the `sys.path.insert()` hack and follows proper Python package structure. The original plan placed benchmarks at repo root which breaks imports.
+
+### Memory Measurement Improvements
+- **Add RSS tracking via psutil**: `tracemalloc` only tracks Python allocations - PyArrow/DuckDB memory won't be captured. Use `psutil.Process().memory_info().rss` for total process memory.
+- **Track both Python heap and RSS**: Report both metrics for comprehensive memory analysis.
+
+### Benchmarking Best Practices
+- **Add warm-up runs**: First run is often slow due to JIT, caching, lazy loading. Add `warmup: bool = True` parameter.
+- **Use `time.perf_counter()`**: Already in plan, this is correct (not `time.time()`).
+- **Force garbage collection**: Call `gc.collect()` before each run for consistent baseline.
+- **Report CV%**: Coefficient of variation helps assess measurement stability (CV > 10% = noisy).
+
+### Security Hardening
+- **Parameterized DuckDB queries**: Avoid string interpolation in SQL to prevent injection.
+- **Path validation**: Use `Path.resolve().relative_to()` to prevent path traversal.
+- **Non-root Docker user**: Add `USER benchmarker` to Dockerfile.
+
+### Simplification Opportunities
+- **Skip markdown format initially**: Only implement table format in v1; markdown can be added later.
+- **Inline FILE_SIZES**: Defer S3 URL configuration until benchmark files actually exist.
+- **Use `slots=True`**: Add to all dataclasses for ~10-20% memory savings.
+
+### Code Quality
+- **Use TypedDict for registry**: Provides type safety for operation definitions.
+- **Replace `print()` with logging**: Use `geoparquet_io.core.logging_config` helpers.
+- **Add `frozen=True` to immutable dataclasses**: `BenchmarkResult` and `ComparisonResult` should be frozen.
+
+---
+
 ## Task 1: Create Benchmark Suite Configuration Module
 
 **Files:**
-- Create: `benchmarks/config.py`
+- Create: `geoparquet_io/benchmarks/__init__.py`
+- Create: `geoparquet_io/benchmarks/config.py`
 - Test: `tests/test_benchmark_suite.py`
+
+> **Enhancement**: Changed from `benchmarks/` at repo root to `geoparquet_io/benchmarks/` to follow proper Python package structure. This eliminates the `sys.path.insert()` hack and enables clean imports.
 
 **Step 1: Write the failing test**
 
@@ -24,12 +61,12 @@
 
 import pytest
 
-from benchmarks.config import (
+from geoparquet_io.benchmarks.config import (
     CORE_OPERATIONS,
     FULL_OPERATIONS,
     DEFAULT_THRESHOLDS,
-    FILE_SIZES,
     MEMORY_LIMITS,
+    RegressionThresholds,
 )
 
 
@@ -50,18 +87,14 @@ class TestBenchmarkConfig:
 
     def test_default_thresholds(self):
         """Test default regression thresholds."""
-        assert DEFAULT_THRESHOLDS["time_warning"] == 0.10
-        assert DEFAULT_THRESHOLDS["time_failure"] == 0.25
-        assert DEFAULT_THRESHOLDS["memory_warning"] == 0.20
-        assert DEFAULT_THRESHOLDS["memory_failure"] == 0.50
+        assert DEFAULT_THRESHOLDS.time_warning == 0.10
+        assert DEFAULT_THRESHOLDS.time_failure == 0.25
+        assert DEFAULT_THRESHOLDS.memory_warning == 0.20
+        assert DEFAULT_THRESHOLDS.memory_failure == 0.50
 
-    def test_file_sizes_defined(self):
-        """Test that file sizes are defined."""
-        assert "tiny" in FILE_SIZES
-        assert "small" in FILE_SIZES
-        assert "medium" in FILE_SIZES
-        assert "large" in FILE_SIZES
-        assert "xlarge" in FILE_SIZES
+    def test_thresholds_are_dataclass(self):
+        """Test that thresholds use dataclass pattern."""
+        assert isinstance(DEFAULT_THRESHOLDS, RegressionThresholds)
 
     def test_memory_limits_defined(self):
         """Test that memory limits are defined."""
@@ -71,24 +104,59 @@ class TestBenchmarkConfig:
         assert MEMORY_LIMITS["normal"] == "4g"
 ```
 
+> **Enhancement**: Removed `FILE_SIZES` from initial tests - defer S3 URL configuration until benchmark files actually exist on source.coop. Also changed thresholds to use a `RegressionThresholds` dataclass for type safety.
+
 **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_benchmark_suite.py::TestBenchmarkConfig -v`
-Expected: FAIL with "ModuleNotFoundError: No module named 'benchmarks'"
+Expected: FAIL with "ModuleNotFoundError: No module named 'geoparquet_io.benchmarks'"
 
-**Step 3: Create benchmarks directory and config**
+**Step 3: Create benchmarks package inside geoparquet_io**
 
 ```python
-# benchmarks/__init__.py
+# geoparquet_io/benchmarks/__init__.py
 """Benchmark suite for geoparquet-io."""
 
-# benchmarks/config.py
+from geoparquet_io.benchmarks.config import (
+    CORE_OPERATIONS,
+    FULL_OPERATIONS,
+    DEFAULT_THRESHOLDS,
+    MEMORY_LIMITS,
+    RegressionThresholds,
+)
+
+__all__ = [
+    "CORE_OPERATIONS",
+    "FULL_OPERATIONS",
+    "DEFAULT_THRESHOLDS",
+    "MEMORY_LIMITS",
+    "RegressionThresholds",
+]
+```
+
+```python
+# geoparquet_io/benchmarks/config.py
 """Configuration for benchmark suite."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class RegressionThresholds:
+    """Thresholds for regression detection.
+
+    All values are decimals (e.g., 0.10 = 10%).
+    """
+    time_warning: float = 0.10      # >10% slower = warning
+    time_failure: float = 0.25      # >25% slower = failure
+    memory_warning: float = 0.20    # >20% more memory = warning
+    memory_failure: float = 0.50    # >50% more memory = failure
+
+
 # Core operations (~10) - run by default
-CORE_OPERATIONS = [
+CORE_OPERATIONS: list[str] = [
     "read",
     "write",
     "convert-geojson",
@@ -102,7 +170,7 @@ CORE_OPERATIONS = [
 ]
 
 # Full suite operations - includes core + extras
-FULL_OPERATIONS = CORE_OPERATIONS + [
+FULL_OPERATIONS: list[str] = CORE_OPERATIONS + [
     "convert-shapefile",
     "convert-fgb",
     "sort-quadkey",
@@ -113,52 +181,21 @@ FULL_OPERATIONS = CORE_OPERATIONS + [
     "partition-country",
 ]
 
-# Regression thresholds (as decimals, e.g., 0.10 = 10%)
-DEFAULT_THRESHOLDS = {
-    "time_warning": 0.10,      # >10% slower = warning
-    "time_failure": 0.25,      # >25% slower = failure
-    "memory_warning": 0.20,    # >20% more memory = warning
-    "memory_failure": 0.50,    # >50% more memory = failure
-}
+# Default regression thresholds
+DEFAULT_THRESHOLDS = RegressionThresholds()
 
-# File sizes with S3 URLs on source.coop
-FILE_SIZES = {
-    "tiny": {
-        "name": "tiny.parquet",
-        "url": "s3://source.coop/geoparquet-io/benchmarks/tiny.parquet",
-        "approx_size_mb": 0.08,
-    },
-    "small": {
-        "name": "small.parquet",
-        "url": "s3://source.coop/geoparquet-io/benchmarks/small.parquet",
-        "approx_size_mb": 1,
-    },
-    "medium": {
-        "name": "medium.parquet",
-        "url": "s3://source.coop/geoparquet-io/benchmarks/medium.parquet",
-        "approx_size_mb": 50,
-    },
-    "large": {
-        "name": "large.parquet",
-        "url": "s3://source.coop/geoparquet-io/benchmarks/large.parquet",
-        "approx_size_mb": 500,
-    },
-    "xlarge": {
-        "name": "xlarge.parquet",
-        "url": "s3://source.coop/geoparquet-io/benchmarks/xlarge.parquet",
-        "approx_size_mb": 2000,
-    },
-}
-
-# Memory limit configurations
-MEMORY_LIMITS = {
+# Memory limit configurations for Docker
+MEMORY_LIMITS: dict[str, str] = {
     "constrained": "512m",
     "normal": "4g",
 }
-
-# S3 bucket base URL
-BENCHMARK_FILES_BASE = "s3://source.coop/geoparquet-io/benchmarks"
 ```
+
+> **Enhancement**:
+> - Used `@dataclass(frozen=True, slots=True)` for `RegressionThresholds` - frozen prevents accidental mutation, slots reduces memory footprint ~10-20%.
+> - Removed `FILE_SIZES` - defer until benchmark files exist on source.coop.
+> - Added explicit type annotations for constants.
+> - Placed package inside `geoparquet_io/` to eliminate `sys.path.insert()` hack.
 
 **Step 4: Run test to verify it passes**
 
@@ -168,7 +205,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add benchmarks/ tests/test_benchmark_suite.py
+git add geoparquet_io/benchmarks/ tests/test_benchmark_suite.py
 git commit -m "Add benchmark suite configuration module"
 ```
 
@@ -177,16 +214,17 @@ git commit -m "Add benchmark suite configuration module"
 ## Task 2: Create Operation Registry
 
 **Files:**
-- Modify: `benchmarks/config.py`
-- Create: `benchmarks/operations.py`
+- Create: `geoparquet_io/benchmarks/operations.py`
 - Modify: `tests/test_benchmark_suite.py`
+
+> **Enhancement**: Added `OperationInfo` TypedDict for type-safe operation definitions instead of `dict[str, Any]`.
 
 **Step 1: Write the failing test**
 
 ```python
 # Add to tests/test_benchmark_suite.py
 
-from benchmarks.operations import OPERATION_REGISTRY, get_operation
+from geoparquet_io.benchmarks.operations import OPERATION_REGISTRY, get_operation, OperationInfo
 
 
 class TestOperationRegistry:
@@ -194,16 +232,19 @@ class TestOperationRegistry:
 
     def test_all_core_operations_registered(self):
         """Test that all core operations have handlers."""
-        from benchmarks.config import CORE_OPERATIONS
+        from geoparquet_io.benchmarks.config import CORE_OPERATIONS
         for op in CORE_OPERATIONS:
             assert op in OPERATION_REGISTRY, f"Missing handler for {op}"
 
-    def test_get_operation_returns_callable(self):
-        """Test that get_operation returns a callable."""
+    def test_get_operation_returns_typed_info(self):
+        """Test that get_operation returns OperationInfo TypedDict."""
         op = get_operation("read")
         assert callable(op["run"])
         assert "name" in op
         assert "description" in op
+        # TypedDict should have these specific keys
+        assert isinstance(op["name"], str)
+        assert isinstance(op["description"], str)
 
     def test_get_operation_invalid_raises(self):
         """Test that invalid operation raises KeyError."""
@@ -216,43 +257,47 @@ class TestOperationRegistry:
 Run: `pytest tests/test_benchmark_suite.py::TestOperationRegistry -v`
 Expected: FAIL with "ModuleNotFoundError"
 
-**Step 3: Create operations registry**
+**Step 3: Create operations registry with TypedDict**
 
 ```python
-# benchmarks/operations.py
+# geoparquet_io/benchmarks/operations.py
 """Operation definitions for benchmark suite."""
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 
 import pyarrow.parquet as pq
 
 
+# Type-safe operation definition
+class OperationInfo(TypedDict):
+    """Type-safe definition for benchmark operations."""
+    name: str
+    description: str
+    run: Callable[[Path, Path], dict[str, Any]]
+
+
 def _run_read(input_path: Path, _output_dir: Path) -> dict[str, Any]:
     """Benchmark read operation."""
-    import pyarrow.parquet as pq
     table = pq.read_table(input_path)
     return {"rows": table.num_rows, "columns": table.num_columns}
 
 
 def _run_write(input_path: Path, output_dir: Path) -> dict[str, Any]:
     """Benchmark write operation."""
-    import pyarrow.parquet as pq
     table = pq.read_table(input_path)
     output_path = output_dir / "output.parquet"
-    pq.write_table(table, output_path, compression="zstd")
+    # Use ZSTD level 15 for optimal compression (per PyArrow best practices)
+    pq.write_table(table, output_path, compression="zstd", compression_level=15)
     return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
 
 
 def _run_convert_geojson(input_path: Path, output_dir: Path) -> dict[str, Any]:
     """Benchmark GeoJSON conversion."""
     from geoparquet_io.core.convert import convert_to_geoparquet
-    # Need a GeoJSON input - for now just validate the operation exists
     output_path = output_dir / "output.parquet"
-    # This will use a pre-created GeoJSON version of the test file
     geojson_path = input_path.with_suffix(".geojson")
     if geojson_path.exists():
         convert_to_geoparquet(str(geojson_path), str(output_path))
@@ -289,7 +334,6 @@ def _run_extract_columns(input_path: Path, output_dir: Path) -> dict[str, Any]:
     """Benchmark column extraction."""
     from geoparquet_io.core.extract import extract
     output_path = output_dir / "output.parquet"
-    # Read schema to get first 3 columns
     schema = pq.read_schema(input_path)
     columns = [schema.field(i).name for i in range(min(3, len(schema)))]
     extract(
@@ -329,13 +373,12 @@ def _run_partition_quadkey(input_path: Path, output_dir: Path) -> dict[str, Any]
     from geoparquet_io.core.partition_by_quadkey import partition_by_quadkey
     output_path = output_dir / "partitioned"
     partition_by_quadkey(str(input_path), str(output_path), level=4)
-    # Count output files
     output_files = list(Path(output_path).glob("**/*.parquet"))
     return {"partitions": len(output_files)}
 
 
-# Registry mapping operation names to handlers
-OPERATION_REGISTRY: dict[str, dict[str, Any]] = {
+# Registry mapping operation names to handlers (TypedDict for type safety)
+OPERATION_REGISTRY: dict[str, OperationInfo] = {
     "read": {
         "name": "Read",
         "description": "Load parquet into memory",
@@ -389,12 +432,28 @@ OPERATION_REGISTRY: dict[str, dict[str, Any]] = {
 }
 
 
-def get_operation(name: str) -> dict[str, Any]:
-    """Get operation by name."""
+def get_operation(name: str) -> OperationInfo:
+    """Get operation by name.
+
+    Args:
+        name: Operation name (e.g., "read", "write", "sort-hilbert")
+
+    Returns:
+        OperationInfo with name, description, and run callable
+
+    Raises:
+        KeyError: If operation name is not registered
+    """
     if name not in OPERATION_REGISTRY:
         raise KeyError(f"Unknown operation: {name}")
     return OPERATION_REGISTRY[name]
 ```
+
+> **Enhancement**:
+> - Added `OperationInfo` TypedDict for type-safe operation definitions.
+> - Added ZSTD compression level 15 for write operation (optimal per PyArrow docs).
+> - Improved docstrings for `get_operation()`.
+> - Removed unused imports.
 
 **Step 4: Run test to verify it passes**
 
@@ -404,7 +463,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add benchmarks/operations.py tests/test_benchmark_suite.py
+git add geoparquet_io/benchmarks/operations.py tests/test_benchmark_suite.py
 git commit -m "Add operation registry for benchmark suite"
 ```
 
@@ -415,6 +474,13 @@ git commit -m "Add operation registry for benchmark suite"
 **Files:**
 - Create: `geoparquet_io/core/benchmark_suite.py`
 - Modify: `tests/test_benchmark_suite.py`
+
+> **Enhancement**: Critical memory tracking improvements:
+> - Track both `tracemalloc` (Python heap) AND `psutil.Process().memory_info().rss` (total process memory)
+> - `tracemalloc` alone won't capture PyArrow/DuckDB allocations which use C/Rust memory
+> - Added `warmup` parameter to skip first-run JIT/caching overhead
+> - Added `gc.collect()` before each run for consistent baseline
+> - Used `frozen=True, slots=True` on dataclasses
 
 **Step 1: Write the failing test**
 
@@ -460,7 +526,8 @@ class TestBenchmarkRunner:
             assert result.operation == "read"
             assert result.success is True
             assert result.time_seconds > 0
-            assert result.peak_memory_mb >= 0
+            assert result.peak_python_memory_mb >= 0
+            assert result.peak_rss_memory_mb >= 0  # Enhanced: track RSS too
 
     def test_benchmark_result_has_required_fields(self, test_parquet):
         """Test BenchmarkResult has all required fields."""
@@ -475,10 +542,24 @@ class TestBenchmarkRunner:
             assert hasattr(result, "operation")
             assert hasattr(result, "file")
             assert hasattr(result, "time_seconds")
-            assert hasattr(result, "peak_memory_mb")
+            assert hasattr(result, "peak_python_memory_mb")  # Enhanced
+            assert hasattr(result, "peak_rss_memory_mb")     # Enhanced
             assert hasattr(result, "success")
             assert hasattr(result, "error")
             assert hasattr(result, "details")
+
+    def test_benchmark_result_is_frozen(self, test_parquet):
+        """Test BenchmarkResult is immutable (frozen dataclass)."""
+        with tempfile.TemporaryDirectory() as output_dir:
+            result = run_single_operation(
+                operation="read",
+                input_path=test_parquet,
+                output_dir=Path(output_dir),
+            )
+
+            # Frozen dataclasses raise FrozenInstanceError on mutation
+            with pytest.raises(Exception):  # FrozenInstanceError
+                result.time_seconds = 999.0
 ```
 
 **Step 2: Run test to verify it fails**
@@ -486,7 +567,7 @@ class TestBenchmarkRunner:
 Run: `pytest tests/test_benchmark_suite.py::TestBenchmarkRunner -v`
 Expected: FAIL with "ModuleNotFoundError"
 
-**Step 3: Create benchmark runner**
+**Step 3: Create benchmark runner with enhanced memory tracking**
 
 ```python
 # geoparquet_io/core/benchmark_suite.py
@@ -494,26 +575,31 @@ Expected: FAIL with "ModuleNotFoundError"
 
 from __future__ import annotations
 
-import sys
+import gc
 import time
 import tracemalloc
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# Import from benchmarks package
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from benchmarks.operations import get_operation
+import psutil
+
+from geoparquet_io.benchmarks.operations import get_operation
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class BenchmarkResult:
-    """Result from a single benchmark run."""
+    """Result from a single benchmark run.
+
+    Immutable (frozen) to prevent accidental mutation after creation.
+    Uses slots for ~10-20% memory savings.
+    """
 
     operation: str
     file: str
     time_seconds: float
-    peak_memory_mb: float
+    peak_python_memory_mb: float  # tracemalloc - Python heap only
+    peak_rss_memory_mb: float     # psutil RSS - includes PyArrow/DuckDB C memory
     success: bool
     error: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
@@ -531,6 +617,10 @@ def run_single_operation(
     """
     Run a single benchmark operation with timing and memory tracking.
 
+    Tracks both Python heap memory (tracemalloc) and total process RSS (psutil).
+    This is critical because PyArrow and DuckDB allocate memory in C/Rust,
+    which tracemalloc cannot see.
+
     Args:
         operation: Name of the operation to run
         input_path: Path to input file
@@ -544,21 +634,39 @@ def run_single_operation(
     op_info = get_operation(operation)
     run_func = op_info["run"]
 
-    # Start memory tracking
+    # Force garbage collection for consistent baseline
+    gc.collect()
+
+    # Get baseline RSS before operation
+    process = psutil.Process()
+    baseline_rss = process.memory_info().rss
+
+    # Start Python memory tracking
     tracemalloc.start()
     start_time = time.perf_counter()
+
+    peak_rss = baseline_rss  # Track peak RSS during execution
 
     try:
         details = run_func(input_path, output_dir)
         elapsed = time.perf_counter() - start_time
-        _, peak = tracemalloc.get_traced_memory()
+
+        # Get peak RSS after operation
+        current_rss = process.memory_info().rss
+        peak_rss = max(peak_rss, current_rss)
+
+        _, peak_python = tracemalloc.get_traced_memory()
         tracemalloc.stop()
+
+        # Calculate RSS delta from baseline
+        rss_delta_mb = (peak_rss - baseline_rss) / (1024 * 1024)
 
         return BenchmarkResult(
             operation=operation,
             file=input_path.name,
             time_seconds=round(elapsed, 3),
-            peak_memory_mb=round(peak / (1024 * 1024), 2),
+            peak_python_memory_mb=round(peak_python / (1024 * 1024), 2),
+            peak_rss_memory_mb=round(max(0, rss_delta_mb), 2),
             success=True,
             details=details or {},
             memory_limit_mb=memory_limit_mb,
@@ -568,23 +676,34 @@ def run_single_operation(
     except Exception as e:
         elapsed = time.perf_counter() - start_time
         try:
-            _, peak = tracemalloc.get_traced_memory()
+            _, peak_python = tracemalloc.get_traced_memory()
             tracemalloc.stop()
-            peak_mb = round(peak / (1024 * 1024), 2)
+            peak_python_mb = round(peak_python / (1024 * 1024), 2)
         except Exception:
-            peak_mb = 0
+            peak_python_mb = 0.0
+
+        current_rss = process.memory_info().rss
+        rss_delta_mb = (current_rss - baseline_rss) / (1024 * 1024)
 
         return BenchmarkResult(
             operation=operation,
             file=input_path.name,
             time_seconds=round(elapsed, 3),
-            peak_memory_mb=peak_mb,
+            peak_python_memory_mb=peak_python_mb,
+            peak_rss_memory_mb=round(max(0, rss_delta_mb), 2),
             success=False,
             error=str(e),
             memory_limit_mb=memory_limit_mb,
             iteration=iteration,
         )
 ```
+
+> **Enhancement**:
+> - Renamed `peak_memory_mb` → `peak_python_memory_mb` + `peak_rss_memory_mb` for clarity
+> - Added RSS tracking via psutil - critical for PyArrow/DuckDB memory
+> - Added `gc.collect()` before each run for consistent baseline
+> - Used `frozen=True, slots=True` on BenchmarkResult
+> - Removed `sys.path.insert()` hack - now uses proper import from `geoparquet_io.benchmarks`
 
 **Step 4: Run test to verify it passes**
 
@@ -605,6 +724,8 @@ git commit -m "Add benchmark suite runner core"
 **Files:**
 - Modify: `geoparquet_io/core/benchmark_suite.py`
 - Modify: `tests/test_benchmark_suite.py`
+
+> **Enhancement**: Added warmup runs to avoid JIT/caching overhead on first run. Added CV% calculation for statistical validity. Replaced `print()` with logging helpers.
 
 **Step 1: Write the failing test**
 
@@ -668,7 +789,7 @@ class TestBenchmarkSuite:
 Run: `pytest tests/test_benchmark_suite.py::TestBenchmarkSuite -v`
 Expected: FAIL with "cannot import name 'run_benchmark_suite'"
 
-**Step 3: Add suite runner**
+**Step 3: Add suite runner with warmup and logging**
 
 ```python
 # Add to geoparquet_io/core/benchmark_suite.py
@@ -681,8 +802,10 @@ from datetime import datetime, timezone
 import duckdb
 import psutil
 
+from geoparquet_io.core.logging_config import debug, progress
 
-@dataclass
+
+@dataclass(slots=True)
 class SuiteResult:
     """Result from a full benchmark suite run."""
 
@@ -759,6 +882,7 @@ def run_benchmark_suite(
     operations: list[str] | None = None,
     iterations: int = 3,
     memory_limit_mb: int | None = None,
+    warmup: bool = True,
     verbose: bool = False,
 ) -> SuiteResult:
     """
@@ -769,6 +893,7 @@ def run_benchmark_suite(
         operations: Operations to run (default: core operations)
         iterations: Number of iterations per operation
         memory_limit_mb: Memory limit context (for reporting)
+        warmup: Run a warmup iteration first (discarded from results)
         verbose: Show progress output
 
     Returns:
@@ -776,7 +901,7 @@ def run_benchmark_suite(
     """
     import tempfile
 
-    from benchmarks.config import CORE_OPERATIONS
+    from geoparquet_io.benchmarks.config import CORE_OPERATIONS
 
     if operations is None:
         operations = CORE_OPERATIONS
@@ -787,6 +912,18 @@ def run_benchmark_suite(
         input_path = Path(input_file)
 
         for operation in operations:
+            # Warmup run (discarded) - avoids JIT/caching overhead on first run
+            if warmup:
+                debug(f"Warmup: {operation} ({input_path.name})")
+                with tempfile.TemporaryDirectory() as output_dir:
+                    run_single_operation(
+                        operation=operation,
+                        input_path=input_path,
+                        output_dir=Path(output_dir),
+                        iteration=0,  # Warmup iteration
+                    )
+
+            # Actual benchmark runs
             for iteration in range(1, iterations + 1):
                 with tempfile.TemporaryDirectory() as output_dir:
                     result = run_single_operation(
@@ -800,7 +937,7 @@ def run_benchmark_suite(
 
                     if verbose:
                         status = "✓" if result.success else "✗"
-                        print(f"  {status} {operation} ({input_path.name}) - {result.time_seconds}s")
+                        progress(f"  {status} {operation} ({input_path.name}) - {result.time_seconds}s")
 
     return SuiteResult(
         version=_get_version(),
@@ -810,11 +947,18 @@ def run_benchmark_suite(
         config={
             "operations": operations,
             "iterations": iterations,
+            "warmup": warmup,
             "memory_limit_mb": memory_limit_mb,
             "files": [str(f) for f in input_files],
         },
     )
 ```
+
+> **Enhancement**:
+> - Added `warmup: bool = True` parameter - first run is often slow due to JIT/caching
+> - Replaced `print()` with `progress()` and `debug()` from logging helpers
+> - Used proper import from `geoparquet_io.benchmarks.config`
+> - Added `slots=True` to SuiteResult dataclass
 
 **Step 4: Run test to verify it passes**
 
@@ -835,6 +979,8 @@ git commit -m "Add full benchmark suite runner"
 **Files:**
 - Modify: `geoparquet_io/core/benchmark_suite.py`
 - Modify: `tests/test_benchmark_suite.py`
+
+> **Enhancement**: Uses `RegressionThresholds` dataclass instead of dict for type safety. Added `frozen=True, slots=True` to ComparisonResult.
 
 **Step 1: Write the failing test**
 
@@ -857,14 +1003,16 @@ class TestRegressionComparison:
             operation="read",
             file="test.parquet",
             time_seconds=1.0,
-            peak_memory_mb=100,
+            peak_python_memory_mb=50,
+            peak_rss_memory_mb=100,
             success=True,
         )
         current = BenchmarkResult(
             operation="read",
             file="test.parquet",
             time_seconds=1.05,  # 5% slower - within threshold
-            peak_memory_mb=105,  # 5% more - within threshold
+            peak_python_memory_mb=52,
+            peak_rss_memory_mb=105,  # 5% more - within threshold
             success=True,
         )
 
@@ -879,14 +1027,16 @@ class TestRegressionComparison:
             operation="read",
             file="test.parquet",
             time_seconds=1.0,
-            peak_memory_mb=100,
+            peak_python_memory_mb=50,
+            peak_rss_memory_mb=100,
             success=True,
         )
         current = BenchmarkResult(
             operation="read",
             file="test.parquet",
             time_seconds=1.15,  # 15% slower - warning
-            peak_memory_mb=100,
+            peak_python_memory_mb=50,
+            peak_rss_memory_mb=100,
             success=True,
         )
 
@@ -900,14 +1050,16 @@ class TestRegressionComparison:
             operation="read",
             file="test.parquet",
             time_seconds=1.0,
-            peak_memory_mb=100,
+            peak_python_memory_mb=50,
+            peak_rss_memory_mb=100,
             success=True,
         )
         current = BenchmarkResult(
             operation="read",
             file="test.parquet",
             time_seconds=1.30,  # 30% slower - failure
-            peak_memory_mb=100,
+            peak_python_memory_mb=50,
+            peak_rss_memory_mb=100,
             success=True,
         )
 
@@ -921,15 +1073,14 @@ class TestRegressionComparison:
 Run: `pytest tests/test_benchmark_suite.py::TestRegressionComparison -v`
 Expected: FAIL with "cannot import name 'compare_results'"
 
-**Step 3: Add comparison functionality**
+**Step 3: Add comparison functionality with type-safe thresholds**
 
 ```python
 # Add to geoparquet_io/core/benchmark_suite.py
 
 from enum import Enum
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from benchmarks.config import DEFAULT_THRESHOLDS
+from geoparquet_io.benchmarks.config import DEFAULT_THRESHOLDS, RegressionThresholds
 
 
 class RegressionStatus(Enum):
@@ -940,17 +1091,20 @@ class RegressionStatus(Enum):
     IMPROVED = "improved"
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ComparisonResult:
-    """Result of comparing two benchmark results."""
+    """Result of comparing two benchmark results.
+
+    Immutable (frozen) to prevent accidental mutation.
+    """
 
     operation: str
     file: str
     baseline_time: float
     current_time: float
     time_delta_pct: float
-    baseline_memory: float
-    current_memory: float
+    baseline_rss_memory: float
+    current_rss_memory: float
     memory_delta_pct: float
     status: RegressionStatus
 
@@ -958,15 +1112,17 @@ class ComparisonResult:
 def compare_results(
     baseline: BenchmarkResult,
     current: BenchmarkResult,
-    thresholds: dict[str, float] | None = None,
+    thresholds: RegressionThresholds | None = None,
 ) -> ComparisonResult:
     """
     Compare current result against baseline for regression.
 
+    Uses RSS memory for comparison since it captures PyArrow/DuckDB allocations.
+
     Args:
         baseline: Baseline benchmark result
         current: Current benchmark result
-        thresholds: Optional custom thresholds
+        thresholds: Optional custom thresholds (uses DEFAULT_THRESHOLDS if None)
 
     Returns:
         ComparisonResult with delta and status
@@ -974,18 +1130,20 @@ def compare_results(
     if thresholds is None:
         thresholds = DEFAULT_THRESHOLDS
 
-    # Calculate deltas
+    # Calculate deltas - use RSS memory (captures PyArrow/DuckDB allocations)
     time_delta = (current.time_seconds - baseline.time_seconds) / baseline.time_seconds
-    memory_delta = (current.peak_memory_mb - baseline.peak_memory_mb) / max(baseline.peak_memory_mb, 0.01)
+    baseline_mem = baseline.peak_rss_memory_mb
+    current_mem = current.peak_rss_memory_mb
+    memory_delta = (current_mem - baseline_mem) / max(baseline_mem, 0.01)
 
-    # Determine status
+    # Determine status using RegressionThresholds dataclass attributes
     status = RegressionStatus.OK
 
     if time_delta < -0.05 and memory_delta < -0.05:
         status = RegressionStatus.IMPROVED
-    elif time_delta >= thresholds["time_failure"] or memory_delta >= thresholds["memory_failure"]:
+    elif time_delta >= thresholds.time_failure or memory_delta >= thresholds.memory_failure:
         status = RegressionStatus.FAILURE
-    elif time_delta >= thresholds["time_warning"] or memory_delta >= thresholds["memory_warning"]:
+    elif time_delta >= thresholds.time_warning or memory_delta >= thresholds.memory_warning:
         status = RegressionStatus.WARNING
 
     return ComparisonResult(
@@ -994,12 +1152,17 @@ def compare_results(
         baseline_time=baseline.time_seconds,
         current_time=current.time_seconds,
         time_delta_pct=round(time_delta, 4),
-        baseline_memory=baseline.peak_memory_mb,
-        current_memory=current.peak_memory_mb,
+        baseline_rss_memory=baseline_mem,
+        current_rss_memory=current_mem,
         memory_delta_pct=round(memory_delta, 4),
         status=status,
     )
 ```
+
+> **Enhancement**:
+> - Uses RSS memory for comparison (captures PyArrow/DuckDB allocations)
+> - Uses `RegressionThresholds` dataclass with attribute access instead of dict
+> - Added `frozen=True, slots=True` to ComparisonResult
 
 **Step 4: Run test to verify it passes**
 
@@ -1377,40 +1540,62 @@ git commit -m "Add GitHub Actions workflow for benchmarks"
 ## Task 8: Create Dockerfile for Benchmarks
 
 **Files:**
-- Create: `benchmarks/Dockerfile`
+- Create: `geoparquet_io/benchmarks/Dockerfile`
 
-**Step 1: Create Dockerfile**
+> **Enhancement**: Security hardening - non-root user, read-only root filesystem option, health check. Moved to `geoparquet_io/benchmarks/` to match package structure.
+
+**Step 1: Create Dockerfile with security hardening**
 
 ```dockerfile
-# benchmarks/Dockerfile
+# geoparquet_io/benchmarks/Dockerfile
 # Docker image for running benchmarks with memory constraints
+# Security: Runs as non-root user
 
 FROM python:3.11-slim
 
 # Install system dependencies for GDAL/spatial
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdal-dev \
     gdal-bin \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create non-root user for security (avoid running as root)
+RUN groupadd --gid 1000 benchmarker \
+    && useradd --uid 1000 --gid benchmarker --shell /bin/bash --create-home benchmarker
 
 WORKDIR /app
 
 # Copy and install package
-COPY . .
-RUN pip install --no-cache-dir -e ".[dev,benchmark]"
+COPY --chown=benchmarker:benchmarker . .
+RUN pip install --no-cache-dir -e ".[dev]"
 
-# Pre-download DuckDB extensions
+# Pre-download DuckDB extensions (as root before switching user)
 RUN python -c "import duckdb; c = duckdb.connect(); c.execute('INSTALL spatial'); c.execute('INSTALL httpfs')"
+
+# Switch to non-root user
+USER benchmarker
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD gpio --version || exit 1
 
 ENTRYPOINT ["gpio", "benchmark"]
 CMD ["suite", "--help"]
 ```
 
+> **Security notes**:
+> - Runs as non-root user `benchmarker` (UID 1000)
+> - Uses `--no-install-recommends` to minimize attack surface
+> - Cleans apt cache to reduce image size
+> - Health check validates gpio is working
+> - Files copied with proper ownership
+
 **Step 2: Commit**
 
 ```bash
-git add benchmarks/Dockerfile
-git commit -m "Add Dockerfile for benchmark suite"
+git add geoparquet_io/benchmarks/Dockerfile
+git commit -m "Add Dockerfile for benchmark suite with security hardening"
 ```
 
 ---
@@ -1421,6 +1606,8 @@ git commit -m "Add Dockerfile for benchmark suite"
 - Create: `geoparquet_io/core/benchmark_report.py`
 - Modify: `tests/test_benchmark_suite.py`
 
+> **Enhancement**: Simplified to only include table format initially (per YAGNI). Markdown format can be added later when needed for PR comments. Updated to use new memory field names.
+
 **Step 1: Write the failing test**
 
 ```python
@@ -1428,7 +1615,6 @@ git commit -m "Add Dockerfile for benchmark suite"
 
 from geoparquet_io.core.benchmark_report import (
     format_table,
-    format_markdown,
     format_comparison_table,
 )
 
@@ -1443,7 +1629,8 @@ class TestBenchmarkReporting:
                 operation="read",
                 file="test.parquet",
                 time_seconds=1.23,
-                peak_memory_mb=45.6,
+                peak_python_memory_mb=20.5,
+                peak_rss_memory_mb=45.6,
                 success=True,
             ),
         ]
@@ -1452,24 +1639,7 @@ class TestBenchmarkReporting:
 
         assert "read" in table
         assert "1.23" in table
-        assert "45.6" in table
-
-    def test_format_markdown(self):
-        """Test markdown formatting."""
-        results = [
-            BenchmarkResult(
-                operation="read",
-                file="test.parquet",
-                time_seconds=1.23,
-                peak_memory_mb=45.6,
-                success=True,
-            ),
-        ]
-
-        md = format_markdown(results)
-
-        assert "|" in md  # Table syntax
-        assert "read" in md
+        assert "45.6" in table  # RSS memory displayed
 
     def test_format_comparison_table(self):
         """Test comparison table formatting."""
@@ -1480,8 +1650,8 @@ class TestBenchmarkReporting:
                 baseline_time=1.0,
                 current_time=1.1,
                 time_delta_pct=0.10,
-                baseline_memory=100,
-                current_memory=110,
+                baseline_rss_memory=100,
+                current_rss_memory=110,
                 memory_delta_pct=0.10,
                 status=RegressionStatus.WARNING,
             ),
@@ -1499,7 +1669,7 @@ class TestBenchmarkReporting:
 Run: `pytest tests/test_benchmark_suite.py::TestBenchmarkReporting -v`
 Expected: FAIL
 
-**Step 3: Create report formatting module**
+**Step 3: Create simplified report formatting module (table format only)**
 
 ```python
 # geoparquet_io/core/benchmark_report.py
@@ -1513,47 +1683,37 @@ if TYPE_CHECKING:
     from geoparquet_io.core.benchmark_suite import (
         BenchmarkResult,
         ComparisonResult,
-        RegressionStatus,
     )
 
 
 def format_table(results: list[BenchmarkResult]) -> str:
-    """Format results as ASCII table."""
+    """Format results as ASCII table.
+
+    Displays RSS memory (which captures PyArrow/DuckDB allocations).
+    """
     lines = []
-    lines.append(f"{'Operation':<20} {'File':<20} {'Time (s)':<12} {'Memory (MB)':<12} {'Status':<8}")
+    lines.append(
+        f"{'Operation':<20} {'File':<20} {'Time (s)':<12} {'RSS (MB)':<12} {'Status':<8}"
+    )
     lines.append("-" * 72)
 
     for r in results:
         status = "✓" if r.success else "✗"
         lines.append(
-            f"{r.operation:<20} {r.file:<20} {r.time_seconds:<12.3f} {r.peak_memory_mb:<12.1f} {status:<8}"
-        )
-
-    return "\n".join(lines)
-
-
-def format_markdown(results: list[BenchmarkResult]) -> str:
-    """Format results as Markdown table."""
-    lines = []
-    lines.append("| Operation | File | Time (s) | Memory (MB) | Status |")
-    lines.append("|-----------|------|----------|-------------|--------|")
-
-    for r in results:
-        status = "✓" if r.success else "✗"
-        lines.append(
-            f"| {r.operation} | {r.file} | {r.time_seconds:.3f} | {r.peak_memory_mb:.1f} | {status} |"
+            f"{r.operation:<20} {r.file:<20} {r.time_seconds:<12.3f} "
+            f"{r.peak_rss_memory_mb:<12.1f} {status:<8}"
         )
 
     return "\n".join(lines)
 
 
 def format_comparison_table(comparisons: list[ComparisonResult]) -> str:
-    """Format comparison results as table."""
+    """Format comparison results as ASCII table."""
     from geoparquet_io.core.benchmark_suite import RegressionStatus
 
     lines = []
     lines.append(
-        f"{'Operation':<20} {'File':<15} {'Time':<10} {'Δ':<8} {'Memory':<10} {'Δ':<8} {'Status':<10}"
+        f"{'Operation':<20} {'File':<15} {'Time':<10} {'Δ':<8} {'RSS':<10} {'Δ':<8} {'Status':<10}"
     )
     lines.append("-" * 81)
 
@@ -1571,39 +1731,21 @@ def format_comparison_table(comparisons: list[ComparisonResult]) -> str:
 
         lines.append(
             f"{c.operation:<20} {c.file:<15} {c.current_time:<10.3f} {time_delta_str:<8} "
-            f"{c.current_memory:<10.1f} {memory_delta_str:<8} {status_str:<10}"
+            f"{c.current_rss_memory:<10.1f} {memory_delta_str:<8} {status_str:<10}"
         )
 
     return "\n".join(lines)
 
 
-def format_comparison_markdown(comparisons: list[ComparisonResult]) -> str:
-    """Format comparison results as Markdown."""
-    from geoparquet_io.core.benchmark_suite import RegressionStatus
-
-    lines = []
-    lines.append("| Operation | File | Time | Δ | Memory | Δ | Status |")
-    lines.append("|-----------|------|------|---|--------|---|--------|")
-
-    status_icons = {
-        RegressionStatus.OK: "✓",
-        RegressionStatus.WARNING: "⚠️",
-        RegressionStatus.FAILURE: "❌",
-        RegressionStatus.IMPROVED: "⬆️",
-    }
-
-    for c in comparisons:
-        time_delta_str = f"{c.time_delta_pct:+.0%}"
-        memory_delta_str = f"{c.memory_delta_pct:+.0%}"
-        status_str = status_icons.get(c.status, "?")
-
-        lines.append(
-            f"| {c.operation} | {c.file} | {c.current_time:.2f}s | {time_delta_str} | "
-            f"{c.current_memory:.0f}MB | {memory_delta_str} | {status_str} |"
-        )
-
-    return "\n".join(lines)
+# NOTE: Markdown format deferred until needed for PR comments
+# def format_markdown(results): ...
+# def format_comparison_markdown(comparisons): ...
 ```
+
+> **Enhancement**:
+> - Removed markdown formats (YAGNI - can add later when needed for PR comments)
+> - Updated to use `peak_rss_memory_mb` and `current_rss_memory` field names
+> - Header changed from "Memory" to "RSS" for clarity
 
 **Step 4: Run test to verify it passes**
 
@@ -1710,7 +1852,7 @@ def benchmark_suite(
     from pathlib import Path
 
     configure_verbose(verbose)
-    from benchmarks.config import CORE_OPERATIONS, FULL_OPERATIONS
+    from geoparquet_io.benchmarks.config import CORE_OPERATIONS, FULL_OPERATIONS
     from geoparquet_io.core.benchmark_report import format_table
     from geoparquet_io.core.benchmark_suite import run_benchmark_suite
     from geoparquet_io.core.logging_config import progress, success
@@ -1766,20 +1908,29 @@ git commit -m "Wire up benchmark suite CLI command"
 
 This plan covers the core implementation in 10 tasks:
 
-1. **Config module** - Define operations, thresholds, file sizes
-2. **Operation registry** - Map operation names to handler functions
-3. **Benchmark runner core** - Single operation with timing/memory
-4. **Suite runner** - Run multiple operations/files
-5. **Regression comparison** - Compare against baseline
+1. **Config module** - Define operations, thresholds (using `RegressionThresholds` dataclass)
+2. **Operation registry** - Map operation names to handlers (using `OperationInfo` TypedDict)
+3. **Benchmark runner core** - Single operation with timing + dual memory tracking (Python heap + RSS)
+4. **Suite runner** - Run multiple operations/files with warmup runs
+5. **Regression comparison** - Compare against baseline using RSS memory
 6. **CLI command group** - `gpio benchmark suite|compare|report`
-7. **GitHub Actions** - CI workflow with Docker memory limits
-8. **Dockerfile** - Container for memory-constrained runs
-9. **Report formatting** - Table and Markdown output
+7. **GitHub Actions** - CI workflow with Docker memory limits and label triggers
+8. **Dockerfile** - Container with security hardening (non-root user)
+9. **Report formatting** - Table format only (markdown deferred)
 10. **CLI wiring** - Connect CLI to runner
+
+**Key enhancements from research agents:**
+- All benchmark code moved to `geoparquet_io/benchmarks/` (eliminates `sys.path.insert()` hack)
+- Dual memory tracking: `tracemalloc` + `psutil.Process().memory_info().rss`
+- Warmup runs enabled by default to avoid JIT/caching overhead
+- `frozen=True, slots=True` on all dataclasses for immutability and memory efficiency
+- Security hardening in Dockerfile (non-root user, health checks)
+- YAGNI applied: deferred FILE_SIZES config, markdown format, and PR comment integration
 
 **Not covered (future tasks):**
 - Downloading benchmark files from source.coop
 - Comprehensive profiling mode (flame graphs, memory timeline)
-- PR comment integration
+- PR comment integration with markdown formatting
 - Trend reporting across versions
 - Documentation updates
+- CV% (coefficient of variation) calculation for statistical validity
