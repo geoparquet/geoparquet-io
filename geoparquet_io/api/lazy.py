@@ -566,19 +566,28 @@ def _hilbert_sort_transform(
 ) -> str:
     """Transform that orders by Hilbert curve for spatial locality.
 
-    Uses window function to compute extent in a single scan instead of
-    scanning the data twice (once for extent, once for the data).
+    Uses a CTE to compute the dataset extent once, then cross-joins it
+    for use in ST_Hilbert ordering. DuckDB's ST_Extent is not an aggregate
+    function, so we use MIN/MAX of coordinate functions to build a BOX_2D.
     """
     geom_col = _quote_identifier(geometry_column)
-    # Use window function for single-scan extent computation
+    # Compute extent using MIN/MAX aggregates, create BOX_2D via struct
     return f"""
-        SELECT * EXCLUDE(__extent)
-        FROM (
-            SELECT *,
-                ST_Extent({geom_col}) OVER () as __extent
-            FROM ({inner_sql}) AS __hilbert_src
-        ) AS __hilbert_with_extent
-        ORDER BY ST_Hilbert({geom_col}, __extent)
+        WITH __hilbert_data AS (
+            SELECT * FROM ({inner_sql}) AS __src
+        ),
+        __hilbert_extent AS (
+            SELECT {{
+                'min_x': MIN(ST_XMin({geom_col})),
+                'min_y': MIN(ST_YMin({geom_col})),
+                'max_x': MAX(ST_XMax({geom_col})),
+                'max_y': MAX(ST_YMax({geom_col}))
+            }}::BOX_2D AS __ext
+            FROM __hilbert_data
+        )
+        SELECT __hilbert_data.*
+        FROM __hilbert_data, __hilbert_extent
+        ORDER BY ST_Hilbert({geom_col}, __hilbert_extent.__ext)
     """
 
 
