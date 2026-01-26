@@ -679,7 +679,9 @@ class Table:
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
+        write_strategy: str = "duckdb-kv",
         profile: str | None = None,
+        verbose: bool = False,
         # Format-specific options
         overwrite: bool = False,
         layer_name: str = "features",
@@ -707,6 +709,8 @@ class Table:
             row_group_size_mb: Target row group size in MB for GeoParquet
             row_group_rows: Exact rows per row group for GeoParquet
             geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, or None to preserve)
+            write_strategy: Write strategy for GeoParquet ('in-memory', 'streaming',
+                           'duckdb-kv', 'disk-rewrite'). Default: 'duckdb-kv'
             profile: AWS profile for S3 operations
             overwrite: Overwrite existing file (GeoPackage, Shapefile)
             layer_name: Layer name for GeoPackage (default: 'features')
@@ -743,7 +747,9 @@ class Table:
                 row_group_size_mb=row_group_size_mb,
                 row_group_rows=row_group_rows,
                 geoparquet_version=geoparquet_version,
+                write_strategy=write_strategy,
                 profile=profile,
+                verbose=verbose,
             )
 
         # Handle other formats
@@ -788,28 +794,57 @@ class Table:
         row_group_size_mb: float | None,
         row_group_rows: int | None,
         geoparquet_version: str | None,
+        write_strategy: str,
         profile: str | None,
+        verbose: bool = False,
     ) -> Path:
         """Write table to GeoParquet format (supports local and cloud)."""
+        import tempfile
+        import uuid
         from pathlib import Path as PathLib
 
-        output_path = PathLib(path)
+        from geoparquet_io.core.common import is_remote_url, setup_aws_profile_if_needed
+        from geoparquet_io.core.upload import upload
+        from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
 
-        # Use write_geoparquet_table which handles both local and remote
-        write_geoparquet_table(
-            self._table,
-            output_file=str(output_path),
-            geometry_column=self._geometry_column,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            geoparquet_version=geoparquet_version,
-            verbose=False,
-            profile=profile,
-        )
+        path_str = str(path)
+        is_remote = is_remote_url(path_str)
 
-        return output_path
+        # For remote destinations, write to temp file first
+        if is_remote:
+            setup_aws_profile_if_needed(profile, path_str)
+            temp_dir = PathLib(tempfile.gettempdir())
+            local_path = temp_dir / f"gpio_write_{uuid.uuid4()}.parquet"
+        else:
+            local_path = PathLib(path)
+
+        try:
+            # Get the appropriate write strategy
+            strategy_enum = WriteStrategy(write_strategy)
+            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
+
+            strategy.write_from_table(
+                table=self._table,
+                output_path=str(local_path),
+                geometry_column=self._geometry_column,
+                geoparquet_version=geoparquet_version,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_rows,
+                verbose=verbose,
+            )
+
+            # Upload to remote if needed
+            if is_remote:
+                upload(local_path, path_str, profile=profile)
+                return PathLib(path)
+
+            return local_path
+        finally:
+            # Clean up temp file for remote writes
+            if is_remote and local_path.exists():
+                local_path.unlink()
 
     def _write_format(
         self,

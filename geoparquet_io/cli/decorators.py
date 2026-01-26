@@ -88,12 +88,14 @@ def row_group_options(func):
 
 def output_format_options(func):
     """
-    Add all output format options (compression + row groups).
+    Add all output format options (compression + row groups + memory limit).
 
-    This is a convenience decorator that combines compression_options and row_group_options.
+    This is a convenience decorator that combines compression_options, row_group_options,
+    and write_memory_option.
     """
     func = compression_options(func)
     func = row_group_options(func)
+    func = write_memory_option(func)
     return func
 
 
@@ -139,6 +141,23 @@ def overwrite_option(func):
     Allows overwriting existing files without prompting.
     """
     return click.option("--overwrite", is_flag=True, help="Overwrite existing files")(func)
+
+
+def write_memory_option(func):
+    """
+    Add --write-memory option to a command.
+
+    Allows specifying the DuckDB memory limit for streaming writes.
+    When set, DuckDB uses single-threaded mode for memory control.
+    Accepts values like '512MB', '2GB', '4GB'.
+    """
+    return click.option(
+        "--write-memory",
+        type=str,
+        default=None,
+        help="Memory limit for streaming writes (e.g., '512MB', '2GB'). "
+        "Default: 50%% of available RAM (container-aware).",
+    )(func)
 
 
 def any_extension_option(func):
@@ -212,6 +231,31 @@ def geoparquet_version_option(func):
         help="GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only). "
         "Auto-detects from input if not specified: preserves input version, "
         "upgrades native geo types to 2.0, defaults to 1.1.",
+    )(func)
+
+
+def write_strategy_option(func):
+    """
+    Add --write-strategy option to a command.
+
+    Allows specifying the write strategy for GeoParquet metadata writes:
+    - duckdb-kv (default): Use DuckDB COPY TO with native KV_METADATA (fastest)
+    - in-memory: Load entire dataset into memory, apply metadata, write once
+    - streaming: Stream Arrow RecordBatches for constant memory usage
+    - disk-rewrite: Write with DuckDB, then rewrite with PyArrow for metadata
+
+    Note: When no metadata rewrite is needed (parquet-geo-only, some 2.0 ops),
+    a plain DuckDB COPY TO is used regardless of this setting.
+    """
+    return click.option(
+        "--write-strategy",
+        type=click.Choice(["duckdb-kv", "in-memory", "streaming", "disk-rewrite"]),
+        default="duckdb-kv",
+        help="Write strategy for geo metadata. "
+        "duckdb-kv (default): DuckDB COPY with native metadata (fastest). "
+        "in-memory: load full dataset into memory. "
+        "streaming: constant memory usage. "
+        "disk-rewrite: reliable fallback.",
     )(func)
 
 

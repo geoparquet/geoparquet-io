@@ -13,11 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.common import (
-    check_bbox_structure,
-    get_parquet_metadata,
-    parse_geo_metadata,
-)
+from geoparquet_io.core.common import check_bbox_structure
 
 # ============================================================================
 # CENTRAL FORMAT REQUIREMENTS
@@ -74,9 +70,16 @@ def validate_output_format(
     # Check file exists
     assert os.path.exists(parquet_file), f"Output file not found: {parquet_file}"
 
-    # Get metadata
-    metadata, schema = get_parquet_metadata(parquet_file, verbose)
-    geo_meta = parse_geo_metadata(metadata, verbose)
+    # Get metadata using PyArrow directly (not DuckDB) to avoid duplicate key issues
+    # DuckDB's parquet_kv_metadata can return duplicate keys, with the old value
+    # overwriting the new value when converted to a Python dict. PyArrow returns
+    # only the most recent value for each key.
+    pf = pq.ParquetFile(parquet_file)
+    schema = pf.schema_arrow
+    metadata = schema.metadata or {}
+    geo_meta = None
+    if b"geo" in metadata:
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
 
     # =========================
     # 1. GEOPARQUET VERSION CHECK
@@ -294,13 +297,23 @@ class TestHilbertSort:
     def test_default_format(self, sample_parquet, temp_output):
         """Test default hilbert sort format."""
         run_command_and_validate(
-            ["sort", "hilbert", sample_parquet, temp_output], expect_bbox=False
+            ["sort", "hilbert", sample_parquet, temp_output, "--geoparquet-version", "1.1"],
+            expect_bbox=False,
         )
 
     def test_with_bbox(self, sample_parquet, temp_output):
         """Test hilbert sort with bbox."""
         run_command_and_validate(
-            ["sort", "hilbert", sample_parquet, temp_output, "--add-bbox"], expect_bbox=True
+            [
+                "sort",
+                "hilbert",
+                sample_parquet,
+                temp_output,
+                "--add-bbox",
+                "--geoparquet-version",
+                "1.1",
+            ],
+            expect_bbox=True,
         )
 
     def test_custom_compression(self, sample_parquet, temp_output):
@@ -315,21 +328,68 @@ class TestHilbertSort:
                 "zstd",
                 "--compression-level",
                 "15",
+                "--geoparquet-version",
+                "1.1",
             ],
             expected_compression="ZSTD",
             expect_bbox=False,
         )
 
-    def test_row_groups(self, sample_parquet, temp_output):
-        """Test hilbert sort with custom row groups."""
+    def test_row_groups(self, temp_dir, temp_output):
+        """Test hilbert sort with custom row groups.
+
+        Note: DuckDB's ROW_GROUP_SIZE is a hint, not a strict limit.
+        DuckDB only starts splitting into multiple row groups once the dataset
+        exceeds a certain size threshold (~5000 rows). We create a sufficiently
+        large synthetic file to reliably trigger multiple row groups.
+        """
+        # Create a synthetic file with enough rows to reliably split into multiple groups
+        # DuckDB needs at least ~5000+ rows to actually create multiple row groups
+        import pyarrow as pa
+
+        # Create 10000 rows to ensure DuckDB creates multiple row groups
+        wkb_point = bytes.fromhex("0101000000000000000000000000000000000000000000000000000000")
+        n_rows = 10000
+        table = pa.table(
+            {
+                "id": [str(i) for i in range(n_rows)],
+                "name": [f"feature_{i}" for i in range(n_rows)],
+                "geometry": [wkb_point] * n_rows,
+            }
+        )
+
+        # Add geo metadata with version 1.1.0
+        metadata = {
+            b"geo": json.dumps(
+                {
+                    "version": "1.1.0",
+                    "primary_column": "geometry",
+                    "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+                }
+            ).encode("utf-8")
+        }
+
+        tmp_input = os.path.join(temp_dir, "test_input.parquet")
+        table = table.replace_schema_metadata(metadata)
+        pq.write_table(table, tmp_input)
 
         def check_row_groups(parquet_file, metadata, geo_meta, results):
             pf = pq.ParquetFile(parquet_file)
-            # With 42 rows and size 20, expect at least 2 groups
+            # With 10000 rows and row-group-size 100, expect at least 2 groups
+            # DuckDB uses ROW_GROUP_SIZE as a hint combined with data size factors
             assert pf.num_row_groups >= 2, f"Expected multiple row groups, got {pf.num_row_groups}"
 
         run_command_and_validate(
-            ["sort", "hilbert", sample_parquet, temp_output, "--row-group-size", "20"],
+            [
+                "sort",
+                "hilbert",
+                tmp_input,
+                temp_output,
+                "--row-group-size",
+                "100",
+                "--geoparquet-version",
+                "1.1",
+            ],
             custom_checks={"row_groups": check_row_groups},
         )
 
@@ -339,7 +399,10 @@ class TestAddBbox:
 
     def test_default_format(self, sample_parquet, temp_output):
         """Test default add bbox format."""
-        run_command_and_validate(["add", "bbox", sample_parquet, temp_output], expect_bbox=True)
+        run_command_and_validate(
+            ["add", "bbox", sample_parquet, temp_output, "--geoparquet-version", "1.1"],
+            expect_bbox=True,
+        )
 
     def test_custom_compression(self, sample_parquet, temp_output):
         """Test add bbox with custom compression."""
@@ -353,6 +416,8 @@ class TestAddBbox:
                 "zstd",
                 "--compression-level",
                 "15",
+                "--geoparquet-version",
+                "1.1",
             ],
             expected_compression="ZSTD",
             expect_bbox=True,
@@ -368,7 +433,16 @@ class TestAddBbox:
             )
 
         run_command_and_validate(
-            ["add", "bbox", sample_parquet, temp_output, "--bbox-name", "bounds"],
+            [
+                "add",
+                "bbox",
+                sample_parquet,
+                temp_output,
+                "--bbox-name",
+                "bounds",
+                "--geoparquet-version",
+                "1.1",
+            ],
             expect_bbox=True,
             custom_checks={"bbox_name": check_bbox_name},
         )
@@ -418,11 +492,11 @@ class TestPartition:
                 }
             )
 
-            # Add minimal geo metadata
+            # Add geo metadata with version 1.1.0
             metadata = {
                 b"geo": json.dumps(
                     {
-                        "version": "1.0.0",
+                        "version": "1.1.0",
                         "primary_column": "geometry",
                         "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
                     }
@@ -444,6 +518,8 @@ class TestPartition:
                     "--column",
                     "category",
                     "--skip-analysis",
+                    "--geoparquet-version",
+                    "1.1",
                 ],
             )
 
@@ -460,28 +536,240 @@ class TestPartition:
                 os.unlink(tmp_input_name)
 
 
+class TestExtractOutput:
+    """Test extract command output format compliance."""
+
+    def test_default_format(self, sample_parquet, temp_output):
+        """Test default extract format."""
+        run_command_and_validate(
+            ["extract", sample_parquet, temp_output, "--geoparquet-version", "1.1"],
+            expect_bbox=None,  # Don't enforce bbox, just validate format
+        )
+
+    def test_with_bbox_filter(self, sample_parquet, temp_output):
+        """Test extract with bbox filter produces valid output."""
+        run_command_and_validate(
+            [
+                "extract",
+                sample_parquet,
+                temp_output,
+                "--bbox",
+                "-180,-90,180,90",
+                "--geoparquet-version",
+                "1.1",
+            ],
+            expect_bbox=None,
+        )
+
+    def test_with_where_filter(self, sample_parquet, temp_output):
+        """Test extract with WHERE filter produces valid output."""
+        run_command_and_validate(
+            [
+                "extract",
+                sample_parquet,
+                temp_output,
+                "--where",
+                "1=1",
+                "--geoparquet-version",
+                "1.1",
+            ],
+            expect_bbox=None,
+        )
+
+    def test_with_include_cols(self, sample_parquet, temp_output):
+        """Test extract with column selection produces valid output."""
+        run_command_and_validate(
+            [
+                "extract",
+                sample_parquet,
+                temp_output,
+                "--include-cols",
+                "id",
+                "--geoparquet-version",
+                "1.1",
+            ],
+            expect_bbox=None,
+        )
+
+    def test_custom_compression(self, sample_parquet, temp_output):
+        """Test extract with custom compression."""
+        run_command_and_validate(
+            [
+                "extract",
+                sample_parquet,
+                temp_output,
+                "--compression",
+                "gzip",
+                "--geoparquet-version",
+                "1.1",
+            ],
+            expected_compression="GZIP",
+            expect_bbox=None,
+        )
+
+
+@pytest.mark.slow
+class TestConvertOutput:
+    """Test convert command output format compliance."""
+
+    @pytest.fixture
+    def geojson_input(self):
+        """Path to sample GeoJSON test file."""
+        return "tests/data/buildings_test.geojson"
+
+    @pytest.fixture
+    def shapefile_input(self):
+        """Path to sample shapefile test file."""
+        return "tests/data/buildings_test.shp"
+
+    def test_from_geojson(self, geojson_input, temp_output):
+        """Test convert from GeoJSON produces valid GeoParquet."""
+        run_command_and_validate(
+            ["convert", geojson_input, temp_output],
+            expect_bbox=True,  # Convert adds bbox by default
+        )
+
+    def test_from_shapefile(self, shapefile_input, temp_output):
+        """Test convert from shapefile produces valid GeoParquet."""
+        run_command_and_validate(
+            ["convert", shapefile_input, temp_output],
+            expect_bbox=True,  # Convert adds bbox by default
+        )
+
+    def test_skip_hilbert(self, geojson_input, temp_output):
+        """Test convert with --skip-hilbert still produces valid output."""
+        run_command_and_validate(
+            ["convert", geojson_input, temp_output, "--skip-hilbert"],
+            expect_bbox=True,
+        )
+
+    def test_custom_compression(self, shapefile_input, temp_output):
+        """Test convert with custom compression."""
+        run_command_and_validate(
+            [
+                "convert",
+                shapefile_input,
+                temp_output,
+                "--compression",
+                "gzip",
+                "--skip-hilbert",
+            ],
+            expected_compression="GZIP",
+            expect_bbox=True,
+        )
+
+
+class TestSortColumnOutput:
+    """Test sort column output format compliance."""
+
+    def test_default_format(self, sample_parquet, temp_output):
+        """Test default sort column format."""
+        # sort column takes: INPUT OUTPUT COLUMNS (positional arg)
+        run_command_and_validate(
+            [
+                "sort",
+                "column",
+                sample_parquet,
+                temp_output,
+                "id",
+                "--geoparquet-version",
+                "1.1",
+            ],
+            expect_bbox=None,  # Don't enforce bbox
+        )
+
+    def test_custom_compression(self, sample_parquet, temp_output):
+        """Test sort column with custom compression."""
+        run_command_and_validate(
+            [
+                "sort",
+                "column",
+                sample_parquet,
+                temp_output,
+                "id",
+                "--compression",
+                "gzip",
+                "--geoparquet-version",
+                "1.1",
+            ],
+            expected_compression="GZIP",
+            expect_bbox=None,
+        )
+
+
+class TestSortQuadkeyOutput:
+    """Test sort quadkey output format compliance."""
+
+    def test_default_format(self, sample_parquet, temp_output):
+        """Test default sort quadkey format."""
+        run_command_and_validate(
+            [
+                "sort",
+                "quadkey",
+                sample_parquet,
+                temp_output,
+                "--geoparquet-version",
+                "1.1",
+            ],
+            expect_bbox=None,  # Don't enforce bbox
+        )
+
+    def test_custom_compression(self, sample_parquet, temp_output):
+        """Test sort quadkey with custom compression."""
+        run_command_and_validate(
+            [
+                "sort",
+                "quadkey",
+                sample_parquet,
+                temp_output,
+                "--compression",
+                "gzip",
+                "--geoparquet-version",
+                "1.1",
+            ],
+            expected_compression="GZIP",
+            expect_bbox=None,
+        )
+
+
 class TestAllCommandsConsistency:
     """Test consistency across all commands."""
 
     def test_all_produce_correct_version(self, sample_parquet):
         """Ensure all commands produce the configured GeoParquet version."""
-        test_commands = [
+        # Commands where the pattern is: cmd INPUT OUTPUT [OPTIONS]
+        simple_commands = [
             ["sort", "hilbert"],
+            ["sort", "quadkey"],
             ["add", "bbox"],
+            ["extract"],
         ]
 
-        for cmd_base in test_commands:
+        for cmd_base in simple_commands:
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
                 tmp_name = tmp.name
 
             try:
                 run_command_and_validate(
-                    cmd_base + [sample_parquet, tmp_name],
+                    cmd_base + [sample_parquet, tmp_name, "--geoparquet-version", "1.1"],
                     expect_bbox=None,  # Don't check bbox, just version/compression
                 )
             finally:
                 if os.path.exists(tmp_name):
                     os.unlink(tmp_name)
+
+        # sort column has special syntax: sort column INPUT OUTPUT COLUMNS [OPTIONS]
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            tmp_name = tmp.name
+
+        try:
+            run_command_and_validate(
+                ["sort", "column", sample_parquet, tmp_name, "id", "--geoparquet-version", "1.1"],
+                expect_bbox=None,
+            )
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def test_compression_options_work(self, sample_parquet):
         """Test that all compression options work correctly."""
@@ -506,6 +794,8 @@ class TestAllCommandsConsistency:
                         tmp_name,
                         "--compression",
                         compression_arg,
+                        "--geoparquet-version",
+                        "1.1",
                     ],
                     expected_compression=expected_compression,
                 )

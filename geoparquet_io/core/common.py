@@ -1866,7 +1866,7 @@ def _detect_geometry_from_query(
     return "geometry"
 
 
-def _wrap_query_with_wkb_conversion(query: str, geometry_column: str) -> str:
+def _wrap_query_with_wkb_conversion(query: str, geometry_column: str, con=None) -> str:
     """
     Wrap query to convert geometry column to WKB for Arrow export.
 
@@ -1877,10 +1877,22 @@ def _wrap_query_with_wkb_conversion(query: str, geometry_column: str) -> str:
     Args:
         query: Original SQL SELECT query
         geometry_column: Name of the geometry column to convert
+        con: Optional DuckDB connection to verify column exists
 
     Returns:
-        str: Wrapped query with WKB conversion
+        str: Wrapped query with WKB conversion, or original query if column doesn't exist
     """
+    # If connection provided, check if geometry column exists in query output
+    if con is not None:
+        try:
+            schema_result = con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow()
+            if geometry_column not in schema_result.schema.names:
+                # Geometry column was excluded, return original query
+                return query
+        except Exception:
+            # If check fails, try the conversion anyway
+            pass
+
     # Quote column name to handle special characters
     quoted_geom = geometry_column.replace('"', '""')
 
@@ -1889,6 +1901,123 @@ def _wrap_query_with_wkb_conversion(query: str, geometry_column: str) -> str:
         SELECT * REPLACE (ST_AsWKB("{quoted_geom}") AS "{quoted_geom}")
         FROM __arrow_source
     """
+
+
+def _wrap_query_with_blob_conversion(query: str, geometry_column: str, con=None) -> str:
+    """
+    Wrap query to convert geometry column to plain binary BLOB.
+
+    Unlike _wrap_query_with_wkb_conversion which produces WKB that DuckDB still
+    recognizes as spatial, this casts to BLOB to produce truly plain binary data.
+    Used for GeoParquet v1.x where we need plain binary WKB without geoarrow
+    extension types in the Parquet schema.
+
+    Args:
+        query: Original SQL SELECT query
+        geometry_column: Name of the geometry column to convert
+        con: Optional DuckDB connection to verify column exists
+
+    Returns:
+        str: Wrapped query with BLOB conversion, or original query if column doesn't exist
+    """
+    # If connection provided, check if geometry column exists in query output
+    if con is not None:
+        try:
+            schema_result = con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow()
+            if geometry_column not in schema_result.schema.names:
+                # Geometry column was excluded, return original query
+                return query
+        except Exception:
+            # If check fails, try the conversion anyway
+            pass
+
+    # Quote column name to handle special characters
+    quoted_geom = geometry_column.replace('"', '""')
+
+    # Cast to BLOB to produce plain binary without geoarrow extension type
+    return f"""
+        WITH __arrow_source AS ({query})
+        SELECT * REPLACE (ST_AsWKB("{quoted_geom}")::BLOB AS "{quoted_geom}")
+        FROM __arrow_source
+    """
+
+
+def compute_bbox_via_sql(
+    con,
+    query: str,
+    geometry_column: str,
+) -> list[float] | None:
+    """
+    Compute bounding box from query using DuckDB spatial functions.
+
+    Args:
+        con: DuckDB connection with spatial extension loaded
+        query: SQL query containing geometry column
+        geometry_column: Name of geometry column
+
+    Returns:
+        [xmin, ymin, xmax, ymax] or None if query returns no rows
+    """
+    # Escape column name for SQL (double any embedded quotes)
+    escaped_col = geometry_column.replace('"', '""')
+    bbox_query = f"""
+        SELECT
+            MIN(ST_XMin("{escaped_col}")) as xmin,
+            MIN(ST_YMin("{escaped_col}")) as ymin,
+            MAX(ST_XMax("{escaped_col}")) as xmax,
+            MAX(ST_YMax("{escaped_col}")) as ymax
+        FROM ({query})
+    """
+    result = con.execute(bbox_query).fetchone()
+
+    if result and all(v is not None for v in result):
+        return list(result)
+    return None
+
+
+def compute_geometry_types_via_sql(
+    con,
+    query: str,
+    geometry_column: str,
+) -> list[str]:
+    """
+    Compute distinct geometry types from query using DuckDB.
+
+    Args:
+        con: DuckDB connection with spatial extension loaded
+        query: SQL query containing geometry column
+        geometry_column: Name of geometry column
+
+    Returns:
+        List of geometry type names (e.g., ["Point", "Polygon"])
+    """
+    # Escape column name for SQL (double any embedded quotes)
+    escaped_col = geometry_column.replace('"', '""')
+    types_query = f"""
+        SELECT DISTINCT ST_GeometryType("{escaped_col}") as geom_type
+        FROM ({query})
+        WHERE "{escaped_col}" IS NOT NULL
+    """
+    results = con.execute(types_query).fetchall()
+
+    # DuckDB returns types like "POINT", "POLYGON" - convert to GeoParquet format
+    type_map = {
+        "POINT": "Point",
+        "LINESTRING": "LineString",
+        "POLYGON": "Polygon",
+        "MULTIPOINT": "MultiPoint",
+        "MULTILINESTRING": "MultiLineString",
+        "MULTIPOLYGON": "MultiPolygon",
+        "GEOMETRYCOLLECTION": "GeometryCollection",
+    }
+
+    types = []
+    for (geom_type,) in results:
+        if geom_type:
+            normalized = type_map.get(geom_type.upper(), geom_type)
+            types.append(normalized)
+
+    return sorted(set(types))
 
 
 def _rebuild_array_with_type(
@@ -1916,6 +2045,75 @@ def _rebuild_array_with_type(
         new_chunks.append(new_chunk)
 
     return pa.chunked_array(new_chunks, type=new_type)
+
+
+def _detect_version_from_table(table, verbose: bool = False) -> str | None:
+    """
+    Detect GeoParquet version from table's schema metadata.
+
+    Checks the table's schema metadata for existing geo metadata and extracts
+    the version. This allows preserving v2.0 or parquet-geo-only formats when
+    writing a table that was read from such a source.
+
+    Also checks for native geoarrow extension types which indicate v2.0 or
+    parquet-geo-only format.
+
+    Args:
+        table: PyArrow Table to check
+        verbose: Whether to print verbose output
+
+    Returns:
+        Version string (e.g., "1.1", "2.0", "parquet-geo-only") or None if not detected
+    """
+    import json
+
+    from geoparquet_io.core.streaming import is_geoarrow_type
+
+    # Check for native geoarrow extension types (indicates v2.0 or parquet-geo-only)
+    has_native_geo = False
+    for field in table.schema:
+        if is_geoarrow_type(field.type):
+            has_native_geo = True
+            break
+
+    # Check schema metadata for geo version
+    metadata = table.schema.metadata
+    if not metadata:
+        if has_native_geo:
+            # Native geo types but no metadata suggests parquet-geo-only
+            if verbose:
+                debug("Detected parquet-geo-only format from native geo types")
+            return "parquet-geo-only"
+        return None
+
+    if b"geo" not in metadata:
+        if has_native_geo:
+            # Native geo types but no geo metadata = parquet-geo-only
+            if verbose:
+                debug("Detected parquet-geo-only format (native types, no geo metadata)")
+            return "parquet-geo-only"
+        return None
+
+    try:
+        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
+        if isinstance(geo_meta, dict):
+            version = geo_meta.get("version")
+            if version:
+                parts = version.split(".")
+                if len(parts) >= 2:
+                    major = parts[0]
+                    if major == "2":
+                        if verbose:
+                            debug("Detected GeoParquet version 2.0 from table metadata")
+                        return "2.0"
+                    # Upgrade all 1.x versions to 1.1 (backwards compatible)
+                    if major == "1":
+                        if verbose:
+                            debug("Detected GeoParquet version 1.x from table metadata")
+                        return "1.1"
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
@@ -2305,10 +2503,15 @@ def _apply_geoparquet_metadata(
     - v2.0: Apply CRS to schema type AND geo metadata
     - parquet-geo-only: Apply CRS to schema type only, no geo metadata
 
+    When geoparquet_version is None, the function will detect the version from
+    the table's existing schema metadata, preserving v2.0 or parquet-geo-only
+    formats when present.
+
     Args:
         table: PyArrow Table to modify
         geometry_column: Name of the geometry column
-        geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, parquet-geo-only)
+        geoparquet_version: GeoParquet version (1.0, 1.1, 2.0, parquet-geo-only),
+            or None to auto-detect from existing table metadata
         original_metadata: Original metadata to preserve
         input_crs: PROJJSON dict with CRS
         custom_metadata: Custom metadata (e.g., H3 covering info)
@@ -2319,14 +2522,19 @@ def _apply_geoparquet_metadata(
     Returns:
         pa.Table: Table with GeoParquet metadata applied
     """
+    # Auto-detect version from table schema metadata if not specified
+    effective_version = geoparquet_version
+    if effective_version is None:
+        effective_version = _detect_version_from_table(table, verbose)
+
     version_config = GEOPARQUET_VERSIONS.get(
-        geoparquet_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
+        effective_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
     )
     metadata_version = version_config["metadata_version"]
-    should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
+    should_add_geo_metadata = effective_version != "parquet-geo-only"
 
     if verbose:
-        debug(f"Applying GeoParquet metadata for version: {geoparquet_version or 'default (1.1)'}")
+        debug(f"Applying GeoParquet metadata for version: {effective_version or 'default (1.1)'}")
 
     # Check if geometry column exists in table
     if geometry_column not in table.column_names:
@@ -2336,7 +2544,7 @@ def _apply_geoparquet_metadata(
 
     # Step 1: Handle geometry column based on version
     table = _process_geometry_column_for_version(
-        table, geometry_column, geoparquet_version, input_crs, verbose
+        table, geometry_column, effective_version, input_crs, verbose
     )
 
     # Step 2: Build and apply geo metadata (unless parquet-geo-only)
@@ -2595,7 +2803,7 @@ def write_geoparquet_via_arrow(
 
         # Wrap query with WKB conversion only if geometry column exists
         if has_geometry:
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
         else:
             final_query = query
             if verbose:
@@ -2656,6 +2864,79 @@ def write_geoparquet_via_arrow(
             )
 
 
+def _plain_copy_to(
+    con,
+    query: str,
+    output_path: str,
+    compression: str = "ZSTD",
+    verbose: bool = False,
+    geoparquet_version: str = "1.1",
+    compression_level: int | None = None,
+    row_group_rows: int | None = None,
+) -> None:
+    """
+    Execute a plain DuckDB COPY TO without geo metadata manipulation.
+
+    Used when no metadata rewrite is needed (parquet-geo-only, 2.0 passthrough).
+    This is the fastest possible write path.
+
+    Args:
+        con: DuckDB connection
+        query: SQL query to execute
+        output_path: Path to output file
+        compression: Compression type
+        verbose: Whether to print verbose output
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
+        compression_level: Compression level (codec-specific)
+        row_group_rows: Target number of rows per row group
+    """
+    compression_map = {
+        "zstd": "ZSTD",
+        "gzip": "GZIP",
+        "snappy": "SNAPPY",
+        "lz4": "LZ4",
+        "none": "UNCOMPRESSED",
+        "uncompressed": "UNCOMPRESSED",
+        "brotli": "BROTLI",
+    }
+    duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
+
+    # Map version to DuckDB GEOPARQUET_VERSION parameter
+    version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+    duckdb_version = version_config.get("duckdb_param", "V1")
+
+    escaped_path = output_path.replace("'", "''")
+
+    # Build options list
+    options = [
+        "FORMAT PARQUET",
+        f"COMPRESSION {duckdb_compression}",
+        f"GEOPARQUET_VERSION '{duckdb_version}'",
+    ]
+    # Only add compression level for codecs that support it (ZSTD, GZIP, BROTLI)
+    if compression_level is not None and duckdb_compression in ("ZSTD", "GZIP", "BROTLI"):
+        options.append(f"COMPRESSION_LEVEL {compression_level}")
+    if row_group_rows is not None:
+        options.append(f"ROW_GROUP_SIZE {row_group_rows}")
+
+    copy_query = f"""
+        COPY ({query})
+        TO '{escaped_path}'
+        ({", ".join(options)})
+    """
+
+    if verbose:
+        debug(f"Executing plain COPY TO with {duckdb_compression} compression...")
+
+    con.execute(copy_query)
+
+    if verbose:
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(output_path)
+        success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
+
+
 def write_parquet_with_metadata(
     con,
     query,
@@ -2671,13 +2952,15 @@ def write_parquet_with_metadata(
     profile=None,
     geoparquet_version=None,
     input_crs=None,
+    write_strategy: str = "duckdb-kv",
+    memory_limit: str | None = None,
 ):
     """
     Write a parquet file with proper compression and metadata handling.
 
-    Uses Arrow as the internal transfer format for efficiency - fetches DuckDB
-    query results directly as an Arrow table, applies metadata in memory, and
-    writes once to disk (no intermediate file rewrites).
+    Supports multiple write strategies with different memory and performance
+    characteristics. The default "duckdb-kv" strategy uses DuckDB's native
+    KV_METADATA for fast streaming writes.
 
     Supports both local and remote outputs (S3, GCS, Azure). Remote outputs
     are written to a temporary local file, then uploaded.
@@ -2697,29 +2980,122 @@ def write_parquet_with_metadata(
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         input_crs: PROJJSON dict with CRS from input file
+        write_strategy: Write strategy to use. Options:
+            - "duckdb-kv" (default): Use DuckDB COPY TO with KV_METADATA
+            - "in-memory": Load entire dataset into memory
+            - "streaming": Stream Arrow RecordBatches
+            - "disk-rewrite": Write with DuckDB, then rewrite with PyArrow
+        memory_limit: DuckDB memory limit for streaming writes (e.g., '2GB', '512MB').
+            If None, auto-detects based on available system/container memory.
 
     Returns:
         None
     """
-    # Delegate to the Arrow-based implementation
-    # Bounds are always computed from actual table data during metadata application
-    write_geoparquet_via_arrow(
-        con=con,
-        query=query,
-        output_file=output_file,
-        geometry_column=None,  # Auto-detect
-        original_metadata=original_metadata,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        custom_metadata=custom_metadata,
-        verbose=verbose,
-        show_sql=show_sql,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        input_crs=input_crs,
+    from geoparquet_io.core.write_strategies import (
+        WriteStrategy,
+        WriteStrategyFactory,
+        needs_metadata_rewrite,
     )
+
+    configure_verbose(verbose)
+
+    # Setup AWS profile if needed
+    setup_aws_profile_if_needed(profile, output_file)
+
+    # Auto-detect geometry column and version if not provided
+    geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
+
+    if geoparquet_version is None:
+        geoparquet_version = extract_version_from_metadata(original_metadata)
+
+    effective_version = geoparquet_version or "1.1"
+
+    # Check if we need to add/rewrite geo metadata
+    rewrite_needed = needs_metadata_rewrite(effective_version, original_metadata)
+
+    if show_sql:
+        info("\n-- Query:")
+        progress(query)
+
+    with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
+        actual_output,
+        is_remote,
+    ):
+        if not rewrite_needed:
+            # Fast path: plain DuckDB COPY TO without geo metadata manipulation
+            if verbose:
+                debug(f"Writing GeoParquet version: {effective_version}")
+                debug(f"No metadata rewrite needed for {effective_version} - using plain COPY TO")
+
+            _plain_copy_to(
+                con=con,
+                query=query,
+                output_path=actual_output,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_rows=row_group_rows,
+                verbose=verbose,
+                geoparquet_version=effective_version,
+            )
+
+            # For 2.0 and parquet-geo-only with non-default CRS, apply CRS to schema
+            if input_crs and not is_default_crs(input_crs):
+                if effective_version in ("2.0", "parquet-geo-only"):
+                    apply_crs_to_parquet(
+                        actual_output,
+                        input_crs,
+                        geometry_column=geometry_column or "geometry",
+                        compression=compression,
+                        compression_level=compression_level,
+                        row_group_rows=row_group_rows,
+                        add_to_geo_metadata=(effective_version == "2.0"),
+                        verbose=verbose,
+                    )
+        else:
+            # Metadata rewrite needed - use strategy pattern
+            strategy_enum = WriteStrategy(write_strategy)
+            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
+
+            # Validate memory_limit is only used with duckdb-kv strategy
+            if memory_limit is not None and strategy_enum != WriteStrategy.DUCKDB_KV:
+                raise ValueError(
+                    f"--write-memory is only supported with the 'duckdb-kv' strategy, "
+                    f"not '{write_strategy}'"
+                )
+
+            if verbose:
+                debug(f"Writing GeoParquet version: {effective_version}")
+                debug(f"Using write strategy: {strategy.name}")
+
+            # Build kwargs - only pass memory_limit for duckdb-kv
+            write_kwargs = {
+                "con": con,
+                "query": query,
+                "output_path": actual_output,
+                "geometry_column": geometry_column or "geometry",
+                "original_metadata": original_metadata,
+                "geoparquet_version": effective_version,
+                "compression": compression,
+                "compression_level": compression_level,
+                "row_group_size_mb": row_group_size_mb,
+                "row_group_rows": row_group_rows,
+                "input_crs": input_crs,
+                "verbose": verbose,
+                "custom_metadata": custom_metadata,
+            }
+            if strategy_enum == WriteStrategy.DUCKDB_KV:
+                write_kwargs["memory_limit"] = memory_limit
+
+            strategy.write_from_query(**write_kwargs)
+
+        if is_remote:
+            upload_if_remote(
+                actual_output,
+                output_file,
+                profile=profile,
+                is_directory=False,
+                verbose=verbose,
+            )
 
 
 def write_geoparquet_table(
