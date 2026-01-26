@@ -32,17 +32,28 @@ CORE_OPERATIONS: list[str] = [
     "partition-quadkey",
 ]
 
-# Full suite operations - includes core + extras
-FULL_OPERATIONS: list[str] = CORE_OPERATIONS + [
-    "convert-shapefile",
-    "convert-fgb",
-    "sort-quadkey",
-    "add-h3",
-    "add-quadkey",
-    "add-country",
-    "partition-h3",
-    "partition-country",
+# Chain operations - multi-step workflows for testing chaining performance
+CHAIN_OPERATIONS: list[str] = [
+    "chain-extract-bbox-sort",  # Extract → Add BBox → Hilbert Sort
+    "chain-convert-optimize",  # Convert → Add BBox → Hilbert Sort
+    "chain-filter-reproject-partition",  # BBox Filter → Reproject → Quadkey Partition
 ]
+
+# Full suite operations - includes core + extras + chains
+FULL_OPERATIONS: list[str] = (
+    CORE_OPERATIONS
+    + [
+        "convert-shapefile",
+        "convert-fgb",
+        "sort-quadkey",
+        "add-h3",
+        "add-quadkey",
+        "add-country",
+        "partition-h3",
+        "partition-country",
+    ]
+    + CHAIN_OPERATIONS
+)
 
 # Default regression thresholds
 DEFAULT_THRESHOLDS = RegressionThresholds()

@@ -124,6 +124,149 @@ def _run_partition_quadkey(input_path: Path, output_dir: Path) -> dict[str, Any]
     return {"partitions": len(output_files)}
 
 
+def _run_chain_extract_bbox_sort(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark chained operations: extract → add-bbox → sort-hilbert.
+
+    This tests real-world performance of chaining multiple operations,
+    where intermediate I/O can be a significant overhead. Measures:
+    - Realistic workflow performance
+    - Intermediate file overhead
+    - Memory accumulation across operations
+
+    The chain performs:
+    1. Extract columns (subset to first 5 columns + geometry)
+    2. Add bbox column
+    3. Sort by Hilbert curve
+    """
+    from geoparquet_io.core.add_bbox_column import add_bbox_column
+    from geoparquet_io.core.extract import extract
+    from geoparquet_io.core.hilbert_order import hilbert_order
+
+    # Step 1: Extract columns
+    step1_output = output_dir / "step1_extract.parquet"
+    schema = pq.read_schema(input_path)
+    columns = [schema.field(i).name for i in range(min(5, len(schema)))]
+    extract(
+        str(input_path),
+        str(step1_output),
+        include_cols=",".join(columns),
+    )
+
+    # Step 2: Add bbox column
+    step2_output = output_dir / "step2_bbox.parquet"
+    add_bbox_column(str(step1_output), str(step2_output), force=True)
+
+    # Step 3: Sort by Hilbert
+    final_output = output_dir / "final_sorted.parquet"
+    hilbert_order(str(step2_output), str(final_output))
+
+    result_table = pq.read_table(final_output)
+    return {
+        "columns_selected": len(columns),
+        "final_rows": result_table.num_rows,
+        "final_size_mb": final_output.stat().st_size / (1024 * 1024),
+        "steps_completed": 3,
+    }
+
+
+def _run_chain_convert_optimize(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark chained operations: convert → add-bbox → sort-hilbert.
+
+    This tests the full optimization pipeline for converting raw data
+    to optimized GeoParquet:
+    1. Convert from source format (GeoJSON/GPKG)
+    2. Add bbox column for efficient filtering
+    3. Sort by Hilbert curve for spatial locality
+
+    Skips if no source format file is available alongside the parquet.
+    """
+    from geoparquet_io.core.add_bbox_column import add_bbox_column
+    from geoparquet_io.core.convert import convert_to_geoparquet
+    from geoparquet_io.core.hilbert_order import hilbert_order
+
+    # Look for GeoJSON or GPKG source file
+    geojson_path = input_path.with_suffix(".geojson")
+    gpkg_path = input_path.with_suffix(".gpkg")
+
+    if geojson_path.exists():
+        source_path = geojson_path
+        source_format = "geojson"
+    elif gpkg_path.exists():
+        source_path = gpkg_path
+        source_format = "gpkg"
+    else:
+        return {"skipped": True, "reason": "No source format file available"}
+
+    # Step 1: Convert to GeoParquet
+    step1_output = output_dir / "step1_convert.parquet"
+    convert_to_geoparquet(str(source_path), str(step1_output))
+
+    # Step 2: Add bbox column
+    step2_output = output_dir / "step2_bbox.parquet"
+    add_bbox_column(str(step1_output), str(step2_output), force=True)
+
+    # Step 3: Sort by Hilbert
+    final_output = output_dir / "final_sorted.parquet"
+    hilbert_order(str(step2_output), str(final_output))
+
+    result_table = pq.read_table(final_output)
+    return {
+        "source_format": source_format,
+        "final_rows": result_table.num_rows,
+        "final_size_mb": final_output.stat().st_size / (1024 * 1024),
+        "steps_completed": 3,
+    }
+
+
+def _run_chain_filter_reproject_partition(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark chained operations: extract-bbox → reproject → partition.
+
+    This tests a complex spatial workflow:
+    1. Filter by bounding box (Western Hemisphere)
+    2. Reproject to Web Mercator and back to WGS84 (simulating coordinate work)
+    3. Partition by quadkey
+
+    Note: Quadkey requires geographic (WGS84) coordinates, so we reproject
+    to Web Mercator and back to exercise the reprojection machinery.
+
+    Useful for measuring performance of multi-stage spatial processing.
+    """
+    from geoparquet_io.core.extract import extract
+    from geoparquet_io.core.partition_by_quadkey import partition_by_quadkey
+    from geoparquet_io.core.reproject import reproject
+
+    # Step 1: Extract by bbox (Western Hemisphere)
+    step1_output = output_dir / "step1_extract.parquet"
+    extract(
+        str(input_path),
+        str(step1_output),
+        bbox="-180,-90,0,90",
+    )
+
+    # Check if we got any rows
+    step1_table = pq.read_table(step1_output)
+    if step1_table.num_rows == 0:
+        return {"skipped": True, "reason": "No rows in bbox filter result"}
+
+    # Step 2: Reproject to Web Mercator and back (exercises reprojection)
+    step2a_output = output_dir / "step2a_mercator.parquet"
+    reproject(str(step1_output), str(step2a_output), target_crs="EPSG:3857")
+
+    step2b_output = output_dir / "step2b_wgs84.parquet"
+    reproject(str(step2a_output), str(step2b_output), target_crs="EPSG:4326")
+
+    # Step 3: Partition by quadkey (requires WGS84)
+    partition_output = output_dir / "partitioned"
+    partition_by_quadkey(str(step2b_output), str(partition_output), partition_resolution=4)
+    output_files = list(Path(partition_output).glob("**/*.parquet"))
+
+    return {
+        "filtered_rows": step1_table.num_rows,
+        "partitions_created": len(output_files),
+        "steps_completed": 3,
+    }
+
+
 # Registry mapping operation names to handlers (TypedDict for type safety)
 OPERATION_REGISTRY: dict[str, OperationInfo] = {
     "read": {
@@ -175,6 +318,22 @@ OPERATION_REGISTRY: dict[str, OperationInfo] = {
         "name": "Partition Quadkey",
         "description": "Partition by quadkey",
         "run": _run_partition_quadkey,
+    },
+    # Chain operations for testing performance of multi-step workflows
+    "chain-extract-bbox-sort": {
+        "name": "Chain: Extract→BBox→Sort",
+        "description": "Extract columns, add bbox, Hilbert sort",
+        "run": _run_chain_extract_bbox_sort,
+    },
+    "chain-convert-optimize": {
+        "name": "Chain: Convert→Optimize",
+        "description": "Convert, add bbox, Hilbert sort",
+        "run": _run_chain_convert_optimize,
+    },
+    "chain-filter-reproject-partition": {
+        "name": "Chain: Filter→Reproject→Partition",
+        "description": "Bbox filter, reproject, quadkey partition",
+        "run": _run_chain_filter_reproject_partition,
     },
 }
 

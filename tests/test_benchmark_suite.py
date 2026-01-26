@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from geoparquet_io.benchmarks.config import (
+    CHAIN_OPERATIONS,
     CORE_OPERATIONS,
     DEFAULT_THRESHOLDS,
     FULL_OPERATIONS,
@@ -327,3 +328,107 @@ class TestBenchmarkReporting:
         assert "read" in table
         assert "+10%" in table or "10%" in table
         assert "WARNING" in table or "⚠" in table
+
+
+class TestChainOperations:
+    """Tests for chained operation benchmarks."""
+
+    def test_chain_operations_defined(self):
+        """Test that chain operations are defined."""
+        assert len(CHAIN_OPERATIONS) == 3
+        assert "chain-extract-bbox-sort" in CHAIN_OPERATIONS
+        assert "chain-convert-optimize" in CHAIN_OPERATIONS
+        assert "chain-filter-reproject-partition" in CHAIN_OPERATIONS
+
+    def test_chain_operations_in_full_suite(self):
+        """Test that chain operations are in full suite."""
+        for op in CHAIN_OPERATIONS:
+            assert op in FULL_OPERATIONS, f"Chain operation {op} not in FULL_OPERATIONS"
+
+    def test_chain_operations_registered(self):
+        """Test that all chain operations have handlers."""
+        from geoparquet_io.benchmarks.operations import OPERATION_REGISTRY
+
+        for op in CHAIN_OPERATIONS:
+            assert op in OPERATION_REGISTRY, f"Missing handler for chain op {op}"
+
+    def test_chain_operations_have_info(self):
+        """Test that chain operations have proper info."""
+        from geoparquet_io.benchmarks.operations import get_operation
+
+        for op in CHAIN_OPERATIONS:
+            info = get_operation(op)
+            assert "chain" in info["name"].lower() or "→" in info["name"]
+            assert callable(info["run"])
+
+
+@pytest.mark.slow
+class TestChainOperationExecution:
+    """Tests for actual execution of chain operations.
+
+    Uses real test fixtures from tests/data/ directory to ensure
+    operations work with valid GeoParquet data.
+    """
+
+    def test_chain_extract_bbox_sort_runs(self, places_test_file):
+        """Test chain-extract-bbox-sort operation runs."""
+        from geoparquet_io.benchmarks.operations import get_operation
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            op = get_operation("chain-extract-bbox-sort")
+            result = op["run"](Path(places_test_file), Path(output_dir))
+
+            assert result["steps_completed"] == 3
+            assert "columns_selected" in result
+            assert "final_rows" in result
+            assert "final_size_mb" in result
+
+    def test_chain_filter_reproject_partition_runs(self, places_test_file):
+        """Test chain-filter-reproject-partition operation runs."""
+        from geoparquet_io.benchmarks.operations import get_operation
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            op = get_operation("chain-filter-reproject-partition")
+            result = op["run"](Path(places_test_file), Path(output_dir))
+
+            # May be skipped if no rows in bbox
+            if result.get("skipped"):
+                assert "reason" in result
+            else:
+                assert result["steps_completed"] == 3
+                assert "partitions_created" in result
+
+    def test_chain_convert_optimize_skips_when_no_source(self, places_test_file):
+        """Test chain-convert-optimize skips when no source file."""
+        from geoparquet_io.benchmarks.operations import get_operation
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            op = get_operation("chain-convert-optimize")
+            result = op["run"](Path(places_test_file), Path(output_dir))
+
+            # Should skip since there's no GeoJSON/GPKG alongside
+            assert result["skipped"] is True
+            assert "No source format file" in result["reason"]
+
+    def test_chain_convert_optimize_with_geojson_source(self, geojson_input, tmp_path):
+        """Test chain-convert-optimize works when source file exists."""
+        import shutil
+
+        from geoparquet_io.benchmarks.operations import get_operation
+
+        # Copy geojson to tmp_path and create a parquet name beside it
+        input_geojson = Path(geojson_input)
+        copied_geojson = tmp_path / input_geojson.name
+        shutil.copy(input_geojson, copied_geojson)
+
+        # Create a "parquet" path that will be passed (the function looks for .geojson)
+        parquet_path = copied_geojson.with_suffix(".parquet")
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            op = get_operation("chain-convert-optimize")
+            result = op["run"](parquet_path, Path(output_dir))
+
+            assert result.get("skipped") is not True
+            assert result["steps_completed"] == 3
+            assert result["source_format"] == "geojson"
+            assert "final_rows" in result
