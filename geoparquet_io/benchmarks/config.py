@@ -63,3 +63,49 @@ MEMORY_LIMITS: dict[str, str] = {
     "constrained": "512m",
     "normal": "4g",
 }
+
+# Base URL for benchmark data on source.coop
+BENCHMARK_DATA_URL = "https://data.source.coop/cholmes/gpio-test/benchmark"
+
+# Benchmark files by size tier
+# These are real-world GeoParquet files from public datasets:
+# - buildings: Overture Singapore Buildings (polygons, WGS84)
+# - places: Overture Singapore Places (points, WGS84)
+# - fields: fiboa Slovenia Field Boundaries (polygons, EPSG:3794)
+BENCHMARK_FILES: dict[str, dict[str, str]] = {
+    "tiny": {
+        "buildings": f"{BENCHMARK_DATA_URL}/buildings_tiny.parquet",  # 1K rows, ~178KB
+        "places": f"{BENCHMARK_DATA_URL}/places_tiny.parquet",  # 1K rows, ~130KB
+    },
+    "small": {
+        "buildings": f"{BENCHMARK_DATA_URL}/buildings_small.parquet",  # 10K rows, ~2.4MB
+        "places": f"{BENCHMARK_DATA_URL}/places_small.parquet",  # 10K rows, ~1.1MB
+    },
+    "medium": {
+        "buildings": f"{BENCHMARK_DATA_URL}/buildings_medium.parquet",  # 100K rows, ~18MB
+    },
+    "large": {
+        "fields": f"{BENCHMARK_DATA_URL}/fields_large.parquet",  # 809K rows, ~176MB
+    },
+}
+
+# Default benchmark file sets for different use cases
+QUICK_BENCHMARK_FILES: list[str] = [
+    BENCHMARK_FILES["tiny"]["buildings"],
+    BENCHMARK_FILES["tiny"]["places"],
+]
+
+STANDARD_BENCHMARK_FILES: list[str] = [
+    BENCHMARK_FILES["small"]["buildings"],
+    BENCHMARK_FILES["small"]["places"],
+    BENCHMARK_FILES["medium"]["buildings"],
+]
+
+FULL_BENCHMARK_FILES: list[str] = [
+    BENCHMARK_FILES["tiny"]["buildings"],
+    BENCHMARK_FILES["small"]["buildings"],
+    BENCHMARK_FILES["medium"]["buildings"],
+    BENCHMARK_FILES["large"]["fields"],
+    BENCHMARK_FILES["tiny"]["places"],
+    BENCHMARK_FILES["small"]["places"],
+]

@@ -7,11 +7,16 @@ from pathlib import Path
 import pytest
 
 from geoparquet_io.benchmarks.config import (
+    BENCHMARK_DATA_URL,
+    BENCHMARK_FILES,
     CHAIN_OPERATIONS,
     CORE_OPERATIONS,
     DEFAULT_THRESHOLDS,
+    FULL_BENCHMARK_FILES,
     FULL_OPERATIONS,
     MEMORY_LIMITS,
+    QUICK_BENCHMARK_FILES,
+    STANDARD_BENCHMARK_FILES,
     RegressionThresholds,
 )
 from geoparquet_io.core.benchmark_report import (
@@ -61,6 +66,43 @@ class TestBenchmarkConfig:
         assert "normal" in MEMORY_LIMITS
         assert MEMORY_LIMITS["constrained"] == "512m"
         assert MEMORY_LIMITS["normal"] == "4g"
+
+    def test_benchmark_data_url_defined(self):
+        """Test that benchmark data URL points to source.coop."""
+        assert BENCHMARK_DATA_URL.startswith("https://data.source.coop/")
+        assert "gpio-test" in BENCHMARK_DATA_URL
+
+    def test_benchmark_files_tiers(self):
+        """Test that benchmark files are defined for each tier."""
+        assert "tiny" in BENCHMARK_FILES
+        assert "small" in BENCHMARK_FILES
+        assert "medium" in BENCHMARK_FILES
+        assert "large" in BENCHMARK_FILES
+
+    def test_benchmark_files_have_urls(self):
+        """Test that all benchmark file entries are valid URLs."""
+        for tier, files in BENCHMARK_FILES.items():
+            for name, url in files.items():
+                assert url.startswith("https://"), f"Invalid URL for {tier}/{name}"
+                assert url.endswith(".parquet"), f"Non-parquet URL for {tier}/{name}"
+
+    def test_quick_benchmark_files_exist(self):
+        """Test quick benchmark files list."""
+        assert len(QUICK_BENCHMARK_FILES) >= 2
+        for url in QUICK_BENCHMARK_FILES:
+            assert url.endswith(".parquet")
+
+    def test_standard_benchmark_files_exist(self):
+        """Test standard benchmark files list."""
+        assert len(STANDARD_BENCHMARK_FILES) >= 3
+        for url in STANDARD_BENCHMARK_FILES:
+            assert url.endswith(".parquet")
+
+    def test_full_benchmark_files_exist(self):
+        """Test full benchmark files list."""
+        assert len(FULL_BENCHMARK_FILES) >= 5
+        for url in FULL_BENCHMARK_FILES:
+            assert url.endswith(".parquet")
 
 
 class TestOperationRegistry:
