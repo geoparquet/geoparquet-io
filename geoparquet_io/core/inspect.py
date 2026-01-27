@@ -4,7 +4,12 @@ This module contains the business logic for inspecting GeoParquet files,
 including summary, preview (head/tail), statistics, and metadata operations.
 """
 
-from geoparquet_io.core.common import get_parquet_metadata, parse_geo_metadata
+from geoparquet_io.core.common import (
+    get_duckdb_connection,
+    get_parquet_metadata,
+    needs_httpfs,
+    parse_geo_metadata,
+)
 from geoparquet_io.core.duckdb_metadata import get_usable_columns
 from geoparquet_io.core.inspect_utils import (
     extract_file_info,
@@ -88,10 +93,16 @@ def inspect_summary(
 
         partition_summary = extract_partition_summary(all_files, verbose=False)
         first_file = partition_info["first_file"]
-        geo_info = extract_geo_info(first_file)
-        usable_columns = get_usable_columns(first_file)
-        primary_geom_col = geo_info.get("primary_column")
-        columns_info = _build_columns_info(usable_columns, primary_geom_col)
+
+        # Create shared connection for all metadata operations
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(first_file))
+        try:
+            geo_info = extract_geo_info(first_file, con=con)
+            usable_columns = get_usable_columns(first_file, con=con)
+            primary_geom_col = geo_info.get("primary_column")
+            columns_info = _build_columns_info(usable_columns, primary_geom_col)
+        finally:
+            con.close()
 
         return {
             "is_partition": True,
@@ -109,11 +120,16 @@ def inspect_summary(
             "Use --check-all to aggregate all files."
         )
 
-    file_info = extract_file_info(file_to_inspect)
-    geo_info = extract_geo_info(file_to_inspect)
-    usable_columns = get_usable_columns(file_to_inspect)
-    primary_geom_col = geo_info.get("primary_column")
-    columns_info = _build_columns_info(usable_columns, primary_geom_col)
+    # Create shared connection for all metadata operations
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_to_inspect))
+    try:
+        file_info = extract_file_info(file_to_inspect, con=con)
+        geo_info = extract_geo_info(file_to_inspect, con=con)
+        usable_columns = get_usable_columns(file_to_inspect, con=con)
+        primary_geom_col = geo_info.get("primary_column")
+        columns_info = _build_columns_info(usable_columns, primary_geom_col)
+    finally:
+        con.close()
 
     return {
         "is_partition": partition_info["is_partition"],
@@ -202,11 +218,16 @@ def inspect_preview(
         file_to_inspect = partition_info["first_file"]
         partition_notice = f"Previewing first file (of {partition_info['file_count']} total)."
 
-    file_info = extract_file_info(file_to_inspect)
-    geo_info = extract_geo_info(file_to_inspect)
-    usable_columns = get_usable_columns(file_to_inspect)
-    primary_geom_col = geo_info.get("primary_column")
-    columns_info = _build_columns_info(usable_columns, primary_geom_col)
+    # Create shared connection for all metadata operations
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_to_inspect))
+    try:
+        file_info = extract_file_info(file_to_inspect, con=con)
+        geo_info = extract_geo_info(file_to_inspect, con=con)
+        usable_columns = get_usable_columns(file_to_inspect, con=con)
+        primary_geom_col = geo_info.get("primary_column")
+        columns_info = _build_columns_info(usable_columns, primary_geom_col)
+    finally:
+        con.close()
 
     head_val = count if mode == "head" else None
     tail_val = count if mode == "tail" else None
@@ -298,11 +319,17 @@ def inspect_stats(
             f"Showing stats for first file (of {partition_info['file_count']} total)."
         )
 
-    file_info = extract_file_info(file_to_inspect)
-    geo_info = extract_geo_info(file_to_inspect)
-    usable_columns = get_usable_columns(file_to_inspect)
-    primary_geom_col = geo_info.get("primary_column")
-    columns_info = _build_columns_info(usable_columns, primary_geom_col)
+    # Create shared connection for all metadata operations
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_to_inspect))
+    try:
+        file_info = extract_file_info(file_to_inspect, con=con)
+        geo_info = extract_geo_info(file_to_inspect, con=con)
+        usable_columns = get_usable_columns(file_to_inspect, con=con)
+        primary_geom_col = geo_info.get("primary_column")
+        columns_info = _build_columns_info(usable_columns, primary_geom_col)
+    finally:
+        con.close()
+
     statistics = get_column_statistics(file_to_inspect, columns_info)
 
     return {
