@@ -42,10 +42,12 @@ CACHE_DIR = Path("/tmp/gpio-benchmark-cache")
 # Operations to benchmark (CLI commands)
 # All available operations
 ALL_OPERATIONS = {
+    # Inspect
     "inspect": {
         "cmd": ["gpio", "inspect", "{input}"],
         "description": "Inspect file metadata",
     },
+    # Extract operations
     "extract-limit": {
         "cmd": ["gpio", "extract", "{input}", "{output}", "--limit", "100"],
         "description": "Extract first 100 rows",
@@ -58,21 +60,54 @@ ALL_OPERATIONS = {
         "cmd": ["gpio", "extract", "{input}", "{output}", "--bbox", "-180,-45,0,45"],
         "description": "Spatial bbox filtering",
     },
+    # Add column operations
     "add-bbox": {
         "cmd": ["gpio", "add", "bbox", "{input}", "{output}", "--force", "--bbox-name", "bounds"],
         "description": "Add bbox column",
     },
+    "add-quadkey": {
+        "cmd": ["gpio", "add", "quadkey", "{input}", "{output}", "--resolution", "12"],
+        "description": "Add quadkey column",
+    },
+    "add-h3": {
+        "cmd": ["gpio", "add", "h3", "{input}", "{output}", "--resolution", "8"],
+        "description": "Add H3 column",
+    },
+    # Sort operations
     "sort-hilbert": {
         "cmd": ["gpio", "sort", "hilbert", "{input}", "{output}"],
         "description": "Sort by Hilbert curve",
     },
+    "sort-quadkey": {
+        "cmd": ["gpio", "sort", "quadkey", "{input}", "{output}", "--resolution", "12"],
+        "description": "Sort by quadkey",
+    },
+    # Reproject
     "reproject": {
-        "cmd": ["gpio", "reproject", "{input}", "{output}", "--target-crs", "EPSG:3857"],
+        "cmd": ["gpio", "convert", "reproject", "{input}", "{output}", "-d", "EPSG:3857"],
         "description": "Reproject to Web Mercator",
     },
+    # Partition operations
     "partition-quadkey": {
         "cmd": ["gpio", "partition", "quadkey", "{input}", "{output_dir}", "--resolution", "4"],
         "description": "Partition by quadkey",
+    },
+    "partition-h3": {
+        "cmd": ["gpio", "partition", "h3", "{input}", "{output_dir}", "--resolution", "4"],
+        "description": "Partition by H3",
+    },
+    # Convert/export operations
+    "convert-geojson": {
+        "cmd": ["gpio", "convert", "geojson", "{input}", "{output_geojson}"],
+        "description": "Convert to GeoJSON",
+    },
+    "convert-flatgeobuf": {
+        "cmd": ["gpio", "convert", "flatgeobuf", "{input}", "{output_fgb}"],
+        "description": "Convert to FlatGeobuf",
+    },
+    "convert-geopackage": {
+        "cmd": ["gpio", "convert", "geopackage", "{input}", "{output_gpkg}"],
+        "description": "Convert to GeoPackage",
     },
 }
 
@@ -102,13 +137,28 @@ OPERATION_PRESETS = {
     "quick": ["inspect", "extract-limit", "add-bbox"],
     "standard": ["inspect", "extract-limit", "extract-columns", "add-bbox", "sort-hilbert"],
     "full": [
+        # Core operations
         "inspect",
         "extract-limit",
         "extract-columns",
         "extract-bbox",
+        # Add column operations
         "add-bbox",
+        "add-quadkey",
+        "add-h3",
+        # Sort operations
         "sort-hilbert",
+        "sort-quadkey",
+        # Reproject
         "reproject",
+        # Partition operations
+        "partition-quadkey",
+        "partition-h3",
+        # Convert operations
+        "convert-geojson",
+        "convert-flatgeobuf",
+        "convert-geopackage",
+        # Chain operations
         "chain-extract-bbox-sort",
         "chain-filter-sort",
     ],
@@ -182,11 +232,17 @@ def run_operation(cmd: list[str], input_file: str, output_dir: Path) -> dict:
     """Run a single operation and measure time."""
     output_file = output_dir / "output.parquet"
     partition_dir = output_dir / "partitioned"
+    output_geojson = output_dir / "output.geojson"
+    output_fgb = output_dir / "output.fgb"
+    output_gpkg = output_dir / "output.gpkg"
 
     substitutions = {
         "input": input_file,
         "output": str(output_file),
         "output_dir": str(partition_dir),
+        "output_geojson": str(output_geojson),
+        "output_fgb": str(output_fgb),
+        "output_gpkg": str(output_gpkg),
     }
     final_cmd = _substitute_cmd(cmd, substitutions)
 
@@ -218,8 +274,9 @@ def run_operation(cmd: list[str], input_file: str, output_dir: Path) -> dict:
     elapsed = end_time - start_time
 
     # Clean up output files
-    if output_file.exists():
-        output_file.unlink()
+    for output_path in [output_file, output_geojson, output_fgb, output_gpkg]:
+        if output_path.exists():
+            output_path.unlink()
     if partition_dir.exists():
         import shutil
 

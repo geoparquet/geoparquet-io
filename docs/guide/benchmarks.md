@@ -16,9 +16,9 @@ python scripts/version_benchmark.py --compare results_baseline.json results_curr
 
 ## Benchmark Operations
 
-The suite tests these operations:
+The suite tests these operations covering most gpio capabilities:
 
-### Core Operations
+### Extract Operations
 
 | Operation | Description |
 |-----------|-------------|
@@ -26,10 +26,42 @@ The suite tests these operations:
 | `extract-limit` | Extract first 100 rows |
 | `extract-columns` | Extract specific columns (includes geometry) |
 | `extract-bbox` | Spatial bounding box filtering |
-| `add-bbox` | Add bounding box column (with --force) |
+
+### Add Column Operations
+
+| Operation | Description |
+|-----------|-------------|
+| `add-bbox` | Add bounding box column |
+| `add-quadkey` | Add quadkey column (resolution 12) |
+| `add-h3` | Add H3 cell ID column (resolution 8) |
+
+### Sort Operations
+
+| Operation | Description |
+|-----------|-------------|
 | `sort-hilbert` | Sort by Hilbert curve for spatial locality |
+| `sort-quadkey` | Sort by quadkey spatial index |
+
+### Transform Operations
+
+| Operation | Description |
+|-----------|-------------|
 | `reproject` | Reproject to Web Mercator (EPSG:3857) |
-| `partition-quadkey` | Partition by quadkey |
+
+### Partition Operations
+
+| Operation | Description |
+|-----------|-------------|
+| `partition-quadkey` | Partition by quadkey (resolution 4) |
+| `partition-h3` | Partition by H3 cells (resolution 4) |
+
+### Convert/Export Operations
+
+| Operation | Description |
+|-----------|-------------|
+| `convert-geojson` | Convert to GeoJSON format |
+| `convert-flatgeobuf` | Convert to FlatGeobuf format |
+| `convert-geopackage` | Convert to GeoPackage format |
 
 ### Chain Operations (Multi-step Workflows)
 
@@ -44,7 +76,7 @@ The suite tests these operations:
 |--------|------------|
 | `quick` | inspect, extract-limit, add-bbox |
 | `standard` | inspect, extract-limit, extract-columns, add-bbox, sort-hilbert |
-| `full` | All operations including chains |
+| `full` | All 17 operations including chains |
 
 ## Test Data
 
