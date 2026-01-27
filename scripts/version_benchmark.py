@@ -49,8 +49,8 @@ OPERATIONS = [
     },
     {
         "name": "add-bbox",
-        "cmd": ["gpio", "add", "bbox", "{input}", "{output}", "--bbox-name", "bbox2"],
-        "description": "Add bbox column (as bbox2)",
+        "cmd": ["gpio", "add", "bbox", "{input}", "{output}", "--force", "--bbox-name", "bounds"],
+        "description": "Add bbox column (as bounds)",
     },
     {
         "name": "sort-hilbert",

@@ -23,7 +23,7 @@ The suite tests these core operations:
 | `inspect` | Read and display file metadata |
 | `extract-limit` | Extract first 100 rows |
 | `extract-columns` | Extract specific columns (includes geometry) |
-| `add-bbox` | Add bounding box column |
+| `add-bbox` | Add bounding box column (with --force) |
 | `sort-hilbert` | Sort by Hilbert curve for spatial locality |
 
 ## Test Data
