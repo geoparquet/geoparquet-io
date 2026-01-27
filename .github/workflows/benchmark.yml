@@ -10,6 +10,16 @@ on:
         required: false
         default: '3'
         type: string
+      files:
+        description: 'File sizes to benchmark (quick, standard, full, or comma-separated)'
+        required: false
+        default: 'full'
+        type: string
+      ops:
+        description: 'Operations to benchmark (quick, standard, full, or comma-separated)'
+        required: false
+        default: 'full'
+        type: string
       compare_version:
         description: 'Version to compare against (e.g., v0.9.0, main)'
         required: false
@@ -62,7 +72,9 @@ jobs:
           uv run python scripts/version_benchmark.py \
             --version-label "${{ github.sha }}" \
             -o results_current.json \
-            -n ${{ inputs.iterations || '3' }}
+            -n ${{ inputs.iterations || '3' }} \
+            --files ${{ inputs.files || 'full' }} \
+            --ops ${{ inputs.ops || 'full' }}
 
       - name: Checkout and benchmark comparison version
         if: inputs.compare_version != ''
@@ -81,7 +93,9 @@ jobs:
           uv run python scripts/version_benchmark.py \
             --version-label "${{ inputs.compare_version }}" \
             -o results_baseline.json \
-            -n ${{ inputs.iterations || '3' }}
+            -n ${{ inputs.iterations || '3' }} \
+            --files ${{ inputs.files || 'full' }} \
+            --ops ${{ inputs.ops || 'full' }}
 
           # Restore current and compare
           cp /tmp/results_current.json results_current.json

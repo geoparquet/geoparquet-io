@@ -65,7 +65,9 @@ jobs:
           uv run python scripts/version_benchmark.py \
             --version-label "${{ steps.versions.outputs.current }}" \
             -o results_current.json \
-            -n 5
+            -n 5 \
+            --files full \
+            --ops full
 
       - name: Install baseline version
         run: |
@@ -80,7 +82,9 @@ jobs:
           uv run python /tmp/version_benchmark.py \
             --version-label "${{ steps.versions.outputs.baseline }}" \
             -o results_baseline.json \
-            -n 5
+            -n 5 \
+            --files full \
+            --ops full
 
       - name: Generate comparison report
         id: comparison

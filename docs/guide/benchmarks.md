@@ -16,15 +16,35 @@ python scripts/version_benchmark.py --compare results_baseline.json results_curr
 
 ## Benchmark Operations
 
-The suite tests these core operations:
+The suite tests these operations:
+
+### Core Operations
 
 | Operation | Description |
 |-----------|-------------|
 | `inspect` | Read and display file metadata |
 | `extract-limit` | Extract first 100 rows |
 | `extract-columns` | Extract specific columns (includes geometry) |
+| `extract-bbox` | Spatial bounding box filtering |
 | `add-bbox` | Add bounding box column (with --force) |
 | `sort-hilbert` | Sort by Hilbert curve for spatial locality |
+| `reproject` | Reproject to Web Mercator (EPSG:3857) |
+| `partition-quadkey` | Partition by quadkey |
+
+### Chain Operations (Multi-step Workflows)
+
+| Operation | Description |
+|-----------|-------------|
+| `chain-extract-bbox-sort` | Extract columns → Add bbox → Hilbert sort |
+| `chain-filter-sort` | Bbox filter → Hilbert sort |
+
+### Operation Presets
+
+| Preset | Operations |
+|--------|------------|
+| `quick` | inspect, extract-limit, add-bbox |
+| `standard` | inspect, extract-limit, extract-columns, add-bbox, sort-hilbert |
+| `full` | All operations including chains |
 
 ## Test Data
 
@@ -37,6 +57,14 @@ Benchmark files are hosted on source.coop with different size tiers:
 | medium | 100,000 | Overture Buildings (Singapore) |
 | large | 809,000 | fiboa field boundaries (Japan) |
 
+### File Presets
+
+| Preset | Files |
+|--------|-------|
+| `quick` | tiny, small |
+| `standard` | small, medium |
+| `full` | tiny, small, medium, large |
+
 Files are automatically downloaded and cached locally in `/tmp/gpio-benchmark-cache/`.
 
 ## Running Benchmarks Locally
@@ -46,14 +74,20 @@ Files are automatically downloaded and cached locally in `/tmp/gpio-benchmark-ca
 The `scripts/version_benchmark.py` script works with any gpio version:
 
 ```bash
-# Run benchmarks on current version
-python scripts/version_benchmark.py --version-label "v0.9.0" -o results_v0.9.0.json
+# Run full benchmarks (all files, all operations)
+python scripts/version_benchmark.py --version-label "v0.9.0" -o results.json
+
+# Run quick benchmarks (smaller file set, fewer operations)
+python scripts/version_benchmark.py --version-label "v0.9.0" -o results.json --files quick --ops quick
 
 # Run benchmarks with more iterations for accuracy
-python scripts/version_benchmark.py --version-label "main" -o results_main.json -n 5
+python scripts/version_benchmark.py --version-label "main" -o results.json -n 5
+
+# Run specific operations on specific files
+python scripts/version_benchmark.py --version-label "test" --files small,medium --ops add-bbox,sort-hilbert
 
 # Compare two result files
-python scripts/version_benchmark.py --compare results_v0.9.0.json results_main.json
+python scripts/version_benchmark.py --compare results_baseline.json results_current.json
 
 # Skip local caching (test remote file performance)
 python scripts/version_benchmark.py --version-label "remote-test" --no-cache
@@ -104,6 +138,8 @@ Run benchmarks manually from the Actions tab:
 2. Click **Run workflow**
 3. Configure options:
    - **iterations**: Number of runs per operation (default: 3)
+   - **files**: File preset or comma-separated list (default: full)
+   - **ops**: Operation preset or comma-separated list (default: full)
    - **compare_version**: Optional version to compare against (e.g., `v0.9.0`)
 4. View results in the workflow summary
 

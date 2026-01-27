@@ -21,43 +21,101 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-# Test files from source.coop
+# Test files from source.coop (ordered by size)
 TEST_FILES = {
     "tiny": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_tiny.parquet",
     "small": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_small.parquet",
+    "medium": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_medium.parquet",
+    "large": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_large.parquet",
+}
+
+# File size presets
+FILE_PRESETS = {
+    "quick": ["tiny", "small"],
+    "standard": ["small", "medium"],
+    "full": ["tiny", "small", "medium", "large"],
 }
 
 # Local cache directory
 CACHE_DIR = Path("/tmp/gpio-benchmark-cache")
 
 # Operations to benchmark (CLI commands)
-OPERATIONS = [
-    {
-        "name": "inspect",
+# All available operations
+ALL_OPERATIONS = {
+    "inspect": {
         "cmd": ["gpio", "inspect", "{input}"],
         "description": "Inspect file metadata",
     },
-    {
-        "name": "extract-limit",
+    "extract-limit": {
         "cmd": ["gpio", "extract", "{input}", "{output}", "--limit", "100"],
         "description": "Extract first 100 rows",
     },
-    {
-        "name": "extract-columns",
+    "extract-columns": {
         "cmd": ["gpio", "extract", "{input}", "{output}", "--include-cols", "id,geometry"],
         "description": "Extract specific columns",
     },
-    {
-        "name": "add-bbox",
-        "cmd": ["gpio", "add", "bbox", "{input}", "{output}", "--force", "--bbox-name", "bounds"],
-        "description": "Add bbox column (as bounds)",
+    "extract-bbox": {
+        "cmd": ["gpio", "extract", "{input}", "{output}", "--bbox", "-180,-45,0,45"],
+        "description": "Spatial bbox filtering",
     },
-    {
-        "name": "sort-hilbert",
+    "add-bbox": {
+        "cmd": ["gpio", "add", "bbox", "{input}", "{output}", "--force", "--bbox-name", "bounds"],
+        "description": "Add bbox column",
+    },
+    "sort-hilbert": {
         "cmd": ["gpio", "sort", "hilbert", "{input}", "{output}"],
         "description": "Sort by Hilbert curve",
     },
-]
+    "reproject": {
+        "cmd": ["gpio", "reproject", "{input}", "{output}", "--target-crs", "EPSG:3857"],
+        "description": "Reproject to Web Mercator",
+    },
+    "partition-quadkey": {
+        "cmd": ["gpio", "partition", "quadkey", "{input}", "{output_dir}", "--resolution", "4"],
+        "description": "Partition by quadkey",
+    },
+}
+
+# Chain operations (multi-step workflows)
+CHAIN_OPERATIONS = {
+    "chain-extract-bbox-sort": {
+        "cmd": None,  # Handled specially
+        "description": "Extract → Add bbox → Hilbert sort",
+        "steps": [
+            ["gpio", "extract", "{input}", "{step1}", "--include-cols", "id,geometry"],
+            ["gpio", "add", "bbox", "{step1}", "{step2}", "--force", "--bbox-name", "bounds"],
+            ["gpio", "sort", "hilbert", "{step2}", "{output}"],
+        ],
+    },
+    "chain-filter-sort": {
+        "cmd": None,
+        "description": "Bbox filter → Hilbert sort",
+        "steps": [
+            ["gpio", "extract", "{input}", "{step1}", "--bbox", "-180,-45,0,45"],
+            ["gpio", "sort", "hilbert", "{step1}", "{output}"],
+        ],
+    },
+}
+
+# Operation presets
+OPERATION_PRESETS = {
+    "quick": ["inspect", "extract-limit", "add-bbox"],
+    "standard": ["inspect", "extract-limit", "extract-columns", "add-bbox", "sort-hilbert"],
+    "full": [
+        "inspect",
+        "extract-limit",
+        "extract-columns",
+        "extract-bbox",
+        "add-bbox",
+        "sort-hilbert",
+        "reproject",
+        "chain-extract-bbox-sort",
+        "chain-filter-sort",
+    ],
+}
+
+# Default operations (for backward compatibility)
+OPERATIONS = [{"name": name, **ALL_OPERATIONS[name]} for name in OPERATION_PRESETS["standard"]]
 
 
 def download_file(url: str, dest: Path) -> bool:
@@ -89,29 +147,48 @@ def get_cached_file(url: str) -> Path:
     return cached_path
 
 
-def ensure_files_cached() -> dict[str, Path]:
-    """Download all test files to local cache."""
+def ensure_files_cached(file_sizes: list[str] | None = None) -> dict[str, Path]:
+    """Download test files to local cache.
+
+    Args:
+        file_sizes: List of file sizes to cache. If None, caches all files.
+    """
     print("\nEnsuring test files are cached locally...")
     local_files = {}
-    for size_name, url in TEST_FILES.items():
-        local_files[size_name] = get_cached_file(url)
+    sizes_to_cache = file_sizes if file_sizes else list(TEST_FILES.keys())
+    for size_name in sizes_to_cache:
+        if size_name in TEST_FILES:
+            local_files[size_name] = get_cached_file(TEST_FILES[size_name])
     print()
     return local_files
+
+
+def _substitute_cmd(cmd: list[str], substitutions: dict[str, str]) -> list[str]:
+    """Substitute placeholders in command."""
+    final_cmd = []
+    for arg in cmd:
+        if arg.startswith("{") and arg.endswith("}"):
+            key = arg[1:-1]
+            if key in substitutions:
+                final_cmd.append(substitutions[key])
+            else:
+                final_cmd.append(arg)
+        else:
+            final_cmd.append(arg)
+    return final_cmd
 
 
 def run_operation(cmd: list[str], input_file: str, output_dir: Path) -> dict:
     """Run a single operation and measure time."""
     output_file = output_dir / "output.parquet"
+    partition_dir = output_dir / "partitioned"
 
-    # Substitute placeholders
-    final_cmd = []
-    for arg in cmd:
-        if arg == "{input}":
-            final_cmd.append(input_file)
-        elif arg == "{output}":
-            final_cmd.append(str(output_file))
-        else:
-            final_cmd.append(arg)
+    substitutions = {
+        "input": input_file,
+        "output": str(output_file),
+        "output_dir": str(partition_dir),
+    }
+    final_cmd = _substitute_cmd(cmd, substitutions)
 
     # Force garbage collection before timing
     gc.collect()
@@ -140,9 +217,13 @@ def run_operation(cmd: list[str], input_file: str, output_dir: Path) -> dict:
 
     elapsed = end_time - start_time
 
-    # Clean up output file
+    # Clean up output files
     if output_file.exists():
         output_file.unlink()
+    if partition_dir.exists():
+        import shutil
+
+        shutil.rmtree(partition_dir, ignore_errors=True)
 
     return {
         "time_seconds": elapsed,
@@ -151,12 +232,95 @@ def run_operation(cmd: list[str], input_file: str, output_dir: Path) -> dict:
     }
 
 
-def run_benchmarks(version_label: str, iterations: int = 3, use_cache: bool = True) -> dict:
-    """Run all benchmarks and return results."""
+def run_chain_operation(steps: list[list[str]], input_file: str, output_dir: Path) -> dict:
+    """Run a chain of operations and measure total time."""
+    # Create step files
+    step_files = {
+        "input": input_file,
+        "step1": str(output_dir / "step1.parquet"),
+        "step2": str(output_dir / "step2.parquet"),
+        "step3": str(output_dir / "step3.parquet"),
+        "output": str(output_dir / "output.parquet"),
+    }
+
+    # Force garbage collection before timing
+    gc.collect()
+
+    start_time = time.perf_counter()
+    try:
+        for step_cmd in steps:
+            final_cmd = _substitute_cmd(step_cmd, step_files)
+            result = subprocess.run(
+                final_cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                end_time = time.perf_counter()
+                return {
+                    "time_seconds": end_time - start_time,
+                    "success": False,
+                    "error": result.stderr,
+                }
+
+        end_time = time.perf_counter()
+        success = True
+        error = None
+
+    except subprocess.TimeoutExpired:
+        end_time = time.perf_counter()
+        success = False
+        error = "Timeout"
+    except Exception as e:
+        end_time = time.perf_counter()
+        success = False
+        error = str(e)
+
+    elapsed = end_time - start_time
+
+    # Clean up step files
+    for key, path in step_files.items():
+        if key != "input":
+            p = Path(path)
+            if p.exists():
+                p.unlink()
+
+    return {
+        "time_seconds": elapsed,
+        "success": success,
+        "error": error,
+    }
+
+
+def run_benchmarks(
+    version_label: str,
+    iterations: int = 3,
+    use_cache: bool = True,
+    file_sizes: list[str] | None = None,
+    ops: list[str] | None = None,
+) -> dict:
+    """Run all benchmarks and return results.
+
+    Args:
+        version_label: Label for this version (e.g., 'v0.9.0', 'main')
+        iterations: Number of iterations per operation
+        use_cache: Whether to cache files locally
+        file_sizes: List of file sizes to test. If None, uses all available.
+        ops: List of operation names to run. If None, uses standard preset.
+    """
+    # Determine which files to run
+    sizes_to_run = file_sizes if file_sizes else list(TEST_FILES.keys())
+
+    # Determine which operations to run
+    ops_to_run = ops if ops else OPERATION_PRESETS["standard"]
+
     results = {
         "version": version_label,
         "timestamp": datetime.now().isoformat(),
         "iterations": iterations,
+        "file_sizes": sizes_to_run,
+        "operations": ops_to_run,
         "benchmarks": [],
     }
 
@@ -169,7 +333,7 @@ def run_benchmarks(version_label: str, iterations: int = 3, use_cache: bool = Tr
 
     # Get local files if caching enabled
     if use_cache:
-        local_files = ensure_files_cached()
+        local_files = ensure_files_cached(sizes_to_run)
     else:
         local_files = None
 
@@ -177,13 +341,16 @@ def run_benchmarks(version_label: str, iterations: int = 3, use_cache: bool = Tr
     print(f"Benchmarking: {version_label}")
     print(f"GPIO Version: {results['gpio_version']}")
     print(f"Iterations: {iterations}")
+    print(f"File sizes: {', '.join(sizes_to_run)}")
+    print(f"Operations: {', '.join(ops_to_run)}")
     print(f"Using local cache: {use_cache}")
     print(f"{'=' * 60}\n")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_dir = Path(tmpdir)
 
-        for size_name, input_url in TEST_FILES.items():
+        for size_name in sizes_to_run:
+            input_url = TEST_FILES[size_name]
             # Use cached local file or remote URL
             if local_files:
                 input_path = str(local_files[size_name])
@@ -192,15 +359,28 @@ def run_benchmarks(version_label: str, iterations: int = 3, use_cache: bool = Tr
 
             print(f"\n--- File: {size_name} ({input_url.split('/')[-1]}) ---")
 
-            for op in OPERATIONS:
-                op_name = op["name"]
+            for op_name in ops_to_run:
+                # Get operation details
+                if op_name in ALL_OPERATIONS:
+                    op = ALL_OPERATIONS[op_name]
+                    is_chain = False
+                elif op_name in CHAIN_OPERATIONS:
+                    op = CHAIN_OPERATIONS[op_name]
+                    is_chain = True
+                else:
+                    print(f"  {op_name}: SKIPPED (unknown operation)")
+                    continue
+
                 print(f"  {op_name}: ", end="", flush=True)
 
                 times = []
                 errors = []
 
                 for _i in range(iterations):
-                    result = run_operation(op["cmd"], input_path, output_dir)
+                    if is_chain:
+                        result = run_chain_operation(op["steps"], input_path, output_dir)
+                    else:
+                        result = run_operation(op["cmd"], input_path, output_dir)
 
                     if result["success"]:
                         times.append(result["time_seconds"])
@@ -317,6 +497,23 @@ def main():
         help="Don't cache files locally, use remote URLs directly",
     )
     parser.add_argument(
+        "--files",
+        "-f",
+        default="full",
+        help=(
+            "File sizes to benchmark. Use preset names (quick, standard, full) "
+            "or comma-separated sizes (tiny,small,medium,large). Default: full"
+        ),
+    )
+    parser.add_argument(
+        "--ops",
+        default="full",
+        help=(
+            "Operations to benchmark. Use preset names (quick, standard, full) "
+            "or comma-separated operation names. Default: full"
+        ),
+    )
+    parser.add_argument(
         "--compare",
         nargs=2,
         metavar=("FILE1", "FILE2"),
@@ -325,6 +522,27 @@ def main():
 
     args = parser.parse_args()
 
+    # Parse file sizes
+    if args.files in FILE_PRESETS:
+        file_sizes = FILE_PRESETS[args.files]
+    else:
+        file_sizes = [s.strip() for s in args.files.split(",")]
+        # Validate file sizes
+        invalid = [s for s in file_sizes if s not in TEST_FILES]
+        if invalid:
+            parser.error(f"Invalid file sizes: {invalid}. Valid: {list(TEST_FILES.keys())}")
+
+    # Parse operations
+    all_ops = set(ALL_OPERATIONS.keys()) | set(CHAIN_OPERATIONS.keys())
+    if args.ops in OPERATION_PRESETS:
+        ops_list = OPERATION_PRESETS[args.ops]
+    else:
+        ops_list = [s.strip() for s in args.ops.split(",")]
+        # Validate operations
+        invalid = [s for s in ops_list if s not in all_ops]
+        if invalid:
+            parser.error(f"Invalid operations: {invalid}. Valid: {sorted(all_ops)}")
+
     if args.compare:
         compare_results(args.compare[0], args.compare[1])
     elif args.version_label:
@@ -332,6 +550,8 @@ def main():
             args.version_label,
             args.iterations,
             use_cache=not args.no_cache,
+            file_sizes=file_sizes,
+            ops=ops_list,
         )
 
         if args.output:
