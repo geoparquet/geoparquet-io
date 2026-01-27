@@ -174,15 +174,15 @@ def any_extension_option(func):
     )(func)
 
 
-def profile_option(func):
+def aws_profile_option(func):
     """
-    Add --profile option to a command.
+    Add --aws-profile option to a command.
 
     Allows specifying AWS profile name for S3 operations. This is a convenience
     wrapper that sets the AWS_PROFILE environment variable.
     """
     return click.option(
-        "--profile",
+        "--aws-profile",
         help="AWS profile name for S3 operations (sets AWS_PROFILE env var)",
     )(func)
 

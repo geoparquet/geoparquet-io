@@ -4,11 +4,11 @@ import click
 from click.testing import CliRunner
 
 from geoparquet_io.cli.decorators import (
+    aws_profile_option,
     bbox_option,
     dry_run_option,
     geoparquet_version_option,
     prefix_option,
-    profile_option,
     verbose_option,
 )
 
@@ -90,25 +90,25 @@ class TestDryRunOption:
         assert "dry run mode" in result.output
 
 
-class TestProfileOption:
-    """Tests for profile_option decorator."""
+class TestAwsProfileOption:
+    """Tests for aws_profile_option decorator."""
 
-    def test_profile_option_adds_option(self):
-        """Test that profile_option adds --profile option."""
+    def test_aws_profile_option_adds_option(self):
+        """Test that aws_profile_option adds --aws-profile option."""
 
         @click.command()
-        @profile_option
-        def test_cmd(profile):
-            if profile:
-                click.echo(f"profile: {profile}")
+        @aws_profile_option
+        def test_cmd(aws_profile):
+            if aws_profile:
+                click.echo(f"aws_profile: {aws_profile}")
             else:
-                click.echo("no profile")
+                click.echo("no aws_profile")
 
         runner = CliRunner()
 
-        result = runner.invoke(test_cmd, ["--profile", "my-profile"])
+        result = runner.invoke(test_cmd, ["--aws-profile", "my-profile"])
         assert result.exit_code == 0
-        assert "profile: my-profile" in result.output
+        assert "aws_profile: my-profile" in result.output
 
 
 class TestPrefixOption:
