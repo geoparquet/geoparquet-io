@@ -10,6 +10,9 @@ import json
 import re
 from typing import Any
 
+import click
+import duckdb
+
 
 def _get_connection_for_file(parquet_file: str, existing_con=None):
     """Get or create DuckDB connection appropriate for file location."""
@@ -107,6 +110,16 @@ def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
                 json_str = str(result[0])
             return json.loads(json_str)
         return None
+    except duckdb.InvalidInputException:
+        # File is not a valid Parquet file (e.g., wrong format, corrupt)
+        raise click.ClickException(
+            f"Not a valid GeoParquet file: {parquet_file}\n"
+            f"This command requires .parquet files with valid Parquet format.\n"
+            f"Hint: Use 'gpio convert' to convert other formats to GeoParquet."
+        ) from None
+    except duckdb.IOException as e:
+        # File not found, permission denied, or other I/O error
+        raise click.ClickException(f"Cannot read file: {parquet_file}\n{str(e)}") from None
     except json.JSONDecodeError:
         return None
     finally:

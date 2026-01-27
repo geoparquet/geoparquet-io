@@ -209,6 +209,8 @@ def is_remote_url(path):
     Returns:
         bool: True if path is a remote URL, False otherwise
     """
+    if path is None:
+        return False
     remote_schemes = [
         "http://",
         "https://",
