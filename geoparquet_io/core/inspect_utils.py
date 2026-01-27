@@ -146,7 +146,10 @@ def _extract_crs_identifier(crs_info: Any) -> tuple[str, int] | None:
                 authority = crs_id.get("authority", "").upper()
                 code = crs_id.get("code")
                 if authority and code:
-                    return (authority, int(code))
+                    try:
+                        return (authority, int(code))
+                    except (ValueError, TypeError):
+                        pass  # Non-numeric code like "LAMB93"
         return None
 
     if isinstance(crs_info, str):
