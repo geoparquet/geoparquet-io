@@ -1,0 +1,182 @@
+# Release Benchmark Comparison
+# Compares performance against the previous release before publishing
+# Results are posted to the release notes
+name: Release Benchmark
+
+on:
+  # Run when a release is created (before publish)
+  release:
+    types: [created]
+
+  # Manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      current_version:
+        description: 'Current version/tag to benchmark'
+        required: true
+        default: 'main'
+      baseline_version:
+        description: 'Previous version to compare against'
+        required: true
+        default: 'v0.9.0'
+
+jobs:
+  benchmark-comparison:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for tags
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Determine versions
+        id: versions
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            CURRENT="${{ github.event.release.tag_name }}"
+            # Get the previous tag
+            BASELINE=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -2 | tail -1)
+          else
+            CURRENT="${{ inputs.current_version }}"
+            BASELINE="${{ inputs.baseline_version }}"
+          fi
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "baseline=$BASELINE" >> $GITHUB_OUTPUT
+          echo "Comparing $CURRENT against $BASELINE"
+
+      - name: Install current version
+        run: |
+          git checkout ${{ steps.versions.outputs.current }}
+          uv sync --all-extras
+
+      - name: Pre-install DuckDB extensions
+        run: |
+          uv run python -c "import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs')"
+
+      - name: Run current benchmarks
+        run: |
+          uv run python scripts/version_benchmark.py \
+            --version-label "${{ steps.versions.outputs.current }}" \
+            -o results_current.json \
+            -n 5
+
+      - name: Install baseline version
+        run: |
+          git checkout ${{ steps.versions.outputs.baseline }}
+          uv sync --all-extras
+
+      - name: Run baseline benchmarks
+        run: |
+          # Copy the benchmark script from current (baseline may not have it)
+          git show ${{ steps.versions.outputs.current }}:scripts/version_benchmark.py > /tmp/version_benchmark.py
+
+          uv run python /tmp/version_benchmark.py \
+            --version-label "${{ steps.versions.outputs.baseline }}" \
+            -o results_baseline.json \
+            -n 5
+
+      - name: Generate comparison report
+        id: comparison
+        run: |
+          git checkout ${{ steps.versions.outputs.current }}
+          uv sync --all-extras
+
+          # Generate comparison
+          uv run python scripts/version_benchmark.py \
+            --compare results_baseline.json results_current.json > comparison.txt
+
+          # Check for regressions (>25% slower)
+          REGRESSIONS=$(uv run python -c "
+          import json
+          with open('results_baseline.json') as f:
+              baseline = json.load(f)
+          with open('results_current.json') as f:
+              current = json.load(f)
+
+          baseline_lookup = {(b['file_size'], b['operation']): b['avg_time'] for b in baseline['benchmarks'] if b['avg_time']}
+          regressions = []
+          for b in current['benchmarks']:
+              key = (b['file_size'], b['operation'])
+              if b['avg_time'] and key in baseline_lookup:
+                  delta = (b['avg_time'] - baseline_lookup[key]) / baseline_lookup[key]
+                  if delta > 0.25:
+                      regressions.append(f\"{b['operation']} ({b['file_size']}): +{delta*100:.0f}%\")
+          print('\\n'.join(regressions) if regressions else 'none')
+          ")
+
+          echo "regressions=$REGRESSIONS" >> $GITHUB_OUTPUT
+
+          # Create summary
+          echo "## Release Benchmark Comparison" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Current:** ${{ steps.versions.outputs.current }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Baseline:** ${{ steps.versions.outputs.baseline }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "$REGRESSIONS" != "none" ]]; then
+            echo "### ⚠️ Performance Regressions Detected" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "$REGRESSIONS" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ✅ No Significant Regressions" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "### Detailed Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat comparison.txt >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-benchmark-${{ steps.versions.outputs.current }}
+          path: |
+            results_*.json
+            comparison.txt
+
+      - name: Update release notes
+        if: github.event_name == 'release'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const comparison = fs.readFileSync('comparison.txt', 'utf8');
+            const regressions = '${{ steps.comparison.outputs.regressions }}';
+
+            let benchmarkSection = '\n\n---\n\n## Performance\n\n';
+            if (regressions !== 'none') {
+              benchmarkSection += '⚠️ **Regressions detected:**\n```\n' + regressions + '\n```\n\n';
+            } else {
+              benchmarkSection += '✅ No significant performance regressions compared to ${{ steps.versions.outputs.baseline }}\n\n';
+            }
+            benchmarkSection += '<details>\n<summary>Detailed benchmark comparison</summary>\n\n```\n';
+            benchmarkSection += comparison;
+            benchmarkSection += '\n```\n</details>';
+
+            const release = await github.rest.repos.getRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: context.payload.release.id
+            });
+
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: context.payload.release.id,
+              body: release.data.body + benchmarkSection
+            });
+
+      - name: Warn on regressions
+        if: steps.comparison.outputs.regressions != 'none'
+        run: |
+          echo "::warning::Performance regressions detected: ${{ steps.comparison.outputs.regressions }}"
