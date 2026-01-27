@@ -4419,7 +4419,7 @@ def benchmark_compare(
 )
 @click.option(
     "--compare",
-    "baseline_path",
+    "_baseline_path",
     type=click.Path(exists=True),
     help="Compare against baseline JSON file",
 )
@@ -4431,12 +4431,14 @@ def benchmark_compare(
 )
 @click.option(
     "--threshold-time",
+    "_threshold_time",
     default=0.10,
     type=float,
     help="Regression threshold for time (default: 0.10 = 10%%)",
 )
 @click.option(
     "--threshold-memory",
+    "_threshold_memory",
     default=0.20,
     type=float,
     help="Regression threshold for memory (default: 0.20 = 20%%)",
