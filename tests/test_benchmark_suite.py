@@ -12,11 +12,7 @@ from geoparquet_io.benchmarks.config import (
     CHAIN_OPERATIONS,
     CORE_OPERATIONS,
     DEFAULT_THRESHOLDS,
-    FULL_BENCHMARK_FILES,
     FULL_OPERATIONS,
-    MEMORY_LIMITS,
-    QUICK_BENCHMARK_FILES,
-    STANDARD_BENCHMARK_FILES,
     RegressionThresholds,
 )
 from geoparquet_io.core.benchmark_report import (
@@ -60,13 +56,6 @@ class TestBenchmarkConfig:
         """Test that thresholds use dataclass pattern."""
         assert isinstance(DEFAULT_THRESHOLDS, RegressionThresholds)
 
-    def test_memory_limits_defined(self):
-        """Test that memory limits are defined."""
-        assert "constrained" in MEMORY_LIMITS
-        assert "normal" in MEMORY_LIMITS
-        assert MEMORY_LIMITS["constrained"] == "512m"
-        assert MEMORY_LIMITS["normal"] == "4g"
-
     def test_benchmark_data_url_defined(self):
         """Test that benchmark data URL points to source.coop."""
         assert BENCHMARK_DATA_URL.startswith("https://data.source.coop/")
@@ -85,24 +74,6 @@ class TestBenchmarkConfig:
             for name, url in files.items():
                 assert url.startswith("https://"), f"Invalid URL for {tier}/{name}"
                 assert url.endswith(".parquet"), f"Non-parquet URL for {tier}/{name}"
-
-    def test_quick_benchmark_files_exist(self):
-        """Test quick benchmark files list."""
-        assert len(QUICK_BENCHMARK_FILES) >= 2
-        for url in QUICK_BENCHMARK_FILES:
-            assert url.endswith(".parquet")
-
-    def test_standard_benchmark_files_exist(self):
-        """Test standard benchmark files list."""
-        assert len(STANDARD_BENCHMARK_FILES) >= 3
-        for url in STANDARD_BENCHMARK_FILES:
-            assert url.endswith(".parquet")
-
-    def test_full_benchmark_files_exist(self):
-        """Test full benchmark files list."""
-        assert len(FULL_BENCHMARK_FILES) >= 5
-        for url in FULL_BENCHMARK_FILES:
-            assert url.endswith(".parquet")
 
 
 class TestOperationRegistry:
@@ -169,8 +140,7 @@ class TestBenchmarkRunner:
             assert result.operation == "read"
             assert result.success is True
             assert result.time_seconds > 0
-            assert result.peak_python_memory_mb >= 0
-            assert result.peak_rss_memory_mb >= 0  # Enhanced: track RSS too
+            assert result.peak_rss_memory_mb >= 0
 
     def test_benchmark_result_has_required_fields(self, test_parquet):
         """Test BenchmarkResult has all required fields."""
@@ -185,8 +155,7 @@ class TestBenchmarkRunner:
             assert hasattr(result, "operation")
             assert hasattr(result, "file")
             assert hasattr(result, "time_seconds")
-            assert hasattr(result, "peak_python_memory_mb")  # Enhanced
-            assert hasattr(result, "peak_rss_memory_mb")  # Enhanced
+            assert hasattr(result, "peak_rss_memory_mb")
             assert hasattr(result, "success")
             assert hasattr(result, "error")
             assert hasattr(result, "details")
@@ -262,7 +231,6 @@ class TestRegressionComparison:
             operation="read",
             file="test.parquet",
             time_seconds=1.0,
-            peak_python_memory_mb=50,
             peak_rss_memory_mb=100,
             success=True,
         )
@@ -270,7 +238,6 @@ class TestRegressionComparison:
             operation="read",
             file="test.parquet",
             time_seconds=1.05,  # 5% slower - within threshold
-            peak_python_memory_mb=52,
             peak_rss_memory_mb=105,  # 5% more - within threshold
             success=True,
         )
@@ -286,7 +253,6 @@ class TestRegressionComparison:
             operation="read",
             file="test.parquet",
             time_seconds=1.0,
-            peak_python_memory_mb=50,
             peak_rss_memory_mb=100,
             success=True,
         )
@@ -294,7 +260,6 @@ class TestRegressionComparison:
             operation="read",
             file="test.parquet",
             time_seconds=1.15,  # 15% slower - warning
-            peak_python_memory_mb=50,
             peak_rss_memory_mb=100,
             success=True,
         )
@@ -309,7 +274,6 @@ class TestRegressionComparison:
             operation="read",
             file="test.parquet",
             time_seconds=1.0,
-            peak_python_memory_mb=50,
             peak_rss_memory_mb=100,
             success=True,
         )
@@ -317,7 +281,6 @@ class TestRegressionComparison:
             operation="read",
             file="test.parquet",
             time_seconds=1.30,  # 30% slower - failure
-            peak_python_memory_mb=50,
             peak_rss_memory_mb=100,
             success=True,
         )
@@ -337,7 +300,6 @@ class TestBenchmarkReporting:
                 operation="read",
                 file="test.parquet",
                 time_seconds=1.23,
-                peak_python_memory_mb=20.5,
                 peak_rss_memory_mb=45.6,
                 success=True,
             ),

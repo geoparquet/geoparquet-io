@@ -49,8 +49,36 @@ jobs:
     needs: check-trigger
     if: needs.check-trigger.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    env:
+      # Use environment variables to safely pass user inputs to shell commands
+      ITERATIONS: ${{ inputs.iterations || '3' }}
+      FILES: ${{ inputs.files || 'full' }}
+      OPS: ${{ inputs.ops || 'full' }}
+      COMPARE_VERSION: ${{ inputs.compare_version }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          # Validate iterations is a positive integer
+          if ! [[ "$ITERATIONS" =~ ^[0-9]+$ ]] || [[ "$ITERATIONS" -lt 1 ]]; then
+            echo "Error: iterations must be a positive integer"
+            exit 1
+          fi
+          # Validate files and ops are alphanumeric with allowed chars
+          if ! [[ "$FILES" =~ ^[a-zA-Z0-9,_-]+$ ]]; then
+            echo "Error: files must be alphanumeric with commas, underscores, or hyphens"
+            exit 1
+          fi
+          if ! [[ "$OPS" =~ ^[a-zA-Z0-9,_-]+$ ]]; then
+            echo "Error: ops must be alphanumeric with commas, underscores, or hyphens"
+            exit 1
+          fi
+          # Validate compare_version if provided (git ref format)
+          if [[ -n "$COMPARE_VERSION" ]] && ! [[ "$COMPARE_VERSION" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "Error: compare_version must be a valid git ref"
+            exit 1
+          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -77,9 +105,9 @@ jobs:
           uv run python scripts/version_benchmark.py \
             --version-label "${{ github.sha }}" \
             -o results_current.json \
-            -n ${{ inputs.iterations || '3' }} \
-            --files ${{ inputs.files || 'full' }} \
-            --ops ${{ inputs.ops || 'full' }}
+            -n "$ITERATIONS" \
+            --files "$FILES" \
+            --ops "$OPS"
 
       - name: Checkout and benchmark comparison version
         if: inputs.compare_version != ''
@@ -87,20 +115,20 @@ jobs:
           # Save current results
           cp results_current.json /tmp/results_current.json
 
-          # Checkout comparison version
+          # Checkout comparison version (already validated above)
           git fetch --tags --depth=1 origin
-          git checkout ${{ inputs.compare_version }}
+          git checkout "$COMPARE_VERSION"
 
           # Reinstall at that version
           uv sync --all-extras
 
           # Run benchmarks
           uv run python scripts/version_benchmark.py \
-            --version-label "${{ inputs.compare_version }}" \
+            --version-label "$COMPARE_VERSION" \
             -o results_baseline.json \
-            -n ${{ inputs.iterations || '3' }} \
-            --files ${{ inputs.files || 'full' }} \
-            --ops ${{ inputs.ops || 'full' }}
+            -n "$ITERATIONS" \
+            --files "$FILES" \
+            --ops "$OPS"
 
           # Restore current and compare
           cp /tmp/results_current.json results_current.json

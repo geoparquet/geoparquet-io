@@ -267,6 +267,113 @@ def _run_chain_filter_reproject_partition(input_path: Path, output_dir: Path) ->
     }
 
 
+def _run_convert_shapefile(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark Shapefile conversion."""
+    from geoparquet_io.core.convert import convert_to_geoparquet
+
+    output_path = output_dir / "output.parquet"
+    shp_path = input_path.with_suffix(".shp")
+    if shp_path.exists():
+        convert_to_geoparquet(str(shp_path), str(output_path))
+        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+    return {"skipped": True, "reason": "No Shapefile version available"}
+
+
+def _run_convert_fgb(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark FlatGeobuf conversion."""
+    from geoparquet_io.core.convert import convert_to_geoparquet
+
+    output_path = output_dir / "output.parquet"
+    fgb_path = input_path.with_suffix(".fgb")
+    if fgb_path.exists():
+        convert_to_geoparquet(str(fgb_path), str(output_path))
+        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+    return {"skipped": True, "reason": "No FlatGeobuf version available"}
+
+
+def _run_sort_quadkey(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark quadkey sorting."""
+    from geoparquet_io.core.sort_quadkey import sort_by_quadkey
+
+    output_path = output_dir / "output.parquet"
+    sort_by_quadkey(str(input_path), str(output_path), resolution=12)
+    return {"sorted": True}
+
+
+def _run_add_h3(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark adding H3 column."""
+    from geoparquet_io.core.add_h3_column import add_h3_column
+
+    output_path = output_dir / "output.parquet"
+    add_h3_column(str(input_path), str(output_path), h3_resolution=9)
+    return {"h3_added": True, "resolution": 9}
+
+
+def _run_add_quadkey(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark adding quadkey column."""
+    from geoparquet_io.core.add_quadkey_column import add_quadkey_column
+
+    output_path = output_dir / "output.parquet"
+    add_quadkey_column(str(input_path), str(output_path), resolution=12)
+    return {"quadkey_added": True, "resolution": 12}
+
+
+def _run_add_country(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark adding country codes.
+
+    Note: This operation uses the default Overture Maps admin boundaries,
+    which requires network access and can be slow for the first run.
+    """
+    from geoparquet_io.core.add_country_codes import add_country_codes
+
+    output_path = output_dir / "output.parquet"
+    # Use default Overture countries (countries_parquet=None)
+    add_country_codes(
+        input_parquet=str(input_path),
+        countries_parquet=None,  # Use default Overture data
+        output_parquet=str(output_path),
+        add_bbox_flag=False,
+        dry_run=False,
+        verbose=False,
+    )
+    result_table = pq.read_table(output_path)
+    return {"rows_with_country": result_table.num_rows}
+
+
+def _run_partition_h3(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark H3 partitioning."""
+    from geoparquet_io.core.partition_by_h3 import partition_by_h3
+
+    output_path = output_dir / "partitioned_h3"
+    partition_by_h3(
+        str(input_path),
+        str(output_path),
+        resolution=4,  # Lower resolution for fewer partitions
+        verbose=False,
+    )
+    output_files = list(Path(output_path).glob("**/*.parquet"))
+    return {"partitions": len(output_files)}
+
+
+def _run_partition_country(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Benchmark country-level partitioning.
+
+    Note: This operation uses the Overture Maps admin boundaries,
+    which requires network access and can be slow for the first run.
+    """
+    from geoparquet_io.core.partition_admin_hierarchical import partition_by_admin_hierarchical
+
+    output_path = output_dir / "partitioned_country"
+    num_partitions = partition_by_admin_hierarchical(
+        input_parquet=str(input_path),
+        output_folder=str(output_path),
+        dataset_name="overture",
+        levels=["country"],
+        verbose=False,
+    )
+    return {"partitions": num_partitions}
+
+
 # Registry mapping operation names to handlers (TypedDict for type safety)
 OPERATION_REGISTRY: dict[str, OperationInfo] = {
     "read": {
@@ -334,6 +441,47 @@ OPERATION_REGISTRY: dict[str, OperationInfo] = {
         "name": "Chain: Filter→Reproject→Partition",
         "description": "Bbox filter, reproject, quadkey partition",
         "run": _run_chain_filter_reproject_partition,
+    },
+    # Additional operations for full benchmark suite
+    "convert-shapefile": {
+        "name": "Convert Shapefile",
+        "description": "Shapefile to GeoParquet",
+        "run": _run_convert_shapefile,
+    },
+    "convert-fgb": {
+        "name": "Convert FlatGeobuf",
+        "description": "FlatGeobuf to GeoParquet",
+        "run": _run_convert_fgb,
+    },
+    "sort-quadkey": {
+        "name": "Sort Quadkey",
+        "description": "Quadkey-based ordering",
+        "run": _run_sort_quadkey,
+    },
+    "add-h3": {
+        "name": "Add H3",
+        "description": "Add H3 cell ID column",
+        "run": _run_add_h3,
+    },
+    "add-quadkey": {
+        "name": "Add Quadkey",
+        "description": "Add quadkey column",
+        "run": _run_add_quadkey,
+    },
+    "add-country": {
+        "name": "Add Country",
+        "description": "Add country codes via spatial join",
+        "run": _run_add_country,
+    },
+    "partition-h3": {
+        "name": "Partition H3",
+        "description": "Partition by H3 cells",
+        "run": _run_partition_h3,
+    },
+    "partition-country": {
+        "name": "Partition Country",
+        "description": "Partition by country boundaries",
+        "run": _run_partition_country,
     },
 }
 

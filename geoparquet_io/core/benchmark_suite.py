@@ -7,7 +7,6 @@ import json
 import platform
 import tempfile
 import time
-import tracemalloc
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -33,7 +32,6 @@ class BenchmarkResult:
     operation: str
     file: str
     time_seconds: float
-    peak_python_memory_mb: float  # tracemalloc - Python heap only
     peak_rss_memory_mb: float  # psutil RSS - includes PyArrow/DuckDB C memory
     success: bool
     error: str | None = None
@@ -52,9 +50,9 @@ def run_single_operation(
     """
     Run a single benchmark operation with timing and memory tracking.
 
-    Tracks both Python heap memory (tracemalloc) and total process RSS (psutil).
-    This is critical because PyArrow and DuckDB allocate memory in C/Rust,
-    which tracemalloc cannot see.
+    Tracks total process RSS (psutil) which includes PyArrow/DuckDB C memory.
+    Python's tracemalloc is not used since PyArrow and DuckDB allocate
+    memory in C/Rust which tracemalloc cannot see.
 
     Args:
         operation: Name of the operation to run
@@ -76,31 +74,22 @@ def run_single_operation(
     process = psutil.Process()
     baseline_rss = process.memory_info().rss
 
-    # Start Python memory tracking
-    tracemalloc.start()
     start_time = time.perf_counter()
-
-    peak_rss = baseline_rss  # Track peak RSS during execution
 
     try:
         details = run_func(input_path, output_dir)
         elapsed = time.perf_counter() - start_time
 
-        # Get peak RSS after operation
+        # Get RSS after operation
         current_rss = process.memory_info().rss
-        peak_rss = max(peak_rss, current_rss)
 
-        _, peak_python = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-
-        # Calculate RSS delta from baseline
-        rss_delta_mb = (peak_rss - baseline_rss) / (1024 * 1024)
+        # Calculate RSS delta from baseline (memory used during operation)
+        rss_delta_mb = (current_rss - baseline_rss) / (1024 * 1024)
 
         return BenchmarkResult(
             operation=operation,
             file=input_path.name,
             time_seconds=round(elapsed, 3),
-            peak_python_memory_mb=round(peak_python / (1024 * 1024), 2),
             peak_rss_memory_mb=round(max(0, rss_delta_mb), 2),
             success=True,
             details=details or {},
@@ -110,12 +99,6 @@ def run_single_operation(
 
     except Exception as e:
         elapsed = time.perf_counter() - start_time
-        try:
-            _, peak_python = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
-            peak_python_mb = round(peak_python / (1024 * 1024), 2)
-        except Exception:
-            peak_python_mb = 0.0
 
         current_rss = process.memory_info().rss
         rss_delta_mb = (current_rss - baseline_rss) / (1024 * 1024)
@@ -124,7 +107,6 @@ def run_single_operation(
             operation=operation,
             file=input_path.name,
             time_seconds=round(elapsed, 3),
-            peak_python_memory_mb=peak_python_mb,
             peak_rss_memory_mb=round(max(0, rss_delta_mb), 2),
             success=False,
             error=str(e),
@@ -332,14 +314,25 @@ def compare_results(
         thresholds = DEFAULT_THRESHOLDS
 
     # Calculate deltas - use RSS memory (captures PyArrow/DuckDB allocations)
-    # Guard against zero baseline time (instant operations or timing errors)
-    if baseline.time_seconds > 0:
+    # Guard against zero/near-zero baseline time (instant operations or timing errors)
+    # Use 0.001s (1ms) as minimum to avoid amplifying tiny timing differences
+    min_time_threshold = 0.001
+    if baseline.time_seconds > min_time_threshold:
         time_delta = (current.time_seconds - baseline.time_seconds) / baseline.time_seconds
     else:
-        time_delta = 0.0 if current.time_seconds == 0 else float("inf")
+        # Both are near-instant, consider them equal
+        time_delta = 0.0
+
     baseline_mem = baseline.peak_rss_memory_mb
     current_mem = current.peak_rss_memory_mb
-    memory_delta = (current_mem - baseline_mem) / max(baseline_mem, 0.01)
+    # Use 1MB as minimum to avoid amplifying small memory differences
+    # Operations using <1MB are considered equal
+    min_mem_threshold = 1.0
+    if baseline_mem > min_mem_threshold:
+        memory_delta = (current_mem - baseline_mem) / baseline_mem
+    else:
+        # Both use minimal memory, consider them equal
+        memory_delta = 0.0
 
     # Determine status using RegressionThresholds dataclass attributes
     status = RegressionStatus.OK

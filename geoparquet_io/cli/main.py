@@ -4418,52 +4418,28 @@ def benchmark_compare(
     help="Runs per operation (default: 3)",
 )
 @click.option(
-    "--compare",
-    "_baseline_path",
-    type=click.Path(exists=True),
-    help="Compare against baseline JSON file",
-)
-@click.option(
     "--output",
     "-o",
     type=click.Path(),
     help="Write results to JSON file",
-)
-@click.option(
-    "--threshold-time",
-    "_threshold_time",
-    default=0.10,
-    type=float,
-    help="Regression threshold for time (default: 0.10 = 10%%)",
-)
-@click.option(
-    "--threshold-memory",
-    "_threshold_memory",
-    default=0.20,
-    type=float,
-    help="Regression threshold for memory (default: 0.20 = 20%%)",
 )
 @verbose_option
 def benchmark_suite(
     operations,
     files,
     iterations,
-    _baseline_path,  # TODO: implement baseline comparison
     output,
-    _threshold_time,  # TODO: implement threshold checking
-    _threshold_memory,  # TODO: implement threshold checking
     verbose,
 ):
     """
     Run comprehensive benchmark suite.
 
     Tests gpio operations across multiple file sizes with timing and memory tracking.
-    Results can be compared against a baseline to detect regressions.
 
     \b
     Example:
         gpio benchmark suite --operations core --output results.json
-        gpio benchmark suite --compare baseline.json
+        gpio benchmark suite --files input.parquet --output results.json
     """
     from pathlib import Path
 
@@ -4519,22 +4495,10 @@ def benchmark_suite(
     default="table",
     help="Output format (default: table)",
 )
-@click.option(
-    "--compare",
-    type=click.Path(exists=True),
-    help="Compare two result files",
-)
-@click.option(
-    "--trend",
-    is_flag=True,
-    help="Show trend across multiple versions",
-)
 @verbose_option
 def benchmark_report(
     result_files,
     output_format,
-    _compare,  # TODO: implement comparison
-    _trend,  # TODO: implement trend analysis
     verbose,
 ):
     """
@@ -4543,8 +4507,7 @@ def benchmark_report(
     \b
     Example:
         gpio benchmark report results.json
-        gpio benchmark report v0.5.0.json --compare v0.4.0.json
-        gpio benchmark report results/*.json --trend
+        gpio benchmark report results/*.json
     """
     import json
 
@@ -4567,7 +4530,6 @@ def benchmark_report(
                         operation=r["operation"],
                         file=r["file"],
                         time_seconds=r["time_seconds"],
-                        peak_python_memory_mb=r["peak_python_memory_mb"],
                         peak_rss_memory_mb=r["peak_rss_memory_mb"],
                         success=r["success"],
                         error=r.get("error"),

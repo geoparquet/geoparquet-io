@@ -14,22 +14,28 @@ Usage:
 import argparse
 import gc
 import json
+import os
 import subprocess
 import tempfile
 import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
+
+# Import base URL and benchmark files from config to avoid duplication
+from geoparquet_io.benchmarks.config import BENCHMARK_DATA_URL, BENCHMARK_FILES
 
 # Test files from source.coop (ordered by size)
+# Built from BENCHMARK_FILES plus additional test files
 TEST_FILES = {
-    "tiny": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_tiny.parquet",
-    "small": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_small.parquet",
-    "medium": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_medium.parquet",
-    "large": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_large.parquet",
+    "tiny": BENCHMARK_FILES["tiny"]["buildings"],
+    "small": BENCHMARK_FILES["small"]["buildings"],
+    "medium": BENCHMARK_FILES["medium"]["buildings"],
+    "large": BENCHMARK_FILES["large"]["fields"],
     # Points in alternate projection (EPSG:3857) for geometry type and CRS variation
-    "points-tiny": "https://data.source.coop/cholmes/gpio-test/benchmark/points_tiny_3857.parquet",
-    "points-small": "https://data.source.coop/cholmes/gpio-test/benchmark/points_small_3857.parquet",
+    "points-tiny": f"{BENCHMARK_DATA_URL}/points_tiny_3857.parquet",
+    "points-small": f"{BENCHMARK_DATA_URL}/points_small_3857.parquet",
 }
 
 # Source format files for import/convert benchmarks (tiny and small only)
@@ -37,12 +43,12 @@ TEST_FILES = {
 # doesn't preserve CRS metadata for EPSG:4326 files (see issues #189 and #190)
 SOURCE_FORMAT_FILES = {
     "geojson": {
-        "tiny": "https://data.source.coop/cholmes/gpio-test/benchmark/geojson/buildings_tiny.geojson",
-        "small": "https://data.source.coop/cholmes/gpio-test/benchmark/geojson/buildings_small.geojson",
+        "tiny": f"{BENCHMARK_DATA_URL}/geojson/buildings_tiny.geojson",
+        "small": f"{BENCHMARK_DATA_URL}/geojson/buildings_small.geojson",
     },
     "geopackage": {
-        "tiny": "https://data.source.coop/cholmes/gpio-test/benchmark/geopackage/buildings_tiny.gpkg",
-        "small": "https://data.source.coop/cholmes/gpio-test/benchmark/geopackage/buildings_small.gpkg",
+        "tiny": f"{BENCHMARK_DATA_URL}/geopackage/buildings_tiny.gpkg",
+        "small": f"{BENCHMARK_DATA_URL}/geopackage/buildings_small.gpkg",
     },
 }
 
@@ -228,25 +234,51 @@ OPERATION_PRESETS = {
 OPERATIONS = [{"name": name, **ALL_OPERATIONS[name]} for name in OPERATION_PRESETS["standard"]]
 
 
+# Trusted domains for benchmark file downloads
+TRUSTED_DOMAINS = {"data.source.coop", "source.coop"}
+
+
+def _validate_url(url: str) -> None:
+    """Validate URL is from a trusted domain."""
+    parsed = urlparse(url)
+    if parsed.netloc not in TRUSTED_DOMAINS:
+        raise ValueError(f"URL domain '{parsed.netloc}' not in trusted domains: {TRUSTED_DOMAINS}")
+
+
 def download_file(url: str, dest: Path) -> bool:
-    """Download a file from URL to destination."""
+    """Download a file from URL to destination.
+
+    Only downloads from trusted domains (source.coop).
+    """
     try:
-        print(f"  Downloading {url.split('/')[-1]}...", end=" ", flush=True)
+        _validate_url(url)
+        # Use basename to get just the filename, preventing path traversal
+        filename = os.path.basename(urlparse(url).path)
+        print(f"  Downloading {filename}...", end=" ", flush=True)
         urllib.request.urlretrieve(url, dest)
         size_mb = dest.stat().st_size / (1024 * 1024)
         print(f"done ({size_mb:.2f} MB)")
         return True
+    except ValueError as e:
+        print(f"validation error: {e}")
+        return False
     except Exception as e:
         print(f"failed: {e}")
         return False
 
 
 def get_cached_file(url: str) -> Path:
-    """Get local cached path for a URL, downloading if needed."""
+    """Get local cached path for a URL, downloading if needed.
+
+    Uses os.path.basename to prevent path traversal attacks.
+    """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Use filename from URL
-    filename = url.split("/")[-1]
+    # Use basename to extract just the filename, preventing path traversal
+    # e.g., "../../../etc/passwd" becomes "passwd"
+    filename = os.path.basename(urlparse(url).path)
+    if not filename:
+        raise ValueError(f"Could not extract filename from URL: {url}")
     cached_path = CACHE_DIR / filename
 
     # Download if not cached

@@ -6,11 +6,7 @@ from geoparquet_io.benchmarks.config import (
     CHAIN_OPERATIONS,
     CORE_OPERATIONS,
     DEFAULT_THRESHOLDS,
-    FULL_BENCHMARK_FILES,
     FULL_OPERATIONS,
-    MEMORY_LIMITS,
-    QUICK_BENCHMARK_FILES,
-    STANDARD_BENCHMARK_FILES,
     RegressionThresholds,
 )
 
@@ -20,10 +16,6 @@ __all__ = [
     "CHAIN_OPERATIONS",
     "CORE_OPERATIONS",
     "DEFAULT_THRESHOLDS",
-    "FULL_BENCHMARK_FILES",
     "FULL_OPERATIONS",
-    "MEMORY_LIMITS",
-    "QUICK_BENCHMARK_FILES",
     "RegressionThresholds",
-    "STANDARD_BENCHMARK_FILES",
 ]

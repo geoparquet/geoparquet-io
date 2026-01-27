@@ -58,12 +58,6 @@ FULL_OPERATIONS: list[str] = (
 # Default regression thresholds
 DEFAULT_THRESHOLDS = RegressionThresholds()
 
-# Memory limit configurations for Docker
-MEMORY_LIMITS: dict[str, str] = {
-    "constrained": "512m",
-    "normal": "4g",
-}
-
 # Base URL for benchmark data on source.coop
 BENCHMARK_DATA_URL = "https://data.source.coop/cholmes/gpio-test/benchmark"
 
@@ -88,24 +82,3 @@ BENCHMARK_FILES: dict[str, dict[str, str]] = {
         "fields": f"{BENCHMARK_DATA_URL}/fields_large.parquet",  # 809K rows, ~176MB
     },
 }
-
-# Default benchmark file sets for different use cases
-QUICK_BENCHMARK_FILES: list[str] = [
-    BENCHMARK_FILES["tiny"]["buildings"],
-    BENCHMARK_FILES["tiny"]["places"],
-]
-
-STANDARD_BENCHMARK_FILES: list[str] = [
-    BENCHMARK_FILES["small"]["buildings"],
-    BENCHMARK_FILES["small"]["places"],
-    BENCHMARK_FILES["medium"]["buildings"],
-]
-
-FULL_BENCHMARK_FILES: list[str] = [
-    BENCHMARK_FILES["tiny"]["buildings"],
-    BENCHMARK_FILES["small"]["buildings"],
-    BENCHMARK_FILES["medium"]["buildings"],
-    BENCHMARK_FILES["large"]["fields"],
-    BENCHMARK_FILES["tiny"]["places"],
-    BENCHMARK_FILES["small"]["places"],
-]

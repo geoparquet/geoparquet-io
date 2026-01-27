@@ -23,10 +23,27 @@ on:
 jobs:
   benchmark-comparison:
     runs-on: ubuntu-latest
+    env:
+      # Use environment variables to safely pass user inputs to shell commands
+      INPUT_CURRENT: ${{ inputs.current_version }}
+      INPUT_BASELINE: ${{ inputs.baseline_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Need full history for tags
+
+      - name: Validate inputs
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          # Validate version inputs are valid git ref format
+          if ! [[ "$INPUT_CURRENT" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "Error: current_version must be a valid git ref"
+            exit 1
+          fi
+          if ! [[ "$INPUT_BASELINE" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "Error: baseline_version must be a valid git ref"
+            exit 1
+          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -51,8 +68,8 @@ jobs:
               BASELINE=$(echo "$TAGS" | head -2 | tail -1)
             fi
           else
-            CURRENT="${{ inputs.current_version }}"
-            BASELINE="${{ inputs.baseline_version }}"
+            CURRENT="$INPUT_CURRENT"
+            BASELINE="$INPUT_BASELINE"
           fi
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
           echo "baseline=$BASELINE" >> $GITHUB_OUTPUT
@@ -68,8 +85,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends libgdal-dev gdal-bin
 
       - name: Install current version
+        env:
+          CURRENT_VERSION: ${{ steps.versions.outputs.current }}
         run: |
-          git checkout ${{ steps.versions.outputs.current }}
+          git checkout "$CURRENT_VERSION"
           uv sync --all-extras
 
       - name: Pre-install DuckDB extensions
@@ -77,26 +96,33 @@ jobs:
           uv run python -c "import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs')"
 
       - name: Run current benchmarks
+        env:
+          CURRENT_VERSION: ${{ steps.versions.outputs.current }}
         run: |
           uv run python scripts/version_benchmark.py \
-            --version-label "${{ steps.versions.outputs.current }}" \
+            --version-label "$CURRENT_VERSION" \
             -o results_current.json \
             -n 5 \
             --files full \
             --ops full
 
       - name: Install baseline version
+        env:
+          BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
         run: |
-          git checkout ${{ steps.versions.outputs.baseline }}
+          git checkout "$BASELINE_VERSION"
           uv sync --all-extras
 
       - name: Run baseline benchmarks
+        env:
+          CURRENT_VERSION: ${{ steps.versions.outputs.current }}
+          BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
         run: |
           # Copy the benchmark script from current (baseline may not have it)
-          git show ${{ steps.versions.outputs.current }}:scripts/version_benchmark.py > /tmp/version_benchmark.py
+          git show "$CURRENT_VERSION":scripts/version_benchmark.py > /tmp/version_benchmark.py
 
           uv run python /tmp/version_benchmark.py \
-            --version-label "${{ steps.versions.outputs.baseline }}" \
+            --version-label "$BASELINE_VERSION" \
             -o results_baseline.json \
             -n 5 \
             --files full \
@@ -104,8 +130,11 @@ jobs:
 
       - name: Generate comparison report
         id: comparison
+        env:
+          CURRENT_VERSION: ${{ steps.versions.outputs.current }}
+          BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
         run: |
-          git checkout ${{ steps.versions.outputs.current }}
+          git checkout "$CURRENT_VERSION"
           uv sync --all-extras
 
           # Generate comparison
@@ -143,8 +172,8 @@ jobs:
           # Create summary
           echo "## Release Benchmark Comparison" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Current:** ${{ steps.versions.outputs.current }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Baseline:** ${{ steps.versions.outputs.baseline }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Current:** $CURRENT_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "**Baseline:** $BASELINE_VERSION" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [[ "$REGRESSIONS" != "none" ]]; then
