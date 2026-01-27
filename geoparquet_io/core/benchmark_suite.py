@@ -332,7 +332,11 @@ def compare_results(
         thresholds = DEFAULT_THRESHOLDS
 
     # Calculate deltas - use RSS memory (captures PyArrow/DuckDB allocations)
-    time_delta = (current.time_seconds - baseline.time_seconds) / baseline.time_seconds
+    # Guard against zero baseline time (instant operations or timing errors)
+    if baseline.time_seconds > 0:
+        time_delta = (current.time_seconds - baseline.time_seconds) / baseline.time_seconds
+    else:
+        time_delta = 0.0 if current.time_seconds == 0 else float("inf")
     baseline_mem = baseline.peak_rss_memory_mb
     current_mem = current.peak_rss_memory_mb
     memory_delta = (current_mem - baseline_mem) / max(baseline_mem, 0.01)

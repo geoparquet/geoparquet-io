@@ -613,7 +613,7 @@ def compare_results(file1: str, file2: str):
         else:
             time2_str = f"{b2['avg_time']:.3f}s"
 
-            if b1["avg_time"] is not None:
+            if b1["avg_time"] is not None and b1["avg_time"] > 0:
                 delta = (b2["avg_time"] - b1["avg_time"]) / b1["avg_time"] * 100
                 if delta > 0:
                     delta_str = f"+{delta:.1f}% slower"

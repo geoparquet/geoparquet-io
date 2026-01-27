@@ -60,6 +60,11 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
+      - name: Install system dependencies (GDAL for import operations)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgdal-dev gdal-bin
+
       - name: Install dependencies
         run: uv sync --all-extras
 

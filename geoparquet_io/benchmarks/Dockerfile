@@ -20,11 +20,11 @@ WORKDIR /app
 COPY --chown=benchmarker:benchmarker . .
 RUN pip install --no-cache-dir -e ".[dev]"
 
-# Pre-download DuckDB extensions (as root before switching user)
-RUN python -c "import duckdb; c = duckdb.connect(); c.execute('INSTALL spatial'); c.execute('INSTALL httpfs')"
-
 # Switch to non-root user
 USER benchmarker
+
+# Pre-download DuckDB extensions (as benchmarker user so they're in ~/.duckdb/extensions)
+RUN python -c "import duckdb; c = duckdb.connect(); c.execute('INSTALL spatial'); c.execute('INSTALL httpfs')"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
