@@ -91,12 +91,16 @@ Note: Import operations only run on tiny/small file sizes as source format files
 
 Benchmark files are hosted on source.coop with different size tiers:
 
-| Tier | Rows | Source |
-|------|------|--------|
-| tiny | 1,000 | Overture Buildings (Singapore) |
-| small | 10,000 | Overture Buildings (Singapore) |
-| medium | 100,000 | Overture Buildings (Singapore) |
-| large | 809,000 | fiboa field boundaries (Japan) |
+| Tier | Rows | Geometry | CRS | Source |
+|------|------|----------|-----|--------|
+| tiny | 1,000 | Polygon | EPSG:4326 | Overture Buildings (Singapore) |
+| small | 10,000 | Polygon | EPSG:4326 | Overture Buildings (Singapore) |
+| medium | 100,000 | Polygon | EPSG:4326 | Overture Buildings (Singapore) |
+| large | 809,000 | Polygon | EPSG:3794 | fiboa field boundaries (Slovenia) |
+| points-tiny | 1,000 | Point | EPSG:3857 | Building centroids (Web Mercator) |
+| points-small | 10,000 | Point | EPSG:3857 | Building centroids (Web Mercator) |
+
+The points files provide variation in geometry type and CRS for regression testing.
 
 ### File Presets
 
@@ -104,7 +108,7 @@ Benchmark files are hosted on source.coop with different size tiers:
 |--------|-------|
 | `quick` | tiny, small |
 | `standard` | small, medium |
-| `full` | tiny, small, medium, large |
+| `full` | tiny, small, medium, large, points-tiny, points-small |
 
 Files are automatically downloaded and cached locally in `/tmp/gpio-benchmark-cache/`.
 

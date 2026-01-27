@@ -27,6 +27,9 @@ TEST_FILES = {
     "small": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_small.parquet",
     "medium": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_medium.parquet",
     "large": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_large.parquet",
+    # Points in alternate projection (EPSG:3857) for geometry type and CRS variation
+    "points-tiny": "https://data.source.coop/cholmes/gpio-test/benchmark/points_tiny_3857.parquet",
+    "points-small": "https://data.source.coop/cholmes/gpio-test/benchmark/points_small_3857.parquet",
 }
 
 # Source format files for import/convert benchmarks (tiny and small only)
@@ -47,7 +50,7 @@ SOURCE_FORMAT_FILES = {
 FILE_PRESETS = {
     "quick": ["tiny", "small"],
     "standard": ["small", "medium"],
-    "full": ["tiny", "small", "medium", "large"],
+    "full": ["tiny", "small", "medium", "large", "points-tiny", "points-small"],
 }
 
 # Local cache directory
