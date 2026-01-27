@@ -63,6 +63,15 @@ The suite tests these operations covering most gpio capabilities:
 | `convert-flatgeobuf` | Convert to FlatGeobuf format |
 | `convert-geopackage` | Convert to GeoPackage format |
 
+### Import Operations
+
+| Operation | Description |
+|-----------|-------------|
+| `import-geojson` | Import from GeoJSON to GeoParquet |
+| `import-geopackage` | Import from GeoPackage to GeoParquet |
+
+Note: Import operations only run on tiny/small file sizes as source format files are only available in those sizes.
+
 ### Chain Operations (Multi-step Workflows)
 
 | Operation | Description |
@@ -76,7 +85,7 @@ The suite tests these operations covering most gpio capabilities:
 |--------|------------|
 | `quick` | inspect, extract-limit, add-bbox |
 | `standard` | inspect, extract-limit, extract-columns, add-bbox, sort-hilbert |
-| `full` | All 17 operations including chains |
+| `full` | All 19 operations including imports and chains |
 
 ## Test Data
 

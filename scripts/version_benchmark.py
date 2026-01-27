@@ -29,6 +29,20 @@ TEST_FILES = {
     "large": "https://data.source.coop/cholmes/gpio-test/benchmark/buildings_large.parquet",
 }
 
+# Source format files for import/convert benchmarks (tiny and small only)
+# NOTE: flatgeobuf and shapefile are excluded because gpio's export to those formats
+# doesn't preserve CRS metadata for EPSG:4326 files (see issues #189 and #190)
+SOURCE_FORMAT_FILES = {
+    "geojson": {
+        "tiny": "https://data.source.coop/cholmes/gpio-test/benchmark/geojson/buildings_tiny.geojson",
+        "small": "https://data.source.coop/cholmes/gpio-test/benchmark/geojson/buildings_small.geojson",
+    },
+    "geopackage": {
+        "tiny": "https://data.source.coop/cholmes/gpio-test/benchmark/geopackage/buildings_tiny.gpkg",
+        "small": "https://data.source.coop/cholmes/gpio-test/benchmark/geopackage/buildings_small.gpkg",
+    },
+}
+
 # File size presets
 FILE_PRESETS = {
     "quick": ["tiny", "small"],
@@ -66,7 +80,17 @@ ALL_OPERATIONS = {
         "description": "Add bbox column",
     },
     "add-quadkey": {
-        "cmd": ["gpio", "add", "quadkey", "{input}", "{output}", "--resolution", "12"],
+        "cmd": [
+            "gpio",
+            "add",
+            "quadkey",
+            "{input}",
+            "{output}",
+            "--resolution",
+            "12",
+            "--quadkey-name",
+            "quadkey_bench",
+        ],
         "description": "Add quadkey column",
     },
     "add-h3": {
@@ -89,7 +113,17 @@ ALL_OPERATIONS = {
     },
     # Partition operations
     "partition-quadkey": {
-        "cmd": ["gpio", "partition", "quadkey", "{input}", "{output_dir}", "--resolution", "4"],
+        "cmd": [
+            "gpio",
+            "partition",
+            "quadkey",
+            "{input}",
+            "{output_dir}",
+            "--resolution",
+            "12",
+            "--partition-resolution",
+            "4",
+        ],
         "description": "Partition by quadkey",
     },
     "partition-h3": {
@@ -111,6 +145,24 @@ ALL_OPERATIONS = {
     },
 }
 
+# Import operations (convert TO GeoParquet from other formats)
+# These use special source format files, only available for tiny/small
+# Uses {input} placeholder - the source file is passed as input_file
+# NOTE: import-flatgeobuf and import-shapefile are excluded because gpio's export
+# to those formats doesn't preserve CRS metadata for EPSG:4326 (see issues #189 and #190)
+IMPORT_OPERATIONS = {
+    "import-geojson": {
+        "cmd": ["gpio", "convert", "{input}", "{output}"],
+        "description": "Import from GeoJSON",
+        "source_format": "geojson",
+    },
+    "import-geopackage": {
+        "cmd": ["gpio", "convert", "{input}", "{output}"],
+        "description": "Import from GeoPackage",
+        "source_format": "geopackage",
+    },
+}
+
 # Chain operations (multi-step workflows)
 CHAIN_OPERATIONS = {
     "chain-extract-bbox-sort": {
@@ -126,7 +178,9 @@ CHAIN_OPERATIONS = {
         "cmd": None,
         "description": "Bbox filter → Hilbert sort",
         "steps": [
-            ["gpio", "extract", "{input}", "{step1}", "--bbox", "-180,-45,0,45"],
+            # Bbox covering most Singapore test data (tiny/small/medium)
+            # Note: This won't work correctly for the large file (Slovenia, EPSG:3794)
+            ["gpio", "extract", "{input}", "{step1}", "--bbox", "103.7,1.4,104.0,1.47"],
             ["gpio", "sort", "hilbert", "{step1}", "{output}"],
         ],
     },
@@ -154,10 +208,13 @@ OPERATION_PRESETS = {
         # Partition operations
         "partition-quadkey",
         "partition-h3",
-        # Convert operations
+        # Export/convert operations
         "convert-geojson",
         "convert-flatgeobuf",
         "convert-geopackage",
+        # Import operations (only run on tiny/small)
+        "import-geojson",
+        "import-geopackage",
         # Chain operations
         "chain-extract-bbox-sort",
         "chain-filter-sort",
@@ -197,11 +254,17 @@ def get_cached_file(url: str) -> Path:
     return cached_path
 
 
-def ensure_files_cached(file_sizes: list[str] | None = None) -> dict[str, Path]:
+def ensure_files_cached(
+    file_sizes: list[str] | None = None, include_source_formats: bool = False
+) -> tuple[dict[str, Path], dict[str, dict[str, Path]]]:
     """Download test files to local cache.
 
     Args:
         file_sizes: List of file sizes to cache. If None, caches all files.
+        include_source_formats: Whether to also cache source format files for imports.
+
+    Returns:
+        Tuple of (parquet_files, source_format_files)
     """
     print("\nEnsuring test files are cached locally...")
     local_files = {}
@@ -209,8 +272,19 @@ def ensure_files_cached(file_sizes: list[str] | None = None) -> dict[str, Path]:
     for size_name in sizes_to_cache:
         if size_name in TEST_FILES:
             local_files[size_name] = get_cached_file(TEST_FILES[size_name])
+
+    # Cache source format files for import operations
+    source_files: dict[str, dict[str, Path]] = {}
+    if include_source_formats:
+        print("  Caching source format files for import tests...")
+        for fmt, sizes in SOURCE_FORMAT_FILES.items():
+            source_files[fmt] = {}
+            for size_name in sizes_to_cache:
+                if size_name in sizes:
+                    source_files[fmt][size_name] = get_cached_file(sizes[size_name])
+
     print()
-    return local_files
+    return local_files, source_files
 
 
 def _substitute_cmd(cmd: list[str], substitutions: dict[str, str]) -> list[str]:
@@ -388,11 +462,15 @@ def run_benchmarks(
     except Exception:
         results["gpio_version"] = "unknown"
 
+    # Check if we need source format files for import operations
+    has_import_ops = any(op in IMPORT_OPERATIONS for op in ops_to_run)
+
     # Get local files if caching enabled
     if use_cache:
-        local_files = ensure_files_cached(sizes_to_run)
+        local_files, source_files = ensure_files_cached(sizes_to_run, has_import_ops)
     else:
         local_files = None
+        source_files = {}
 
     print(f"\n{'=' * 60}")
     print(f"Benchmarking: {version_label}")
@@ -421,9 +499,22 @@ def run_benchmarks(
                 if op_name in ALL_OPERATIONS:
                     op = ALL_OPERATIONS[op_name]
                     is_chain = False
+                    is_import = False
+                elif op_name in IMPORT_OPERATIONS:
+                    op = IMPORT_OPERATIONS[op_name]
+                    is_chain = False
+                    is_import = True
+                    # Skip import ops for sizes that don't have source files
+                    source_fmt = op["source_format"]
+                    if source_fmt not in source_files or size_name not in source_files.get(
+                        source_fmt, {}
+                    ):
+                        print(f"  {op_name}: SKIPPED (no {source_fmt} file for {size_name})")
+                        continue
                 elif op_name in CHAIN_OPERATIONS:
                     op = CHAIN_OPERATIONS[op_name]
                     is_chain = True
+                    is_import = False
                 else:
                     print(f"  {op_name}: SKIPPED (unknown operation)")
                     continue
@@ -436,6 +527,11 @@ def run_benchmarks(
                 for _i in range(iterations):
                     if is_chain:
                         result = run_chain_operation(op["steps"], input_path, output_dir)
+                    elif is_import:
+                        # Get the source format file for import operations
+                        source_fmt = op["source_format"]
+                        source_input = str(source_files[source_fmt][size_name])
+                        result = run_operation(op["cmd"], source_input, output_dir)
                     else:
                         result = run_operation(op["cmd"], input_path, output_dir)
 
@@ -590,7 +686,9 @@ def main():
             parser.error(f"Invalid file sizes: {invalid}. Valid: {list(TEST_FILES.keys())}")
 
     # Parse operations
-    all_ops = set(ALL_OPERATIONS.keys()) | set(CHAIN_OPERATIONS.keys())
+    all_ops = (
+        set(ALL_OPERATIONS.keys()) | set(CHAIN_OPERATIONS.keys()) | set(IMPORT_OPERATIONS.keys())
+    )
     if args.ops in OPERATION_PRESETS:
         ops_list = OPERATION_PRESETS[args.ops]
     else:
