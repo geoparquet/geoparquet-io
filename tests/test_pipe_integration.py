@@ -57,9 +57,10 @@ class TestTwoStagePipelines:
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_add_bbox_to_sort_hilbert(self, output_file):
         """Test: gpio add bbox input | gpio sort hilbert - output."""
+        # Use --bbox-name to avoid conflict with existing bbox column in test file
         result = run_pipeline(
             [
-                f"gpio add bbox {PLACES_PARQUET} -",
+                f"gpio add bbox --bbox-name bbox_test {PLACES_PARQUET} -",
                 f"gpio sort hilbert - {output_file}",
             ]
         )
@@ -67,18 +68,19 @@ class TestTwoStagePipelines:
         assert result.returncode == 0, f"Pipeline failed: {result.stderr}"
         assert Path(output_file).exists()
 
-        # Verify output has bbox and is sorted
+        # Verify output has bbox_test and is sorted
         table = pq.read_table(output_file)
-        assert "bbox" in table.column_names
+        assert "bbox_test" in table.column_names
         assert table.num_rows == 766
 
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_extract_to_add_bbox(self, output_file):
         """Test: gpio extract --limit 100 input | gpio add bbox - output."""
+        # Use --bbox-name to avoid conflict with existing bbox column in test file
         result = run_pipeline(
             [
                 f"gpio extract --limit 100 {PLACES_PARQUET} -",
-                f"gpio add bbox - {output_file}",
+                f"gpio add bbox --bbox-name bbox_test - {output_file}",
             ]
         )
 
@@ -86,15 +88,16 @@ class TestTwoStagePipelines:
         assert Path(output_file).exists()
 
         table = pq.read_table(output_file)
-        assert "bbox" in table.column_names
+        assert "bbox_test" in table.column_names
         assert table.num_rows == 100
 
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_add_bbox_to_add_quadkey(self, output_file):
         """Test: gpio add bbox input | gpio add quadkey - output."""
+        # Use --bbox-name to avoid conflict with existing bbox column in test file
         result = run_pipeline(
             [
-                f"gpio add bbox {PLACES_PARQUET} -",
+                f"gpio add bbox --bbox-name bbox_test {PLACES_PARQUET} -",
                 f"gpio add quadkey - {output_file}",
             ]
         )
@@ -103,7 +106,7 @@ class TestTwoStagePipelines:
         assert Path(output_file).exists()
 
         table = pq.read_table(output_file)
-        assert "bbox" in table.column_names
+        assert "bbox_test" in table.column_names
         assert "quadkey" in table.column_names
         assert table.num_rows == 766
 
@@ -114,10 +117,11 @@ class TestThreeStagePipelines:
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_extract_add_bbox_add_quadkey(self, output_file):
         """Test: extract | add bbox | add quadkey."""
+        # Use --bbox-name to avoid conflict with existing bbox column in test file
         result = run_pipeline(
             [
                 f"gpio extract --limit 50 {PLACES_PARQUET} -",
-                "gpio add bbox - -",
+                "gpio add bbox --bbox-name bbox_test - -",
                 f"gpio add quadkey - {output_file}",
             ]
         )
@@ -126,16 +130,17 @@ class TestThreeStagePipelines:
         assert Path(output_file).exists()
 
         table = pq.read_table(output_file)
-        assert "bbox" in table.column_names
+        assert "bbox_test" in table.column_names
         assert "quadkey" in table.column_names
         assert table.num_rows == 50
 
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_add_bbox_add_quadkey_sort_hilbert(self, output_file):
         """Test: add bbox | add quadkey | sort hilbert."""
+        # Use --bbox-name to avoid conflict with existing bbox column in test file
         result = run_pipeline(
             [
-                f"gpio add bbox {PLACES_PARQUET} -",
+                f"gpio add bbox --bbox-name bbox_test {PLACES_PARQUET} -",
                 "gpio add quadkey - -",
                 f"gpio sort hilbert - {output_file}",
             ]
@@ -145,7 +150,7 @@ class TestThreeStagePipelines:
         assert Path(output_file).exists()
 
         table = pq.read_table(output_file)
-        assert "bbox" in table.column_names
+        assert "bbox_test" in table.column_names
         assert "quadkey" in table.column_names
         assert table.num_rows == 766
 
@@ -177,10 +182,11 @@ class TestFullPipeline:
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_full_transform_pipeline(self, output_file):
         """Test: extract | add bbox | add quadkey | sort hilbert."""
+        # Use --bbox-name to avoid conflict with existing bbox column in test file
         result = run_pipeline(
             [
                 f"gpio extract --limit 100 {PLACES_PARQUET} -",
-                "gpio add bbox - -",
+                "gpio add bbox --bbox-name bbox_test - -",
                 "gpio add quadkey - -",
                 f"gpio sort hilbert - {output_file}",
             ]
@@ -190,7 +196,7 @@ class TestFullPipeline:
         assert Path(output_file).exists()
 
         table = pq.read_table(output_file)
-        assert "bbox" in table.column_names
+        assert "bbox_test" in table.column_names
         assert "quadkey" in table.column_names
         assert table.num_rows == 100
 
@@ -201,10 +207,11 @@ class TestEdgeCases:
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_single_row_pipeline(self, output_file):
         """Test pipeline with single row extract."""
+        # Use --bbox-name to avoid conflict with existing bbox column in test file
         result = run_pipeline(
             [
                 f"gpio extract --limit 1 {PLACES_PARQUET} -",
-                f"gpio add bbox - {output_file}",
+                f"gpio add bbox --bbox-name bbox_test - {output_file}",
             ]
         )
 
@@ -212,23 +219,24 @@ class TestEdgeCases:
 
         table = pq.read_table(output_file)
         assert table.num_rows == 1
-        assert "bbox" in table.column_names
+        assert "bbox_test" in table.column_names
 
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_column_selection_through_pipe(self, output_file):
         """Test that column selection works through pipe."""
+        # Use --bbox-name to avoid conflict with existing bbox column in test file
         result = run_pipeline(
             [
                 f"gpio extract --include-cols name,address {PLACES_PARQUET} -",
-                f"gpio add bbox - {output_file}",
+                f"gpio add bbox --bbox-name bbox_test - {output_file}",
             ]
         )
 
         assert result.returncode == 0, f"Pipeline failed: {result.stderr}"
 
         table = pq.read_table(output_file)
-        # Should have: name, address, geometry (auto-included), bbox (added)
+        # Should have: name, address, geometry (auto-included), bbox_test (added)
         assert "name" in table.column_names
         assert "address" in table.column_names
         assert "geometry" in table.column_names
-        assert "bbox" in table.column_names
+        assert "bbox_test" in table.column_names
