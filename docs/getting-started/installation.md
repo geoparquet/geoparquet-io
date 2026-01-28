@@ -21,11 +21,13 @@ pipx and uv tool install the CLI in isolation while keeping it globally availabl
 For the latest development version:
 
 ```bash
+# Install from PyPI into current environment
+uv pip install geoparquet-io
+
+# Or install from source
 git clone https://github.com/geoparquet/geoparquet-io.git
 cd geoparquet-io
-uv sync --all-extras  # for development
-# or
-pip install -e .
+uv sync --all-extras
 ```
 
 ## Requirements
@@ -45,7 +47,7 @@ For contributing to geoparquet-io:
 ```bash
 uv sync --all-extras
 # or
-pip install -e ".[dev]"
+pip install geoparquet-io[dev]
 ```
 
 This installs:
@@ -60,8 +62,9 @@ This installs:
 For building documentation:
 
 ```bash
+uv pip install geoparquet-io[docs]
+# or
 pip install geoparquet-io[docs]
-# or: uv add geoparquet-io --extra docs
 ```
 
 This installs:
@@ -137,6 +140,16 @@ Ensure you have PyArrow 12.0.0 or higher:
 
 ```bash
 pip install --upgrade pyarrow>=12.0.0
+```
+
+### Using Virtual Environments with uv
+
+uv automatically manages virtual environments, but if you need a fresh environment:
+
+```bash
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv pip install geoparquet-io
 ```
 
 ## Next Steps
