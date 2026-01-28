@@ -4305,21 +4305,40 @@ def check_spec(
         raise click.ClickException(str(e)) from e
 
 
-# Benchmark command
-@cli.command()
+# Benchmark commands group
+@cli.group()
+@click.pass_context
+def benchmark(ctx):
+    """Benchmark GeoParquet performance.
+
+    Commands for measuring and comparing performance of GeoParquet operations.
+
+    \b
+    Subcommands:
+      suite    Run comprehensive benchmark suite
+      compare  Compare converter performance on a single file
+      report   View and compare benchmark results
+    """
+    ctx.ensure_object(dict)
+
+
+@benchmark.command("compare")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option(
     "--iterations",
+    "-n",
     default=3,
     type=int,
     help="Number of iterations per converter (default: 3)",
 )
 @click.option(
     "--converters",
+    "-c",
     help="Comma-separated list of converters to run (default: all available)",
 )
 @click.option(
     "--output-json",
+    "-o",
     type=click.Path(),
     help="Save results to JSON file",
 )
@@ -4342,10 +4361,12 @@ def check_spec(
 )
 @click.option(
     "--quiet",
+    "-q",
     is_flag=True,
     help="Suppress progress output, show only results",
 )
-def benchmark(
+@verbose_option
+def benchmark_compare(
     input_file,
     iterations,
     converters,
@@ -4354,39 +4375,26 @@ def benchmark(
     warmup,
     output_format,
     quiet,
+    verbose,
 ):
     """
-    Benchmark GeoParquet conversion performance.
+    Compare converter performance on a single file.
 
     Tests different conversion methods (DuckDB, GeoPandas, GDAL) on an input
     geospatial file and reports time and memory usage.
 
+    \b
     Available converters:
-
-      \b
       - duckdb: DuckDB spatial extension (always available)
       - geopandas_fiona: GeoPandas with Fiona engine
       - geopandas_pyogrio: GeoPandas with PyOGRIO engine
       - gdal_ogr2ogr: GDAL ogr2ogr CLI
 
-    Examples:
-
-      \b
-      # Basic benchmark with all available converters
-      gpio benchmark input.geojson
-
-      \b
-      # Run specific converters with more iterations
-      gpio benchmark input.shp --converters duckdb,geopandas_pyogrio --iterations 5
-
-      \b
-      # Save results to JSON and keep converted files
-      gpio benchmark input.gpkg --output-json results.json --keep-output ./output
-
-      \b
-      # JSON output format
-      gpio benchmark input.geojson --format json
+    \b
+    Example:
+        gpio benchmark compare input.geojson --iterations 5
     """
+    configure_verbose(verbose)
     from geoparquet_io.core.benchmark import run_benchmark
 
     # Parse converters string to list
@@ -4404,6 +4412,150 @@ def benchmark(
         output_format=output_format,
         quiet=quiet,
     )
+
+
+@benchmark.command("suite")
+@click.option(
+    "--operations",
+    type=click.Choice(["core", "full"]),
+    default="core",
+    help="Operation set to run (default: core)",
+)
+@click.option(
+    "--files",
+    multiple=True,
+    help="Files to test (paths or size names: tiny, small, medium, large, xlarge)",
+)
+@click.option(
+    "--iterations",
+    "-n",
+    default=3,
+    help="Runs per operation (default: 3)",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    help="Write results to JSON file",
+)
+@verbose_option
+def benchmark_suite(
+    operations,
+    files,
+    iterations,
+    output,
+    verbose,
+):
+    """
+    Run comprehensive benchmark suite.
+
+    Tests gpio operations across multiple file sizes with timing and memory tracking.
+
+    \b
+    Example:
+        gpio benchmark suite --operations core --output results.json
+        gpio benchmark suite --files input.parquet --output results.json
+    """
+    from pathlib import Path
+
+    configure_verbose(verbose)
+    from geoparquet_io.benchmarks.config import CORE_OPERATIONS, FULL_OPERATIONS
+    from geoparquet_io.core.benchmark_suite import run_benchmark_suite
+    from geoparquet_io.core.logging_config import progress, success
+
+    # Determine operations
+    ops = CORE_OPERATIONS if operations == "core" else FULL_OPERATIONS
+
+    # Resolve files
+    if not files:
+        raise click.ClickException("No files specified. Use --files with paths.")
+
+    input_files = []
+    for f in files:
+        path = Path(f)
+        if path.exists():
+            input_files.append(path)
+        else:
+            raise click.ClickException(f"File not found: {f}")
+
+    progress(
+        f"Running benchmark suite: {len(ops)} operations, "
+        f"{len(input_files)} files, {iterations} iterations"
+    )
+
+    result = run_benchmark_suite(
+        input_files=input_files,
+        operations=ops,
+        iterations=iterations,
+        verbose=verbose,
+    )
+
+    # Display summary
+    success_count = sum(1 for r in result.results if r.success)
+    total_count = len(result.results)
+    progress(f"\nCompleted: {success_count}/{total_count} benchmarks")
+
+    # Save if requested
+    if output:
+        Path(output).write_text(result.to_json())
+        success(f"Results saved to {output}")
+
+
+@benchmark.command("report")
+@click.argument("result_files", nargs=-1, type=click.Path(exists=True))
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Output format (default: table)",
+)
+@verbose_option
+def benchmark_report(
+    result_files,
+    output_format,
+    verbose,
+):
+    """
+    View and compare benchmark results.
+
+    \b
+    Example:
+        gpio benchmark report results.json
+        gpio benchmark report results/*.json
+    """
+    import json
+
+    configure_verbose(verbose)
+    from geoparquet_io.core.benchmark_report import format_table
+    from geoparquet_io.core.benchmark_suite import BenchmarkResult
+    from geoparquet_io.core.logging_config import progress
+
+    if not result_files:
+        raise click.ClickException("No result files provided")
+
+    # Load results
+    all_results = []
+    for rf in result_files:
+        with open(rf) as f:
+            data = json.load(f)
+            for r in data.get("results", []):
+                all_results.append(
+                    BenchmarkResult(
+                        operation=r["operation"],
+                        file=r["file"],
+                        time_seconds=r["time_seconds"],
+                        peak_rss_memory_mb=r["peak_rss_memory_mb"],
+                        success=r["success"],
+                        error=r.get("error"),
+                        details=r.get("details", {}),
+                    )
+                )
+
+    if output_format == "json":
+        click.echo(json.dumps([r.__dict__ for r in all_results], indent=2, default=str))
+    else:
+        progress(format_table(all_results))
 
 
 if __name__ == "__main__":

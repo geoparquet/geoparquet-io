@@ -1,0 +1,191 @@
+# Benchmark Suite Workflow
+# Runs performance benchmarks on-demand via workflow_dispatch or when 'benchmark' label is added to PRs
+name: Benchmark Suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Number of iterations per operation'
+        required: false
+        default: '3'
+        type: string
+      files:
+        description: 'File sizes to benchmark (quick, standard, full, or comma-separated)'
+        required: false
+        default: 'full'
+        type: string
+      ops:
+        description: 'Operations to benchmark (quick, standard, full, or comma-separated)'
+        required: false
+        default: 'full'
+        type: string
+      compare_version:
+        description: 'Version to compare against (e.g., v0.9.0, main)'
+        required: false
+        default: ''
+        type: string
+
+  pull_request:
+    types: [labeled]
+
+jobs:
+  check-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.label.name }}" == "benchmark" ]]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+  benchmark:
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Use environment variables to safely pass user inputs to shell commands
+      ITERATIONS: ${{ inputs.iterations || '3' }}
+      FILES: ${{ inputs.files || 'full' }}
+      OPS: ${{ inputs.ops || 'full' }}
+      COMPARE_VERSION: ${{ inputs.compare_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          # Validate iterations is a positive integer
+          if ! [[ "$ITERATIONS" =~ ^[0-9]+$ ]] || [[ "$ITERATIONS" -lt 1 ]]; then
+            echo "Error: iterations must be a positive integer"
+            exit 1
+          fi
+          # Validate files and ops are alphanumeric with allowed chars
+          if ! [[ "$FILES" =~ ^[a-zA-Z0-9,_-]+$ ]]; then
+            echo "Error: files must be alphanumeric with commas, underscores, or hyphens"
+            exit 1
+          fi
+          if ! [[ "$OPS" =~ ^[a-zA-Z0-9,_-]+$ ]]; then
+            echo "Error: ops must be alphanumeric with commas, underscores, or hyphens"
+            exit 1
+          fi
+          # Validate compare_version if provided (git ref format)
+          if [[ -n "$COMPARE_VERSION" ]] && ! [[ "$COMPARE_VERSION" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "Error: compare_version must be a valid git ref"
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install system dependencies (GDAL for import operations)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgdal-dev gdal-bin
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Pre-install DuckDB extensions
+        run: |
+          uv run python -c "import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs')"
+
+      - name: Run benchmarks (current)
+        run: |
+          uv run python scripts/version_benchmark.py \
+            --version-label "${{ github.sha }}" \
+            -o results_current.json \
+            -n "$ITERATIONS" \
+            --files "$FILES" \
+            --ops "$OPS"
+
+      - name: Checkout and benchmark comparison version
+        if: inputs.compare_version != ''
+        run: |
+          # Save current results
+          cp results_current.json /tmp/results_current.json
+
+          # Checkout comparison version (already validated above)
+          git fetch --tags --depth=1 origin
+          git checkout "$COMPARE_VERSION"
+
+          # Reinstall at that version
+          uv sync --all-extras
+
+          # Run benchmarks
+          uv run python scripts/version_benchmark.py \
+            --version-label "$COMPARE_VERSION" \
+            -o results_baseline.json \
+            -n "$ITERATIONS" \
+            --files "$FILES" \
+            --ops "$OPS"
+
+          # Restore current and compare
+          cp /tmp/results_current.json results_current.json
+          git checkout ${{ github.sha }}
+          uv sync --all-extras
+
+          echo "## Benchmark Comparison" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          uv run python scripts/version_benchmark.py \
+            --compare results_baseline.json results_current.json >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate summary (no comparison)
+        if: inputs.compare_version == ''
+        run: |
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Version: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          cat results_current.json >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: |
+            results_*.json
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const results = JSON.parse(fs.readFileSync('results_current.json', 'utf8'));
+
+            let body = '## Benchmark Results\n\n';
+            body += `**Version:** \`${results.version}\`\n`;
+            body += `**GPIO Version:** ${results.gpio_version}\n`;
+            body += `**Iterations:** ${results.iterations}\n\n`;
+            body += '| Operation | File | Avg Time | Min | Max |\n';
+            body += '|-----------|------|----------|-----|-----|\n';
+
+            for (const b of results.benchmarks) {
+              if (b.avg_time !== null) {
+                body += `| ${b.operation} | ${b.file_size} | ${b.avg_time.toFixed(3)}s | ${b.min_time.toFixed(3)}s | ${b.max_time.toFixed(3)}s |\n`;
+              } else {
+                body += `| ${b.operation} | ${b.file_size} | FAILED | - | - |\n`;
+              }
+            }
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

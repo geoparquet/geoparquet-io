@@ -259,11 +259,38 @@ def sample_geoparquet():
 
 (For maintainers only)
 
+### Pre-Release Checklist
+
+1. **Run benchmarks** to check for performance regressions:
+   ```bash
+   # Install previous release
+   git checkout v0.9.0 && pip install -e .
+   python scripts/version_benchmark.py --version-label "baseline" -o baseline.json -n 5
+
+   # Install new version
+   git checkout main && pip install -e .
+   python scripts/version_benchmark.py --version-label "new" -o current.json -n 5
+
+   # Compare results
+   python scripts/version_benchmark.py --compare baseline.json current.json
+   ```
+
+2. **Review any regressions** (>25% slower on large files):
+   - If intentional (new features), document in release notes
+   - If unintentional, investigate and fix before release
+
+### Release Steps
+
 1. Update version in `pyproject.toml` and `geoparquet_io/cli/main.py`
 2. Update `CHANGELOG.md` with release notes
 3. Create and push a git tag: `git tag v0.x.0 && git push origin v0.x.0`
-4. GitHub Actions will automatically build and publish to PyPI
-5. Create a GitHub release with the changelog content
+4. Create a GitHub release with the changelog content
+5. GitHub Actions will automatically:
+   - Build and publish to PyPI
+   - Run benchmark comparison against previous release
+   - Append performance results to release notes
+
+See [Performance Benchmarks](guide/benchmarks.md) for details on the benchmark system.
 
 ## Questions?
 
