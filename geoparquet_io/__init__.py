@@ -11,6 +11,7 @@ from geoparquet_io.api import (
 from geoparquet_io.api.check import CheckResult
 from geoparquet_io.api.stac import generate_stac, validate_stac
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_metadata import GeoParquetError
 
 __all__ = [
     "cli",
@@ -25,4 +26,5 @@ __all__ = [
     "CheckResult",
     "generate_stac",
     "validate_stac",
+    "GeoParquetError",
 ]
