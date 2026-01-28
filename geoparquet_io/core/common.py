@@ -1956,8 +1956,17 @@ def compute_bbox_via_sql(
         geometry_column: Name of geometry column
 
     Returns:
-        [xmin, ymin, xmax, ymax] or None if query returns no rows
+        [xmin, ymin, xmax, ymax] or None if query returns no rows or geometry column not in query
     """
+    # Check if geometry column exists in query result
+    try:
+        columns = _get_query_columns(con, query)
+        if geometry_column not in columns:
+            return None
+    except (duckdb.Error, RuntimeError, ValueError, AttributeError):
+        # If we can't determine schema, return None rather than failing
+        return None
+
     # Escape column name for SQL (double any embedded quotes)
     escaped_col = geometry_column.replace('"', '""')
     bbox_query = f"""
@@ -1989,8 +1998,17 @@ def compute_geometry_types_via_sql(
         geometry_column: Name of geometry column
 
     Returns:
-        List of geometry type names (e.g., ["Point", "Polygon"])
+        List of geometry type names (e.g., ["Point", "Polygon"]) or empty list if column not in query
     """
+    # Check if geometry column exists in query result
+    try:
+        columns = _get_query_columns(con, query)
+        if geometry_column not in columns:
+            return []
+    except (duckdb.Error, RuntimeError, ValueError, AttributeError):
+        # If we can't determine schema, return empty list rather than failing
+        return []
+
     # Escape column name for SQL (double any embedded quotes)
     escaped_col = geometry_column.replace('"', '""')
     types_query = f"""
