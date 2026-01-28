@@ -933,7 +933,8 @@ def convert_to_geoparquet(
     verbose=False,
     compression="ZSTD",
     compression_level=15,
-    row_group_rows=100000,
+    row_group_rows=None,
+    row_group_size_mb=None,
     wkt_column=None,
     lat_column=None,
     lon_column=None,
@@ -960,7 +961,8 @@ def convert_to_geoparquet(
         verbose: Print detailed progress
         compression: Compression type (default: ZSTD)
         compression_level: Compression level (default: 15)
-        row_group_rows: Rows per group (default: 100000)
+        row_group_rows: Rows per group (default: None)
+        row_group_size_mb: Target row group size in MB (alternative to row_group_rows)
         wkt_column: CSV/TSV only - WKT column name (auto-detected if not specified)
         lat_column: CSV/TSV only - Latitude column name (requires lon_column)
         lon_column: CSV/TSV only - Longitude column name (requires lat_column)
@@ -1082,6 +1084,7 @@ def convert_to_geoparquet(
             compression=compression,
             compression_level=compression_level,
             row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
             verbose=verbose,
             profile=profile,
             geoparquet_version=geoparquet_version,

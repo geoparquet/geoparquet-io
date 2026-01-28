@@ -719,6 +719,11 @@ def _process_partition_value(
     keep_partition_column,
     verbose,
     geoparquet_version=None,
+    compression: str = "ZSTD",
+    compression_level: int = 15,
+    row_group_size_mb: int | None = None,
+    row_group_rows: int | None = None,
+    memory_limit: str | None = None,
 ):
     """Process a single partition value."""
     output_filename = _determine_output_path(
@@ -758,10 +763,13 @@ def _process_partition_value(
         partition_query,
         output_filename,
         original_metadata=partition_metadata,
-        compression="ZSTD",
-        compression_level=15,
+        compression=compression,
+        compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
         verbose=False,
         geoparquet_version=geoparquet_version,
+        memory_limit=memory_limit,
     )
 
     if verbose:
@@ -784,6 +792,11 @@ def partition_by_column(
     filename_prefix: str | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int = 15,
+    row_group_size_mb: int | None = None,
+    row_group_rows: int | None = None,
+    memory_limit: str | None = None,
 ) -> int:
     """
     Common function to partition a GeoParquet file by column values.
@@ -804,6 +817,12 @@ def partition_by_column(
         skip_analysis: Skip partition strategy analysis (for performance)
         filename_prefix: Optional prefix for partition filenames (e.g., 'fields' → fields_USA.parquet)
         profile: AWS profile name (S3 only, optional)
+        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
+        compression: Compression codec (default: ZSTD)
+        compression_level: Compression level (default: 15)
+        row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
+        row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
+        memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
 
     Returns:
         Number of partitions created
@@ -866,6 +885,11 @@ def partition_by_column(
                 keep_partition_column,
                 verbose,
                 geoparquet_version,
+                compression,
+                compression_level,
+                row_group_size_mb,
+                row_group_rows,
+                memory_limit,
             )
 
         con.close()

@@ -99,6 +99,12 @@ def csv_mixed_geoms_input(test_data_dir):
     return str(test_data_dir / "mixed_geometries.csv")
 
 
+@pytest.fixture
+def unsorted_parquet_input(test_data_dir):
+    """Return path to larger unsorted parquet file (1445 rows, ~115 KB uncompressed)."""
+    return str(test_data_dir / "unsorted.parquet")
+
+
 @pytest.mark.slow
 class TestConvertCore:
     """Test core convert_to_geoparquet function."""
@@ -703,3 +709,77 @@ class TestConvertCSVCLI:
 
         assert result.exit_code == 0
         assert os.path.exists(temp_output_file)
+
+    def test_cli_row_group_size(self, temp_output_file, tmp_path):
+        """Test CLI with --row-group-size option.
+
+        DuckDB has a minimum row group size of 2,048 rows (vector size).
+        We create a file with 10,000 rows and request 3,000 rows per group.
+        DuckDB will create groups of ~4,096 rows (2 vectors).
+        See: https://github.com/duckdb/duckdb/discussions/8392
+        """
+        # Create a parquet file with 10,000 rows (enough for multiple row groups)
+        large_input = str(tmp_path / "large_input.parquet")
+        con = duckdb.connect()
+        con.install_extension("spatial")
+        con.load_extension("spatial")
+        con.execute(f"""
+            COPY (
+                SELECT
+                    i as id,
+                    ST_Point(i % 360 - 180, i % 180 - 90) as geometry
+                FROM range(10000) t(i)
+            ) TO '{large_input}' (FORMAT PARQUET)
+        """)
+        con.close()
+
+        runner = CliRunner()
+        # Request 3000 rows per group - DuckDB will round to multiples of 2048
+        result = runner.invoke(
+            cli, ["convert", large_input, temp_output_file, "--row-group-size", "3000"]
+        )
+
+        assert result.exit_code == 0, f"Command failed: {result.output}"
+        assert os.path.exists(temp_output_file)
+
+        # Verify multiple row groups were created
+        con = duckdb.connect()
+        row_groups = con.execute(
+            f"""
+            SELECT DISTINCT row_group_id, row_group_num_rows
+            FROM parquet_metadata('{temp_output_file}')
+            ORDER BY row_group_id
+            """
+        ).fetchall()
+        total_rows = con.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
+        ).fetchone()[0]
+        con.close()
+
+        assert total_rows == 10000, f"Expected 10000 rows, got {total_rows}"
+        # With 10,000 rows and ~4,096 rows per group, expect 2-3 row groups
+        assert len(row_groups) >= 2, (
+            f"Expected multiple row groups, got {len(row_groups)}: {row_groups}"
+        )
+
+    def test_cli_row_group_size_mb(self, unsorted_parquet_input, temp_output_file):
+        """Test CLI with --row-group-size-mb option is accepted and doesn't error."""
+        runner = CliRunner()
+        # Test that the option is accepted and file is created successfully
+        # Note: Actual row group splitting behavior depends on file format and DuckDB internals
+        result = runner.invoke(
+            cli,
+            ["convert", unsorted_parquet_input, temp_output_file, "--row-group-size-mb", "0.05"],
+        )
+
+        assert result.exit_code == 0, f"Command failed: {result.output}"
+        assert os.path.exists(temp_output_file)
+
+        # Verify the file is valid and can be read
+        con = duckdb.connect()
+        row_count = con.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
+        ).fetchone()[0]
+        con.close()
+
+        assert row_count == 1445, f"Expected 1445 rows, got {row_count}"

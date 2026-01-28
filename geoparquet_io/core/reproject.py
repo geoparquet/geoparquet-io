@@ -233,6 +233,9 @@ def reproject_impl(
     profile: str | None = None,
     geoparquet_version: str | None = None,
     on_progress: Callable[[str], None] | None = None,
+    row_group_size_mb: int | None = None,
+    row_group_rows: int | None = None,
+    memory_limit: str | None = None,
 ) -> ReprojectResult:
     """
     Reproject a GeoParquet file to a different CRS using DuckDB.
@@ -249,6 +252,9 @@ def reproject_impl(
         profile: AWS profile name for S3 operations
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         on_progress: Optional callback for progress messages
+        row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
+        row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
+        memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
 
     Returns:
         ReprojectResult with information about the operation
@@ -365,10 +371,13 @@ def reproject_impl(
                     original_metadata=None,
                     compression=compression,
                     compression_level=compression_level,
+                    row_group_size_mb=row_group_size_mb,
+                    row_group_rows=row_group_rows,
                     verbose=verbose,
                     profile=profile,
                     geoparquet_version=geoparquet_version,
                     input_crs=target_crs_projjson,
+                    memory_limit=memory_limit,
                 )
                 # Replace original with temp file
                 shutil.move(str(tmp_path), str(out_path))
@@ -389,10 +398,13 @@ def reproject_impl(
                     original_metadata=None,
                     compression=compression,
                     compression_level=compression_level,
+                    row_group_size_mb=row_group_size_mb,
+                    row_group_rows=row_group_rows,
                     verbose=verbose,
                     profile=profile,
                     geoparquet_version=geoparquet_version,
                     input_crs=target_crs_projjson,
+                    memory_limit=memory_limit,
                 )
 
                 if is_remote:
@@ -541,6 +553,9 @@ def reproject(
     profile: str | None = None,
     geoparquet_version: str | None = None,
     on_progress: Callable[[str], None] | None = None,
+    row_group_size_mb: int | None = None,
+    row_group_rows: int | None = None,
+    memory_limit: str | None = None,
 ) -> ReprojectResult | None:
     """
     Reproject a GeoParquet file to a different CRS.
@@ -561,6 +576,9 @@ def reproject(
         profile: AWS profile name for S3 operations
         geoparquet_version: GeoParquet version to write
         on_progress: Optional callback for progress messages
+        row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
+        row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
+        memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
 
     Returns:
         ReprojectResult with information, or None for streaming output
@@ -595,4 +613,7 @@ def reproject(
         profile,
         geoparquet_version,
         on_progress,
+        row_group_size_mb,
+        row_group_rows,
+        memory_limit,
     )
