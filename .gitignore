@@ -3,6 +3,9 @@
 todos/
 .DS_Store
 
+# Context directory - personal notes
+context/personal/notes/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

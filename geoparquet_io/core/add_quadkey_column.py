@@ -22,7 +22,14 @@ from geoparquet_io.core.common import (
 )
 from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME, DEFAULT_QUADKEY_RESOLUTION
 from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata
-from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
+from geoparquet_io.core.logging_config import (
+    configure_verbose,
+    debug,
+    info,
+    progress,
+    success,
+    warn,
+)
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
     find_geometry_column_from_table,
@@ -563,6 +570,9 @@ def _add_quadkey_file_based(
 
         if verbose:
             debug(f"Query: {query}")
+
+        if not dry_run:
+            progress(f"Adding quadkey column '{quadkey_column_name}' (zoom level {resolution})...")
 
         # Prepare quadkey metadata for GeoParquet spec
         quadkey_metadata = {
