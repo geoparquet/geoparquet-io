@@ -5,7 +5,8 @@ PMTiles generation plugin for [geoparquet-io](https://github.com/geoparquet/geop
 ## Installation
 
 ```bash
-pip install gpio-pmtiles
+pipx inject geoparquet-io gpio-pmtiles  # If using pipx for CLI
+pip install gpio-pmtiles                # If using pip for library
 ```
 
 **Note:** This plugin requires [tippecanoe](https://github.com/felt/tippecanoe) to be installed and available in your PATH.

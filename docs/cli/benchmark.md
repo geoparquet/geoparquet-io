@@ -24,8 +24,8 @@ Tests available conversion methods (DuckDB, GeoPandas with Fiona/PyOGRIO, GDAL o
 Install all optional converters:
 
 ```bash
-uv pip install geoparquet-io[benchmark]
-# or: pip install geoparquet-io[benchmark]
+pip install geoparquet-io[benchmark]
+# or: uv add geoparquet-io --extra benchmark
 ```
 
 ## Options

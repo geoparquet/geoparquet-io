@@ -22,8 +22,9 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 ## Quick Example
 
 ```bash
-# Install
-pip install geoparquet-io
+# Install CLI tool
+pipx install geoparquet-io
+# or: pip install geoparquet-io (for Python library)
 
 # Convert Shapefile/GeoJSON/GeoPackage/CSV to optimized GeoParquet
 gpio convert input.shp output.parquet
