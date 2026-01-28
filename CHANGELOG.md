@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Removed 186 lines of Grade E complexity code
   - This command was hidden and deprecated - subcommands are the stable API
 
+### Fixed
+
+- Improved error messages for common user mistakes (closes #140)
+  - No more stack traces when passing wrong file types (e.g., `.gpkg` to parquet commands)
+  - Clear, actionable error messages with hints for fixing the issue
+  - Added defensive checks to prevent `AttributeError` on missing output files
+
 ### Internal
 
 - Simplified codebase by removing deprecated legacy inspect interface

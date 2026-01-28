@@ -1,6 +1,12 @@
 """Tests for core/duckdb_metadata.py module."""
 
+import tempfile
+from pathlib import Path
+
+import pytest
+
 from geoparquet_io.core.duckdb_metadata import (
+    GeoParquetError,
     detect_geometry_columns,
     get_bbox_from_row_group_stats,
     get_column_names,
@@ -307,3 +313,63 @@ class TestExtractCrsFromParquet:
         assert "type" in crs or "$schema" in crs
         # Should be EPSG:5070
         assert crs.get("id", {}).get("code") == 5070
+
+
+class TestGeoParquetErrorExceptions:
+    """Tests for GeoParquetError exception behavior."""
+
+    def test_raises_geoparquet_error_for_invalid_parquet(self):
+        """Test that get_geo_metadata raises GeoParquetError for invalid files."""
+        # Create a temporary non-parquet file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".parquet", delete=False) as f:
+            f.write("This is not a parquet file")
+            temp_path = f.name
+
+        try:
+            with pytest.raises(GeoParquetError) as exc_info:
+                get_geo_metadata(temp_path)
+
+            # Verify error message is informative
+            error_msg = str(exc_info.value)
+            assert "Not a valid GeoParquet file" in error_msg
+            assert temp_path in error_msg
+            assert "gpio convert" in error_msg
+
+            # Verify the original exception is chained
+            assert exc_info.value.__cause__ is not None
+        finally:
+            # Clean up
+            Path(temp_path).unlink(missing_ok=True)
+
+    def test_raises_geoparquet_error_for_io_error(self):
+        """Test that get_geo_metadata raises GeoParquetError for I/O errors."""
+        # Create an empty parquet file that will cause I/O issues when reading metadata
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".parquet", delete=False) as f:
+            # Write just a few bytes - not a complete parquet file structure
+            f.write(b"PAR1")  # Parquet magic number but incomplete
+            temp_path = f.name
+
+        try:
+            with pytest.raises(GeoParquetError) as exc_info:
+                get_geo_metadata(temp_path)
+
+            # Verify error message mentions read issue
+            error_msg = str(exc_info.value)
+            assert "Cannot read file" in error_msg or "Not a valid GeoParquet file" in error_msg
+            assert temp_path in error_msg
+
+            # Verify the original exception is chained
+            assert exc_info.value.__cause__ is not None
+        finally:
+            # Clean up
+            Path(temp_path).unlink(missing_ok=True)
+
+    def test_geoparquet_error_is_library_exception(self):
+        """Test that GeoParquetError is a standard Exception, not a Click exception."""
+        # Verify it's a standard exception that can be caught in library usage
+        assert issubclass(GeoParquetError, Exception)
+
+        # Verify it's not a Click exception
+        import click
+
+        assert not issubclass(GeoParquetError, click.ClickException)
