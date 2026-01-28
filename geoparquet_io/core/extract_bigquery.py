@@ -198,10 +198,8 @@ class BigQueryConnection:
             if self.geography_as_geometry:
                 self._con.execute("SET bq_geography_as_geometry=true;")
 
-            # Set project if provided (validated)
-            if self.project:
-                validated_project = _validate_project_id(self.project)
-                self._con.execute(f"SET bq_project_id='{validated_project}';")
+            # Note: project ID is specified in the fully-qualified table name
+            # (project.dataset.table) passed to bigquery_scan(), not as a SET parameter
 
             return self._con
 
@@ -259,10 +257,8 @@ def get_bigquery_connection(
     if geography_as_geometry:
         con.execute("SET bq_geography_as_geometry=true;")
 
-    # Set project if provided (validated)
-    if project:
-        validated_project = _validate_project_id(project)
-        con.execute(f"SET bq_project_id='{validated_project}';")
+    # Note: project ID is specified in the fully-qualified table name
+    # (project.dataset.table) passed to bigquery_scan(), not as a SET parameter
 
     return con
 
