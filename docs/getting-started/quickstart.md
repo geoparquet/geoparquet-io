@@ -4,10 +4,17 @@ Get started with geoparquet-io in 5 minutes.
 
 ## Installation
 
-```bash
-pipx install geoparquet-io     # CLI tool
-pip install geoparquet-io      # Python library
-```
+=== "CLI"
+
+    ```bash
+    pipx install geoparquet-io
+    ```
+
+=== "Python"
+
+    ```bash
+    pip install geoparquet-io
+    ```
 
 See the [Installation Guide](installation.md) for more options including uv tool.
 
