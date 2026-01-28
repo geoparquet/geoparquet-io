@@ -4,10 +4,18 @@ gpio provides a fluent Python API for GeoParquet transformations. This API offer
 
 ## Installation
 
-```bash
-pip install geoparquet-io
-# or: uv add geoparquet-io
-```
+=== "CLI"
+
+    ```bash
+    pipx install geoparquet-io
+    ```
+
+=== "Python"
+
+    ```bash
+    pip install geoparquet-io
+    # or: uv add geoparquet-io
+    ```
 
 ## Quick Start
 
