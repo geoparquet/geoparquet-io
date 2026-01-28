@@ -1,37 +1,33 @@
 # Installation
 
-## With uv (Recommended)
+## Quick Install
 
-[uv](https://github.com/astral-sh/uv) is a fast Python package manager that we use for this project:
-
+**CLI tool**:
 ```bash
-# Install from PyPI
-uv pip install geoparquet-io
-
-# Or install from source
-git clone https://github.com/geoparquet/geoparquet-io.git
-cd geoparquet-io
-uv sync --all-extras
+pipx install geoparquet-io
+# or: uv tool install geoparquet-io
 ```
 
-## With pip
-
-If you prefer using pip:
-
+**Python library**:
 ```bash
 pip install geoparquet-io
+# or: uv add geoparquet-io
 ```
+
+pipx and uv tool install the CLI in isolation while keeping it globally available. Use pip/uv add when you need the Python API in your project.
 
 ## From Source
 
 For the latest development version:
 
 ```bash
+# Install from PyPI into current environment
+uv pip install geoparquet-io
+
+# Or install from source
 git clone https://github.com/geoparquet/geoparquet-io.git
 cd geoparquet-io
-uv sync  # recommended
-# or
-pip install -e .
+uv sync --all-extras
 ```
 
 ## Requirements
@@ -97,9 +93,13 @@ gpio inspect your_file.parquet
 To upgrade to the latest version:
 
 ```bash
-uv pip install --upgrade geoparquet-io
-# or
+# CLI tool
+pipx upgrade geoparquet-io
+# or: uv tool upgrade geoparquet-io
+
+# Python library
 pip install --upgrade geoparquet-io
+# or: uv add geoparquet-io (automatically gets latest)
 ```
 
 ## Uninstalling
@@ -107,9 +107,13 @@ pip install --upgrade geoparquet-io
 To remove geoparquet-io:
 
 ```bash
-uv pip uninstall geoparquet-io
-# or
+# CLI tool
+pipx uninstall geoparquet-io
+# or: uv tool uninstall geoparquet-io
+
+# Python library
 pip uninstall geoparquet-io
+# or: uv remove geoparquet-io
 ```
 
 ## Platform Support
@@ -127,7 +131,7 @@ geoparquet-io is tested on:
 If you encounter issues with DuckDB installation, try:
 
 ```bash
-uv pip install --upgrade duckdb
+pip install --upgrade duckdb
 ```
 
 ### PyArrow Compatibility
@@ -135,7 +139,7 @@ uv pip install --upgrade duckdb
 Ensure you have PyArrow 12.0.0 or higher:
 
 ```bash
-uv pip install --upgrade pyarrow>=12.0.0
+pip install --upgrade pyarrow>=12.0.0
 ```
 
 ### Using Virtual Environments with uv

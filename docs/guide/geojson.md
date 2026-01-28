@@ -44,7 +44,8 @@ gpio convert geojson data.parquet --no-rs | some-other-tool
 For a simpler PMTiles workflow, install the [`gpio-pmtiles`](https://github.com/geoparquet/geoparquet-io/tree/main/plugins/gpio-pmtiles) plugin:
 
 ```bash
-pip install gpio-pmtiles
+pipx inject geoparquet-io gpio-pmtiles  # CLI tool
+pip install gpio-pmtiles                # Python library
 ```
 
 The plugin provides integrated PMTiles generation with better defaults and built-in CRS handling:
