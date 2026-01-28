@@ -26,12 +26,13 @@ from geoparquet_io.core.metadata_utils import (
 )
 
 
-def extract_file_info(parquet_file: str) -> dict[str, Any]:
+def extract_file_info(parquet_file: str, con=None) -> dict[str, Any]:
     """
     Extract basic file information from a Parquet file.
 
     Args:
         parquet_file: Path to the parquet file
+        con: Optional existing DuckDB connection for reuse
 
     Returns:
         dict: File info including size, rows, row_groups, compression
@@ -42,12 +43,12 @@ def extract_file_info(parquet_file: str) -> dict[str, Any]:
     )
 
     # Get file metadata using DuckDB
-    file_meta = get_file_metadata(parquet_file)
+    file_meta = get_file_metadata(parquet_file, con=con)
     num_rows = file_meta.get("num_rows", 0)
     num_row_groups = file_meta.get("num_row_groups", 0)
 
     # Get compression from first column
-    compression_info = get_compression_info(parquet_file)
+    compression_info = get_compression_info(parquet_file, con=con)
     compression = None
     if compression_info:
         # Get compression from first column (any column will do)
@@ -258,7 +259,7 @@ def _detect_metadata_mismatches(
     return warnings
 
 
-def extract_geo_info(parquet_file: str) -> dict[str, Any]:
+def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     """
     Extract geospatial information from both Parquet native types and GeoParquet metadata.
 
@@ -269,6 +270,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
 
     Args:
         parquet_file: Path to the parquet file
+        con: Optional existing DuckDB connection for reuse
 
     Returns:
         dict: Geo info including:
@@ -292,9 +294,9 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
     )
 
     # Get metadata using DuckDB
-    geo_meta = get_geo_metadata(parquet_file)
-    schema_info = get_schema_info(parquet_file)
-    geo_columns = detect_geometry_columns(parquet_file)
+    geo_meta = get_geo_metadata(parquet_file, con=con)
+    schema_info = get_schema_info(parquet_file, con=con)
+    geo_columns = detect_geometry_columns(parquet_file, con=con)
 
     # Detect Parquet native geo type
     parquet_type = "No Parquet geo logical type"
@@ -371,7 +373,7 @@ def extract_geo_info(parquet_file: str) -> dict[str, Any]:
 
     # Try native Parquet GeospatialStatistics for files with native geo types
     if parquet_type != "No Parquet geo logical type":
-        native_stats = get_aggregated_native_geo_stats(parquet_file, primary_column)
+        native_stats = get_aggregated_native_geo_stats(parquet_file, primary_column, con=con)
 
         # Use native bbox if GeoParquet bbox not available
         if not effective_bbox and native_stats.get("bbox"):
