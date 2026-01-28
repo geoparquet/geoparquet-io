@@ -69,6 +69,7 @@ nav:
     - Converting Formats: guide/convert.md
     - GeoJSON & PMTiles: guide/geojson.md
     - Extracting Data: guide/extract.md
+    - Write Strategies: guide/write-strategies.md
     - Checking Best Practices: guide/check.md
     - Sorting Data: guide/sort.md
     - Adding Spatial Indices: guide/add.md

@@ -1205,9 +1205,61 @@ gpio extract data.parquet output.parquet --where "population > 1000; DROP TABLE 
 # Error: WHERE clause contains potentially dangerous SQL keywords: DROP
 ```
 
+## Large File Handling
+
+gpio efficiently handles larger-than-memory files using streaming write strategies. The default strategy uses constant memory regardless of file size.
+
+### Basic Usage
+
+For most files, no special configuration is needed:
+
+=== "CLI"
+
+    ```bash
+    # Process a 50GB file on a machine with 4GB RAM - just works
+    gpio extract huge_dataset.parquet filtered.parquet --bbox -122.5,37.5,-122.0,38.0
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Large files work automatically
+    gpio.read('huge_dataset.parquet') \
+        .extract(bbox=(-122.5, 37.5, -122.0, 38.0)) \
+        .write('filtered.parquet')
+    ```
+
+### Memory Configuration
+
+For containerized environments or when you need explicit control:
+
+=== "CLI"
+
+    ```bash
+    # Limit memory usage for Docker/Kubernetes
+    gpio extract input.parquet output.parquet --write-memory 512MB
+
+    # Use a different write strategy
+    gpio extract input.parquet output.parquet --write-strategy streaming
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Explicit memory limit
+    gpio.read('input.parquet').write('output.parquet', write_memory='512MB')
+    ```
+
+For detailed information on write strategies, memory configuration, and container environments, see the [Write Strategies Guide](write-strategies.md).
+
 ## See Also
 
 - [CLI Reference](../cli/extract.md) - Complete option reference
+- [Write Strategies Guide](write-strategies.md) - Large file handling and memory configuration
 - [Remote Files Guide](remote-files.md) - Working with S3 and HTTP files
 - [Inspect Guide](inspect.md) - Examine file structure and metadata
 - [Partition Guide](partition.md) - Split files into partitions
