@@ -18,6 +18,7 @@ from geoparquet_io.cli.decorators import (
     parse_row_group_options,
     partition_input_options,
     partition_options,
+    row_group_options,
     show_sql_option,
     verbose_option,
     write_strategy_option,
@@ -1060,7 +1061,7 @@ def convert(ctx):
 )
 @geoparquet_version_option
 @verbose_option
-@compression_options
+@output_format_options
 @aws_profile_option
 @any_extension_option
 @show_sql_option
@@ -1078,6 +1079,9 @@ def convert_to_geoparquet_cmd(
     verbose,
     compression,
     compression_level,
+    row_group_size,
+    row_group_size_mb,
+    write_memory,
     aws_profile,
     any_extension,
     show_sql,
@@ -1113,6 +1117,9 @@ def convert_to_geoparquet_cmd(
     # Validate .parquet extension
     validate_parquet_extension(output_file, any_extension)
 
+    # Parse row group options
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+
     # Check for streaming output
     if should_stream_output(output_file):
         # Suppress verbose for streaming
@@ -1128,6 +1135,10 @@ def convert_to_geoparquet_cmd(
             skip_invalid=skip_invalid,
             profile=aws_profile,
             geoparquet_version=geoparquet_version,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=row_group_size,
+            row_group_size_mb=row_group_mb,
         )
     else:
         convert_to_geoparquet(
@@ -1137,7 +1148,8 @@ def convert_to_geoparquet_cmd(
             verbose=verbose,
             compression=compression,
             compression_level=compression_level,
-            row_group_rows=100000,  # Best practice default
+            row_group_rows=row_group_size,  # Pass through as-is (None if not specified)
+            row_group_size_mb=row_group_mb,
             wkt_column=wkt_column,
             lat_column=lat_column,
             lon_column=lon_column,
@@ -1158,8 +1170,12 @@ def _convert_streaming(
     delimiter,
     crs,
     skip_invalid,
-    aws_profile,
+    profile,
     geoparquet_version,
+    compression="ZSTD",
+    compression_level=15,
+    row_group_rows=None,
+    row_group_size_mb=None,
 ):
     """Handle streaming output for convert command."""
     import tempfile
@@ -1178,15 +1194,17 @@ def _convert_streaming(
             str(temp_path),
             skip_hilbert=skip_hilbert,
             verbose=False,
-            compression="ZSTD",
-            compression_level=15,
-            row_group_rows=100000,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
             wkt_column=wkt_column,
             lat_column=lat_column,
             lon_column=lon_column,
             delimiter=delimiter,
             crs=crs,
             skip_invalid=skip_invalid,
+            profile=profile,
             geoparquet_version=geoparquet_version,
         )
 
@@ -1209,6 +1227,9 @@ def _reproject_impl_cli(
     compression,
     compression_level,
     geoparquet_version,
+    row_group_size_mb=None,
+    row_group_rows=None,
+    memory_limit=None,
 ):
     """Shared reproject CLI implementation."""
     from geoparquet_io.core.common import validate_profile_for_urls
@@ -1230,6 +1251,9 @@ def _reproject_impl_cli(
             compression_level=compression_level,
             verbose=verbose,
             geoparquet_version=geoparquet_version,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            memory_limit=memory_limit,
         )
 
         # result is None for streaming mode (stdout)
@@ -1261,7 +1285,7 @@ def _reproject_impl_cli(
 @overwrite_option
 @verbose_option
 @aws_profile_option
-@compression_options
+@output_format_options
 @geoparquet_version_option
 @any_extension_option
 @show_sql_option
@@ -1275,6 +1299,9 @@ def convert_reproject(
     aws_profile,
     compression,
     compression_level,
+    row_group_size,
+    row_group_size_mb,
+    write_memory,
     geoparquet_version,
     any_extension,
     show_sql,
@@ -1298,6 +1325,9 @@ def convert_reproject(
     # Validate .parquet extension
     validate_parquet_extension(output_file, any_extension)
 
+    # Validate mutual exclusivity of row group options and get MB value
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+
     _reproject_impl_cli(
         input_file,
         output_file,
@@ -1309,6 +1339,9 @@ def convert_reproject(
         compression,
         compression_level,
         geoparquet_version,
+        row_group_size_mb=row_group_mb,
+        row_group_rows=row_group_size,
+        memory_limit=write_memory,
     )
 
 
@@ -2195,6 +2228,7 @@ def extract_geoparquet(
 @geoparquet_version_option
 @verbose_option
 @compression_options
+@row_group_options
 @any_extension_option
 @aws_profile_option
 @show_sql_option
@@ -2217,6 +2251,8 @@ def extract_arcgis(
     verbose,
     compression,
     compression_level,
+    row_group_size,
+    row_group_size_mb,
     any_extension,
     aws_profile,
     show_sql,
@@ -2285,6 +2321,9 @@ def extract_arcgis(
     if not any_extension:
         validate_parquet_extension(output_file)
 
+    # Validate mutual exclusivity of row group options and get MB value
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+
     # Parse bbox string if provided
     bbox_tuple = None
     if bbox:
@@ -2316,6 +2355,9 @@ def extract_arcgis(
             compression_level=compression_level,
             verbose=verbose,
             geoparquet_version=geoparquet_version,
+            profile=aws_profile,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -3311,6 +3353,7 @@ def partition(ctx):
     "Overture levels: country,region.",
 )
 @partition_options
+@output_format_options
 @verbose_option
 @geoparquet_version_option
 @show_sql_option
@@ -3326,6 +3369,11 @@ def partition_admin(
     force,
     skip_analysis,
     prefix,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    write_memory,
     verbose,
     geoparquet_version,
     show_sql,
@@ -3370,6 +3418,9 @@ def partition_admin(
     if not preview and not output_folder:
         raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
+    # Validate mutual exclusivity of row group options and get MB value
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+
     # Parse levels
     level_list = [level.strip() for level in levels.split(",")]
 
@@ -3388,6 +3439,11 @@ def partition_admin(
         skip_analysis=skip_analysis,
         filename_prefix=prefix,
         geoparquet_version=geoparquet_version,
+        compression=compression.upper(),
+        compression_level=compression_level,
+        row_group_size_mb=row_group_mb,
+        row_group_rows=row_group_size,
+        memory_limit=write_memory,
     )
 
 
@@ -3397,6 +3453,7 @@ def partition_admin(
 @click.option("--column", required=True, help="Column name to partition by (required)")
 @click.option("--chars", type=int, help="Number of characters to use as prefix for partitioning")
 @partition_options
+@output_format_options
 @verbose_option
 @geoparquet_version_option
 @show_sql_option
@@ -3412,6 +3469,11 @@ def partition_string(
     force,
     skip_analysis,
     prefix,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    write_memory,
     verbose,
     geoparquet_version,
     show_sql,
@@ -3443,6 +3505,9 @@ def partition_string(
     if not preview and not output_folder:
         raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
+    # Validate mutual exclusivity of row group options and get MB value
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+
     try:
         partition_by_string_impl(
             input_parquet,
@@ -3459,6 +3524,11 @@ def partition_string(
             prefix,
             None,
             geoparquet_version,
+            compression=compression.upper(),
+            compression_level=compression_level,
+            row_group_size_mb=row_group_mb,
+            row_group_rows=row_group_size,
+            memory_limit=write_memory,
         )
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
@@ -3484,6 +3554,7 @@ def partition_string(
     help="Keep the H3 column in output files (default: excluded for non-Hive, included for Hive)",
 )
 @partition_options
+@output_format_options
 @verbose_option
 @geoparquet_version_option
 @show_sql_option
@@ -3500,6 +3571,11 @@ def partition_h3(
     force,
     skip_analysis,
     prefix,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    write_memory,
     verbose,
     geoparquet_version,
     show_sql,
@@ -3536,6 +3612,9 @@ def partition_h3(
     if not preview and not output_folder:
         raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
+    # Validate mutual exclusivity of row group options and get MB value
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+
     # Convert flag to None if not explicitly set, so implementation can determine default
     keep_h3_col = True if keep_h3_column else None
 
@@ -3555,6 +3634,11 @@ def partition_h3(
         prefix,
         None,
         geoparquet_version,
+        compression=compression.upper(),
+        compression_level=compression_level,
+        row_group_size_mb=row_group_mb,
+        row_group_rows=row_group_size,
+        memory_limit=write_memory,
     )
 
 
@@ -3595,6 +3679,7 @@ def partition_h3(
     help="Keep the KD-tree column in output files (default: excluded for non-Hive, included for Hive)",
 )
 @partition_options
+@output_format_options
 @verbose_option
 @geoparquet_version_option
 @show_sql_option
@@ -3614,6 +3699,11 @@ def partition_kdtree(
     force,
     skip_analysis,
     prefix,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    write_memory,
     verbose,
     geoparquet_version,
     show_sql,
@@ -3683,6 +3773,9 @@ def partition_kdtree(
     if not preview and not output_folder:
         raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
+    # Validate mutual exclusivity of row group options and get MB value
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+
     # Convert flag to None if not explicitly set, so implementation can determine default
     keep_kdtree_col = True if keep_kdtree_column else None
 
@@ -3704,6 +3797,11 @@ def partition_kdtree(
         prefix,
         None,
         geoparquet_version,
+        compression=compression.upper(),
+        compression_level=compression_level,
+        row_group_size_mb=row_group_mb,
+        row_group_rows=row_group_size,
+        memory_limit=write_memory,
     )
 
 
@@ -3738,6 +3836,7 @@ def partition_kdtree(
     help="Keep the quadkey column in output files (default: excluded for non-Hive, included for Hive)",
 )
 @partition_options
+@output_format_options
 @verbose_option
 @geoparquet_version_option
 @show_sql_option
@@ -3756,6 +3855,11 @@ def partition_quadkey(
     force,
     skip_analysis,
     prefix,
+    compression,
+    compression_level,
+    row_group_size,
+    row_group_size_mb,
+    write_memory,
     verbose,
     geoparquet_version,
     show_sql,
@@ -3797,6 +3901,9 @@ def partition_quadkey(
     if not preview and not output_folder:
         raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
+    # Validate mutual exclusivity of row group options and get MB value
+    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+
     # Convert flag to None if not explicitly set, so implementation can determine default
     keep_quadkey_col = True if keep_quadkey_column else None
 
@@ -3817,6 +3924,11 @@ def partition_quadkey(
         skip_analysis=skip_analysis,
         filename_prefix=prefix,
         geoparquet_version=geoparquet_version,
+        compression=compression.upper(),
+        compression_level=compression_level,
+        row_group_size_mb=row_group_mb,
+        row_group_rows=row_group_size,
+        memory_limit=write_memory,
     )
 
 

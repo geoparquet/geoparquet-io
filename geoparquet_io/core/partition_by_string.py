@@ -58,6 +58,11 @@ def partition_by_string(
     filename_prefix: str | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int = 15,
+    row_group_size_mb: int | None = None,
+    row_group_rows: int | None = None,
+    memory_limit: str | None = None,
 ):
     """
     Partition a GeoParquet file by string column values or prefixes.
@@ -80,6 +85,11 @@ def partition_by_string(
         filename_prefix: Optional prefix for partition filenames
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write
+        compression: Compression codec (default: ZSTD)
+        compression_level: Compression level (default: 15)
+        row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
+        row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
+        memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
     """
     import os
 
@@ -157,6 +167,11 @@ def partition_by_string(
             filename_prefix=filename_prefix,
             profile=profile,
             geoparquet_version=geoparquet_version,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            memory_limit=memory_limit,
         )
 
         success(f"Successfully created {num_partitions} partition file(s)")

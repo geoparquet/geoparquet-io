@@ -870,6 +870,8 @@ def convert_arcgis_to_geoparquet(
     verbose: bool = False,
     geoparquet_version: str | None = None,
     profile: str | None = None,
+    row_group_size_mb: int | None = None,
+    row_group_rows: int | None = None,
 ) -> None:
     """
     Convert ArcGIS Feature Service to GeoParquet file.
@@ -902,6 +904,8 @@ def convert_arcgis_to_geoparquet(
         verbose: Whether to print verbose output
         geoparquet_version: GeoParquet version to write
         profile: AWS profile for S3 output
+        row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
+        row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
     """
     configure_verbose(verbose)
 
@@ -953,6 +957,8 @@ def convert_arcgis_to_geoparquet(
         geometry_column="geometry",
         compression=compression,
         compression_level=compression_level,
+        row_group_size_mb=row_group_size_mb,
+        row_group_rows=row_group_rows,
         geoparquet_version=geoparquet_version,
         verbose=verbose,
         profile=profile,
