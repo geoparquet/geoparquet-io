@@ -21,31 +21,50 @@ Fast I/O and transformation tools for GeoParquet files using PyArrow and DuckDB.
 
 ## Quick Example
 
-```bash
-# Install
-pip install geoparquet-io
+=== "CLI"
 
-# Convert Shapefile/GeoJSON/GeoPackage/CSV to optimized GeoParquet
-gpio convert input.shp output.parquet
+    ```bash
+    # Install
+    pipx install geoparquet-io
 
-# Inspect file structure and metadata
-gpio inspect myfile.parquet
+    # Convert Shapefile/GeoJSON/GeoPackage/CSV to optimized GeoParquet
+    gpio convert input.shp output.parquet
 
-# Check file quality and best practices
-gpio check all myfile.parquet
+    # Inspect file structure and metadata
+    gpio inspect myfile.parquet
 
-# Add bounding box column for faster queries
-gpio add bbox input.parquet output.parquet
+    # Check file quality and best practices
+    gpio check all myfile.parquet
 
-# Sort using Hilbert curve for spatial locality
-gpio sort hilbert input.parquet output_sorted.parquet
+    # Add bounding box column for faster queries
+    gpio add bbox input.parquet output.parquet
 
-# Partition into separate files by country
-gpio partition admin buildings.parquet output_dir/
+    # Sort using Hilbert curve for spatial locality
+    gpio sort hilbert input.parquet output_sorted.parquet
 
-# Chain commands with Unix pipes - no intermediate files
-gpio extract --limit 10000 input.parquet | gpio add bbox - | gpio sort hilbert - output.parquet
-```
+    # Partition into separate files by country
+    gpio partition admin buildings.parquet output_dir/
+
+    # Chain commands with Unix pipes - no intermediate files
+    gpio extract --limit 10000 input.parquet | gpio add bbox - | gpio sort hilbert - output.parquet
+    ```
+
+=== "Python"
+
+    ```bash
+    # Install
+    pip install geoparquet-io
+    ```
+
+    ```python
+    import geoparquet_io as gpio
+
+    # Read, transform, and write in a fluent chain
+    gpio.read('input.parquet') \
+        .add_bbox() \
+        .sort_hilbert() \
+        .write('output.parquet')
+    ```
 
 ## Why geoparquet-io?
 

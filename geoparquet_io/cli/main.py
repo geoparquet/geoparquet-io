@@ -8,6 +8,7 @@ from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
     SingleFileCommand,
     any_extension_option,
+    aws_profile_option,
     check_partition_options,
     compression_options,
     dry_run_option,
@@ -17,7 +18,6 @@ from geoparquet_io.cli.decorators import (
     parse_row_group_options,
     partition_input_options,
     partition_options,
-    profile_option,
     row_group_options,
     show_sql_option,
     verbose_option,
@@ -430,7 +430,6 @@ class MultiFileCheckRunner:
     help="Show full spec validation results instead of summary",
 )
 @check_partition_options
-@profile_option
 def check_all(
     parquet_file,
     verbose,
@@ -443,7 +442,6 @@ def check_all(
     spec_details,
     check_all_files,
     check_sample,
-    profile,
 ):
     """Check compression, bbox, row groups, spatial order, and spec compliance."""
     from geoparquet_io.core.common import is_remote_url, show_remote_read_message
@@ -571,7 +569,7 @@ def check_all(
                 no_backup=no_backup,
                 overwrite=overwrite,
                 verbose=verbose,
-                profile=profile,
+                profile=None,
                 check_structure_impl=check_structure_impl,
                 check_spatial_impl=check_spatial_impl,
                 random_sample_size=random_sample_size,
@@ -611,7 +609,6 @@ def check_all(
     help="Skip .bak backup when fixing",
 )
 @check_partition_options
-@profile_option
 def check_spatial(
     parquet_file,
     random_sample_size,
@@ -622,7 +619,6 @@ def check_spatial(
     no_backup,
     check_all_files,
     check_sample,
-    profile,
 ):
     """Check spatial ordering."""
     from geoparquet_io.core.check_fixes import fix_spatial_ordering
@@ -689,7 +685,7 @@ def check_spatial(
 
             click.echo("\nApplying Hilbert spatial ordering...")
             output_path, backup_path = handle_fix_common(
-                file_path, fix_output, no_backup, fix_spatial_ordering, verbose, False, profile
+                file_path, fix_output, no_backup, fix_spatial_ordering, verbose, False, None
             )
 
             click.echo(click.style("\n✓ Spatial ordering applied successfully!", fg="green"))
@@ -717,7 +713,6 @@ def check_spatial(
 )
 @overwrite_option
 @check_partition_options
-@profile_option
 def check_compression_cmd(
     parquet_file,
     verbose,
@@ -727,7 +722,6 @@ def check_compression_cmd(
     overwrite,
     check_all_files,
     check_sample,
-    profile,
 ):
     """Check geometry column compression."""
     from geoparquet_io.core.check_fixes import fix_compression
@@ -775,7 +769,7 @@ def check_compression_cmd(
 
             click.echo("\nRe-compressing with ZSTD...")
             output_path, backup_path = handle_fix_common(
-                file_path, fix_output, no_backup, fix_compression, verbose, overwrite, profile
+                file_path, fix_output, no_backup, fix_compression, verbose, overwrite, None
             )
 
             click.echo(click.style("\n✓ Compression optimized successfully!", fg="green"))
@@ -803,7 +797,6 @@ def check_compression_cmd(
 )
 @overwrite_option
 @check_partition_options
-@profile_option
 def check_bbox_cmd(
     parquet_file,
     verbose,
@@ -813,7 +806,6 @@ def check_bbox_cmd(
     overwrite,
     check_all_files,
     check_sample,
-    profile,
 ):
     """Check bbox column and metadata (version-aware).
 
@@ -877,7 +869,7 @@ def check_bbox_cmd(
                     )
 
                 output_path, backup_path = handle_fix_common(
-                    file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
+                    file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, None
                 )
 
                 click.echo(click.style("\n✓ Bbox column removed successfully!", fg="green"))
@@ -907,7 +899,7 @@ def check_bbox_cmd(
                     )
 
                 output_path, backup_path = handle_fix_common(
-                    file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, profile
+                    file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, None
                 )
 
                 click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
@@ -935,7 +927,6 @@ def check_bbox_cmd(
 )
 @overwrite_option
 @check_partition_options
-@profile_option
 def check_row_group_cmd(
     parquet_file,
     verbose,
@@ -945,7 +936,6 @@ def check_row_group_cmd(
     overwrite,
     check_all_files,
     check_sample,
-    profile,
 ):
     """Check row group size."""
     from geoparquet_io.core.check_fixes import fix_row_groups
@@ -993,7 +983,7 @@ def check_row_group_cmd(
 
             click.echo("\nOptimizing row groups...")
             output_path, backup_path = handle_fix_common(
-                file_path, fix_output, no_backup, fix_row_groups, verbose, overwrite, profile
+                file_path, fix_output, no_backup, fix_row_groups, verbose, overwrite, None
             )
 
             click.echo(click.style("\n✓ Row groups optimized successfully!", fg="green"))
@@ -1072,8 +1062,9 @@ def convert(ctx):
 @geoparquet_version_option
 @verbose_option
 @output_format_options
-@profile_option
+@aws_profile_option
 @any_extension_option
+@show_sql_option
 def convert_to_geoparquet_cmd(
     input_file,
     output_file,
@@ -1091,8 +1082,9 @@ def convert_to_geoparquet_cmd(
     row_group_size,
     row_group_size_mb,
     write_memory,
-    profile,
+    aws_profile,
     any_extension,
+    show_sql,
 ):
     """
     Convert vector formats to optimized GeoParquet.
@@ -1141,7 +1133,7 @@ def convert_to_geoparquet_cmd(
             delimiter=delimiter,
             crs=crs,
             skip_invalid=skip_invalid,
-            profile=profile,
+            profile=aws_profile,
             geoparquet_version=geoparquet_version,
         )
     else:
@@ -1160,7 +1152,7 @@ def convert_to_geoparquet_cmd(
             delimiter=delimiter,
             crs=crs,
             skip_invalid=skip_invalid,
-            profile=profile,
+            profile=aws_profile,
             geoparquet_version=geoparquet_version,
         )
 
@@ -1174,7 +1166,7 @@ def _convert_streaming(
     delimiter,
     crs,
     skip_invalid,
-    profile,
+    aws_profile,
     geoparquet_version,
 ):
     """Handle streaming output for convert command."""
@@ -1203,7 +1195,6 @@ def _convert_streaming(
             delimiter=delimiter,
             crs=crs,
             skip_invalid=skip_invalid,
-            profile=profile,
             geoparquet_version=geoparquet_version,
         )
 
@@ -1222,7 +1213,7 @@ def _reproject_impl_cli(
     src_crs,
     overwrite,
     verbose,
-    profile,
+    aws_profile,
     compression,
     compression_level,
     geoparquet_version,
@@ -1237,7 +1228,7 @@ def _reproject_impl_cli(
     configure_verbose(verbose)
 
     # Validate profile is only used with S3
-    validate_profile_for_urls(profile, input_file, output_file)
+    validate_profile_for_urls(None, input_file, output_file)
 
     try:
         result = reproject_core(
@@ -1249,7 +1240,6 @@ def _reproject_impl_cli(
             compression=compression,
             compression_level=compression_level,
             verbose=verbose,
-            profile=profile,
             geoparquet_version=geoparquet_version,
             row_group_size_mb=row_group_size_mb,
             row_group_rows=row_group_rows,
@@ -1284,10 +1274,11 @@ def _reproject_impl_cli(
 )
 @overwrite_option
 @verbose_option
-@profile_option
+@aws_profile_option
 @output_format_options
 @geoparquet_version_option
 @any_extension_option
+@show_sql_option
 def convert_reproject(
     input_file,
     output_file,
@@ -1295,7 +1286,7 @@ def convert_reproject(
     src_crs,
     overwrite,
     verbose,
-    profile,
+    aws_profile,
     compression,
     compression_level,
     row_group_size,
@@ -1303,6 +1294,7 @@ def convert_reproject(
     write_memory,
     geoparquet_version,
     any_extension,
+    show_sql,
 ):
     """
     Reproject a GeoParquet file to a different CRS.
@@ -1333,7 +1325,7 @@ def convert_reproject(
         src_crs,
         overwrite,
         verbose,
-        profile,
+        aws_profile,
         compression,
         compression_level,
         geoparquet_version,
@@ -1391,7 +1383,8 @@ def convert_reproject(
     help="Keep original CRS instead of reprojecting to WGS84 (EPSG:4326)",
 )
 @verbose_option
-@profile_option
+@aws_profile_option
+@show_sql_option
 def convert_geojson(
     input_file,
     output_file,
@@ -1404,7 +1397,8 @@ def convert_geojson(
     pretty,
     keep_crs,
     verbose,
-    profile,
+    aws_profile,
+    show_sql,
 ):
     """
     Convert GeoParquet to GeoJSON format.
@@ -1445,8 +1439,8 @@ def convert_geojson(
 
     configure_verbose(verbose)
 
-    # Validate profile is only used with S3
-    validate_profile_for_urls(profile, input_file, output_file)
+    # Validate aws_profile is only used with S3
+    validate_profile_for_urls(aws_profile, input_file, output_file)
 
     try:
         feature_count = convert_to_geojson(
@@ -1460,7 +1454,7 @@ def convert_geojson(
             seq=not no_seq,
             pretty=pretty,
             verbose=verbose,
-            profile=profile,
+            profile=aws_profile,
             keep_crs=keep_crs,
         )
 
@@ -1481,14 +1475,16 @@ def convert_geojson(
     help="Layer name in GeoPackage",
 )
 @verbose_option
-@profile_option
+@aws_profile_option
+@show_sql_option
 def convert_geopackage(
     input_file,
     output_file,
     overwrite,
     layer_name,
     verbose,
-    profile,
+    aws_profile,
+    show_sql,
 ):
     """
     Convert GeoParquet to GeoPackage format.
@@ -1525,7 +1521,7 @@ def convert_geopackage(
             overwrite=overwrite,
             layer_name=layer_name,
             verbose=verbose,
-            profile=profile,
+            profile=aws_profile,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -1535,12 +1531,14 @@ def convert_geopackage(
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @verbose_option
-@profile_option
+@aws_profile_option
+@show_sql_option
 def convert_flatgeobuf(
     input_file,
     output_file,
     verbose,
-    profile,
+    aws_profile,
+    show_sql,
 ):
     """
     Convert GeoParquet to FlatGeobuf format.
@@ -1570,7 +1568,7 @@ def convert_flatgeobuf(
             input_path=input_file,
             output_path=output_file,
             verbose=verbose,
-            profile=profile,
+            profile=aws_profile,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -1590,14 +1588,16 @@ def convert_flatgeobuf(
     help="Exclude bbox column if present in input",
 )
 @verbose_option
-@profile_option
+@aws_profile_option
+@show_sql_option
 def convert_csv(
     input_file,
     output_file,
     no_wkt,
     no_bbox,
     verbose,
-    profile,
+    aws_profile,
+    show_sql,
 ):
     """
     Convert GeoParquet to CSV format with optional WKT geometry.
@@ -1634,7 +1634,7 @@ def convert_csv(
             include_wkt=not no_wkt,
             include_bbox=not no_bbox,
             verbose=verbose,
-            profile=profile,
+            profile=aws_profile,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -1651,14 +1651,16 @@ def convert_csv(
     help="Character encoding for attribute data",
 )
 @verbose_option
-@profile_option
+@aws_profile_option
+@show_sql_option
 def convert_shapefile(
     input_file,
     output_file,
     overwrite,
     encoding,
     verbose,
-    profile,
+    aws_profile,
+    show_sql,
 ):
     """
     Convert GeoParquet to Shapefile format.
@@ -1700,7 +1702,7 @@ def convert_shapefile(
             overwrite=overwrite,
             encoding=encoding,
             verbose=verbose,
-            profile=profile,
+            profile=aws_profile,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -1749,13 +1751,13 @@ def inspect(ctx):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files, profile):
+def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files):
     """CLI wrapper for inspect summary - delegates to core function."""
     if json_output and markdown_output:
         raise click.UsageError("--json and --markdown are mutually exclusive")
 
     try:
-        result = _inspect_summary_core(parquet_file, check_all_files, profile)
+        result = _inspect_summary_core(parquet_file, check_all_files)
 
         # Show partition notice if applicable
         if result.get("partition_notice"):
@@ -1772,13 +1774,13 @@ def _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_
         raise click.ClickException(str(e)) from e
 
 
-def _inspect_preview_impl(parquet_file, count, mode, json_output, markdown_output, profile):
+def _inspect_preview_impl(parquet_file, count, mode, json_output, markdown_output):
     """CLI wrapper for inspect head/tail - delegates to core function."""
     if json_output and markdown_output:
         raise click.UsageError("--json and --markdown are mutually exclusive")
 
     try:
-        result = _inspect_preview_core(parquet_file, count, mode, profile)
+        result = _inspect_preview_core(parquet_file, count, mode)
 
         # Show partition notice if applicable
         if result.get("partition_notice"):
@@ -1793,13 +1795,13 @@ def _inspect_preview_impl(parquet_file, count, mode, json_output, markdown_outpu
         raise click.ClickException(str(e)) from e
 
 
-def _inspect_stats_impl(parquet_file, json_output, markdown_output, profile):
+def _inspect_stats_impl(parquet_file, json_output, markdown_output):
     """CLI wrapper for inspect stats - delegates to core function."""
     if json_output and markdown_output:
         raise click.UsageError("--json and --markdown are mutually exclusive")
 
     try:
-        result = _inspect_stats_core(parquet_file, profile)
+        result = _inspect_stats_core(parquet_file)
 
         # Show partition notice if applicable
         if result.get("partition_notice"):
@@ -1826,13 +1828,13 @@ def _inspect_stats_impl(parquet_file, json_output, markdown_output, profile):
     is_flag=True,
     help="For partitioned data: aggregate info from all files",
 )
-@profile_option
-def inspect_summary(parquet_file, json_output, markdown_output, check_all_files, profile):
+@verbose_option
+def inspect_summary(parquet_file, json_output, markdown_output, check_all_files, verbose):
     """Show quick metadata summary (default).
 
     Displays file size, row count, columns, geometry type, CRS, and bounding box.
     """
-    _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files, profile)
+    _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files)
 
 
 @inspect.command(name="head", cls=GlobAwareCommand)
@@ -1842,8 +1844,8 @@ def inspect_summary(parquet_file, json_output, markdown_output, check_all_files,
 @click.option(
     "--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files"
 )
-@profile_option
-def inspect_head(parquet_file, count, json_output, markdown_output, profile):
+@verbose_option
+def inspect_head(parquet_file, count, json_output, markdown_output, verbose):
     """Show first N rows of data (default: 10).
 
     Examples:
@@ -1852,7 +1854,7 @@ def inspect_head(parquet_file, count, json_output, markdown_output, profile):
         gpio inspect head data.parquet        # First 10 rows
         gpio inspect head data.parquet 20     # First 20 rows
     """
-    _inspect_preview_impl(parquet_file, count, "head", json_output, markdown_output, profile)
+    _inspect_preview_impl(parquet_file, count, "head", json_output, markdown_output)
 
 
 @inspect.command(name="tail", cls=GlobAwareCommand)
@@ -1862,8 +1864,8 @@ def inspect_head(parquet_file, count, json_output, markdown_output, profile):
 @click.option(
     "--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files"
 )
-@profile_option
-def inspect_tail(parquet_file, count, json_output, markdown_output, profile):
+@verbose_option
+def inspect_tail(parquet_file, count, json_output, markdown_output, verbose):
     """Show last N rows of data (default: 10).
 
     Examples:
@@ -1872,7 +1874,7 @@ def inspect_tail(parquet_file, count, json_output, markdown_output, profile):
         gpio inspect tail data.parquet        # Last 10 rows
         gpio inspect tail data.parquet 5      # Last 5 rows
     """
-    _inspect_preview_impl(parquet_file, count, "tail", json_output, markdown_output, profile)
+    _inspect_preview_impl(parquet_file, count, "tail", json_output, markdown_output)
 
 
 @inspect.command(name="stats", cls=GlobAwareCommand)
@@ -1881,10 +1883,10 @@ def inspect_tail(parquet_file, count, json_output, markdown_output, profile):
 @click.option(
     "--markdown", "markdown_output", is_flag=True, help="Output as Markdown for README files"
 )
-@profile_option
-def inspect_stats(parquet_file, json_output, markdown_output, profile):
+@verbose_option
+def inspect_stats(parquet_file, json_output, markdown_output, verbose):
     """Show column statistics (nulls, min/max, unique counts)."""
-    _inspect_stats_impl(parquet_file, json_output, markdown_output, profile)
+    _inspect_stats_impl(parquet_file, json_output, markdown_output)
 
 
 @inspect.command(name="meta", cls=GlobAwareCommand)
@@ -1902,7 +1904,7 @@ def inspect_stats(parquet_file, json_output, markdown_output, profile):
     help="Number of row groups to display (default: 1)",
 )
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON for scripting")
-@profile_option
+@verbose_option
 def inspect_meta(
     parquet_file,
     meta_geoparquet,
@@ -1910,7 +1912,7 @@ def inspect_meta(
     meta_parquet_geo,
     meta_row_groups,
     json_output,
-    profile,
+    verbose,
 ):
     """Show comprehensive metadata (Parquet, GeoParquet, row groups).
 
@@ -1927,8 +1929,8 @@ def inspect_meta(
         validate_profile_for_urls,
     )
 
-    validate_profile_for_urls(profile, parquet_file)
-    setup_aws_profile_if_needed(profile, parquet_file)
+    validate_profile_for_urls(None, parquet_file)
+    setup_aws_profile_if_needed(None, parquet_file)
 
     try:
         _handle_meta_display(
@@ -2010,7 +2012,7 @@ def extract(ctx):
 @dry_run_option
 @show_sql_option
 @verbose_option
-@profile_option
+@aws_profile_option
 @any_extension_option
 def extract_geoparquet(
     input_file,
@@ -2035,7 +2037,7 @@ def extract_geoparquet(
     dry_run,
     show_sql,
     verbose,
-    profile,
+    aws_profile,
     any_extension,
 ):
     """
@@ -2107,7 +2109,7 @@ def extract_geoparquet(
         \b
         # Remote file with spatial filter
         gpio extract s3://bucket/data.parquet output.parquet \\
-            --profile my-aws \\
+            --aws_profile my-aws \\
             --bbox -122.5,37.5,-122.0,38.0
 
         \b
@@ -2147,7 +2149,6 @@ def extract_geoparquet(
             compression_level=compression_level,
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
-            profile=profile,
             geoparquet_version=geoparquet_version,
             allow_schema_diff=allow_schema_diff,
             hive_input=hive_input,
@@ -2219,7 +2220,8 @@ def extract_geoparquet(
 @compression_options
 @row_group_options
 @any_extension_option
-@profile_option
+@aws_profile_option
+@show_sql_option
 def extract_arcgis(
     service_url,
     output_file,
@@ -2242,7 +2244,8 @@ def extract_arcgis(
     row_group_size,
     row_group_size_mb,
     any_extension,
-    profile,
+    aws_profile,
+    show_sql,
 ):
     """
     Extract features from ArcGIS Feature Service to GeoParquet.
@@ -2342,7 +2345,7 @@ def extract_arcgis(
             compression_level=compression_level,
             verbose=verbose,
             geoparquet_version=geoparquet_version,
-            profile=profile,
+            profile=aws_profile,
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
         )
@@ -2556,15 +2559,14 @@ def sort(ctx):
 )
 @output_format_options
 @geoparquet_version_option
-@profile_option
 @verbose_option
 @any_extension_option
+@show_sql_option
 def hilbert_order(
     input_parquet,
     output_parquet,
     geometry_column,
     add_bbox,
-    profile,
     compression,
     compression_level,
     row_group_size,
@@ -2573,6 +2575,7 @@ def hilbert_order(
     geoparquet_version,
     verbose,
     any_extension,
+    show_sql,
 ):
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -2610,7 +2613,7 @@ def hilbert_order(
             compression_level,
             row_group_mb,
             row_group_size,
-            profile,
+            None,
             geoparquet_version,
         )
     except Exception as e:
@@ -2626,17 +2629,16 @@ def hilbert_order(
     is_flag=True,
     help="Sort in descending order (default: ascending)",
 )
-@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @geoparquet_version_option
 @verbose_option
 @any_extension_option
+@show_sql_option
 def sort_column(
     input_parquet,
     output_parquet,
     columns,
     descending,
-    profile,
     compression,
     compression_level,
     row_group_size,
@@ -2645,6 +2647,7 @@ def sort_column(
     geoparquet_version,
     verbose,
     any_extension,
+    show_sql,
 ):
     """
     Sort a GeoParquet file by specified column(s).
@@ -2676,7 +2679,6 @@ def sort_column(
             compression_level=compression_level,
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
-            profile=profile,
             geoparquet_version=geoparquet_version,
         )
     except Exception as e:
@@ -2707,11 +2709,11 @@ def sort_column(
     is_flag=True,
     help="Exclude quadkey column from output after sorting",
 )
-@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @geoparquet_version_option
 @verbose_option
 @any_extension_option
+@show_sql_option
 def sort_quadkey(
     input_parquet,
     output_parquet,
@@ -2719,7 +2721,6 @@ def sort_quadkey(
     resolution,
     use_centroid,
     remove_quadkey_column,
-    profile,
     compression,
     compression_level,
     row_group_size,
@@ -2728,6 +2729,7 @@ def sort_quadkey(
     geoparquet_version,
     verbose,
     any_extension,
+    show_sql,
 ):
     """
     Sort a GeoParquet file by quadkey spatial index.
@@ -2759,7 +2761,6 @@ def sort_quadkey(
         compression_level=compression_level,
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
-        profile=profile,
         geoparquet_version=geoparquet_version,
     )
 
@@ -2793,17 +2794,16 @@ def add(ctx):
 )
 @output_format_options
 @geoparquet_version_option
-@profile_option
 @dry_run_option
 @verbose_option
 @any_extension_option
+@show_sql_option
 def add_country_codes(
     input_parquet,
     output_parquet,
     dataset,
     levels,
     add_bbox,
-    profile,
     compression,
     compression_level,
     row_group_size,
@@ -2813,6 +2813,7 @@ def add_country_codes(
     dry_run,
     verbose,
     any_extension,
+    show_sql,
 ):
     """Add admin division columns via spatial join with remote boundaries datasets.
 
@@ -2839,7 +2840,7 @@ def add_country_codes(
 
     \b
     # Remote to remote
-    gpio add admin-divisions s3://in.parquet s3://out.parquet --profile my-aws
+    gpio add admin-divisions s3://in.parquet s3://out.parquet --aws-profile my-aws
 
     \b
     # Preview SQL before execution
@@ -2895,7 +2896,6 @@ def add_country_codes(
         compression_level=compression_level,
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
-        profile=profile,
         geoparquet_version=geoparquet_version,
     )
 
@@ -2911,16 +2911,15 @@ def add_country_codes(
 )
 @output_format_options
 @geoparquet_version_option
-@profile_option
 @dry_run_option
 @verbose_option
 @any_extension_option
+@show_sql_option
 def add_bbox(
     input_parquet,
     output_parquet,
     bbox_name,
     force,
-    profile,
     compression,
     compression_level,
     row_group_size,
@@ -2930,6 +2929,7 @@ def add_bbox(
     dry_run,
     verbose,
     any_extension,
+    show_sql,
 ):
     """Add a bbox struct column to a GeoParquet file.
 
@@ -2952,7 +2952,7 @@ def add_bbox(
 
         \b
         # Remote to remote
-        gpio add bbox s3://bucket/in.parquet s3://bucket/out.parquet --profile my-aws
+        gpio add bbox s3://bucket/in.parquet s3://bucket/out.parquet --aws-profile my-aws
 
         \b
         # Force replace existing bbox
@@ -2985,7 +2985,7 @@ def add_bbox(
             compression_level,
             row_group_mb,
             row_group_size,
-            profile,
+            None,
             force,
             geoparquet_version,
         )
@@ -2995,9 +2995,8 @@ def add_bbox(
 
 @add.command(name="bbox-metadata", cls=SingleFileCommand)
 @click.argument("parquet_file")
-@profile_option
 @verbose_option
-def add_bbox_metadata_cmd(parquet_file, profile, verbose):
+def add_bbox_metadata_cmd(parquet_file, verbose):
     """Add bbox covering metadata for an existing bbox column.
 
     Use this when you have a file with a bbox column but no covering metadata.
@@ -3008,10 +3007,10 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
     from geoparquet_io.core.common import setup_aws_profile_if_needed, validate_profile_for_urls
 
     # Validate profile is only used with S3
-    validate_profile_for_urls(profile, parquet_file)
+    validate_profile_for_urls(None, parquet_file)
 
     # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, parquet_file)
+    setup_aws_profile_if_needed(None, parquet_file)
 
     add_bbox_metadata_impl(parquet_file, verbose)
 
@@ -3028,16 +3027,15 @@ def add_bbox_metadata_cmd(parquet_file, profile, verbose):
 )
 @output_format_options
 @geoparquet_version_option
-@profile_option
 @dry_run_option
 @verbose_option
 @any_extension_option
+@show_sql_option
 def add_h3(
     input_parquet,
     output_parquet,
     h3_name,
     resolution,
-    profile,
     compression,
     compression_level,
     row_group_size,
@@ -3047,6 +3045,7 @@ def add_h3(
     dry_run,
     verbose,
     any_extension,
+    show_sql,
 ):
     """Add an H3 cell ID column to a GeoParquet file.
 
@@ -3085,7 +3084,7 @@ def add_h3(
             compression_level,
             row_group_mb,
             row_group_size,
-            profile,
+            None,
             geoparquet_version,
         )
     except StreamingError as e:
@@ -3125,7 +3124,6 @@ def add_h3(
 )
 @output_format_options
 @geoparquet_version_option
-@profile_option
 @dry_run_option
 @click.option(
     "--force",
@@ -3134,6 +3132,7 @@ def add_h3(
 )
 @verbose_option
 @any_extension_option
+@show_sql_option
 def add_kdtree(
     input_parquet,
     output_parquet,
@@ -3142,7 +3141,6 @@ def add_kdtree(
     auto,
     approx,
     exact,
-    profile,
     compression,
     compression_level,
     row_group_size,
@@ -3153,6 +3151,7 @@ def add_kdtree(
     force,
     verbose,
     any_extension,
+    show_sql,
 ):
     """Add a KD-tree cell ID column to a GeoParquet file.
 
@@ -3225,7 +3224,7 @@ def add_kdtree(
         force,
         sample_size,
         auto_target,
-        profile,
+        None,
         geoparquet_version,
     )
 
@@ -3249,19 +3248,18 @@ def add_kdtree(
     is_flag=True,
     help="Use geometry centroid instead of bbox midpoint for quadkey calculation",
 )
-@click.option("--profile", help="AWS profile name (for S3 remote outputs)")
 @output_format_options
 @geoparquet_version_option
 @dry_run_option
 @verbose_option
 @any_extension_option
+@show_sql_option
 def add_quadkey(
     input_parquet,
     output_parquet,
     quadkey_name,
     resolution,
     use_centroid,
-    profile,
     compression,
     compression_level,
     row_group_size,
@@ -3271,6 +3269,7 @@ def add_quadkey(
     dry_run,
     verbose,
     any_extension,
+    show_sql,
 ):
     """Add a quadkey column to a GeoParquet file.
 
@@ -3310,7 +3309,6 @@ def add_quadkey(
             compression_level=compression_level,
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
-            profile=profile,
             geoparquet_version=geoparquet_version,
         )
     except StreamingError as e:
@@ -3347,8 +3345,8 @@ def partition(ctx):
 @partition_options
 @output_format_options
 @verbose_option
-@profile_option
 @geoparquet_version_option
+@show_sql_option
 def partition_admin(
     input_parquet,
     output_folder,
@@ -3367,8 +3365,8 @@ def partition_admin(
     row_group_size_mb,
     write_memory,
     verbose,
-    profile,
     geoparquet_version,
+    show_sql,
 ):
     """Partition by administrative boundaries via spatial join with remote datasets.
 
@@ -3430,7 +3428,6 @@ def partition_admin(
         force=force,
         skip_analysis=skip_analysis,
         filename_prefix=prefix,
-        profile=profile,
         geoparquet_version=geoparquet_version,
         compression=compression.upper(),
         compression_level=compression_level,
@@ -3448,8 +3445,8 @@ def partition_admin(
 @partition_options
 @output_format_options
 @verbose_option
-@profile_option
 @geoparquet_version_option
+@show_sql_option
 def partition_string(
     input_parquet,
     output_folder,
@@ -3468,8 +3465,8 @@ def partition_string(
     row_group_size_mb,
     write_memory,
     verbose,
-    profile,
     geoparquet_version,
+    show_sql,
 ):
     """Partition a GeoParquet file by string column values.
 
@@ -3515,7 +3512,7 @@ def partition_string(
             force,
             skip_analysis,
             prefix,
-            profile,
+            None,
             geoparquet_version,
             compression=compression.upper(),
             compression_level=compression_level,
@@ -3549,8 +3546,8 @@ def partition_string(
 @partition_options
 @output_format_options
 @verbose_option
-@profile_option
 @geoparquet_version_option
+@show_sql_option
 def partition_h3(
     input_parquet,
     output_folder,
@@ -3570,8 +3567,8 @@ def partition_h3(
     row_group_size_mb,
     write_memory,
     verbose,
-    profile,
     geoparquet_version,
+    show_sql,
 ):
     """Partition a GeoParquet file by H3 cells at specified resolution.
 
@@ -3625,7 +3622,7 @@ def partition_h3(
         force,
         skip_analysis,
         prefix,
-        profile,
+        None,
         geoparquet_version,
         compression=compression.upper(),
         compression_level=compression_level,
@@ -3674,8 +3671,8 @@ def partition_h3(
 @partition_options
 @output_format_options
 @verbose_option
-@profile_option
 @geoparquet_version_option
+@show_sql_option
 def partition_kdtree(
     input_parquet,
     output_folder,
@@ -3698,8 +3695,8 @@ def partition_kdtree(
     row_group_size_mb,
     write_memory,
     verbose,
-    profile,
     geoparquet_version,
+    show_sql,
 ):
     """Partition a GeoParquet file by KD-tree cells.
 
@@ -3788,7 +3785,7 @@ def partition_kdtree(
         sample_size,
         auto_target,
         prefix,
-        profile,
+        None,
         geoparquet_version,
         compression=compression.upper(),
         compression_level=compression_level,
@@ -3831,8 +3828,8 @@ def partition_kdtree(
 @partition_options
 @output_format_options
 @verbose_option
-@profile_option
 @geoparquet_version_option
+@show_sql_option
 def partition_quadkey(
     input_parquet,
     output_folder,
@@ -3854,8 +3851,8 @@ def partition_quadkey(
     row_group_size_mb,
     write_memory,
     verbose,
-    profile,
     geoparquet_version,
+    show_sql,
 ):
     """Partition a GeoParquet file by quadkey cells.
 
@@ -3916,7 +3913,6 @@ def partition_quadkey(
         force=force,
         skip_analysis=skip_analysis,
         filename_prefix=prefix,
-        profile=profile,
         geoparquet_version=geoparquet_version,
         compression=compression.upper(),
         compression_level=compression_level,
@@ -4167,7 +4163,7 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
 @publish.command(name="upload")
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.argument("destination", type=str)
-@profile_option
+@aws_profile_option
 @click.option("--pattern", help="Glob pattern for filtering files (e.g., '*.parquet', '**/*.json')")
 @click.option(
     "--max-files", default=4, show_default=True, help="Max parallel file uploads for directories"
@@ -4193,11 +4189,12 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
     is_flag=True,
     help="Disable SSL for S3 endpoint (use HTTP instead of HTTPS)",
 )
+@verbose_option
 @dry_run_option
 def publish_upload(
     source,
     destination,
-    profile,
+    aws_profile,
     pattern,
     max_files,
     chunk_concurrency,
@@ -4207,6 +4204,7 @@ def publish_upload(
     s3_region,
     s3_no_ssl,
     dry_run,
+    verbose,
 ):
     """Upload file or directory to object storage.
 
@@ -4216,7 +4214,7 @@ def publish_upload(
     \b
     Examples:
       # Single file to S3
-      gpio publish upload data.parquet s3://bucket/path/data.parquet --profile source-coop
+      gpio publish upload data.parquet s3://bucket/path/data.parquet --aws-profile source-coop
 
       \b
       # Directory to GCS (preserves structure, uploads files in parallel)
@@ -4231,7 +4229,7 @@ def publish_upload(
       gpio publish upload output/ s3://bucket/dataset/ --fail-fast
     """
     # Check credentials before attempting upload
-    creds_ok, hint = check_credentials(destination, profile)
+    creds_ok, hint = check_credentials(destination, aws_profile)
     if not creds_ok:
         raise click.ClickException(f"Authentication failed:\n\n{hint}")
 
@@ -4239,7 +4237,7 @@ def publish_upload(
         upload_impl(
             source=source,
             destination=destination,
-            profile=profile,
+            profile=aws_profile,
             pattern=pattern,
             max_files=max_files,
             chunk_concurrency=chunk_concurrency,
@@ -4258,9 +4256,8 @@ def publish_upload(
 
 @check.command(name="stac")
 @click.argument("stac_file")
-@profile_option
 @verbose_option
-def check_stac_cmd(stac_file, profile, verbose):
+def check_stac_cmd(stac_file, verbose):
     """
     Validate STAC Item or Collection JSON.
 
@@ -4283,10 +4280,10 @@ def check_stac_cmd(stac_file, profile, verbose):
     from geoparquet_io.core.stac_check import check_stac
 
     # Validate profile is only used with S3
-    validate_profile_for_urls(profile, stac_file)
+    validate_profile_for_urls(None, stac_file)
 
     # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, stac_file)
+    setup_aws_profile_if_needed(None, stac_file)
 
     check_stac(stac_file, verbose)
 
@@ -4318,7 +4315,6 @@ def check_stac_cmd(stac_file, profile, verbose):
     help="Number of rows to sample for data validation (0 = all rows)",
 )
 @verbose_option
-@profile_option
 def check_spec(
     parquet_file,
     geoparquet_version,
@@ -4326,7 +4322,6 @@ def check_spec(
     skip_data_validation,
     sample_size,
     verbose,
-    profile,
 ):
     """
     Validate a GeoParquet file against specification requirements.
@@ -4377,8 +4372,8 @@ def check_spec(
     configure_verbose(verbose)
 
     # Validate profile is only used with S3
-    validate_profile_for_urls(profile, parquet_file)
-    setup_aws_profile_if_needed(profile, parquet_file)
+    validate_profile_for_urls(None, parquet_file)
+    setup_aws_profile_if_needed(None, parquet_file)
 
     try:
         result = validate_geoparquet(
@@ -4406,21 +4401,40 @@ def check_spec(
         raise click.ClickException(str(e)) from e
 
 
-# Benchmark command
-@cli.command()
+# Benchmark commands group
+@cli.group()
+@click.pass_context
+def benchmark(ctx):
+    """Benchmark GeoParquet performance.
+
+    Commands for measuring and comparing performance of GeoParquet operations.
+
+    \b
+    Subcommands:
+      suite    Run comprehensive benchmark suite
+      compare  Compare converter performance on a single file
+      report   View and compare benchmark results
+    """
+    ctx.ensure_object(dict)
+
+
+@benchmark.command("compare")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option(
     "--iterations",
+    "-n",
     default=3,
     type=int,
     help="Number of iterations per converter (default: 3)",
 )
 @click.option(
     "--converters",
+    "-c",
     help="Comma-separated list of converters to run (default: all available)",
 )
 @click.option(
     "--output-json",
+    "-o",
     type=click.Path(),
     help="Save results to JSON file",
 )
@@ -4443,10 +4457,12 @@ def check_spec(
 )
 @click.option(
     "--quiet",
+    "-q",
     is_flag=True,
     help="Suppress progress output, show only results",
 )
-def benchmark(
+@verbose_option
+def benchmark_compare(
     input_file,
     iterations,
     converters,
@@ -4455,39 +4471,26 @@ def benchmark(
     warmup,
     output_format,
     quiet,
+    verbose,
 ):
     """
-    Benchmark GeoParquet conversion performance.
+    Compare converter performance on a single file.
 
     Tests different conversion methods (DuckDB, GeoPandas, GDAL) on an input
     geospatial file and reports time and memory usage.
 
+    \b
     Available converters:
-
-      \b
       - duckdb: DuckDB spatial extension (always available)
       - geopandas_fiona: GeoPandas with Fiona engine
       - geopandas_pyogrio: GeoPandas with PyOGRIO engine
       - gdal_ogr2ogr: GDAL ogr2ogr CLI
 
-    Examples:
-
-      \b
-      # Basic benchmark with all available converters
-      gpio benchmark input.geojson
-
-      \b
-      # Run specific converters with more iterations
-      gpio benchmark input.shp --converters duckdb,geopandas_pyogrio --iterations 5
-
-      \b
-      # Save results to JSON and keep converted files
-      gpio benchmark input.gpkg --output-json results.json --keep-output ./output
-
-      \b
-      # JSON output format
-      gpio benchmark input.geojson --format json
+    \b
+    Example:
+        gpio benchmark compare input.geojson --iterations 5
     """
+    configure_verbose(verbose)
     from geoparquet_io.core.benchmark import run_benchmark
 
     # Parse converters string to list
@@ -4505,6 +4508,150 @@ def benchmark(
         output_format=output_format,
         quiet=quiet,
     )
+
+
+@benchmark.command("suite")
+@click.option(
+    "--operations",
+    type=click.Choice(["core", "full"]),
+    default="core",
+    help="Operation set to run (default: core)",
+)
+@click.option(
+    "--files",
+    multiple=True,
+    help="Files to test (paths or size names: tiny, small, medium, large, xlarge)",
+)
+@click.option(
+    "--iterations",
+    "-n",
+    default=3,
+    help="Runs per operation (default: 3)",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    help="Write results to JSON file",
+)
+@verbose_option
+def benchmark_suite(
+    operations,
+    files,
+    iterations,
+    output,
+    verbose,
+):
+    """
+    Run comprehensive benchmark suite.
+
+    Tests gpio operations across multiple file sizes with timing and memory tracking.
+
+    \b
+    Example:
+        gpio benchmark suite --operations core --output results.json
+        gpio benchmark suite --files input.parquet --output results.json
+    """
+    from pathlib import Path
+
+    configure_verbose(verbose)
+    from geoparquet_io.benchmarks.config import CORE_OPERATIONS, FULL_OPERATIONS
+    from geoparquet_io.core.benchmark_suite import run_benchmark_suite
+    from geoparquet_io.core.logging_config import progress, success
+
+    # Determine operations
+    ops = CORE_OPERATIONS if operations == "core" else FULL_OPERATIONS
+
+    # Resolve files
+    if not files:
+        raise click.ClickException("No files specified. Use --files with paths.")
+
+    input_files = []
+    for f in files:
+        path = Path(f)
+        if path.exists():
+            input_files.append(path)
+        else:
+            raise click.ClickException(f"File not found: {f}")
+
+    progress(
+        f"Running benchmark suite: {len(ops)} operations, "
+        f"{len(input_files)} files, {iterations} iterations"
+    )
+
+    result = run_benchmark_suite(
+        input_files=input_files,
+        operations=ops,
+        iterations=iterations,
+        verbose=verbose,
+    )
+
+    # Display summary
+    success_count = sum(1 for r in result.results if r.success)
+    total_count = len(result.results)
+    progress(f"\nCompleted: {success_count}/{total_count} benchmarks")
+
+    # Save if requested
+    if output:
+        Path(output).write_text(result.to_json())
+        success(f"Results saved to {output}")
+
+
+@benchmark.command("report")
+@click.argument("result_files", nargs=-1, type=click.Path(exists=True))
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Output format (default: table)",
+)
+@verbose_option
+def benchmark_report(
+    result_files,
+    output_format,
+    verbose,
+):
+    """
+    View and compare benchmark results.
+
+    \b
+    Example:
+        gpio benchmark report results.json
+        gpio benchmark report results/*.json
+    """
+    import json
+
+    configure_verbose(verbose)
+    from geoparquet_io.core.benchmark_report import format_table
+    from geoparquet_io.core.benchmark_suite import BenchmarkResult
+    from geoparquet_io.core.logging_config import progress
+
+    if not result_files:
+        raise click.ClickException("No result files provided")
+
+    # Load results
+    all_results = []
+    for rf in result_files:
+        with open(rf) as f:
+            data = json.load(f)
+            for r in data.get("results", []):
+                all_results.append(
+                    BenchmarkResult(
+                        operation=r["operation"],
+                        file=r["file"],
+                        time_seconds=r["time_seconds"],
+                        peak_rss_memory_mb=r["peak_rss_memory_mb"],
+                        success=r["success"],
+                        error=r.get("error"),
+                        details=r.get("details", {}),
+                    )
+                )
+
+    if output_format == "json":
+        click.echo(json.dumps([r.__dict__ for r in all_results], indent=2, default=str))
+    else:
+        progress(format_table(all_results))
 
 
 if __name__ == "__main__":

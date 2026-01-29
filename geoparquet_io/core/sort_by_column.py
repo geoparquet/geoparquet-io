@@ -19,7 +19,7 @@ from geoparquet_io.core.common import (
     write_parquet_with_metadata,
 )
 from geoparquet_io.core.duckdb_metadata import get_usable_columns
-from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.stream_io import execute_transform
 from geoparquet_io.core.streaming import is_stdin, should_stream_output
 
@@ -191,6 +191,8 @@ def sort_by_column(
 
     if verbose:
         debug(f"Sort query: {order_query}")
+
+    progress(f"Sorting by {', '.join(column_list)}...")
 
     try:
         # Use the common write function with metadata preservation

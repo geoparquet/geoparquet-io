@@ -11,7 +11,7 @@ from geoparquet_io.core.common import (
     get_duckdb_connection,
 )
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
-from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.partition_reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
 from geoparquet_io.core.streaming import (
@@ -211,6 +211,9 @@ def add_h3_column(
 
     # Prepare H3 metadata for GeoParquet spec
     h3_metadata = {"covering": {"h3": {"column": h3_column_name, "resolution": h3_resolution}}}
+
+    if not dry_run:
+        progress(f"Adding H3 column '{h3_column_name}' (resolution {h3_resolution})...")
 
     # Use the generic helper
     add_computed_column(

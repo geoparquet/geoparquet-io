@@ -109,7 +109,7 @@ class TestUploadDryRun:
                     "upload",
                     places_test_file,
                     "s3://test-bucket/data.parquet",
-                    "--profile",
+                    "--aws-profile",
                     "test-profile",
                     "--dry-run",
                 ],

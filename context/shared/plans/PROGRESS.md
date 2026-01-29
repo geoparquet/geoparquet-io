@@ -9,9 +9,9 @@
 |----|-------|--------|---------|-------|
 | PR1 | C4: Remove deprecated commands | ✅ Complete | PR #174 - Merged | Issue #154 (M4/Issue #115 was already fixed) |
 | PR2 | C1: Refactor inspect_legacy | ✅ Complete | PR #176 - Merged | Grade E → C (removed deprecated code) |
-| PR3 | C2: Test coverage 75%+ | 🔄 In progress | Branch: cleanup/pr3-test-coverage | 67.0% → 68.54% (target: 75%+ not reached) |
-| PR4 | C3: CLI consistency | ⏳ Not started | - | Issue #120 |
-| PR5 | H1 + H3: Error handling + profile cleanup | ⏳ Not started | - | Issues #140, #150 |
+| PR3 | C2: Test coverage 75%+ | ✅ Complete | PR #178 - Merged | 67.0% → 68.54% (target: 75%+ not reached, but meaningful progress) |
+| PR4 | C3: CLI consistency (partial) | 🔍 PR Open - Awaiting Review | PR #192 | Issue #120 (partial), #150. Added --show-sql, --verbose, progress, renamed --profile→--aws-profile |
+| PR5 | H1 + H3: Error handling + profile cleanup | ⏸️ Partial (H3 done in PR4) | - | H3 complete in PR4. H1 (#140) remains |
 | PR6 | H2: Grade D refactoring (top 3) | ⏳ Not started | - | extract, convert, inspect |
 | PR7 | Docs audit (optional) | ⏳ Not started | - | If time permits |
 
@@ -56,3 +56,16 @@
     - Admin partitioning (217 lines, 188 untested)
   - **Conclusion:** 68.54% represents meaningful coverage of core user-facing functionality.
     Further improvement requires systematic testing of external dependencies.
+
+### 2026-01-27
+- **PR4 Completed** (PR #192 - Awaiting Review):
+  - Added `--show-sql` to all DuckDB commands (add, partition, sort, extract arcgis)
+  - Added `--verbose` to 6 missing commands (inspect subcommands, publish upload)
+  - Added progress reporting to 3 commands (add h3, add quadkey, sort column)
+  - **BREAKING**: Renamed `--profile` → `--aws-profile` for clarity
+  - **BREAKING**: Removed AWS profile from 26 local commands (add, partition, sort, check, inspect, publish stac)
+  - Closes issue #150 (profile cleanup)
+  - Partially addresses issue #120 (CLI consistency)
+  - Created issue #191 for --overwrite standardization (deferred to separate PR)
+  - All 1412 tests passing, 68% coverage maintained
+  - CHANGELOG.md updated with all changes
