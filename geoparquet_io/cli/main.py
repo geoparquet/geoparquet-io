@@ -1135,6 +1135,10 @@ def convert_to_geoparquet_cmd(
             skip_invalid=skip_invalid,
             profile=aws_profile,
             geoparquet_version=geoparquet_version,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=row_group_size,
+            row_group_size_mb=row_group_mb,
         )
     else:
         convert_to_geoparquet(
@@ -1166,8 +1170,12 @@ def _convert_streaming(
     delimiter,
     crs,
     skip_invalid,
-    aws_profile,
+    profile,
     geoparquet_version,
+    compression="ZSTD",
+    compression_level=15,
+    row_group_rows=None,
+    row_group_size_mb=None,
 ):
     """Handle streaming output for convert command."""
     import tempfile
@@ -1186,15 +1194,17 @@ def _convert_streaming(
             str(temp_path),
             skip_hilbert=skip_hilbert,
             verbose=False,
-            compression="ZSTD",
-            compression_level=15,
-            row_group_rows=100000,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
             wkt_column=wkt_column,
             lat_column=lat_column,
             lon_column=lon_column,
             delimiter=delimiter,
             crs=crs,
             skip_invalid=skip_invalid,
+            profile=profile,
             geoparquet_version=geoparquet_version,
         )
 
