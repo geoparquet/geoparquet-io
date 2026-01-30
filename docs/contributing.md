@@ -88,10 +88,31 @@ Pre-commit hooks run automatically before each commit. They will:
 - Remove trailing whitespace
 - Fix end-of-file issues
 - Check YAML and TOML syntax
+- Check commit message format (capital letter for imperative mood)
+- Remind about Python API when CLI changes are made
+- Sync dependencies when pyproject.toml changes
 
 To run hooks manually:
 ```bash
 uv run pre-commit run --all-files
+```
+
+#### Optional: Enable Pre-Push Tests
+
+To run fast tests automatically before pushing, first install the pre-push hook:
+```bash
+# Install the pre-push hook
+uv run pre-commit install --hook-type pre-push
+
+# Then enable the tests
+export ENABLE_PRE_PUSH_TESTS=1
+```
+
+This will run `pytest -m "not slow and not network"` before each push.
+
+To disable:
+```bash
+unset ENABLE_PRE_PUSH_TESTS
 ```
 
 ## Making Changes
@@ -104,32 +125,29 @@ uv run pre-commit run --all-files
 
 ### Commit Messages
 
-Follow conventional commit format:
+Use imperative mood with a capital letter:
 
 ```
-<type>(<scope>): <description>
-
-[optional body]
-
-[optional footer]
+<Verb> <what changed>
 ```
 
-**Types:**
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation changes
-- `style`: Code style changes (formatting, etc.)
-- `refactor`: Code refactoring
-- `test`: Adding or updating tests
-- `chore`: Maintenance tasks
+**Good examples:**
+```
+Add streaming mode for large files
+Fix bbox metadata format for GeoParquet 1.1
+Update installation instructions in README
+Add edge case tests for empty file partitions
+Remove deprecated --format flag from convert
+```
 
-**Examples:**
+**Bad examples:**
 ```
-feat(cli): add streaming mode for large files
-fix(bbox): correct metadata format for GeoParquet 1.1
-docs(readme): update installation instructions
-test(partition): add edge case tests for empty files
+added streaming mode  # Wrong: lowercase, past tense
+Adding new feature    # Wrong: continuous tense
+fixes bug            # Wrong: lowercase
 ```
+
+Keep first line under 72 characters. Add details in body if needed.
 
 ### Pull Request Process
 
