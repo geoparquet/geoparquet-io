@@ -179,3 +179,38 @@ gpio extract input.parquet output.parquet --dry-run --show-sql
 ```
 
 For Windows: Always close DuckDB connections explicitly, use UUID in temp filenames.
+
+---
+
+## Claude Hooks & Permissions
+
+### Automatic Command Permissions
+Common commands are pre-approved in `.claude/settings.local.json`:
+- `uv run pytest:*` - Run tests without asking
+- `uv run ruff check:*` and `uv run ruff format:*` - Format/lint without asking
+- `git add:*`, `git commit:*`, `git push:*` - Version control operations
+- `gh pr create:*`, `gh pr view:*` - GitHub operations
+- `gpio:*` - All GPIO commands
+
+### Setting Up Your Own Permissions
+Add frequently used commands to `.claude/settings.local.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest:*)",
+      "Bash(pre-commit run:*)",
+      // Add your common commands here
+    ]
+  }
+}
+```
+
+This eliminates repetitive approval prompts and improves workflow efficiency.
+
+### Session Hooks
+Create `.claude/hooks/` for automated session behavior:
+- **pre-session-hook.md**: Instructions Claude reads at session start
+- Can enforce documentation checks, context loading, etc.
+
+Example hook ensures Claude reads relevant docs before starting work. This maintains consistency across conversations and prevents reinventing already-solved problems.
