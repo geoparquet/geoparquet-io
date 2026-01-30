@@ -2813,6 +2813,7 @@ def add(ctx):
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @verbose_option
 @any_extension_option
@@ -2829,6 +2830,7 @@ def add_country_codes(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     verbose,
     any_extension,
@@ -2916,6 +2918,7 @@ def add_country_codes(
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
         geoparquet_version=geoparquet_version,
+        overwrite=overwrite,
     )
 
 
@@ -2930,6 +2933,7 @@ def add_country_codes(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @verbose_option
 @any_extension_option
@@ -2945,6 +2949,7 @@ def add_bbox(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     verbose,
     any_extension,
@@ -3007,6 +3012,7 @@ def add_bbox(
             None,
             force,
             geoparquet_version,
+            overwrite=overwrite,
         )
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
@@ -3046,6 +3052,7 @@ def add_bbox_metadata_cmd(parquet_file, verbose):
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @verbose_option
 @any_extension_option
@@ -3061,6 +3068,7 @@ def add_h3(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     verbose,
     any_extension,
@@ -3105,6 +3113,7 @@ def add_h3(
             row_group_size,
             None,
             geoparquet_version,
+            overwrite=overwrite,
         )
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
@@ -3143,6 +3152,7 @@ def add_h3(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @click.option(
     "--force",
