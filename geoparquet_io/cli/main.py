@@ -2578,6 +2578,7 @@ def sort(ctx):
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @verbose_option
 @any_extension_option
 @show_sql_option
@@ -2592,6 +2593,7 @@ def hilbert_order(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     verbose,
     any_extension,
     show_sql,
@@ -2634,6 +2636,7 @@ def hilbert_order(
             row_group_size,
             None,
             geoparquet_version,
+            overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from None
@@ -2650,6 +2653,7 @@ def hilbert_order(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @verbose_option
 @any_extension_option
 @show_sql_option
@@ -2664,6 +2668,7 @@ def sort_column(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     verbose,
     any_extension,
     show_sql,
@@ -2699,6 +2704,7 @@ def sort_column(
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
             geoparquet_version=geoparquet_version,
+            overwrite=overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -2730,6 +2736,7 @@ def sort_column(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @verbose_option
 @any_extension_option
 @show_sql_option
@@ -2746,6 +2753,7 @@ def sort_quadkey(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     verbose,
     any_extension,
     show_sql,
@@ -2781,6 +2789,7 @@ def sort_quadkey(
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
         geoparquet_version=geoparquet_version,
+        overwrite=overwrite,
     )
 
 
@@ -3176,6 +3185,7 @@ def add_kdtree(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     force,
     verbose,
@@ -3255,6 +3265,7 @@ def add_kdtree(
         auto_target,
         None,
         geoparquet_version,
+        overwrite=overwrite,
     )
 
 
@@ -3279,6 +3290,7 @@ def add_kdtree(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @verbose_option
 @any_extension_option
@@ -3295,6 +3307,7 @@ def add_quadkey(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     verbose,
     any_extension,
@@ -3339,6 +3352,7 @@ def add_quadkey(
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
             geoparquet_version=geoparquet_version,
+            overwrite=overwrite,
         )
     except StreamingError as e:
         raise click.ClickException(str(e)) from None

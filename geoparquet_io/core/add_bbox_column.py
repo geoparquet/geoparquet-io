@@ -152,6 +152,7 @@ def add_bbox_column(
     profile: str | None = None,
     force: bool = False,
     geoparquet_version: str | None = None,
+    overwrite: bool = False,
 ) -> None:
     """
     Add a bbox struct column to a GeoParquet file.
@@ -216,6 +217,7 @@ def add_bbox_column(
         profile,
         force,
         geoparquet_version,
+        overwrite,
     )
 
 
@@ -284,8 +286,20 @@ def _add_bbox_file_based(
     profile: str | None,
     force: bool,
     geoparquet_version: str | None,
+    overwrite: bool = False,
 ) -> None:
     """Handle file-based add_bbox operation."""
+    # Check if output file exists
+    if output_parquet and not overwrite:
+        from pathlib import Path
+
+        import click
+
+        if Path(output_parquet).exists():
+            raise click.ClickException(
+                f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+            )
+
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add bbox")
 

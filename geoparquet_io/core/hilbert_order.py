@@ -175,6 +175,7 @@ def hilbert_order(
     row_group_rows: int | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
+    overwrite: bool = False,
 ) -> None:
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -227,6 +228,7 @@ def hilbert_order(
         row_group_rows,
         profile,
         geoparquet_version,
+        overwrite,
     )
 
 
@@ -324,8 +326,18 @@ def _hilbert_order_file_based(
     row_group_rows: int | None,
     profile: str | None,
     geoparquet_version: str | None,
+    overwrite: bool = False,
 ) -> None:
     """Handle file-based hilbert_order operation."""
+    # Check if output file exists
+    if output_parquet and not overwrite:
+        from pathlib import Path
+
+        if Path(output_parquet).exists():
+            raise click.ClickException(
+                f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+            )
+
     # Check for partition input (not supported)
     require_single_file(input_parquet, "sort hilbert")
 

@@ -116,7 +116,8 @@ class TestExtractArcGISOverwrite:
         # Note: This test may fail if the URL isn't valid
         # In production, this would succeed and overwrite the file
         # For now, we're testing that the --overwrite flag is accepted
-        assert "--overwrite" in str(result.args) or result.exit_code == 0
+        # The test passes if CLI accepts the flag (exit code might not be 0 due to network)
+        assert result.exit_code != 2  # 2 indicates usage/parameter error
 
 
 class TestExtractBigQueryOverwrite:
@@ -151,4 +152,4 @@ class TestExtractBigQueryOverwrite:
         # Note: This test may fail if credentials aren't set up
         # In production, this would succeed and overwrite the file
         # For now, we're testing that the --overwrite flag is accepted
-        assert "--overwrite" in str(result.args) or result.exit_code == 0
+        assert result.exit_code != 2  # 2 indicates usage/parameter error

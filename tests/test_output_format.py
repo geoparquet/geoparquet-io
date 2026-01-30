@@ -271,9 +271,11 @@ def sample_parquet():
 
 @pytest.fixture
 def temp_output():
-    """Create a temporary output file that gets cleaned up."""
+    """Create a temporary output path that gets cleaned up."""
     tmp = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False)
     tmp.close()
+    # Remove the file so tests don't trigger overwrite checks
+    os.unlink(tmp.name)
     yield tmp.name
     if os.path.exists(tmp.name):
         os.unlink(tmp.name)

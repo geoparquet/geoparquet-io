@@ -301,6 +301,7 @@ def add_quadkey_column(
     row_group_rows: int | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
+    overwrite: bool = False,
 ) -> None:
     """
     Add a quadkey column to a GeoParquet file.
@@ -362,6 +363,7 @@ def add_quadkey_column(
         row_group_rows,
         profile,
         geoparquet_version,
+        overwrite,
     )
 
 
@@ -476,9 +478,19 @@ def _add_quadkey_file_based(
     row_group_rows: int | None,
     profile: str | None,
     geoparquet_version: str | None,
+    overwrite: bool = False,
 ) -> None:
     """Handle file-based add_quadkey operation."""
     configure_verbose(verbose)
+
+    # Check if output file exists
+    if output_parquet and not overwrite:
+        from pathlib import Path
+
+        if Path(output_parquet).exists():
+            raise click.ClickException(
+                f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+            )
 
     # Validate resolution
     if not 0 <= resolution <= 23:
