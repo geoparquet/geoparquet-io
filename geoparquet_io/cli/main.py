@@ -2424,6 +2424,7 @@ def extract_arcgis(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @show_sql_option
 @verbose_option
@@ -2447,6 +2448,7 @@ def extract_bigquery_cmd(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     show_sql,
     verbose,
@@ -2532,6 +2534,7 @@ def extract_bigquery_cmd(
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
             geoparquet_version=geoparquet_version,
+            overwrite=overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
