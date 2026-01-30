@@ -10,768 +10,144 @@ geoparquet-io (gpio) is a Python CLI tool for fast I/O and transformation of Geo
 
 ---
 
-## Planning and Research Before Coding
+## Before Writing Code: Research First
 
-**Always research before implementing.** This is the most important guideline.
+**Always research before implementing.** Before any code changes:
 
-### Before Writing Any Code
+1. **Understand the request** - Ask clarifying questions if ambiguous
+2. **Search for patterns** - Check if similar functionality exists (`grep -r "pattern"`)
+3. **Check utilities** - Review `core/common.py` and `cli/decorators.py` first
+4. **Identify affected files** - Map out what needs to change
+5. **Review existing tests** - Look at tests for the area you're modifying
+6. **Plan documentation** - Identify docs needing updates
 
-1. **Understand the request fully** - Ask clarifying questions if scope is ambiguous
-2. **Search for existing patterns** - Check if similar functionality exists
-3. **Identify affected files** - Map out what needs to change
-4. **Check for utilities** - Review `core/common.py` and `cli/decorators.py` for reusable code
-5. **Understand test requirements** - Look at existing tests for the area you're modifying
-6. **Plan documentation updates** - Identify which docs need updating (see Documentation Standards)
-
-### Research Commands
-
-```bash
-# Find files by pattern
-ls geoparquet_io/core/
-ls geoparquet_io/cli/
-
-# Search for function usage
-grep -r "function_name" geoparquet_io/
-
-# Check how similar features are implemented
-grep -r "pattern_to_find" --include="*.py"
-
-# Run tests in specific area
-pytest tests/test_<area>.py -v
-```
-
-### Questions to Answer Before Coding
-
-1. Does this feature already exist partially?
-2. What existing utilities can I reuse?
-3. How do similar features handle errors?
-4. What's the test coverage expectation?
-5. Are there edge cases mentioned in similar code?
-6. What documentation needs to be updated for this feature?
+**Key questions:** Does this exist partially? What utilities can I reuse? How do similar features handle errors? What's the test coverage expectation?
 
 ---
 
-## Codebase Architecture
-
-Understanding the structure prevents architectural mistakes.
-
-### Directory Layout
+## Architecture & Key Files
 
 ```
 geoparquet_io/
-├── __init__.py          # Exports cli entry point
-├── cli.py               # Legacy entry (imports from cli/)
 ├── cli/
-│   ├── __init__.py      # Exports cli group
-│   ├── main.py          # All CLI commands defined here (~2200 lines)
-│   ├── decorators.py    # Reusable Click option decorators
-│   └── fix_helpers.py   # Helpers for check --fix functionality
+│   ├── main.py          # All CLI commands (~2200 lines)
+│   ├── decorators.py    # Reusable Click options - CHECK FIRST
+│   └── fix_helpers.py   # Check --fix helpers
 └── core/
-    ├── common.py        # Shared utilities (~1400 lines) - CHECK THIS FIRST
-    ├── extract.py       # Extract command logic
-    ├── convert.py       # Convert command logic
-    ├── hilbert_order.py # Hilbert sorting logic
-    ├── partition_*.py   # Partitioning implementations
-    ├── add_*.py         # Column addition logic
-    ├── check_*.py       # Check/validation logic
-    └── ...
+    ├── common.py        # Shared utilities (~1400 lines) - CHECK FIRST
+    ├── <command>.py     # Command implementations (extract, convert, etc.)
+    └── logging_config.py # Logging system
 ```
 
 ### Key Patterns
 
-**1. CLI/Core Separation**
-CLI commands are thin wrappers. Business logic lives in `core/`.
+1. **CLI/Core Separation**: CLI commands are thin wrappers; business logic in `core/`
+2. **Common Utilities**: Always check `core/common.py` before writing new utilities
+3. **Shared Decorators**: Use existing decorators from `cli/decorators.py`
+4. **Error Handling**: Use `ClickException` for user-facing errors
 
-```python
-# In cli/main.py - CLI wrapper
-@cli.command()
-@click.argument("input_file")
-@verbose_option  # From decorators.py
-def mycommand(input_file, verbose):
-    """Command docstring."""
-    mycommand_impl(input_file, verbose)  # Core function
+### Critical Rules
 
-# In core/mymodule.py - Business logic
-def mycommand_impl(input_file, verbose):
-    # Actual implementation here
-```
-
-**2. Shared Decorators**
-Common options are defined once in `cli/decorators.py`:
-- `@verbose_option` - Adds `--verbose/-v`
-- `@dry_run_option` - Adds `--dry-run`
-- `@compression_options` - Adds `--compression` and `--compression-level`
-- `@output_format_options` - Compression + row group options
-- `@partition_options` - All partition-related flags
-- `@profile_option` - AWS profile for S3
-
-**3. Common Utilities** (`core/common.py`)
-Before writing new utility code, check if these exist:
-- `get_duckdb_connection()` - Creates configured DuckDB connection
-- `is_remote_url()`, `is_s3_url()` - URL detection
-- `safe_file_url()` - Validates and encodes file paths
-- `write_parquet_with_metadata()` - Writes parquet with proper metadata
-- `add_computed_column()` - Generic column addition helper
-- `check_bbox_structure()` - Checks bbox column presence
-- `find_primary_geometry_column()` - Gets geometry column name
-- `validate_compression_settings()` - Validates compression params
-- `remote_write_context()` - Context manager for remote output
-
-**4. Error Handling**
-Use Click's error handling for user-facing errors:
-```python
-from click import ClickException, BadParameter
-
-# For general errors
-raise ClickException("Human readable error message")
-
-# For parameter validation
-raise BadParameter("Invalid value for --option")
-```
+- **Never use `click.echo()` in `core/` modules** - Use logging helpers instead
+- **Every CLI command needs a Python API** - Add to `api/table.py` and `api/ops.py`
+- **All documentation needs CLI + Python examples** - Use tabbed format
 
 ---
 
-## Key Dependencies and Usage
-
-### DuckDB (SQL engine)
-- Primary data processing engine
-- Spatial extension for geometry operations
-- httpfs extension for remote files
+## Dependencies Quick Reference
 
 ```python
+# DuckDB with extensions
 from geoparquet_io.core.common import get_duckdb_connection, needs_httpfs
+con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_path))
 
-con = get_duckdb_connection(
-    load_spatial=True,
-    load_httpfs=needs_httpfs(file_path)
-)
-con.execute("SELECT * FROM read_parquet('file.parquet')")
-```
-
-### PyArrow (Parquet I/O)
-- Reading/writing parquet with metadata control
-- Schema inspection
-
-```python
-import pyarrow.parquet as pq
-
-pf = pq.ParquetFile(file_path)
-schema = pf.schema_arrow
-metadata = schema.metadata  # Dict with b"geo" key for GeoParquet
-```
-
-### Click (CLI framework)
-- All CLI commands use Click decorators
-- Command groups: `cli`, `check`, `add`, `sort`, `partition`
-- **IMPORTANT: Do NOT use `click.echo()` for output** - use the logger instead (see Logging section below)
-
----
-
-## Logging
-
-**CRITICAL: Never use `click.echo()` in `core/` modules. Always use the logging helpers.**
-
-`click.echo()` is allowed in `cli/` for direct CLI output, but `core/` modules must use the logger for testability and library compatibility.
-
-This project uses a centralized logging system in `core/logging_config.py` that provides colored CLI output while maintaining compatibility with library usage and testing.
-
-### Import and Usage
-```python
+# Logging (not click.echo!)
 from geoparquet_io.core.logging_config import success, warn, error, info, debug, progress
 
-success("Operation completed")  # Green - for completed operations
-warn("Something to note")       # Yellow - for warnings
-error("Something went wrong")   # Red - for errors
-info("Informational message")   # Cyan - for tips/context
-debug("Debug details")          # Only shown when verbose=True
-progress("Processing...")       # Plain text - for status updates
-```
-
-### Why Not click.echo()?
-
-1. **Testability**: Logger output is captured by pytest; click.echo requires special handling
-2. **Library usage**: When gpio is used as a library, users can configure logging handlers
-3. **Consistency**: Single source of truth for all output formatting
-4. **Verbosity control**: Debug messages are automatically hidden unless `--verbose` is passed
-
-### Setting Up Verbose Mode in Core Functions
-```python
-from geoparquet_io.core.logging_config import configure_verbose, debug
-
-def my_function(input_file: str, verbose: bool = False):
-    configure_verbose(verbose)  # Call at start of function
-    debug("This only shows with --verbose")
-```
-
-### Pre-Commit Enforcement
-A pre-commit hook enforces this rule. If you add `click.echo()` in `core/`, the commit will fail.
-
-### fsspec (File system abstraction)
-- Handles local and remote file access uniformly
-```python
-import fsspec
-with fsspec.open(file_path, "rb") as f:
-    # Works for local, S3, HTTP, etc.
+# Remote files
+from geoparquet_io.core.common import is_remote_url, remote_write_context, setup_aws_profile_if_needed
 ```
 
 ---
 
-## Git Commit Messages
+## Testing with uv
 
-Keep commit messages brief and focused:
-
-- **Maximum 1-2 lines** - Single sentence preferred
-- Use imperative mood: "Add feature" not "Added feature"
-- Start with a verb: Add, Fix, Update, Remove, Refactor, Improve
-- No period at the end, no emoji
-- Focus on *what* changed, not *how*
-
-**Good examples:**
-```
-Add spatial filtering to gpio extract command
-Fix bbox validation for antimeridian-crossing geometries
-Remove deprecated --format flag from convert command
-```
-
-**Bad examples:**
-```
-Updated the extract.py file to add new functionality for filtering rows and columns with various options including bbox support
-```
-
-Do NOT include the standard Claude Code footer. Keep commits minimal.
-
----
-
-## Pull Requests
-
-Follow the template in `.github/pull_request_template.md` exactly:
-
-### PR Title
-- Action-oriented: `<Verb> <what>` - e.g., "Add `gpio inspect --meta` option"
-- Used in changelogs and release notes
-
-### PR Body Structure
-1. **Description**: 1-3 sentences on what and why
-2. **Technical Details**: Implementation notes for reviewers
-3. **Related Issue(s)**: Link with `#<number>`
-4. **Checklist**: Verify formatting and tests
-
-### Documentation Requirement
-
-**CRITICAL: Every pull request must include documentation updates.**
-
-If your PR adds or modifies functionality:
-1. Update the relevant guide in `docs/guide/` (e.g., `extract.md`, `convert.md`)
-2. Update API documentation in `docs/api/python-api.md` if Python API changed
-3. Add examples for both CLI and Python usage (see Documentation Standards below)
-
-PRs without documentation for new features will be incomplete.
-
----
-
-## Documentation Standards
-
-**All documentation must include both CLI and Python examples.**
-
-This project serves two audiences equally: CLI users and Python API users. Every feature, option, and workflow must be documented for both.
-
-### Tabbed Examples Format
-
-Use Material for MkDocs tabbed content for all examples:
-
-    === "CLI"
-
-        gpio extract input.parquet output.parquet --bbox -122.5,37.5,-122.0,38.0
-
-    === "Python"
-
-        import geoparquet_io as gpio
-
-        table = gpio.read("input.parquet")
-        filtered = table.extract(bbox=(-122.5, 37.5, -122.0, 38.0))
-        filtered.write("output.parquet")
-
-### Documentation Checklist
-
-When documenting a feature:
-
-1. **CLI tab first** - Show the command-line usage
-2. **Python tab second** - Show equivalent Python API usage
-3. **Mirror the examples** - Both tabs should demonstrate the same functionality
-4. **Use realistic examples** - Show actual parameter values, not placeholders
-5. **Include all options** - If CLI has `--token`, `--username`, etc., Python must show `token=`, `username=`, etc.
-
-### Where to Add Documentation
-
-| Change Type | Documentation Location |
-|-------------|----------------------|
-| New command | `docs/guide/<command>.md` + `docs/api/python-api.md` |
-| New option | Relevant section in existing guide |
-| New Python API method | `docs/api/python-api.md` + relevant guide |
-| Bug fix | Usually none, unless behavior change |
-
----
-
-## Code Formatting with Ruff
-
-This project uses Ruff for linting and formatting.
-
-### Before Any Commit
 ```bash
+# Fast tests only (recommended for development)
+uv run pytest -n auto -m "not slow and not network"
+
+# Specific test
+uv run pytest tests/test_extract.py::TestParseBbox::test_valid_bbox -v
+
+# With coverage
+uv run pytest --cov=geoparquet_io --cov-report=term-missing
+```
+
+**Test markers:**
+- `@pytest.mark.slow` - Tests >5s, conversions, reprojection
+- `@pytest.mark.network` - Requires network access
+- **Coverage requirement**: 75% minimum (enforced), 80% for new code
+
+---
+
+## Git Workflow
+
+### Commits
+- **One line, imperative mood**: "Add feature" not "Added feature"
+- Start with verb: Add, Fix, Update, Remove, Refactor
+- No emoji, no period, no Claude footer
+
+### Pull Requests
+- Update relevant guide in `docs/guide/`
+- Update `docs/api/python-api.md` if API changed
+- Include both CLI and Python examples
+- Follow PR template
+
+---
+
+## Code Quality
+
+```bash
+# Before committing (all handled by pre-commit)
 pre-commit run --all-files
+
+# Or manually
+uv run ruff check --fix .
+uv run ruff format .
+uv run xenon --max-absolute=A geoparquet_io/  # Aim for A grade
 ```
 
-### Ruff Configuration (`pyproject.toml`)
-- **Line length**: 100 characters
-- **Target Python**: 3.10+
-- **Enabled rules**: E, W, F, I, B, C4, UP
-- Use double quotes, f-strings, comprehensions
-- Imports: stdlib, third-party, first-party (`geoparquet_io`)
-
-### Auto-fix
-```bash
-ruff check --fix .
-ruff format .
-```
-
----
-
-## Code Complexity with Xenon
-
-**Aim for grade 'A' complexity on all new code.**
-
-### Complexity Grades
-- **A**: Simple, easy to understand (TARGET)
-- **B**: Acceptable, low complexity
-- **C-F**: Needs refactoring
-
-### Check Complexity
-```bash
-# Strict check - aim for this
-xenon --max-absolute=A --max-modules=A --max-average=A geoparquet_io/
-
-# Current pre-commit threshold (minimum acceptable)
-xenon --max-absolute=E --max-modules=D --max-average=C geoparquet_io/
-```
-
-### Reducing Complexity
-
-**1. Extract helper functions**
-```python
-# BAD: Long function with many branches
-def process_file(file, options):
-    if options.a:
-        # 20 lines of code
-    elif options.b:
-        # 20 lines of code
-    # ...
-
-# GOOD: Extracted helpers
-def process_file(file, options):
-    if options.a:
-        return _process_option_a(file)
-    elif options.b:
-        return _process_option_b(file)
-
-def _process_option_a(file):
-    # 20 lines of code
-
-def _process_option_b(file):
-    # 20 lines of code
-```
-
-**2. Early returns (guard clauses)**
-```python
-# BAD: Nested conditions
-def validate(data):
-    if data:
-        if data.valid:
-            if data.complete:
-                return process(data)
-    return None
-
-# GOOD: Early returns
-def validate(data):
-    if not data:
-        return None
-    if not data.valid:
-        return None
-    if not data.complete:
-        return None
-    return process(data)
-```
-
-**3. Use data structures instead of branching**
-```python
-# BAD: Long if-elif chain
-if format == "json":
-    return json_handler()
-elif format == "csv":
-    return csv_handler()
-elif format == "parquet":
-    return parquet_handler()
-
-# GOOD: Dictionary dispatch
-handlers = {
-    "json": json_handler,
-    "csv": csv_handler,
-    "parquet": parquet_handler,
-}
-return handlers[format]()
-```
-
-**4. Single responsibility per function**
-- Each function does one thing
-- If you need "and" to describe it, split it
+**Complexity reduction:**
+- Extract helper functions
+- Use early returns (guard clauses)
+- Dictionary dispatch over long if-elif
 - Max 30-40 lines per function
 
 ---
 
-## Code Reuse and Refactoring
+## Quick Checklist for New Features
 
-### Before Writing New Code
-
-1. **Search `core/common.py`** - Most utilities are here
-2. **Search `cli/decorators.py`** - Reusable Click options
-3. **Search for similar patterns**: `grep -r "pattern" geoparquet_io/`
-4. **Check if helper exists in the same module**
-
-### DRY Signals (When to Extract)
-
-- Same code appears in 2+ places → extract to helper
-- Same parameters grouped together → consider dataclass
-- Same error handling pattern → extract to context manager
-- Same Click options → extract to decorator in `decorators.py`
-
-### When Refactoring
-
-1. **Ensure tests exist first** - Never refactor untested code
-2. **Make incremental changes** - One extraction at a time
-3. **Run tests after each change**
-4. **Preserve behavior** - Refactoring ≠ feature changes
-
-### Where to Put Extracted Code
-
-| Code Type | Location |
-|-----------|----------|
-| CLI option decorators | `cli/decorators.py` |
-| File/URL utilities | `core/common.py` |
-| DuckDB/Parquet utilities | `core/common.py` |
-| Domain-specific logic | Same module or new `core/*.py` |
-| Test utilities | `tests/conftest.py` |
+1. [ ] Core logic in `core/<feature>.py` with `*_table()` function
+2. [ ] CLI wrapper in `cli/main.py` using decorators
+3. [ ] Python API in `api/table.py` and `api/ops.py`
+4. [ ] Tests in `tests/test_<feature>.py` and `tests/test_api.py`
+5. [ ] Documentation in `docs/guide/<feature>.md` with CLI/Python tabs
+6. [ ] Complexity grade A (`xenon --max-absolute=A`)
+7. [ ] Coverage >80% for new code
 
 ---
 
-## Testing Guidelines
-
-### Test Coverage Requirements
-
-**CRITICAL: All new code must have tests. This is mandatory, not optional.**
-
-- **Overall project threshold**: 75% minimum (enforced by pytest)
-- **New code requirement**: 80% or higher coverage for new features/changes
-- **Every commit with code changes must include corresponding tests**
-
-When writing new code:
-1. Write tests alongside implementation, not as an afterthought
-2. Test both happy paths and error cases
-3. Run `pytest` before committing to verify coverage threshold is met
+## Debugging
 
 ```bash
-# Check coverage for a specific file
-pytest --cov=geoparquet_io/core/mymodule --cov-report=term-missing tests/test_mymodule.py
-
-# Check overall coverage
-pytest --cov=geoparquet_io --cov-report=term-missing
-```
-
-If coverage falls below 75%, pytest will fail. Fix this by adding missing tests before committing.
-
-### Test Structure
-```
-tests/
-├── conftest.py          # Shared fixtures
-├── data/                # Test parquet files
-├── test_<module>.py     # Tests mirror source structure
-```
-
-### Running Tests
-
-**Fast tests (default for development - runs in parallel):**
-```bash
-# Fast tests only (recommended for local development)
-pytest -n auto -m "not slow and not network"
-
-# All tests including slow (runs in parallel)
-pytest -n auto
-
-# Specific module
-pytest tests/test_extract.py -v
-
-# Single test
-pytest tests/test_extract.py::TestParseBbox::test_valid_bbox -v
-```
-
-**Slow tests (conversion, streaming, reprojection):**
-```bash
-# Run slow tests only
-pytest -n auto -m "slow"
-
-# Run network tests only
-pytest -n auto -m "network"
-
-# Run all slow and network tests
-pytest -n auto -m "slow or network"
-```
-
-**Important:** Slow tests are **not run automatically** in CI on pull requests. They run:
-- Nightly at 2:15 AM UTC via scheduled workflow
-- On-demand when commit message contains `[test-slow]`
-- Manually when you run them locally
-
-This keeps PR feedback fast while ensuring comprehensive testing happens regularly.
-
-### Test Markers
-
-**Available markers:**
-- `@pytest.mark.slow` - Tests >5 seconds or heavy I/O (file conversions, reprojection)
-- `@pytest.mark.network` - Requires external network access (HTTP, S3)
-- `@pytest.mark.integration` - End-to-end integration tests
-
-**When to mark tests as slow:**
-Mark a test as slow if it meets ANY of these criteria:
-- Execution time >5 seconds consistently
-- Full file format conversions (GeoJSON/Shapefile/GPKG → GeoParquet)
-- Reprojection with coordinate transformation
-- Round-trip version conversion tests
-- Streaming operations with multiple partitions
-- Reading/writing files >10MB
-
-**When NOT to mark as slow:**
-- Simple unit tests (<1 second)
-- Metadata parsing/validation
-- Schema inspection tests
-- Small fixture-based tests (<100 rows)
-
-**Marking guidelines:**
-- **Class level:** Use when most methods in the class are slow
-  ```python
-  @pytest.mark.slow
-  class TestGeoJSONConversions:
-      # All methods inherit the marker
-  ```
-- **Method level:** Use for individual slow tests in a fast class
-  ```python
-  class TestValidation:
-      def test_fast_check(self): ...  # Fast
-
-      @pytest.mark.slow
-      def test_full_conversion(self): ...  # Slow
-  ```
-- **Finding slow tests:** Run `pytest --durations=20` to see slowest tests
-- **Borderline tests (4-6s):** Mark as slow to be safe - keeps fast suite fast
-
-**Why this matters:** Fast tests run on every PR (target: <12min). Slow tests run nightly. Proper categorization keeps PR feedback fast while ensuring comprehensive testing happens regularly.
-
-### Test Patterns Used
-
-**1. Class-based organization**
-```python
-class TestParseBbox:
-    """Tests for parse_bbox function."""
-
-    def test_valid_bbox(self):
-        result = parse_bbox("-122.5,37.5,-122.0,38.0")
-        assert result == (-122.5, 37.5, -122.0, 38.0)
-```
-
-**2. Fixtures for temp files**
-```python
-@pytest.fixture
-def output_file(self):
-    tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.parquet"
-    yield str(tmp_path)
-    if tmp_path.exists():
-        tmp_path.unlink()
-```
-
-**3. Markers for conditional tests**
-```python
-@pytest.mark.slow  # For tests taking >5s or doing expensive operations
-class TestConversionRoundTrips:
-    """Tests for format conversions."""
-
-@pytest.mark.network  # For tests requiring network access
-class TestRemoteFiles:
-    """Tests requiring network access."""
-```
-
-**When to mark tests as slow:**
-- Full format conversions (GeoJSON → Parquet, Shapefile → GeoParquet)
-- Tests processing large files (>100KB)
-- Reprojection operations
-- Streaming operations
-- Tests taking >5 seconds to complete
-- Network requests (use `@pytest.mark.network` instead)
-
-**4. CLI testing with CliRunner**
-```python
-from click.testing import CliRunner
-from geoparquet_io.cli.main import extract
-
-runner = CliRunner()
-result = runner.invoke(extract, [input_file, output_file])
-assert result.exit_code == 0
-```
-
-### Windows Compatibility
-- Use `uuid.uuid4()` in temp filenames to avoid locking
-- Retry cleanup with delays for file handle release
-- Use context managers for DuckDB connections
-
----
-
-## Debugging and Troubleshooting
-
-### Common Issues
-
-**1. DuckDB file locking (Windows)**
-```python
-# Always close connections explicitly
-con = get_duckdb_connection()
-try:
-    # ... operations
-finally:
-    con.close()
-```
-
-**2. Remote file authentication**
-```python
-# Check if profile is set correctly
-from geoparquet_io.core.common import setup_aws_profile_if_needed
-setup_aws_profile_if_needed(profile, file_path)
-```
-
-**3. GeoParquet metadata issues**
-```python
-# Debug metadata structure
-import json
-metadata = pf.schema_arrow.metadata
-if b"geo" in metadata:
-    geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-    print(json.dumps(geo_meta, indent=2))
-```
-
-### Debug Commands
-
-```bash
-# Check file structure
+# Inspect file structure
 gpio inspect file.parquet --verbose
 
 # Check metadata
 gpio inspect --meta file.parquet --json
 
-# Dry-run to see SQL
-gpio extract input.parquet output.parquet --dry-run
-
-# Show SQL during execution
-gpio extract input.parquet output.parquet --show-sql --verbose
+# Dry-run with SQL
+gpio extract input.parquet output.parquet --dry-run --show-sql
 ```
 
-### Adding Debug Output
-```python
-from geoparquet_io.core.logging_config import debug
-
-debug(f"variable = {variable}")  # Only shown when verbose=True
-```
-
----
-
-## Pre-Commit Workflow Summary
-
-Before every commit:
-```bash
-# 1. Run all checks
-pre-commit run --all-files
-
-# 2. Fix any issues
-ruff check --fix .
-ruff format .
-
-# 3. Verify complexity (aim for A)
-xenon --max-absolute=A --max-modules=A --max-average=A geoparquet_io/
-
-# 4. Run tests
-pytest
-
-# 5. If tests pass, commit
-git add .
-git commit -m "Brief description of change"
-```
-
----
-
-## Quick Reference
-
-### Adding a New CLI Command
-
-1. Define core logic in `core/newcommand.py`
-   - Create a `*_table()` function that accepts/returns `pa.Table` for Python API use
-   - Keep file I/O separate from the core transformation logic
-2. Add CLI wrapper in `cli/main.py`
-3. Use existing decorators from `cli/decorators.py`
-4. **Add Python API support** (see below)
-5. Add tests in `tests/test_newcommand.py` and `tests/test_api.py`
-6. Check complexity: `xenon --max-absolute=A geoparquet_io/core/newcommand.py`
-
-### Adding Python API for New Commands
-
-**CRITICAL: Every new CLI command must have a corresponding Python API.**
-
-The Python API is equally important as the CLI. Users expect to be able to use gpio programmatically.
-
-1. **Add a method to `Table` class** in `api/table.py`:
-   ```python
-   def new_operation(self, param: str = "default") -> Table:
-       """Brief description."""
-       from geoparquet_io.core.newcommand import new_operation_table
-       result = new_operation_table(self._table, param=param)
-       return Table(result, self._geometry_column)
-   ```
-
-2. **Add a function to `ops` module** in `api/ops.py`:
-   ```python
-   def new_operation(table: pa.Table, param: str = "default") -> pa.Table:
-       """Brief description for functional API users."""
-       from geoparquet_io.core.newcommand import new_operation_table
-       return new_operation_table(table, param=param)
-   ```
-
-3. **Export if needed** from `api/__init__.py` and top-level `__init__.py`
-
-4. **Add tests** in `tests/test_api.py` for both Table method and ops function
-
-5. **Update documentation** in `docs/api/python-api.md`
-
-The Python API should mirror the CLI functionality but work with in-memory Arrow tables for better performance and composability.
-
-### Adding a CLI Option
-
-1. Check if decorator exists in `cli/decorators.py`
-2. If common, add decorator there
-3. If command-specific, add inline
-
-### Modifying Core Logic
-
-1. Read existing tests first
-2. Understand the function's contract
-3. Make changes
-4. Run tests: `pytest tests/test_<module>.py -v`
-5. Check complexity
-
-### Working with Remote Files
-
-1. Use `is_remote_url()` to detect
-2. Use `needs_httpfs()` for DuckDB
-3. Use `remote_write_context()` for writes
-4. Use `setup_aws_profile_if_needed()` for S3
+For Windows: Always close DuckDB connections explicitly, use UUID in temp filenames.

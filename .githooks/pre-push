@@ -1,0 +1,16 @@
+#!/bin/bash
+# Pre-push hook to run fast tests before pushing
+
+echo "Running fast tests before push..."
+
+# Run only fast tests (excluding slow and network tests)
+uv run pytest -n auto -m "not slow and not network" --tb=short
+
+if [ $? -ne 0 ]; then
+    echo "❌ Tests failed! Fix issues before pushing."
+    echo "To push anyway (not recommended): git push --no-verify"
+    exit 1
+fi
+
+echo "✅ All fast tests passed!"
+exit 0

@@ -50,3 +50,22 @@ repos:
       language: system
       pass_filenames: false
       types: [python]
+
+    - id: check-api-for-cli
+      name: check-api-for-cli
+      description: Remind to add Python API for new CLI commands
+      entry: bash
+      args:
+        - -c
+        - |
+          # This is a reminder hook - it doesn't fail, just warns
+          if git diff --cached --name-only | grep -q "geoparquet_io/cli/main.py"; then
+            echo "⚠️  Reminder: If you added new CLI commands, ensure you also:"
+            echo "   1. Added corresponding methods to api/table.py"
+            echo "   2. Added corresponding functions to api/ops.py"
+            echo "   3. Updated docs/api/python-api.md"
+            echo "   See CLAUDE.md Quick Checklist for details."
+          fi
+      language: system
+      pass_filenames: false
+      always_run: true
