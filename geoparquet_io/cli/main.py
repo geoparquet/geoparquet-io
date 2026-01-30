@@ -2229,6 +2229,7 @@ def extract_geoparquet(
     help="Skip adding bbox column (bbox enables faster spatial filtering on remote files)",
 )
 @geoparquet_version_option
+@overwrite_option
 @verbose_option
 @compression_options
 @row_group_options
@@ -2251,6 +2252,7 @@ def extract_arcgis(
     skip_hilbert,
     skip_bbox,
     geoparquet_version,
+    overwrite,
     verbose,
     compression,
     compression_level,
@@ -2361,6 +2363,7 @@ def extract_arcgis(
             profile=aws_profile,
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
+            overwrite=overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e

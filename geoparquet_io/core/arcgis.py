@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
+from pathlib import Path
 
 import click
 import pyarrow as pa
@@ -872,6 +873,7 @@ def convert_arcgis_to_geoparquet(
     profile: str | None = None,
     row_group_size_mb: int | None = None,
     row_group_rows: int | None = None,
+    overwrite: bool = False,
 ) -> None:
     """
     Convert ArcGIS Feature Service to GeoParquet file.
@@ -911,6 +913,12 @@ def convert_arcgis_to_geoparquet(
 
     # Setup AWS profile if needed
     setup_aws_profile_if_needed(profile, output_file)
+
+    # Check if output file exists and overwrite is False
+    if not overwrite and Path(output_file).exists():
+        raise click.ClickException(
+            f"Output file already exists: {output_file}\nUse --overwrite to replace it."
+        )
 
     # Build auth config
     auth = None
