@@ -254,3 +254,109 @@ This ensures commands always use the correct virtual environment without manual 
 - Enforces documentation checks, context loading, etc.
 
 This maintains consistency across conversations and prevents reinventing already-solved problems.
+
+## Directives d'utilisation des outils MCP
+
+Utilisez les outils Distill MCP pour des opérations économes en tokens :
+
+### Règle 1 : Lecture intelligente de fichiers
+
+Lors de la lecture de fichiers source pour **exploration ou compréhension** :
+
+```
+mcp__distill__smart_file_read filePath="path/to/file.ts"
+```
+
+**Quand utiliser Read natif à la place :**
+- Avant d'éditer un fichier (Edit nécessite Read d'abord)
+- Fichiers de configuration : `.json`, `.yaml`, `.toml`, `.md`, `.env`
+
+### Règle 2 : Compresser les sorties volumineuses
+
+Après les commandes Bash qui produisent une sortie volumineuse (>500 caractères) :
+
+```
+mcp__distill__auto_optimize content="<collez la sortie volumineuse>"
+```
+
+### Règle 3 : SDK d'exécution de code pour les opérations complexes
+
+Pour les opérations multi-étapes, utilisez `code_execute` au lieu de plusieurs appels d'outils (**98% d'économie de tokens**) :
+
+```
+mcp__distill__code_execute code="<code typescript>"
+```
+
+**API du SDK (`ctx`) :**
+
+*Compression :*
+- `ctx.compress.auto(content, hint?)` - Détection auto et compression
+- `ctx.compress.logs(logs)` - Résumer les logs
+- `ctx.compress.diff(diff)` - Compresser les git diff
+- `ctx.compress.semantic(content, ratio?)` - Compression TF-IDF
+
+*Code :*
+- `ctx.code.parse(content, lang)` - Parser en structure AST
+- `ctx.code.extract(content, lang, {type, name})` - Extraire un élément
+- `ctx.code.skeleton(content, lang)` - Obtenir les signatures uniquement
+
+*Fichiers :*
+- `ctx.files.read(path)` - Lire le contenu d'un fichier
+- `ctx.files.exists(path)` - Vérifier si un fichier existe
+- `ctx.files.glob(pattern)` - Trouver des fichiers par pattern
+
+*Git :*
+- `ctx.git.diff(ref?)` - Obtenir le diff git
+- `ctx.git.log(limit?)` - Historique des commits
+- `ctx.git.status()` - Statut du repo
+- `ctx.git.branch()` - Info sur les branches
+- `ctx.git.blame(file, line?)` - Git blame d'un fichier
+
+*Recherche :*
+- `ctx.search.grep(pattern, glob?)` - Rechercher un pattern dans les fichiers
+- `ctx.search.symbols(query, glob?)` - Rechercher des symboles (fonctions, classes)
+- `ctx.search.files(pattern)` - Rechercher des fichiers par pattern
+- `ctx.search.references(symbol, glob?)` - Trouver les références d'un symbole
+
+*Analyse :*
+- `ctx.analyze.dependencies(file)` - Analyser les imports/exports
+- `ctx.analyze.callGraph(fn, file, depth?)` - Construire le graphe d'appels
+- `ctx.analyze.exports(file)` - Obtenir les exports d'un fichier
+- `ctx.analyze.structure(dir?, depth?)` - Structure du répertoire avec analyse
+
+*Utilitaires :*
+- `ctx.utils.countTokens(text)` - Compter les tokens
+- `ctx.utils.detectType(content)` - Détecter le type de contenu
+- `ctx.utils.detectLanguage(path)` - Détecter le langage depuis le chemin
+
+**Exemples :**
+
+```typescript
+// Obtenir les squelettes de tous les fichiers TypeScript
+const files = ctx.files.glob("src/**/*.ts").slice(0, 5);
+return files.map(f => ({
+  file: f,
+  skeleton: ctx.code.skeleton(ctx.files.read(f), "typescript")
+}));
+
+// Compresser et analyser les logs
+const logs = ctx.files.read("server.log");
+return ctx.compress.logs(logs);
+
+// Extraire une fonction spécifique
+const content = ctx.files.read("src/api.ts");
+return ctx.code.extract(content, "typescript", { type: "function", name: "handleRequest" });
+```
+
+### Référence rapide
+
+| Action | Utiliser |
+|--------|----------|
+| Lire du code pour exploration | `mcp__distill__smart_file_read filePath="file.ts"` |
+| Obtenir une fonction/classe | `mcp__distill__smart_file_read filePath="file.ts" target={"type":"function","name":"myFunc"}` |
+| Compresser les erreurs de build | `mcp__distill__auto_optimize content="..."` |
+| Résumer les logs | `mcp__distill__summarize_logs logs="..."` |
+| Opérations multi-étapes | `mcp__distill__code_execute code="return ctx.files.glob('src/**/*.ts')"` |
+| Avant d'éditer | Utiliser l'outil natif `Read` |
+
+<!-- END DISTILL -->
