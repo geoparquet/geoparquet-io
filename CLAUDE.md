@@ -225,8 +225,31 @@ For commands not covered by patterns, add to `.claude/settings.local.json`:
 }
 ```
 
+### PreToolUse Hooks
+The project includes command modification hooks in `.claude/settings.local.json`:
+
+```json
+"hooks": {
+  "PreToolUse": [
+    {
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "command": "python .claude/hooks/ensure-uv-run.py"
+      }]
+    }
+  ]
+}
+```
+
+**ensure-uv-run.py**: Automatically prefixes Python commands with `uv run`:
+- `pytest` → `uv run pytest`
+- `ruff check` → `uv run ruff check`
+- `gpio` → `uv run gpio`
+
+This ensures commands always use the correct virtual environment without manual intervention.
+
 ### Session Hooks
-Create `.claude/hooks/` for automated session behavior:
 - **pre-session-hook.md**: Instructions Claude reads at session start
 - Enforces documentation checks, context loading, etc.
 
