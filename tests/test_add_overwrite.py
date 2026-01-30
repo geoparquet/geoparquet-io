@@ -34,6 +34,7 @@ class TestAddCommandsOverwrite:
         assert "already exists" in result.output or "Use --overwrite" in result.output
 
     @pytest.mark.slow
+    @pytest.mark.network
     def test_add_admin_divisions_with_overwrite(self, tmp_path):
         """Test that add admin-divisions works with --overwrite."""
         output_file = tmp_path / "output.parquet"
@@ -83,6 +84,20 @@ class TestAddCommandsOverwrite:
         assert result.exit_code != 0
         assert "already exists" in result.output or "Use --overwrite" in result.output
 
+    @pytest.mark.slow
+    def test_add_h3_with_overwrite(self, tmp_path):
+        """Test that add h3 works with --overwrite."""
+        output_file = tmp_path / "output.parquet"
+        output_file.write_text("existing content")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["add", "h3", str(TEST_PARQUET), str(output_file), "--overwrite"]
+        )
+
+        # Should succeed with --overwrite
+        assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
+
     def test_add_kdtree_fails_without_overwrite(self, tmp_path):
         """Test that add kdtree fails by default if output exists."""
         output_file = tmp_path / "output.parquet"
@@ -94,6 +109,20 @@ class TestAddCommandsOverwrite:
         assert result.exit_code != 0
         assert "already exists" in result.output or "Use --overwrite" in result.output
 
+    @pytest.mark.slow
+    def test_add_kdtree_with_overwrite(self, tmp_path):
+        """Test that add kdtree works with --overwrite."""
+        output_file = tmp_path / "output.parquet"
+        output_file.write_text("existing content")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["add", "kdtree", str(TEST_PARQUET), str(output_file), "--overwrite"]
+        )
+
+        # Should succeed with --overwrite
+        assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
+
     def test_add_quadkey_fails_without_overwrite(self, tmp_path):
         """Test that add quadkey fails by default if output exists."""
         output_file = tmp_path / "output.parquet"
@@ -104,3 +133,17 @@ class TestAddCommandsOverwrite:
 
         assert result.exit_code != 0
         assert "already exists" in result.output or "Use --overwrite" in result.output
+
+    @pytest.mark.slow
+    def test_add_quadkey_with_overwrite(self, tmp_path):
+        """Test that add quadkey works with --overwrite."""
+        output_file = tmp_path / "output.parquet"
+        output_file.write_text("existing content")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["add", "quadkey", str(TEST_PARQUET), str(output_file), "--overwrite"]
+        )
+
+        # Should succeed with --overwrite
+        assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
