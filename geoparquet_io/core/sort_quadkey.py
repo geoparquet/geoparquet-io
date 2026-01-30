@@ -348,6 +348,7 @@ def _sort_by_quadkey_streaming(
                 compression="ZSTD",
                 compression_level=15,
                 profile=profile,
+                overwrite=True,  # Temp file created by mkstemp
             )
             actual_input = temp_quadkey_file
 
