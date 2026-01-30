@@ -14,25 +14,20 @@ data = json.load(sys.stdin)
 tool_input = data.get("tool_input", {})
 cmd = tool_input.get("command", "")
 
-# Commands that should use 'uv run'
+# Commands that should use 'uv run' (based on pyproject.toml)
 UV_COMMANDS = [
     "pytest",
     "ruff",
     "xenon",
     "pre-commit",
     "gpio",
-    "python -m pytest",
-    "python -m",
+    "gt",  # Legacy alias for gpio
     "mypy",
-    "black",
-    "isort",
-    "flake8",
-    "pylint",
-    "coverage",
-    "tox",
-    "pip",
     "vulture",
     "radon",
+    "mkdocs",  # For documentation
+    "python -m pytest",
+    "python -m",
 ]
 
 # Check if command needs 'uv run' prefix
