@@ -2017,6 +2017,7 @@ def extract(ctx):
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @write_strategy_option
 @partition_input_options
 @dry_run_option
@@ -2040,6 +2041,7 @@ def extract_geoparquet(
     row_group_size,
     row_group_size_mb,
     geoparquet_version,
+    overwrite,
     write_strategy,
     write_memory,
     allow_schema_diff,
@@ -2164,6 +2166,7 @@ def extract_geoparquet(
             hive_input=hive_input,
             write_strategy=write_strategy,
             memory_limit=write_memory,
+            overwrite=overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
