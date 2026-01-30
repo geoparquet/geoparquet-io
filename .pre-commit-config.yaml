@@ -77,19 +77,26 @@ repos:
       args:
         - -c
         - |
-          # Check if first word starts with lowercase (catches "added" vs "Add")
-          commit_file=".git/COMMIT_EDITMSG"
+          # Works with worktrees - uses passed filename
+          commit_file="$1"
           if [ -f "$commit_file" ]; then
-            first_char=$(head -n1 "$commit_file" | cut -c1)
+            first_line=$(head -n1 "$commit_file")
+            # Skip merge commits
+            if echo "$first_line" | grep -q "^Merge"; then
+              exit 0
+            fi
+            # Check if starts with capital letter (imperative mood)
+            first_char=$(echo "$first_line" | cut -c1)
             if [[ "$first_char" =~ [a-z] ]]; then
               echo "❌ Commit message should start with a capital letter (imperative mood)"
               echo "   Bad:  'added new feature' or 'adding new feature'"
               echo "   Good: 'Add new feature'"
+              echo "   See CLAUDE.md for commit message guidelines"
               exit 1
             fi
           fi
       language: system
-      pass_filenames: false
+      pass_filenames: true
       stages: [commit-msg]
 
     - id: fast-tests
