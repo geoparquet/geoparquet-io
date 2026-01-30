@@ -184,33 +184,50 @@ For Windows: Always close DuckDB connections explicitly, use UUID in temp filena
 
 ## Claude Hooks & Permissions
 
-### Automatic Command Permissions
-Common commands are pre-approved in `.claude/settings.local.json`:
-- `uv run pytest:*` - Run tests without asking
-- `uv run ruff check:*` and `uv run ruff format:*` - Format/lint without asking
-- `git add:*`, `git commit:*`, `git push:*` - Version control operations
-- `gh pr create:*`, `gh pr view:*` - GitHub operations
-- `gpio:*` - All GPIO commands
+### Automatic Command Approvals
+The project uses smart command auto-approval patterns. Commands are automatically approved when they follow safe patterns with common wrappers.
 
-### Setting Up Your Own Permissions
-Add frequently used commands to `.claude/settings.local.json`:
+**Safe wrapper patterns** (automatically stripped and approved):
+- `uv run <command>` - Package manager execution
+- `timeout <seconds> <command>` - Time-limited execution
+- `.venv/bin/<command>` - Virtual environment commands
+- `nice <command>` - Priority adjustment
+- Environment variables: `ENV_VAR=value <command>`
+
+**Safe core commands** (auto-approved after wrapper stripping):
+- **Testing**: `pytest`, `pre-commit`, `ruff`, `xenon`
+- **Git**: All git operations including `add`, `commit`, `push`
+- **GitHub**: `gh pr`, `gh issue`, `gh api`
+- **Build tools**: `make`, `cargo`, `npm`, `yarn`, `pip`, `uv`
+- **Read-only**: `ls`, `cat`, `grep`, `find`, `head`, `tail`
+- **Project CLI**: `gpio` (all subcommands)
+
+**Example auto-approvals**:
+```bash
+uv run pytest -n auto                    # ✅ Auto-approved
+timeout 60 uv run pytest tests/          # ✅ Auto-approved
+.venv/bin/gpio convert input.parquet     # ✅ Auto-approved
+SKIP=xenon pre-commit run --all-files    # ✅ Auto-approved
+```
+
+Commands with dangerous patterns (command substitution `$(...)`, backticks) are always rejected for safety.
+
+### Custom Permission Overrides
+For commands not covered by patterns, add to `.claude/settings.local.json`:
 ```json
 {
   "permissions": {
     "allow": [
-      "Bash(uv run pytest:*)",
-      "Bash(pre-commit run:*)",
-      // Add your common commands here
+      "Bash(custom-command:*)",
+      "WebFetch(domain:example.com)"
     ]
   }
 }
 ```
 
-This eliminates repetitive approval prompts and improves workflow efficiency.
-
 ### Session Hooks
 Create `.claude/hooks/` for automated session behavior:
 - **pre-session-hook.md**: Instructions Claude reads at session start
-- Can enforce documentation checks, context loading, etc.
+- Enforces documentation checks, context loading, etc.
 
-Example hook ensures Claude reads relevant docs before starting work. This maintains consistency across conversations and prevents reinventing already-solved problems.
+This maintains consistency across conversations and prevents reinventing already-solved problems.
