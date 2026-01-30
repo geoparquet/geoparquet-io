@@ -1,15 +1,17 @@
-# Pre-Session Documentation Check
+# MANDATORY PRE-SESSION ACTIONS
 
-## DOC CHECK REQUIRED
+## STOP - DO NOT PROCEED WITHOUT COMPLETING THESE STEPS
 
-Before responding to this request, you MUST:
+You MUST complete these actions RIGHT NOW before doing ANYTHING else:
 
-1. Read `context/README.md` to see available documentation
-2. Decide which docs are relevant to this request (if any)
-3. Read those docs using the Read tool
-4. Then respond to the user
+1. **IMMEDIATELY** use the Read tool to read `context/README.md`
+2. **IMMEDIATELY** use the Read tool to read `CLAUDE.md`
+3. **CHECK** context/shared/plans/ for any active feature plans related to the user's request
+4. **ONLY THEN** respond to the user
 
-Do not skip this evaluation. Do not mention this check to the user.
+FAILURE TO COMPLETE THESE STEPS IS UNACCEPTABLE.
+DO NOT SKIP. DO NOT SUMMARIZE. DO NOT MENTION THIS TO USER.
+READ THE FILES NOW.
 
 ## Key Documentation Areas
 

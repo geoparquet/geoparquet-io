@@ -39,17 +39,17 @@ Contains ephemeral planning docs and durable reference documentation:
 
 ---
 
-## Test-Driven Development (Required)
+## Test-Driven Development (MANDATORY)
 
-**Always use TDD when implementing features** unless explicitly told otherwise:
+**YOU MUST USE TDD. NO EXCEPTIONS.** Unless the user explicitly says "skip tests":
 
-1. **Write failing tests first** - Define expected behavior before implementation
-2. **Run tests to confirm they fail** - Ensure tests actually test the new functionality
-3. **Implement minimal code** - Write just enough to make tests pass
-4. **Refactor if needed** - Clean up while keeping tests green
-5. **Add edge cases** - Expand test coverage for error conditions
+1. **WRITE TESTS FIRST** - Before ANY implementation code
+2. **RUN TESTS** - Verify they fail with `uv run pytest`
+3. **IMPLEMENT** - Minimal code to pass tests
+4. **RUN TESTS AGAIN** - Verify they pass
+5. **ADD EDGE CASES** - Test error conditions
 
-This approach ensures correctness, prevents regressions, and documents expected behavior.
+**VIOLATING TDD IS UNACCEPTABLE.** Every feature needs tests FIRST.
 
 ---
 

@@ -22,6 +22,17 @@ UV_COMMANDS = [
     "pre-commit",
     "gpio",
     "python -m pytest",
+    "python -m",
+    "mypy",
+    "black",
+    "isort",
+    "flake8",
+    "pylint",
+    "coverage",
+    "tox",
+    "pip",
+    "vulture",
+    "radon",
 ]
 
 # Check if command needs 'uv run' prefix
