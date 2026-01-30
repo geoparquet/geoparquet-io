@@ -69,3 +69,63 @@ repos:
       language: system
       pass_filenames: false
       always_run: true
+
+    - id: check-commit-msg
+      name: check-commit-msg
+      description: Enforce imperative mood in commit messages
+      entry: bash
+      args:
+        - -c
+        - |
+          # Check if first word starts with lowercase (catches "added" vs "Add")
+          commit_file=".git/COMMIT_EDITMSG"
+          if [ -f "$commit_file" ]; then
+            first_char=$(head -n1 "$commit_file" | cut -c1)
+            if [[ "$first_char" =~ [a-z] ]]; then
+              echo "❌ Commit message should start with a capital letter (imperative mood)"
+              echo "   Bad:  'added new feature' or 'adding new feature'"
+              echo "   Good: 'Add new feature'"
+              exit 1
+            fi
+          fi
+      language: system
+      pass_filenames: false
+      stages: [commit-msg]
+
+    - id: fast-tests
+      name: fast-tests
+      description: Run fast tests (optional - enable with ENABLE_PRE_PUSH_TESTS=1)
+      entry: bash
+      args:
+        - -c
+        - |
+          # Only run if explicitly enabled via environment variable
+          if [ "$ENABLE_PRE_PUSH_TESTS" = "1" ]; then
+            echo "Running fast tests..."
+            uv run pytest -n auto -m "not slow and not network" --tb=short
+          else
+            # Silent pass - tests not enabled
+            exit 0
+          fi
+      language: system
+      pass_filenames: false
+      stages: [push]
+
+    - id: sync-dependencies
+      name: sync-dependencies
+      description: Auto-sync dependencies when pyproject.toml changes
+      entry: bash
+      args:
+        - -c
+        - |
+          # Check if pyproject.toml was changed
+          if git diff --cached --name-only | grep -q "^pyproject.toml$"; then
+            if command -v uv &> /dev/null; then
+              echo "📦 pyproject.toml changed, running uv sync..."
+              uv sync --all-extras
+              echo "✅ Dependencies synced"
+            fi
+          fi
+      language: system
+      pass_filenames: false
+      always_run: true

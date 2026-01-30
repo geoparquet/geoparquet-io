@@ -10,6 +10,20 @@ geoparquet-io (gpio) is a Python CLI tool for fast I/O and transformation of Geo
 
 ---
 
+## Documentation Structure
+
+### context/ Directory
+Contains ephemeral planning docs and durable reference documentation:
+
+- **context/shared/plans/** - Active feature plans and implementation strategies
+- **context/shared/documentation/** - Durable docs on specific topics/features for AI developers
+- **context/shared/reports/** - Analysis reports and architectural assessments
+- **context/shared/research/** - Auto-generated research from feature exploration
+
+**Important**: When starting work on any feature, check `context/README.md` for available documentation and read relevant docs before proceeding.
+
+---
+
 ## Before Writing Code: Research First
 
 **Always research before implementing.** Before any code changes:

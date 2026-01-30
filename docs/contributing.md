@@ -88,11 +88,23 @@ Pre-commit hooks run automatically before each commit. They will:
 - Remove trailing whitespace
 - Fix end-of-file issues
 - Check YAML and TOML syntax
+- Check commit message format (capital letter for imperative mood)
+- Remind about Python API when CLI changes are made
+- Sync dependencies when pyproject.toml changes
 
 To run hooks manually:
 ```bash
 uv run pre-commit run --all-files
 ```
+
+#### Optional: Enable Pre-Push Tests
+
+To run fast tests automatically before pushing:
+```bash
+export ENABLE_PRE_PUSH_TESTS=1
+```
+
+This will run `pytest -m "not slow and not network"` before each push. Disable by unsetting the variable.
 
 ## Making Changes
 
