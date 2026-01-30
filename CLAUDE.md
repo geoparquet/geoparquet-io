@@ -39,6 +39,20 @@ Contains ephemeral planning docs and durable reference documentation:
 
 ---
 
+## Test-Driven Development (Required)
+
+**Always use TDD when implementing features** unless explicitly told otherwise:
+
+1. **Write failing tests first** - Define expected behavior before implementation
+2. **Run tests to confirm they fail** - Ensure tests actually test the new functionality
+3. **Implement minimal code** - Write just enough to make tests pass
+4. **Refactor if needed** - Clean up while keeping tests green
+5. **Add edge cases** - Expand test coverage for error conditions
+
+This approach ensures correctness, prevents regressions, and documents expected behavior.
+
+---
+
 ## Architecture & Key Files
 
 ```
