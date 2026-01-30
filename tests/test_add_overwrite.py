@@ -34,8 +34,8 @@ class TestAddCommandsOverwrite:
             cli, ["add", "admin-divisions", str(TEST_PARQUET), str(output_file), "--overwrite"]
         )
 
-        # Should succeed or at least accept the flag
-        assert "--overwrite" in str(result.args) or result.exit_code == 0
+        # Should succeed with --overwrite
+        assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
 
     def test_add_bbox_fails_without_overwrite(self, tmp_path):
         """Test that add bbox fails by default if output exists."""
@@ -58,8 +58,8 @@ class TestAddCommandsOverwrite:
             cli, ["add", "bbox", str(TEST_PARQUET), str(output_file), "--overwrite"]
         )
 
-        # Should succeed or at least accept the flag
-        assert "--overwrite" in str(result.args) or result.exit_code == 0
+        # Should succeed with --overwrite
+        assert result.exit_code == 0, f"Expected success with --overwrite, got: {result.output}"
 
     def test_add_h3_fails_without_overwrite(self, tmp_path):
         """Test that add h3 fails by default if output exists."""
