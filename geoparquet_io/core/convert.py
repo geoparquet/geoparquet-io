@@ -1059,11 +1059,11 @@ def convert_to_geoparquet(
     if is_parquet and is_partition_path(input_file):
         require_single_file(input_file, "convert")
 
-    effective_crs = _determine_effective_crs(
-        input_file, input_url, crs, is_csv, is_parquet, con, verbose
-    )
-
     try:
+        effective_crs = _determine_effective_crs(
+            input_file, input_url, crs, is_csv, is_parquet, con, verbose
+        )
+
         if is_csv:
             query = _convert_csv_path(
                 con,
