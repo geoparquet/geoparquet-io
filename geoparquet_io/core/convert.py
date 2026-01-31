@@ -926,6 +926,72 @@ def _read_spatial_to_arrow(con, input_url, verbose, is_parquet=False):
     return result.fetch_arrow_table()
 
 
+def _determine_effective_crs(
+    input_file: str,
+    input_url: str,
+    crs: str,
+    is_csv: bool,
+    is_parquet: bool,
+    con,
+    verbose: bool,
+) -> dict | None:
+    """Determine the effective CRS for output based on input file type."""
+    user_specified_crs = crs != "EPSG:4326"
+
+    if user_specified_crs:
+        if not is_csv:
+            raise click.ClickException(
+                f"The --crs option is only valid for CSV/TSV files.\n"
+                f"For {os.path.splitext(input_file)[1]} files, CRS is read from the file metadata."
+            )
+        if verbose:
+            debug(f"Using user-specified CRS: {crs}")
+        return parse_crs_string_to_projjson(crs, con)
+
+    if is_csv:
+        return None  # CSV with default CRS
+
+    if is_parquet:
+        detected = extract_crs_from_parquet(input_url, verbose=verbose)
+        if detected and not is_default_crs(detected):
+            if verbose:
+                debug(f"Preserving input CRS: {_format_crs_display(detected)}")
+            return detected
+        return None
+
+    # Spatial files (GPKG, GeoJSON, Shapefile) - CRS must be present
+    detected = detect_crs_from_spatial_file(input_url, con, verbose=verbose)
+    if detected is None:
+        raise click.ClickException(
+            f"No CRS found in input file: {input_file}\n"
+            f"Spatial files (GeoPackage, Shapefile, GeoJSON, etc.) must have a defined CRS."
+        )
+    if is_default_crs(detected):
+        if verbose:
+            debug("Input has default CRS (WGS84), not writing explicit CRS")
+        return None
+
+    if verbose:
+        debug(f"Detected input CRS: {_format_crs_display(detected)}")
+    return detected
+
+
+def _report_conversion_results(output_file: str, start_time: float) -> None:
+    """Report conversion results with timing and file size."""
+    elapsed = time.time() - start_time
+    if is_remote_url(output_file):
+        file_size = None
+    else:
+        file_size = os.path.getsize(output_file)
+
+    progress(f"Done in {elapsed:.1f}s")
+    if file_size is not None:
+        progress(f"Output: {output_file} ({format_size(file_size)})")
+    else:
+        progress(f"Output: {output_file}")
+    success("✓ Output passes GeoParquet validation")
+
+
 def convert_to_geoparquet(
     input_file,
     output_file,
@@ -975,81 +1041,27 @@ def convert_to_geoparquet(
     Raises:
         click.ClickException: If input file not found or conversion fails
     """
-    # Configure logging verbosity
     configure_verbose(verbose)
-
     start_time = time.time()
 
-    # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_file, output_file)
-
-    # Setup AWS profile if needed (for DuckDB reads and obstore writes)
     setup_aws_profile_if_needed(profile, input_file, output_file)
-
-    # Show single progress message for remote files
     show_remote_read_message(input_file, verbose=False)
-
-    # Validate input file exists (for local files) and get safe URL
     input_url = safe_file_url(input_file, verbose)
-
-    # Validate output directory exists and is writable (for local files)
     validate_output_path(output_file, verbose)
 
     progress(f"Converting {input_file}...")
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
-
-    # Check input file type
     is_csv = _is_csv_file(input_file)
     is_parquet = _is_parquet_file(input_file)
 
-    # Check for partitioned parquet input (not supported)
     if is_parquet and is_partition_path(input_file):
         require_single_file(input_file, "convert")
 
-    # Determine effective CRS for output
-    # --crs parameter is ONLY valid for CSV/TSV files
-    # For spatial files, CRS is auto-detected and must be present
-    user_specified_crs = crs != "EPSG:4326"  # User explicitly provided non-default CRS
-    effective_crs = None
-
-    if user_specified_crs:
-        # --crs is only valid for CSV/TSV files
-        if not is_csv:
-            raise click.ClickException(
-                f"The --crs option is only valid for CSV/TSV files.\n"
-                f"For {os.path.splitext(input_file)[1]} files, CRS is read from the file metadata."
-            )
-        # User explicitly specified a CRS for CSV, convert to PROJJSON
-        effective_crs = parse_crs_string_to_projjson(crs, con)
-        if verbose:
-            debug(f"Using user-specified CRS: {crs}")
-    elif is_csv:
-        # CSV with default CRS - effective_crs stays None (use default)
-        pass
-    elif is_parquet:
-        # Parquet files - detect CRS from file
-        detected_crs = extract_crs_from_parquet(input_url, verbose=verbose)
-        if detected_crs and not is_default_crs(detected_crs):
-            effective_crs = detected_crs
-            if verbose:
-                debug(f"Preserving input CRS: {_format_crs_display(detected_crs)}")
-    else:
-        # Spatial files (GPKG, GeoJSON, Shapefile) - CRS must be present
-        detected_crs = detect_crs_from_spatial_file(input_url, con, verbose=verbose)
-        if detected_crs is None:
-            raise click.ClickException(
-                f"No CRS found in input file: {input_file}\n"
-                f"Spatial files (GeoPackage, Shapefile, GeoJSON, etc.) must have a defined CRS."
-            )
-        # Only set effective_crs if it's non-default (skip writing default CRS)
-        if is_default_crs(detected_crs):
-            if verbose:
-                debug("Input has default CRS (WGS84), not writing explicit CRS")
-        else:
-            effective_crs = detected_crs
-            if verbose:
-                debug(f"Detected input CRS: {_format_crs_display(detected_crs)}")
+    effective_crs = _determine_effective_crs(
+        input_file, input_url, crs, is_csv, is_parquet, con, verbose
+    )
 
     try:
         if is_csv:
@@ -1090,33 +1102,17 @@ def convert_to_geoparquet(
             geoparquet_version=geoparquet_version,
             input_crs=effective_crs,
         )
-
-        # Report results
-        elapsed = time.time() - start_time
-        # For remote files, we can't get the size locally, skip it
-        if is_remote_url(output_file):
-            file_size = None
-        else:
-            file_size = os.path.getsize(output_file)
-
-        progress(f"Done in {elapsed:.1f}s")
-        if file_size is not None:
-            progress(f"Output: {output_file} ({format_size(file_size)})")
-        else:
-            progress(f"Output: {output_file}")
-        success("✓ Output passes GeoParquet validation")
+        _report_conversion_results(output_file, start_time)
 
     except duckdb.IOException as e:
         con.close()
         error_msg = str(e)
-        # Provide helpful hints for remote file errors
         if is_remote_url(input_file):
             hints = get_remote_error_hint(error_msg, input_file)
             raise click.ClickException(
                 f"Failed to read remote file.\n\n{hints}\n\nOriginal error: {error_msg}"
             ) from e
-        else:
-            raise click.ClickException(f"Failed to read input file: {error_msg}") from e
+        raise click.ClickException(f"Failed to read input file: {error_msg}") from e
 
     except duckdb.BinderException as e:
         con.close()
@@ -1126,8 +1122,7 @@ def convert_to_geoparquet(
         con.close()
         if e.errno == 28:  # ENOSPC
             raise click.ClickException("Not enough disk space for output file") from e
-        else:
-            raise click.ClickException(f"File system error: {str(e)}") from e
+        raise click.ClickException(f"File system error: {str(e)}") from e
 
     except Exception as e:
         con.close()

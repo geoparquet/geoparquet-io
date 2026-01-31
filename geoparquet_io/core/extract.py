@@ -670,6 +670,59 @@ def _get_table_column_info(
     return all_columns, geometry_col, bbox_info
 
 
+def _setup_geometry_view(
+    con,
+    table: pa.Table,
+    geom_col: str,
+) -> tuple[str, bool]:
+    """
+    Setup geometry view if needed for BLOB geometry columns.
+
+    Returns (source_ref, needs_wkb_conversion).
+    """
+    columns_info = con.execute("DESCRIBE __input_table").fetchall()
+    geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
+
+    if not (geom_is_blob and geom_col in table.column_names):
+        return "__input_table", False
+
+    # Create view with geometry conversion (quote column names for special chars)
+    other_cols = [f'"{c}"' for c in table.column_names if c != geom_col]
+    col_defs = other_cols + [f'ST_GeomFromWKB("{geom_col}") AS "{geom_col}"']
+    view_query = f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
+    con.execute(view_query)
+    return "__input_view", True
+
+
+def _build_query_with_wkb_conversion(
+    source_ref: str,
+    selected_columns: list[str],
+    geom_col: str,
+    spatial_filter: str | None,
+    where: str | None,
+    limit: int | None,
+) -> str:
+    """Build query with WKB conversion for geometry column."""
+    cols_with_wkb = [
+        f'ST_AsWKB("{geom_col}") AS "{geom_col}"' if c == geom_col else f'"{c}"'
+        for c in selected_columns
+    ]
+    col_list = ", ".join(cols_with_wkb)
+
+    conditions = []
+    if spatial_filter:
+        conditions.append(f"({spatial_filter})")
+    if where:
+        conditions.append(f"({where})")
+
+    query = f"SELECT {col_list} FROM {source_ref}"
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    if limit is not None:
+        query += f" LIMIT {limit}"
+    return query
+
+
 def extract_table(
     table: pa.Table,
     columns: list[str] | None = None,
@@ -697,88 +750,38 @@ def extract_table(
         Filtered PyArrow Table
     """
     all_columns, geom_col, bbox_info = _get_table_column_info(table)
+    geom_col = geometry_column or geom_col or "geometry"
 
-    if geometry_column:
-        geom_col = geometry_column
-    if not geom_col:
-        geom_col = "geometry"
-
-    # Validate geometry column exists
     if geom_col not in all_columns:
         raise ValueError(
             f"geometry_column '{geom_col}' not found in table columns: {list(all_columns)}"
         )
 
-    # Build column selection
     selected_columns = build_column_selection(
-        all_columns,
-        columns,
-        exclude_columns,
-        geom_col,
-        bbox_info.get("bbox_column_name"),
+        all_columns, columns, exclude_columns, geom_col, bbox_info.get("bbox_column_name")
     )
-
-    # Build spatial filter
     spatial_filter = build_spatial_filter(bbox, None, bbox_info, geom_col) if bbox else None
 
-    # Validate WHERE clause if provided
     if where:
         validate_where_clause(where)
 
-    # Register table and execute query
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         con.register("__input_table", table)
+        source_ref, needs_wkb = _setup_geometry_view(con, table, geom_col)
 
-        # Check if geometry column is BLOB (needs conversion)
-        columns_info = con.execute("DESCRIBE __input_table").fetchall()
-        geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
-
-        if geom_is_blob and geom_col in table.column_names:
-            # Create view with geometry conversion
-            # Quote column names to handle special characters (colons, spaces, etc.)
-            other_cols = [f'"{c}"' for c in table.column_names if c != geom_col]
-            col_defs = other_cols + [f'ST_GeomFromWKB("{geom_col}") AS "{geom_col}"']
-            view_query = (
-                f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
+        if needs_wkb and geom_col in selected_columns:
+            query = _build_query_with_wkb_conversion(
+                source_ref, selected_columns, geom_col, spatial_filter, where, limit
             )
-            con.execute(view_query)
-            source_ref = "__input_view"
-            needs_wkb_conversion = True
-        else:
-            source_ref = "__input_table"
-            needs_wkb_conversion = False
-
-        # Build query, but if geometry was converted, we need to convert back to WKB
-        if needs_wkb_conversion and geom_col in selected_columns:
-            # Replace geometry column with WKB conversion in column list
-            cols_with_wkb = [
-                f'ST_AsWKB("{geom_col}") AS "{geom_col}"' if c == geom_col else f'"{c}"'
-                for c in selected_columns
-            ]
-            col_list = ", ".join(cols_with_wkb)
-
-            conditions = []
-            if spatial_filter:
-                conditions.append(f"({spatial_filter})")
-            if where:
-                conditions.append(f"({where})")
-
-            query = f"SELECT {col_list} FROM {source_ref}"
-            if conditions:
-                query += " WHERE " + " AND ".join(conditions)
-            if limit is not None:
-                query += f" LIMIT {limit}"
         else:
             query = _build_query_for_source(
                 source_ref, selected_columns, spatial_filter, where, limit
             )
-        result = con.execute(query).fetch_arrow_table()
 
-        # Preserve metadata
+        result = con.execute(query).fetch_arrow_table()
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
-
         return result
     finally:
         con.close()
@@ -1067,6 +1070,45 @@ def extract(
     )
 
 
+def _check_overwrite_safety(
+    output_parquet: str | None,
+    is_streaming: bool,
+    dry_run: bool,
+    overwrite: bool,
+) -> None:
+    """Check if output file exists and raise error if overwrite not allowed."""
+    if not output_parquet or is_streaming or dry_run or overwrite:
+        return
+    if Path(output_parquet).exists():
+        raise click.ClickException(
+            f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+        )
+
+
+def _validate_column_overlap(
+    include_list: list[str] | None,
+    exclude_list: list[str] | None,
+    geometry_col: str,
+    bbox_col: str | None,
+) -> None:
+    """Validate that only special columns appear in both include and exclude lists."""
+    if not (include_list and exclude_list):
+        return
+
+    special_cols = {geometry_col}
+    if bbox_col:
+        special_cols.add(bbox_col)
+
+    overlap = set(include_list) & set(exclude_list)
+    non_special_overlap = overlap - special_cols
+    if non_special_overlap:
+        raise click.ClickException(
+            f"Columns cannot be in both --include-cols and --exclude-cols: "
+            f"{', '.join(sorted(non_special_overlap))}\n"
+            f"Only geometry ({geometry_col}) and bbox ({bbox_col}) columns can appear in both."
+        )
+
+
 def _extract_impl(
     input_parquet: str,
     output_parquet: str | None,
@@ -1094,29 +1136,17 @@ def _extract_impl(
     memory_limit: str | None = None,
 ) -> None:
     """Internal implementation of extract with auto-detecting S3 access."""
-    # Parse column lists
     include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
     exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
-
-    # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
-    # Check if output file exists and overwrite is False (skip for streaming/dry-run)
-    if output_parquet and not is_streaming and not dry_run and not overwrite:
-        if Path(output_parquet).exists():
-            raise click.ClickException(
-                f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
-            )
+    _check_overwrite_safety(output_parquet, is_streaming, dry_run, overwrite)
 
     if is_streaming and not dry_run:
-        # Parse bbox and geometry if provided
         bbox_tuple = parse_bbox(bbox) if bbox else None
         geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
-
-        # Validate WHERE clause
         if where:
             validate_where_clause(where)
-
         return _extract_streaming(
             input_parquet,
             output_parquet,
@@ -1135,55 +1165,28 @@ def _extract_impl(
             geoparquet_version,
         )
 
-    # File-based mode - get schema info early for validation
-    # DuckDB handles glob patterns natively for all metadata operations
+    # File-based mode
     all_columns = get_schema_columns(input_parquet)
     geometry_col = find_primary_geometry_column(input_parquet, verbose)
     bbox_info = check_bbox_structure(input_parquet, verbose=False)
     bbox_col = bbox_info.get("bbox_column_name")
 
-    # Validate columns in both lists - only geometry and bbox allowed in both
-    if include_list and exclude_list:
-        special_cols = {geometry_col}
-        if bbox_col:
-            special_cols.add(bbox_col)
-
-        overlap = set(include_list) & set(exclude_list)
-        non_special_overlap = overlap - special_cols
-        if non_special_overlap:
-            raise click.ClickException(
-                f"Columns cannot be in both --include-cols and --exclude-cols: "
-                f"{', '.join(sorted(non_special_overlap))}\n"
-                f"Only geometry ({geometry_col}) and bbox ({bbox_col}) columns can appear in both."
-            )
-
-    # Validate columns
+    _validate_column_overlap(include_list, exclude_list, geometry_col, bbox_col)
     validate_columns(include_list, all_columns, "--include-cols")
     validate_columns(exclude_list, all_columns, "--exclude-cols")
-
-    # Validate WHERE clause for dangerous SQL keywords
     if where:
         validate_where_clause(where)
 
-    # Build column selection
     selected_columns = build_column_selection(
         all_columns, include_list, exclude_list, geometry_col, bbox_col
     )
-
-    # Parse bbox if provided
     bbox_tuple = parse_bbox(bbox) if bbox else None
-
-    # Warn if bbox looks like lat/long but data is projected
     if bbox_tuple and not dry_run:
         _warn_if_crs_mismatch(bbox_tuple, input_parquet, geometry_col)
 
-    # Parse geometry if provided
     geometry_wkt = parse_geometry_input(geometry, use_first_geometry) if geometry else None
-
-    # Build spatial filter
     spatial_filter = build_spatial_filter(bbox_tuple, geometry_wkt, bbox_info, geometry_col)
 
-    # Build the query - pass original input_parquet, partition reader handles path resolution
     query = build_extract_query(
         input_parquet,
         selected_columns,
