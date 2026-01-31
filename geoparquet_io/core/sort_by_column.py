@@ -92,6 +92,7 @@ def sort_by_column(
     row_group_rows: int | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
+    overwrite: bool = False,
 ) -> None:
     """
     Sort a GeoParquet file by specified column(s).
@@ -147,6 +148,15 @@ def sort_by_column(
         return
 
     # File-based mode
+    # Check if output file exists
+    if output_parquet and not overwrite:
+        from pathlib import Path
+
+        if Path(output_parquet).exists():
+            raise click.ClickException(
+                f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+            )
+
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_parquet, output_parquet)
 

@@ -429,6 +429,7 @@ def add_admin_divisions_multi(
     row_group_rows: int | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
+    overwrite: bool = False,
 ):
     """
     Add admin division columns from a multi-level admin dataset.
@@ -448,6 +449,17 @@ def add_admin_divisions_multi(
         row_group_rows: Exact number of rows per row group
         profile: AWS profile name (S3 only, optional)
     """
+    # Check if output file exists
+    if output_parquet and not overwrite:
+        from pathlib import Path
+
+        import click
+
+        if Path(output_parquet).exists():
+            raise click.ClickException(
+                f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+            )
+
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add admin-divisions")
 

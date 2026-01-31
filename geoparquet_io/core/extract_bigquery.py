@@ -674,6 +674,7 @@ def extract_bigquery(
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
     geoparquet_version: str | None = None,
+    overwrite: bool = False,
 ) -> pa.Table | None:
     """
     Extract data from BigQuery table to GeoParquet.
@@ -728,6 +729,17 @@ def extract_bigquery(
     # Parse column lists
     include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
     exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
+
+    # Check if output file exists and overwrite is False
+    if output_parquet and not overwrite and not dry_run:
+        from pathlib import Path
+
+        import click
+
+        if Path(output_parquet).exists():
+            raise click.ClickException(
+                f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+            )
 
     # Handle dry_run without connecting to BigQuery
     if dry_run:

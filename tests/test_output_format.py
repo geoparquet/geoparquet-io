@@ -271,9 +271,11 @@ def sample_parquet():
 
 @pytest.fixture
 def temp_output():
-    """Create a temporary output file that gets cleaned up."""
+    """Create a temporary output path that gets cleaned up."""
     tmp = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False)
     tmp.close()
+    # Remove the file so tests don't trigger overwrite checks
+    os.unlink(tmp.name)
     yield tmp.name
     if os.path.exists(tmp.name):
         os.unlink(tmp.name)
@@ -748,6 +750,8 @@ class TestAllCommandsConsistency:
         for cmd_base in simple_commands:
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
                 tmp_name = tmp.name
+            # Remove the file so tests don't trigger overwrite checks
+            os.unlink(tmp_name)
 
             try:
                 run_command_and_validate(
@@ -761,6 +765,8 @@ class TestAllCommandsConsistency:
         # sort column has special syntax: sort column INPUT OUTPUT COLUMNS [OPTIONS]
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
             tmp_name = tmp.name
+        # Remove the file so tests don't trigger overwrite checks
+        os.unlink(tmp_name)
 
         try:
             run_command_and_validate(
@@ -784,6 +790,8 @@ class TestAllCommandsConsistency:
         for compression_arg, expected_compression in compressions:
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
                 tmp_name = tmp.name
+            # Remove the file so tests don't trigger overwrite checks
+            os.unlink(tmp_name)
 
             try:
                 run_command_and_validate(

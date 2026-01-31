@@ -109,6 +109,7 @@ def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
         compression_level=15,
         row_group_rows=100000,
         profile=profile,
+        overwrite=True,  # check --fix manages file lifecycle
     )
 
     return {"fix_applied": "Added bbox column", "success": True}

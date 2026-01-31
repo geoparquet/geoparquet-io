@@ -1022,6 +1022,7 @@ def extract(
     profile: str | None = None,
     geoparquet_version: str | None = None,
     allow_schema_diff: bool = False,
+    overwrite: bool = False,
     hive_input: bool = False,
     write_strategy: str = "duckdb-kv",
     memory_limit: str | None = None,
@@ -1059,6 +1060,7 @@ def extract(
         profile,
         geoparquet_version,
         allow_schema_diff,
+        overwrite,
         hive_input,
         write_strategy,
         memory_limit,
@@ -1086,6 +1088,7 @@ def _extract_impl(
     profile: str | None,
     geoparquet_version: str | None,
     allow_schema_diff: bool = False,
+    overwrite: bool = False,
     hive_input: bool = False,
     write_strategy: str = "duckdb-kv",
     memory_limit: str | None = None,
@@ -1097,6 +1100,13 @@ def _extract_impl(
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
+
+    # Check if output file exists and overwrite is False (skip for streaming/dry-run)
+    if output_parquet and not is_streaming and not dry_run and not overwrite:
+        if Path(output_parquet).exists():
+            raise click.ClickException(
+                f"Output file already exists: {output_parquet}\nUse --overwrite to replace it."
+            )
 
     if is_streaming and not dry_run:
         # Parse bbox and geometry if provided

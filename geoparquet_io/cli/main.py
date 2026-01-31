@@ -2017,6 +2017,7 @@ def extract(ctx):
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @write_strategy_option
 @partition_input_options
 @dry_run_option
@@ -2040,6 +2041,7 @@ def extract_geoparquet(
     row_group_size,
     row_group_size_mb,
     geoparquet_version,
+    overwrite,
     write_strategy,
     write_memory,
     allow_schema_diff,
@@ -2164,6 +2166,7 @@ def extract_geoparquet(
             hive_input=hive_input,
             write_strategy=write_strategy,
             memory_limit=write_memory,
+            overwrite=overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -2226,6 +2229,7 @@ def extract_geoparquet(
     help="Skip adding bbox column (bbox enables faster spatial filtering on remote files)",
 )
 @geoparquet_version_option
+@overwrite_option
 @verbose_option
 @compression_options
 @row_group_options
@@ -2248,6 +2252,7 @@ def extract_arcgis(
     skip_hilbert,
     skip_bbox,
     geoparquet_version,
+    overwrite,
     verbose,
     compression,
     compression_level,
@@ -2358,6 +2363,7 @@ def extract_arcgis(
             profile=aws_profile,
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
+            overwrite=overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -2418,6 +2424,7 @@ def extract_arcgis(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @show_sql_option
 @verbose_option
@@ -2441,6 +2448,7 @@ def extract_bigquery_cmd(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     show_sql,
     verbose,
@@ -2526,6 +2534,7 @@ def extract_bigquery_cmd(
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
             geoparquet_version=geoparquet_version,
+            overwrite=overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -2569,6 +2578,7 @@ def sort(ctx):
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @verbose_option
 @any_extension_option
 @show_sql_option
@@ -2583,6 +2593,7 @@ def hilbert_order(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     verbose,
     any_extension,
     show_sql,
@@ -2625,6 +2636,7 @@ def hilbert_order(
             row_group_size,
             None,
             geoparquet_version,
+            overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from None
@@ -2641,6 +2653,7 @@ def hilbert_order(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @verbose_option
 @any_extension_option
 @show_sql_option
@@ -2655,6 +2668,7 @@ def sort_column(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     verbose,
     any_extension,
     show_sql,
@@ -2690,6 +2704,7 @@ def sort_column(
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
             geoparquet_version=geoparquet_version,
+            overwrite=overwrite,
         )
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -2721,6 +2736,7 @@ def sort_column(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @verbose_option
 @any_extension_option
 @show_sql_option
@@ -2737,6 +2753,7 @@ def sort_quadkey(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     verbose,
     any_extension,
     show_sql,
@@ -2772,6 +2789,7 @@ def sort_quadkey(
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
         geoparquet_version=geoparquet_version,
+        overwrite=overwrite,
     )
 
 
@@ -2804,6 +2822,7 @@ def add(ctx):
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @verbose_option
 @any_extension_option
@@ -2820,6 +2839,7 @@ def add_country_codes(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     verbose,
     any_extension,
@@ -2907,6 +2927,7 @@ def add_country_codes(
         row_group_size_mb=row_group_mb,
         row_group_rows=row_group_size,
         geoparquet_version=geoparquet_version,
+        overwrite=overwrite,
     )
 
 
@@ -2921,6 +2942,7 @@ def add_country_codes(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @verbose_option
 @any_extension_option
@@ -2936,6 +2958,7 @@ def add_bbox(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     verbose,
     any_extension,
@@ -2998,6 +3021,7 @@ def add_bbox(
             None,
             force,
             geoparquet_version,
+            overwrite=overwrite,
         )
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
@@ -3037,6 +3061,7 @@ def add_bbox_metadata_cmd(parquet_file, verbose):
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @verbose_option
 @any_extension_option
@@ -3052,6 +3077,7 @@ def add_h3(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     verbose,
     any_extension,
@@ -3096,6 +3122,7 @@ def add_h3(
             row_group_size,
             None,
             geoparquet_version,
+            overwrite=overwrite,
         )
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
@@ -3134,6 +3161,7 @@ def add_h3(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @click.option(
     "--force",
@@ -3157,6 +3185,7 @@ def add_kdtree(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     force,
     verbose,
@@ -3236,6 +3265,7 @@ def add_kdtree(
         auto_target,
         None,
         geoparquet_version,
+        overwrite=overwrite,
     )
 
 
@@ -3260,6 +3290,7 @@ def add_kdtree(
 )
 @output_format_options
 @geoparquet_version_option
+@overwrite_option
 @dry_run_option
 @verbose_option
 @any_extension_option
@@ -3276,6 +3307,7 @@ def add_quadkey(
     row_group_size_mb,
     write_memory,
     geoparquet_version,
+    overwrite,
     dry_run,
     verbose,
     any_extension,
@@ -3320,6 +3352,7 @@ def add_quadkey(
             row_group_size_mb=row_group_mb,
             row_group_rows=row_group_size,
             geoparquet_version=geoparquet_version,
+            overwrite=overwrite,
         )
     except StreamingError as e:
         raise click.ClickException(str(e)) from None
