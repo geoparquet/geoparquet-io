@@ -27,6 +27,43 @@ if TYPE_CHECKING:
 DEFAULT_BATCH_SIZE = 100_000
 
 
+def _detect_bbox_column(schema: pa.Schema) -> dict:
+    """Detect bbox column from schema using common naming conventions."""
+    for name in schema.names:
+        if name in ["bbox", "bounds", "extent"] or name.endswith("_bbox"):
+            field = schema.field(name)
+            if hasattr(field.type, "names") and set(field.type.names) >= {
+                "xmin",
+                "ymin",
+                "xmax",
+                "ymax",
+            }:
+                return {"has_bbox_column": True, "bbox_column_name": name}
+    return {"has_bbox_column": False, "bbox_column_name": None}
+
+
+def _check_geometry_type(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    geometry_column: str,
+    verbose: bool,
+) -> tuple[bool, str]:
+    """Check if geometry column needs WKB conversion. Returns (needs_conversion, final_sql)."""
+    from geoparquet_io.core.common import _wrap_query_with_wkb_conversion
+
+    quoted_geom = geometry_column.replace('"', '""')
+    type_result = con.execute(f'SELECT TYPEOF("{quoted_geom}") FROM ({query}) LIMIT 1').fetchone()
+    duckdb_type = type_result[0] if type_result else None
+    needs_wkb = duckdb_type == "GEOMETRY"
+
+    if verbose:
+        msg = "wrapping with WKB conversion" if needs_wkb else "no conversion needed"
+        debug(f"Geometry column is {duckdb_type}, {msg}")
+
+    final_sql = _wrap_query_with_wkb_conversion(query, geometry_column, con) if needs_wkb else query
+    return needs_wkb, final_sql
+
+
 class ArrowStreamingStrategy(BaseWriteStrategy):
     """
     Stream DuckDB results as RecordBatches to ParquetWriter.
@@ -60,16 +97,13 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         """Write query results to GeoParquet using streaming RecordBatch approach."""
         from geoparquet_io.core.common import (
             GEOPARQUET_VERSIONS,
-            _wrap_query_with_wkb_conversion,
-            compute_geometry_types_via_sql,
-            create_geo_metadata,
-            is_default_crs,
             validate_compression_settings,
         )
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
 
+        # Setup compression and version config
         validated_compression, validated_level, _ = validate_compression_settings(
             compression or "ZSTD", compression_level, verbose
         )
@@ -77,43 +111,19 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             validated_compression = None
 
         version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
-        metadata_version = version_config["metadata_version"]
-
         batch_size = row_group_rows or DEFAULT_BATCH_SIZE
 
-        quoted_geom = geometry_column.replace('"', '""')
-        type_result = con.execute(
-            f'SELECT TYPEOF("{quoted_geom}") FROM ({query}) LIMIT 1'
-        ).fetchone()
-        duckdb_type = type_result[0] if type_result else None
-        needs_wkb_conversion = duckdb_type == "GEOMETRY"
+        # Check geometry type and prepare SQL
+        _, final_sql = _check_geometry_type(con, query, geometry_column, verbose)
 
-        if verbose:
-            if needs_wkb_conversion:
-                debug(f"Geometry column is {duckdb_type}, wrapping with WKB conversion")
-            else:
-                debug(f"Geometry column is {duckdb_type}, no conversion needed")
-
-        final_sql = query
-        if needs_wkb_conversion:
-            final_sql = _wrap_query_with_wkb_conversion(query, geometry_column, con)
-
+        # Determine version flags
         use_native_geometry = geoparquet_version in ("2.0", "parquet-geo-only")
         should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
 
-        precomputed_bbox = None
-        precomputed_geom_types = []
-
-        if should_add_geo_metadata:
-            # Pre-compute geometry types via SQL to get accurate types across all rows
-            if verbose:
-                debug("Pre-computing geometry types via SQL...")
-            precomputed_geom_types = compute_geometry_types_via_sql(con, query, geometry_column)
-
-            if use_native_geometry:
-                precomputed_bbox = self._compute_bbox_via_duckdb(
-                    con, query, geometry_column, verbose
-                )
+        # Pre-compute metadata
+        precomputed_bbox, precomputed_geom_types = self._precompute_metadata(
+            con, query, geometry_column, verbose, should_add_geo_metadata, use_native_geometry
+        )
 
         if verbose:
             debug(f"Executing query with batch size {batch_size:,}...")
@@ -128,40 +138,20 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 f"Available columns: {schema.names}"
             )
 
-        geo_meta = None
-        if should_add_geo_metadata:
-            bbox_info = {"has_bbox_column": False, "bbox_column_name": None}
+        # Build geo metadata
+        geo_meta = self._build_geo_metadata_for_query(
+            schema,
+            geometry_column,
+            original_metadata,
+            input_crs,
+            verbose,
+            version_config["metadata_version"],
+            should_add_geo_metadata,
+            precomputed_geom_types,
+            precomputed_bbox,
+        )
 
-            for name in schema.names:
-                if name in ["bbox", "bounds", "extent"] or name.endswith("_bbox"):
-                    field = schema.field(name)
-                    if hasattr(field.type, "names") and set(field.type.names) >= {
-                        "xmin",
-                        "ymin",
-                        "xmax",
-                        "ymax",
-                    }:
-                        bbox_info = {"has_bbox_column": True, "bbox_column_name": name}
-                        break
-
-            geo_meta = create_geo_metadata(
-                original_metadata=original_metadata,
-                geom_col=geometry_column,
-                bbox_info=bbox_info,
-                custom_metadata=None,
-                verbose=verbose,
-                version=metadata_version,
-            )
-
-            if input_crs and not is_default_crs(input_crs):
-                geo_meta["columns"][geometry_column]["crs"] = input_crs
-
-            geo_meta["columns"][geometry_column]["encoding"] = "WKB"
-            geo_meta["columns"][geometry_column]["geometry_types"] = precomputed_geom_types
-
-            if precomputed_bbox is not None:
-                geo_meta["columns"][geometry_column]["bbox"] = precomputed_bbox
-
+        # Prepare writer kwargs
         writer_kwargs = {"compression": validated_compression or "NONE"}
         if validated_level is not None and validated_compression:
             writer_kwargs["compression_level"] = validated_level
@@ -169,23 +159,111 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         if verbose:
             progress(f"Streaming to {output_path}...")
 
+        # Stream batches to file
+        self._stream_batches_to_file(
+            reader,
+            output_path,
+            schema,
+            geometry_column,
+            geo_meta,
+            use_native_geometry,
+            input_crs,
+            precomputed_geom_types,
+            writer_kwargs,
+            verbose,
+        )
+
+    def _precompute_metadata(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        query: str,
+        geometry_column: str,
+        verbose: bool,
+        should_add_geo_metadata: bool,
+        use_native_geometry: bool,
+    ) -> tuple[list[float] | None, list[str]]:
+        """Pre-compute bbox and geometry types via SQL."""
+        from geoparquet_io.core.common import compute_geometry_types_via_sql
+
+        if not should_add_geo_metadata:
+            return None, []
+
+        if verbose:
+            debug("Pre-computing geometry types via SQL...")
+        geom_types = compute_geometry_types_via_sql(con, query, geometry_column)
+
+        bbox = None
+        if use_native_geometry:
+            bbox = self._compute_bbox_via_duckdb(con, query, geometry_column, verbose)
+
+        return bbox, geom_types
+
+    def _build_geo_metadata_for_query(
+        self,
+        schema: pa.Schema,
+        geometry_column: str,
+        original_metadata: dict | None,
+        input_crs: dict | None,
+        verbose: bool,
+        metadata_version: str,
+        should_add_geo_metadata: bool,
+        precomputed_geom_types: list[str],
+        precomputed_bbox: list[float] | None,
+    ) -> dict | None:
+        """Build geo metadata for query results."""
+        from geoparquet_io.core.common import create_geo_metadata, is_default_crs
+
+        if not should_add_geo_metadata:
+            return None
+
+        bbox_info = _detect_bbox_column(schema)
+        geo_meta = create_geo_metadata(
+            original_metadata=original_metadata,
+            geom_col=geometry_column,
+            bbox_info=bbox_info,
+            custom_metadata=None,
+            verbose=verbose,
+            version=metadata_version,
+        )
+
+        col_meta = geo_meta["columns"][geometry_column]
+        if input_crs and not is_default_crs(input_crs):
+            col_meta["crs"] = input_crs
+        col_meta["encoding"] = "WKB"
+        col_meta["geometry_types"] = precomputed_geom_types
+        if precomputed_bbox is not None:
+            col_meta["bbox"] = precomputed_bbox
+
+        return geo_meta
+
+    def _stream_batches_to_file(
+        self,
+        reader,
+        output_path: str,
+        schema: pa.Schema,
+        geometry_column: str,
+        geo_meta: dict | None,
+        use_native_geometry: bool,
+        input_crs: dict | None,
+        precomputed_geom_types: list[str],
+        writer_kwargs: dict,
+        verbose: bool,
+    ) -> None:
+        """Stream batches from reader to Parquet file."""
         first_batch = None
         try:
             first_batch = next(iter(reader))
         except StopIteration:
-            schema_with_meta = self._build_streaming_schema(
-                schema=schema,
-                geometry_column=geometry_column,
-                geo_meta=geo_meta,
-                use_native_geometry=use_native_geometry,
-                input_crs=input_crs,
-                geom_types=[],
-                verbose=verbose,
+            self._write_empty_result(
+                output_path,
+                schema,
+                geometry_column,
+                geo_meta,
+                use_native_geometry,
+                input_crs,
+                writer_kwargs,
+                verbose,
             )
-            with pq.ParquetWriter(output_path, schema_with_meta, **writer_kwargs) as writer:
-                pass
-            if verbose:
-                success("Wrote 0 rows (empty result)")
             return
 
         schema_with_meta = self._build_streaming_schema(
@@ -203,10 +281,65 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             col_index = schema_with_meta.get_field_index(geometry_column)
             geoarrow_type = schema_with_meta.field(col_index).type
 
+        rows_written, batches_written = self._write_all_batches(
+            output_path,
+            schema_with_meta,
+            first_batch,
+            reader,
+            geometry_column,
+            geoarrow_type,
+            use_native_geometry,
+            writer_kwargs,
+            verbose,
+        )
+
+        if verbose:
+            success(f"Wrote {rows_written:,} rows in {batches_written} row groups")
+
+    def _write_empty_result(
+        self,
+        output_path: str,
+        schema: pa.Schema,
+        geometry_column: str,
+        geo_meta: dict | None,
+        use_native_geometry: bool,
+        input_crs: dict | None,
+        writer_kwargs: dict,
+        verbose: bool,
+    ) -> None:
+        """Handle writing an empty result set."""
+        schema_with_meta = self._build_streaming_schema(
+            schema=schema,
+            geometry_column=geometry_column,
+            geo_meta=geo_meta,
+            use_native_geometry=use_native_geometry,
+            input_crs=input_crs,
+            geom_types=[],
+            verbose=verbose,
+        )
+        with pq.ParquetWriter(output_path, schema_with_meta, **writer_kwargs):
+            pass
+        if verbose:
+            success("Wrote 0 rows (empty result)")
+
+    def _write_all_batches(
+        self,
+        output_path: str,
+        schema_with_meta: pa.Schema,
+        first_batch: pa.RecordBatch,
+        reader,
+        geometry_column: str,
+        geoarrow_type,
+        use_native_geometry: bool,
+        writer_kwargs: dict,
+        verbose: bool,
+    ) -> tuple[int, int]:
+        """Write all batches to Parquet file. Returns (rows_written, batches_written)."""
         rows_written = 0
         batches_written = 0
 
         with pq.ParquetWriter(output_path, schema_with_meta, **writer_kwargs) as writer:
+            # Write first batch
             if use_native_geometry:
                 first_batch = self._convert_batch_to_geoarrow(
                     first_batch, geometry_column, geoarrow_type, schema_with_meta
@@ -216,6 +349,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             rows_written += first_batch.num_rows
             batches_written += 1
 
+            # Write remaining batches
             for batch in reader:
                 if use_native_geometry:
                     batch = self._convert_batch_to_geoarrow(
@@ -229,8 +363,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 if verbose and batches_written % 10 == 0:
                     debug(f"Written {rows_written:,} rows in {batches_written} batches...")
 
-        if verbose:
-            success(f"Wrote {rows_written:,} rows in {batches_written} row groups")
+        return rows_written, batches_written
 
     def write_from_table(
         self,

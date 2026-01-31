@@ -796,6 +796,116 @@ def get_column_statistics(
         con.close()
 
 
+def _print_bbox(console: Console, bbox: list) -> None:
+    """Print bbox in consistent format."""
+    if len(bbox) == 4:
+        console.print(
+            f"Bbox: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
+        )
+    else:
+        console.print(f"Bbox: [cyan]{bbox}[/cyan]")
+
+
+def _print_geo_info(console: Console, geo_info: dict[str, Any]) -> None:
+    """Print CRS, geometry types, and bbox from geo_info."""
+    crs_display = _format_crs_for_display(geo_info["crs"])
+    console.print(f"CRS: [cyan]{crs_display}[/cyan]")
+
+    if geo_info.get("geometry_types"):
+        geom_types = ", ".join(geo_info["geometry_types"])
+        console.print(f"Geometry Types: [cyan]{geom_types}[/cyan]")
+
+    if geo_info["bbox"]:
+        _print_bbox(console, geo_info["bbox"])
+
+
+def _print_geo_metadata_section(console: Console, geo_info: dict[str, Any]) -> None:
+    """Print geo metadata section based on what's available."""
+    parquet_type = geo_info.get("parquet_type", "No Parquet geo logical type")
+
+    if geo_info["has_geo_metadata"]:
+        if geo_info.get("version"):
+            console.print(f"GeoParquet Version: [cyan]{geo_info['version']}[/cyan]")
+        _print_geo_info(console, geo_info)
+    elif parquet_type in ("Geometry", "Geography"):
+        console.print("[dim]No GeoParquet metadata (using Parquet geo type)[/dim]")
+        _print_geo_info(console, geo_info)
+    else:
+        console.print("[yellow]No GeoParquet metadata found[/yellow]")
+
+
+def _create_columns_table(columns_info: list[dict[str, Any]]) -> Table:
+    """Create the columns table."""
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Name", style="white")
+    table.add_column("Type", style="blue")
+
+    for col in columns_info:
+        name = col["name"]
+        if col["is_geometry"]:
+            name_display = Text(f"{name} 🌍", style="cyan bold")
+        else:
+            name_display = name
+        table.add_row(name_display, col["type"])
+
+    return table
+
+
+def _create_preview_table(
+    preview_table: pa.Table,
+    columns_info: list[dict[str, Any]],
+) -> Table:
+    """Create the preview data table."""
+    preview = Table(show_header=True, header_style="bold")
+    for col in columns_info:
+        preview.add_column(col["name"], style="white", overflow="fold")
+
+    for i in range(preview_table.num_rows):
+        row_data = [
+            format_value_for_display(
+                preview_table.column(col["name"])[i].as_py(),
+                col["type"],
+                col["is_geometry"],
+            )
+            for col in columns_info
+        ]
+        preview.add_row(*row_data)
+
+    return preview
+
+
+def _truncate_stat_value(value: Any) -> str:
+    """Truncate stat value for display."""
+    value_str = str(value) if value is not None else "-"
+    return value_str[:17] + "..." if len(value_str) > 20 else value_str
+
+
+def _create_stats_table(
+    columns_info: list[dict[str, Any]],
+    stats: dict[str, dict[str, Any]],
+) -> Table:
+    """Create the statistics table."""
+    stats_table = Table(show_header=True, header_style="bold")
+    stats_table.add_column("Column", style="white")
+    stats_table.add_column("Nulls", style="yellow")
+    stats_table.add_column("Min", style="blue")
+    stats_table.add_column("Max", style="blue")
+    stats_table.add_column("Unique", style="green")
+
+    for col in columns_info:
+        col_stats = stats.get(col["name"], {})
+        unique = col_stats.get("unique")
+        stats_table.add_row(
+            col["name"],
+            f"{col_stats.get('nulls', 0):,}",
+            _truncate_stat_value(col_stats.get("min")),
+            _truncate_stat_value(col_stats.get("max")),
+            f"~{unique:,}" if unique is not None else "-",
+        )
+
+    return stats_table
+
+
 def format_terminal_output(
     file_info: dict[str, Any],
     geo_info: dict[str, Any],
@@ -823,163 +933,42 @@ def format_terminal_output(
     console.print(f"📄 [bold]{file_name}[/bold] ({file_info['size_human']})")
     console.print("━" * 60)
 
-    # Metadata section
+    # File metadata
     console.print(f"Rows: [cyan]{file_info['rows']:,}[/cyan]")
     console.print(f"Row Groups: [cyan]{file_info['row_groups']}[/cyan]")
-
-    # Compression
     if file_info.get("compression"):
         console.print(f"Compression: [cyan]{file_info['compression']}[/cyan]")
 
-    # Parquet type (new field)
+    # Parquet type
     parquet_type = geo_info.get("parquet_type", "No Parquet geo logical type")
-    if parquet_type in ("Geometry", "Geography"):
-        console.print(f"Parquet Type: [cyan]{parquet_type}[/cyan]")
-    else:
-        console.print(f"Parquet Type: [dim]{parquet_type}[/dim]")
+    style = "cyan" if parquet_type in ("Geometry", "Geography") else "dim"
+    console.print(f"Parquet Type: [{style}]{parquet_type}[/{style}]")
 
-    if geo_info["has_geo_metadata"]:
-        # GeoParquet version
-        if geo_info.get("version"):
-            console.print(f"GeoParquet Version: [cyan]{geo_info['version']}[/cyan]")
+    # Geo metadata section
+    _print_geo_metadata_section(console, geo_info)
 
-        crs_display = _format_crs_for_display(geo_info["crs"])
-        console.print(f"CRS: [cyan]{crs_display}[/cyan]")
-
-        # Geometry types (if available)
-        if geo_info.get("geometry_types"):
-            geom_types = ", ".join(geo_info["geometry_types"])
-            console.print(f"Geometry Types: [cyan]{geom_types}[/cyan]")
-
-        if geo_info["bbox"]:
-            bbox = geo_info["bbox"]
-            if len(bbox) == 4:
-                console.print(
-                    f"Bbox: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
-                )
-            else:
-                console.print(f"Bbox: [cyan]{bbox}[/cyan]")
-    elif parquet_type in ("Geometry", "Geography"):
-        # Has Parquet geo type but no GeoParquet metadata
-        console.print("[dim]No GeoParquet metadata (using Parquet geo type)[/dim]")
-        crs_display = _format_crs_for_display(geo_info["crs"])
-        console.print(f"CRS: [cyan]{crs_display}[/cyan]")
-
-        # Geometry types from native Parquet geo stats
-        if geo_info.get("geometry_types"):
-            geom_types = ", ".join(geo_info["geometry_types"])
-            console.print(f"Geometry Types: [cyan]{geom_types}[/cyan]")
-
-        # Display bbox from native geo stats
-        if geo_info["bbox"]:
-            bbox = geo_info["bbox"]
-            if len(bbox) == 4:
-                console.print(
-                    f"Bbox: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
-                )
-            else:
-                console.print(f"Bbox: [cyan]{bbox}[/cyan]")
-    else:
-        console.print("[yellow]No GeoParquet metadata found[/yellow]")
-
-    # Display warnings for metadata mismatches
-    warnings = geo_info.get("warnings", [])
-    if warnings:
-        console.print()
-        for warning in warnings:
-            console.print(f"[yellow]⚠ {warning}[/yellow]")
+    # Warnings
+    for warning in geo_info.get("warnings", []):
+        console.print(f"[yellow]⚠ {warning}[/yellow]")
 
     console.print()
 
     # Columns table
-    num_cols = len(columns_info)
-    console.print(f"Columns ({num_cols}):")
-
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Name", style="white")
-    table.add_column("Type", style="blue")
-
-    for col in columns_info:
-        name = col["name"]
-        if col["is_geometry"]:
-            name = f"{name} 🌍"
-            name_display = Text(name, style="cyan bold")
-        else:
-            name_display = name
-
-        table.add_row(name_display, col["type"])
-
-    console.print(table)
+    console.print(f"Columns ({len(columns_info)}):")
+    console.print(_create_columns_table(columns_info))
 
     # Preview table
     if preview_table is not None and preview_table.num_rows > 0:
         console.print()
-        preview_label = (
-            f"Preview (first {preview_table.num_rows} rows)"
-            if preview_mode == "head"
-            else f"Preview (last {preview_table.num_rows} rows)"
-        )
-        console.print(f"{preview_label}:")
-
-        # Create preview table
-        preview = Table(show_header=True, header_style="bold")
-
-        # Add columns
-        for col in columns_info:
-            preview.add_column(col["name"], style="white", overflow="fold")
-
-        # Add rows
-        for i in range(preview_table.num_rows):
-            row_data = []
-            for col in columns_info:
-                value = preview_table.column(col["name"])[i].as_py()
-                formatted = format_value_for_display(value, col["type"], col["is_geometry"])
-                row_data.append(formatted)
-            preview.add_row(*row_data)
-
-        console.print(preview)
+        label = "first" if preview_mode == "head" else "last"
+        console.print(f"Preview ({label} {preview_table.num_rows} rows):")
+        console.print(_create_preview_table(preview_table, columns_info))
 
     # Statistics table
     if stats:
         console.print()
         console.print("Statistics:")
-
-        stats_table = Table(show_header=True, header_style="bold")
-        stats_table.add_column("Column", style="white")
-        stats_table.add_column("Nulls", style="yellow")
-        stats_table.add_column("Min", style="blue")
-        stats_table.add_column("Max", style="blue")
-        stats_table.add_column("Unique", style="green")
-
-        for col in columns_info:
-            col_name = col["name"]
-            col_stats = stats.get(col_name, {})
-
-            nulls = col_stats.get("nulls", 0)
-            min_val = col_stats.get("min")
-            max_val = col_stats.get("max")
-            unique = col_stats.get("unique")
-
-            # Format values
-            min_str = str(min_val) if min_val is not None else "-"
-            max_str = str(max_val) if max_val is not None else "-"
-            unique_str = f"~{unique:,}" if unique is not None else "-"
-
-            # Truncate long values
-            if len(min_str) > 20:
-                min_str = min_str[:17] + "..."
-            if len(max_str) > 20:
-                max_str = max_str[:17] + "..."
-
-            stats_table.add_row(
-                col_name,
-                f"{nulls:,}",
-                min_str,
-                max_str,
-                unique_str,
-            )
-
-        console.print(stats_table)
+        console.print(_create_stats_table(columns_info, stats))
 
     console.print()
 
