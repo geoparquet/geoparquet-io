@@ -39,6 +39,16 @@ FAST_PAGES = frozenset({"sort.md", "piping.md", "check.md"})
 #: prompting or hanging command from wedging CI, not to police runtimes.
 BLOCK_TIMEOUT_SECONDS = 120
 
+#: Ceiling for a ``network``-marked example, which has to finish a real download
+#: before it can run anything. The largest of these is the GAUL boundary
+#: dataset at ~724 MB: at a pessimistic-but-plausible 2 MB/s that is six
+#: minutes, so 120 s could never have been enough and the block could only ever
+#: time out (#894). 600 s clears that fetch with headroom while still capping a
+#: genuinely wedged command. It applies only to blocks that opted into the
+#: network lane; every other block keeps the 120 s default, so a hanging local
+#: example still fails fast.
+NETWORK_BLOCK_TIMEOUT_SECONDS = 600
+
 
 def find_bash() -> str | None:
     """Locate a bash that can actually run scripts, or ``None``.
@@ -145,7 +155,7 @@ class DocExampleItem(pytest.Item):
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=BLOCK_TIMEOUT_SECONDS,
+                timeout=block_timeout(self.block),
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
@@ -193,12 +203,31 @@ class DocExampleFailure(Exception):
             parts += ["", "--- stdout ---", _tail(self.stdout)]
         if self.stderr.strip():
             parts += ["", "--- stderr ---", _tail(self.stderr)]
-        parts += [
-            "",
-            "Fix the example, or mark it in the doc with an HTML comment on the",
-            'line above the fence, e.g. <!-- doctest: skip="needs credentials" -->.',
-        ]
+        parts += ["", *self._advice()]
         return "\n".join(parts)
+
+    def _advice(self) -> list[str]:
+        """Closing lines: what the reader should actually do about this failure.
+
+        A network block failing is usually not a documentation error — it is a
+        real download that did not happen — so say that instead of pointing at
+        the doc, which has sent more than one reader hunting for a broken
+        example that was fine (#894).
+        """
+        if not self.block.directives.network:
+            return [
+                "Fix the example, or mark it in the doc with an HTML comment on the",
+                'line above the fence, e.g. <!-- doctest: skip="needs credentials" -->.',
+            ]
+        return [
+            "This block is marked <!-- doctest: network -->: it needs the internet",
+            "and a real download (the boundary datasets run to hundreds of MB), so",
+            "it runs only in the network lane and only against live third-party",
+            "services. A failure here usually means the download was slow, blocked",
+            "or unavailable — not that the documented command is wrong. Check the",
+            "network before editing the doc, and note that the whole docs lane is",
+            'meant to be run as -m "docs_example and not network".',
+        ]
 
 
 #: Shell syntax that makes "one line, one independent command" untrue. A menu
@@ -261,6 +290,17 @@ def check_menu_is_splittable(source: str) -> str | None:
             f"({match.group(0).strip()!r}); the lines are a script, not a menu"
         )
     return None
+
+
+def block_timeout(block: Block) -> int:
+    """Seconds this block gets before it is killed.
+
+    A module-level function rather than a method so the choice is testable
+    without building a pytest item around a fence.
+    """
+    if block.directives.network:
+        return NETWORK_BLOCK_TIMEOUT_SECONDS
+    return BLOCK_TIMEOUT_SECONDS
 
 
 def _is_slow(block: Block) -> bool:

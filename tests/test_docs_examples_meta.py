@@ -65,6 +65,31 @@ _MUTATES_ENVIRONMENT = re.compile(
     r"|rm\s+-[a-z]*rf?\s+[~/])"
 )
 
+#: Commands that cannot run without the internet. Each downloads a boundary
+#: dataset or reads a remote object; the largest is a 724 MB GAUL fetch, so an
+#: unmarked one does not fail fast — it sits in the default lane until the
+#: block timeout fires, and reads as a flaky doc error rather than as "this
+#: needs the network lane" (#894).
+#:
+#: Matching is per line of a bash fence, against the same source the harness
+#: would execute.
+_NEEDS_NETWORK = {
+    # Downloads GAUL/Overture administrative boundaries to tag each row.
+    "gpio add admin-divisions": re.compile(r"^\s*gpio\s+add\s+admin-divisions\b"),
+    # Same download, then splits the file by the boundaries it fetched.
+    "gpio partition admin": re.compile(r"^\s*gpio\s+partition\s+admin\b"),
+    # Aggregates into Overture administrative regions; fetches them first.
+    "gpio process aggregate admin": re.compile(r"^\s*gpio\s+process\s+aggregate\s+admin\b"),
+    # Resolves ISO country codes against the remote boundary dataset.
+    "--country-codes": re.compile(r"--country-codes\b"),
+    # Names the remote boundary dataset for any of the commands above.
+    "--dataset gaul/overture": re.compile(r"--dataset[= ]\s*(gaul|overture)\b"),
+    # Reads a hosted GeoParquet over https/S3 (Source Cooperative).
+    "source.coop": re.compile(r"\bdata\.source\.coop\b"),
+    # The upstream Overture CLI, which streams from their S3 bucket.
+    "overturemaps": re.compile(r"\boverturemaps\b"),
+}
+
 GUIDE_PAGES = sorted(GUIDE_DIR.glob("*.md"))
 
 
@@ -188,6 +213,33 @@ def test_no_runnable_fence_mutates_the_real_environment(page: Path):
         "Runnable fence(s) contain commands that mutate the real environment:\n  "
         + "\n  ".join(offenders)
         + '\nMark the fence <!-- doctest: skip="..." --> so the harness never runs it.'
+    )
+
+
+@pytest.mark.parametrize("page", GUIDE_PAGES, ids=lambda p: p.name)
+def test_network_fences_carry_the_network_directive(page: Path):
+    """A fence that downloads boundaries must be deselected by ``-m "not network"``.
+
+    Without the directive the block runs in the default lane, where it has 120
+    seconds to fetch hundreds of megabytes. It cannot, so it fails — and the
+    number of such failures drifts run to run with the state of the boundary
+    cache, which makes the whole docs lane read as flaky (#894). ``skip`` also
+    satisfies this: a block that never runs cannot download anything.
+    """
+    offenders = [
+        f"{block.path.name}:{block.line}: matched {name!r} in {line.strip()!r}"
+        for block in iter_fences(page, DOCS_ROOT)
+        if block.lang == "bash" and not (block.directives.network or block.directives.skip)
+        for line in block.source.split("\n")
+        for name, pattern in _NEEDS_NETWORK.items()
+        if pattern.search(line)
+    ]
+    assert not offenders, (
+        "Fence(s) needing the network but not marked for the network lane:\n  "
+        + "\n  ".join(offenders)
+        + "\nPut <!-- doctest: network --> on the line above the fence so it runs"
+        ' only in the network CI lane, or <!-- doctest: skip="why" --> if it'
+        " cannot run at all."
     )
 
 

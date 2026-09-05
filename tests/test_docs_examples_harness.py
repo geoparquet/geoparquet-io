@@ -13,6 +13,10 @@ from __future__ import annotations
 import pytest
 
 from tests.docs_examples.collector import (
+    BLOCK_TIMEOUT_SECONDS,
+    NETWORK_BLOCK_TIMEOUT_SECONDS,
+    DocExampleFailure,
+    block_timeout,
     check_menu_is_splittable,
     menu_refusal_reason,
     split_statements,
@@ -217,6 +221,43 @@ def test_menu_on_a_plain_bash_list_is_allowed():
 
 def test_menu_refusal_is_none_without_the_directive():
     assert menu_refusal_reason("bash", "for f in *; do :; done", parse_directives("slow")) is None
+
+
+def _block(tmp_path, directive: str):
+    """One bash block carrying ``directive``, parsed the way the collector sees it."""
+    comment = f"<!-- doctest: {directive} -->\n" if directive else ""
+    page = _write(
+        tmp_path, "t.md", f"{comment}```bash\ngpio partition admin input.parquet out/\n```\n"
+    )
+    (block,) = iter_blocks(page, tmp_path)
+    return block
+
+
+def test_network_blocks_get_the_longer_timeout(tmp_path):
+    """120 s cannot cover a 724 MB boundary download; the network lane gets 600 s."""
+    assert block_timeout(_block(tmp_path, "network")) == NETWORK_BLOCK_TIMEOUT_SECONDS
+    assert NETWORK_BLOCK_TIMEOUT_SECONDS > BLOCK_TIMEOUT_SECONDS
+
+
+def test_ordinary_blocks_keep_the_short_timeout(tmp_path):
+    """A hanging local example must still fail fast — the bump is network-only."""
+    assert block_timeout(_block(tmp_path, "")) == BLOCK_TIMEOUT_SECONDS
+    assert block_timeout(_block(tmp_path, "slow")) == BLOCK_TIMEOUT_SECONDS
+
+
+def test_a_network_failure_reads_as_a_download_not_a_doc_error(tmp_path):
+    """The closing advice is the part a reader acts on, so it has to be right."""
+    block = _block(tmp_path, "network")
+    message = str(DocExampleFailure(block, "block", "gpio ...", -1, "", "timed out after 600s"))
+    assert "needs the internet" in message
+    assert 'doctest: skip="needs credentials"' not in message
+
+
+def test_a_local_failure_still_points_at_the_doc(tmp_path):
+    block = _block(tmp_path, "")
+    message = str(DocExampleFailure(block, "block", "gpio ...", 1, "", "boom"))
+    assert 'doctest: skip="needs credentials"' in message
+    assert "needs the internet" not in message
 
 
 def test_end_line_points_at_the_closing_fence(tmp_path):

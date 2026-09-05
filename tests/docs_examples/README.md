@@ -9,6 +9,12 @@ uv run pytest "docs/guide/sort.md"               # one page
 uv run pytest "docs/guide/sort.md::guide/sort.md:L14[bash]"   # one block
 ```
 
+**Keep the `-m "not network"`.** Dropping it adds 29 blocks that download
+hundreds of megabytes of administrative boundaries from live services. Those
+belong to the network CI lane; run without the filter and you get a dozen or so
+timeouts whose count drifts with the state of your boundary cache, which looks
+like a flaky docs lane and is not.
+
 Each block runs in its own throwaway directory, seeded from
 `tests/data/canonical/` under the placeholder names the guides already use —
 `input.parquet`, `data.parquet`, `buildings.parquet`, `places.geojson`,
@@ -31,7 +37,7 @@ gpio add bbox s3://bucket/in.parquet s3://bucket/out.parquet
 | Directive | Effect |
 |---|---|
 | `skip="reason"` | Not executed. **The reason is required** and must be true of the whole fence. |
-| `network` | Runs only in the network CI lane (`-m network`). |
+| `network` | Runs only in the network CI lane (`-m network`), with a 600 s block timeout instead of the usual 120 s — a boundary download cannot finish in two minutes. Required on any fence that needs the internet; the meta-test checks the known ones. |
 | `slow` / `fast` | Force the block out of / into the fast suite, whatever page it is on. |
 | `needs-tippecanoe` | Skipped when `tippecanoe` is not installed. Use it for anything piping to tippecanoe or calling `gpio pmtiles`. |
 | `needs-ogr` | Skipped when `ogr2ogr` is not installed. |
@@ -53,6 +59,9 @@ Combine with commas: `<!-- doctest: network, setup="gpio add bbox in.parquet out
 - a directive is misspelled or malformed;
 - a block is skipped without a reason;
 - a command-shaped snippet hides in a prose fence with no directive;
+- a fence runs a command that cannot work without the internet (`gpio add
+  admin-divisions`, `gpio partition admin`, `gpio process aggregate admin`,
+  `--dataset gaul`, a `source.coop` URL, …) without `network` or `skip`;
 - the number of opted-out blocks drifts past the agreed ceiling.
 
 `tests/test_docs_examples_coverage.py` (slow lane) adds the expensive one: it

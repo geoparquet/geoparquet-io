@@ -787,6 +787,7 @@ output/
 
 Add `--prefix NAME` to prepend a custom prefix to partition filenames:
 
+<!-- doctest: network -->
 ```bash
 # Standard: fields_USA.parquet, fields_Kenya.parquet
 gpio partition admin input.parquet output/ --dataset gaul --levels country --prefix fields

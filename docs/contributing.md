@@ -138,6 +138,11 @@ to the next person.
 uv run pytest docs/guide -n 4 -m "not network"   # run the guides' examples
 ```
 
+Keep the `-m "not network"`. Without it the run also picks up the 29 blocks
+marked `network`, each of which downloads hundreds of megabytes of
+administrative boundaries from a live service; they belong to the network CI
+lane, and locally they mostly just time out.
+
 ## Code Quality
 
 `.pre-commit-config.yaml` is the **single source of truth** for every quality

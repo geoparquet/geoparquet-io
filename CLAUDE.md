@@ -190,6 +190,11 @@ not all: commitizen is a `commit-msg`-stage hook and mutmut has no hook, so
 | `@pytest.mark.docs_example` | a fenced example block executed out of docs/guide/*.md |
 <!-- END GENERATED: test-markers -->
 
+Run the docs lane as `uv run pytest docs/guide -n 4 -m "not network"`. The bare
+form also collects the 29 `network` blocks, which each download hundreds of MB
+of administrative boundaries from a live service — they belong to the network CI
+lane, and locally they time out and read as a flaky docs lane.
+
 ---
 
 ## Code Quality
