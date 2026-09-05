@@ -1331,17 +1331,17 @@ def _bbox_xy(bbox: list) -> tuple | None:
     return bbox[0], bbox[1], bbox[half], bbox[half + 1]
 
 
-def _x_within_sql(xmin_expr: str, xmax_expr: str, xmin, xmax) -> str:
-    """SQL predicate: the [xmin_expr, xmax_expr] range lies within the bbox X range.
+def _x_within_sql(geom_expr: str, xmin, xmax) -> str:
+    """SQL predicate: every X of the geometry lies within the bbox X range.
 
-    When xmin > xmax the bbox crosses the antimeridian (RFC 7946, 5.2) and a
-    geometry is outside only if one of its X extremes falls in the gap (xmax, xmin).
+    When xmin > xmax the bbox crosses the antimeridian (RFC 7946, 5.2): the
+    allowed longitudes are [xmin, 180] and [-180, xmax], checked per vertex.
     """
     if xmin <= xmax:
-        return f"{xmin_expr} >= {xmin} AND {xmax_expr} <= {xmax}"
+        return f"ST_XMin({geom_expr}) >= {xmin} AND ST_XMax({geom_expr}) <= {xmax}"
     return (
-        f"NOT ({xmin_expr} > {xmax} AND {xmin_expr} < {xmin}) AND "
-        f"NOT ({xmax_expr} > {xmax} AND {xmax_expr} < {xmin})"
+        f"list_bool_and([ST_X(p.geom) <= {xmax} OR ST_X(p.geom) >= {xmin} "
+        f"FOR p IN ST_Dump(ST_Points({geom_expr}))])"
     )
 
 
@@ -1374,8 +1374,8 @@ def _build_bbox_query(
         return f"""
             SELECT COUNT(*) as total,
                    COUNT(CASE WHEN
-                       {_x_within_sql("xmin", "xmax", xmin, xmax)} AND
-                       ymin >= {ymin} AND ymax <= {ymax}
+                       xmin >= {xmin} AND ymin >= {ymin} AND
+                       xmax <= {xmax} AND ymax <= {ymax}
                    THEN 1 END) as within_bbox
             FROM ({_geoarrow_bounds_subquery(safe_url, geom_col, encoding, limit_clause)})
         """
@@ -1392,7 +1392,7 @@ def _build_bbox_query(
     return f"""
         SELECT COUNT(*) as total,
                COUNT(CASE WHEN
-                   {_x_within_sql(f"ST_XMin({geom_expr})", f"ST_XMax({geom_expr})", xmin, xmax)} AND
+                   {_x_within_sql(geom_expr, xmin, xmax)} AND
                    ST_YMin({geom_expr}) >= {ymin} AND
                    ST_YMax({geom_expr}) <= {ymax}
                THEN 1 END) as within_bbox
@@ -1477,6 +1477,13 @@ def _check_bbox_contains_data(
             name=f"bbox_contains_data_{geom_col}",
             status=CheckStatus.SKIPPED,
             message=f"bbox has {len(bbox)} elements, expected 4, 6 or 8; skipping data check",
+            category="data_validation",
+        )
+    if xy[0] > xy[2] and _is_geoarrow_encoding(encoding):
+        return ValidationCheck(
+            name=f"bbox_contains_data_{geom_col}",
+            status=CheckStatus.SKIPPED,
+            message="antimeridian-crossing bbox is not checked for GeoArrow encodings",
             category="data_validation",
         )
 

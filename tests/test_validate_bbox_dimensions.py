@@ -110,6 +110,27 @@ class TestBboxContainsData:
         assert check.status == CheckStatus.FAILED
         assert "1 of 2" in check.message
 
+    def test_antimeridian_bbox_checks_every_vertex(self, tmp_path, con):
+        # X extremes sit in the two lobes, but the middle vertex is in the gap
+        path = _write_v2(tmp_path / "gap.parquet", ["MULTIPOINT (175 0, -175 0, 0 0)"])
+        check = _check_bbox_contains_data(str(path), "geometry", [170, -10, -170, 10], con, 0)
+        assert check.status == CheckStatus.FAILED
+        assert "1 of 1" in check.message
+
+    def test_invalid_length_skips_data_check(self, xyz_file, con):
+        check = _check_bbox_contains_data(str(xyz_file), "geometry", [0, 0, 0, 5, 5], con, 0)
+        assert check.status == CheckStatus.SKIPPED
+        assert "expected 4, 6 or 8" in check.message
+
+    def test_geoarrow_encoding(self, con):
+        path = "tests/data/data-polygon-encoding_native.parquet"
+        wide = _check_bbox_contains_data(
+            path, "geometry", [-180, -90, -1, 180, 90, 1], con, 0, "polygon"
+        )
+        assert wide.status == CheckStatus.PASSED, wide.message
+        wrap = _check_bbox_contains_data(path, "geometry", [170, -90, -170, 90], con, 0, "polygon")
+        assert wrap.status == CheckStatus.SKIPPED
+
     def test_full_validation_of_xyz_file_passes_bbox_checks(self, xyz_file):
         result = validate_geoparquet(str(xyz_file))
         bbox_checks = {c.name: c for c in result.checks if c.name.startswith("bbox_")}
