@@ -527,7 +527,7 @@ def _check_edges_spherical_on_projected_crs(
 
 
 def _check_bbox_valid(col_meta: dict, col_name: str) -> ValidationCheck:
-    """Check 12: optional 'bbox' must be an array of 4 or 6 numbers."""
+    """Check 12: optional 'bbox' must be an array of 4, 6 or 8 numbers."""
     bbox = col_meta.get("bbox")
 
     if bbox is None:
@@ -546,11 +546,11 @@ def _check_bbox_valid(col_meta: dict, col_name: str) -> ValidationCheck:
             category="column_metadata",
         )
 
-    if len(bbox) not in [4, 6]:
+    if len(bbox) not in [4, 6, 8]:
         return ValidationCheck(
             name=f"bbox_valid_{col_name}",
             status=CheckStatus.FAILED,
-            message=f'column "{col_name}" bbox must have 4 or 6 elements (got {len(bbox)})',
+            message=f'column "{col_name}" bbox must have 4, 6 or 8 elements (got {len(bbox)})',
             category="column_metadata",
         )
 
@@ -1362,6 +1362,28 @@ def _check_orientation_matches_data(
     )
 
 
+def _bbox_xy(bbox: list) -> tuple | None:
+    """(xmin, ymin, xmax, ymax) of a 4-, 6- or 8-element GeoParquet bbox; None otherwise."""
+    if len(bbox) not in (4, 6, 8):
+        return None
+    half = len(bbox) // 2
+    return bbox[0], bbox[1], bbox[half], bbox[half + 1]
+
+
+def _x_within_sql(geom_expr: str, xmin, xmax) -> str:
+    """SQL predicate: every X of the geometry lies within the bbox X range.
+
+    When xmin > xmax the bbox crosses the antimeridian (RFC 7946, 5.2): the
+    allowed longitudes are [xmin, 180] and [-180, xmax], checked per vertex.
+    """
+    if xmin <= xmax:
+        return f"ST_XMin({geom_expr}) >= {xmin} AND ST_XMax({geom_expr}) <= {xmax}"
+    return (
+        f"list_bool_and([ST_X(p.geom) <= {xmax} OR ST_X(p.geom) >= {xmin} "
+        f"FOR p IN ST_Dump(ST_Points({geom_expr}))])"
+    )
+
+
 def _build_bbox_query(
     safe_url: str,
     geom_col: str,
@@ -1409,9 +1431,8 @@ def _build_bbox_query(
     return f"""
         SELECT COUNT(*) as total,
                COUNT(CASE WHEN
-                   ST_XMin({geom_expr}) >= {xmin} AND
+                   {_x_within_sql(geom_expr, xmin, xmax)} AND
                    ST_YMin({geom_expr}) >= {ymin} AND
-                   ST_XMax({geom_expr}) <= {xmax} AND
                    ST_YMax({geom_expr}) <= {ymax}
                THEN 1 END) as within_bbox
         FROM (
@@ -1489,17 +1510,25 @@ def _check_bbox_contains_data(
     safe_url = safe_file_url(parquet_file, verbose=False)
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 
-    try:
-        # Check if DuckDB already has it as a GEOMETRY type
-        col_type = _describe_geom_type(con, safe_url, geom_col)
-
-        # NOTE: bbox[:4] mishandles the spec's 6-element 3D form
-        # [xmin,ymin,zmin,xmax,ymax,zmax], comparing against
-        # [xmin,ymin,zmin,xmax]. Pre-existing and equally wrong for WKB;
-        # tracked as #603 item 1 (same line), so it is not fixed here.
-        query = _build_bbox_query(
-            safe_url, geom_col, col_type, tuple(bbox[:4]), limit_clause, encoding
+    xy = _bbox_xy(bbox)
+    if xy is None:
+        return ValidationCheck(
+            name=f"bbox_contains_data_{geom_col}",
+            status=CheckStatus.SKIPPED,
+            message=f"bbox has {len(bbox)} elements, expected 4, 6 or 8; skipping data check",
+            category="data_validation",
         )
+    if xy[0] > xy[2] and _is_geoarrow_encoding(encoding):
+        return ValidationCheck(
+            name=f"bbox_contains_data_{geom_col}",
+            status=CheckStatus.SKIPPED,
+            message="antimeridian-crossing bbox is not checked for GeoArrow encodings",
+            category="data_validation",
+        )
+
+    try:
+        col_type = _describe_geom_type(con, safe_url, geom_col)
+        query = _build_bbox_query(safe_url, geom_col, col_type, xy, limit_clause, encoding)
         result = con.execute(query).fetchone()
         return _interpret_bbox_result(result, geom_col)
 
