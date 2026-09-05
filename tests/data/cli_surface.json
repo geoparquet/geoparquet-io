@@ -3411,6 +3411,22 @@
        "type": "integer"
       },
       {
+       "default": "0.7",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "min_efficiency",
+       "nargs": 1,
+       "opts": [
+        "--min-efficiency"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "float range[min=0.0,max=1.0,min_open=False,max_open=False,clamp=False]"
+      },
+      {
        "default": "False",
        "hidden": false,
        "is_flag": true,
@@ -3425,6 +3441,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "20",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "num_samples",
+       "nargs": 1,
+       "opts": [
+        "--num-samples"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer range[min=1,max=None,min_open=False,max_open=False,clamp=False]"
       },
       {
        "default": "<unset>",
@@ -3443,6 +3475,22 @@
        "type": "text"
       },
       {
+       "default": "0.1",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "query_fraction",
+       "nargs": 1,
+       "opts": [
+        "--query-fraction"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "float range[min=0.0,max=1.0,min_open=True,max_open=False,clamp=False]"
+      },
+      {
        "default": "100",
        "hidden": false,
        "is_flag": false,
@@ -3452,6 +3500,22 @@
        "nargs": 1,
        "opts": [
         "--random-sample-size"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer"
+      },
+      {
+       "default": "42",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "seed",
+       "nargs": 1,
+       "opts": [
+        "--seed"
        ],
        "param_type": "Option",
        "required": false,

@@ -2729,17 +2729,35 @@ class Table:
         results = self._with_temp_file(check_all, verbose=False, return_results=True, quiet=True)
         return CheckResult(results, check_type="all")
 
-    def check_spatial(self, sample_size: int = 100, limit_rows: int = 500000) -> CheckResult:
+    def check_spatial(
+        self,
+        sample_size: int = 100,
+        limit_rows: int = 500000,
+        query_fraction: float = 0.1,
+        num_samples: int = 20,
+        seed: int = 42,
+        min_efficiency: float = 0.7,
+    ) -> CheckResult:
         """
         Check if data is spatially ordered.
 
-        Compares distance between consecutive features vs random pairs.
-        A ratio < 0.5 indicates good spatial clustering.
+        For a file with per-row-group bbox statistics, the verdict is how well
+        those row groups let a reader skip work, as a fraction of what the file's
+        row-group count allows. Files without such statistics fall back to
+        comparing the distance between consecutive features against random pairs.
 
         Args:
-            sample_size: Number of random pairs to sample (default: 100)
+            sample_size: Number of random pairs to sample (default: 100).
+                Sampling fallback only.
             limit_rows: Maximum rows to analyze (default: 500000, matching
-                `gpio check spatial --limit-rows`)
+                `gpio check spatial --limit-rows`). Sampling fallback only.
+            query_fraction: Fraction of each dimension a sample query window
+                spans (default: 0.1).
+            num_samples: Number of sample query windows (default: 20).
+            seed: Random seed for the sample windows, for reproducibility.
+            min_efficiency: Minimum skip rate as a fraction of what this
+                row-group count allows (default: 0.7). 1.0 demands an ideal grid
+                tiling.
 
         Returns:
             CheckResult with spatial ordering analysis
@@ -2762,6 +2780,10 @@ class Table:
             verbose=False,
             return_results=True,
             quiet=True,
+            query_fraction=query_fraction,
+            num_samples=num_samples,
+            seed=seed,
+            efficiency_threshold=min_efficiency,
         )
         return CheckResult(results, check_type="spatial")
 
