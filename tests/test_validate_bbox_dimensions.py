@@ -30,6 +30,26 @@ def _declared_bbox(path):
     return geo["columns"]["geometry"]["bbox"]
 
 
+def _rewrite_geo(path, out_path, *, version=None, **column_updates):
+    """Copy a GeoParquet file with its geo metadata version/column fields edited."""
+    table = pq.read_table(path)
+    meta = dict(table.schema.metadata or {})
+    geo = json.loads(meta[b"geo"])
+    if version is not None:
+        geo["version"] = version
+    geo["columns"]["geometry"].update(column_updates)
+    meta[b"geo"] = json.dumps(geo).encode()
+    pq.write_table(table.replace_schema_metadata(meta), out_path)
+    return out_path
+
+
+UTM_33N = {
+    "type": "ProjectedCRS",
+    "name": "WGS 84 / UTM zone 33N",
+    "id": {"authority": "EPSG", "code": 32633},
+}
+
+
 @pytest.fixture
 def xyz_file(tmp_path):
     return _write_v2(
@@ -62,10 +82,22 @@ def con():
 
 
 class TestBboxValid:
-    @pytest.mark.parametrize("n", [4, 6, 8])
+    @pytest.mark.parametrize("n", [4, 6])
     def test_accepts_spec_lengths(self, n):
         check = _check_bbox_valid({"bbox": [float(i) for i in range(n)]}, "geometry")
         assert check.status == CheckStatus.PASSED, check.message
+
+    def test_accepts_xyzm_bbox_on_2_0(self):
+        check = _check_bbox_valid({"bbox": [float(i) for i in range(8)]}, "geometry", "2.0.0")
+        assert check.status == CheckStatus.PASSED, check.message
+
+    @pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+    def test_rejects_xyzm_bbox_below_2_0(self, version):
+        # The XYZM bbox is spec text only on the 2.0 line; the released 1.1.0
+        # schema allows only 4 or 6 elements.
+        check = _check_bbox_valid({"bbox": [float(i) for i in range(8)]}, "geometry", version)
+        assert check.status == CheckStatus.FAILED
+        assert "2.0" in check.message
 
     @pytest.mark.parametrize("n", [1, 2, 3, 5, 7, 9])
     def test_rejects_other_lengths(self, n):
@@ -103,6 +135,24 @@ class TestBboxContainsData:
             str(antimeridian_file), "geometry", [170, -10, -170, 10], con, 0
         )
         assert check.status == CheckStatus.PASSED, check.message
+        # The reinterpretation must never be invisible in the check output.
+        assert "antimeridian" in check.message
+
+    def test_wrap_bbox_on_projected_crs_fails(self, tmp_path, con):
+        # For a projected CRS xmin > xmax is not a wrap -- it is broken metadata,
+        # and the geometry must not be blessed by the wrap reading.
+        path = _write_v2(tmp_path / "proj.parquet", ["POINT (0 0)"])
+        check = _check_bbox_contains_data(
+            str(path), "geometry", [10, -10, 5, 10], con, 0, "WKB", crs=UTM_33N
+        )
+        assert check.status == CheckStatus.FAILED
+        assert "projected" in check.message.lower()
+
+    def test_wrap_fail_message_names_the_interpretation(self, tmp_path, con):
+        path = _write_v2(tmp_path / "gap2.parquet", ["POINT (0 0)"])
+        check = _check_bbox_contains_data(str(path), "geometry", [170, -10, -170, 10], con, 0)
+        assert check.status == CheckStatus.FAILED
+        assert "antimeridian" in check.message
 
     def test_antimeridian_bbox_excludes_geometry_in_the_gap(self, tmp_path, con):
         path = _write_v2(tmp_path / "gap.parquet", ["POINT (175 0)", "POINT (0 0)"])
@@ -122,6 +172,12 @@ class TestBboxContainsData:
         assert check.status == CheckStatus.SKIPPED
         assert "expected 4, 6 or 8" in check.message
 
+    def test_non_numeric_bbox_element_skips_data_check(self, xyz_file, con):
+        # A non-numeric metadata element must never reach the SQL f-string.
+        check = _check_bbox_contains_data(str(xyz_file), "geometry", [0, 0, "east", 5], con, 0)
+        assert check.status == CheckStatus.SKIPPED
+        assert "expected 4, 6 or 8" in check.message
+
     def test_geoarrow_encoding(self, con):
         path = "tests/data/data-polygon-encoding_native.parquet"
         wide = _check_bbox_contains_data(
@@ -130,6 +186,40 @@ class TestBboxContainsData:
         assert wide.status == CheckStatus.PASSED, wide.message
         wrap = _check_bbox_contains_data(path, "geometry", [170, -90, -170, 90], con, 0, "polygon")
         assert wrap.status == CheckStatus.SKIPPED
+
+    def test_full_validation_rejects_xyzm_bbox_on_1_1(self, xyz_file, tmp_path):
+        path = _rewrite_geo(
+            xyz_file,
+            tmp_path / "xyzm_11.parquet",
+            version="1.1.0",
+            bbox=[0.0, 0.0, 10.0, 0.0, 4.0, 4.0, 15.0, 0.0],
+        )
+        result = validate_geoparquet(str(path))
+        check = next(c for c in result.checks if c.name == "bbox_valid_geometry")
+        assert check.status == CheckStatus.FAILED, check.message
+        assert "2.0" in check.message
+
+    def test_full_validation_accepts_xyzm_bbox_on_2_0(self, xyz_file, tmp_path):
+        path = _rewrite_geo(
+            xyz_file,
+            tmp_path / "xyzm_20.parquet",
+            bbox=[0.0, 0.0, 10.0, 0.0, 4.0, 4.0, 15.0, 0.0],
+        )
+        result = validate_geoparquet(str(path))
+        check = next(c for c in result.checks if c.name == "bbox_valid_geometry")
+        assert check.status == CheckStatus.PASSED, check.message
+
+    def test_full_validation_fails_wrap_bbox_on_projected_crs(self, xyz_file, tmp_path):
+        path = _rewrite_geo(
+            xyz_file,
+            tmp_path / "proj_wrap.parquet",
+            bbox=[170.0, -10.0, -170.0, 10.0],
+            crs=UTM_33N,
+        )
+        result = validate_geoparquet(str(path))
+        check = next(c for c in result.checks if c.name == "bbox_contains_data_geometry")
+        assert check.status == CheckStatus.FAILED, check.message
+        assert "projected" in check.message.lower()
 
     def test_full_validation_of_xyz_file_passes_bbox_checks(self, xyz_file):
         result = validate_geoparquet(str(xyz_file))
