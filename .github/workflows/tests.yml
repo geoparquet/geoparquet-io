@@ -251,6 +251,86 @@ jobs:
         run: |
           uv run pytest --nbmake examples/*.ipynb -v --nbmake-timeout=120 --no-cov
 
+  docs-examples:
+    # Every fenced example in docs/guide/ that does not need the internet, run on
+    # every pull request. `testpaths` already collects docs/guide, so these blocks
+    # were reaching CI sorted only by marker: 57 landed in the fast matrix, ~398 in
+    # slow-tests -- which does NOT run on pull requests. The large majority of the
+    # documented commands were therefore verified only after merge (#896).
+    #
+    # One runner, not the ten of the fast matrix: these assert that a documented
+    # command still works, which is not per-interpreter behaviour. The 57 blocks
+    # already in the fast lane keep their Windows and macOS coverage there; the
+    # rest stay Linux-only until slow-tests picks them up on merge. That is a real
+    # gap for the shell-quoting and path-encoding bugs this repo has seen only on
+    # Windows -- named here rather than glossed, and cheap to close later by adding
+    # an os matrix if it ever bites.
+    #
+    # Deliberately NOT in the required-checks list yet. #894 was this lane reading
+    # as flaky; its network blocks are excluded here, but the ~234 that execute all
+    # spawn CLI subprocesses, the same shape as the known xdist flakes in
+    # test_pipe_integration / test_geojson_stream / e2e/test_journeys. Let it report
+    # for a couple of weeks before promoting it to a gate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      # ogr2ogr backs 8 convert.md fences and tippecanoe 11 in geojson.md; without
+      # them those blocks skip via needs-ogr / needs-tippecanoe rather than fail, so
+      # installing both is what makes this job cover the pages it claims to.
+      - name: Install GDAL
+        run: sudo apt-get update && sudo apt-get install -y gdal-bin
+
+      - name: Install tippecanoe
+        run: sudo apt-get install -y tippecanoe
+
+      - name: Pre-install DuckDB extensions
+        run: |
+          # Same transient-failure retry as the fast matrix: extensions.duckdb.org
+          # occasionally drops a request and breaks an otherwise-green build.
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          for attempt in 1 2 3 4 5; do
+            if uv run python -c "$install"; then
+              echo "DuckDB extensions installed (attempt $attempt)."
+              exit 0
+            fi
+            echo "Extension install failed (attempt $attempt). Retrying in $((attempt * 10))s..." >&2
+            sleep $((attempt * 10))
+          done
+          echo "Failed to install DuckDB extensions after 5 attempts." >&2
+          exit 1
+
+      - name: Run guide examples
+        run: |
+          # network-marked fences need multi-hundred-MB downloads and live in the
+          # non-blocking network-tests job; --no-cov because this lane exists to
+          # check the guide, not to move the coverage number.
+          #
+          # -n 4, not -n auto, and the difference is not cosmetic. Every block
+          # shells out to `gpio`, which itself opens a multi-threaded DuckDB, so
+          # one pytest worker is already several busy cores. Measured locally:
+          # -n auto (12 workers) produced 35 failures in 857s, all of them
+          # BLOCK_TIMEOUT_SECONDS expiring under contention rather than a broken
+          # example -- add.md:L62 alone passes in 14.5s. The same selection run
+          # serially was 235 passed / 0 failed in 271s. -n 4 matches what the
+          # harness README and every other job here already use.
+          uv run pytest -n 4 -m "docs_example and not network" \
+            --no-cov --tb=short --durations=15 --durations-min=1.0
+
   slow-tests:
     # Slow tests run on merge to main, schedule, and manual dispatch. They do NOT
     # run on every PR (too slow), but can be opted in per-PR by adding the
