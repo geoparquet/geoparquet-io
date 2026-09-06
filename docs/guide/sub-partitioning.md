@@ -75,6 +75,7 @@ by_country/
 | `--preview` | `preview=` | List the files that would be processed, then stop |
 | `--resolution` / `--level` | `resolution=` / `level=` | Spatial index resolution (or use `--auto`) |
 | `--auto` | `auto=` | Auto-calculate optimal resolution |
+| `--partition-resolution` | `partition_resolution=` | Quadkey partition prefix length, no greater than `resolution` |
 
 `OUTPUT_FOLDER` and the index column name options (`--h3-name`, `--a5-name`,
 `--s2-name`, `--quadkey-column`) apply to single-file runs only: in directory
@@ -151,19 +152,22 @@ they are reached through `--min-size`.
 
 === "Quadkey"
 
-    Quadkey needs `--auto` / `auto=True` here: the partitioner takes both a column
-    resolution and a partition resolution, and directory mode forwards only one.
+    Pass both a column resolution and a partition resolution, just as in single-file
+    mode. The partition resolution must be between zero and the column resolution
+    (at most 23). Alternatively, use `--auto` / `auto=True` to calculate both.
 
     <!-- doctest: setup="gpio partition quadkey input.parquet by_country/ --resolution 6 --partition-resolution 2" -->
     ```bash
-    gpio partition quadkey by_country/ --min-size 100MB --auto --in-place
+    gpio partition quadkey by_country/ --min-size 1B --resolution 13 --partition-resolution 6 --in-place
     ```
 
     <!-- doctest: setup="gpio partition quadkey input.parquet by_country/ --resolution 6 --partition-resolution 2" -->
     ```python
     from geoparquet_io.api import ops
 
-    ops.sub_partition_by_quadkey('by_country/', min_size='100MB', auto=True, in_place=True)
+    ops.sub_partition_by_quadkey(
+        'by_country/', min_size='1B', resolution=13, partition_resolution=6, in_place=True
+    )
     ```
 
 ## From Python

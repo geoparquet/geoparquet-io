@@ -1148,7 +1148,7 @@ for file_path in large_files:
 
 **Returns:** List of file paths sorted by size (largest first)
 
-#### `sub_partition_directory(directory, partition_type, min_size_bytes, resolution=None, level=None, in_place=False, hive=False, overwrite=False, verbose=False, force=False, skip_analysis=True, compression='ZSTD', compression_level=None, auto=False, target_rows=100000, max_partitions=10000)`
+#### `sub_partition_directory(directory, partition_type, min_size_bytes, resolution=None, level=None, in_place=False, hive=False, overwrite=False, verbose=False, force=False, skip_analysis=True, compression='ZSTD', compression_level=None, auto=False, target_rows=100000, max_partitions=10000, partition_resolution=None)`
 
 Sub-partition large files in a directory using spatial indexing.
 
@@ -1193,6 +1193,7 @@ result = sub_partition_directory(
 - `partition_type` (str): Type of partition ("h3", "a5", "s2", "quadkey")
 - `min_size_bytes` (int): Minimum file size to process
 - `resolution` (int | None): Resolution for H3/quadkey (0-15 for H3)
+- `partition_resolution` (int | None): Quadkey partition prefix length (0-23, no greater than `resolution`); required with explicit quadkey `resolution`
 - `level` (int | None): Level for S2 (alias for resolution)
 - `in_place` (bool): Delete originals after successful sub-partition (default: False)
 - `hive` (bool): Use Hive-style partitioning (default: False)
@@ -1585,6 +1586,10 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 - `column_name=` and `output_dir=` are refused: in directory mode each file gets
   its own sibling directory and the default index column name. Partition a single
   file with `ops.partition_by_<index>` if you need to control those.
+- `ops.sub_partition_by_quadkey` accepts both `resolution` for column precision and
+  `partition_resolution` for the output prefix length (0-23, no greater than
+  `resolution`), or `auto=True` to calculate both. Directory mode forwards these
+  to the same validated partitioner as single-file mode.
 - `ops.sub_partition_by_s2` uses the `geography` DuckDB community extension,
   which gpio installs on first use; where that extension cannot load it raises
   `ExtensionUnavailableError` before touching a file, like every other S2
@@ -1629,7 +1634,7 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.partition_by_admin(table, output_dir, dataset='gaul', levels=None, hive=False, overwrite=False, vecorel=False, compression='ZSTD', compression_level=None, geometry_column=None)` | Partition into a directory by administrative boundaries |
 | `ops.sub_partition_by_h3(directory, min_size, resolution=None, auto=False, in_place=False, preview=False, hive=False, overwrite=False, force=False, skip_analysis=False, compression='ZSTD', compression_level=None, ...)` | Split every file in a directory over `min_size` into H3 sub-partitions |
 | `ops.sub_partition_by_a5(directory, min_size, resolution=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into A5 sub-partitions |
-| `ops.sub_partition_by_quadkey(directory, min_size, resolution=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into quadkey sub-partitions (use `auto=True`) |
+| `ops.sub_partition_by_quadkey(directory, min_size, resolution=None, partition_resolution=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into quadkey sub-partitions (pass both resolutions or use `auto=True`) |
 | `ops.sub_partition_by_s2(directory, min_size, level=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into S2 sub-partitions |
 | `ops.get_row_group_geo_stats(parquet_file)` | Per-row-group geo bbox statistics |
 | `ops.compression_stats(path)` | Per-column compression ratios |

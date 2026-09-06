@@ -1258,6 +1258,7 @@ def _sub_partition(
     *,
     min_size: str | int,
     resolution: int | None = None,
+    partition_resolution: int | None = None,
     level: int | None = None,
     auto: bool = False,
     target_rows: int = 100000,
@@ -1340,6 +1341,7 @@ def _sub_partition(
         partition_type=partition_type,
         min_size_bytes=min_size_bytes,
         resolution=resolution,
+        partition_resolution=partition_resolution,
         level=level,
         in_place=in_place,
         hive=hive,
@@ -1548,6 +1550,7 @@ def sub_partition_by_quadkey(
     *,
     min_size: str | int,
     resolution: int | None = None,
+    partition_resolution: int | None = None,
     auto: bool = False,
     target_rows: int = 100000,
     max_partitions: int = 10000,
@@ -1570,18 +1573,16 @@ def sub_partition_by_quadkey(
     over the threshold is partitioned into a sibling ``<file>_quadkey/``
     directory; files under it are left alone.
 
-    **Use ``auto=True``.** The quadkey partitioner needs a column resolution
-    *and* a partition resolution, and directory mode -- on the CLI as here --
-    forwards only one, so a lone ``resolution`` is reported as a per-file
-    failure. ``auto=True`` sizes both from the data. ``resolution`` is accepted
-    for symmetry with the other three indexes and forwarded unchanged rather
-    than papered over.
+    Pass both ``resolution`` (column precision) and ``partition_resolution``
+    (partition prefix length), or use ``auto=True`` to size both from the data.
+    The partition resolution cannot exceed the column resolution, matching
+    single-file partitioning.
 
     Args:
         directory: Directory of parquet files, searched recursively
         min_size: Size threshold -- ``'100MB'`` or a byte count
-        resolution: Quadkey resolution 0-23. See above: directory mode wants
-            ``auto=True``
+        resolution: Quadkey column resolution 0-23
+        partition_resolution: Quadkey partition prefix length 0-23, at most resolution
         auto: Size the resolution from each file (default: False)
         target_rows: Target rows per partition when ``auto=True`` (default: 100000)
         max_partitions: Maximum partitions when ``auto=True`` (default: 10000)
@@ -1620,6 +1621,7 @@ def sub_partition_by_quadkey(
         "quadkey",
         min_size=min_size,
         resolution=resolution,
+        partition_resolution=partition_resolution,
         auto=auto,
         target_rows=target_rows,
         max_partitions=max_partitions,

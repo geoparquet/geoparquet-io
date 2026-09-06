@@ -185,6 +185,7 @@ def sub_partition_directory(
     auto: bool = False,
     target_rows: int = 100000,
     max_partitions: int = 10000,
+    partition_resolution: int | None = None,
 ) -> dict:
     """
     Sub-partition large files in a directory.
@@ -209,6 +210,7 @@ def sub_partition_directory(
         auto: Auto-calculate resolution
         target_rows: Target rows per partition for auto mode
         max_partitions: Max partitions for auto mode
+        partition_resolution: Quadkey partition prefix length (0-23), at most resolution
 
     Returns:
         dict with keys: processed, skipped, errors
@@ -299,6 +301,9 @@ def sub_partition_directory(
             # Add resolution parameter with correct name
             if res_value is not None:
                 kwargs[res_param] = res_value
+
+            if partition_type == "quadkey":
+                kwargs["partition_resolution"] = partition_resolution
 
             func(**kwargs)
 

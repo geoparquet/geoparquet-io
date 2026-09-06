@@ -862,15 +862,108 @@ class TestApiDirectorySubPartition:
         assert result["processed"] == 1
         assert _total_rows(os.path.join(temp_partition_dir, "large_quadkey")) == BUILDINGS_ROWS
 
+    @pytest.mark.parametrize("door", ["cli", "api"])
+    @pytest.mark.parametrize("partition_resolution", [0, 6, 13])
+    def test_explicit_quadkey_resolutions_preserve_rows(
+        self, cli_runner, temp_partition_dir, door, partition_resolution
+    ):
+        """Both entrypoints must carry the requested partition precision to disk."""
+        from pathlib import Path
+
+        from geoparquet_io.api import ops
+
+        large, small = self._seed(temp_partition_dir)
+        threshold = f"{os.path.getsize(large) - 100}B"
+        if door == "cli":
+            result = cli_runner.invoke(
+                partition,
+                [
+                    "quadkey",
+                    temp_partition_dir,
+                    "--min-size",
+                    threshold,
+                    "--resolution",
+                    "13",
+                    "--partition-resolution",
+                    str(partition_resolution),
+                    "--in-place",
+                    "--force",
+                ],
+            )
+            assert result.exit_code == 0, result.output
+        else:
+            result = ops.sub_partition_by_quadkey(
+                temp_partition_dir,
+                min_size=threshold,
+                resolution=13,
+                partition_resolution=partition_resolution,
+                in_place=True,
+                force=True,
+            )
+            assert result["processed"] == 1
+            assert result["errors"] == []
+        output = Path(temp_partition_dir) / "large_quadkey"
+        assert _total_rows(output) == BUILDINGS_ROWS
+        assert not Path(large).exists()
+        assert Path(small).exists()
+        # Non-Hive output filenames encode the requested quadkey prefix.
+        prefixes = {f.stem for f in _partition_files(output)}
+        if partition_resolution == 0:
+            assert len(_partition_files(output)) == 1
+        else:
+            assert all(len(prefix) == partition_resolution for prefix in prefixes)
+            assert all(set(prefix) <= set("0123") for prefix in prefixes)
+
+    @pytest.mark.parametrize("door", ["cli", "api"])
+    @pytest.mark.parametrize(
+        "partition_resolution,auto", [(-1, False), (24, False), (14, False), (6, True)]
+    )
+    def test_invalid_quadkey_resolutions_never_remove_originals(
+        self, cli_runner, temp_partition_dir, door, partition_resolution, auto
+    ):
+        from pathlib import Path
+
+        from geoparquet_io.api import ops
+        from geoparquet_io.core.exceptions import PartitionError
+
+        large, small = self._seed(temp_partition_dir)
+        originals = {path: Path(path).read_bytes() for path in (large, small)}
+        threshold = f"{os.path.getsize(large) - 100}B"
+        if door == "cli":
+            args = [
+                "quadkey",
+                temp_partition_dir,
+                "--min-size",
+                threshold,
+                "--resolution",
+                "13",
+                "--partition-resolution",
+                str(partition_resolution),
+                "--in-place",
+                "--force",
+            ]
+            if auto:
+                args.append("--auto")
+            result = cli_runner.invoke(partition, args)
+            assert result.exit_code != 0
+        else:
+            with pytest.raises(PartitionError):
+                ops.sub_partition_by_quadkey(
+                    temp_partition_dir,
+                    min_size=threshold,
+                    resolution=13,
+                    partition_resolution=partition_resolution,
+                    auto=auto,
+                    in_place=True,
+                    force=True,
+                )
+        assert all(Path(path).read_bytes() == data for path, data in originals.items())
+        assert not (Path(temp_partition_dir) / "large_quadkey").exists()
+
     def test_a_lone_quadkey_resolution_fails_the_same_way_as_the_cli(
         self, cli_runner, temp_partition_dir
     ):
-        """Pin the CLI's own limitation rather than quietly diverging from it.
-
-        `gpio partition quadkey <dir> --min-size ... --resolution 6` reports a
-        per-file failure and exits non-zero; the API must not paper over that by
-        inventing a partition resolution of its own.
-        """
+        """Explicit mode requires both resolutions, just like single-file mode."""
         from geoparquet_io.api import ops
         from geoparquet_io.core.exceptions import PartitionError
 
@@ -1097,7 +1190,12 @@ class TestSubPartitionFrontDoorParity:
         ("a5", "sub_partition_by_a5", ["--resolution", "12"], {"resolution": 12}),
         ("h3", "sub_partition_by_h3", ["--resolution", "4"], {"resolution": 4}),
         ("s2", "sub_partition_by_s2", ["--level", "10"], {"level": 10}),
-        ("quadkey", "sub_partition_by_quadkey", ["--resolution", "6"], {"resolution": 6}),
+        (
+            "quadkey",
+            "sub_partition_by_quadkey",
+            ["--resolution", "13", "--partition-resolution", "6"],
+            {"resolution": 13, "partition_resolution": 6},
+        ),
     ]
 
     @pytest.mark.parametrize(
