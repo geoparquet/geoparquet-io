@@ -7,8 +7,10 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3
+from geoparquet_io.cli._shared import _activate_s3, init_group_context
 from geoparquet_io.cli.decorators import (
+    DEFAULT_KDTREE_APPROX,
+    DEFAULT_KDTREE_TARGET_ROWS,
     SingleFileCommand,
     geoparquet_version_option,
     handle_directory_sub_partition,
@@ -16,10 +18,10 @@ from geoparquet_io.cli.decorators import (
     parse_row_group_options,
     partition_options,
     partition_options_base,
+    resolve_kdtree_options,
     show_sql_option,
     verbose_option,
 )
-from geoparquet_io.core.logging_config import setup_cli_logging
 from geoparquet_io.core.partition.admin_hierarchical import (
     partition_by_admin_hierarchical as partition_admin_hierarchical_impl,
 )
@@ -40,10 +42,7 @@ from geoparquet_io.core.partition.by_string import (
 @click.pass_context
 def partition(ctx):
     """Commands for partitioning GeoParquet files."""
-    # Ensure logging is set up (in case this group is invoked directly in tests)
-    ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False)
-    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+    init_group_context(ctx)
 
 
 @partition.command(name="admin", cls=SingleFileCommand)
@@ -808,13 +807,13 @@ def partition_a5(
     "--auto",
     default=None,
     type=int,
-    help="Auto-select partitions targeting N rows/partition. Default: 120,000.",
+    help=f"Auto-select partitions targeting N rows/partition. Default: {DEFAULT_KDTREE_TARGET_ROWS:,}.",
 )
 @click.option(
     "--approx",
-    default=100000,
+    default=DEFAULT_KDTREE_APPROX,
     type=int,
-    help="Use approximate computation by sampling N points (default: 100000). Mutually exclusive with --exact.",
+    help=f"Use approximate computation by sampling N points (default: {DEFAULT_KDTREE_APPROX}). Mutually exclusive with --exact.",
 )
 @click.option(
     "--exact",
@@ -886,39 +885,9 @@ def partition_kdtree(
         gpio partition kdtree input.parquet output/ --approx 200000
     """
     with _activate_s3(ctx):
-        # Validate mutually exclusive options
-        import math
-
-        if sum([partitions is not None, auto is not None]) > 1:
-            raise click.UsageError("--partitions and --auto are mutually exclusive")
-
-        # Set defaults
-        if partitions is None and auto is None:
-            auto = 120000  # Default: auto-select targeting 120k rows/partition
-
-        # Validate partitions if specified
-        if partitions is not None:
-            if partitions < 2 or (partitions & (partitions - 1)) != 0:
-                raise click.UsageError(
-                    f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}"
-                )
-            iterations = int(math.log2(partitions))
-        else:
-            iterations = None  # Will be computed in auto mode
-
-        # Validate mutually exclusive options for approx/exact
-        if exact and approx != 100000:
-            raise click.UsageError("--approx and --exact are mutually exclusive")
-
-        # Determine sample size
-        sample_size = None if exact else approx
-
-        # Prepare auto_target if in auto mode
-        if auto is not None:
-            target_rows = auto if auto > 0 else 120000
-            auto_target = ("rows", target_rows)
-        else:
-            auto_target = None
+        iterations, sample_size, auto_target = resolve_kdtree_options(
+            partitions, auto, approx, exact
+        )
 
         # If preview mode, output_folder is not required
         if not preview and not output_folder:

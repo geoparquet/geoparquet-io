@@ -9,7 +9,7 @@ from pathlib import Path
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3
+from geoparquet_io.cli._shared import _activate_s3, init_group_context, prepare_output
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     any_extension_option,
@@ -25,7 +25,7 @@ from geoparquet_io.cli.decorators import (
 )
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.file_utils import validate_parquet_extension
-from geoparquet_io.core.logging_config import configure_verbose, setup_cli_logging
+from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.reproject import reproject as reproject_core
 
 
@@ -118,9 +118,7 @@ def convert(ctx):
         gpio convert reproject input.parquet out.parquet -d EPSG:32610
         gpio convert geojson data.parquet | tippecanoe -P -o tiles.pmtiles
     """
-    ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False)
-    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+    init_group_context(ctx)
 
 
 @convert.command(name="geoparquet", cls=SingleFileCommand)
@@ -228,27 +226,13 @@ def convert_to_geoparquet_cmd(
       gpio convert input.gpkg | gpio add bbox - | gpio upload - s3://bucket/data.parquet
     """
     from geoparquet_io.core.convert import set_csv_max_line_size
-    from geoparquet_io.core.streaming import (
-        StreamingError,
-        should_stream_output,
-        validate_output,
-    )
+    from geoparquet_io.core.streaming import should_stream_output
 
     # Set CSV max line size if specified
     if csv_max_line_size is not None:
         set_csv_max_line_size(csv_max_line_size)
 
-    # Validate output early - provides helpful error if no output and not piping
-    try:
-        validate_output(output_file)
-    except StreamingError as e:
-        raise click.ClickException(str(e)) from None
-
-    # Validate .parquet extension
-    validate_parquet_extension(output_file, any_extension)
-
-    # Parse row group options
-    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+    row_group_mb = prepare_output(output_file, any_extension, row_group_size, row_group_size_mb)
 
     # Check for streaming output
     with _activate_s3(ctx, aws_profile=aws_profile):

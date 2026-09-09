@@ -12,7 +12,7 @@ from pathlib import Path
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, create_default_group
+from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
     check_partition_options,
@@ -24,7 +24,7 @@ from geoparquet_io.cli.fix_helpers import handle_fix_common
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
-from geoparquet_io.core.logging_config import configure_verbose, setup_cli_logging
+from geoparquet_io.core.logging_config import configure_verbose
 
 # CheckDefaultGroup: defaults to 'all' when no subcommand is provided
 CheckDefaultGroup = create_default_group(
@@ -44,10 +44,7 @@ def check(ctx):
     When run without a subcommand, all checks are performed. Options like --fix
     can be used directly without specifying 'all'.
     """
-    # Ensure logging is set up (in case this group is invoked directly in tests)
-    ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False)
-    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+    init_group_context(ctx)
 
 
 class MultiFileCheckRunner:

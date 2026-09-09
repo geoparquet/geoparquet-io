@@ -9,7 +9,7 @@ import os
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, create_default_group
+from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import GlobAwareCommand, verbose_option
 from geoparquet_io.core.inspect import (
     display_metadata,
@@ -26,7 +26,6 @@ from geoparquet_io.core.inspect import (
 from geoparquet_io.core.inspect import (
     inspect_summary as _inspect_summary_core,
 )
-from geoparquet_io.core.logging_config import setup_cli_logging
 
 # InspectDefaultGroup: defaults to 'summary' when no subcommand is provided
 InspectDefaultGroup = create_default_group(
@@ -73,9 +72,7 @@ def inspect(ctx):
         # GeoParquet 'geo' key metadata only
         gpio inspect meta data.parquet --geo
     """
-    ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False)
-    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+    init_group_context(ctx)
 
 
 def _validate_parquet_input(file_path: str) -> None:

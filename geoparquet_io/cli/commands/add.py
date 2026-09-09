@@ -8,15 +8,19 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 import click
 from click.core import ParameterSource
 
-from geoparquet_io.cli._shared import _activate_s3
+from geoparquet_io.cli._shared import _activate_s3, init_group_context, prepare_output
 from geoparquet_io.cli.decorators import (
+    DEFAULT_KDTREE_APPROX,
+    DEFAULT_KDTREE_TARGET_ROWS,
     SingleFileCommand,
     any_extension_option,
+    bbox_option,
     dry_run_option,
     geoparquet_version_option,
     output_format_options,
     overwrite_option,
     parse_row_group_options,
+    resolve_kdtree_options,
     show_sql_option,
     verbose_option,
 )
@@ -28,17 +32,14 @@ from geoparquet_io.core.add.kdtree import add_kdtree_column as add_kdtree_column
 from geoparquet_io.core.add.quadkey import add_quadkey_column as add_quadkey_column_impl
 from geoparquet_io.core.add.s2 import add_s2_column as add_s2_column_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
-from geoparquet_io.core.logging_config import setup_cli_logging
+from geoparquet_io.core.streaming import StreamingError
 
 
 @click.group()
 @click.pass_context
 def add(ctx):
     """Commands for enhancing GeoParquet files in various ways."""
-    # Ensure logging is set up (in case this group is invoked directly in tests)
-    ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False)
-    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+    init_group_context(ctx)
 
 
 @add.command(name="admin-divisions", cls=SingleFileCommand)
@@ -61,9 +62,7 @@ def add(ctx):
     help="Comma-separated hierarchical levels to add as columns (e.g., 'continent,country'). "
     "If not specified, adds all available levels for the dataset.",
 )
-@click.option(
-    "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
-)
+@bbox_option
 @click.option(
     "--prefix",
     type=str,
@@ -440,19 +439,9 @@ def add_bbox(
         gpio add bbox input.parquet output.parquet --force
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         # An input that already has a bbox column is answered with a verbatim copy,
         # which cannot honour a --compression the user actually typed. Pass None
@@ -554,19 +543,9 @@ def add_h3(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         try:
             add_h3_column_impl(
@@ -637,19 +616,9 @@ def add_a5(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         try:
             add_a5_column_impl(
@@ -720,19 +689,9 @@ def add_s2(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         try:
             add_s2_column_impl(
@@ -773,13 +732,13 @@ def add_s2(
     "--auto",
     default=None,
     type=int,
-    help="Auto-select partitions targeting N rows/partition. Default when neither --partitions nor --auto specified: 120,000.",
+    help=f"Auto-select partitions targeting N rows/partition. Default when neither --partitions nor --auto specified: {DEFAULT_KDTREE_TARGET_ROWS:,}.",
 )
 @click.option(
     "--approx",
-    default=100000,
+    default=DEFAULT_KDTREE_APPROX,
     type=int,
-    help="Use approximate computation by sampling N points (default: 100000). Mutually exclusive with --exact.",
+    help=f"Use approximate computation by sampling N points (default: {DEFAULT_KDTREE_APPROX}). Mutually exclusive with --exact.",
 )
 @click.option(
     "--exact",
@@ -837,46 +796,12 @@ def add_kdtree(
     Use --verbose to track progress with iteration-by-iteration updates.
     """
     with _activate_s3(ctx):
-        import math
-
         # Validate .parquet extension
         validate_parquet_extension(output_parquet, any_extension)
 
-        # Validate mutually exclusive options
-        if sum([partitions is not None, auto is not None]) > 1:
-            raise click.UsageError("--partitions and --auto are mutually exclusive")
-
-        # Set defaults
-        if partitions is None and auto is None:
-            auto = 120000  # Default: auto-select targeting 120k rows/partition
-            partitions = None
-        elif auto is not None:
-            # Auto mode: will compute partitions below
-            partitions = None
-
-        # Validate partitions if specified
-        if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
-            raise click.UsageError(
-                f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}"
-            )
-
-        # Validate mutually exclusive options for approx/exact
-        if exact and approx != 100000:
-            raise click.UsageError("--approx and --exact are mutually exclusive")
-
-        # Determine sample size
-        sample_size = None if exact else approx
-
-        # If auto mode, compute optimal partitions
-        if auto is not None:
-            # Pass None for iterations, let implementation compute
-            iterations = None
-            target_rows = auto if auto > 0 else 120000
-            auto_target = ("rows", target_rows)
-        else:
-            # Convert partitions to iterations
-            iterations = int(math.log2(partitions))
-            auto_target = None
+        iterations, sample_size, auto_target = resolve_kdtree_options(
+            partitions, auto, approx, exact
+        )
 
         # Parse row group options
         row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
@@ -960,19 +885,9 @@ def add_quadkey(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         try:
             add_quadkey_column_impl(
