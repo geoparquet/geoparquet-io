@@ -124,14 +124,48 @@ def _json_type_name(value) -> str:
 
 
 @lru_cache(maxsize=256)
-def _emit_malformed_geo_warning(detail: str) -> None:
-    """Emit the malformed-block warning once per distinct ``detail`` (LRU-bounded)."""
-    warn(f"Ignoring malformed 'geo' metadata on the input: {detail}")
+def _emit_malformed_geo_warning(detail: str, source: str | None = None) -> None:
+    """Emit the malformed-block warning once per ``(detail, source)`` (LRU-bounded).
+
+    ``source`` names the file the block came from where the caller knows it. It
+    is part of the dedup key as well as the message: without it two different
+    malformed inputs in one process (a Python API loop, a shell ``for``) share
+    one cache entry and the second file is ignored in silence.
+    """
+    where = f" of {source}" if source else ""
+    warn(f"Ignoring malformed 'geo' metadata on the input{where}: {detail}")
 
 
 def reset_malformed_geo_warnings() -> None:
     """Clear the malformed-``geo`` warn-once cache. Intended for tests."""
     _emit_malformed_geo_warning.cache_clear()
+
+
+def carried_column_name(
+    value, key: str = "primary_column", source: str | None = None
+) -> str | None:
+    """A carried geometry-column *name*, or ``None`` when the block does not give one.
+
+    A column name is a string. A carried ``primary_column: 123`` handed on
+    reaches ``quote_identifier`` and fails there with a bare ``TypeError``
+    several frames later (#887), so the readers that must keep seeing the file
+    as it really is -- the column-name readers are shared with ``gpio check``
+    and so guard rather than sanitize -- come through here instead of repeating
+    the check, and their caller falls through to schema detection.
+
+    An ignored key gets named in a warning, the rule #883 established: without
+    it ``gpio sort hilbert``, ``gpio check spatial`` and ``gpio add bbox`` all
+    exit 0 with nothing said, while ``gpio convert geoparquet`` on the same file
+    warns. An *absent* key is not malformed and says nothing.
+    """
+    if isinstance(value, str):
+        return value or None
+    if value is None:
+        return None
+    _emit_malformed_geo_warning(
+        f"'{key}' is {_article(_json_type_name(value))}, expected a string", source
+    )
+    return None
 
 
 def decode_carried_geo(raw):
@@ -278,7 +312,8 @@ def sanitize_geo_metadata(geo_meta):
     cleaned = geo_meta
 
     primary = geo_meta.get("primary_column")
-    if "primary_column" in geo_meta and not isinstance(primary, str):
+    dropped_primary = "primary_column" in geo_meta and not isinstance(primary, str)
+    if dropped_primary:
         problems.append(
             f"'primary_column' is {_article(_json_type_name(primary))}, expected a string"
         )
@@ -301,9 +336,33 @@ def sanitize_geo_metadata(geo_meta):
                 cleaned = dict(cleaned)
                 cleaned["columns"] = kept
 
+    if dropped_primary:
+        _repair_primary_column(cleaned)
+
     for problem in problems:
         _emit_malformed_geo_warning(problem)
     return cleaned
+
+
+def _repair_primary_column(cleaned: dict) -> None:
+    """Name the primary column again when exactly one candidate survives sanitizing.
+
+    Dropping a malformed ``primary_column`` and stopping there is not a safe
+    recovery: the readers downstream then fall back to the literal string
+    ``"geometry"``, which *misses* a file whose column is called ``geom`` (or
+    ``wkb_geometry``, ``shape``, ``the_geom``) and reports its CRS as absent.
+    That is worse than the crash it replaced -- ``convert reproject`` bypasses
+    the explicit-null-CRS guard and a projected file is aggregated as lon/lat,
+    silently, where the raw block used to raise (#887 review).
+
+    One surviving column is an unambiguous primary: the spec requires
+    ``primary_column`` to name a key of ``columns``, and there is only one. Two
+    or more is a guess, so the block is left without one and the callers ask the
+    file's schema instead.
+    """
+    columns = cleaned.get("columns")
+    if isinstance(columns, dict) and len(columns) == 1:
+        cleaned["primary_column"] = next(iter(columns))
 
 
 def _article(type_name: str) -> str:

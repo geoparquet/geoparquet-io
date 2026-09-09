@@ -13,6 +13,23 @@ from geoparquet_io.core.logging_config import debug
 STANDARD_GEOMETRY_NAMES = ["geometry", "geom", "wkb_geometry", "shape", "the_geom"]
 
 
+def detect_geometry_column_from_names(column_names) -> str | None:
+    """First standard geometry name present in ``column_names``, matched case-insensitively.
+
+    The name-based half of detection, split out so the callers that already
+    hold a schema -- an in-memory ``pa.Table`` in ``reproject``, a CRS reader
+    that has to answer "which column did the block mean?" -- do not fall back
+    to the literal string ``"geometry"`` and miss a ``geom`` file (#887 review).
+    """
+    by_lowered: dict[str, str] = {}
+    for name in column_names:
+        by_lowered.setdefault(str(name).lower(), name)
+    for std_name in STANDARD_GEOMETRY_NAMES:
+        if std_name in by_lowered:
+            return by_lowered[std_name]
+    return None
+
+
 def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> str | None:
     """
     Detect the geometry column in a Parquet file.
@@ -30,15 +47,19 @@ def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> 
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
     from geoparquet_io.core.file_utils import resolve_file_url
+    from geoparquet_io.core.geo_metadata import carried_column_name
     from geoparquet_io.core.remote import needs_httpfs
 
     # Normalize path for consistent handling of URLs and local files
     raw_url = resolve_file_url(parquet_file, verbose=False)
 
-    # 1. Check GeoParquet metadata first
+    # 1. Check GeoParquet metadata first. A carried `primary_column` that is not
+    # a string is somebody else's malformed block: `carried_column_name` names
+    # the ignored key in a warning and answers None, so detection falls through
+    # to the schema rather than handing `quote_identifier` a number (#887).
     geo_meta = get_geo_metadata(parquet_file)
     if geo_meta and isinstance(geo_meta, dict):
-        primary = geo_meta.get("primary_column")
+        primary = carried_column_name(geo_meta.get("primary_column"), source=str(parquet_file))
         if primary:
             if verbose:
                 debug(f"Detected geometry column from metadata: {primary}")
@@ -49,13 +70,11 @@ def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> 
     try:
         con = get_duckdb_connection(load_httpfs=needs_httpfs(raw_url))
         result = con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_path(raw_url)})").fetchall()
-        column_names = [row[0] for row in result]
-        for std_name in STANDARD_GEOMETRY_NAMES:
-            for col in column_names:
-                if col.lower() == std_name.lower():
-                    if verbose:
-                        debug(f"Detected geometry column from schema: {col}")
-                    return col
+        col = detect_geometry_column_from_names(row[0] for row in result)
+        if col:
+            if verbose:
+                debug(f"Detected geometry column from schema: {col}")
+            return col
     except (OSError, duckdb.InvalidInputException) as e:
         # OSError for file access issues
         # InvalidInputException for DuckDB rejecting invalid GeoParquet metadata
@@ -121,21 +140,27 @@ def find_primary_geometry_column(parquet_file: str, verbose: bool = False) -> st
         str: Name of the primary geometry column (defaults to 'geometry')
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.geo_metadata import carried_column_name
 
     geo_meta = get_geo_metadata(parquet_file)
 
     if verbose and geo_meta:
         debug(f"Geo metadata: {_summarize_geo_metadata(geo_meta)}")
 
+    # Only a string is a column name. A non-string one reaches
+    # `quote_identifier` and fails with a bare TypeError (#887), so
+    # `carried_column_name` warns that the key was ignored and the schema
+    # fallback below gives the answer the file's data supports.
+    source = str(parquet_file)
     if geo_meta:
         if isinstance(geo_meta, dict):
-            primary = geo_meta.get("primary_column")
+            primary = carried_column_name(geo_meta.get("primary_column"), source=source)
             if primary:
                 return primary
         elif isinstance(geo_meta, list):
             for col in geo_meta:
                 if isinstance(col, dict) and col.get("primary", False):
-                    name = col.get("name")
+                    name = carried_column_name(col.get("name"), key="name", source=source)
                     if name:
                         return name
 

@@ -179,6 +179,15 @@ def _detect_geometry_column(con, input_file, verbose, is_parquet=False, layer=No
     return None
 
 
+def _schema_geometry_column(input_file: str, verbose: bool, is_parquet: bool = True) -> str | None:
+    """``_detect_geometry_column`` on a connection of its own, closed either way."""
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
+    try:
+        return _detect_geometry_column(con, input_file, verbose, is_parquet=is_parquet)
+    finally:
+        con.close()
+
+
 def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
     """Detect all geometry columns from a GeoParquet file.
 
@@ -199,38 +208,43 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
             - "metadata": dict - per-column metadata from input (crs, encoding, etc.)
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 
     result = {"primary": None, "secondary": [], "metadata": {}}
 
     # Only GeoParquet files can have multiple geometry columns with metadata
     if not _is_parquet_file(input_file):
         # For non-parquet, detect single geometry column the standard way
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
-        try:
-            geom_col = _detect_geometry_column(con, input_file, verbose, is_parquet=False)
-            if geom_col:
-                result["primary"] = geom_col
-                result["metadata"][geom_col] = {"encoding": "WKB"}
-        finally:
-            con.close()
+        geom_col = _schema_geometry_column(input_file, verbose, is_parquet=False)
+        if geom_col:
+            result["primary"] = geom_col
+            result["metadata"][geom_col] = {"encoding": "WKB"}
         return result
 
-    geo_meta = get_geo_metadata(input_file)
+    # A write-path reader: the column names and encodings this returns are
+    # quoted into the conversion query and copied into the output block, so a
+    # malformed carried block is sanitized rather than indexed as-is (#887).
+    # Without it `columns: null` crashed on `.items()`, a non-string
+    # `primary_column` reached `quote_identifier`, and a non-string `encoding`
+    # reached `_calculate_bounds`'s `encoding.lower()`.
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(input_file))
 
-    if not geo_meta:
-        # No GeoParquet metadata - detect single column from schema
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
-        try:
-            geom_col = _detect_geometry_column(con, input_file, verbose, is_parquet=True)
-            if geom_col:
-                result["primary"] = geom_col
-                result["metadata"][geom_col] = {"encoding": "WKB"}
-        finally:
-            con.close()
+    if not geo_meta or not geo_meta.get("columns"):
+        # No GeoParquet metadata -- or nothing left of it once the malformed
+        # parts were dropped. Either way, detect the column from the schema.
+        geom_col = _schema_geometry_column(input_file, verbose)
+        if geom_col:
+            result["primary"] = geom_col
+            result["metadata"][geom_col] = {"encoding": "WKB"}
         return result
 
     # Extract from GeoParquet metadata
-    primary_col = geo_meta.get("primary_column", "geometry")
+    primary_col = geo_meta.get("primary_column")
+    if not isinstance(primary_col, str):
+        # Sanitizing dropped a malformed `primary_column` and could not repair
+        # it from a single column. The literal "geometry" would name a column
+        # this file may not have, so ask the schema (#887 review).
+        primary_col = _schema_geometry_column(input_file, verbose)
     columns = geo_meta.get("columns", {})
 
     result["primary"] = primary_col
