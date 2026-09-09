@@ -12,6 +12,7 @@ from geoparquet_io.cli._shared import _activate_s3, init_group_context, prepare_
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     any_extension_option,
+    bbox_option,
     dry_run_option,
     geoparquet_version_option,
     output_format_options,
@@ -58,9 +59,7 @@ def add(ctx):
     help="Comma-separated hierarchical levels to add as columns (e.g., 'continent,country'). "
     "If not specified, adds all available levels for the dataset.",
 )
-@click.option(
-    "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
-)
+@bbox_option
 @click.option(
     "--prefix",
     type=str,

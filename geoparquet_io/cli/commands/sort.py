@@ -12,6 +12,7 @@ from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     allow_schema_diff_option,
     any_extension_option,
+    bbox_option,
     geoparquet_version_option,
     output_format_options,
     overwrite_option,
@@ -43,9 +44,7 @@ def sort(ctx):
     default="geometry",
     help="Name of the geometry column (default: geometry)",
 )
-@click.option(
-    "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
-)
+@bbox_option
 @output_format_options(default_rows=DEFAULT_SORT_ROW_GROUP_ROWS)
 @geoparquet_version_option
 @overwrite_option
@@ -115,9 +114,7 @@ def hilbert_order(
     default="geometry",
     help="Name of the geometry column (default: geometry)",
 )
-@click.option(
-    "--add-bbox", is_flag=True, help="Automatically add bbox column and metadata if missing."
-)
+@bbox_option
 @output_format_options(default_rows=DEFAULT_SORT_ROW_GROUP_ROWS)
 @geoparquet_version_option
 @overwrite_option
