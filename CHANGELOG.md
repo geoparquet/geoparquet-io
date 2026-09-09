@@ -6,6 +6,115 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## v1.5.0 (2026-09-08)
+
+What is newly possible in this release:
+
+- **S2 works again.** The `geography` DuckDB extension is published once more, so `gpio add s2` and `gpio partition s2` run instead of stopping with an explanation. This is what raises the DuckDB floor to 1.5.5. ([#893](https://github.com/geoparquet/geoparquet-io/pull/893))
+- **`gpio extract wfs` reads GML.** It asks each service for the format that service advertises and parses whatever comes back, which makes the many WFS 1.x deployments serving only GML usable for the first time. ([#835](https://github.com/geoparquet/geoparquet-io/pull/835))
+- **`gpio sort column` and `sort quadkey` take a directory** of GeoParquet files, with `--allow-schema-diff` for directories whose files disagree — and they now refuse to re-read their own output as input, a loop that silently doubled row counts on every run. ([#852](https://github.com/geoparquet/geoparquet-io/pull/852), [#873](https://github.com/geoparquet/geoparquet-io/pull/873))
+- **`az://account/container` uploads and copies work.** They were being handed to a container-first URL parser and could not build a store at all. ([#871](https://github.com/geoparquet/geoparquet-io/pull/871))
+- **S3 credentials resolve through the full AWS chain**, so `aws sso login`, assume-role and `credential_process` profiles authenticate the same way gpio's DuckDB reads already did. ([#874](https://github.com/geoparquet/geoparquet-io/pull/874))
+- **`gpio check spec` gained four GeoParquet 2.0 conformance checks** — `geometry_types` uniqueness, native geometry columns missing from `columns`, `geometry_types` against the Parquet geospatial statistics, and orientation checked against the actual ring winding rather than merely being declared. The existing bbox and covering checks were corrected in the same pass: 6- and 8-element bboxes are read at the right offsets, antimeridian extents are no longer flagged, and the `covering.bbox` path, field-order and field-type rules are enforced. Thanks **@jatorre**. ([#879](https://github.com/geoparquet/geoparquet-io/pull/879), [#882](https://github.com/geoparquet/geoparquet-io/pull/882), [#876](https://github.com/geoparquet/geoparquet-io/pull/876), [#877](https://github.com/geoparquet/geoparquet-io/pull/877))
+- **Python API parity with the CLI on partitioning.** Every partition method takes `auto`, the kdtree methods take `auto` and `target_rows`, `ops.partition_by_*` twins exist for every subcommand, and directory sub-partitioning is reachable from Python. ([#800](https://github.com/geoparquet/geoparquet-io/pull/800), [#808](https://github.com/geoparquet/geoparquet-io/pull/808), [#853](https://github.com/geoparquet/geoparquet-io/pull/853), [#855](https://github.com/geoparquet/geoparquet-io/pull/855))
+- **`gpio partition a5` sub-partitions** with `--min-size` and `--in-place`, matching h3, s2 and quadkey. ([#790](https://github.com/geoparquet/geoparquet-io/pull/790))
+
+**The fixes are overwhelmingly about not lying to you regarding the CRS.** Seven separate paths could write, or bless, a file whose stated coordinate reference system was wrong — projected coordinates labelled OGC:CRS84, which nothing downstream can detect. M and ZM geometry at 2.0 dropped the CRS entirely (#888); the in-memory and streaming write strategies wrote a bare GEOMETRY type beside a `geo` block that declared one (#869); a GeoArrow file with no `geo` block lost its CRS depending on whether `geoarrow.pyarrow` happened to be imported (#872, #846); a free-form `crs` string on the Parquet type was read as the CRS84 default rather than failing closed (#870, #851); and reprojecting geography-edged data left `edges: spherical` on projected output (#884). Alongside those: apostrophes in paths no longer crash `convert`, `add` and `admin-divisions`; zero-row inputs no longer traceback through `partition` and `check`; and `check stac` explains that it wants the STAC JSON rather than reporting a codec error.
+
+**Six changes are marked breaking, and this is a minor release rather than a 2.0 on purpose.** Each of them is narrow: five are behaviour catching up with what the documentation already said, and none asks you to redesign anything. A major bump signals "your code needs rework", which would misdescribe this release — and would spend 2.0.0 on a bug-fix batch when the Python API redesign that deserves it has not happened yet.
+
+- `partition_by_admin` returns the same dict as every other partition method instead of an int ([#841](https://github.com/geoparquet/geoparquet-io/pull/841)). Its annotation always said dict; the int was the defect. **If you were using the return value as a count**, read `result["file_count"]`.
+- The partition and kdtree API methods raise if you name neither a resolution nor `auto` ([#800](https://github.com/geoparquet/geoparquet-io/pull/800), [#855](https://github.com/geoparquet/geoparquet-io/pull/855)), where the API used to silently pick values the CLI refused to assume — `iterations` defaulted to a hardcoded 9. **Pass `auto=True` or an explicit resolution.**
+- `resolve_file_url()` no longer percent-encodes `http(s)` URLs; one is passed to the reader exactly as you typed it ([#845](https://github.com/geoparquet/geoparquet-io/pull/845)). This only affects you **if you were relying on gpio encoding spaces for you** — encode them yourself.
+- `gpio sort` defaults to 50,000 rows per row group ([#797](https://github.com/geoparquet/geoparquet-io/pull/797)), the top of the band gpio's own guidance recommends. No API changes, but **sorted output differs byte-for-byte from 1.4.0** for identical input; pass `--row-group-size` to pin the old value.
+- The DuckDB floor moves to 1.5.5 ([#893](https://github.com/geoparquet/geoparquet-io/pull/893)), which is what makes S2 work again. **Pinned below that, you will need to upgrade DuckDB.**
+
+Three people made their first contribution. **@maxmalynowsky** mapped the ArcGIS 10.9 field-type cohort — BigInteger, DateOnly and TimeOnly — which had been falling back to strings, and the fix turned up a crash in the time-parsing path that is fixed here too (#786). **@bertt** found that a WFS service URL already carrying a query parameter, such as an apikey, had that parameter dropped when gpio built the GetFeature URL, giving an HTTP 403 that looked like an auth problem rather than a URL-building bug (#836). **@be-student** fixed `gpio partition quadkey` in directory mode, where only `--resolution` was forwarded to each per-file run so every file failed unless `--auto` was passed (#900). Thank you all three — these are exactly the reports and fixes that come from using the tool on real services and real data, and we would be glad to see you back.
+
+### Breaking
+
+- feat(api)!: accept auto resolution on the partition methods by [@cholmes](https://github.com/cholmes) in [#800](https://github.com/geoparquet/geoparquet-io/pull/800)
+- fix(sort)!: default to 50,000 rows per row group by [@cholmes](https://github.com/cholmes) in [#797](https://github.com/geoparquet/geoparquet-io/pull/797)
+- fix(api)!: return the same dict from partition_by_admin as the other partition methods by [@cholmes](https://github.com/cholmes) in [#841](https://github.com/geoparquet/geoparquet-io/pull/841)
+- fix(remote)!: take an http(s) URL as already percent-encoded instead of re-encoding it by [@cholmes](https://github.com/cholmes) in [#845](https://github.com/geoparquet/geoparquet-io/pull/845)
+- feat(api)!: accept auto mode on the kdtree methods instead of pinning iterations=9 by [@cholmes](https://github.com/cholmes) in [#855](https://github.com/geoparquet/geoparquet-io/pull/855)
+- feat(s2)!: bring S2 back by requiring duckdb>=1.5.5, where the geography extension is published by [@cholmes](https://github.com/cholmes) in [#893](https://github.com/geoparquet/geoparquet-io/pull/893)
+
+### Added
+
+- feat(partition): sub-partition a5 with --min-size and --in-place by [@cholmes](https://github.com/cholmes) in [#790](https://github.com/geoparquet/geoparquet-io/pull/790)
+- feat(api): add ops.partition_by_* twins for every partition subcommand by [@cholmes](https://github.com/cholmes) in [#808](https://github.com/geoparquet/geoparquet-io/pull/808)
+- feat(api): expose directory sub-partitioning (min_size, in_place, preview) by [@cholmes](https://github.com/cholmes) in [#853](https://github.com/geoparquet/geoparquet-io/pull/853)
+- feat(sort): guard against re-reading the output as input, and accept --allow-schema-diff on directory input by [@cholmes](https://github.com/cholmes) in [#873](https://github.com/geoparquet/geoparquet-io/pull/873)
+- feat(remote): resolve S3 credentials through the full AWS chain, so SSO and assume-role work by [@cholmes](https://github.com/cholmes) in [#874](https://github.com/geoparquet/geoparquet-io/pull/874)
+- feat(validate): geometry_types uniqueness, undeclared native columns, geometry_types vs geospatial statistics by [@jatorre](https://github.com/jatorre) in [#879](https://github.com/geoparquet/geoparquet-io/pull/879)
+- feat(validate): implement the orientation-vs-data check (exterior CCW, holes CW) by [@jatorre](https://github.com/jatorre) in [#882](https://github.com/geoparquet/geoparquet-io/pull/882)
+
+### Changed
+
+- refactor: delete the dead metadata/writer duplicates by [@cholmes](https://github.com/cholmes) in [#829](https://github.com/geoparquet/geoparquet-io/pull/829)
+- refactor: rehome the test-only schema parser and delete its dead siblings by [@cholmes](https://github.com/cholmes) in [#834](https://github.com/geoparquet/geoparquet-io/pull/834)
+
+### Fixed
+
+- fix(ci): accept metadata 2.5 when publishing to PyPI by [@cholmes](https://github.com/cholmes) in [#783](https://github.com/geoparquet/geoparquet-io/pull/783)
+- fix(deps): upgrade vulnerable dependencies (automated) by [@nlebovits](https://github.com/nlebovits) in [#787](https://github.com/geoparquet/geoparquet-io/pull/787)
+- fix(arcgis): map BigInteger, DateOnly, and TimeOnly field types by [@maxmalynowsky](https://github.com/maxmalynowsky) in [#786](https://github.com/geoparquet/geoparquet-io/pull/786)
+- fix(convert): stop copying an invalid PROJJSON CRS into the output by [@cholmes](https://github.com/cholmes) in [#794](https://github.com/geoparquet/geoparquet-io/pull/794)
+- fix(write): detect geoarrow.wkb from field metadata, not just the Arrow type by [@cholmes](https://github.com/cholmes) in [#791](https://github.com/geoparquet/geoparquet-io/pull/791)
+- fix(extract): carry geometry_types into the piped Arrow stream by [@cholmes](https://github.com/cholmes) in [#801](https://github.com/geoparquet/geoparquet-io/pull/801)
+- fix(metadata): keep epoch, orientation and a derived covering on the no-rewrite fast path by [@cholmes](https://github.com/cholmes) in [#793](https://github.com/geoparquet/geoparquet-io/pull/793)
+- fix(api): validate extract columns and keep an attribute table writable by [@cholmes](https://github.com/cholmes) in [#788](https://github.com/geoparquet/geoparquet-io/pull/788)
+- fix(validate): treat OGC:CRS84 and EPSG:4326 as the same CRS, and an absent crs as CRS84 by [@cholmes](https://github.com/cholmes) in [#796](https://github.com/geoparquet/geoparquet-io/pull/796)
+- fix(stream): write a valid empty stream instead of aborting on a zero-row result by [@cholmes](https://github.com/cholmes) in [#806](https://github.com/geoparquet/geoparquet-io/pull/806)
+- fix(geoarrow): detect the extension name from field metadata everywhere, not just in the writers by [@cholmes](https://github.com/cholmes) in [#807](https://github.com/geoparquet/geoparquet-io/pull/807)
+- fix(sql): stop apostrophes in paths crashing convert, add and admin-divisions by [@cholmes](https://github.com/cholmes) in [#803](https://github.com/geoparquet/geoparquet-io/pull/803)
+- fix(add): write OUTPUT_FILE when the input already has a bbox column by [@cholmes](https://github.com/cholmes) in [#798](https://github.com/geoparquet/geoparquet-io/pull/798)
+- fix(admin): attribute Overture dependency territories instead of dropping them to ZZ by [@cholmes](https://github.com/cholmes) in [#820](https://github.com/geoparquet/geoparquet-io/pull/820)
+- fix(sql): show the real path, not the SQL-escaped one, in logs and errors by [@cholmes](https://github.com/cholmes) in [#809](https://github.com/geoparquet/geoparquet-io/pull/809)
+- fix(wfs): request the format the server advertises and parse GML responses by [@cholmes](https://github.com/cholmes) in [#835](https://github.com/geoparquet/geoparquet-io/pull/835)
+- fix(streaming): read a geoarrow CRS object as PROJJSON instead of stringifying it by [@cholmes](https://github.com/cholmes) in [#846](https://github.com/geoparquet/geoparquet-io/pull/846)
+- fix(partition,check): handle a zero-row input cleanly instead of crashing by [@cholmes](https://github.com/cholmes) in [#850](https://github.com/geoparquet/geoparquet-io/pull/850)
+- fix(write): give disk-rewrite 2.0 output a native GEOMETRY logical type by [@cholmes](https://github.com/cholmes) in [#847](https://github.com/geoparquet/geoparquet-io/pull/847)
+- fix(sort): say that an explicit default CRS is normalized, not preserved by [@cholmes](https://github.com/cholmes) in [#842](https://github.com/geoparquet/geoparquet-io/pull/842)
+- fix(validate): recognize the authority:code CRS form in the Parquet GEOMETRY type by [@cholmes](https://github.com/cholmes) in [#851](https://github.com/geoparquet/geoparquet-io/pull/851)
+- fix(extract): recompute geometry_types and bbox after geometry repair by [@cholmes](https://github.com/cholmes) in [#843](https://github.com/geoparquet/geoparquet-io/pull/843)
+- fix(check): explain that check stac wants the STAC JSON, not the Parquet file by [@cholmes](https://github.com/cholmes) in [#857](https://github.com/geoparquet/geoparquet-io/pull/857)
+- fix(add): copy a remote input through gpio's configured object store, not bare fsspec by [@cholmes](https://github.com/cholmes) in [#849](https://github.com/geoparquet/geoparquet-io/pull/849)
+- fix(sort): accept a directory of GeoParquet files as input by [@cholmes](https://github.com/cholmes) in [#852](https://github.com/geoparquet/geoparquet-io/pull/852)
+- fix(crs): keep a GeoArrow file's CRS when it has no geo block by [@cholmes](https://github.com/cholmes) in [#872](https://github.com/geoparquet/geoparquet-io/pull/872)
+- fix(remote): build Azure stores from az://account/container so uploads and copies work by [@cholmes](https://github.com/cholmes) in [#871](https://github.com/geoparquet/geoparquet-io/pull/871)
+- fix(validate): fail closed on a free-form Parquet GEOMETRY crs instead of reading it as CRS84 by [@cholmes](https://github.com/cholmes) in [#870](https://github.com/geoparquet/geoparquet-io/pull/870)
+- fix(extract): say what --write-memory does on extract bigquery by [@cholmes](https://github.com/cholmes) in [#878](https://github.com/geoparquet/geoparquet-io/pull/878)
+- fix(convert): report when an input's explicit default CRS is normalized away by [@cholmes](https://github.com/cholmes) in [#881](https://github.com/geoparquet/geoparquet-io/pull/881)
+- fix(wfs): reword the GML-path error, sanitize advertised formats, refuse XML with a DTD by [@cholmes](https://github.com/cholmes) in [#861](https://github.com/geoparquet/geoparquet-io/pull/861)
+- fix(write): don't crash on a malformed 'geo' block carried from the input by [@cholmes](https://github.com/cholmes) in [#883](https://github.com/geoparquet/geoparquet-io/pull/883)
+- fix(write): keep the declared CRS on in-memory and streaming 2.0 geometry types by [@cholmes](https://github.com/cholmes) in [#869](https://github.com/geoparquet/geoparquet-io/pull/869)
+- fix(convert): keep the source CRS in the geo block for M and ZM geometry at 2.0 by [@cholmes](https://github.com/cholmes) in [#888](https://github.com/geoparquet/geoparquet-io/pull/888)
+- fix(reproject): drop a spherical edges declaration when the destination CRS is projected by [@cholmes](https://github.com/cholmes) in [#884](https://github.com/geoparquet/geoparquet-io/pull/884)
+- fix(validate): enforce the covering.bbox path, field-order and field-type rules by [@jatorre](https://github.com/jatorre) in [#877](https://github.com/geoparquet/geoparquet-io/pull/877)
+- fix(wfs): keep existing query params (e.g. apikey) when building WFS GetFeature URLs by [@bertt](https://github.com/bertt) in [#836](https://github.com/geoparquet/geoparquet-io/pull/836)
+- fix(partition): support explicit quadkey resolutions in directory mode by [@be-student](https://github.com/be-student) in [#900](https://github.com/geoparquet/geoparquet-io/pull/900)
+- fix(partition): forward --use-centroid and refuse a lone --resolution up front in quadkey directory mode by [@cholmes](https://github.com/cholmes) in [#902](https://github.com/geoparquet/geoparquet-io/pull/902)
+- fix(validate): read X/Y from 6- and 8-element bboxes; handle antimeridian extents by [@jatorre](https://github.com/jatorre) in [#876](https://github.com/geoparquet/geoparquet-io/pull/876)
+- fix(geojson): write UTF-8 to stdout from the Python API too by [@cholmes](https://github.com/cholmes) in [#907](https://github.com/geoparquet/geoparquet-io/pull/907)
+
+### Documentation
+
+- docs(inspect): use the key compression_stats actually returns by [@cholmes](https://github.com/cholmes) in [#789](https://github.com/geoparquet/geoparquet-io/pull/789)
+- docs: S2 is available again -- the geography extension is published for DuckDB 1.5.5 by [@cholmes](https://github.com/cholmes) in [#860](https://github.com/geoparquet/geoparquet-io/pull/860)
+- docs(release): record what the v1.4.0 release actually did by [@cholmes](https://github.com/cholmes) in [#784](https://github.com/geoparquet/geoparquet-io/pull/784)
+
+### New Contributors
+
+- @maxmalynowsky made their first contribution in https://github.com/geoparquet/geoparquet-io/pull/786
+- @bertt made their first contribution in https://github.com/geoparquet/geoparquet-io/pull/836
+- @be-student made their first contribution in https://github.com/geoparquet/geoparquet-io/pull/900
+
+_16 internal changes and 2 dependency updates are not listed here; the full changelog has them._
+
+**Full Changelog**: https://github.com/geoparquet/geoparquet-io/compare/v1.4.0...v1.5.0
+
 ## v1.4.0 (2026-08-30)
 
 This release adds a pipeline for visualizing large data at low zoom.

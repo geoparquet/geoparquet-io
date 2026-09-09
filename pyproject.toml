@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "geoparquet-io"
-version = "1.4.0"
+version = "1.5.0"
 description = "Fast I/O and transformation tools for GeoParquet files"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -336,7 +336,7 @@ skips = [
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "1.4.0"
+version = "1.5.0"
 version_files = ["pyproject.toml:^version"]
 tag_format = "v$version"
 # Off: the changelog is generated from merged pull requests by

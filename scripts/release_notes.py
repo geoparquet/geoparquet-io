@@ -149,14 +149,23 @@ def apply_overrides(notes: Notes, overrides: dict[str, str]) -> Notes:
     Contributors do not all write conventional-commit titles, and the pull
     request keeps whatever it was merged with. The changelog does not have to:
     a rewrite here gives the entry a type, which is what puts it in a section.
+
+    The file is keyed by pull-request number across the whole project, so most
+    of its entries belong to releases that have already shipped. Those are
+    reported and skipped rather than treated as an error: raising on them made
+    the first release work and every release after it fail, since the file only
+    ever grows. A number here that is *not* in any release is still worth
+    seeing — a typo'd number silently rewrites nothing — so it goes to stderr.
     """
     wanted = {int(k): v for k, v in overrides.items() if not k.startswith("_")}
     present = {entry.number for entry in notes.entries}
-    missing = sorted(wanted.keys() - present)
-    if missing:
-        raise ReleaseNotesError(
-            "overrides name pull requests that are not in this range: "
-            + ", ".join(str(n) for n in missing)
+    out_of_range = sorted(wanted.keys() - present)
+    if out_of_range:
+        print(
+            f"note: {len(out_of_range)} override(s) are not in this range and were "
+            "skipped (earlier releases, or a mistyped number): "
+            + ", ".join(str(n) for n in out_of_range),
+            file=sys.stderr,
         )
 
     notes.entries = [

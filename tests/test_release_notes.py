@@ -195,9 +195,32 @@ class TestOverrides:
         notes = rn.apply_overrides(rn.parse(SAMPLE), {"_note": "not a pull request"})
         assert len(notes.entries) == 9
 
-    def test_an_override_for_an_absent_pull_request_is_an_error(self):
-        with pytest.raises(rn.ReleaseNotesError, match="9999"):
-            rn.apply_overrides(rn.parse(SAMPLE), {"9999": "fix: nothing"})
+    def test_an_override_for_an_absent_pull_request_is_reported_and_skipped(self, capsys):
+        """Out-of-range overrides are a note, not a failure.
+
+        The file is keyed by pull-request number across the whole project, so
+        after the first generated release most of its entries belong to
+        releases that already shipped. Raising on them made release one work
+        and every release after it fail. The number still has to reach stderr:
+        an override that matches nothing rewrites nothing, and a mistyped
+        number is otherwise silent.
+        """
+        notes = rn.apply_overrides(rn.parse(SAMPLE), {"9999": "fix: nothing"})
+
+        assert "9999" in capsys.readouterr().err
+        assert len(notes.entries) == 9
+        assert all(e.title != "fix: nothing" for e in notes.entries)
+
+    def test_an_in_range_override_still_applies_alongside_an_absent_one(self, capsys):
+        """One stale entry must not stop the entries that do match."""
+        notes = rn.apply_overrides(
+            rn.parse(SAMPLE),
+            {"9999": "fix: nothing", "534": "chore(deps): relax the duckdb pin"},
+        )
+
+        assert "9999" in capsys.readouterr().err
+        entry = next(e for e in notes.entries if e.number == 534)
+        assert entry.title == "chore(deps): relax the duckdb pin"
 
     def test_the_shipped_overrides_file_parses(self):
         overrides = rn.load_overrides(rn.OVERRIDES_PATH)
