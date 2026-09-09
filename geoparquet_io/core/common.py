@@ -1600,6 +1600,7 @@ def _apply_geoparquet_metadata(
     verbose: bool = False,
     edges: str | None = None,
     geometry_info: dict | None = None,
+    geo_bbox: list[float] | None = None,
 ):
     """
     Apply GeoParquet metadata to an Arrow Table based on version.
@@ -1628,6 +1629,11 @@ def _apply_geoparquet_metadata(
             - "primary": primary geometry column name
             - "secondary": list of secondary geometry column names
             - "metadata": dict mapping column names to their metadata
+        geo_bbox: Pre-computed [xmin, ymin, xmax, ymax] for the primary column,
+            used instead of the plain min/max taken off the data. A caller that
+            knows the data crosses the antimeridian passes the RFC 7946 5.2
+            wrap form (xmin > xmax) here, which cannot be recovered from
+            per-geometry extents alone.
 
     Returns:
         pa.Table: Table with GeoParquet metadata applied
@@ -1775,7 +1781,7 @@ def _apply_geoparquet_metadata(
     if "geometry_types" not in col_meta:
         col_meta["geometry_types"] = _compute_geometry_types(table, geometry_column, verbose)
 
-    computed_bbox = _compute_bbox_from_data(table, geometry_column, verbose)
+    computed_bbox = geo_bbox or _compute_bbox_from_data(table, geometry_column, verbose)
     if computed_bbox:
         col_meta["bbox"] = computed_bbox
 
@@ -3197,6 +3203,7 @@ def write_geoparquet_table(
     verbose: bool = False,
     profile: str | None = None,
     edges: str | None = None,
+    geo_bbox: list[float] | None = None,
 ) -> None:
     """
     Write a PyArrow Table to a GeoParquet file with proper metadata.
@@ -3217,6 +3224,9 @@ def write_geoparquet_table(
         profile: AWS profile name (S3 only, optional)
         edges: Edge interpretation, "spherical" or "planar" (default None = planar).
                Use "spherical" for data from BigQuery or other S2-based sources.
+        geo_bbox: Pre-computed [xmin, ymin, xmax, ymax] for the geometry column.
+               Pass the RFC 7946 5.2 wrap form (xmin > xmax) for data that
+               crosses the antimeridian; None computes a plain extent.
     """
     # Auto-detect geometry column if not provided
     if geometry_column is None:
@@ -3285,6 +3295,7 @@ def write_geoparquet_table(
                 custom_metadata=None,
                 verbose=verbose,
                 edges=edges,
+                geo_bbox=geo_bbox,
             )
 
         # Write to disk with proper settings

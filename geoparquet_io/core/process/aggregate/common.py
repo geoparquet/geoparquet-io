@@ -423,3 +423,65 @@ def build_breakdown_select(
                 other_clause = "TRUE"
             parts.append(f'COUNT(*) FILTER (WHERE {other_clause}) AS "count_other"')
     return ", ".join(parts)
+
+
+# Grid-cell output and the antimeridian
+# -------------------------------------
+# A cell that straddles the antimeridian is written cut into a MultiPolygon with
+# parts at both -180 and +180 (RFC 7946 3.1.9). Plain min/max over such a
+# dataset reports a bbox of [-180, ..., 180, ...] -- true, but it claims the
+# whole globe for data that only touches the seam. RFC 7946 5.2, which
+# GeoParquet's `bbox` follows, writes the crossing extent as xmin > xmax
+# instead; gpio's own validator already reads it that way (#876).
+_ANTIMERIDIAN_EPS = 1e-6
+
+_PLAIN_EXTENT_SQL = """
+SELECT min(ST_XMin(g)), max(ST_XMax(g)), min(ST_YMin(g)), max(ST_YMax(g))
+FROM (SELECT {geom_expr} AS g FROM {relation} WHERE {qcol} IS NOT NULL)
+"""
+
+# Widest longitude gap between the parts, found with a running max over the
+# sorted part extents -- the standard interval merge. The parts, not the whole
+# geometries: a cut cell's own extent already spans -180 to 180 and would hide
+# the gap that makes the crossing visible.
+_WIDEST_LON_GAP_SQL = """
+WITH parts AS (
+    SELECT ST_XMin(p) AS lo, ST_XMax(p) AS hi
+    FROM (SELECT UNNEST(ST_Dump({geom_expr})).geom AS p FROM {relation} WHERE {qcol} IS NOT NULL)
+), merged AS (
+    SELECT lo, max(hi) OVER (ORDER BY lo ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev
+    FROM parts
+)
+SELECT lo, prev FROM merged WHERE prev IS NOT NULL AND lo > prev ORDER BY lo - prev DESC LIMIT 1
+"""
+
+
+def antimeridian_aware_bbox(con, relation: str, geometry_column: str) -> list[float] | None:
+    """The ``geo`` bbox for a lon/lat relation, in RFC 7946 wrap form when it crosses.
+
+    Returns ``[xmin, ymin, xmax, ymax]`` with ``xmin > xmax`` when the data
+    leaves a longitude gap wider than the one the plain extent implies -- the
+    shape of a dataset that sits astride the antimeridian rather than spanning
+    the globe. Returns the plain extent otherwise, and None when the relation
+    holds no geometry (the caller then leaves the bbox to the writer).
+
+    ``relation`` must already be a FROM-able expression and ``geometry_column``
+    a column of it holding WKB or GEOMETRY. Longitudes are assumed: the caller
+    establishes a geographic CRS, since ``xmin > xmax`` cannot mean a crossing
+    in a projected one.
+    """
+    qcol = quote_identifier(geometry_column)
+    geom_expr = geometry_to_geom_expr(con, relation, geometry_column)
+    params = {"relation": relation, "qcol": qcol, "geom_expr": geom_expr}
+    xmin, xmax, ymin, ymax = con.execute(_PLAIN_EXTENT_SQL.format(**params)).fetchone()
+    if xmin is None:
+        return None
+    plain = [xmin, ymin, xmax, ymax]
+    # Only data reaching both edges can be hiding a crossing; anything else is
+    # already reported tightly and must not pay for the part-level scan.
+    if xmin > -180.0 + _ANTIMERIDIAN_EPS or xmax < 180.0 - _ANTIMERIDIAN_EPS:
+        return plain
+    gap = con.execute(_WIDEST_LON_GAP_SQL.format(**params)).fetchone()
+    if gap is None or (gap[0] - gap[1]) <= (xmin + 360.0) - xmax:
+        return plain
+    return [gap[0], ymin, gap[1], ymax]
