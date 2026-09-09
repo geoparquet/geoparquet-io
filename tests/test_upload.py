@@ -13,6 +13,9 @@ from click.testing import CliRunner
 # Use importlib to get the actual module (avoids namespace collision with cli group)
 main_module = importlib.import_module("geoparquet_io.cli.main")
 cli = main_module.cli
+# `check_credentials` is patched where `gpio publish upload` resolves it, which is
+# the module that owns the command (Deep Review 3.2 moved it out of `cli.main`).
+publish_module = importlib.import_module("geoparquet_io.cli.commands.publish")
 from geoparquet_io.core.upload import (  # noqa: E402
     _check_azure_credentials,
     _check_gcs_credentials,
@@ -76,7 +79,7 @@ class TestUploadDryRun:
     def test_upload_single_file_dry_run(self, places_test_file):
         """Test dry-run mode for single file upload."""
         runner = CliRunner()
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -102,7 +105,7 @@ class TestUploadDryRun:
         """Test dry-run mode with AWS profile."""
         runner = CliRunner()
         # Mock credential check to pass (since test-profile doesn't exist)
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -130,7 +133,7 @@ class TestUploadDryRun:
             (test_dir / f"file_{i}.parquet").write_text(f"test content {i}")
 
         runner = CliRunner()
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -163,7 +166,7 @@ class TestUploadDryRun:
             (test_dir / f"readme_{i}.txt").write_text(f"text {i}")
 
         runner = CliRunner()
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -197,7 +200,7 @@ class TestUploadDryRun:
             (test_dir / f"file_{i:02d}.parquet").write_text(f"test {i}")
 
         runner = CliRunner()
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -220,7 +223,7 @@ class TestUploadDryRun:
         test_dir.mkdir()
 
         runner = CliRunner()
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -245,7 +248,7 @@ class TestUploadDryRun:
             (test_dir / f"data_{i}.parquet").write_text(f"test {i}")
 
         runner = CliRunner()
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -572,7 +575,7 @@ class TestUploadCLIRefusesUnparseableAzureUrls:
         source.write_bytes(b"parquet-bytes")
 
         runner = CliRunner()
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli, ["publish", "upload", str(source), destination], catch_exceptions=False
             )
@@ -588,7 +591,7 @@ class TestUploadCLIS3Options:
     def test_upload_with_s3_endpoint_dry_run(self, places_test_file):
         """Test dry-run mode with S3 endpoint options."""
         runner = CliRunner()
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -609,7 +612,7 @@ class TestUploadCLIS3Options:
     def test_upload_with_s3_region_dry_run(self, places_test_file):
         """Test dry-run mode with S3 region option."""
         runner = CliRunner()
-        with patch.object(main_module, "check_credentials", return_value=(True, "")):
+        with patch.object(publish_module, "check_credentials", return_value=(True, "")):
             result = runner.invoke(
                 cli,
                 [
@@ -641,7 +644,7 @@ class TestUploadEventLoopCompatibility:
         async def call_upload_from_async():
             # This should NOT raise RuntimeError about asyncio.run()
             runner = CliRunner()
-            with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            with patch.object(publish_module, "check_credentials", return_value=(True, "")):
                 result = runner.invoke(
                     cli,
                     [
@@ -672,7 +675,7 @@ class TestUploadEventLoopCompatibility:
 
         async def call_upload_from_async():
             runner = CliRunner()
-            with patch.object(main_module, "check_credentials", return_value=(True, "")):
+            with patch.object(publish_module, "check_credentials", return_value=(True, "")):
                 result = runner.invoke(
                     cli,
                     [
