@@ -15,13 +15,19 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from geoparquet_io.cli import _shared
 from geoparquet_io.cli._shared import init_group_context
 from geoparquet_io.cli.main import cli
 
 
 @pytest.fixture
 def logging_spy():
-    with mock.patch("geoparquet_io.cli._shared.setup_cli_logging") as spy:
+    # `patch.object`, not the dotted string form: `geoparquet_io/__init__.py`
+    # does `from geoparquet_io.cli.main import cli`, which rebinds the name
+    # `geoparquet_io.cli` to the Click Group. On Python 3.10 mock resolves the
+    # target by walking that name and gets `AttributeError: 'Group' object has
+    # no attribute '_shared'`. The module object imported above is unambiguous.
+    with mock.patch.object(_shared, "setup_cli_logging") as spy:
         yield spy
 
 
