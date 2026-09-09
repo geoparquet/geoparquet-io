@@ -30,10 +30,19 @@ def _activate_s3(ctx, aws_profile=None, s3_endpoint=None, s3_region=None, s3_no_
     """Resolve and activate S3 config from ctx + per-command overrides.
 
     Properly saves/restores AWS_PROFILE env var to avoid credential leaks.
+
+    ``ctx.obj`` is primed here rather than relied upon. The root ``gpio`` group
+    fills it, so every real CLI path already arrives with a dict -- but a group
+    object invoked on its own (``CliRunner().invoke(process, [...])``, or any
+    programmatic caller) never runs the root callback, and the read below then
+    raised ``AttributeError: 'NoneType' object has no attribute 'get'`` (#922).
+    Enforcing the precondition in the one helper that has it keeps every group
+    correct, instead of depending on each group callback to remember.
     """
     from geoparquet_io.core.duckdb_utils import s3_config_scope
     from geoparquet_io.core.remote import resolve_s3_config
 
+    ctx.ensure_object(dict)
     config = resolve_s3_config(
         s3_endpoint=s3_endpoint or ctx.obj.get("s3_endpoint"),
         s3_region=s3_region or ctx.obj.get("s3_region"),

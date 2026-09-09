@@ -677,3 +677,66 @@ class TestAddKDTreePythonAPI:
         # because `extract_crs_from_table` stringified the resolved geoarrow CRS
         # object into "ProjJsonCrs(OGC:CRS84)" (issue #816, fixed).
         assert _failed_checks(temp_output_file) == []
+
+
+class TestKDTreeColumnNameQuoting:
+    """``--kdtree-name`` reaches the KD-tree ``SELECT ... AS <name>`` verbatim.
+
+    Both KD-tree query builders alias the computed partition id to the
+    user-supplied column name: ``_build_sampling_query`` (approximate mode, the
+    default) and the exact-mode branch of ``add_kdtree_column``. Interpolating
+    that name bare means any name that is not a bare SQL identifier either
+    breaks the query or, with a crafted value, injects into the projection
+    (#924, the CLI-supplied sibling of #918).
+    """
+
+    # A name that closes the alias and appends an attacker-chosen projection
+    # column. Bare, this yields an extra ``pwn`` column; quoted, it is one
+    # delimited identifier that happens to contain punctuation.
+    _PAYLOAD = "cell, 42 AS pwn"
+
+    @pytest.mark.parametrize("mode", [[], ["--exact"]], ids=["approx", "exact"])
+    def test_a_name_needing_quoting_round_trips(self, buildings_test_file, temp_output_file, mode):
+        """A name with a space and an embedded double quote survives verbatim."""
+        name = 'weird "kd" name'
+        result = CliRunner().invoke(
+            add,
+            [
+                "kdtree",
+                buildings_test_file,
+                temp_output_file,
+                "--partitions",
+                "4",
+                "--kdtree-name",
+                name,
+                *mode,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        table = pq.read_table(temp_output_file)
+        assert name in table.schema.names
+        values = table.column(name).to_pylist()
+        assert values and all(v is None or all(c in "01" for c in v) for v in values)
+
+    @pytest.mark.parametrize("mode", [[], ["--exact"]], ids=["approx", "exact"])
+    def test_an_injection_payload_stays_one_column(
+        self, buildings_test_file, temp_output_file, mode
+    ):
+        """The payload must land as a single column name, not extra SQL."""
+        result = CliRunner().invoke(
+            add,
+            [
+                "kdtree",
+                buildings_test_file,
+                temp_output_file,
+                "--partitions",
+                "4",
+                "--kdtree-name",
+                self._PAYLOAD,
+                *mode,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        names = pq.read_table(temp_output_file).schema.names
+        assert "pwn" not in names
+        assert self._PAYLOAD in names
