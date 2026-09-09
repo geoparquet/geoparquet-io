@@ -26,7 +26,6 @@ from urllib.parse import unquote
 from geoparquet_io.core.common import write_parquet_with_metadata
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.geo_metadata import strip_derived_stats
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.write_strategies.duckdb_kv import (
     get_default_memory_limit,
@@ -190,9 +189,16 @@ def finalize_partition_file(
 
     Reads the (small) staging partition via a glob so a partition that DuckDB
     split across files still collapses into one output file. Recomputes the
-    tight per-partition ``bbox``/``geometry_types`` by stripping the inherited
-    ones. Returns ``True`` when a file was written, ``False`` when skipped
-    (exists and not overwrite).
+    tight per-partition ``bbox``/``geometry_types`` by invalidating the
+    inherited ones — ``metadata`` describes the whole input, so on a partition
+    holding a fraction of its rows they are at best far too wide and, when the
+    input was itself a glob, only the first file's. Returns ``True`` when a file
+    was written, ``False`` when skipped (exists and not overwrite).
+
+    The invalidation is left to ``write_parquet_with_metadata`` rather than done
+    here: only it knows which column it will recompute, and a secondary geometry
+    column that loses ``geometry_types`` without one lands in the output missing
+    a key GeoParquet 1.1 requires (#934).
     """
     if os.path.exists(output_filename) and not overwrite:
         if verbose:
@@ -209,7 +215,8 @@ def finalize_partition_file(
         con,
         query,
         output_filename,
-        original_metadata=strip_derived_stats(metadata),
+        original_metadata=metadata,
+        invalidate_derived_stats=True,
         verbose=False,
         **options.as_write_kwargs(),
     )

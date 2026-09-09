@@ -571,7 +571,9 @@ def _rewrite_geo_metadata(metadata: dict | None, rewrite) -> dict | None:
 
 
 def strip_derived_stats(
-    metadata: dict | None, columns: Collection[str] | None = None
+    metadata: dict | None,
+    columns: Collection[str] | None = None,
+    recomputed_columns: Collection[str] | None = None,
 ) -> dict | None:
     """Return a copy of Parquet KV ``metadata`` without derived geo stats.
 
@@ -592,7 +594,17 @@ def strip_derived_stats(
     them anyway left the output without the ``geometry_types`` GeoParquet 1.1
     requires — nothing recomputes a secondary column's — and DuckDB then refuses
     to open the file at all. ``None`` strips every column, which is right for a
-    row filter or a merge: those change every column's rows.
+    merge, whose carried stats UNDER-cover every column of the output.
+
+    ``recomputed_columns`` names the stripped columns the caller's write path
+    will fill back in — on every file-write path that is the primary geometry
+    column and nothing else. Removing ``geometry_types`` is a way of *asking*
+    for a recompute, so for any other stripped column it is not a marker but a
+    REQUIRED key silently deleted, and the same unreadable output comes back by
+    another route (#934). Those columns therefore keep the key with the spec's
+    "not known" value, ``[]``, and lose only ``bbox``, which is optional and
+    whose absence already means "not known". ``None`` (the default) means the
+    caller recomputes everything it strips.
 
     Both ``"geo"`` and ``b"geo"`` keys are handled, and the value is returned in
     the same form (``bytes``/``str``/``dict``) it arrived in. The input is never
@@ -603,9 +615,12 @@ def strip_derived_stats(
         for col_name, col_meta in (geo_dict.get("columns") or {}).items():
             if columns is not None and col_name not in columns:
                 continue
-            if isinstance(col_meta, dict):
-                for key in DERIVED_STAT_KEYS:
-                    col_meta.pop(key, None)
+            if not isinstance(col_meta, dict):
+                continue
+            for key in DERIVED_STAT_KEYS:
+                col_meta.pop(key, None)
+            if recomputed_columns is not None and col_name not in recomputed_columns:
+                col_meta["geometry_types"] = []
         return geo_dict
 
     return _rewrite_geo_metadata(metadata, _drop)
@@ -682,7 +697,12 @@ def backfill_derived_stats(
     is unreadable by the next stage of a pipe (issue #722). ``bbox`` is optional
     and stays absent when the data cannot supply one (an empty result).
 
-    Values already present are left alone — this fills gaps, it does not audit.
+    A *known* value already present is left alone — this fills gaps, it does not
+    audit. An empty ``geometry_types`` is a gap, not a value: ``[]`` is how the
+    spec spells "not known", and it is what the strip leaves on a column a
+    file-write path would not have recomputed (#934). This path holds the rows,
+    so it can answer the question the sentinel leaves open.
+
     The input is never mutated; unparsable ``geo`` values pass through untouched.
     """
 
@@ -690,7 +710,7 @@ def backfill_derived_stats(
         for name, col_meta in (geo_dict.get("columns") or {}).items():
             if not isinstance(col_meta, dict) or name not in table.column_names:
                 continue
-            if "geometry_types" not in col_meta:
+            if not col_meta.get("geometry_types"):
                 col_meta["geometry_types"] = _compute_geometry_types(table, name, verbose)
             if "bbox" not in col_meta:
                 bbox = _compute_bbox_from_data(table, name, verbose)

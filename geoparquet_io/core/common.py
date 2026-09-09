@@ -2880,7 +2880,11 @@ def write_parquet_with_metadata(
             geometry columns but not others — reproject transforms only the
             primary column, so a secondary column reaches the output unchanged
             and its carried stats still describe it (#890). None (the default)
-            invalidates every column, which is right for a row filter or a merge.
+            invalidates every column, which is right for a merge: its carried
+            stats under-cover every column of the output. An invalidated column
+            other than the primary keeps ``geometry_types`` as the spec's empty
+            "not known" list rather than losing the key, since nothing here
+            recomputes it (#934).
         drop_nonplanar_edges_columns: Geometry columns whose non-planar
             ``edges`` declaration must neither be carried through nor
             re-attached to the output. Set by writes that invalidate the edge
@@ -2902,14 +2906,30 @@ def write_parquet_with_metadata(
 
     configure_verbose(verbose)
 
+    # Use geometry column from geometry_info if provided, otherwise auto-detect
+    # This ensures original column names are preserved (fixes #328)
+    # Resolved before the invalidation below, which has to name the one column
+    # the write strategies recompute derived stats for.
+    if geometry_info and geometry_info.get("primary"):
+        geometry_column = geometry_info["primary"]
+    else:
+        geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
+
     # Callers that transform geometry, filter rows, or merge multiple inputs
     # invalidate the carried bbox/geometry_types; drop them so the write
     # strategies recompute (or omit) them instead of describing the input. A
     # caller that transforms only some geometry columns names them, so an
     # untouched secondary column keeps the stats that still describe it (#890).
+    #
+    # Every strategy recomputes `geometry_column` and only that, so a stripped
+    # SECONDARY column would be left with no `geometry_types` at all -- a key
+    # GeoParquet 1.1 requires and DuckDB refuses to open a file without. Naming
+    # the recomputed column leaves the others the "not known" sentinel (#934).
     if invalidate_derived_stats:
         original_metadata = strip_derived_stats(
-            original_metadata, columns=invalidate_derived_stats_columns
+            original_metadata,
+            columns=invalidate_derived_stats_columns,
+            recomputed_columns={geometry_column} if geometry_column else set(),
         )
 
     # A write that invalidates the edge interpretation for the columns it
@@ -2920,13 +2940,6 @@ def write_parquet_with_metadata(
         original_metadata = strip_nonplanar_edges(
             original_metadata, columns=drop_nonplanar_edges_columns
         )
-
-    # Use geometry column from geometry_info if provided, otherwise auto-detect
-    # This ensures original column names are preserved (fixes #328)
-    if geometry_info and geometry_info.get("primary"):
-        geometry_column = geometry_info["primary"]
-    else:
-        geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
 
     # A column projection (e.g. ``extract --exclude-cols``) can drop the bbox
     # column a ``covering`` points at, a secondary geometry column, or the
