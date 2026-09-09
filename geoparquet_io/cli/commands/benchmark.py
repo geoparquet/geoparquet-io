@@ -13,8 +13,7 @@ from geoparquet_io.core.logging_config import configure_verbose
 
 # Benchmark commands group
 @click.group()
-@click.pass_context
-def benchmark(ctx):
+def benchmark():
     """Benchmark GeoParquet performance.
 
     Commands for measuring and comparing performance of GeoParquet operations.
@@ -26,7 +25,6 @@ def benchmark(ctx):
       explain  Show DuckDB query plan analysis (EXPLAIN ANALYZE)
       report   View and compare benchmark results
     """
-    ctx.ensure_object(dict)
 
 
 @benchmark.command("compare")
