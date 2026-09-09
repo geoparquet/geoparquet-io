@@ -8,7 +8,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 import click
 from click.core import ParameterSource
 
-from geoparquet_io.cli._shared import _activate_s3
+from geoparquet_io.cli._shared import _activate_s3, prepare_output
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     any_extension_option,
@@ -29,6 +29,7 @@ from geoparquet_io.core.add.quadkey import add_quadkey_column as add_quadkey_col
 from geoparquet_io.core.add.s2 import add_s2_column as add_s2_column_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.logging_config import setup_cli_logging
+from geoparquet_io.core.streaming import StreamingError
 
 
 @click.group()
@@ -440,19 +441,9 @@ def add_bbox(
         gpio add bbox input.parquet output.parquet --force
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         # An input that already has a bbox column is answered with a verbatim copy,
         # which cannot honour a --compression the user actually typed. Pass None
@@ -554,19 +545,9 @@ def add_h3(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         try:
             add_h3_column_impl(
@@ -637,19 +618,9 @@ def add_a5(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         try:
             add_a5_column_impl(
@@ -720,19 +691,9 @@ def add_s2(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         try:
             add_s2_column_impl(
@@ -960,19 +921,9 @@ def add_quadkey(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        # Validate output early - provides helpful error if no output and not piping
-        from geoparquet_io.core.streaming import StreamingError, validate_output
-
-        try:
-            validate_output(output_parquet)
-        except StreamingError as e:
-            raise click.ClickException(str(e)) from None
-
-        # Validate .parquet extension
-        validate_parquet_extension(output_parquet, any_extension)
-
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+        row_group_mb = prepare_output(
+            output_parquet, any_extension, row_group_size, row_group_size_mb
+        )
 
         try:
             add_quadkey_column_impl(

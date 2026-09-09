@@ -13,7 +13,8 @@ The split against the neighbouring modules:
   helpers such as ``parse_row_group_options``. That is still their home;
   nothing was moved out of it.
 * this module - the group-neutral runtime plumbing that is not a decorator and
-  not a Click option: S3 activation, and the default-subcommand group factory.
+  not a Click option: S3 activation, the shared write-command prologue, and the
+  default-subcommand group factory.
 
 Only helpers used by more than one command group belong here. A helper used by a
 single group travels with that group into ``cli/commands/<group>.py``.
@@ -60,6 +61,67 @@ def _activate_s3(ctx, aws_profile=None, s3_endpoint=None, s3_region=None, s3_no_
             os.environ.pop("AWS_PROFILE", None)
         else:
             os.environ["AWS_PROFILE"] = previous_profile
+
+
+def prepare_output(
+    output_path: str | None,
+    any_extension: bool,
+    row_group_size: int | None,
+    row_group_size_mb: str | None,
+) -> float | None:
+    """Run the three checks every write command performs before it does any work.
+
+    In order:
+
+    1. :func:`~geoparquet_io.core.streaming.validate_output` - refuses a missing
+       output when stdout is a terminal, and warns when binary Arrow IPC would
+       be written to one. Its ``StreamingError`` is re-raised as a
+       ``ClickException`` with ``from None``: the message is already written for
+       a user, and the traceback behind it is noise.
+    2. :func:`~geoparquet_io.core.file_utils.validate_parquet_extension` -
+       rejects a non-``.parquet`` output unless ``--any-extension`` was given.
+    3. :func:`~geoparquet_io.cli.decorators.parse_row_group_options` - enforces
+       that ``--row-group-size`` and ``--row-group-size-mb`` are mutually
+       exclusive and converts the size string to MB.
+
+    The order matters and is part of what this helper pins: a user who typed
+    neither an output nor a ``.parquet`` name should get the streaming hint,
+    which tells them what to do, rather than the extension complaint.
+
+    Args:
+        output_path: The command's output argument. ``None`` means "stream to
+            stdout" and ``"-"`` means it explicitly.
+        any_extension: Value of ``--any-extension``.
+        row_group_size: Value of ``--row-group-size`` (rows).
+        row_group_size_mb: Value of ``--row-group-size-mb`` (size string).
+
+    Returns:
+        The row group size in MB, or ``None`` when it was not requested -- pass
+        it to the core writer as ``row_group_size_mb``.
+
+    Raises:
+        click.ClickException: No output was given and stdout is a terminal.
+        click.UsageError: Both row-group options were given, or the size string
+            is invalid.
+        InvalidParameterError: The output has a non-``.parquet`` extension and
+            ``--any-extension`` was not given.
+    """
+    from geoparquet_io.cli.decorators import parse_row_group_options
+    from geoparquet_io.core.file_utils import validate_parquet_extension
+    from geoparquet_io.core.streaming import StreamingError, validate_output
+
+    try:
+        validate_output(output_path)
+    except StreamingError as e:
+        raise click.ClickException(str(e)) from None
+
+    # ``validate_parquet_extension`` returns immediately on ``None``, but is
+    # annotated ``str``. Skipping the call keeps the None-handling visible here
+    # rather than relying on an annotation that does not admit it.
+    if output_path is not None:
+        validate_parquet_extension(output_path, any_extension)
+
+    return parse_row_group_options(row_group_size, row_group_size_mb)
 
 
 def create_default_group(default_subcommand: str, description: str) -> type:

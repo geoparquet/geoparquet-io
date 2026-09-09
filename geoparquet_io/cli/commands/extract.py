@@ -7,7 +7,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, create_default_group
+from geoparquet_io.cli._shared import _activate_s3, create_default_group, prepare_output
 from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
     SingleFileCommand,
@@ -220,19 +220,7 @@ def extract_geoparquet(
         # Extract first 1000 rows
         gpio extract data.parquet output.parquet --limit 1000
     """
-    # Validate output early - provides helpful error if no output and not piping
-    from geoparquet_io.core.streaming import StreamingError, validate_output
-
-    try:
-        validate_output(output_file)
-    except StreamingError as e:
-        raise click.ClickException(str(e)) from None
-
-    # Validate .parquet extension
-    validate_parquet_extension(output_file, any_extension)
-
-    # Parse row group options
-    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+    row_group_mb = prepare_output(output_file, any_extension, row_group_size, row_group_size_mb)
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         extract_impl(
@@ -675,19 +663,7 @@ def extract_bigquery_cmd(
     """
     from geoparquet_io.core.extract_bigquery import extract_bigquery
 
-    # Validate output early
-    from geoparquet_io.core.streaming import StreamingError, validate_output
-
-    try:
-        validate_output(output_file)
-    except StreamingError as e:
-        raise click.ClickException(str(e)) from None
-
-    # Validate .parquet extension
-    validate_parquet_extension(output_file, any_extension)
-
-    # Parse row group options
-    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
+    row_group_mb = prepare_output(output_file, any_extension, row_group_size, row_group_size_mb)
 
     extract_bigquery(
         table_id=table_id,
