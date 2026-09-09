@@ -161,6 +161,74 @@ class TestStripDerivedStatsColumns:
         assert strip_derived_stats(meta, columns={"nope"}) == meta
 
 
+class TestStripDerivedStatsRecomputedColumns:
+    """``recomputed_columns=`` says which stripped columns get filled back (#934).
+
+    ``geometry_types`` is REQUIRED by GeoParquet 1.1, so removing it is only safe
+    for a column the write path will recompute — in practice the primary geometry
+    column and nothing else. Any other stripped column keeps the key with the
+    spec's "not known" sentinel, ``[]``, instead of losing it.
+    """
+
+    def _geo(self):
+        return {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "bbox": [1, 1, 3, 3],
+                    "geometry_types": ["Point"],
+                },
+                "other_geom": {
+                    "encoding": "WKB",
+                    "bbox": [0, 0, 9, 9],
+                    "geometry_types": ["Polygon"],
+                },
+            },
+        }
+
+    def test_recomputed_column_loses_both_keys(self):
+        out = strip_derived_stats({"geo": self._geo()}, recomputed_columns={"geometry"})
+        col = out["geo"]["columns"]["geometry"]
+        assert "bbox" not in col
+        assert "geometry_types" not in col
+
+    def test_unrecomputed_column_keeps_an_empty_type_list(self):
+        out = strip_derived_stats({"geo": self._geo()}, recomputed_columns={"geometry"})
+        col = out["geo"]["columns"]["other_geom"]
+        assert col["geometry_types"] == []
+        assert "bbox" not in col
+
+    def test_default_still_deletes_everything(self):
+        """No ``recomputed_columns`` means the caller recomputes all it strips."""
+        out = strip_derived_stats({"geo": self._geo()})
+        for col in out["geo"]["columns"].values():
+            assert "bbox" not in col
+            assert "geometry_types" not in col
+
+    def test_scope_wins_over_the_sentinel(self):
+        """A column outside ``columns`` is not stale, so it keeps its real stats."""
+        out = strip_derived_stats(
+            {"geo": self._geo()}, columns={"geometry"}, recomputed_columns={"geometry"}
+        )
+        col = out["geo"]["columns"]["other_geom"]
+        assert col["geometry_types"] == ["Polygon"]
+        assert col["bbox"] == [0, 0, 9, 9]
+
+    def test_does_not_mutate_the_input(self):
+        geo = self._geo()
+        strip_derived_stats({"geo": geo}, recomputed_columns={"geometry"})
+        assert geo["columns"]["other_geom"]["geometry_types"] == ["Polygon"]
+
+    def test_non_object_column_entry_gets_no_sentinel(self):
+        """A malformed entry is left exactly as found, not turned into a dict."""
+        geo = self._geo()
+        geo["columns"]["junk"] = "not an object"
+        out = strip_derived_stats({"geo": geo}, recomputed_columns={"geometry"})
+        assert out["geo"]["columns"]["junk"] == "not an object"
+
+
 def _write_points(path, points, version="1.1"):
     """Write a CRS84 GeoParquet file from ``[(id, wkt), ...]``."""
     from geoparquet_io.core.common import write_parquet_with_metadata
@@ -747,6 +815,21 @@ class TestBackfillDerivedStats:
         col = out["geo"]["columns"]["geometry"]
         assert col["geometry_types"] == []
         assert "bbox" not in col
+
+    def test_empty_geometry_types_is_a_gap_not_a_value(self):
+        """``[]`` is the spec's "not known", which is exactly what backfill fills.
+
+        ``strip_derived_stats`` leaves it on a column the file writer will not
+        recompute (#934); a path that CAN compute the real list — this one — must
+        not mistake the sentinel for a declaration and skip the column.
+        """
+        from geoparquet_io.core.geo_metadata import backfill_derived_stats
+
+        geo = self._geo_without_stats()
+        geo["columns"]["geometry"]["geometry_types"] = []
+        out = backfill_derived_stats({"geo": geo}, self._points_table())
+
+        assert out["geo"]["columns"]["geometry"]["geometry_types"] == ["Point"]
 
     def test_column_absent_from_the_table_is_skipped(self):
         from geoparquet_io.core.geo_metadata import backfill_derived_stats

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Collection
 from pathlib import Path
 
 import pyarrow as pa
@@ -848,34 +849,53 @@ def _carry_metadata_to_columns(metadata: dict, columns: list[str]) -> dict | Non
     return prune_geo_metadata_to_columns(metadata, columns, repoint_primary=True)
 
 
-def _output_stats_are_stale(
+#: ``_stale_stat_columns`` answer meaning "the carried stats still describe the
+#: output" — a single-file, unfiltered, unrepaired column projection.
+_NOTHING_STALE: tuple[str, ...] = ()
+
+
+def _stale_stat_columns(
     input_path: str,
     spatial_filter: str | None,
     where: str | None,
     limit: int | None,
+    geometry_column: str | None,
     geometry_repaired: bool = False,
-) -> bool:
-    """True when the input's carried bbox/geometry_types cannot describe the output.
+) -> Collection[str] | None:
+    """Which columns' carried bbox/geometry_types cannot describe the output.
 
-    Three independent reasons:
+    Three independent reasons, which do not all reach the same columns. The
+    difference decides what a SECONDARY geometry column's output metadata says:
+    no file-write path recomputes one, so whatever survives here is what ships.
 
     * A row filter (``--bbox``/``--geometry``/``--where``/``--limit``) keeps only
-      part of the input, so the carried stats over-cover the result.
-    * A glob/directory input merges several files, but ``get_parquet_metadata``
-      reads the footer of the FIRST file only — carrying its stats would
-      UNDER-cover the merged output, which makes conformant readers skip data.
+      part of the input, so the carried stats OVER-cover the result. Over-cover
+      is what the spec allows — the type list must be exhaustive, not exact, and
+      a wider bbox never hides a row — so a secondary column's stats still
+      describe it and are left alone. Only the primary column is named, and only
+      so the write path retightens it.
     * The repair pass (``--repair-geometry``, on by default) rewrote at least one
       row: ``ST_MakeValid`` can change a geometry's type (a bowtie ``Polygon``
       comes back a ``MultiPolygon``) and its extent, so the carried
       ``geometry_types`` UNDER-declares what the output holds and ``gpio check
-      spec`` fails the file gpio just wrote (#812). A repair pass that found
-      nothing to fix is not a reason: it left every row as it was.
+      spec`` fails the file gpio just wrote (#812). It rewrites the primary
+      column and no other, so again only the primary is stale. A repair pass
+      that found nothing to fix is not a reason: it left every row as it was.
+    * A glob/directory input merges several files, but ``get_parquet_metadata``
+      reads the footer of the FIRST file only — carrying its stats would
+      UNDER-cover the merged output, which makes conformant readers skip data.
+      That holds for every column, so every column is stale.
 
-    A single-file, unfiltered, unrepaired column projection keeps its stats.
+    Returns ``None`` for "every column" (the ``columns=`` convention of
+    :func:`strip_derived_stats`) and :data:`_NOTHING_STALE` for "no column".
     """
-    if spatial_filter or where or limit is not None:
-        return True
-    return geometry_repaired or is_partition_path(input_path)
+    if is_partition_path(input_path):
+        return None
+    if spatial_filter or where or limit is not None or geometry_repaired:
+        # Without a known primary column there is nothing to scope to, so fall
+        # back to invalidating everything rather than guessing.
+        return {geometry_column} if geometry_column else None
+    return _NOTHING_STALE
 
 
 def _extract_streaming(
@@ -942,9 +962,21 @@ def _extract_streaming(
         if verbose:
             debug(f"Streaming extraction query: {query}")
 
-        # write_output backfills whatever is stripped here from the rows it writes.
-        if _output_stats_are_stale(input_path, spatial_filter, where, limit, geometry_repaired):
-            metadata = strip_derived_stats(metadata)
+        # `write_output` goes two ways: the stdout stream recomputes the stats of
+        # EVERY column from the rows it writes (`backfill_derived_stats`, which
+        # reads the empty list below as the gap it is), while a file output
+        # recomputes the primary column's only. So the primary is stripped
+        # outright -- an absent key is what asks for the recompute -- and any
+        # other stale column keeps `geometry_types` as the spec's empty "not
+        # known" list, since deleting a REQUIRED key nothing puts back is what
+        # made the output unreadable (#934).
+        stale_columns = _stale_stat_columns(
+            input_path, spatial_filter, where, limit, geom_col, geometry_repaired
+        )
+        if stale_columns is None or stale_columns:
+            metadata = strip_derived_stats(
+                metadata, columns=stale_columns, recomputed_columns={geom_col}
+            )
         if geometry_repaired:
             # ST_MakeValid can rewind rings, so a carried orientation
             # declaration no longer holds; it is dropped, not recomputed.
@@ -1096,8 +1128,8 @@ def _execute_extraction(
                 con, query, geometry_col, repair_geometry
             )
 
-        invalidate_derived_stats = _output_stats_are_stale(
-            input_parquet, spatial_filter, where, limit, geometry_repaired
+        stale_columns = _stale_stat_columns(
+            input_parquet, spatial_filter, where, limit, geometry_col, geometry_repaired
         )
         if geometry_repaired:
             # ST_MakeValid can rewind rings, so a carried orientation
@@ -1121,7 +1153,8 @@ def _execute_extraction(
             write_strategy=write_strategy,
             memory_limit=memory_limit,
             input_file=input_parquet,
-            invalidate_derived_stats=invalidate_derived_stats,
+            invalidate_derived_stats=stale_columns is None or bool(stale_columns),
+            invalidate_derived_stats_columns=stale_columns,
         )
 
         # Get extracted row count from output file metadata (fast - reads footer only)

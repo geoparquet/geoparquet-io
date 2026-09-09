@@ -699,3 +699,194 @@ class TestMultiGeometryReproject:
         finally:
             con.close()
         assert len(rows) == 3
+
+
+class TestMultiGeometryDerivedStatsInvalidation:
+    """A row-changing write must leave a secondary column readable (#934).
+
+    ``geometry_types`` is REQUIRED by GeoParquet 1.1, and only the PRIMARY
+    geometry column's is recomputed on a file-write path. Deleting the key to
+    mark it stale therefore left a secondary column with no ``geometry_types``
+    at all, which DuckDB refuses to open — "Geoparquet column 'boundary' does
+    not have geometry types" — and which ``gpio check spec`` fails. gpio wrote a
+    file gpio rejects.
+
+    Two answers, chosen per site by whether the carried stats OVER- or
+    UNDER-cover the output:
+
+    * A row filter over a single file keeps a subset of the rows, so the
+      secondary column's carried stats still cover it — the strip is scoped to
+      the primary and the real ``["Polygon"]`` survives.
+    * A multi-file merge or a partition split carries the FIRST file's (or the
+      whole input's) stats, which under-cover or misdescribe the output. Those
+      cannot be kept, so the key is emptied to ``[]`` — the spec's "not known"
+      — rather than deleted.
+    """
+
+    @staticmethod
+    def _geo(path):
+        return json.loads(pq.read_metadata(str(path)).metadata[b"geo"].decode("utf-8"))
+
+    @staticmethod
+    def _assert_duckdb_reads(path):
+        import duckdb
+
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            return con.execute(f"SELECT * FROM read_parquet('{Path(path).as_posix()}')").fetchall()
+        finally:
+            con.close()
+
+    @staticmethod
+    def _assert_spec_valid(path):
+        from geoparquet_io.core.validate import validate_geoparquet
+
+        failed = sorted(
+            c.name for c in validate_geoparquet(str(path)).checks if c.status.value == "failed"
+        )
+        assert failed == [], f"gpio check spec failed on gpio's own output: {failed}"
+
+    def _glob_input(self, tmp_path):
+        """Two identical files behind a glob — the multi-file merge shape."""
+        folder = tmp_path / "parts"
+        folder.mkdir()
+        for name in ("a.parquet", "b.parquet"):
+            create_multi_geometry_geoparquet(str(folder / name))
+        return str(folder / "*.parquet")
+
+    # --- extract: row filter over a single file (scoped) --------------------
+
+    def test_extract_where_keeps_the_secondary_readable(self, tmp_path):
+        from geoparquet_io.core.extract import extract
+
+        input_file = tmp_path / "in.parquet"
+        output_file = tmp_path / "out.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+        extract(str(input_file), str(output_file), where="id = 1")
+
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        assert len(self._assert_duckdb_reads(output_file)) == 1
+        self._assert_spec_valid(output_file)
+
+    def test_extract_bbox_keeps_the_secondary_readable(self, tmp_path):
+        from geoparquet_io.core.extract import extract
+
+        input_file = tmp_path / "in.parquet"
+        output_file = tmp_path / "out.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+        extract(str(input_file), str(output_file), bbox="0,0,4,4")
+
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        self._assert_duckdb_reads(output_file)
+        self._assert_spec_valid(output_file)
+
+    def test_extract_still_retightens_the_primary(self, tmp_path):
+        """Scoping must not stop the primary's own stats being recomputed."""
+        from geoparquet_io.core.extract import extract
+
+        input_file = tmp_path / "in.parquet"
+        output_file = tmp_path / "out.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+        extract(str(input_file), str(output_file), where="id = 1")
+
+        # Input bbox was [0, 0, 2, 2]; only the (0, 0) point survives.
+        assert self._geo(output_file)["columns"]["geometry"]["bbox"] == [0.0, 0.0, 0.0, 0.0]
+
+    def test_extract_streaming_to_a_file_keeps_the_secondary_readable(self, tmp_path):
+        """stdin-shaped input with a file output takes the other extract path."""
+        from geoparquet_io.core.extract import _extract_streaming
+
+        input_file = tmp_path / "in.parquet"
+        output_file = tmp_path / "out.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+        _extract_streaming(
+            str(input_file),
+            str(output_file),
+            None,
+            None,
+            None,
+            None,
+            "id = 1",
+            None,
+            False,
+            "ZSTD",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        self._assert_duckdb_reads(output_file)
+        self._assert_spec_valid(output_file)
+
+    # --- extract: multi-file merge (emptied) --------------------------------
+
+    def test_extract_over_a_glob_empties_rather_than_deletes(self, tmp_path):
+        """The first file's stats under-cover the merge, so they cannot be kept."""
+        from geoparquet_io.core.extract import extract
+
+        output_file = tmp_path / "out.parquet"
+        extract(self._glob_input(tmp_path), str(output_file))
+
+        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == []
+        assert len(self._assert_duckdb_reads(output_file)) == 6
+        self._assert_spec_valid(output_file)
+
+    # --- sort: multi-file merge (emptied) -----------------------------------
+
+    def test_sort_by_column_over_a_glob(self, tmp_path):
+        from geoparquet_io.core.sort_by_column import sort_by_column
+
+        output_file = tmp_path / "out.parquet"
+        sort_by_column(self._glob_input(tmp_path), str(output_file), columns="id")
+
+        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == []
+        assert len(self._assert_duckdb_reads(output_file)) == 6
+        self._assert_spec_valid(output_file)
+
+    def test_sort_by_quadkey_over_a_glob(self, tmp_path):
+        from geoparquet_io.core.sort_quadkey import sort_by_quadkey
+
+        output_file = tmp_path / "out.parquet"
+        sort_by_quadkey(self._glob_input(tmp_path), str(output_file))
+
+        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == []
+        assert len(self._assert_duckdb_reads(output_file)) == 6
+        self._assert_spec_valid(output_file)
+
+    def test_sort_over_a_single_file_still_carries_real_stats(self, tmp_path):
+        """No invalidation at all for a single file — nothing about it is stale."""
+        from geoparquet_io.core.sort_by_column import sort_by_column
+
+        input_file = tmp_path / "in.parquet"
+        output_file = tmp_path / "out.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+        sort_by_column(str(input_file), str(output_file), columns="id")
+
+        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == ["Polygon"]
+
+    # --- partition (emptied) -------------------------------------------------
+
+    def test_partition_writes_readable_partitions(self, tmp_path):
+        """Each partition holds a subset, and the carried stats describe the whole."""
+        from geoparquet_io.core.partition.common import partition_by_column
+
+        input_file = tmp_path / "in.parquet"
+        output_folder = tmp_path / "parts_out"
+        create_multi_geometry_geoparquet(str(input_file))
+        partition_by_column(
+            str(input_file), str(output_folder), "name", force=True, skip_analysis=True
+        )
+
+        written = sorted(output_folder.rglob("*.parquet"))
+        assert written, "partitioning produced no files"
+        for part in written:
+            assert self._geo(part)["columns"]["boundary"]["geometry_types"] == []
+            self._assert_duckdb_reads(part)
+            self._assert_spec_valid(part)
