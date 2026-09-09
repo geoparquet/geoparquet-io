@@ -72,7 +72,15 @@ Checks if data is spatially ordered. Spatially ordered data improves:
 
 **How it works:**
 
-- **Bbox-stats method**: Checks if consecutive row groups have overlapping bounding boxes. Non-overlapping row groups indicate good spatial ordering. Passes if < 30% of row group pairs overlap.
+- **Bbox-stats method**: Estimates how many row groups a spatial query can skip, using only the bounding boxes in the file footer, and compares that against what the file's row-group count allows. Passes if the file reaches at least 70% of the achievable skip rate (`--min-efficiency`).
+
+    The comparison is relative because the achievable skip rate depends on how many row groups there are: two row groups can never let a reader skip more than about half the file, while 500 should let it skip ~98%. A fixed threshold is wrong at one end or the other.
+
+    Below five row groups the verdict is withheld — the numbers are still reported, but the file is not failed. With only a few row groups an ideal grid is a poor model of what a sort can achieve on clustered data: measured across Hilbert-sorted samples, a *perfectly* sorted file scores as low as 0.11 at two row groups and 0.30 at three, so failing on that score would measure the row-group count rather than the ordering.
+
+    The fraction of *consecutive* row-group pairs whose boxes overlap is still reported, but it does not decide the verdict. Hilbert-sorted row groups are spatially adjacent by construction, so their boxes touch and that fraction runs near 1.00 for a perfectly ordered file — it cannot tell "every row group covers the whole country" from "row groups tile the country perfectly but neighbours touch".
+
+    Tune the estimate with `--query-fraction` (how large a query window to assume, default 10% of each dimension), `--num-samples`, and `--seed`.
 - **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5.
 
 ### Compression
@@ -208,8 +216,15 @@ The `gpio check spatial` command also reports spatial filter pushdown readiness 
 Shows:
 
 - **Row group count** and bbox coverage
-- **Estimated skip rate** - percentage of row groups that can be skipped for representative spatial queries
+- **Estimated skip rate** - percentage of row groups that can be skipped for representative spatial queries, alongside the percentage achievable at this row-group count
 - **Avg bbox area ratio** - how tight the row group bounding boxes are
+
+!!! note "Ordering and pushdown readiness answer different questions"
+    The ordering verdict is **relative**: is this data sorted as well as its
+    row-group count allows? Pushdown readiness is **absolute**: will queries
+    actually prune well? A file with two row groups can be perfectly ordered and
+    still poor for pushdown, because two row groups cannot be skipped past. When
+    that happens, use smaller row groups rather than re-sorting.
 
 !!! note "Requires bbox data"
     Pushdown readiness requires GeoParquet 2.0 native geo stats or a bbox column. For v1.1 files, add a bbox column with `gpio add bbox`.

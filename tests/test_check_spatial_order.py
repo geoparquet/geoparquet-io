@@ -490,8 +490,16 @@ class TestSpatialLocalitySecondaryCheck:
             "Should fail because bboxes cover nearly the entire extent"
         )
 
-    def test_two_row_groups_skips_secondary_check(self):
-        """With only 2 row groups, secondary locality check is skipped."""
+    def test_two_row_groups_are_measured_not_skipped(self):
+        """Two row groups get the locality check like any other count (#755).
+
+        This used to assert the opposite: the check was gated on >= 3 row groups,
+        so a two-group file whose boxes overlap at all was reported "Poor spatial
+        ordering (overlap ratio: 1.00)" with no metrics computed. These two boxes
+        prune exactly as well as two row groups allow -- estimated and ideal skip
+        rates are both 0.475 -- so failing it was measuring the row-group count,
+        not the ordering.
+        """
         from geoparquet_io.core.check_spatial_order import (
             _check_spatial_order_from_row_group_bboxes,
         )
@@ -509,11 +517,11 @@ class TestSpatialLocalitySecondaryCheck:
             quiet=True,
         )
 
-        assert result["ratio"] == 1.0, "Both groups overlap"
-        assert result["passed"] is False, "Secondary check not applied with < 3 row groups"
-        # None (not 0.0) signals the metrics were never computed
-        assert result["estimated_skip_rate"] is None
-        assert result["avg_bbox_area_ratio"] is None
+        assert result["ratio"] == 1.0, "Both groups overlap - kept as a statistic"
+        assert result["passed"] is True
+        assert result["skip_rate_efficiency"] == pytest.approx(1.0)
+        assert result["estimated_skip_rate"] is not None
+        assert result["avg_bbox_area_ratio"] is not None
 
     def test_hilbert_few_large_row_groups_pass(self):
         """Hilbert-sorted data with few large row groups must still pass.

@@ -734,6 +734,37 @@ def check_all(
     show_default=True,
     help="Max rows for spatial order check",
 )
+@click.option(
+    "--query-fraction",
+    default=0.1,
+    show_default=True,
+    type=click.FloatRange(0.0, 1.0, min_open=True),
+    help="Fraction of each dimension a sample query window spans",
+)
+@click.option(
+    "--num-samples",
+    default=20,
+    show_default=True,
+    type=click.IntRange(1),
+    help="Number of sample query windows used to estimate the skip rate",
+)
+@click.option(
+    "--seed",
+    default=42,
+    show_default=True,
+    type=int,
+    help="Random seed for the sample query windows (reproducible results)",
+)
+@click.option(
+    "--min-efficiency",
+    default=0.7,
+    show_default=True,
+    type=click.FloatRange(0.0, 1.0),
+    help=(
+        "Minimum skip rate as a fraction of what this row-group count allows. "
+        "1.0 demands an ideal grid tiling; 0 accepts anything."
+    ),
+)
 @click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
 @click.option("--fix", is_flag=True, help="Fix with Hilbert ordering")
 @click.option(
@@ -753,6 +784,10 @@ def check_spatial(
     parquet_file,
     random_sample_size,
     limit_rows,
+    query_fraction,
+    num_samples,
+    seed,
+    min_efficiency,
     verbose,
     fix,
     fix_output,
@@ -794,6 +829,10 @@ def check_spatial(
                 verbose and show_output,
                 return_results=True,
                 quiet=quiet,
+                num_samples=num_samples,
+                query_fraction=query_fraction,
+                seed=seed,
+                efficiency_threshold=min_efficiency,
             )
             ratio = result["ratio"]
             passed = result.get("passed", ratio < 0.5 if ratio is not None else True)
@@ -810,24 +849,54 @@ def check_spatial(
                         )
                     )
 
-            # Pushdown readiness metric
+            # Pushdown readiness. The ordering check above already measured the
+            # locality of the same row groups, so reuse it rather than reading
+            # the footer and running the sample queries a second time (#755).
             if show_output:
-                from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness
+                from geoparquet_io.core.check_spatial_order import (
+                    _SKIP_RATE_THRESHOLD,
+                    check_spatial_pushdown_readiness,
+                )
 
-                try:
-                    pushdown = check_spatial_pushdown_readiness(
-                        file_path, verbose=verbose and show_output
-                    )
-                except Exception as e:
-                    if verbose:
-                        click.echo(f"  Debug: Pushdown check failed: {e}", err=True)
-                    pushdown = {"has_geo_bbox": False}
+                pushdown = None
+                if result.get("estimated_skip_rate") is not None:
+                    pushdown = {
+                        "has_geo_bbox": True,
+                        "num_row_groups": result["total_pairs"] + 1,
+                        "estimated_skip_rate": result["estimated_skip_rate"],
+                        "ideal_skip_rate": result["ideal_skip_rate"],
+                        "skip_rate_efficiency": result["skip_rate_efficiency"],
+                        "avg_bbox_area_ratio": result["avg_bbox_area_ratio"],
+                        # Absolute, unlike the ordering verdict: see the note in
+                        # check_spatial_pushdown_readiness.
+                        "passed": result["estimated_skip_rate"] >= _SKIP_RATE_THRESHOLD,
+                    }
+                else:
+                    try:
+                        pushdown = check_spatial_pushdown_readiness(
+                            file_path,
+                            verbose=verbose and show_output,
+                            num_samples=num_samples,
+                            query_fraction=query_fraction,
+                            seed=seed,
+                        )
+                    except Exception as e:
+                        if verbose:
+                            click.echo(f"  Debug: Pushdown check failed: {e}", err=True)
+                        pushdown = {"has_geo_bbox": False}
 
                 click.echo("\nSpatial Filter Pushdown Readiness:")
                 if pushdown.get("has_geo_bbox"):
                     skip_pct = pushdown["estimated_skip_rate"] * 100
                     click.echo(f"  Row groups: {pushdown['num_row_groups']}")
-                    click.echo(f"  Estimated skip rate: {skip_pct:.0f}%")
+                    ideal = pushdown.get("ideal_skip_rate")
+                    if ideal:
+                        click.echo(
+                            f"  Estimated skip rate: {skip_pct:.0f}% "
+                            f"(of {ideal * 100:.0f}% achievable at this row-group count)"
+                        )
+                    else:
+                        click.echo(f"  Estimated skip rate: {skip_pct:.0f}%")
                     click.echo(f"  Avg bbox area ratio: {pushdown['avg_bbox_area_ratio']:.2f}")
                     if pushdown["passed"]:
                         click.echo(click.style("  ✓ Good pushdown readiness", fg="green"))
