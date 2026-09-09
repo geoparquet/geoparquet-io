@@ -12,6 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from geoparquet_io.core.common import format_size
+from geoparquet_io.core.parquet_schema import root_schema_columns
 
 
 def _calculate_overall_bbox(row_group_stats: list[dict]) -> dict[str, float] | None:
@@ -380,12 +381,9 @@ def format_parquet_metadata_enhanced(
     geo_columns = detect_geometry_columns(parquet_file)
     bloom_filter_info = get_bloom_filter_info(parquet_file)
 
-    num_columns = len([c for c in schema_info if c.get("name") and "." not in c.get("name", "")])
-    schema_str = ", ".join(
-        f"{c['name']}: {c.get('type', 'unknown')}"
-        for c in schema_info
-        if c.get("name") and "." not in c.get("name", "")
-    )
+    root_columns = root_schema_columns(schema_info)
+    num_columns = len(root_columns)
+    schema_str = ", ".join(f"{c['name']}: {c.get('type', 'unknown')}" for c in root_columns)
 
     rg_columns: dict[int, list] = {}
     for col in row_group_meta:

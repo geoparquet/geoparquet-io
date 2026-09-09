@@ -22,6 +22,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.crs_utils import geoarrow_crs_to_projjson, merge_longitude_ranges
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, sql_path
 from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.parquet_schema import root_schema_columns
 
 # =============================================================================
 # PyArrow Fast Path for Local Files (Issue #232 Performance Fix)
@@ -553,8 +554,9 @@ def get_schema_info(parquet_file: str, con=None) -> list[dict]:
 def get_column_names(parquet_file: str, con=None) -> list[str]:
     """Get list of column names from schema."""
     schema = get_schema_info(parquet_file, con)
-    # Filter out empty names (schema root element) and nested struct fields
-    return [col["name"] for col in schema if col.get("name") and "." not in col["name"]]
+    # Filter out the schema root element and nested struct fields: the listing is
+    # depth first, so a struct's children have to be skipped as whole subtrees.
+    return [col["name"] for col in root_schema_columns(schema)]
 
 
 def get_usable_columns(parquet_file: str, con=None) -> list[dict]:

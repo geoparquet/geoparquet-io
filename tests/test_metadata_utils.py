@@ -181,7 +181,9 @@ class TestFormatParquetMetadataEnhanced:
         data = json.loads(capsys.readouterr().out)
         assert data["num_rows"] == 766
         assert data["num_row_groups"] == 1
-        assert data["num_columns"] == 10
+        # Six root columns. The file also carries a `bbox` covering struct, whose
+        # xmin/ymin/xmax/ymax children used to be counted as top-level columns.
+        assert data["num_columns"] == 6
         assert len(data["row_groups"]) == 1
 
     def test_json_output_all_row_groups(self, places_test_file, capsys):
