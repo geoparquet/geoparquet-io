@@ -85,7 +85,7 @@ class TestReprojectToProjectedCrs:
 
         warnings = [r for r in caplog.records if DROP_WARNING in r.message]
         assert len(warnings) == 1, caplog.text
-        assert '"geometry"' in warnings[0].message
+        assert "column 'geometry'" in warnings[0].message
         assert "spherical" in warnings[0].message
         assert "EPSG:3857" in warnings[0].message
 
@@ -167,7 +167,7 @@ class TestMultiGeometryColumns:
 
         warnings = [r for r in caplog.records if DROP_WARNING in r.message]
         assert len(warnings) == 1, caplog.text
-        assert '"geometry"' in warnings[0].message
+        assert "column 'geometry'" in warnings[0].message
         assert "centerline" not in caplog.text
 
     def test_python_api_table_scopes_drop_to_transformed_column(

@@ -141,7 +141,7 @@ def _target_crs_is_projected(target_crs: str, con=None) -> bool:
 
 def _warn_edges_dropped(col_name: str, edges: str, target_crs: str) -> None:
     warn(
-        f"Dropped 'edges: {edges}' on column \"{col_name}\": the reprojected "
+        f"Dropped 'edges: {edges}' on column '{col_name}': the reprojected "
         f"edges are straight lines in {target_crs}. Densify before reprojecting "
         "if great-circle edges must be preserved."
     )

@@ -557,7 +557,9 @@ def build_spatial_filter(
 
     if geometry_wkt:
         escaped_wkt = _escape_sql_string(geometry_wkt)
-        conditions.append(f"ST_Intersects(\"{geometry_col}\", ST_GeomFromText('{escaped_wkt}'))")
+        conditions.append(
+            f"ST_Intersects({quote_identifier(geometry_col)}, ST_GeomFromText('{escaped_wkt}'))"
+        )
 
     return " AND ".join(conditions) if conditions else None
 

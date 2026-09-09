@@ -1304,7 +1304,13 @@ def _build_local_bbox_filter(
     wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
     # Fetched features carry geometry as WKB (BLOB), so decode it before the
     # spatial predicate — ST_Intersects has no BLOB overload.
-    return f"ST_Intersects(ST_GeomFromWKB(\"{safe_column}\"), ST_GeomFromText('{wkt}'))"
+    # _validate_identifier already rejects `"`, so quote_identifier is a no-op
+    # for every name that reaches here -- it is used anyway so the quoting rule
+    # is enforced at the interpolation site rather than by a distant allowlist
+    # that a later edit could loosen (#936).
+    return (
+        f"ST_Intersects(ST_GeomFromWKB({quote_identifier(safe_column)}), ST_GeomFromText('{wkt}'))"
+    )
 
 
 def _reproject_bbox_for_local_filter(
