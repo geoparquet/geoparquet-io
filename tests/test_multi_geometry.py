@@ -623,3 +623,79 @@ class TestWriteStrategiesWithMultiGeometry:
             assert boundary_crs.get("id", {}).get("code") == 3857, (
                 f"Strategy {strategy} did not preserve CRS for secondary column"
             )
+
+
+class TestMultiGeometryReproject:
+    """Reproject must not strip a secondary column's derived stats (#890).
+
+    ``gpio convert reproject`` transforms the PRIMARY geometry column only —
+    the query is ``SELECT * EXCLUDE (geometry), ST_Transform(geometry, ...)``,
+    so a secondary column's bytes reach the output byte-for-byte. Its carried
+    ``geometry_types``/``bbox`` therefore still describe the rows and must
+    survive; blanket-invalidating them left the output without the
+    ``geometry_types`` GeoParquet 1.1 requires, and DuckDB refuses to open such
+    a file at all: "Geoparquet column 'boundary' does not have geometry types".
+    """
+
+    def _reproject(self, tmp_path, name, **kwargs):
+        from geoparquet_io.core.reproject import reproject
+
+        input_file = tmp_path / f"in_{name}.parquet"
+        output_file = tmp_path / f"out_{name}.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+        reproject(str(input_file), str(output_file), target_crs="EPSG:3857", **kwargs)
+        meta = pq.read_metadata(str(output_file))
+        return output_file, json.loads(meta.metadata[b"geo"].decode("utf-8"))
+
+    def test_secondary_column_keeps_geometry_types(self, tmp_path):
+        _, geo_meta = self._reproject(tmp_path, "types")
+        boundary = geo_meta["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"], boundary
+
+    def test_secondary_column_keeps_its_bbox(self, tmp_path):
+        """The untransformed column's coordinates never moved, so its bbox holds."""
+        _, geo_meta = self._reproject(tmp_path, "bbox")
+        assert geo_meta["columns"]["boundary"]["bbox"] == [-0.5, -0.5, 2.5, 2.5]
+
+    def test_primary_column_stats_are_still_recomputed(self, tmp_path):
+        """The transformed column's carried degree-space stats must NOT survive."""
+        _, geo_meta = self._reproject(tmp_path, "primary")
+        geometry = geo_meta["columns"]["geometry"]
+        assert geometry["geometry_types"] == ["Point"]
+        # Reprojected to Web Mercator: meters, not the carried [0, 0, 2, 2].
+        assert geometry["bbox"][2] > 1000, geometry["bbox"]
+
+    def test_streaming_path_also_keeps_secondary_stats(self, tmp_path):
+        """The pipe path strips the same way and needed the same scoping."""
+        from geoparquet_io.core.reproject import _reproject_streaming
+
+        input_file = tmp_path / "in_stream.parquet"
+        output_file = tmp_path / "out_stream.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+        _reproject_streaming(
+            str(input_file),
+            str(output_file),
+            "EPSG:3857",
+            None,
+            "ZSTD",
+            None,
+            False,
+            None,
+            None,
+        )
+        meta = pq.read_metadata(str(output_file))
+        geo_meta = json.loads(meta.metadata[b"geo"].decode("utf-8"))
+        assert geo_meta["columns"]["boundary"]["geometry_types"] == ["Polygon"]
+
+    def test_duckdb_can_read_the_output(self, tmp_path):
+        """The end-user symptom of #890: the output was unreadable outright."""
+        import duckdb
+
+        output_file, _ = self._reproject(tmp_path, "duckdb")
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            rows = con.execute(f"SELECT * FROM read_parquet('{output_file.as_posix()}')").fetchall()
+        finally:
+            con.close()
+        assert len(rows) == 3

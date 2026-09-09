@@ -78,6 +78,28 @@ _DIMENSION_SUFFIXES = {
     3: " ZM",  # ZM dimensions (codes 3001-3007)
 }
 
+# geoarrow's Dimensions enum (XY=1, XYZ=2, XYM=3, XYZM=4) to the WKB type
+# code's dimensional modifier above. UNSPECIFIED (-1) and UNKNOWN (0) have no
+# entry and fall back to 2D, the only reading that claims nothing extra.
+_GEOARROW_DIMENSION_CODES = {1: 0, 2: 1, 3: 2, 4: 3}
+
+
+def geoarrow_wkb_codes(types_struct) -> list[int]:
+    """WKB type codes for a geoarrow ``unique_geometry_types`` result.
+
+    geoarrow reports the base type and the dimensions in two *separate* struct
+    fields, so reading only ``geometry_type`` spells ``Polygon M`` data as
+    ``Polygon`` — dropping a suffix the spec makes part of the type name, and
+    which every other gpio write path emits (#892). Recombining the two fields
+    yields the code :func:`_get_geometry_type_name` already understands.
+    """
+    bases = types_struct.field("geometry_type").to_pylist()
+    dims = types_struct.field("dimensions").to_pylist()
+    return [
+        1000 * _GEOARROW_DIMENSION_CODES.get(dim, 0) + base
+        for base, dim in zip(bases, dims, strict=True)
+    ]
+
 
 # =============================================================================
 # Carried-block shape check
@@ -548,16 +570,9 @@ def _rewrite_geo_metadata(metadata: dict | None, rewrite) -> dict | None:
     return result
 
 
-def _drop_derived_stats(geo_dict: dict) -> dict:
-    """Remove :data:`DERIVED_STAT_KEYS` from every column entry, in place."""
-    for col_meta in (geo_dict.get("columns") or {}).values():
-        if isinstance(col_meta, dict):
-            for key in DERIVED_STAT_KEYS:
-                col_meta.pop(key, None)
-    return geo_dict
-
-
-def strip_derived_stats(metadata: dict | None) -> dict | None:
+def strip_derived_stats(
+    metadata: dict | None, columns: Collection[str] | None = None
+) -> dict | None:
     """Return a copy of Parquet KV ``metadata`` without derived geo stats.
 
     Drops the per-column ``bbox`` and ``geometry_types`` (see
@@ -570,11 +585,30 @@ def strip_derived_stats(metadata: dict | None) -> dict | None:
     per-partition splits, and multi-file merges whose carried metadata came from
     only the first input file.
 
+    ``columns`` limits the strip to those column entries, for a caller that
+    changes coordinates in some geometry columns but not others: reproject
+    transforms only the primary column, so a secondary column's bytes reach the
+    output unchanged and its carried stats still describe them (#890). Dropping
+    them anyway left the output without the ``geometry_types`` GeoParquet 1.1
+    requires — nothing recomputes a secondary column's — and DuckDB then refuses
+    to open the file at all. ``None`` strips every column, which is right for a
+    row filter or a merge: those change every column's rows.
+
     Both ``"geo"`` and ``b"geo"`` keys are handled, and the value is returned in
     the same form (``bytes``/``str``/``dict``) it arrived in. The input is never
     mutated; unparsable ``geo`` values are passed through untouched.
     """
-    return _rewrite_geo_metadata(metadata, _drop_derived_stats)
+
+    def _drop(geo_dict: dict) -> dict:
+        for col_name, col_meta in (geo_dict.get("columns") or {}).items():
+            if columns is not None and col_name not in columns:
+                continue
+            if isinstance(col_meta, dict):
+                for key in DERIVED_STAT_KEYS:
+                    col_meta.pop(key, None)
+        return geo_dict
+
+    return _rewrite_geo_metadata(metadata, _drop)
 
 
 def strip_orientation(metadata: dict | None, column: str) -> dict | None:
@@ -1225,8 +1259,11 @@ def _compute_geometry_types(table: pa.Table, geometry_column: str, verbose: bool
         wkb_arr = ga.as_wkb(geom_col)
         types_struct = ga.unique_geometry_types(wkb_arr)
 
-        # Extract geometry type codes from struct array
-        type_codes = types_struct.field("geometry_type").to_pylist()
+        # Extract geometry type codes from struct array. geoarrow reports the
+        # base type and the dimensions separately, so the two are recombined
+        # into a WKB code -- reading `geometry_type` alone dropped the " Z" /
+        # " M" / " ZM" the spec makes part of the type name (#892).
+        type_codes = geoarrow_wkb_codes(types_struct)
 
         # Map codes to GeoParquet standard names (avoid duplicates)
         type_names = []

@@ -649,6 +649,7 @@ def reproject_impl(
                     memory_limit=memory_limit,
                     input_file=read_source,
                     invalidate_derived_stats=True,
+                    invalidate_derived_stats_columns={geom_col},
                     drop_nonplanar_edges_columns=drop_edges_columns,
                 )
                 # Replace original with temp file
@@ -679,6 +680,7 @@ def reproject_impl(
                     memory_limit=memory_limit,
                     input_file=read_source,
                     invalidate_derived_stats=True,
+                    invalidate_derived_stats_columns={geom_col},
                     drop_nonplanar_edges_columns=drop_edges_columns,
                 )
 
@@ -833,7 +835,9 @@ def _reproject_streaming(
             # Reprojection moves coordinates, so the carried bbox (and, for a
             # geometry-repairing transform, geometry_types) no longer describes
             # the output; drop them so they are recomputed from the written data.
-            metadata = strip_derived_stats(metadata)
+            # Only the transformed column, though: a secondary geometry column
+            # is passed through untouched, and its stats must survive (#890).
+            metadata = strip_derived_stats(metadata, columns={geom_col})
 
             # Write output using stream_io
             write_output(

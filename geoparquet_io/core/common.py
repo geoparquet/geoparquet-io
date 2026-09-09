@@ -46,6 +46,7 @@ from geoparquet_io.core.geo_metadata import (
     build_bbox_covering,
     create_geo_metadata,
     detect_bbox_column_from_schema,
+    geoarrow_wkb_codes,
     prune_geo_metadata_to_columns,
     sanitize_geo_metadata,
     strip_derived_stats,
@@ -1333,8 +1334,11 @@ def _compute_geometry_types(table, geometry_column: str, verbose: bool) -> list[
         wkb_arr = ga.as_wkb(geom_col)
         types_struct = ga.unique_geometry_types(wkb_arr)
 
-        # Extract geometry type codes from struct array
-        type_codes = types_struct.field("geometry_type").to_pylist()
+        # Extract geometry type codes from struct array. geoarrow reports the
+        # base type and the dimensions separately, so the two are recombined
+        # into a WKB code -- reading `geometry_type` alone dropped the " Z" /
+        # " M" / " ZM" the spec makes part of the type name (#892).
+        type_codes = geoarrow_wkb_codes(types_struct)
 
         # Map codes to GeoParquet standard names (avoid duplicates)
         type_names = []
@@ -2819,6 +2823,7 @@ def write_parquet_with_metadata(
     extra_kv_metadata: dict[str, str] | None = None,
     input_file: str | None = None,
     invalidate_derived_stats: bool = False,
+    invalidate_derived_stats_columns: Collection[str] | None = None,
     drop_nonplanar_edges_columns: Collection[str] | None = None,
 ):
     """
@@ -2870,6 +2875,12 @@ def write_parquet_with_metadata(
             carried metadata came from only the first file: the input's stats no
             longer describe the output, so they must be recomputed from the
             written data or omitted rather than carried.
+        invalidate_derived_stats_columns: Restricts that invalidation to these
+            geometry columns. Set by a caller that changes coordinates in some
+            geometry columns but not others — reproject transforms only the
+            primary column, so a secondary column reaches the output unchanged
+            and its carried stats still describe it (#890). None (the default)
+            invalidates every column, which is right for a row filter or a merge.
         drop_nonplanar_edges_columns: Geometry columns whose non-planar
             ``edges`` declaration must neither be carried through nor
             re-attached to the output. Set by writes that invalidate the edge
@@ -2893,9 +2904,13 @@ def write_parquet_with_metadata(
 
     # Callers that transform geometry, filter rows, or merge multiple inputs
     # invalidate the carried bbox/geometry_types; drop them so the write
-    # strategies recompute (or omit) them instead of describing the input.
+    # strategies recompute (or omit) them instead of describing the input. A
+    # caller that transforms only some geometry columns names them, so an
+    # untouched secondary column keeps the stats that still describe it (#890).
     if invalidate_derived_stats:
-        original_metadata = strip_derived_stats(original_metadata)
+        original_metadata = strip_derived_stats(
+            original_metadata, columns=invalidate_derived_stats_columns
+        )
 
     # A write that invalidates the edge interpretation for the columns it
     # transforms (reprojecting into a projected CRS, #601) must neither carry
