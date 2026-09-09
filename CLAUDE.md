@@ -3,6 +3,8 @@
 ## Project Overview
 
 geoparquet-io (`gpio`) is a Python CLI for GeoParquet I/O. Entry point: `geoparquet_io/cli/main.py`
+(root group, global options, group registration). The commands themselves live in
+`geoparquet_io/cli/commands/`, one module per group.
 
 ---
 
@@ -36,8 +38,10 @@ uv tool install geoparquet-io  # Global install
 
 ```
 geoparquet_io/
-├── cli/main.py        # CLI commands (thin wrappers)
-├── cli/decorators.py  # Reusable Click options
+├── cli/main.py        # Root group, global options, group registration
+├── cli/commands/      # One module per command group (thin wrappers)
+├── cli/_shared.py     # Group-neutral plumbing (S3 activation, default-group factory)
+├── cli/decorators.py  # Reusable Click options and cls= command classes
 ├── core/              # Business logic (52 modules)
 │   └── common.py      # Shared utilities - CHECK FIRST
 └── api/               # Python API (table.py, ops.py)
@@ -46,10 +50,11 @@ geoparquet_io/
 **Enforced rules** (see `.pre-commit-config.yaml`):
 - `no-click-echo`: Use logger in `core/`, not `click.echo()`
 - `duckdb-antipatterns`: Blocks `.fetch_arrow_table()`, `.to_arrow_table()`, `TRY_CAST.*GEOMETRY`
-- `import-linter`: Core cannot import Click; API cannot import CLI
+- `import-linter`: Core cannot import Click; API cannot import CLI; `cli/commands/`
+  cannot import `cli.main` and its group modules cannot import each other
 - `check-api-for-cli`: Reminds to add Python API for new CLI commands
 
-<!-- freshness: last-verified: 2026-04-03, maps-to: geoparquet_io/cli/main.py -->
+<!-- freshness: last-verified: 2026-09-09, maps-to: geoparquet_io/cli/main.py, geoparquet_io/cli/commands/ -->
 <!-- BEGIN GENERATED: cli-commands -->
 ### CLI Command Groups
 
@@ -290,7 +295,10 @@ bumped or tagged.
 ## New Feature Checklist
 
 1. [ ] Core logic in `core/<feature>.py`
-2. [ ] CLI wrapper in `cli/main.py`
+2. [ ] CLI wrapper in `cli/commands/<group>.py`, registered in `cli/main.py` with
+   `cli.add_command()`. Where a helper goes: shared by many groups → `cli/_shared.py`;
+   a reusable option or `cls=` command class → `cli/decorators.py`; used by one group
+   only → it travels with that group's module.
 3. [ ] Python API in `api/table.py` and `api/ops.py`
 4. [ ] Tests in `tests/`
 5. [ ] Docs in `docs/guide/`

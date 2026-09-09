@@ -44,10 +44,27 @@ docs = ["docs/guide/stac.md"]
 code = "geoparquet_io/cli/main.py"
 docs = ["docs/contributing.md"]
 
+# main.py keeps the root group, global options and the `check`/`skills` commands;
+# every other group now lives in cli/commands/<group>.py. Adding or changing a
+# subcommand there goes stale in exactly the same docs, so the group modules carry
+# the same links. Without this, a new `gpio add foo` touches only cli/commands/add.py
+# and menard reports "up-to-date" while the prose it guards rots.
+[[link]]
+code = "geoparquet_io/cli/commands/*.py"
+docs = ["docs/contributing.md"]
+
 # CLAUDE.md mappings (LLM-focused documentation)
 [[link]]
 code = "geoparquet_io/cli/main.py"
 docs = ["CLAUDE.md#CLI Command Groups", "CLAUDE.md#Architecture & Key Files"]
+
+# "Architecture & Key Files" above is a stale section name — CLAUDE.md's heading is
+# plain "Architecture" — so that half of the main.py link has never resolved
+# (`menard validate-links` reports it). Point the new entry at the real heading
+# rather than duplicating the broken one; fixing the main.py entry is a separate change.
+[[link]]
+code = "geoparquet_io/cli/commands/*.py"
+docs = ["CLAUDE.md#CLI Command Groups", "CLAUDE.md#Architecture"]
 
 [[link]]
 code = "geoparquet_io/cli/decorators.py"
@@ -68,6 +85,10 @@ docs = ["CLAUDE.md#DuckDB 1.5 Patterns (MUST follow)"]
 # Skill mappings (packaged with gpio for LLM integration)
 [[link]]
 code = "geoparquet_io/cli/main.py"
+docs = ["geoparquet_io/skills/geoparquet.md#Command Reference"]
+
+[[link]]
+code = "geoparquet_io/cli/commands/*.py"
 docs = ["geoparquet_io/skills/geoparquet.md#Command Reference"]
 
 # LLM integration guide

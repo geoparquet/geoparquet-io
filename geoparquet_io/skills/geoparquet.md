@@ -3,7 +3,7 @@ name: GeoParquet
 description: Convert spatial data (GeoJSON, Shapefile, etc.) to optimized GeoParquet using the gpio CLI. Analyzes files, recommends settings, and publishes to cloud storage.
 ---
 
-<!-- freshness: last-verified: 2026-04-02, maps-to: geoparquet_io/cli/main.py -->
+<!-- freshness: last-verified: 2026-09-09, maps-to: geoparquet_io/cli/main.py, geoparquet_io/cli/commands/ -->
 
 # GeoParquet Skill
 
