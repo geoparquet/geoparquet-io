@@ -297,6 +297,22 @@ module = [
 ]
 disable_error_code = ["arg-type", "index"]
 
+# Same story for the "check" group, moved out of "geoparquet_io.cli.main" by
+# #920: it inherited that module's blanket suppression, so these 7 errors were
+# never reported and this override only keeps them that way. Narrowed to the
+# four codes it actually emits (union-attr 4, arg-type 1, index 1, misc 1) so
+# any OTHER type error in the module is still reported. Two independent causes,
+# neither introduced by the move: `check_spatial_order` is annotated
+# `float | dict | None` while every caller treats the `return_results=True`
+# result as a dict (union-attr/index/arg-type), and `check bbox --fix` defines
+# `bbox_fix_func` once per branch with different keyword defaults (misc).
+# Fixing them belongs with the rest of the CLI typing cleanup, not here.
+[[tool.mypy.overrides]]
+module = [
+    "geoparquet_io.cli.commands.check",
+]
+disable_error_code = ["arg-type", "index", "misc", "union-attr"]
+
 [tool.mutmut]
 source_paths = ["geoparquet_io/"]
 # Fast tests only: slow/network tests are nondeterministic (live third-party
@@ -460,6 +476,7 @@ type = "independence"
 modules = [
     "geoparquet_io.cli.commands.add",
     "geoparquet_io.cli.commands.benchmark",
+    "geoparquet_io.cli.commands.check",
     "geoparquet_io.cli.commands.convert",
     "geoparquet_io.cli.commands.extract",
     "geoparquet_io.cli.commands.inspect",
