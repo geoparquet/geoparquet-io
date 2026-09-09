@@ -6,6 +6,7 @@ Creates:
 - buildings_test_32632.gpkg - EPSG:32632 (UTM Zone 32N) test data
 - fields_v1_1_5070.parquet - GeoParquet 1.1 with EPSG:5070
 - fields_v2_5070.parquet - GeoParquet 2.0 with EPSG:5070 in both locations
+- unsorted.parquet - spatially unsorted places, in enough row groups to prove it
 """
 
 import sys
@@ -18,6 +19,15 @@ from geoparquet_io.core.convert import convert_to_geoparquet
 
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent
+
+#: Rows per row group in unsorted.parquet.
+#:
+#: A row group is the unit the spatial-order check compares, so the fixture's
+#: 1,445 rows have to be spread over several of them: written as one group, the
+#: check has no pairs to compare and short-circuits to "well ordered" whatever
+#: the rows contain (#940). 100 rows gives 15 groups -- comfortably above the
+#: 3 the locality metrics need, at ~37 KB of extra footer and page overhead.
+UNSORTED_ROW_GROUP_ROWS = 100
 
 
 def generate_buildings_32632():
@@ -135,6 +145,67 @@ def generate_fields_v2_5070():
         return False
 
 
+def generate_unsorted():
+    """
+    Generate unsorted.parquet - 1,445 spatially unsorted points, 15 row groups.
+
+    The rows are the Overture places of country_partition/El_Salvador.parquet,
+    projected to six columns and ordered by ``id``. The ids are UUIDs, so id
+    order is spatially random: this is the fixture for "somebody wrote a file
+    without sorting it".
+
+    It is written in ``UNSORTED_ROW_GROUP_ROWS``-row groups because the check it
+    exists to drive reads row-group bounding boxes. Until #940 the file was a
+    single row group, which made ``check spatial`` report ratio 0.0 -- perfectly
+    ordered -- for data that is as unordered as a shuffle.
+
+    Rows, row order, schema and ``geo`` metadata all match what the file had
+    before; only the row-group layout changed.
+    """
+    print("Generating unsorted.parquet...")
+
+    import json
+
+    import pyarrow.parquet as pq
+
+    input_file = TEST_DATA_DIR / "country_partition" / "El_Salvador.parquet"
+    output_file = TEST_DATA_DIR / "unsorted.parquet"
+
+    if not input_file.exists():
+        print(f"  ERROR: {input_file} not found")
+        return False
+
+    try:
+        table = pq.read_table(input_file)
+
+        # The source is GeoParquet 1.1 with a declared covering; this fixture is
+        # the 1.0 file it has always been, so no covering is advertised.
+        geo_meta = json.loads(table.schema.metadata[b"geo"])
+        geo_meta["version"] = "1.0.0"
+        geo_meta["columns"]["geometry"].pop("covering", None)
+
+        table = table.select(
+            ["id", "geometry", "bbox", "version", "operating_status", "theme"]
+        ).sort_by([("id", "ascending")])
+        table = table.replace_schema_metadata(
+            {b"geo": json.dumps(geo_meta, separators=(",", ":")).encode("utf-8")}
+        )
+
+        pq.write_table(
+            table,
+            output_file,
+            row_group_size=UNSORTED_ROW_GROUP_ROWS,
+            compression="snappy",
+        )
+
+        print(f"  ✓ Created {output_file}")
+        return True
+
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        return False
+
+
 def verify_generated_files():
     """Verify that generated files have expected properties."""
     import json
@@ -234,6 +305,43 @@ def verify_generated_files():
         except Exception as e:
             print(f"  ✗ Error verifying {v2_file.name}: {e}")
 
+    # Verify unsorted.parquet: it has to be readable as several row groups, and
+    # it has to actually fail the check it exists to drive (#940).
+    unsorted_file = TEST_DATA_DIR / "unsorted.parquet"
+    if unsorted_file.exists():
+        try:
+            from geoparquet_io.core.check_spatial_order import check_spatial_order
+
+            pf = pq.ParquetFile(unsorted_file)
+            groups = pf.metadata.num_row_groups
+            if pf.metadata.num_rows == 1445:
+                print(f"  ✓ {unsorted_file.name} has 1,445 rows")
+            else:
+                print(f"  ✗ {unsorted_file.name} has {pf.metadata.num_rows} rows, expected 1,445")
+
+            if groups >= 3:
+                print(f"  ✓ {unsorted_file.name} has {groups} row groups")
+            else:
+                print(f"  ✗ {unsorted_file.name} has {groups} row group(s), need at least 3")
+
+            result = check_spatial_order(
+                str(unsorted_file),
+                random_sample_size=50,
+                limit_rows=500,
+                verbose=False,
+                return_results=True,
+                quiet=True,
+            )
+            if result["passed"]:
+                print(
+                    f"  ✗ {unsorted_file.name} reads as spatially ordered (ratio {result['ratio']})"
+                )
+            else:
+                print(f"  ✓ {unsorted_file.name} reads as unsorted (ratio {result['ratio']})")
+
+        except Exception as e:
+            print(f"  ✗ Error verifying {unsorted_file.name}: {e}")
+
 
 def main():
     """Generate all test fixtures."""
@@ -248,6 +356,7 @@ def main():
     results["buildings_32632"] = generate_buildings_32632()
     results["fields_v1_1_5070"] = generate_fields_v1_1_5070()
     results["fields_v2_5070"] = generate_fields_v2_5070()
+    results["unsorted"] = generate_unsorted()
 
     # Verify generated files
     verify_generated_files()

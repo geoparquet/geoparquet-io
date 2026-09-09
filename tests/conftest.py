@@ -437,7 +437,13 @@ def fields_5070_file(test_data_dir):
 
 @pytest.fixture
 def unsorted_test_file(test_data_dir):
-    """Return path to the unsorted.parquet test file (poor spatial ordering)."""
+    """Return path to unsorted.parquet: 1,445 points in id order, 15 row groups.
+
+    Genuinely unsorted -- ``check spatial`` reports ratio 1.0 on it. The row
+    groups are what make that visible: a single-row-group file has no pairs to
+    compare, so the check calls it well ordered whatever the rows contain
+    (#940). Regenerate with tests/data/generate_test_fixtures.py.
+    """
     return str(test_data_dir / "unsorted.parquet")
 
 
