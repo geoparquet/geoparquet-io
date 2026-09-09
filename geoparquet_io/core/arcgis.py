@@ -28,6 +28,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     RemoteAccessError,
 )
+from geoparquet_io.core.geo_metadata import _compute_geometry_types
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_TIMEOUT,
@@ -1195,6 +1196,30 @@ def _stream_features_to_parquet(
             writer.close()
 
 
+def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: bool) -> list[str]:
+    """Geometry types for the geo block, read from the fetched WKB (#928).
+
+    The layer's advertised ``geometryType`` is only a fallback. It is coarser
+    than the data (Esri's ``esriGeometryPolyline`` covers both LineString and
+    MultiLineString, and says nothing about Z/M), it does not cover every Esri
+    type, and it used to fall back to the literal ``"Geometry"`` -- which the
+    GeoParquet schema does not allow, so unmapped layers wrote files that
+    failed validation on their own metadata.
+
+    Computing from the data instead is what every gpio write path does, gives
+    the spec's " Z"/" M"/" ZM" suffixes for free, and keeps the declaration
+    consistent with the statistics a reader checks it against. When the WKB
+    cannot be read the mapping table still serves as a fallback, and an Esri
+    type outside it yields ``[]`` -- the spec's way of saying the types are
+    not known.
+    """
+    computed = _compute_geometry_types(table, "geometry", verbose)
+    if computed:
+        return computed
+    declared = ARCGIS_GEOM_TYPES.get(esri_geometry_type)
+    return [declared] if declared else []
+
+
 def arcgis_to_table(
     service_url: str,
     auth: ArcGISAuth | None = None,
@@ -1348,6 +1373,14 @@ def arcgis_to_table(
                 table = table.select(cols_to_keep)
                 debug(f"Excluded columns: {cols_to_exclude}")
 
+        # Repair invalid geometry (issue #506) before the geo block is built:
+        # ST_MakeValid can change a geometry's type (a bowtie Polygon comes back
+        # as a MultiPolygon), so the types have to be read off the repaired data
+        # that is actually written. The helper preserves schema metadata, so it
+        # is equally safe on either side of the block.
+        if table.num_rows > 0:
+            table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
+
         # Add CRS to metadata.
         # Default (GeoJSON path): always CRS84 (WGS84 lon/lat) because we request
         # f=geojson, which per RFC 7946 is always WGS84 regardless of the native SR.
@@ -1374,9 +1407,9 @@ def arcgis_to_table(
                     "geometry": {
                         "encoding": "WKB",
                         "crs": crs,
-                        "geometry_types": [
-                            ARCGIS_GEOM_TYPES.get(layer_info.geometry_type, "Geometry")
-                        ],
+                        "geometry_types": _resolve_geometry_types(
+                            table, layer_info.geometry_type, verbose
+                        ),
                     }
                 },
             }
@@ -1385,10 +1418,6 @@ def arcgis_to_table(
             existing_metadata = table.schema.metadata or {}
             new_metadata = {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
             table = table.replace_schema_metadata(new_metadata)
-
-        # Repair invalid geometry (issue #506). Helper preserves schema metadata.
-        if table.num_rows > 0:
-            table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
 
         success(f"Converted {table.num_rows} features")
         return table
