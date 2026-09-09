@@ -862,6 +862,11 @@ def merge_longitude_ranges(ranges: list[tuple[float, float]]) -> tuple[float, fl
 
     With no wrapping input the result is exactly ``(min(xmin), max(xmax))``, so
     data from a producer that never wraps is reported as before.
+
+    The ranges must be **longitudes**: the split of a wrapping range happens at
+    +/-180, so callers have to establish a geographic CRS first (see
+    :func:`is_geographic_crs`). For a projected CRS the spec gives a bbox as
+    minima then maxima with no wrap-around, and the caller takes plain min/max.
     """
     if not ranges:
         raise ValueError("merge_longitude_ranges() needs at least one range")

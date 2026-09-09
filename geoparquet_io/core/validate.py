@@ -2448,9 +2448,18 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
 
 
 def _check_native_geo_stats_contains_data(
-    parquet_file: str, geom_col: str, con, sample_size: int
+    parquet_file: str, geom_col: str, con, sample_size: int, crs: Any = None
 ) -> ValidationCheck:
-    """Check that sampled geometries fall within declared geospatial statistics (geo_bbox)."""
+    """Check that sampled geometries fall within declared geospatial statistics (geo_bbox).
+
+    ``crs`` is the column's declared crs value (None means the CRS84 default), read
+    the same way :func:`_check_bbox_contains_data` reads it: xmin > xmax is an
+    antimeridian-crossing extent (RFC 7946, 5.2) only for a geographic CRS. The
+    gate is the CRS and not the GEOGRAPHY logical type -- a GEOMETRY column in a
+    geographic CRS wraps just as legally, and parquet-format's own rule is that
+    "this wraparound occurs only when the corresponding bounding box crosses the
+    antimeridian line".
+    """
     from geoparquet_io.core.duckdb_metadata import get_aggregated_native_geo_stats
     from geoparquet_io.core.file_utils import resolve_file_url
     from geoparquet_io.core.remote import is_remote_url
@@ -2510,8 +2519,20 @@ def _check_native_geo_stats_contains_data(
         xmax = geo_bbox["xmax"]
         ymax = geo_bbox["ymax"]
         # Parquet's geospatial statistics may legally wrap the antimeridian
-        # (xmin > xmax), the same reading _check_bbox_contains_data applies.
+        # (xmin > xmax), the same reading _check_bbox_contains_data applies --
+        # and, like there, only for a geographic CRS.
         wrapped = xmin > xmax
+        if wrapped and not is_geographic_crs(crs):
+            return ValidationCheck(
+                name=f"native_geo_stats_contains_data_{geom_col}",
+                status=CheckStatus.FAILED,
+                message=(
+                    "geospatial statistics have xmin > xmax; the antimeridian wrap-around "
+                    "reading (RFC 7946, 5.2) applies only to geographic CRS, so these "
+                    "statistics are invalid for the declared projected CRS"
+                ),
+                category="parquet_geo_types",
+            )
 
         limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 
@@ -3872,9 +3893,13 @@ def _run_parquet_geo_only_checks(
 
         # Data validation if requested
         if validate_data and con:
+            # The declared CRS decides whether xmin > xmax in the statistics is
+            # an antimeridian wrap or broken metadata; here it comes from the
+            # Parquet logical type, the only place a geo-only file declares it.
+            crs = _get_crs_from_schema(schema_info, geom_col)
             checks.append(_check_native_geo_types_match(parquet_file, geom_col, sample_size, con))
             checks.append(
-                _check_native_geo_stats_contains_data(parquet_file, geom_col, con, sample_size)
+                _check_native_geo_stats_contains_data(parquet_file, geom_col, con, sample_size, crs)
             )
             checks.append(
                 _check_geography_coordinate_bounds(
@@ -3883,8 +3908,6 @@ def _run_parquet_geo_only_checks(
             )
 
             # Check coordinates are valid for declared CRS
-            # Get CRS from schema logical type for parquet-geo-only files
-            crs = _get_crs_from_schema(schema_info, geom_col)
             checks.append(
                 _check_coordinates_valid_for_crs(parquet_file, geom_col, crs, con, sample_size)
             )
@@ -4047,8 +4070,14 @@ def _run_geoparquet_checks(
                 checks.append(
                     _check_native_geo_types_match(parquet_file, col_name, sample_size, con)
                 )
+                # A 2.0 column may declare its CRS in the GeoParquet metadata,
+                # in the Parquet logical type, or both; either one rules out
+                # reading xmin > xmax as an antimeridian wrap when it is projected.
+                stats_crs = col_meta.get("crs") or _get_crs_from_schema(schema_info, col_name)
                 checks.append(
-                    _check_native_geo_stats_contains_data(parquet_file, col_name, con, sample_size)
+                    _check_native_geo_stats_contains_data(
+                        parquet_file, col_name, con, sample_size, stats_crs
+                    )
                 )
                 checks.append(
                     _check_geography_coordinate_bounds(

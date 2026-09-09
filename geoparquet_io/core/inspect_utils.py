@@ -22,6 +22,7 @@ from geoparquet_io.core.crs_utils import (
     _is_crs84_equivalent,
     is_crs84_identifier,
     is_default_crs,
+    is_geographic_crs,
     merge_longitude_ranges,
 )
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
@@ -1221,6 +1222,9 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
     total_rows = 0
     total_size_bytes = 0
     x_ranges: list[tuple[float, float]] = []
+    # The antimeridian reading of xmin > xmax belongs to geographic CRS only, so
+    # one projected member is enough to disqualify it for the whole partition.
+    all_geographic = True
     combined_bbox = None  # [xmin, ymin, xmax, ymax]
     compressions = set()
     geoparquet_versions = set()
@@ -1261,6 +1265,7 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
         if xy:
             xmin, ymin, xmax, ymax = xy
             x_ranges.append((xmin, xmax))
+            all_geographic = all_geographic and is_geographic_crs(geo_info.get("crs"))
             if combined_bbox is None:
                 combined_bbox = [xmin, ymin, xmax, ymax]
             else:
@@ -1292,9 +1297,16 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
         )
 
     if combined_bbox is not None:
-        # xmin > xmax in any file means an antimeridian-crossing extent, which
-        # min/max would turn into its complement (RFC 7946, 5.2).
-        combined_bbox[0], combined_bbox[2] = merge_longitude_ranges(x_ranges)
+        if all_geographic:
+            # xmin > xmax in any file means an antimeridian-crossing extent, which
+            # min/max would turn into its complement (RFC 7946, 5.2).
+            combined_bbox[0], combined_bbox[2] = merge_longitude_ranges(x_ranges)
+        else:
+            # merge_longitude_ranges splits a wrapping range at +/-180, which is
+            # meaningless in projected units: for a non-geographic CRS the spec
+            # gives the bbox as plain minima then maxima, so union them plainly.
+            combined_bbox[0] = min(r[0] for r in x_ranges)
+            combined_bbox[2] = max(r[1] for r in x_ranges)
 
     return {
         "file_count": len(per_file_info),
