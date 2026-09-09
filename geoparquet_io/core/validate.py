@@ -1773,6 +1773,77 @@ def _check_covering_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck
     )
 
 
+def _schema_subtree_end(schema_info: list, index: int) -> int:
+    """Index just past the depth-first subtree rooted at ``schema_info[index]``."""
+    end = index + 1
+    for _ in range(schema_info[index].get("num_children") or 0):
+        if end >= len(schema_info):
+            break
+        end = _schema_subtree_end(schema_info, end)
+    return end
+
+
+def _schema_root_offset(schema_info: list) -> int:
+    """Index at which the root-level columns start: 0 or 1.
+
+    ``get_schema_info()`` returns the same flat depth-first listing in two
+    shapes. DuckDB's ``parquet_schema()`` prefixes it with the file's root group
+    element -- every row carries a ``file_name`` and the root alone has no
+    ``type`` -- while the pyarrow fast path starts straight at the first column
+    and always renders a ``type`` string.
+    """
+    if not schema_info:
+        return 0
+    first = schema_info[0]
+    return 1 if "file_name" in first and first.get("type") is None else 0
+
+
+def _root_schema_index(schema_info: list, name: str) -> int | None:
+    """Index of the root-level schema entry called ``name``, else ``None``.
+
+    The listing is depth first, so a struct's children sit between their parent
+    and the next root column: scanning it for the first entry of a given name can
+    return a *nested* field (say ``meta.bbox``) and shadow the real root column
+    of the same name. Skipping whole subtrees is also what enforces the v1.1.0
+    rule that the covering bbox column is at the root of the schema.
+    """
+    index = _schema_root_offset(schema_info)
+    while index < len(schema_info):
+        if schema_info[index].get("name") == name:
+            return index
+        index = _schema_subtree_end(schema_info, index)
+    return None
+
+
+def _schema_direct_children(schema_info: list, index: int) -> list[dict]:
+    """Direct children of ``schema_info[index]``, grandchildren excluded."""
+    children = []
+    child = index + 1
+    for _ in range(schema_info[index].get("num_children") or 0):
+        if child >= len(schema_info):
+            break
+        children.append(schema_info[child])
+        child = _schema_subtree_end(schema_info, child)
+    return children
+
+
+def _bbox_column_missing(check_name: str, bbox_col_name: str, schema_info: list) -> ValidationCheck:
+    """FAILED for a covering bbox column that is not a root-level column."""
+    nested = any(col.get("name") == bbox_col_name for col in schema_info)
+    detail = (
+        "it exists only as a nested field; GeoParquet 1.1 requires the bounding "
+        "box column at the root of the schema"
+        if nested
+        else "no root-level column of that name exists"
+    )
+    return ValidationCheck(
+        name=check_name,
+        status=CheckStatus.FAILED,
+        message=f'bbox column "{bbox_col_name}" is not at the schema root ({detail})',
+        category="geoparquet_1_1",
+    )
+
+
 def _check_covering_bbox_column_exists(
     col_meta: dict, col_name: str, schema_info: list
 ) -> ValidationCheck:
@@ -1799,21 +1870,14 @@ def _check_covering_bbox_column_exists(
             category="geoparquet_1_1",
         )
 
-    # Check if column exists at root (no dots in name indicating nesting)
-    for col in schema_info:
-        name = col.get("name", "")
-        if name == bbox_col_name:
-            return ValidationCheck(
-                name=f"covering_bbox_column_exists_{col_name}",
-                status=CheckStatus.PASSED,
-                message=f'bbox column "{bbox_col_name}" exists at schema root',
-                category="geoparquet_1_1",
-            )
+    check_name = f"covering_bbox_column_exists_{col_name}"
+    if _root_schema_index(schema_info, bbox_col_name) is None:
+        return _bbox_column_missing(check_name, bbox_col_name, schema_info)
 
     return ValidationCheck(
-        name=f"covering_bbox_column_exists_{col_name}",
-        status=CheckStatus.FAILED,
-        message=f'bbox column "{bbox_col_name}" not found at schema root',
+        name=check_name,
+        status=CheckStatus.PASSED,
+        message=f'bbox column "{bbox_col_name}" exists at schema root',
         category="geoparquet_1_1",
     )
 
@@ -1850,12 +1914,12 @@ def _check_covering_bbox_structure(
             category="geoparquet_1_1",
         )
 
-    found_fields = []
-    for i, col in enumerate(schema_info):
-        if col.get("name") == bbox_col_name:
-            num_children = col.get("num_children") or 0
-            found_fields = [c.get("name") for c in schema_info[i + 1 : i + 1 + num_children]]
-            break
+    check_name = f"covering_bbox_structure_{col_name}"
+    index = _root_schema_index(schema_info, bbox_col_name)
+    if index is None:
+        return _bbox_column_missing(check_name, bbox_col_name, schema_info)
+
+    found_fields = [c.get("name") for c in _schema_direct_children(schema_info, index)]
 
     if found_fields != _BBOX_FIELDS.get(len(found_fields)):
         return ValidationCheck(
@@ -1899,20 +1963,17 @@ def _check_covering_bbox_field_types(
             category="geoparquet_1_1",
         )
 
-    # Find field types
-    field_types = set()
-    valid_types = {"FLOAT", "DOUBLE", "FLOAT32", "FLOAT64"}
+    check_name = f"covering_bbox_field_types_{col_name}"
+    index = _root_schema_index(schema_info, bbox_col_name)
+    if index is None:
+        return _bbox_column_missing(check_name, bbox_col_name, schema_info)
 
-    for i, col in enumerate(schema_info):
-        if col.get("name") == bbox_col_name:
-            num_children = col.get("num_children") or 0
-            for j in range(1, num_children + 1):
-                if i + j < len(schema_info):
-                    # Same trap as _check_geometry_byte_array: a group child's
-                    # type is an explicit None, so `or ""` is the guard here too.
-                    child_type = (schema_info[i + j].get("type") or "").upper()
-                    field_types.add(child_type)
-            break
+    valid_types = {"FLOAT", "DOUBLE", "FLOAT32", "FLOAT64"}
+    # Same trap as _check_geometry_byte_array: a group child's type is an
+    # explicit None, so `or ""` is the guard here too.
+    field_types = {
+        (child.get("type") or "").upper() for child in _schema_direct_children(schema_info, index)
+    }
 
     # Check if all types are valid
     invalid_types = field_types - valid_types
@@ -2361,10 +2422,17 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
                 f"[{geo_bbox['xmin']:.2f}, {geo_bbox['ymin']:.2f}, "
                 f"{geo_bbox['xmax']:.2f}, {geo_bbox['ymax']:.2f}]"
             )
+            # These values may now wrap the antimeridian (#886), and a bare
+            # xmin > xmax reads as corrupt metadata; say which it is.
+            wrap_note = (
+                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)"
+                if geo_bbox["xmin"] > geo_bbox["xmax"]
+                else ""
+            )
             return ValidationCheck(
                 name=f"native_geo_stats_{geom_col}",
                 status=CheckStatus.PASSED,
-                message=f"geometry column has geospatial statistics: {bbox_str}",
+                message=f"geometry column has geospatial statistics: {bbox_str}{wrap_note}",
                 category="parquet_geo_types",
             )
         else:
@@ -2387,9 +2455,18 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
 
 
 def _check_native_geo_stats_contains_data(
-    parquet_file: str, geom_col: str, con, sample_size: int
+    parquet_file: str, geom_col: str, con, sample_size: int, crs: Any = None
 ) -> ValidationCheck:
-    """Check that sampled geometries fall within declared geospatial statistics (geo_bbox)."""
+    """Check that sampled geometries fall within declared geospatial statistics (geo_bbox).
+
+    ``crs`` is the column's declared crs value (None means the CRS84 default), read
+    the same way :func:`_check_bbox_contains_data` reads it: xmin > xmax is an
+    antimeridian-crossing extent (RFC 7946, 5.2) only for a geographic CRS. The
+    gate is the CRS and not the GEOGRAPHY logical type -- a GEOMETRY column in a
+    geographic CRS wraps just as legally, and parquet-format's own rule is that
+    "this wraparound occurs only when the corresponding bounding box crosses the
+    antimeridian line".
+    """
     from geoparquet_io.core.duckdb_metadata import get_aggregated_native_geo_stats
     from geoparquet_io.core.file_utils import resolve_file_url
     from geoparquet_io.core.remote import is_remote_url
@@ -2428,6 +2505,9 @@ def _check_native_geo_stats_contains_data(
                 category="parquet_geo_types",
             )
 
+        # Native statistics order Z after XY ([xmin, ymin, xmax, ymax, zmin,
+        # zmax]), unlike GeoParquet's interleaved metadata bbox -- so the first
+        # four values are the X/Y bounds here and _bbox_xy does not apply.
         geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox[:4], strict=True))
 
         # Validate that bbox values are reasonable (not garbage from parsing errors)
@@ -2445,6 +2525,21 @@ def _check_native_geo_stats_contains_data(
         ymin = geo_bbox["ymin"]
         xmax = geo_bbox["xmax"]
         ymax = geo_bbox["ymax"]
+        # Parquet's geospatial statistics may legally wrap the antimeridian
+        # (xmin > xmax), the same reading _check_bbox_contains_data applies --
+        # and, like there, only for a geographic CRS.
+        wrapped = xmin > xmax
+        if wrapped and not is_geographic_crs(crs):
+            return ValidationCheck(
+                name=f"native_geo_stats_contains_data_{geom_col}",
+                status=CheckStatus.FAILED,
+                message=(
+                    "geospatial statistics have xmin > xmax; the antimeridian wrap-around "
+                    "reading (RFC 7946, 5.2) applies only to geographic CRS, so these "
+                    "statistics are invalid for the declared projected CRS"
+                ),
+                category="parquet_geo_types",
+            )
 
         limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 
@@ -2452,9 +2547,8 @@ def _check_native_geo_stats_contains_data(
         query = f"""
             SELECT COUNT(*) as total,
                    COUNT(CASE WHEN
-                       ST_XMin({quote_identifier(geom_col)}) >= {xmin} AND
+                       {_x_within_sql(quote_identifier(geom_col), xmin, xmax)} AND
                        ST_YMin({quote_identifier(geom_col)}) >= {ymin} AND
-                       ST_XMax({quote_identifier(geom_col)}) <= {xmax} AND
                        ST_YMax({quote_identifier(geom_col)}) <= {ymax}
                    THEN 1 END) as within_bbox
             FROM (
@@ -2478,17 +2572,25 @@ def _check_native_geo_stats_contains_data(
                     message="no non-empty geometries to check against geospatial statistics",
                     category="parquet_geo_types",
                 )
+            # The wrap reading must never be invisible in the check output.
+            wrap_note = (
+                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)"
+                if wrapped
+                else ""
+            )
             if total == within:
                 return ValidationCheck(
                     name=f"native_geo_stats_contains_data_{geom_col}",
                     status=CheckStatus.PASSED,
-                    message=f"all geometries fall within geospatial statistics ({total} checked)",
+                    message=f"all geometries fall within geospatial statistics "
+                    f"({total} checked){wrap_note}",
                     category="parquet_geo_types",
                 )
             return ValidationCheck(
                 name=f"native_geo_stats_contains_data_{geom_col}",
                 status=CheckStatus.FAILED,
-                message=f"{total - within} of {total} geometries fall outside geospatial statistics",
+                message=f"{total - within} of {total} geometries fall outside "
+                f"geospatial statistics{wrap_note}",
                 category="parquet_geo_types",
             )
 
@@ -3798,9 +3900,13 @@ def _run_parquet_geo_only_checks(
 
         # Data validation if requested
         if validate_data and con:
+            # The declared CRS decides whether xmin > xmax in the statistics is
+            # an antimeridian wrap or broken metadata; here it comes from the
+            # Parquet logical type, the only place a geo-only file declares it.
+            crs = _get_crs_from_schema(schema_info, geom_col)
             checks.append(_check_native_geo_types_match(parquet_file, geom_col, sample_size, con))
             checks.append(
-                _check_native_geo_stats_contains_data(parquet_file, geom_col, con, sample_size)
+                _check_native_geo_stats_contains_data(parquet_file, geom_col, con, sample_size, crs)
             )
             checks.append(
                 _check_geography_coordinate_bounds(
@@ -3809,8 +3915,6 @@ def _run_parquet_geo_only_checks(
             )
 
             # Check coordinates are valid for declared CRS
-            # Get CRS from schema logical type for parquet-geo-only files
-            crs = _get_crs_from_schema(schema_info, geom_col)
             checks.append(
                 _check_coordinates_valid_for_crs(parquet_file, geom_col, crs, con, sample_size)
             )
@@ -3973,8 +4077,14 @@ def _run_geoparquet_checks(
                 checks.append(
                     _check_native_geo_types_match(parquet_file, col_name, sample_size, con)
                 )
+                # A 2.0 column may declare its CRS in the GeoParquet metadata,
+                # in the Parquet logical type, or both; either one rules out
+                # reading xmin > xmax as an antimeridian wrap when it is projected.
+                stats_crs = col_meta.get("crs") or _get_crs_from_schema(schema_info, col_name)
                 checks.append(
-                    _check_native_geo_stats_contains_data(parquet_file, col_name, con, sample_size)
+                    _check_native_geo_stats_contains_data(
+                        parquet_file, col_name, con, sample_size, stats_crs
+                    )
                 )
                 checks.append(
                     _check_geography_coordinate_bounds(

@@ -19,7 +19,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.crs_utils import geoarrow_crs_to_projjson
+from geoparquet_io.core.crs_utils import geoarrow_crs_to_projjson, merge_longitude_ranges
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, sql_path
 from geoparquet_io.core.exceptions import GeoParquetError
 
@@ -1355,6 +1355,10 @@ def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con
 def aggregate_native_geo_stats(chunks: list[dict]) -> dict:
     """Combine per-column-chunk statistics into one bbox and type list.
 
+    A chunk whose ``xmin`` exceeds its ``xmax`` wraps the antimeridian, which
+    the Parquet geospatial statistics permit; ``merge_longitude_ranges`` unions
+    the X ranges on the circle so the wrap is not inverted into its complement.
+
     Args:
         chunks: Output of :func:`get_native_geo_stats_by_row_group`
 
@@ -1365,10 +1369,11 @@ def aggregate_native_geo_stats(chunks: list[dict]) -> dict:
 
     with_bbox = [c for c in chunks if c["xmin"] is not None]
     if with_bbox:
+        xmin, xmax = merge_longitude_ranges([(c["xmin"], c["xmax"]) for c in with_bbox])
         stats["bbox"] = [
-            min(c["xmin"] for c in with_bbox),
+            xmin,
             min(c["ymin"] for c in with_bbox),
-            max(c["xmax"] for c in with_bbox),
+            xmax,
             max(c["ymax"] for c in with_bbox),
         ]
         with_z = [c for c in with_bbox if c["zmin"] is not None]

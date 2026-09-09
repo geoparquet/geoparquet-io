@@ -22,6 +22,8 @@ from geoparquet_io.core.crs_utils import (
     _is_crs84_equivalent,
     is_crs84_identifier,
     is_default_crs,
+    is_geographic_crs,
+    merge_longitude_ranges,
 )
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -1215,9 +1217,14 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
             - per_file_info: List of per-file details
     """
     from geoparquet_io.core.logging_config import debug
+    from geoparquet_io.core.validate import _bbox_xy
 
     total_rows = 0
     total_size_bytes = 0
+    x_ranges: list[tuple[float, float]] = []
+    # The antimeridian reading of xmin > xmax belongs to geographic CRS only, so
+    # one projected member is enough to disqualify it for the whole partition.
+    all_geographic = True
     combined_bbox = None  # [xmin, ymin, xmax, ymax]
     compressions = set()
     geoparquet_versions = set()
@@ -1251,16 +1258,19 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
         if geo_info.get("version"):
             geoparquet_versions.add(geo_info["version"])
 
-        # Merge bbox
-        bbox = geo_info.get("bbox")
-        if bbox and len(bbox) >= 4:
+        # Merge bbox. A GeoParquet bbox interleaves its dimensions -- the 6- and
+        # 8-element forms read [xmin, ymin, zmin, ...], so indices 2 and 3 are
+        # not xmax/ymax; _bbox_xy pulls the X/Y bounds out of any of the three.
+        xy = _bbox_xy(geo_info.get("bbox") or [])
+        if xy:
+            xmin, ymin, xmax, ymax = xy
+            x_ranges.append((xmin, xmax))
+            all_geographic = all_geographic and is_geographic_crs(geo_info.get("crs"))
             if combined_bbox is None:
-                combined_bbox = list(bbox[:4])
+                combined_bbox = [xmin, ymin, xmax, ymax]
             else:
-                combined_bbox[0] = min(combined_bbox[0], bbox[0])  # xmin
-                combined_bbox[1] = min(combined_bbox[1], bbox[1])  # ymin
-                combined_bbox[2] = max(combined_bbox[2], bbox[2])  # xmax
-                combined_bbox[3] = max(combined_bbox[3], bbox[3])  # ymax
+                combined_bbox[1] = min(combined_bbox[1], ymin)
+                combined_bbox[3] = max(combined_bbox[3], ymax)
 
         # Check schema consistency
         from geoparquet_io.core.duckdb_metadata import get_usable_columns
@@ -1286,6 +1296,18 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
             }
         )
 
+    if combined_bbox is not None:
+        if all_geographic:
+            # xmin > xmax in any file means an antimeridian-crossing extent, which
+            # min/max would turn into its complement (RFC 7946, 5.2).
+            combined_bbox[0], combined_bbox[2] = merge_longitude_ranges(x_ranges)
+        else:
+            # merge_longitude_ranges splits a wrapping range at +/-180, which is
+            # meaningless in projected units: for a non-geographic CRS the spec
+            # gives the bbox as plain minima then maxima, so union them plainly.
+            combined_bbox[0] = min(r[0] for r in x_ranges)
+            combined_bbox[2] = max(r[1] for r in x_ranges)
+
     return {
         "file_count": len(per_file_info),
         "total_rows": total_rows,
@@ -1297,6 +1319,16 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
         "geoparquet_versions": sorted(geoparquet_versions) if geoparquet_versions else [],
         "per_file_info": per_file_info,
     }
+
+
+def _combined_bbox_wrap_note(bbox: list) -> str:
+    """Trailing note for a combined bbox whose X range wraps the antimeridian.
+
+    ``extract_partition_summary`` can now emit ``xmin > xmax`` (#886). Printed
+    bare, that is indistinguishable from corrupt metadata, so every path that
+    shows the numbers to a person says how they are meant to be read.
+    """
+    return " (antimeridian-crossing, RFC 7946 5.2)" if bbox[0] > bbox[2] else ""
 
 
 def format_partition_terminal_output(
@@ -1329,6 +1361,7 @@ def format_partition_terminal_output(
         console.print(
             f"Combined bounds: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, "
             f"{bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
+            f"[dim]{_combined_bbox_wrap_note(bbox)}[/dim]"
         )
 
     console.print()
@@ -1468,7 +1501,8 @@ def format_partition_markdown_output(
     if partition_summary["combined_bbox"]:
         bbox = partition_summary["combined_bbox"]
         lines.append(
-            f"- **Combined bounds:** [{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}]"
+            f"- **Combined bounds:** [{bbox[0]:.6f}, {bbox[1]:.6f}, "
+            f"{bbox[2]:.6f}, {bbox[3]:.6f}]{_combined_bbox_wrap_note(bbox)}"
         )
 
     lines.append("")

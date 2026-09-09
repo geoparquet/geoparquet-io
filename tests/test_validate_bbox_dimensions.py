@@ -1,4 +1,9 @@
-"""bbox checks for 6-element (XYZ) and 8-element (XYZM) bboxes and antimeridian extents (#603)."""
+"""bbox checks for 6-element (XYZ) and 8-element (XYZM) bboxes and antimeridian extents.
+
+Covers the validate checks (#603) and the same two bug classes where they survived
+outside them: the partition summary's bbox merge and the native geospatial
+statistics aggregate (#886).
+"""
 
 import json
 
@@ -6,10 +11,19 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.common import get_duckdb_connection
+from geoparquet_io.core.crs_utils import merge_longitude_ranges
+from geoparquet_io.core.duckdb_metadata import aggregate_native_geo_stats
+from geoparquet_io.core.inspect_utils import (
+    extract_partition_summary,
+    format_partition_markdown_output,
+    format_partition_terminal_output,
+)
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_bbox_contains_data,
     _check_bbox_valid,
+    _check_native_geo_statistics,
+    _check_native_geo_stats_contains_data,
     validate_geoparquet,
 )
 
@@ -48,6 +62,15 @@ UTM_33N = {
     "name": "WGS 84 / UTM zone 33N",
     "id": {"authority": "EPSG", "code": 32633},
 }
+
+CRS84 = {
+    "type": "GeographicCRS",
+    "name": "WGS 84 longitude-latitude",
+    "id": {"authority": "OGC", "code": "CRS84"},
+}
+
+#: A wrapping extent: legal for a geographic CRS, corrupt for a projected one.
+WRAPPING_BBOX = [170.0, -10.0, -170.0, 10.0]
 
 
 @pytest.fixture
@@ -228,3 +251,285 @@ class TestBboxContainsData:
         assert all(c.status == CheckStatus.PASSED for c in bbox_checks.values()), [
             (c.name, c.message) for c in bbox_checks.values()
         ]
+
+
+def _chunk(xmin, ymin, xmax, ymax, **extra):
+    return {
+        "row_group_id": 0,
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
+        "zmin": None,
+        "zmax": None,
+        "geometry_types": [],
+        **extra,
+    }
+
+
+class TestMergeLongitudeRanges:
+    """The union is taken on the circle, so a wrapping range is not inverted (#886)."""
+
+    def test_plain_ranges_are_min_max(self):
+        assert merge_longitude_ranges([(0.0, 10.0), (-5.0, 4.0)]) == (-5.0, 10.0)
+
+    def test_wrapping_range_survives(self):
+        assert merge_longitude_ranges([(170.0, -170.0)]) == (170.0, -170.0)
+
+    def test_union_with_a_wrapping_range_keeps_the_short_way_round(self):
+        assert merge_longitude_ranges([(170.0, -170.0), (-179.0, -175.0)]) == (170.0, -170.0)
+
+    def test_union_widens_the_wrapping_range(self):
+        # 170 east to -90 spans 100 degrees; -100 west to -170 would span 290.
+        assert merge_longitude_ranges([(170.0, -170.0), (-100.0, -90.0)]) == (170.0, -90.0)
+
+    def test_plain_ranges_that_meet_at_the_antimeridian_stay_min_max(self):
+        # Deliberate: with nothing declaring a wrap, the producer's own reading
+        # of its two extents is kept rather than guessed at.
+        assert merge_longitude_ranges([(170.0, 180.0), (-180.0, -170.0)]) == (-180.0, 180.0)
+
+    def test_no_ranges_is_a_programming_error(self):
+        with pytest.raises(ValueError):
+            merge_longitude_ranges([])
+
+    def test_full_circle_collapses_to_the_whole_world(self):
+        xmin, xmax = merge_longitude_ranges([(170.0, -170.0), (-175.0, 175.0)])
+        assert (xmin, xmax) == (-180.0, 180.0)
+
+
+class TestNativeGeoStatsWrap:
+    """Parquet's own geospatial statistics may wrap the antimeridian (#886)."""
+
+    def test_aggregate_keeps_a_wrapping_extent(self):
+        stats = aggregate_native_geo_stats(
+            [_chunk(175.0, 0.0, -175.0, 5.0), _chunk(178.0, 1.0, 179.0, 2.0)]
+        )
+        assert stats["bbox"] == [175.0, 0.0, -175.0, 5.0]
+
+    def test_aggregate_without_wrap_is_unchanged(self):
+        stats = aggregate_native_geo_stats(
+            [_chunk(0.0, 0.0, 10.0, 5.0), _chunk(-5.0, 1.0, 4.0, 20.0)]
+        )
+        assert stats["bbox"] == [-5.0, 0.0, 10.0, 20.0]
+
+    def test_check_accepts_data_inside_a_wrapping_stat(self, antimeridian_file, con, monkeypatch):
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
+            lambda *a, **k: {"bbox": [170.0, -10.0, -170.0, 10.0]},
+        )
+        check = _check_native_geo_stats_contains_data(str(antimeridian_file), "geometry", con, 0)
+        assert check.status == CheckStatus.PASSED, check.message
+        assert "antimeridian" in check.message
+
+    def test_check_still_fails_geometry_in_the_wrap_gap(self, tmp_path, con, monkeypatch):
+        path = _write_v2(tmp_path / "gap_stats.parquet", ["POINT (175 0)", "POINT (0 0)"])
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
+            lambda *a, **k: {"bbox": [170.0, -10.0, -170.0, 10.0]},
+        )
+        check = _check_native_geo_stats_contains_data(str(path), "geometry", con, 0)
+        assert check.status == CheckStatus.FAILED
+        assert "1 of 2" in check.message
+
+
+class TestPartitionSummaryBbox:
+    """extract_partition_summary read indices 2/3 as xmax/ymax (#886)."""
+
+    def test_six_element_bboxes_merge_on_x_and_y(self, tmp_path, xyz_file):
+        other = _write_v2(
+            tmp_path / "xyz2.parquet",
+            ["POLYGON Z ((10 10 5, 12 10 5, 12 12 5, 10 12 5, 10 10 5))"],
+        )
+        assert len(_declared_bbox(xyz_file)) == 6
+        summary = extract_partition_summary([str(xyz_file), str(other)])
+        assert summary["combined_bbox"] == [0.0, 0.0, 12.0, 12.0]
+
+    def test_wrapping_bboxes_merge_on_the_circle(self, tmp_path, xyz_file):
+        wrapped = _rewrite_geo(
+            xyz_file, tmp_path / "wrap.parquet", bbox=[170.0, -10.0, -170.0, 10.0]
+        )
+        near = _rewrite_geo(xyz_file, tmp_path / "near.parquet", bbox=[-179.0, -5.0, -175.0, 5.0])
+        summary = extract_partition_summary([str(wrapped), str(near)])
+        assert summary["combined_bbox"] == [170.0, -10.0, -170.0, 10.0]
+
+    def test_short_bbox_is_ignored(self, tmp_path, xyz_file):
+        broken = _rewrite_geo(xyz_file, tmp_path / "broken.parquet", bbox=[0.0, 0.0, 1.0])
+        summary = extract_partition_summary([str(broken)])
+        assert summary["combined_bbox"] is None
+
+
+def _stats(monkeypatch, bbox):
+    """Force the aggregated native geospatial statistics to ``bbox``."""
+    monkeypatch.setattr(
+        "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
+        lambda *a, **k: {"bbox": bbox},
+    )
+
+
+class TestNativeGeoStatsWrapNeedsGeographicCrs:
+    """xmin > xmax is a wrap only for a geographic CRS (GeoParquet 1.1.0, #876)."""
+
+    def test_projected_crs_rejects_wrapping_statistics(self, antimeridian_file, con, monkeypatch):
+        _stats(monkeypatch, WRAPPING_BBOX)
+        check = _check_native_geo_stats_contains_data(
+            str(antimeridian_file), "geometry", con, 0, crs=UTM_33N
+        )
+        assert check.status == CheckStatus.FAILED, check.message
+        assert "projected" in check.message.lower()
+        assert "geographic" in check.message.lower()
+
+    def test_geographic_crs_still_reads_the_wrap(self, antimeridian_file, con, monkeypatch):
+        _stats(monkeypatch, WRAPPING_BBOX)
+        check = _check_native_geo_stats_contains_data(
+            str(antimeridian_file), "geometry", con, 0, crs=CRS84
+        )
+        assert check.status == CheckStatus.PASSED, check.message
+        assert "antimeridian" in check.message
+
+    def test_absent_crs_is_the_geographic_crs84_default(self, antimeridian_file, con, monkeypatch):
+        _stats(monkeypatch, WRAPPING_BBOX)
+        check = _check_native_geo_stats_contains_data(str(antimeridian_file), "geometry", con, 0)
+        assert check.status == CheckStatus.PASSED, check.message
+        assert "antimeridian" in check.message
+
+    def test_the_two_wrap_checks_agree_on_a_projected_crs(
+        self, antimeridian_file, con, monkeypatch
+    ):
+        # The bug: these two functions, on the same numbers and the same CRS,
+        # returned PASSED and FAILED respectively.
+        _stats(monkeypatch, WRAPPING_BBOX)
+        stats_check = _check_native_geo_stats_contains_data(
+            str(antimeridian_file), "geometry", con, 0, crs=UTM_33N
+        )
+        bbox_check = _check_bbox_contains_data(
+            str(antimeridian_file), "geometry", WRAPPING_BBOX, con, 0, "WKB", UTM_33N
+        )
+        assert stats_check.status == bbox_check.status == CheckStatus.FAILED, (
+            stats_check.message,
+            bbox_check.message,
+        )
+
+    def _stats_check(self, path):
+        result = validate_geoparquet(str(path))
+        return next(c for c in result.checks if c.name == "native_geo_stats_contains_data_geometry")
+
+    def test_projected_crs_reaches_the_check_end_to_end(
+        self, tmp_path, antimeridian_file, monkeypatch
+    ):
+        # The column's crs has to travel from the metadata to the check; without
+        # the wiring the file validates clean on statistics it contradicts. Same
+        # data and same statistics as the test below -- only the CRS differs.
+        path = _rewrite_geo(antimeridian_file, tmp_path / "proj.parquet", crs=UTM_33N)
+        _stats(monkeypatch, WRAPPING_BBOX)
+        check = self._stats_check(path)
+        assert check.status == CheckStatus.FAILED, check.message
+        assert "projected" in check.message.lower()
+
+    def test_default_crs_file_reads_the_wrap_end_to_end(
+        self, tmp_path, antimeridian_file, monkeypatch
+    ):
+        path = _rewrite_geo(antimeridian_file, tmp_path / "default_crs.parquet")
+        _stats(monkeypatch, WRAPPING_BBOX)
+        check = self._stats_check(path)
+        assert check.status == CheckStatus.PASSED, check.message
+        assert "antimeridian" in check.message
+
+
+class TestPartitionSummaryWrapNeedsGeographicCrs:
+    """merge_longitude_ranges splits at +/-180, which is meaningless in metres (#886)."""
+
+    def _projected_pair(self, tmp_path, xyz_file):
+        a = _rewrite_geo(
+            xyz_file, tmp_path / "m_a.parquet", bbox=[1000.0, 0.0, 2000.0, 100.0], crs=UTM_33N
+        )
+        b = _rewrite_geo(
+            xyz_file, tmp_path / "m_b.parquet", bbox=[5000.0, 0.0, 3000.0, 100.0], crs=UTM_33N
+        )
+        return [str(a), str(b)]
+
+    def test_projected_crs_takes_plain_min_max(self, tmp_path, xyz_file):
+        summary = extract_partition_summary(self._projected_pair(tmp_path, xyz_file))
+        assert summary["combined_bbox"] == [1000.0, 0.0, 3000.0, 100.0]
+
+    def test_projected_crs_never_yields_the_wrap_merge(self, tmp_path, xyz_file):
+        summary = extract_partition_summary(self._projected_pair(tmp_path, xyz_file))
+        xmin, xmax = summary["combined_bbox"][0], summary["combined_bbox"][2]
+        assert (xmin, xmax) != (5000.0, 3000.0)
+        assert xmin <= xmax
+
+    def test_a_single_projected_crs_file_is_not_reinterpreted(self, tmp_path, xyz_file):
+        one = _rewrite_geo(
+            xyz_file,
+            tmp_path / "m_one.parquet",
+            bbox=[-500000.0, 0.0, 500000.0, 100.0],
+            crs=UTM_33N,
+        )
+        other = _rewrite_geo(
+            xyz_file,
+            tmp_path / "m_two.parquet",
+            bbox=[900000.0, 0.0, 800000.0, 100.0],
+            crs=UTM_33N,
+        )
+        summary = extract_partition_summary([str(one), str(other)])
+        assert summary["combined_bbox"] == [-500000.0, 0.0, 800000.0, 100.0]
+
+    def test_a_projected_file_disables_the_wrap_for_the_whole_partition(self, tmp_path, xyz_file):
+        # One projected member is enough to make the wrap reading unsafe.
+        geographic = _rewrite_geo(xyz_file, tmp_path / "geo.parquet", bbox=WRAPPING_BBOX)
+        projected = _rewrite_geo(
+            xyz_file, tmp_path / "proj_member.parquet", bbox=[0.0, 0.0, 10.0, 5.0], crs=UTM_33N
+        )
+        summary = extract_partition_summary([str(geographic), str(projected)])
+        assert summary["combined_bbox"] == [0.0, -10.0, 10.0, 10.0]
+
+
+def _summary(bbox):
+    return {
+        "file_count": 1,
+        "total_rows": 2,
+        "total_size_bytes": 100,
+        "total_size_human": "100 B",
+        "combined_bbox": bbox,
+        "schema_consistent": True,
+        "compressions": ["SNAPPY"],
+        "geoparquet_versions": ["1.1.0"],
+        "per_file_info": [
+            {"file": "a.parquet", "file_name": "a.parquet", "rows": 2, "size_human": "100 B"}
+        ],
+    }
+
+
+class TestWrapIsVisibleWhereTheValuesArePrinted:
+    """A wrapped range printed bare is indistinguishable from corrupt metadata (#886)."""
+
+    def test_terminal_output_notes_a_wrapping_combined_bbox(self, capsys):
+        format_partition_terminal_output(_summary(WRAPPING_BBOX), {}, [])
+        assert "antimeridian" in capsys.readouterr().out
+
+    def test_terminal_output_leaves_a_plain_bbox_unannotated(self, capsys):
+        format_partition_terminal_output(_summary([0.0, 0.0, 10.0, 5.0]), {}, [])
+        assert "antimeridian" not in capsys.readouterr().out
+
+    def test_markdown_output_notes_a_wrapping_combined_bbox(self):
+        out = format_partition_markdown_output(_summary(WRAPPING_BBOX), {}, [])
+        line = next(ln for ln in out.splitlines() if "Combined bounds" in ln)
+        assert "antimeridian-crossing, RFC 7946 5.2" in line
+
+    def test_markdown_output_leaves_a_plain_bbox_unannotated(self):
+        out = format_partition_markdown_output(_summary([0.0, 0.0, 10.0, 5.0]), {}, [])
+        line = next(ln for ln in out.splitlines() if "Combined bounds" in ln)
+        assert "antimeridian" not in line
+
+    def test_native_geo_statistics_message_notes_the_wrap(self, antimeridian_file, monkeypatch):
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_native_geo_stats_by_row_group",
+            lambda *a, **k: [_chunk(175.0, 0.0, -175.0, 5.0)],
+        )
+        check = _check_native_geo_statistics(str(antimeridian_file), "geometry")
+        assert check.status == CheckStatus.PASSED, check.message
+        assert "antimeridian" in check.message
+
+    def test_native_geo_statistics_message_is_unannotated_without_a_wrap(self, antimeridian_file):
+        check = _check_native_geo_statistics(str(antimeridian_file), "geometry")
+        assert check.status == CheckStatus.PASSED, check.message
+        assert "antimeridian" not in check.message
