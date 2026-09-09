@@ -22,7 +22,10 @@ Each `ParityCase` names, per front end:
   into, as a ``(module_or_class, attribute)`` pair. `ops` binds its core imports
   at module import time, so `ops` is patched on `ops`; `Table` imports inside
   each method body, so `Table` is patched on the *core* module; the CLI imports
-  under an ``_impl`` alias, so the CLI is patched on `cli.main`.
+  under an ``_impl`` alias, so the CLI is patched on the module that owns the
+  command. That is `cli.main` for groups still living there, and
+  `cli.commands.<group>` for groups already extracted (#3.2) -- pass
+  ``module=`` to `_cli` for those.
 * the *reference callable* -- the real function, used only for its signature.
   Captured calls are bound through it with ``apply_defaults()``, so a value
   passed positionally by one front end and by keyword (or not at all) by
@@ -83,6 +86,7 @@ from click.testing import CliRunner
 from geoparquet_io.api import ops
 from geoparquet_io.api import table as table_module
 from geoparquet_io.cli import main as cli_main
+from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.core import extract as core_extract
 from geoparquet_io.core import hilbert_order as core_hilbert
 from geoparquet_io.core import sort_by_column as core_sort_column
@@ -189,9 +193,14 @@ class Ctx:
 # --------------------------------------------------------------------------
 
 
-def _cli(alias: str, reference: Callable, args: Callable[[Ctx], list[str]]) -> Frontend:
+def _cli(
+    alias: str,
+    reference: Callable,
+    args: Callable[[Ctx], list[str]],
+    module: Any = cli_main,
+) -> Frontend:
     return Frontend(
-        patch_site=(cli_main, alias),
+        patch_site=(module, alias),
         reference=reference,
         invoke=lambda ctx: ctx.run_cli(args(ctx)),
     )
@@ -373,6 +382,7 @@ CASES: list[ParityCase] = [
             "hilbert_impl",
             core_hilbert.hilbert_order,
             lambda c: ["sort", "hilbert", c.input_file, c.output_file],
+            module=cli_sort,
         ),
         ops=_ops(
             "hilbert_order_table",
@@ -393,6 +403,7 @@ CASES: list[ParityCase] = [
             "str_impl",
             core_str.str_order,
             lambda c: ["sort", "str", c.input_file, c.output_file],
+            module=cli_sort,
         ),
         ops=_ops(
             "str_order_table",
@@ -416,6 +427,7 @@ CASES: list[ParityCase] = [
             "sort_by_column_impl",
             core_sort_column.sort_by_column,
             lambda c: ["sort", "column", c.input_file, c.output_file, SORT_COLUMN],
+            module=cli_sort,
         ),
         ops=_ops(
             "sort_by_column_table",
@@ -439,6 +451,7 @@ CASES: list[ParityCase] = [
             "sort_by_quadkey_impl",
             core_sort_quadkey.sort_by_quadkey,
             lambda c: ["sort", "quadkey", c.input_file, c.output_file],
+            module=cli_sort,
         ),
         ops=_ops(
             "sort_by_quadkey_table",

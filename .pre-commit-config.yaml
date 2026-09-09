@@ -233,7 +233,7 @@ repos:
           - -c
           - |
             # This is a reminder hook - it doesn't fail, just warns
-            if git diff --cached --name-only | grep -q "geoparquet_io/cli/main.py"; then
+            if git diff --cached --name-only | grep -qE "geoparquet_io/cli/(main\.py|commands/)"; then
               echo "⚠️  Reminder: If you added new CLI commands, ensure you also:"
               echo "   1. Added corresponding methods to api/table.py"
               echo "   2. Added corresponding functions to api/ops.py"
@@ -249,7 +249,7 @@ repos:
         description: Validate CLAUDE.md against the actual codebase
         entry: uv run python scripts/validate_claude_md.py
         language: system
-        files: ^(CLAUDE\.md|geoparquet_io/cli/main\.py|pyproject\.toml)$
+        files: ^(CLAUDE\.md|geoparquet_io/cli/main\.py|geoparquet_io/cli/commands/.*\.py|pyproject\.toml)$
         pass_filenames: false
 
       - id: doc-sync
@@ -257,7 +257,7 @@ repos:
         description: Auto-update generated doc sections (CLAUDE.md, SKILL.md, contributing.md)
         entry: uv run python scripts/doc_sync.py --update
         language: system
-        files: ^(CHANGELOG\.md|geoparquet_io/cli/main\.py|geoparquet_io/cli/decorators\.py|pyproject\.toml|geoparquet_io/core/.*\.py|scripts/doc_sync\.py|docs/contributing\.md)$
+        files: ^(CHANGELOG\.md|geoparquet_io/cli/main\.py|geoparquet_io/cli/commands/.*\.py|geoparquet_io/cli/decorators\.py|pyproject\.toml|geoparquet_io/core/.*\.py|scripts/doc_sync\.py|docs/contributing\.md)$
         pass_filenames: false
 
       - id: sync-dependencies

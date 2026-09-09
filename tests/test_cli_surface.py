@@ -181,7 +181,7 @@ def _dispatch_target(ctx: click.Context, group: click.Group) -> str | None:
 def _probe_dispatch(group: click.Group, argv: list[str]) -> str | None:
     """Return the subcommand a group rewrites ``argv`` to, or ``None``.
 
-    ``create_default_group`` in ``cli/main.py`` builds its groups from a
+    ``create_default_group`` in ``cli/_shared.py`` builds its groups from a
     factory, so every generated class is named ``_DefaultGroup`` and the
     configured subcommand lives only in a closure. Rather than reaching into
     ``__closure__`` cells, this asks the group what it actually does with an

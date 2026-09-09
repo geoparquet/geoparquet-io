@@ -42,6 +42,7 @@ from click.testing import CliRunner
 # `from geoparquet_io.cli import main as cli_main` is the form that works
 # everywhere. Do not "simplify" this back to a dotted patch target.
 from geoparquet_io.cli import main as cli_main
+from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.cli.main import cli
 from tests.conftest import skip_if_geography_unavailable
 
@@ -108,43 +109,54 @@ class TestEveryCommandForwardsWriteMemory:
 # Layer 1: CLI forwards --write-memory as memory_limit=<value> BY KEYWORD
 # ---------------------------------------------------------------------------
 
+# The module each case patches is the one that owns the command: `cli.main` for
+# groups still defined there, `cli.commands.<group>` for groups already
+# extracted into their own module (Deep Review 3.2).
 CLI_FORWARDING_CASES = [
     pytest.param(
+        cli_main,
         "add_h3_column_impl",
         lambda in_f, out_f, col: ["add", "h3", in_f, out_f],
         id="add-h3",
     ),
     pytest.param(
+        cli_main,
         "add_a5_column_impl",
         lambda in_f, out_f, col: ["add", "a5", in_f, out_f],
         id="add-a5",
     ),
     pytest.param(
+        cli_main,
         "add_s2_column_impl",
         lambda in_f, out_f, col: ["add", "s2", in_f, out_f],
         id="add-s2",
     ),
     pytest.param(
+        cli_main,
         "add_kdtree_column_impl",
         lambda in_f, out_f, col: ["add", "kdtree", in_f, out_f],
         id="add-kdtree",
     ),
     pytest.param(
+        cli_main,
         "add_quadkey_column_impl",
         lambda in_f, out_f, col: ["add", "quadkey", in_f, out_f],
         id="add-quadkey",
     ),
     pytest.param(
+        cli_main,
         "add_bbox_column_impl",
         lambda in_f, out_f, col: ["add", "bbox", in_f, out_f],
         id="add-bbox",
     ),
     pytest.param(
+        cli_sort,
         "sort_by_column_impl",
         lambda in_f, out_f, col: ["sort", "column", in_f, out_f, col],
         id="sort-column",
     ),
     pytest.param(
+        cli_sort,
         "sort_by_quadkey_impl",
         lambda in_f, out_f, col: ["sort", "quadkey", in_f, out_f],
         id="sort-quadkey",
@@ -155,13 +167,13 @@ CLI_FORWARDING_CASES = [
 class TestCliForwardsWriteMemoryByKeyword:
     """The CLI must call the core function with memory_limit=<value> as a kwarg."""
 
-    @pytest.mark.parametrize("impl_name,build_args", CLI_FORWARDING_CASES)
-    def test_write_memory_forwarded_as_keyword(self, impl_name, build_args):
+    @pytest.mark.parametrize("impl_module,impl_name,build_args", CLI_FORWARDING_CASES)
+    def test_write_memory_forwarded_as_keyword(self, impl_module, impl_name, build_args):
         runner = CliRunner()
         args = build_args("input.parquet", "output.parquet", "some_column")
         args = [*args, "--write-memory", "222MB"]
 
-        with mock.patch.object(cli_main, impl_name) as mocked_impl:
+        with mock.patch.object(impl_module, impl_name) as mocked_impl:
             result = runner.invoke(cli, args)
 
         assert result.exit_code == 0, result.output
