@@ -217,7 +217,10 @@ Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
 New CLI commands need corresponding Python API:
 
 1. Core logic in `geoparquet_io/core/<feature>.py`
-2. CLI wrapper in `geoparquet_io/cli/main.py`
+2. CLI wrapper in `geoparquet_io/cli/commands/<group>.py`, registered in
+   `geoparquet_io/cli/main.py` with `cli.add_command()`. Where a helper goes: shared by
+   many groups → `cli/_shared.py`; a reusable option or `cls=` command class →
+   `cli/decorators.py`; used by one group only → it travels with that group's module.
 3. Python API in `geoparquet_io/api/table.py` and `api/ops.py`
 
 See `CLAUDE.md` for full architecture details.

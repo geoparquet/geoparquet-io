@@ -40,8 +40,9 @@ from click.testing import CliRunner
 # pkgutil.resolve_name). `import geoparquet_io.cli.main as cli_main` does NOT
 # help: IMPORT_FROM getattrs the parent and returns the Group on every version.
 # `from geoparquet_io.cli import main as cli_main` is the form that works
-# everywhere. Do not "simplify" this back to a dotted patch target.
-from geoparquet_io.cli import main as cli_main
+# everywhere. Do not "simplify" this back to a dotted patch target. The same
+# holds for the group modules below: import the module object, patch on it.
+from geoparquet_io.cli.commands import add as cli_add
 from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.cli.main import cli
 from tests.conftest import skip_if_geography_unavailable
@@ -114,37 +115,37 @@ class TestEveryCommandForwardsWriteMemory:
 # extracted into their own module (Deep Review 3.2).
 CLI_FORWARDING_CASES = [
     pytest.param(
-        cli_main,
+        cli_add,
         "add_h3_column_impl",
         lambda in_f, out_f, col: ["add", "h3", in_f, out_f],
         id="add-h3",
     ),
     pytest.param(
-        cli_main,
+        cli_add,
         "add_a5_column_impl",
         lambda in_f, out_f, col: ["add", "a5", in_f, out_f],
         id="add-a5",
     ),
     pytest.param(
-        cli_main,
+        cli_add,
         "add_s2_column_impl",
         lambda in_f, out_f, col: ["add", "s2", in_f, out_f],
         id="add-s2",
     ),
     pytest.param(
-        cli_main,
+        cli_add,
         "add_kdtree_column_impl",
         lambda in_f, out_f, col: ["add", "kdtree", in_f, out_f],
         id="add-kdtree",
     ),
     pytest.param(
-        cli_main,
+        cli_add,
         "add_quadkey_column_impl",
         lambda in_f, out_f, col: ["add", "quadkey", in_f, out_f],
         id="add-quadkey",
     ),
     pytest.param(
-        cli_main,
+        cli_add,
         "add_bbox_column_impl",
         lambda in_f, out_f, col: ["add", "bbox", in_f, out_f],
         id="add-bbox",
@@ -405,7 +406,7 @@ class TestWriteMemoryValidation:
     )
     def test_valid_write_memory_is_accepted(self, good_value):
         runner = CliRunner()
-        with mock.patch.object(cli_main, "add_h3_column_impl"):
+        with mock.patch.object(cli_add, "add_h3_column_impl"):
             result = runner.invoke(
                 cli,
                 ["add", "h3", "in.parquet", "out.parquet", "--write-memory", good_value],

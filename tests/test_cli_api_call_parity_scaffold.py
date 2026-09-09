@@ -86,6 +86,10 @@ from click.testing import CliRunner
 from geoparquet_io.api import ops
 from geoparquet_io.api import table as table_module
 from geoparquet_io.cli import main as cli_main
+from geoparquet_io.cli.commands import add as cli_add
+from geoparquet_io.cli.commands import convert as cli_convert
+from geoparquet_io.cli.commands import extract as cli_extract
+from geoparquet_io.cli.commands import partition as cli_partition
 from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.core import extract as core_extract
 from geoparquet_io.core import hilbert_order as core_hilbert
@@ -262,6 +266,7 @@ CASES: list[ParityCase] = [
             "add_bbox_column_impl",
             core_bbox.add_bbox_column,
             lambda c: ["add", "bbox", c.input_file, c.output_file],
+            module=cli_add,
         ),
         ops=_ops("add_bbox_table", core_bbox.add_bbox_table, lambda c: ops.add_bbox(c.table)),
         table=_table(
@@ -278,6 +283,7 @@ CASES: list[ParityCase] = [
             "add_h3_column_impl",
             core_h3.add_h3_column,
             lambda c: ["add", "h3", c.input_file, c.output_file],
+            module=cli_add,
         ),
         ops=_ops("add_h3_table", core_h3.add_h3_table, lambda c: ops.add_h3(c.table)),
         table=_table(
@@ -294,6 +300,7 @@ CASES: list[ParityCase] = [
             "add_s2_column_impl",
             core_s2.add_s2_column,
             lambda c: ["add", "s2", c.input_file, c.output_file],
+            module=cli_add,
         ),
         ops=_ops("add_s2_table", core_s2.add_s2_table, lambda c: ops.add_s2(c.table)),
         table=_table(
@@ -310,6 +317,7 @@ CASES: list[ParityCase] = [
             "add_a5_column_impl",
             core_a5.add_a5_column,
             lambda c: ["add", "a5", c.input_file, c.output_file],
+            module=cli_add,
         ),
         ops=_ops("add_a5_table", core_a5.add_a5_table, lambda c: ops.add_a5(c.table)),
         table=_table(
@@ -326,6 +334,7 @@ CASES: list[ParityCase] = [
             "add_quadkey_column_impl",
             core_quadkey.add_quadkey_column,
             lambda c: ["add", "quadkey", c.input_file, c.output_file],
+            module=cli_add,
         ),
         ops=_ops(
             "add_quadkey_table",
@@ -350,6 +359,7 @@ CASES: list[ParityCase] = [
             "add_kdtree_column_impl",
             core_kdtree.add_kdtree_column,
             lambda c: ["add", "kdtree", c.input_file, c.output_file],
+            module=cli_add,
         ),
         ops=_ops(
             "add_kdtree_table",
@@ -477,6 +487,7 @@ CASES: list[ParityCase] = [
             "extract_impl",
             core_extract.extract,
             lambda c: ["extract", "geoparquet", c.input_file, c.output_file],
+            module=cli_extract,
         ),
         ops=_ops("extract_table", core_extract.extract_table, lambda c: ops.extract(c.table)),
         table=_table(
@@ -503,6 +514,7 @@ CASES: list[ParityCase] = [
             "convert_to_geoparquet",
             convert_to_geoparquet,
             lambda c: ["convert", "geoparquet", c.convert_input, c.output_file],
+            module=cli_convert,
         ),
         # `Table.write` has no core twin of `convert_to_geoparquet`: it resolves a
         # write strategy and calls `strategy.write_from_table`. That call *is* the
@@ -532,6 +544,7 @@ CASES: list[ParityCase] = [
             "partition_by_h3_impl",
             core_part_h3.partition_by_h3,
             lambda c: ["partition", "h3", c.input_file, c.output_dir, "--resolution", "6"],
+            module=cli_partition,
         ),
         ops=_ops_via_table(
             core_part_h3,
@@ -579,6 +592,7 @@ CASES: list[ParityCase] = [
                 "--partition-resolution",
                 "6",
             ],
+            module=cli_partition,
         ),
         ops=_ops_via_table(
             core_part_quadkey,

@@ -229,7 +229,7 @@ def test_inspect_misnamed_parquet_file(runner, tmp_path):
 
 def test_validate_parquet_input_presigned_url():
     """Test that presigned URLs with query strings are handled correctly."""
-    from geoparquet_io.cli.main import _validate_parquet_input
+    from geoparquet_io.cli.commands.inspect import _validate_parquet_input
 
     # Presigned URL with .parquet extension should pass validation
     presigned_url = (

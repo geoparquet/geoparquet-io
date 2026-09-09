@@ -8,6 +8,7 @@ Tests are split into two categories:
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 from importlinter import api as importlinter_api
@@ -31,11 +32,11 @@ class TestImportLinterConfiguration:
         session_options = config["session_options"]
         assert session_options.get("include_external_packages") == "True"
 
-    def test_has_two_contracts(self, config):
-        """Exactly two architecture contracts should be defined."""
+    def test_has_four_contracts(self, config):
+        """Exactly four architecture contracts should be defined."""
         contracts_options = config["contracts_options"]
-        assert len(contracts_options) == 2, (
-            f"Expected 2 contracts, found {len(contracts_options)}: "
+        assert len(contracts_options) == 4, (
+            f"Expected 4 contracts, found {len(contracts_options)}: "
             f"{[c.get('name', c.get('id', '?')) for c in contracts_options]}"
         )
 
@@ -58,6 +59,36 @@ class TestImportLinterConfiguration:
         assert contract["type"] == "forbidden"
         assert "geoparquet_io.api" in contract["source_modules"]
         assert "geoparquet_io.cli" in contract["forbidden_modules"]
+
+    def test_commands_no_cli_main_contract_configured(self, config):
+        """The command-group layer must not import back into cli.main."""
+        contracts = {c["id"]: c for c in config["contracts_options"]}
+        assert "commands-no-cli-main" in contracts, "Missing commands-no-cli-main contract"
+
+        contract = contracts["commands-no-cli-main"]
+        assert contract["type"] == "forbidden"
+        assert "geoparquet_io.cli.commands" in contract["source_modules"]
+        assert "geoparquet_io.cli.main" in contract["forbidden_modules"]
+
+    def test_commands_independent_contract_covers_every_group(self, config):
+        """Every group module must be listed, or a pair could import each other unchecked."""
+        contracts = {c["id"]: c for c in config["contracts_options"]}
+        assert "commands-independent" in contracts, "Missing commands-independent contract"
+
+        contract = contracts["commands-independent"]
+        assert contract["type"] == "independence"
+
+        commands_dir = Path(__file__).resolve().parents[1] / "geoparquet_io" / "cli" / "commands"
+        on_disk = {
+            f"geoparquet_io.cli.commands.{path.stem}"
+            for path in commands_dir.glob("*.py")
+            if path.stem != "__init__"
+        }
+        assert set(contract["modules"]) == on_disk, (
+            "commands-independent must list exactly the group modules on disk; "
+            f"missing: {sorted(on_disk - set(contract['modules']))}, "
+            f"stale: {sorted(set(contract['modules']) - on_disk)}"
+        )
 
     def test_core_no_click_ignore_imports_minimal(self, config):
         """Click has been removed from core - only transitive ignores should remain."""

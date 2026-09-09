@@ -281,6 +281,22 @@ module = [
 ]
 ignore_errors = true
 
+# The group modules split out of "geoparquet_io.cli.main" inherited its blanket
+# suppression. Narrowed to the two codes they actually emit (17 errors: add 4,
+# extract 5, partition 8 — benchmark now emits none) so any OTHER type error in
+# this new layer is reported. The cause is not the CLI wrappers: Click hands a
+# command `float | None` / `tuple[float, ...] | None` where the core function it
+# calls is annotated `int | None` / a fixed-length tuple, i.e. core annotations
+# narrower than their implementations. Widening those annotations removes the
+# need for this override entirely — tracked in a follow-up issue.
+[[tool.mypy.overrides]]
+module = [
+    "geoparquet_io.cli.commands.add",
+    "geoparquet_io.cli.commands.extract",
+    "geoparquet_io.cli.commands.partition",
+]
+disable_error_code = ["arg-type", "index"]
+
 [tool.mutmut]
 source_paths = ["geoparquet_io/"]
 # Fast tests only: slow/network tests are nondeterministic (live third-party
@@ -421,6 +437,44 @@ name = "API modules must not import CLI"
 type = "forbidden"
 source_modules = ["geoparquet_io.api"]
 forbidden_modules = ["geoparquet_io.cli"]
+
+[[tool.importlinter.contracts]]
+id = "commands-no-cli-main"
+name = "Command group modules must not import cli.main"
+type = "forbidden"
+source_modules = ["geoparquet_io.cli.commands"]
+forbidden_modules = ["geoparquet_io.cli.main"]
+# Same transitive edge core-no-click already ignores: benchmark_suite imports
+# __version__ from the package root, whose __init__ re-exports cli.main. The
+# import is version-info only and the _get_version indirection behind it is dead
+# weight — removing it drops this ignore. Tracked in a follow-up issue.
+ignore_imports = [
+    "geoparquet_io.core.benchmark_suite -> geoparquet_io",
+]
+unmatched_ignore_imports_alerting = "warn"
+
+[[tool.importlinter.contracts]]
+id = "commands-independent"
+name = "Command group modules must not import each other"
+type = "independence"
+modules = [
+    "geoparquet_io.cli.commands.add",
+    "geoparquet_io.cli.commands.benchmark",
+    "geoparquet_io.cli.commands.convert",
+    "geoparquet_io.cli.commands.extract",
+    "geoparquet_io.cli.commands.inspect",
+    "geoparquet_io.cli.commands.partition",
+    "geoparquet_io.cli.commands.pmtiles",
+    "geoparquet_io.cli.commands.process",
+    "geoparquet_io.cli.commands.publish",
+    "geoparquet_io.cli.commands.sort",
+]
+# See commands-no-cli-main above: the same benchmark_suite -> package-root edge
+# would otherwise route every group into every other group through cli.main.
+ignore_imports = [
+    "geoparquet_io.core.benchmark_suite -> geoparquet_io",
+]
+unmatched_ignore_imports_alerting = "warn"
 
 [dependency-groups]
 dev = [
