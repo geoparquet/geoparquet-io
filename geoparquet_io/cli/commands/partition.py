@@ -7,7 +7,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3
+from geoparquet_io.cli._shared import _activate_s3, init_group_context
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     geoparquet_version_option,
@@ -19,7 +19,6 @@ from geoparquet_io.cli.decorators import (
     show_sql_option,
     verbose_option,
 )
-from geoparquet_io.core.logging_config import setup_cli_logging
 from geoparquet_io.core.partition.admin_hierarchical import (
     partition_by_admin_hierarchical as partition_admin_hierarchical_impl,
 )
@@ -40,10 +39,7 @@ from geoparquet_io.core.partition.by_string import (
 @click.pass_context
 def partition(ctx):
     """Commands for partitioning GeoParquet files."""
-    # Ensure logging is set up (in case this group is invoked directly in tests)
-    ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False)
-    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+    init_group_context(ctx)
 
 
 @partition.command(name="admin", cls=SingleFileCommand)

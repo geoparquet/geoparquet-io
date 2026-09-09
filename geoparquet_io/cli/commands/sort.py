@@ -7,7 +7,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, prepare_output
+from geoparquet_io.cli._shared import _activate_s3, init_group_context, prepare_output
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     allow_schema_diff_option,
@@ -21,7 +21,6 @@ from geoparquet_io.cli.decorators import (
 )
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
-from geoparquet_io.core.logging_config import setup_cli_logging
 from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
 from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_impl
@@ -32,10 +31,7 @@ from geoparquet_io.core.str_order import str_order as str_impl
 @click.pass_context
 def sort(ctx):
     """Commands for sorting GeoParquet files."""
-    # Ensure logging is set up (in case this group is invoked directly in tests)
-    ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False)
-    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+    init_group_context(ctx)
 
 
 @sort.command(name="hilbert", cls=SingleFileCommand)

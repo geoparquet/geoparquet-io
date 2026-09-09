@@ -8,7 +8,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 import click
 from click.core import ParameterSource
 
-from geoparquet_io.cli._shared import _activate_s3, prepare_output
+from geoparquet_io.cli._shared import _activate_s3, init_group_context, prepare_output
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     any_extension_option,
@@ -28,7 +28,6 @@ from geoparquet_io.core.add.kdtree import add_kdtree_column as add_kdtree_column
 from geoparquet_io.core.add.quadkey import add_quadkey_column as add_quadkey_column_impl
 from geoparquet_io.core.add.s2 import add_s2_column as add_s2_column_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
-from geoparquet_io.core.logging_config import setup_cli_logging
 from geoparquet_io.core.streaming import StreamingError
 
 
@@ -36,10 +35,7 @@ from geoparquet_io.core.streaming import StreamingError
 @click.pass_context
 def add(ctx):
     """Commands for enhancing GeoParquet files in various ways."""
-    # Ensure logging is set up (in case this group is invoked directly in tests)
-    ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False)
-    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+    init_group_context(ctx)
 
 
 @add.command(name="admin-divisions", cls=SingleFileCommand)

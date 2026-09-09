@@ -25,6 +25,25 @@ from contextlib import contextmanager
 
 import click
 
+from geoparquet_io.core.logging_config import setup_cli_logging
+
+
+def init_group_context(ctx: click.Context) -> None:
+    """Prime ``ctx.obj`` and set up CLI logging for a ``gpio`` subgroup.
+
+    Every group callback needs both, for the same two reasons:
+
+    * ``ctx.obj`` is filled by the root ``gpio`` callback, but a group object
+      invoked on its own -- ``CliRunner().invoke(add, [...])``, or any
+      programmatic caller -- never runs it, and reading ``ctx.obj`` then fails
+      on ``None`` (#922).
+    * ``--timestamps`` is a root option, so a group has to read it back out of
+      ``ctx.obj`` and hand it to the logger. ``verbose`` stays ``False`` here;
+      individual commands raise it to DEBUG themselves.
+    """
+    ctx.ensure_object(dict)
+    setup_cli_logging(verbose=False, show_timestamps=ctx.obj.get("timestamps", False))
+
 
 @contextmanager
 def _activate_s3(ctx, aws_profile=None, s3_endpoint=None, s3_region=None, s3_no_ssl=False):

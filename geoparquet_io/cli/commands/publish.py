@@ -9,14 +9,13 @@ from pathlib import Path
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3
+from geoparquet_io.cli._shared import _activate_s3, init_group_context
 from geoparquet_io.cli.decorators import (
     aws_profile_option,
     dry_run_option,
     handle_geoparquet_errors,
     verbose_option,
 )
-from geoparquet_io.core.logging_config import setup_cli_logging
 from geoparquet_io.core.upload import check_credentials
 from geoparquet_io.core.upload import upload as upload_impl
 
@@ -197,9 +196,7 @@ def _stac_impl(input, output, bucket, public_url, collection_id, item_id, overwr
 @click.pass_context
 def publish(ctx):
     """Commands for publishing GeoParquet data (STAC metadata, cloud uploads)."""
-    ctx.ensure_object(dict)
-    timestamps = ctx.obj.get("timestamps", False)
-    setup_cli_logging(verbose=False, show_timestamps=timestamps)
+    init_group_context(ctx)
 
 
 @publish.command(name="stac")
