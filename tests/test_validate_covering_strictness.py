@@ -6,9 +6,11 @@ import json
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.validate import (
     CheckStatus,
+    _check_covering_bbox_column_exists,
     _check_covering_bbox_field_types,
     _check_covering_bbox_paths,
     _check_covering_bbox_structure,
@@ -40,11 +42,12 @@ def _write(path, children, paths=PATHS_4):
     return str(path)
 
 
-def _covering_checks(path):
+def _covering_checks(path, con=None):
     col_meta = json.loads(pq.read_metadata(path).metadata[b"geo"])["columns"]["geometry"]
-    schema_info = get_schema_info(path)
+    schema_info = get_schema_info(path, con=con)
     return {
         "paths": _check_covering_bbox_paths(col_meta, "geometry"),
+        "exists": _check_covering_bbox_column_exists(col_meta, "geometry", schema_info),
         "structure": _check_covering_bbox_structure(col_meta, "geometry", schema_info),
         "types": _check_covering_bbox_field_types(col_meta, "geometry", schema_info),
     }
@@ -107,6 +110,82 @@ class TestFieldTypes:
             _covering_checks(_write(tmp_path / "f.parquet", children))["types"].status
             == CheckStatus.PASSED
         )
+
+
+def _write_with_decoy(path, children=None, bbox_column="bbox"):
+    """A file whose first column is a struct carrying a child field named ``bbox``.
+
+    The real root ``bbox`` column comes after it, so a flat schema scan that stops
+    at the first name match lands on the nested field instead of the column.
+    ``bbox_column=None`` drops the real column, leaving only the nested field.
+    """
+    children = children or XY
+    decoy = pa.StructArray.from_arrays(
+        [pa.array(["shadow", "shadow"]), pa.array([0, 1], type=pa.int32())],
+        names=["bbox", "other"],
+    )
+    columns = {"meta": decoy, "geometry": pa.array([WKB_POINT] * 2, pa.binary())}
+    if bbox_column is not None:
+        columns[bbox_column] = pa.StructArray.from_arrays(
+            [pa.array([0, 1], type=t) for _, t in children], names=[n for n, _ in children]
+        )
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "covering": {"bbox": PATHS_4},
+            }
+        },
+    }
+    table = pa.table(columns)
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), path)
+    return str(path)
+
+
+class TestRootPlacement:
+    """v1.1.0: "The bounding box column MUST be at the root of the schema"."""
+
+    def _both_schema_paths(self, path):
+        con = get_duckdb_connection()
+        try:
+            return {"pyarrow": _covering_checks(path), "duckdb": _covering_checks(path, con=con)}
+        finally:
+            con.close()
+
+    def test_nested_bbox_field_does_not_shadow_the_root_column(self, tmp_path):
+        path = _write_with_decoy(tmp_path / "shadowed.parquet")
+        for source, checks in self._both_schema_paths(path).items():
+            assert all(c.status == CheckStatus.PASSED for c in checks.values()), (
+                source,
+                {k: c.message for k, c in checks.items()},
+            )
+
+    def test_nested_bbox_field_does_not_shadow_a_6_field_root_column(self, tmp_path):
+        path = _write_with_decoy(tmp_path / "shadowed_xyz.parquet", children=XYZ)
+        for source, checks in self._both_schema_paths(path).items():
+            assert checks["structure"].status == CheckStatus.PASSED, (
+                source,
+                checks["structure"].message,
+            )
+
+    def test_bbox_column_only_nested_is_not_at_the_root(self, tmp_path):
+        path = _write_with_decoy(tmp_path / "nested_only.parquet", bbox_column=None)
+        for source, checks in self._both_schema_paths(path).items():
+            exists = checks["exists"]
+            assert exists.status == CheckStatus.FAILED, (source, exists.message)
+            assert "root" in exists.message
+            assert checks["structure"].status == CheckStatus.FAILED, source
+            assert "found: []" not in checks["structure"].message, source
+
+    def test_missing_bbox_column_says_so(self, tmp_path):
+        path = _write(tmp_path / "f.parquet", XY, {k: ["nope", k] for k in PATHS_4})
+        checks = _covering_checks(path)
+        assert checks["exists"].status == CheckStatus.FAILED
+        assert checks["structure"].status == CheckStatus.FAILED
+        assert "nope" in checks["structure"].message
 
 
 class TestRealFiles:

@@ -372,7 +372,7 @@ def test_check_spec_validates_coverings_at_v2(tmp_path):
 
     result = CliRunner().invoke(cli, ["check", "spec", src])
 
-    assert 'bbox column "ghost" not found at schema root' in result.output
+    assert 'bbox column "ghost" is not at the schema root' in result.output
 
 
 # ---------------------------------------------------------------------------
