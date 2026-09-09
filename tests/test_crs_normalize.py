@@ -541,8 +541,9 @@ class TestAdminReprojectsAdminSideWithBbox:
             source_crs="EPSG:5070",
         )
         assert "ST_Transform" in sql  # admin reprojected
-        assert 'ST_Intersects(b.geom, a."geometry")' in sql  # input untransformed
-        assert "a.bbox.xmin <= b.bbox.xmax" in sql  # bbox pre-filter restored
+        # Identifiers are quoted (#926); the input geom is still untransformed.
+        assert 'ST_Intersects(b."geom", a."geometry")' in sql
+        assert 'a."bbox".xmin <= b."bbox".xmax' in sql  # bbox pre-filter restored
         assert "struct_pack" in sql
 
     def test_enrichment_reproject_path_runs_and_assigns(self, fields_5070_file):
