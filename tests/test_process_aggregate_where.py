@@ -318,7 +318,7 @@ def test_where_error_message_names_the_where_option():
     """An invalid clause must point at --where, not dump the generated SQL (#612)."""
     import duckdb as _duckdb
 
-    from geoparquet_io.cli.main import _aggregate_error
+    from geoparquet_io.cli.commands.process import _aggregate_error
 
     exc = _duckdb.Error(
         'Binder Error: Referenced column "yr" not found in FROM clause!\n'
