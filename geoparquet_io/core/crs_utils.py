@@ -316,8 +316,12 @@ def geoparquet_crs_is_null(parquet_file) -> bool:
     it internally, so passing an already-escaped URL double-escapes it.
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 
-    geo_meta = get_geo_metadata(str(parquet_file))
+    # `get_geo_metadata` is the read-only reader and hands the block back as the
+    # file really holds it; the reproject paths that ask this question then act
+    # on the answer, so the malformed parts get dropped here (#887).
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(str(parquet_file)))
     if not geo_meta:
         return False
     primary_col = geo_meta.get("primary_column", "geometry")
@@ -600,17 +604,20 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     else ``None``. ``geometry_column`` defaults to the geo metadata's declared
     primary column. Used by the table-centric (Python API) operations to detect
     a projected input before grid keying.
+
+    A write-path reader: the CRS it returns decides how the output is keyed, so
+    a malformed carried block goes through :func:`sanitize_geo_metadata` and is
+    treated the way an absent one is (#887).
     """
+    from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
+
     metadata = table.schema.metadata
     if not metadata or b"geo" not in metadata:
         return None
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    geo_meta = sanitize_geo_metadata(decode_carried_geo(metadata[b"geo"]))
+    if not isinstance(geo_meta, dict):
         return None
     columns = geo_meta.get("columns", {})
-    if not isinstance(columns, dict):
-        return None
     col = geometry_column or geo_meta.get("primary_column", "geometry")
     crs = columns.get(col, {}).get("crs")
     if crs and not is_default_crs(crs):
@@ -630,6 +637,13 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
     Checks in order:
     1. GeoParquet metadata (columns.<geom_col>.crs)
     2. Parquet native geo type (from schema logical_type)
+
+    A write-path reader: ``convert``, ``reproject``, the format writers and
+    ``process aggregate`` all turn this answer into a transform or an output
+    file, so a malformed carried block goes through
+    :func:`sanitize_geo_metadata` rather than being indexed as-is (#887).
+    ``get_geo_metadata`` itself stays unsanitized -- ``gpio check`` reads
+    through it and has to see the file as it really is.
     """
     from geoparquet_io.core.duckdb_metadata import (
         get_geo_metadata,
@@ -637,8 +651,9 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
         parse_geometry_logical_type,
         resolve_crs_reference,
     )
+    from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
     if geo_meta:
         primary_col = geo_meta.get("primary_column", "geometry")
         columns = geo_meta.get("columns", {})
@@ -1030,7 +1045,16 @@ def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None
     schema for the table-centric Python API). Returns ``None`` when no transform
     is needed — the CRS is absent, the default (OGC:CRS84 / EPSG:4326), explicitly
     null (unknown), or not identifiable as an authority code.
+
+    A write-path reader: the string it returns is spliced into an
+    ``ST_Transform`` call, so the block is sanitized first (#887). Sanitizing
+    here rather than in the callers keeps the single check in one place --
+    ``parse_geo_metadata_from_schema``, which both callers parse with, is a
+    read-only reader and deliberately hands the block over untouched.
     """
+    from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
+
+    geo_meta = sanitize_geo_metadata(geo_meta)
     if not geo_meta:
         return None
     columns = geo_meta.get("columns", {})

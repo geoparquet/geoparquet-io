@@ -39,7 +39,11 @@ def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> 
     geo_meta = get_geo_metadata(parquet_file)
     if geo_meta and isinstance(geo_meta, dict):
         primary = geo_meta.get("primary_column")
-        if primary:
+        # A carried `primary_column` that is not a string is somebody else's
+        # malformed block; returning it hands a non-string column name to
+        # `quote_identifier`, which fails with a bare TypeError several frames
+        # later (#887). Fall through to schema detection instead.
+        if primary and isinstance(primary, str):
             if verbose:
                 debug(f"Detected geometry column from metadata: {primary}")
             return primary
@@ -130,13 +134,16 @@ def find_primary_geometry_column(parquet_file: str, verbose: bool = False) -> st
     if geo_meta:
         if isinstance(geo_meta, dict):
             primary = geo_meta.get("primary_column")
-            if primary:
+            # Only a string is a column name. A non-string one reaches
+            # `quote_identifier` and fails with a bare TypeError (#887); the
+            # schema fallback below gives the answer the file's data supports.
+            if primary and isinstance(primary, str):
                 return primary
         elif isinstance(geo_meta, list):
             for col in geo_meta:
                 if isinstance(col, dict) and col.get("primary", False):
                     name = col.get("name")
-                    if name:
+                    if name and isinstance(name, str):
                         return name
 
     # No geo metadata or no primary_column specified - use schema-based detection

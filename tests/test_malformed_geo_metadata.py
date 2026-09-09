@@ -265,6 +265,270 @@ def test_extract_crs_from_table_survives_a_malformed_block():
 
 
 # =============================================================================
+# The CRS and geometry-column readers reached before a write (#887)
+# =============================================================================
+
+# #883 routed four write-path readers through the shared check. These are the
+# rest: `crs_utils` resolves the input's CRS and `convert` resolves its geometry
+# columns *before* any metadata is built, and both indexed the raw block. They
+# are write-path readers too -- every caller (`convert geoparquet`, `convert
+# reproject`, `format_writers`, `process aggregate`, and the table-centric API)
+# feeds the answer into a transform or an output file, and none of them is
+# `gpio check` -- so they sanitize rather than report.
+
+#: Every malformed shape these readers can be handed, block-level included.
+#: The entries are otherwise complete 1.1 blocks, so the shape named in the id
+#: is the only thing wrong with each one.
+MALFORMED_BLOCKS = [
+    ("columns_null", {"version": "1.1.0", "primary_column": "geometry", "columns": None}),
+    ("columns_list", {"version": "1.1.0", "primary_column": "geometry", "columns": ["geometry"]}),
+    ("columns_string", {"version": "1.1.0", "primary_column": "geometry", "columns": "geometry"}),
+    (
+        "entry_not_an_object",
+        {"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": "WKB"}},
+    ),
+    ("block_is_a_list", ["geometry"]),
+    ("block_is_a_string", "geometry"),
+    (
+        "primary_column_is_a_number",
+        {
+            "version": "1.1.0",
+            "primary_column": 123,
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        },
+    ),
+    (
+        "encoding_is_a_number",
+        {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": 123, "geometry_types": ["Point"]}},
+        },
+    ),
+]
+
+
+def _file_with_geo(tmp_path, name: str, geo_block) -> str:
+    """A real Parquet file carrying ``geo_block`` verbatim as its ``geo`` key."""
+    path = tmp_path / f"{name}.parquet"
+    pq.write_table(_table_with_geo(geo_block), path)
+    return str(path)
+
+
+@pytest.mark.parametrize(("case", "block"), MALFORMED_BLOCKS)
+def test_crs_utils_extract_crs_from_parquet_survives_a_malformed_block(case, block, tmp_path):
+    """``convert``/``reproject``/``aggregate`` resolve the input CRS through here."""
+    from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+
+    reset_malformed_geo_warnings()
+    assert extract_crs_from_parquet(_file_with_geo(tmp_path, case, block)) is None
+
+
+@pytest.mark.parametrize(("case", "block"), MALFORMED_BLOCKS)
+def test_crs_utils_extract_crs_from_table_survives_a_malformed_block(case, block):
+    """The aggregate grid-keying reader (distinct from ``streaming``'s)."""
+    from geoparquet_io.core.crs_utils import extract_crs_from_table
+
+    reset_malformed_geo_warnings()
+    assert extract_crs_from_table(_table_with_geo(block), "geometry") is None
+
+
+@pytest.mark.parametrize(("case", "block"), MALFORMED_BLOCKS)
+def test_geoparquet_crs_is_null_survives_a_malformed_block(case, block, tmp_path):
+    """``convert reproject`` asks this before it decides how to read the input."""
+    from geoparquet_io.core.crs_utils import geoparquet_crs_is_null
+
+    reset_malformed_geo_warnings()
+    assert geoparquet_crs_is_null(_file_with_geo(tmp_path, case, block)) is False
+
+
+@pytest.mark.parametrize(("case", "block"), MALFORMED_BLOCKS)
+def test_crs_string_from_table_survives_a_malformed_block(case, block):
+    """The table-centric transform-string reader, via ``crs_string_from_geo_meta``."""
+    from geoparquet_io.core.crs_utils import crs_string_from_table
+
+    reset_malformed_geo_warnings()
+    assert crs_string_from_table(_table_with_geo(block), "geometry") is None
+
+
+def test_geoparquet_crs_is_null_still_sees_an_explicit_null_crs(tmp_path):
+    """Sanitizing must not swallow ``crs: null`` -- it is the spec's "unknown"."""
+    reset_malformed_geo_warnings()
+    from geoparquet_io.core.crs_utils import geoparquet_crs_is_null
+
+    path = _file_with_geo(
+        tmp_path,
+        "null_crs",
+        {"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": {"crs": None}}},
+    )
+    assert geoparquet_crs_is_null(path) is True
+
+
+def test_geometry_detection_never_returns_a_non_string_column_name(tmp_path):
+    """The column-name readers are shared with ``gpio check``, so they guard, not sanitize.
+
+    ``check spatial`` and ``check row-group`` ask ``find_primary_geometry_column``
+    what the file calls its geometry -- they must keep seeing the file as it is.
+    But a name is a string: a carried ``primary_column: 123`` handed back here
+    reaches ``quote_identifier`` and fails there with a bare ``TypeError``
+    (#887). Falling through to schema detection answers with the real column --
+    or, when DuckDB will not open the file to describe it either, with ``None``,
+    which the callers already turn into "No geometry column detected".
+    """
+    from geoparquet_io.core.geometry_detection import (
+        detect_parquet_geometry_column,
+        find_primary_geometry_column,
+    )
+
+    reset_malformed_geo_warnings()
+    readable = _file_with_geo(
+        tmp_path,
+        "pc_number_only",
+        {
+            "version": "1.1.0",
+            "primary_column": 123,
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        },
+    )
+    assert detect_parquet_geometry_column(readable) == "geometry"
+    assert find_primary_geometry_column(readable) == "geometry"
+
+    unreadable = _file_with_geo(
+        tmp_path,
+        "pc_number_cols_null",
+        {"version": "1.1.0", "primary_column": 123, "columns": None},
+    )
+    assert detect_parquet_geometry_column(unreadable) is None
+    assert find_primary_geometry_column(unreadable) == "geometry"
+
+
+@pytest.mark.parametrize(
+    ("case", "name", "expected"),
+    [("string", "geom", "geom"), ("number", 123, "geometry")],
+    ids=["a_string_name_is_used", "a_number_name_falls_back"],
+)
+def test_find_primary_geometry_column_guards_the_legacy_list_block(case, name, expected, tmp_path):
+    """The pre-1.0 list-shaped ``geo`` block needs the same string guard (#887)."""
+    from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+
+    reset_malformed_geo_warnings()
+    src = _file_with_geo(tmp_path, f"legacy_{case}", [{"name": name, "primary": True}])
+    assert find_primary_geometry_column(src) == expected
+
+
+@pytest.mark.parametrize(("case", "block"), MALFORMED_BLOCKS)
+def test_detect_all_geometry_columns_survives_a_malformed_block(case, block, tmp_path):
+    """``convert`` resolves the geometry columns here, before it builds any query.
+
+    Every name and encoding this returns is spliced into SQL or copied into the
+    output block, so each one has to be a string -- never the ``123`` a carried
+    ``primary_column`` or ``encoding`` can hold.
+    """
+    from geoparquet_io.core.convert import detect_all_geometry_columns
+
+    reset_malformed_geo_warnings()
+    info = detect_all_geometry_columns(_file_with_geo(tmp_path, case, block))
+
+    assert info["primary"] is None or isinstance(info["primary"], str)
+    assert all(isinstance(name, str) for name in info["metadata"])
+    for col_meta in info["metadata"].values():
+        assert isinstance(col_meta, dict)
+        assert isinstance(col_meta.get("encoding", "WKB"), str)
+
+
+def test_detect_all_geometry_columns_falls_back_when_the_columns_are_unusable(tmp_path):
+    """Nothing left of ``columns`` means the block-less answer: detect from the schema."""
+    from geoparquet_io.core.convert import detect_all_geometry_columns
+
+    reset_malformed_geo_warnings()
+    src = _file_with_geo(
+        tmp_path, "cols_null", {"version": "1.1.0", "primary_column": "geometry", "columns": None}
+    )
+    assert detect_all_geometry_columns(src) == {
+        "primary": "geometry",
+        "secondary": [],
+        "metadata": {"geometry": {"encoding": "WKB"}},
+    }
+
+
+def test_convert_geoparquet_recovers_from_a_non_string_primary_column(tmp_path, caplog):
+    """``primary_column: 123`` used to reach ``quote_identifier`` as a bare TypeError.
+
+    Nothing else about this file is wrong, so the conversion now runs to
+    completion and the output names the geometry column found in the schema.
+    """
+    from geoparquet_io.core.convert import convert_to_geoparquet
+
+    reset_malformed_geo_warnings()
+    src = _file_with_geo(
+        tmp_path,
+        "pc_number",
+        {
+            "version": "1.1.0",
+            "primary_column": 123,
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        },
+    )
+    out = tmp_path / "pc_number_out.parquet"
+    with caplog.at_level(logging.WARNING):
+        convert_to_geoparquet(src, str(out), compression="SNAPPY")
+
+    _assert_fresh_and_valid(_geo_of_file(out))
+    assert pq.ParquetFile(out).metadata.num_rows == 1
+
+    messages = _malformed_warnings(caplog.records)
+    assert any("'primary_column'" in m and "number" in m for m in messages), messages
+
+
+@pytest.mark.parametrize(("case", "block"), MALFORMED_BLOCKS)
+def test_convert_geoparquet_never_fails_with_a_bare_type_error(case, block, tmp_path, caplog):
+    """``gpio convert geoparquet`` on somebody else's file: no ``TypeError`` escapes.
+
+    Some of these files cannot be converted at all -- DuckDB's own GeoParquet
+    reader refuses to open a block whose ``columns`` or ``encoding`` is the
+    wrong type, which is outside gpio's reach (#887, #771). What gpio owes the
+    user either way is a domain error naming the real cause, plus the warning
+    that says which key was malformed -- not a ``TypeError`` from indexing the
+    block three frames deep.
+    """
+    from geoparquet_io.core.convert import convert_to_geoparquet
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    reset_malformed_geo_warnings()
+    out = tmp_path / f"{case}_out.parquet"
+    with caplog.at_level(logging.WARNING):
+        try:
+            convert_to_geoparquet(
+                _file_with_geo(tmp_path, case, block), str(out), compression="SNAPPY"
+            )
+        except GeoParquetError as exc:
+            chain, seen = [], exc.__cause__
+            while seen is not None and seen not in chain:
+                chain.append(seen)
+                seen = seen.__cause__
+            assert not any(isinstance(c, (TypeError, AttributeError)) for c in chain), chain
+        else:
+            _assert_fresh_and_valid(_geo_of_file(out))
+            assert pq.ParquetFile(out).metadata.num_rows == 1
+
+
+def test_convert_geoparquet_names_the_malformed_key(tmp_path, caplog):
+    """One warning, naming the offending key and the JSON type actually found."""
+    from geoparquet_io.core.convert import convert_to_geoparquet
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    reset_malformed_geo_warnings()
+    src = _file_with_geo(
+        tmp_path, "warn", {"version": "1.1.0", "primary_column": "geometry", "columns": None}
+    )
+    with caplog.at_level(logging.WARNING), pytest.raises(GeoParquetError):
+        convert_to_geoparquet(src, str(tmp_path / "warn_out.parquet"), compression="SNAPPY")
+
+    messages = _malformed_warnings(caplog.records)
+    assert any("'columns'" in m and "null" in m for m in messages), messages
+
+
+# =============================================================================
 # The public API boundary -- every write strategy
 # =============================================================================
 
