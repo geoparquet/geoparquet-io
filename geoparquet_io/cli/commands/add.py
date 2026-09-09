@@ -18,6 +18,7 @@ from geoparquet_io.cli.decorators import (
     output_format_options,
     overwrite_option,
     parse_row_group_options,
+    resolve_kdtree_options,
     show_sql_option,
     verbose_option,
 )
@@ -793,46 +794,12 @@ def add_kdtree(
     Use --verbose to track progress with iteration-by-iteration updates.
     """
     with _activate_s3(ctx):
-        import math
-
         # Validate .parquet extension
         validate_parquet_extension(output_parquet, any_extension)
 
-        # Validate mutually exclusive options
-        if sum([partitions is not None, auto is not None]) > 1:
-            raise click.UsageError("--partitions and --auto are mutually exclusive")
-
-        # Set defaults
-        if partitions is None and auto is None:
-            auto = 120000  # Default: auto-select targeting 120k rows/partition
-            partitions = None
-        elif auto is not None:
-            # Auto mode: will compute partitions below
-            partitions = None
-
-        # Validate partitions if specified
-        if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
-            raise click.UsageError(
-                f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}"
-            )
-
-        # Validate mutually exclusive options for approx/exact
-        if exact and approx != 100000:
-            raise click.UsageError("--approx and --exact are mutually exclusive")
-
-        # Determine sample size
-        sample_size = None if exact else approx
-
-        # If auto mode, compute optimal partitions
-        if auto is not None:
-            # Pass None for iterations, let implementation compute
-            iterations = None
-            target_rows = auto if auto > 0 else 120000
-            auto_target = ("rows", target_rows)
-        else:
-            # Convert partitions to iterations
-            iterations = int(math.log2(partitions))
-            auto_target = None
+        iterations, sample_size, auto_target = resolve_kdtree_options(
+            partitions, auto, approx, exact
+        )
 
         # Parse row group options
         row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)

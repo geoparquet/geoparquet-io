@@ -16,6 +16,7 @@ from geoparquet_io.cli.decorators import (
     parse_row_group_options,
     partition_options,
     partition_options_base,
+    resolve_kdtree_options,
     show_sql_option,
     verbose_option,
 )
@@ -882,39 +883,9 @@ def partition_kdtree(
         gpio partition kdtree input.parquet output/ --approx 200000
     """
     with _activate_s3(ctx):
-        # Validate mutually exclusive options
-        import math
-
-        if sum([partitions is not None, auto is not None]) > 1:
-            raise click.UsageError("--partitions and --auto are mutually exclusive")
-
-        # Set defaults
-        if partitions is None and auto is None:
-            auto = 120000  # Default: auto-select targeting 120k rows/partition
-
-        # Validate partitions if specified
-        if partitions is not None:
-            if partitions < 2 or (partitions & (partitions - 1)) != 0:
-                raise click.UsageError(
-                    f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}"
-                )
-            iterations = int(math.log2(partitions))
-        else:
-            iterations = None  # Will be computed in auto mode
-
-        # Validate mutually exclusive options for approx/exact
-        if exact and approx != 100000:
-            raise click.UsageError("--approx and --exact are mutually exclusive")
-
-        # Determine sample size
-        sample_size = None if exact else approx
-
-        # Prepare auto_target if in auto mode
-        if auto is not None:
-            target_rows = auto if auto > 0 else 120000
-            auto_target = ("rows", target_rows)
-        else:
-            auto_target = None
+        iterations, sample_size, auto_target = resolve_kdtree_options(
+            partitions, auto, approx, exact
+        )
 
         # If preview mode, output_folder is not required
         if not preview and not output_folder:
