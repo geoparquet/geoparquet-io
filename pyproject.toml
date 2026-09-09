@@ -220,6 +220,9 @@ module = [
     "geoparquet_io.api.ops",
     "geoparquet_io.api.table",
     "geoparquet_io.benchmarks.profile_report",
+    # Inherited from "geoparquet_io.cli.main": this code was suppressed there
+    # before it was moved out into its own group module, unchanged.
+    "geoparquet_io.cli.commands.benchmark",
     "geoparquet_io.cli.decorators",
     "geoparquet_io.cli.main",
     "geoparquet_io.core.add.a5",
