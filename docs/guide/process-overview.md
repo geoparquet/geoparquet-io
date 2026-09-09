@@ -53,6 +53,8 @@ Outputs are written next to the input (override with `--output-dir`):
 
 Cells roll up by **true hierarchy** — `a5_cell_to_parent` / `h3_cell_to_parent` for grids, the ISO country prefix of `admin_code` (`US-CA` → `US`) for admin — and parent geometry is regenerated from the parent cell id (grids) or cached Overture country polygons (admin).
 
+A coarser parent cell straddles the antimeridian more readily than its children, so grid rollups go through the same seam handling as `gpio process aggregate`: crossing cells are cut into `MultiPolygon`s at ±180 and pole cells are closed through a seam. See [Cells at the antimeridian and the poles](process-aggregate.md#cells-at-the-antimeridian-and-the-poles).
+
 | Column | Rollup | Exactness |
 |--------|--------|-----------|
 | `count` | sum | exact |

@@ -40,6 +40,7 @@ from geoparquet_io.core.logging_config import configure_verbose, debug, info, su
 from geoparquet_io.core.process.aggregate.common import (
     VALID_OUT_GEOMETRY,
     aggregate_source_relation,
+    antimeridian_aware_bbox,
     build_breakdown_column_names,
     build_breakdown_select,
     build_metric_select,
@@ -59,9 +60,10 @@ class GridScheme:
     Templates use ``str.format`` placeholders:
 
     - ``key_template``: ``{pt}`` (a POINT GEOMETRY expression), ``{res}`` -> cell id
-    - ``boundary_template``: ``{cell}`` -> per-row boundary intermediate
+    - ``boundary_template``: ``{cell}`` -> the cell's GEOMETRY polygon, with the
+      longitudes exactly as the grid library reports them (see
+      :data:`_NEEDS_SEAM_REPAIR`); the shared builder owns everything after that
     - ``latlng_template``: ``{cell}`` -> per-row centroid intermediate
-    - ``poly_wkb_template``: ``{bnd}`` (boundary intermediate alias) -> WKB polygon
     - ``centroid_wkb_template``: ``{ll}`` (centroid intermediate alias) -> WKB point
 
     ``name`` doubles as the ``calculate_auto_resolution`` index type and the noun
@@ -76,15 +78,110 @@ class GridScheme:
     key_template: str
     boundary_template: str
     latlng_template: str
-    poly_wkb_template: str
     centroid_wkb_template: str
 
+
+# Cell rings and the antimeridian
+# -------------------------------
+# A cell ring is a closed curve on the sphere; drawing it in the plane forces a
+# choice of where to cut. The two grid libraries make opposite ones, and both
+# need repairing:
+#
+# - ``h3_cell_to_boundary_wkb`` wraps every vertex into [-180, 180], so a cell
+#   straddling the antimeridian comes back with vertices at both +179.x and
+#   -179.x. Read as a planar ring that is a cell spanning 359 degrees, which a
+#   renderer draws as a band across the whole map.
+# - ``a5_cell_to_boundary`` keeps the ring contiguous but lets longitudes run
+#   past the valid range (267.0 is a real value it returns), which fails
+#   GeoParquet's coordinate-range check for a geographic CRS.
+#
+# The repair below is shared by every scheme so the invariant is stated once:
+# **the polygon written for a cell is contiguous, simple, and lies inside
+# [-180, 180]**, as a MultiPolygon cut at the antimeridian when it has to be
+# (RFC 7946 section 3.1.9).
+#
+# It is skipped entirely for the rings that are already fine -- the overwhelming
+# majority -- because a torn ring necessarily has a segment jumping more than
+# 180 degrees of longitude, which forces the planar width past 180. So a ring no
+# wider than 180 degrees and inside the valid range needs nothing done to it.
+_NEEDS_SEAM_REPAIR = (
+    "(ST_XMax({g}) - ST_XMin({g}) > 180.0 OR ST_XMin({g}) < -180.0 OR ST_XMax({g}) > 180.0)"
+)
+
+# The exterior ring as an open DOUBLE[2][] (the closing repeat is sliced off).
+_CELL_RING = (
+    "list_slice(list_transform(ST_Dump(ST_Points(ST_ExteriorRing({g}))), "
+    "p -> [ST_X(p.geom), ST_Y(p.geom)]), 1, -2)"
+)
+
+# Cumulative unwrapping: each vertex is placed relative to the PREVIOUS one, and
+# the 360-degree steps accumulate along the ring. Unwrapping relative to the
+# first vertex instead is only correct while every vertex stays within 180
+# degrees of it, which polar rings do not -- there the `> 180` test fires on
+# vertices that were never wrapped and tears a ring that was intact.
+_UNWRAP_STEPS = (
+    "list_transform({r}, (p, i) -> CASE WHEN i = 1 THEN 0.0 "
+    "WHEN p[1] - {r}[i - 1][1] > 180.0 THEN -360.0 "
+    "WHEN p[1] - {r}[i - 1][1] < -180.0 THEN 360.0 ELSE 0.0 END)"
+)
+_UNWRAP_RING = "list_transform({r}, (p, i) -> [p[1] + list_sum(list_slice({s}, 1, i)), p[2]])"
+
+# Longitude winding of the closed ring, as a multiple of 360. Zero for an
+# ordinary cell -- the unwrapped ring closes on itself. Plus or minus 360 for a
+# ring that encircles a pole: it genuinely spans every longitude, so no amount
+# of unwrapping closes it and it needs an explicit seam instead.
+_RING_WINDING = "(360.0 * round((({u})[-1][1] - ({u})[1][1]) / 360.0))"
+
+_RING_LONS = "list_transform({r}, p -> p[1])"
+_RING_LON_SPAN = "(list_max(" + _RING_LONS + ") - list_min(" + _RING_LONS + "))"
+
+# The pole a ring encircles is the one its vertices sit next to.
+_RING_POLE = "CASE WHEN list_avg(list_transform({r}, p -> p[2])) > 0 THEN 90.0 ELSE -90.0 END"
+
+# Explicit seam for a pole-enclosing ring: carry on past the last vertex to
+# where the first one comes round again, run up to the pole, back along it, and
+# down to the first vertex. That closes the ring in the plane with the polar cap
+# included, and the cut below then splits it at the antimeridian.
+_POLE_SEAM_RING = (
+    "list_concat({u}, [[{u}[1][1] + {w}, {u}[1][2]], "
+    "[{u}[1][1] + {w}, " + _RING_POLE.format(r="{u}") + "], "
+    "[{u}[1][1], " + _RING_POLE.format(r="{u}") + "], {u}[1]])"
+)
+
+# Slide the finished ring by whole turns so its westmost vertex lands in
+# [-180, 180). Everything east of it is then below +540, which is what lets the
+# cut below need only the one eastern box.
+_NORMALIZE_RING = (
+    "list_transform({r}, p -> "
+    "[p[1] - 360.0 * floor((list_min(" + _RING_LONS + ") + 180.0) / 360.0), p[2]])"
+)
+
+_MAKE_RING_POLYGON = "ST_MakePolygon(ST_MakeLine(list_transform({r}, p -> ST_Point(p[1], p[2]))))"
+
+# RFC 7946 section 3.1.9: a polygon crossing the antimeridian is cut at it and
+# written as a MultiPolygon. ST_CollectionExtract(..., 3) drops the degenerate
+# line/point pieces a cut can leave when a ring only grazes the seam.
+_CUT_AT_ANTIMERIDIAN = (
+    "ST_CollectionExtract(ST_Union("
+    "ST_Intersection({g}, ST_MakeEnvelope(-180.0, -90.0, 180.0, 90.0)), "
+    "ST_Translate(ST_Intersection({g}, ST_MakeEnvelope(180.0, -90.0, 540.0, 90.0)), -360.0, 0.0)"
+    "), 3)"
+)
 
 # Internal column aliases used while building the aggregation. Any input column
 # with one of these names is dropped from the SELECT * passthrough so a generated
 # column can never be shadowed by a same-named user column. ("__geom" is kept
 # reserved for inputs that carry a stale column from earlier gpio versions.)
-_RESERVED_INTERNAL = ("__geom", "__pt", "__key", "__bnd", "__ll")
+_RESERVED_INTERNAL = (
+    "__geom",
+    "__pt",
+    "__key",
+    "__bnd",
+    "__ll",
+    "__ring",
+    "__uring",
+    "__fring",
+)
 
 # --bucket-point mode keywords; any other value names an existing point column.
 BUCKET_POINT_GEOMETRY = "geometry"
@@ -325,42 +422,103 @@ def build_grid_query(
     return wrap_grid_geometry(agg_sql, scheme, cell_column, out_geometry)
 
 
+def _cell_boundary_sql(inner_sql: str, scheme: GridScheme, qcol: str) -> str:
+    """Attach the per-cell boundary polygon ``__bnd``, NULL-guarded so a scheme's
+    cell function is never called on the NULL cell id of the unassigned bucket."""
+    boundary = scheme.boundary_template.format(cell=qcol)
+    return (
+        f"SELECT *, CASE WHEN {qcol} IS NULL THEN NULL ELSE {boundary} END AS __bnd "
+        f"FROM ({inner_sql})"
+    )
+
+
+def _seam_repair_sql(base_sql: str) -> str:
+    """Add the seam-repair intermediates for the rings that need one.
+
+    Three nested projections rather than one expression, so each step is named
+    and DuckDB evaluates it only for the rows the previous CASE selected: cells
+    whose ring is already contiguous and in range keep a NULL ``__ring`` and
+    never pay for any of this. See the module comment above
+    :data:`_NEEDS_SEAM_REPAIR` for what the steps mean.
+    """
+    ring = (
+        f"SELECT *, CASE WHEN {_NEEDS_SEAM_REPAIR.format(g='__bnd')} "
+        f"THEN {_CELL_RING.format(g='__bnd')} END AS __ring FROM ({base_sql})"
+    )
+    unwrapped = (
+        f"SELECT *, {_UNWRAP_RING.format(r='__ring', s=_UNWRAP_STEPS.format(r='__ring'))} "
+        f"AS __uring FROM ({ring})"
+    )
+    # Unwrapping is applied only when it narrows the ring. A polar ring spans
+    # more than 180 degrees for real, and shifting its vertices would widen it
+    # towards 360 -- there the original ring was right all along.
+    guarded = (
+        f"CASE WHEN {_RING_LON_SPAN.format(r='__uring')} < {_RING_LON_SPAN.format(r='__ring')} "
+        f"THEN __uring ELSE __ring END"
+    )
+    winding = _RING_WINDING.format(u="__uring")
+    closed = (
+        f"CASE WHEN __ring IS NULL THEN NULL "
+        f"WHEN {winding} <> 0.0 THEN {_POLE_SEAM_RING.format(u='__uring', w=winding)} "
+        f"ELSE list_append({guarded}, ({guarded})[1]) END"
+    )
+    return (
+        f"SELECT * EXCLUDE (__uring), {_NORMALIZE_RING.format(r=closed)} AS __fring "
+        f"FROM ({unwrapped})"
+    )
+
+
+def _repaired_poly_wkb() -> str:
+    """WKB of the cell polygon: the raw boundary, or the repaired ring, cut at
+    the antimeridian into a MultiPolygon when it still crosses."""
+    poly = _MAKE_RING_POLYGON.format(r="__fring")
+    return (
+        "CASE WHEN __bnd IS NULL THEN NULL "
+        "WHEN __ring IS NULL THEN ST_AsWKB(__bnd) "
+        f"WHEN list_max({_RING_LONS.format(r='__fring')}) > 180.0 "
+        f"THEN ST_AsWKB({_CUT_AT_ANTIMERIDIAN.format(g=poly)}) "
+        f"ELSE ST_AsWKB({poly}) END"
+    )
+
+
 def wrap_grid_geometry(
     agg_sql: str, scheme: GridScheme, cell_column: str, out_geometry: str
 ) -> str:
     """Add geometry/centroid columns derived from the grid cell id.
 
     Rows whose cell id is NULL (features with empty/NULL geometry that could not be
-    assigned a cell) get NULL geometry. The boundary/centroid intermediates are
-    NULL-guarded (so a scheme's cell function is never called on a NULL cell), and
-    the output is guarded again so DuckDB short-circuits the geometry constructor
-    for NULL-cell rows.
+    assigned a cell) get NULL geometry throughout.
+
+    The polygon is antimeridian-safe: contiguous, simple, and inside [-180, 180],
+    as a MultiPolygon where the cell crosses the seam. The centroid comes from the
+    scheme's own cell-centre function, which reports lon/lat in range, so polygon
+    and centroid share one frame -- see the module comment above
+    :data:`_NEEDS_SEAM_REPAIR`.
     """
     if out_geometry == "none":
         return agg_sql
 
     qcol = quote_identifier(cell_column)
-    poly_expr = scheme.poly_wkb_template.format(bnd="__bnd")
-    centroid_expr = scheme.centroid_wkb_template.format(ll="__ll")
-    poly = f"CASE WHEN {qcol} IS NULL THEN NULL ELSE {poly_expr} END"
-    centroid = f"CASE WHEN {qcol} IS NULL THEN NULL ELSE {centroid_expr} END"
-
-    if out_geometry == "polygon":
-        geom_cols = f"{poly} AS geometry"
-    elif out_geometry == "centroid":
-        geom_cols = f"{centroid} AS geometry"
-    else:  # both
-        geom_cols = f"{poly} AS geometry, {centroid} AS centroid"
-
-    boundary = scheme.boundary_template.format(cell=qcol)
     latlng = scheme.latlng_template.format(cell=qcol)
-    return (
-        f"SELECT a.* EXCLUDE (__bnd, __ll), {geom_cols} "
-        f"FROM (SELECT *, "
-        f"CASE WHEN {qcol} IS NULL THEN NULL ELSE {boundary} END AS __bnd, "
-        f"CASE WHEN {qcol} IS NULL THEN NULL ELSE {latlng} END AS __ll "
-        f"FROM ({agg_sql})) a"
+    centroid = (
+        f"CASE WHEN {qcol} IS NULL THEN NULL "
+        f"ELSE {scheme.centroid_wkb_template.format(ll='__ll')} END"
     )
+    ll_sql = (
+        f"SELECT *, CASE WHEN {qcol} IS NULL THEN NULL ELSE {latlng} END AS __ll FROM ({agg_sql})"
+    )
+    if out_geometry == "centroid":
+        # No polygon is written, so the cell boundary is never built.
+        return f"SELECT a.* EXCLUDE (__ll), {centroid} AS geometry FROM ({ll_sql}) a"
+
+    poly = _repaired_poly_wkb()
+    geom_cols = (
+        f"{poly} AS geometry"
+        if out_geometry == "polygon"
+        else f"{poly} AS geometry, {centroid} AS centroid"
+    )
+    repaired = _seam_repair_sql(_cell_boundary_sql(ll_sql, scheme, qcol))
+    return f"SELECT a.* EXCLUDE (__bnd, __ll, __ring, __fring), {geom_cols} FROM ({repaired}) a"
 
 
 def _resolve_resolution(
@@ -538,6 +696,23 @@ def _validate_out_geometry(out_geometry: str) -> None:
         )
 
 
+def _result_geo_bbox(con, result) -> list[float] | None:
+    """RFC 7946 bbox for a finished grid result, or None if it cannot be taken.
+
+    A cell cut at the antimeridian puts parts at both -180 and +180, and a plain
+    min/max over that reads as global coverage. Best-effort: a bbox is metadata,
+    so a failure here leaves it to the writer rather than losing the output.
+    """
+    con.register("__agg_result", result)
+    try:
+        return antimeridian_aware_bbox(con, "__agg_result", "geometry")
+    except duckdb.Error as exc:  # pragma: no cover - defensive
+        debug(f"Could not compute an antimeridian-aware bbox: {exc}")
+        return None
+    finally:
+        con.unregister("__agg_result")
+
+
 def aggregate_grid_file(
     scheme: GridScheme,
     input_parquet: str,
@@ -612,6 +787,10 @@ def aggregate_grid_file(
         if show_sql or verbose:
             debug(final_sql)
         result = con.execute(final_sql).arrow().read_all()
+        # The cells are keyed in lon/lat, so the output is always geographic --
+        # whatever the input CRS was -- which is what makes the wrap form
+        # readable (see `antimeridian_aware_bbox`).
+        geo_bbox = None if out_geometry == "none" else _result_geo_bbox(con, result)
     finally:
         con.close()
         # Release GDAL/spatial native handles before the next spatial connection
@@ -646,6 +825,7 @@ def aggregate_grid_file(
             compression_level=compression_level,
             geoparquet_version=geoparquet_version,
             verbose=verbose,
+            geo_bbox=geo_bbox,
         )
     success(f"Aggregated to {result.num_rows} {scheme.name} cells -> {output_parquet}")
 

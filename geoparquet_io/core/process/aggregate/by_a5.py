@@ -22,13 +22,15 @@ A5_SCHEME = GridScheme(
     max_resolution=30,
     default_column=DEFAULT_A5_COLUMN_NAME,
     key_template="a5_lonlat_to_cell(ST_X({pt}), ST_Y({pt}), {res})",
-    boundary_template="a5_cell_to_boundary({cell})",
-    latlng_template="a5_cell_to_lonlat({cell})",
-    # a5_cell_to_boundary returns DOUBLE[2][]; close the ring and build a polygon.
-    poly_wkb_template=(
-        "ST_AsWKB(ST_MakePolygon(ST_MakeLine("
-        "list_transform(list_append({bnd}, {bnd}[1]), p -> ST_Point(p[1], p[2])))))"
+    # a5_cell_to_boundary returns an open DOUBLE[2][] ring that stays contiguous
+    # but lets longitudes run outside [-180, 180] (267.0 is a real value), so the
+    # shared builder still has to bring the polygon back into range.
+    boundary_template=(
+        "ST_MakePolygon(ST_MakeLine(list_transform("
+        "list_append(a5_cell_to_boundary({cell}), a5_cell_to_boundary({cell})[1]), "
+        "p -> ST_Point(p[1], p[2]))))"
     ),
+    latlng_template="a5_cell_to_lonlat({cell})",
     # a5_cell_to_lonlat returns [lon, lat].
     centroid_wkb_template="ST_AsWKB(ST_Point({ll}[1], {ll}[2]))",
 )

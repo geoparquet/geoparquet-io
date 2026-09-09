@@ -543,6 +543,30 @@ Regardless of the chosen bucket scheme, every output file contains:
 | `count_other` | BIGINT | Count for categories beyond `--breakdown-limit` |
 | `geometry` | WKB | Bucket polygon or centroid (absent when `--out-geometry none`) |
 
+### Cells at the antimeridian and the poles
+
+A grid cell is a region of the sphere, and a few of them cannot be drawn as a
+single flat polygon. Those are written the way [RFC 7946
+3.1.9](https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.9) prescribes:
+
+- a cell straddling the antimeridian is **cut at ±180 into a `MultiPolygon`**,
+  with one part either side of the line, rather than a ring that stretches
+  across the whole map;
+- a cell holding a pole is closed through an explicit seam that runs up to
+  ±90, so it covers the polar cap instead of self-intersecting;
+- every coordinate written stays inside `[-180, 180]`, which is what
+  `gpio check spec` requires of a geographic CRS.
+
+So `geometry_types` in the output's GeoParquet metadata reads
+`["Polygon", "MultiPolygon"]` (or just `["MultiPolygon"]`) for any dataset that
+reaches the antimeridian, and consumers must expect both. A dataset that sits
+astride the line — rather than spanning the globe — also gets the RFC 7946 5.2
+wrap-around `bbox`, with `xmin > xmax`.
+
+`--out-geometry centroid` and `both` take the centroid from the grid library's
+own cell-centre function, which reports lon/lat in range, so it always falls
+inside the polygon on the same row.
+
 ---
 
 ## Common Options

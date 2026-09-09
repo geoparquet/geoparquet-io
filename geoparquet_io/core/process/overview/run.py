@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -21,7 +22,10 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.logging_config import info as log_info
 from geoparquet_io.core.partition.auto_resolution import _register_quadkey_udf
-from geoparquet_io.core.process.aggregate.common import geometry_to_geom_expr
+from geoparquet_io.core.process.aggregate.common import (
+    antimeridian_aware_bbox,
+    geometry_to_geom_expr,
+)
 from geoparquet_io.core.process.overview.detect import (
     AggregateInfo,
     aggregate_connection,
@@ -200,6 +204,7 @@ def _write_overview(
     compression_level: int | None,
     gpq_version: str | None,
     verbose: bool,
+    geo_bbox: list[float] | None = None,
 ) -> None:
     if info.out_geometry == "none":
         kwargs: dict[str, Any] = {"compression": compression}
@@ -215,7 +220,29 @@ def _write_overview(
         compression_level=compression_level,
         geoparquet_version=gpq_version,
         verbose=verbose,
+        geo_bbox=geo_bbox,
     )
+
+
+def _overview_geo_bbox(con, table: pa.Table, info: AggregateInfo) -> list[float] | None:
+    """RFC 7946 bbox for one rolled-up level, wrap form included.
+
+    A grid rollup regenerates parent geometry through the same seam-repairing
+    builder the aggregate uses, so a parent cell can be a MultiPolygon cut at
+    the antimeridian and needs the same bbox treatment (see
+    ``antimeridian_aware_bbox``). Best-effort: a bbox is metadata, so a failure
+    leaves it to the writer rather than losing the level.
+    """
+    if info.out_geometry == "none":
+        return None
+    con.register("__overview_result", table)
+    try:
+        return antimeridian_aware_bbox(con, "__overview_result", "geometry")
+    except duckdb.Error as exc:  # pragma: no cover - defensive
+        debug(f"Could not compute an antimeridian-aware bbox: {exc}")
+        return None
+    finally:
+        con.unregister("__overview_result")
 
 
 def create_overviews(
@@ -304,6 +331,7 @@ def create_overviews(
                 compression_level,
                 geoparquet_version,
                 verbose,
+                geo_bbox=_overview_geo_bbox(con, table, info),
             )
             success(f"Wrote level {level} overview ({table.num_rows} rows) -> {out_path}")
             results.append((level, out_path))
