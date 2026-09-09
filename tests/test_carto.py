@@ -721,3 +721,70 @@ class TestCartoCli:
             )
             assert result.exit_code != 0
             assert "Invalid table name" in result.output
+
+
+class TestCartoReadExpressionEscaping:
+    """core/carto.py: `_fetch_with_retry`'s read expression (#936).
+
+    The CSV branch already wrapped the URL with ``sql_path``; the GeoJSON
+    branch one line above hand-rolled ``f'ST_Read("{full_url}")'``. DuckDB
+    tolerates a double-quoted string in that position, so the bug was silent
+    until a URL contained a ``"`` -- which ``_validate_carto_url`` does not
+    reject -- at which point the quoting broke apart. ``--url`` is
+    operator-supplied, so this is primarily a correctness bug, but it is the
+    same "quote at the boundary, exactly once" rule as everywhere else, and a
+    URL that arrives from config or automation makes it an injection.
+    """
+
+    # Passes _validate_carto_url (https scheme, /api/v2/sql suffix) and
+    # carries the one character the old spelling could not survive.
+    HOSTILE_URL = 'https://ex"ample.carto.com/api/v2/sql'
+
+    def _captured_read_sql(self, monkeypatch, fmt):
+        """Run _fetch_with_retry against a connection that only records SQL."""
+        from geoparquet_io.core import carto as carto_module
+
+        seen: list[str] = []
+
+        class _RecordingConnection:
+            def execute(self, sql, *args, **kwargs):
+                seen.append(sql)
+                if sql.lstrip().upper().startswith("SELECT"):
+                    # Non-retryable, so the helper gives up after one attempt.
+                    raise RuntimeError("404 not found")
+                return self
+
+        monkeypatch.setattr(
+            carto_module, "get_duckdb_connection", lambda *a, **k: _RecordingConnection()
+        )
+        with pytest.raises(CartoError):
+            carto_module._fetch_with_retry(
+                url=self.HOSTILE_URL, table_name="t", sql="SELECT * FROM t", fmt=fmt
+            )
+        return next(s for s in seen if s.lstrip().upper().startswith("SELECT"))
+
+    @pytest.mark.parametrize(("fmt", "reader"), [("GeoJSON", "ST_Read"), ("csv", "read_csv_auto")])
+    def test_url_becomes_one_well_formed_string_literal(self, monkeypatch, fmt, reader):
+        from urllib.parse import quote
+
+        from geoparquet_io.core.duckdb_utils import sql_path
+
+        sql = self._captured_read_sql(monkeypatch, fmt)
+
+        fmt_param = "GeoJSON" if fmt == "GeoJSON" else "csv"
+        full_url = f"{self.HOSTILE_URL}?q={quote('SELECT * FROM t')}&format={fmt_param}"
+        assert sql == f"SELECT * FROM {reader}({sql_path(full_url)})"
+
+    def test_geojson_expression_parses(self, monkeypatch):
+        """The generated statement must be parseable SQL, not two half-tokens."""
+        import duckdb
+
+        sql = self._captured_read_sql(monkeypatch, "GeoJSON")
+
+        con = duckdb.connect()
+        try:
+            # json_serialize_sql parses without binding or opening anything.
+            (payload,) = con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
+        finally:
+            con.close()
+        assert '"error":true' not in payload.replace(" ", ""), payload

@@ -464,7 +464,7 @@ def _fetch_with_retry(
 
     # GeoJSON is parsed with ST_Read; CSV (geometry-less) with read_csv_auto.
     if fmt == "GeoJSON":
-        read_expr = f'ST_Read("{full_url}")'
+        read_expr = f"ST_Read({sql_path(full_url)})"
     else:
         read_expr = f"read_csv_auto({sql_path(full_url)})"
 

@@ -622,6 +622,110 @@ class TestExtractGeoparquetQuoting:
         assert column_name in pq.read_schema(out).names
 
 
+class TestExtractSpatialFilterQuoting:
+    """geoparquet_io/core/extract.py: build_spatial_filter's `--geometry` branch.
+
+    The `--bbox` branch five lines above already used ``quote_identifier``; the
+    `--geometry` branch hand-rolled ``f'"{col}"'`` (#936). The name it
+    interpolates is the file's own ``geo.primary_column``, so a published
+    GeoParquet file chose the text -- the #918/#923 threat model, and the one
+    site of that family that lands in a ``WHERE`` clause, where an injected
+    disjunct silently disables the filter instead of crashing.
+    """
+
+    #: A `geo.primary_column` that closes ST_Intersects, ORs in an
+    #: always-true scalar subquery, and reopens ST_Intersects so the template's
+    #: own tail still parses. Unquoted it is a *valid* predicate that matches
+    #: every row; quoted it is one (nonexistent) identifier.
+    BYPASS_COL = (
+        "geometry\", ST_GeomFromText('POINT (0 0)')) "
+        "OR ((SELECT 42) = 42) "
+        'OR ST_Intersects("geometry'
+    )
+
+    @pytest.mark.parametrize("column_name", [*ADVERSARIAL_COLUMNS, INJECTION_COL, BYPASS_COL])
+    def test_geometry_filter_quotes_the_identifier(self, column_name):
+        """The predicate must contain the name as ONE quoted identifier.
+
+        Asserted as an exact string rather than a substring: every hostile name
+        here contains its own payload text, so `"payload" in sql` would pass
+        even on the vulnerable spelling.
+        """
+        from geoparquet_io.core.extract import build_spatial_filter
+
+        wkt = "POINT (999 999)"
+        sql = build_spatial_filter(None, wkt, {}, column_name)
+
+        assert sql == f"ST_Intersects({quote_identifier(column_name)}, ST_GeomFromText('{wkt}'))"
+
+    @adversarial_column
+    def test_cli_geometry_filter_returns_the_right_rows(self, tmp_path, column_name):
+        """A hostile-but-honest column name must still filter correctly."""
+        path = _points_fixture(tmp_path, column_name, "geom_filter_input.parquet")
+        out = str(tmp_path / "geom_filter_output.parquet")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            extract,
+            [
+                "geoparquet",
+                path,
+                out,
+                "--geometry",
+                "POLYGON ((-1 -1, -1 3, 3 3, 3 -1, -1 -1))",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        # Points march along the diagonal (0 0)..(9 9); four fall in the box.
+        assert pq.read_table(out).num_rows == 4
+
+    def test_cli_geometry_filter_injection_cannot_bypass_the_filter(self, tmp_path):
+        """End-to-end: a crafted file must not turn `--geometry` into a no-op.
+
+        The fixture declares BOTH the real ``geometry`` column and the payload
+        in ``geo.columns`` -- DuckDB only hands back a GEOMETRY (rather than a
+        BLOB) for a column the `geo` metadata names, and the injected predicate
+        has to bind for the bypass to be observable at all.
+
+        Before the fix this exits 0 having written all ten rows, none of which
+        intersect the requested point.
+        """
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        values_sql = ", ".join(
+            f"({i + 1}, ST_AsWKB(ST_GeomFromText('POINT ({i} {i})')))" for i in range(10)
+        )
+        table = (
+            con.execute(f"SELECT * FROM (VALUES {values_sql}) AS t(id, geometry)")
+            .arrow()
+            .read_all()
+        )
+        con.close()
+
+        col_meta = {"encoding": "WKB", "geometry_types": ["Point"], "bbox": [0.0, 0.0, 9.0, 9.0]}
+        geo = {
+            "version": "1.0.0",
+            "primary_column": self.BYPASS_COL,
+            "columns": {"geometry": col_meta, self.BYPASS_COL: col_meta},
+        }
+        path = str(tmp_path / "bypass_input.parquet")
+        pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), path)
+        out = tmp_path / "bypass_output.parquet"
+
+        runner = CliRunner()
+        result = runner.invoke(
+            extract, ["geoparquet", path, str(out), "--geometry", "POINT (999 999)"]
+        )
+
+        # Nothing in the file intersects (999 999), so no row may be written.
+        # Quoting turns the payload into a column name that does not exist, so
+        # the run fails cleanly instead of silently returning the whole file.
+        leaked = pq.read_table(out).num_rows if out.exists() else 0
+        assert leaked == 0, f"spatial filter bypassed: {leaked} non-intersecting rows written"
+        assert result.exit_code != 0
+
+
 class TestAddCommandsQuoting:
     """Every `gpio add` subcommand builds its own geometry expression."""
 

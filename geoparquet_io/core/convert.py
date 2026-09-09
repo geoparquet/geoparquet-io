@@ -372,13 +372,15 @@ def _build_csv_read_expr(input_url, delimiter):
     Args:
         input_url: A RAW path or URL. ``sql_path()`` quotes and escapes it
             here, so callers must not pre-escape it (#802).
-        delimiter: CSV delimiter, or None to auto-detect.
+        delimiter: A RAW CSV delimiter, or None to auto-detect. It goes into a
+            SQL string literal, so it is escaped here -- exactly once, at the
+            boundary -- rather than by the caller (#937).
     """
     max_line_size = get_csv_max_line_size()
     if delimiter:
         return (
-            f"read_csv({sql_path(input_url)}, delim='{delimiter}', header=true, "
-            f"AUTO_DETECT=TRUE, max_line_size={max_line_size})"
+            f"read_csv({sql_path(input_url)}, delim='{_escape_sql_string(delimiter)}', "
+            f"header=true, AUTO_DETECT=TRUE, max_line_size={max_line_size})"
         )
     return f"read_csv_auto({sql_path(input_url)}, max_line_size={max_line_size})"
 
