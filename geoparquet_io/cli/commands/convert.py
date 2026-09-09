@@ -81,8 +81,6 @@ class ConvertDefaultGroup(click.Group):
         Scans backwards through args to find the output file (last positional argument).
         This approach correctly handles options with values interspersed with positional args.
         """
-        from pathlib import Path
-
         # Scan backwards to find first argument with a recognized extension
         # Skip tokens starting with "-" to avoid treating option values as file paths
         for arg in reversed(args):

@@ -229,11 +229,7 @@ def benchmark_suite(
 
     # Show profile summary if profiling was enabled
     if profile:
-        profile_files = [
-            Path(r.details.get("profile_path"))
-            for r in result.results
-            if r.details.get("profile_path")
-        ]
+        profile_files = [Path(p) for r in result.results if (p := r.details.get("profile_path"))]
 
         if profile_files:
             info(f"\nGenerated {len(profile_files)} profile files in {profile_path}")

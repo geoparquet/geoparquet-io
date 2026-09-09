@@ -454,8 +454,6 @@ def add_bbox(
         # Parse row group options
         row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
 
-        from geoparquet_io.core.streaming import StreamingError
-
         # An input that already has a bbox column is answered with a verbatim copy,
         # which cannot honour a --compression the user actually typed. Pass None
         # when they did not, so the copy branch can tell the two apart.

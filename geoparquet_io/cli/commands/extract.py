@@ -446,7 +446,6 @@ def extract_arcgis(
           --limit 500
     """
     from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
-    from geoparquet_io.core.file_utils import validate_parquet_extension
 
     configure_verbose(verbose)
 
@@ -722,8 +721,6 @@ def extract_bigquery_cmd(
 def _deprecated_version_callback(ctx, param, value):
     """Callback to warn about deprecated --version flag."""
     if value is not None:
-        import click
-
         click.echo(
             "Warning: --version is deprecated, use --wfs-version instead",
             err=True,
