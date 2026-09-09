@@ -181,7 +181,9 @@ def _build_sampling_query(
     then applies them to the full dataset using iterative CTEs.
 
     ``input_path`` is a RAW path: ``sql_path`` escapes it at each point of
-    interpolation, so it is never escaped twice (#802).
+    interpolation, so it is never escaped twice (#802). ``kdtree_column_name``
+    is likewise RAW — it comes straight from ``--kdtree-name`` — so the alias is
+    wrapped in ``quote_identifier`` at the one place it reaches SQL (#924).
 
     Strategy:
     1. Sample the data and compute KD-tree to get split boundaries
@@ -318,7 +320,7 @@ def _build_sampling_query(
     full_query = f"""
         WITH {cte_sql}
         SELECT * EXCLUDE(_kdtree_x, _kdtree_y, _kdtree_partition),
-            _kdtree_partition AS {kdtree_column_name}
+            _kdtree_partition AS {quote_identifier(kdtree_column_name)}
         FROM {final_cte}
     """
 
@@ -593,7 +595,8 @@ def add_kdtree_column(
                 SELECT *, ROW_NUMBER() OVER () AS row_id
                 FROM {sql_path(input_path)}
             )
-            SELECT original_with_rownum.* EXCLUDE (row_id), kdtree_final.partition_id AS {kdtree_column_name}
+            SELECT original_with_rownum.* EXCLUDE (row_id),
+                kdtree_final.partition_id AS {quote_identifier(kdtree_column_name)}
             FROM original_with_rownum
             JOIN kdtree_final ON original_with_rownum.row_id = kdtree_final.row_id
         """
