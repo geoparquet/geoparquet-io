@@ -81,11 +81,18 @@ def _build_enrichment_query(
     input_ref = input_source if input_is_table_ref else sql_path(input_source)
 
     q_input_geom = quote_identifier(input_geom_col)
+    q_admin_geom = quote_identifier(admin_geom_col)
+    # Struct-field access ``a.<col>.xmin``: quote the column segment only, so the
+    # ``a.`` alias and the ``.xmin`` accessor stay bare. ``input_bbox_col`` comes
+    # from the input file's own schema and ``admin_bbox_col`` from the dataset;
+    # both reach here RAW, so quote exactly once (#926).
+    q_input_bbox = quote_identifier(input_bbox_col) if input_bbox_col else None
+    q_admin_bbox = quote_identifier(admin_bbox_col) if admin_bbox_col else None
     bbox_filter = f"""
-            (a.{input_bbox_col}.xmin <= b.{admin_bbox_col}.xmax AND
-             a.{input_bbox_col}.xmax >= b.{admin_bbox_col}.xmin AND
-             a.{input_bbox_col}.ymin <= b.{admin_bbox_col}.ymax AND
-             a.{input_bbox_col}.ymax >= b.{admin_bbox_col}.ymin)
+            (a.{q_input_bbox}.xmin <= b.{q_admin_bbox}.xmax AND
+             a.{q_input_bbox}.xmax >= b.{q_admin_bbox}.xmin AND
+             a.{q_input_bbox}.ymin <= b.{q_admin_bbox}.ymax AND
+             a.{q_input_bbox}.ymax >= b.{q_admin_bbox}.ymin)
         """
 
     if source_crs and input_bbox_col and admin_bbox_col:
@@ -94,10 +101,10 @@ def _build_enrichment_query(
         # join runs in one CRS and keeps the cheap bbox pre-filter — instead of
         # transforming the (large) input per row and degrading to a nested-loop
         # ST_Intersects (#525, preserving the #460 pre-filter).
-        radmin = reproject_to_source_sql(quote_identifier(admin_geom_col), source_crs)
+        radmin = reproject_to_source_sql(q_admin_geom, source_crs)
         bbox_struct = (
             f"struct_pack(xmin := ST_XMin({radmin}), xmax := ST_XMax({radmin}), "
-            f"ymin := ST_YMin({radmin}), ymax := ST_YMax({radmin})) AS {admin_bbox_col}"
+            f"ymin := ST_YMin({radmin}), ymax := ST_YMax({radmin})) AS {q_admin_bbox}"
         )
         return f"""
             CREATE TEMP TABLE {enriched_table} AS
@@ -106,12 +113,12 @@ def _build_enrichment_query(
                 {admin_select_clause}
             FROM {input_ref} a
             LEFT JOIN (
-                SELECT {radmin} AS {admin_geom_col}, {bbox_struct}, {subquery_cols_str}
+                SELECT {radmin} AS {q_admin_geom}, {bbox_struct}, {subquery_cols_str}
                 FROM {admin_table_ref}
                 {admin_where_clause}
             ) b
             ON {bbox_filter}
-                AND ST_Intersects(b.{admin_geom_col}, a.{q_input_geom})
+                AND ST_Intersects(b.{q_admin_geom}, a.{q_input_geom})
         """
 
     if input_bbox_col and admin_bbox_col and not source_crs:
@@ -122,12 +129,12 @@ def _build_enrichment_query(
                 {admin_select_clause}
             FROM {input_ref} a
             LEFT JOIN (
-                SELECT {admin_geom_col}, {admin_bbox_col}, {subquery_cols_str}
+                SELECT {q_admin_geom}, {q_admin_bbox}, {subquery_cols_str}
                 FROM {admin_table_ref}
                 {admin_where_clause}
             ) b
             ON {bbox_filter}
-                AND ST_Intersects(b.{admin_geom_col}, a.{q_input_geom})
+                AND ST_Intersects(b.{q_admin_geom}, a.{q_input_geom})
         """
 
     # No bbox on one side: reproject the input geometry inline (no pre-filter to
@@ -140,11 +147,11 @@ def _build_enrichment_query(
                 {admin_select_clause}
             FROM {input_ref} a
             LEFT JOIN (
-                SELECT {admin_geom_col}, {subquery_cols_str}
+                SELECT {q_admin_geom}, {subquery_cols_str}
                 FROM {admin_table_ref}
                 {admin_where_clause}
             ) b
-            ON ST_Intersects(b.{admin_geom_col}, {input_geom_sql})
+            ON ST_Intersects(b.{q_admin_geom}, {input_geom_sql})
         """
 
 
@@ -163,12 +170,15 @@ def _compute_input_extent(con, input_path, input_bbox_col, input_geom_col, sourc
     CRS) so the admin extent filter is in the right units (#525).
     """
     if input_bbox_col and not source_crs:
+        # ``input_bbox_col`` is read from the input file's schema; quote the
+        # column segment of the struct-field access, leaving ``.xmin`` bare (#926).
+        q_input_bbox = quote_identifier(input_bbox_col)
         extent_query = f"""
             SELECT
-                MIN({input_bbox_col}.xmin) as xmin,
-                MAX({input_bbox_col}.xmax) as xmax,
-                MIN({input_bbox_col}.ymin) as ymin,
-                MAX({input_bbox_col}.ymax) as ymax
+                MIN({q_input_bbox}.xmin) as xmin,
+                MAX({q_input_bbox}.xmax) as xmax,
+                MIN({q_input_bbox}.ymin) as ymin,
+                MAX({q_input_bbox}.ymax) as ymax
             FROM {sql_path(input_path)}
         """
     else:
@@ -208,11 +218,13 @@ def _build_admin_where_clause(dataset, levels, admin_bbox_col, extent, verbose, 
     # Add bbox extent filter
     if admin_bbox_col and extent:
         xmin, xmax, ymin, ymax = extent
+        # Quote the column segment of the struct-field access (#926).
+        q_admin_bbox = quote_identifier(admin_bbox_col)
         extent_filter = f"""
-            ({admin_bbox_col}.xmin <= {xmax} AND
-             {admin_bbox_col}.xmax >= {xmin} AND
-             {admin_bbox_col}.ymin <= {ymax} AND
-             {admin_bbox_col}.ymax >= {ymin})
+            ({q_admin_bbox}.xmin <= {xmax} AND
+             {q_admin_bbox}.xmax >= {xmin} AND
+             {q_admin_bbox}.ymin <= {ymax} AND
+             {q_admin_bbox}.ymax >= {ymin})
         """
         admin_where_clauses.append(extent_filter)
         if verbose:
@@ -872,7 +884,7 @@ def _get_preview_partitions(con, table_name, partition_columns, level_names):
     group_by_cols = ", ".join([quote_identifier(col) for col in partition_columns])
     select_cols = ", ".join(
         [
-            f"{quote_identifier(col)} as {name}"
+            f"{quote_identifier(col)} as {quote_identifier(name)}"
             for col, name in zip(partition_columns, level_names, strict=True)
         ]
     )
