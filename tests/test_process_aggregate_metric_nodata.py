@@ -32,9 +32,8 @@ _DUMMY_SCHEME = GridScheme(
     max_resolution=10,
     default_column="cell",
     key_template="{res}",
-    boundary_template="{cell}",
+    boundary_template="ST_MakeEnvelope(0.0, 0.0, 1.0, 1.0)",
     latlng_template="{cell}",
-    poly_wkb_template="{bnd}",
     centroid_wkb_template="{ll}",
 )
 

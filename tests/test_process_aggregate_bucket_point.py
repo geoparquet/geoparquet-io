@@ -843,9 +843,8 @@ def test_build_grid_query_with_metric_and_breakdown(tmp_path):
         max_resolution=5,
         default_column="cell",
         key_template="CAST(floor(ST_X({pt})) AS INTEGER)",
-        boundary_template="{cell}",
+        boundary_template="ST_MakeEnvelope(CAST({cell} AS DOUBLE), 0.0, CAST({cell} AS DOUBLE) + 1.0, 1.0)",
         latlng_template="{cell}",
-        poly_wkb_template="ST_AsWKB(ST_Point(CAST({bnd} AS DOUBLE), 0.0))",
         centroid_wkb_template="ST_AsWKB(ST_Point(CAST({ll} AS DOUBLE), 0.0))",
     )
     src = tmp_path / "f.parquet"

@@ -23,10 +23,11 @@ H3_SCHEME = GridScheme(
     default_column=DEFAULT_H3_COLUMN_NAME,
     # h3_latlng_to_cell_string takes (lat, lng) -> note Y before X.
     key_template="h3_latlng_to_cell_string(ST_Y({pt}), ST_X({pt}), {res})",
-    # h3_cell_to_boundary_wkt returns a WKT polygon directly.
-    boundary_template="h3_cell_to_boundary_wkt({cell})",
+    # The WKB form parses straight to a GEOMETRY -- no WKT round trip. Every
+    # vertex comes back wrapped into [-180, 180], so a cell straddling the
+    # antimeridian arrives torn; the shared builder repairs it.
+    boundary_template="ST_GeomFromWKB(h3_cell_to_boundary_wkb({cell}))",
     latlng_template="h3_cell_to_latlng({cell})",
-    poly_wkb_template="ST_AsWKB(ST_GeomFromText({bnd}))",
     # h3_cell_to_latlng returns [lat, lng]; ST_Point wants (lng, lat).
     centroid_wkb_template="ST_AsWKB(ST_Point({ll}[2], {ll}[1]))",
 )

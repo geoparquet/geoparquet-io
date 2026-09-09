@@ -645,8 +645,11 @@ class TestRollupSqlBuilders:
 
         sql = build_grid_rollup_sql(_grid_info("h3", out_geometry="both"), "SELECT * FROM s", 4)
         assert 'h3_cell_to_parent("h3_cell", 4)' in sql
-        assert "h3_cell_to_boundary_wkt" in sql
+        assert "h3_cell_to_boundary_wkb" in sql
         assert "AS centroid" in sql
+        # A rolled-up parent cell straddles the antimeridian as readily as a base
+        # cell, so it goes through the same seam repair.
+        assert "ST_CollectionExtract(" in sql
 
     def test_grid_rollup_sql_none_geometry(self):
         from geoparquet_io.core.process.overview.rollup import build_grid_rollup_sql
