@@ -11,9 +11,13 @@ Key behaviors tested:
 - Bbox/Hilbert computed from primary column only (documented behavior)
 """
 
+import io
 import json
+import sys
 from pathlib import Path
+from unittest import mock
 
+import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 
 from tests.fixtures.multi_geometry import (
@@ -823,6 +827,75 @@ class TestMultiGeometryDerivedStatsInvalidation:
         boundary = self._geo(output_file)["columns"]["boundary"]
         assert boundary["geometry_types"] == ["Polygon"]
         self._assert_duckdb_reads(output_file)
+        self._assert_spec_valid(output_file)
+
+    # --- extract: the stdout stream, which can do better ---------------------
+
+    @staticmethod
+    def _geo_of_arrow_stream(raw):
+        return json.loads(ipc.open_stream(io.BytesIO(raw)).schema.metadata[b"geo"])
+
+    def _extract_to_stdout(self, monkeypatch, input_file, **kwargs):
+        from geoparquet_io.core.extract import extract
+
+        buffer = io.BytesIO()
+        fake_stdout = mock.MagicMock()
+        fake_stdout.buffer = buffer
+        fake_stdout.isatty.return_value = False
+        monkeypatch.setattr(sys, "stdout", fake_stdout)
+        extract(str(input_file), "-", **kwargs)
+        return self._geo_of_arrow_stream(buffer.getvalue())
+
+    def test_stdout_recomputes_the_secondary_exactly(self, tmp_path, monkeypatch):
+        """The stream path must not settle for the file path's over-cover.
+
+        A file output can only recompute the PRIMARY column, so a row filter
+        leaves a secondary column's carried stats in place -- wider than the
+        rows written, which the spec allows. The stdout stream recomputes EVERY
+        column from the rows it writes, so scoping the strip there would ship
+        over-cover when the exact answer was free.
+        """
+        input_file = tmp_path / "in.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+
+        carried = json.loads(pq.read_metadata(str(input_file)).metadata[b"geo"])["columns"]
+        assert carried["boundary"]["bbox"] == [-0.5, -0.5, 2.5, 2.5]
+
+        boundary = self._extract_to_stdout(monkeypatch, input_file, where="id = 1")["columns"][
+            "boundary"
+        ]
+        # Only the box around (0, 0) survives, so the carried [-0.5, -0.5, 2.5, 2.5]
+        # would over-cover it by a factor of nine.
+        assert boundary["bbox"] == [-0.5, -0.5, 0.5, 0.5]
+        assert boundary["geometry_types"] == ["Polygon"]
+
+    def test_stdout_leaves_an_unfiltered_extract_alone(self, tmp_path, monkeypatch):
+        """Nothing stale means nothing stripped, on the stream path too."""
+        input_file = tmp_path / "in.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+
+        carried = json.loads(pq.read_metadata(str(input_file)).metadata[b"geo"])["columns"]
+        streamed = self._extract_to_stdout(monkeypatch, input_file)["columns"]
+
+        assert streamed["boundary"]["bbox"] == carried["boundary"]["bbox"]
+        assert streamed["geometry"]["bbox"] == carried["geometry"]["bbox"]
+
+    def test_a_file_output_still_carries_the_secondary(self, tmp_path):
+        """The stream's precision must not leak into the file path (#934).
+
+        Widening the strip on a file output would delete a REQUIRED key that
+        nothing there puts back -- the unreadable output this PR exists to fix.
+        """
+        from geoparquet_io.core.extract import extract
+
+        input_file = tmp_path / "in.parquet"
+        output_file = tmp_path / "out.parquet"
+        create_multi_geometry_geoparquet(str(input_file))
+        extract(str(input_file), str(output_file), where="id = 1")
+
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        assert boundary["bbox"] == [-0.5, -0.5, 2.5, 2.5]
         self._assert_spec_valid(output_file)
 
     # --- extract: multi-file merge (emptied) --------------------------------

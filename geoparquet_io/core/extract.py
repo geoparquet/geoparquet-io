@@ -870,10 +870,14 @@ def _stale_stat_columns(
 
     * A row filter (``--bbox``/``--geometry``/``--where``/``--limit``) keeps only
       part of the input, so the carried stats OVER-cover the result. Over-cover
-      is what the spec allows — the type list must be exhaustive, not exact, and
-      a wider bbox never hides a row — so a secondary column's stats still
-      describe it and are left alone. Only the primary column is named, and only
-      so the write path retightens it.
+      is safe rather than blessed: the spec asks that ``geometry_types`` be
+      "strictly correct" and its worked example is about UNDER-declaring, but a
+      list naming a type no row has, and a bbox wider than the rows, cost a
+      reader a rejected candidate — never a skipped row. Every reader tolerates
+      it and gpio's own ``check spec`` passes it. A secondary column's stats
+      therefore still describe it and are left alone; only the primary is named,
+      and only so the write path retightens it. Where the exact answer is free
+      it is taken instead — see the stdout branch in ``_extract_streaming``.
     * The repair pass (``--repair-geometry``, on by default) rewrote at least one
       row: ``ST_MakeValid`` can change a geometry's type (a bowtie ``Polygon``
       comes back a ``MultiPolygon``) and its extent, so the carried
@@ -973,6 +977,13 @@ def _extract_streaming(
         stale_columns = _stale_stat_columns(
             input_path, spatial_filter, where, limit, geom_col, geometry_repaired
         )
+        if should_stream_output(output_path) and stale_columns:
+            # The stdout stream can do better than the file path: it recomputes
+            # EVERY column from the rows it writes, so widening the strip past
+            # the primary costs nothing and buys the exact answer. Scoping it
+            # here as the file path does would ship a secondary column's carried
+            # over-cover when the precise stats were free.
+            stale_columns = None
         if stale_columns is None or stale_columns:
             metadata = strip_derived_stats(
                 metadata, columns=stale_columns, recomputed_columns={geom_col}
