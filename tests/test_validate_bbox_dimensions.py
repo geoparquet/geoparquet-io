@@ -13,11 +13,16 @@ import pytest
 from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.crs_utils import merge_longitude_ranges
 from geoparquet_io.core.duckdb_metadata import aggregate_native_geo_stats
-from geoparquet_io.core.inspect_utils import extract_partition_summary
+from geoparquet_io.core.inspect_utils import (
+    extract_partition_summary,
+    format_partition_markdown_output,
+    format_partition_terminal_output,
+)
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_bbox_contains_data,
     _check_bbox_valid,
+    _check_native_geo_statistics,
     _check_native_geo_stats_contains_data,
     validate_geoparquet,
 )
@@ -476,3 +481,55 @@ class TestPartitionSummaryWrapNeedsGeographicCrs:
         )
         summary = extract_partition_summary([str(geographic), str(projected)])
         assert summary["combined_bbox"] == [0.0, -10.0, 10.0, 10.0]
+
+
+def _summary(bbox):
+    return {
+        "file_count": 1,
+        "total_rows": 2,
+        "total_size_bytes": 100,
+        "total_size_human": "100 B",
+        "combined_bbox": bbox,
+        "schema_consistent": True,
+        "compressions": ["SNAPPY"],
+        "geoparquet_versions": ["1.1.0"],
+        "per_file_info": [
+            {"file": "a.parquet", "file_name": "a.parquet", "rows": 2, "size_human": "100 B"}
+        ],
+    }
+
+
+class TestWrapIsVisibleWhereTheValuesArePrinted:
+    """A wrapped range printed bare is indistinguishable from corrupt metadata (#886)."""
+
+    def test_terminal_output_notes_a_wrapping_combined_bbox(self, capsys):
+        format_partition_terminal_output(_summary(WRAPPING_BBOX), {}, [])
+        assert "antimeridian" in capsys.readouterr().out
+
+    def test_terminal_output_leaves_a_plain_bbox_unannotated(self, capsys):
+        format_partition_terminal_output(_summary([0.0, 0.0, 10.0, 5.0]), {}, [])
+        assert "antimeridian" not in capsys.readouterr().out
+
+    def test_markdown_output_notes_a_wrapping_combined_bbox(self):
+        out = format_partition_markdown_output(_summary(WRAPPING_BBOX), {}, [])
+        line = next(ln for ln in out.splitlines() if "Combined bounds" in ln)
+        assert "antimeridian-crossing, RFC 7946 5.2" in line
+
+    def test_markdown_output_leaves_a_plain_bbox_unannotated(self):
+        out = format_partition_markdown_output(_summary([0.0, 0.0, 10.0, 5.0]), {}, [])
+        line = next(ln for ln in out.splitlines() if "Combined bounds" in ln)
+        assert "antimeridian" not in line
+
+    def test_native_geo_statistics_message_notes_the_wrap(self, antimeridian_file, monkeypatch):
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_native_geo_stats_by_row_group",
+            lambda *a, **k: [_chunk(175.0, 0.0, -175.0, 5.0)],
+        )
+        check = _check_native_geo_statistics(str(antimeridian_file), "geometry")
+        assert check.status == CheckStatus.PASSED, check.message
+        assert "antimeridian" in check.message
+
+    def test_native_geo_statistics_message_is_unannotated_without_a_wrap(self, antimeridian_file):
+        check = _check_native_geo_statistics(str(antimeridian_file), "geometry")
+        assert check.status == CheckStatus.PASSED, check.message
+        assert "antimeridian" not in check.message

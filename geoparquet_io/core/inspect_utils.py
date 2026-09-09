@@ -1321,6 +1321,16 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
     }
 
 
+def _combined_bbox_wrap_note(bbox: list) -> str:
+    """Trailing note for a combined bbox whose X range wraps the antimeridian.
+
+    ``extract_partition_summary`` can now emit ``xmin > xmax`` (#886). Printed
+    bare, that is indistinguishable from corrupt metadata, so every path that
+    shows the numbers to a person says how they are meant to be read.
+    """
+    return " (antimeridian-crossing, RFC 7946 5.2)" if bbox[0] > bbox[2] else ""
+
+
 def format_partition_terminal_output(
     partition_summary: dict[str, Any],
     geo_info: dict[str, Any],
@@ -1351,6 +1361,7 @@ def format_partition_terminal_output(
         console.print(
             f"Combined bounds: [cyan][{bbox[0]:.6f}, {bbox[1]:.6f}, "
             f"{bbox[2]:.6f}, {bbox[3]:.6f}][/cyan]"
+            f"[dim]{_combined_bbox_wrap_note(bbox)}[/dim]"
         )
 
     console.print()
@@ -1490,7 +1501,8 @@ def format_partition_markdown_output(
     if partition_summary["combined_bbox"]:
         bbox = partition_summary["combined_bbox"]
         lines.append(
-            f"- **Combined bounds:** [{bbox[0]:.6f}, {bbox[1]:.6f}, {bbox[2]:.6f}, {bbox[3]:.6f}]"
+            f"- **Combined bounds:** [{bbox[0]:.6f}, {bbox[1]:.6f}, "
+            f"{bbox[2]:.6f}, {bbox[3]:.6f}]{_combined_bbox_wrap_note(bbox)}"
         )
 
     lines.append("")

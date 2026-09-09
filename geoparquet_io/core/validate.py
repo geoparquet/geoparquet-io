@@ -2422,10 +2422,17 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
                 f"[{geo_bbox['xmin']:.2f}, {geo_bbox['ymin']:.2f}, "
                 f"{geo_bbox['xmax']:.2f}, {geo_bbox['ymax']:.2f}]"
             )
+            # These values may now wrap the antimeridian (#886), and a bare
+            # xmin > xmax reads as corrupt metadata; say which it is.
+            wrap_note = (
+                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)"
+                if geo_bbox["xmin"] > geo_bbox["xmax"]
+                else ""
+            )
             return ValidationCheck(
                 name=f"native_geo_stats_{geom_col}",
                 status=CheckStatus.PASSED,
-                message=f"geometry column has geospatial statistics: {bbox_str}",
+                message=f"geometry column has geospatial statistics: {bbox_str}{wrap_note}",
                 category="parquet_geo_types",
             )
         else:
