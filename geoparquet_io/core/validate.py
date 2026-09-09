@@ -1427,12 +1427,19 @@ def _check_orientation_matches_data(
         )
 
     from geoparquet_io.core.duckdb_utils import sql_path
-    from geoparquet_io.core.file_utils import safe_file_url
+    from geoparquet_io.core.file_utils import resolve_file_url
 
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
     quoted_geom = quote_identifier(geom_col)
     try:
-        col_type = _describe_geom_type(con, safe_file_url(parquet_file, verbose=False), geom_col)
+        # RAW, like every sibling caller: _describe_geom_type and sql_path each
+        # escape their own argument, so handing them a pre-escaped
+        # safe_file_url() value escaped it twice and failed this check on any
+        # valid file whose path contains an apostrophe (#937, the #718 class).
+        # Resolved inside the try so an unreadable path stays a FAILED check
+        # rather than an exception, as it was before.
+        raw_url = resolve_file_url(parquet_file, verbose=False)
+        col_type = _describe_geom_type(con, raw_url, geom_col)
         geom_expr = (
             quoted_geom if "GEOMETRY" in col_type.upper() else f"ST_GeomFromWKB({quoted_geom})"
         )
@@ -1440,7 +1447,7 @@ def _check_orientation_matches_data(
             SELECT ST_AsWKB(ST_Force2D(part.geom))
             FROM (
                 SELECT {geom_expr} AS g
-                FROM read_parquet({sql_path(parquet_file)})
+                FROM read_parquet({sql_path(raw_url)})
                 WHERE {quoted_geom} IS NOT NULL
                 {limit_clause}
             ) t, UNNEST(ST_Dump(t.g)) AS u(part)

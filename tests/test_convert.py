@@ -675,6 +675,47 @@ class TestConvertCSVCore:
         assert result[1] > 100_000
         con.close()
 
+    def test_delimiter_is_escaped_for_the_sql_literal(self):
+        """#937: `--delimiter` went into `delim='{...}'` unescaped.
+
+        The path beside it was already routed through ``sql_path``; the
+        delimiter was not, so a value containing ``'`` closed the literal early
+        and produced a ParserException. ``_escape_sql_string`` takes a RAW
+        value and adds no quotes of its own, so the surrounding ``'...'`` stays.
+        """
+        from geoparquet_io.core.convert import _build_csv_read_expr
+
+        expr = _build_csv_read_expr("/tmp/x.csv", "'")
+
+        assert "delim=''''" in expr
+        # Escape exactly once: a doubled escape would read as an empty string
+        # followed by a stray quote pair.
+        assert "delim=''''''" not in expr
+
+    def test_quote_in_delimiter_produces_parseable_sql(self):
+        """The generated statement must parse; before the fix it did not."""
+        from geoparquet_io.core.convert import _build_csv_read_expr
+
+        expr = _build_csv_read_expr("/tmp/x.csv", "'")
+
+        con = duckdb.connect()
+        try:
+            (payload,) = con.execute(
+                "SELECT json_serialize_sql(?)", [f"SELECT * FROM {expr}"]
+            ).fetchone()
+        finally:
+            con.close()
+        assert '"error":true' not in payload.replace(" ", ""), payload
+
+    def test_convert_csv_with_quote_delimiter_end_to_end(self, tmp_path, temp_output_file):
+        """A `'`-delimited CSV converts instead of dying in the parser."""
+        csv_path = tmp_path / "quote_delim.csv"
+        csv_path.write_text("id'wkt\n1'POINT (1 2)\n2'POINT (3 4)\n")
+
+        convert_to_geoparquet(str(csv_path), temp_output_file, delimiter="'", verbose=False)
+
+        assert pq.read_table(temp_output_file).num_rows == 2
+
     def test_convert_csv_custom_max_line_size_env_var(
         self, tmp_path, temp_output_file, monkeypatch
     ):

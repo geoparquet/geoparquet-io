@@ -1,10 +1,13 @@
 """orientation_matches_data: exterior rings CCW and holes CW when orientation is declared (#586)."""
 
+import json
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.common import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_orientation_matches_data,
@@ -23,9 +26,35 @@ def _write_v2(path, wkts):
     values = ", ".join("(NULL)" if w is None else f"(ST_GeomFromText('{w}'))" for w in wkts)
     con.execute(
         f"COPY (SELECT * FROM (VALUES {values}) t(geometry)) "
-        f"TO '{path.as_posix()}' (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')"
+        f"TO {sql_path(path.as_posix())} (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')"
     )
     con.close()
+    return str(path)
+
+
+def _write_wkb_with_orientation(path, wkts, orientation="counterclockwise"):
+    """A plain-WKB GeoParquet file that *declares* an orientation.
+
+    ``_write_v2`` leaves the field unset, which makes the orientation check
+    short-circuit to SKIPPED -- useless for an end-to-end assertion.
+    """
+    con = get_duckdb_connection(load_spatial=True)
+    values = ", ".join(f"(ST_AsWKB(ST_GeomFromText('{w}')))" for w in wkts)
+    table = con.execute(f"SELECT * FROM (VALUES {values}) t(geometry)").arrow().read_all()
+    con.close()
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Polygon"],
+                "orientation": orientation,
+            }
+        },
+    }
+    table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+    pq.write_table(table, path)
     return str(path)
 
 
@@ -136,3 +165,50 @@ class TestEdges:
         check = _check(str(tmp_path / "missing.parquet"), con)
         assert check.status == CheckStatus.FAILED
         assert "failed to validate orientation" in check.message
+
+
+class TestPathEscapedExactlyOnce:
+    """#937: the check escaped its own path twice.
+
+    ``_describe_geom_type(con, raw_url, ...)`` escapes its argument itself (it
+    builds ``read_parquet({sql_path(raw_url)})``), so passing the already
+    escaped ``safe_file_url()`` result turned ``o'brien`` into ``o''''brien``
+    inside the literal. The read then failed, the broad ``except`` caught it,
+    and a perfectly valid file was reported as *failing* the orientation
+    check -- the #718 failure mode, in a check whose verdict users act on.
+    """
+
+    def test_apostrophe_in_path_does_not_fail_a_valid_file(self, tmp_path, con):
+        directory = tmp_path / "o'brien"
+        directory.mkdir()
+        path = _write_v2(directory / "f.parquet", [CCW])
+
+        check = _check(path, con)
+
+        assert check.status == CheckStatus.PASSED, check.message
+
+    def test_apostrophe_in_path_still_detects_a_real_violation(self, tmp_path, con):
+        """The path fix must not make the check vacuously pass."""
+        directory = tmp_path / "o'brien"
+        directory.mkdir()
+        path = _write_v2(directory / "bad.parquet", [CW])
+
+        check = _check(path, con)
+
+        assert check.status == CheckStatus.FAILED
+        assert "1 of 1" in check.message
+
+    def test_reported_through_validate_geoparquet(self, tmp_path):
+        """The whole `check spec` run, not just the helper.
+
+        Needs a file that actually *declares* an orientation, or the check
+        short-circuits to SKIPPED before it ever builds the query.
+        """
+        directory = tmp_path / "o'brien"
+        directory.mkdir()
+        path = _write_wkb_with_orientation(directory / "f.parquet", [CCW])
+
+        result = validate_geoparquet(path)
+        (check,) = [c for c in result.checks if c.name == "orientation_matches_data_geometry"]
+
+        assert check.status == CheckStatus.PASSED, check.message
