@@ -103,9 +103,13 @@ def prepare_output(
        that ``--row-group-size`` and ``--row-group-size-mb`` are mutually
        exclusive and converts the size string to MB.
 
-    The order matters and is part of what this helper pins: a user who typed
-    neither an output nor a ``.parquet`` name should get the streaming hint,
-    which tells them what to do, rather than the extension complaint.
+    The order matters and is part of what this helper pins, though not between
+    steps 1 and 2: those two can never both fire, since ``validate_output``
+    raises only for a missing output and ``validate_parquet_extension`` returns
+    immediately on one. The live constraint is step 1 before step 3 -- a user
+    who piped nothing anywhere and also passed both row-group options should be
+    told how to name an output, which is actionable, rather than which pair of
+    size flags conflict.
 
     Args:
         output_path: The command's output argument. ``None`` means "stream to

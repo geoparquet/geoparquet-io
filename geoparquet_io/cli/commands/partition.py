@@ -9,6 +9,8 @@ import click
 
 from geoparquet_io.cli._shared import _activate_s3, init_group_context
 from geoparquet_io.cli.decorators import (
+    DEFAULT_KDTREE_APPROX,
+    DEFAULT_KDTREE_TARGET_ROWS,
     SingleFileCommand,
     geoparquet_version_option,
     handle_directory_sub_partition,
@@ -805,13 +807,13 @@ def partition_a5(
     "--auto",
     default=None,
     type=int,
-    help="Auto-select partitions targeting N rows/partition. Default: 120,000.",
+    help=f"Auto-select partitions targeting N rows/partition. Default: {DEFAULT_KDTREE_TARGET_ROWS:,}.",
 )
 @click.option(
     "--approx",
-    default=100000,
+    default=DEFAULT_KDTREE_APPROX,
     type=int,
-    help="Use approximate computation by sampling N points (default: 100000). Mutually exclusive with --exact.",
+    help=f"Use approximate computation by sampling N points (default: {DEFAULT_KDTREE_APPROX}). Mutually exclusive with --exact.",
 )
 @click.option(
     "--exact",

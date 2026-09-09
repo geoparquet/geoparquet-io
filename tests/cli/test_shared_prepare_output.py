@@ -66,10 +66,10 @@ class TestMissingOutputGuard:
         with mock.patch.object(sys.stdout, "isatty", return_value=False):
             assert prepare_output(None, False, None, None) is None
 
-    def test_output_guard_runs_before_the_extension_check(self):
+    def test_output_guard_runs_before_the_row_group_parse(self):
         # Both would fail; the streaming hint is the more useful message, so it
-        # must win. Reordering the helper's steps would surface the extension
-        # error instead.
+        # must win. Reordering the helper's steps would surface the row-group
+        # mutual-exclusion error instead.
         with mock.patch.object(sys.stdout, "isatty", return_value=True):
             with pytest.raises(click.ClickException) as excinfo:
                 prepare_output(None, False, 50_000, "256MB")

@@ -71,14 +71,18 @@ def parse_row_group_options(
         raise click.UsageError(f"Invalid row group size: {e}") from e
 
 
-# ``--approx``'s declared default, repeated here because exclusivity against
-# ``--exact`` is detected by comparing the received value against it. See the
-# note in ``resolve_kdtree_options``.
-_KDTREE_DEFAULT_APPROX = 100000
+# ``--approx``'s default. ``gpio add kdtree`` and ``gpio partition kdtree`` both
+# declare the option with this value, and exclusivity against ``--exact`` is
+# detected by comparing the received value against it (see the note in
+# ``resolve_kdtree_options``), so the declarations import it from here rather
+# than repeating the literal: a second copy that drifted would make a bare
+# ``--exact`` start reporting a conflict with an ``--approx`` nobody typed.
+DEFAULT_KDTREE_APPROX = 100000
 
 # Rows per partition targeted when the user asks for neither ``--partitions``
-# nor ``--auto``, and the floor for a non-positive ``--auto``.
-_KDTREE_DEFAULT_TARGET_ROWS = 120000
+# nor ``--auto``, and the floor for a non-positive ``--auto``. Both commands
+# quote it in ``--auto``'s help text, so they import it too.
+DEFAULT_KDTREE_TARGET_ROWS = 120000
 
 
 def resolve_kdtree_options(
@@ -119,18 +123,18 @@ def resolve_kdtree_options(
         ``--exact --approx 100000`` is accepted silently. That is preserved
         verbatim from both call sites: correcting it with a
         ``ctx.get_parameter_source`` check would change behaviour, and belongs in
-        its own change (#919).
+        its own change (#951).
     """
     if sum([partitions is not None, auto is not None]) > 1:
         raise click.UsageError("--partitions and --auto are mutually exclusive")
 
     if partitions is None and auto is None:
-        auto = _KDTREE_DEFAULT_TARGET_ROWS
+        auto = DEFAULT_KDTREE_TARGET_ROWS
 
     if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
         raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
 
-    if exact and approx != _KDTREE_DEFAULT_APPROX:
+    if exact and approx != DEFAULT_KDTREE_APPROX:
         raise click.UsageError("--approx and --exact are mutually exclusive")
 
     sample_size = None if exact else approx
@@ -138,7 +142,7 @@ def resolve_kdtree_options(
     if partitions is not None:
         return int(math.log2(partitions)), sample_size, None
 
-    target_rows = auto if auto and auto > 0 else _KDTREE_DEFAULT_TARGET_ROWS
+    target_rows = auto if auto and auto > 0 else DEFAULT_KDTREE_TARGET_ROWS
     return None, sample_size, ("rows", target_rows)
 
 

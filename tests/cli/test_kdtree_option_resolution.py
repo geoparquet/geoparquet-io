@@ -77,7 +77,7 @@ class TestSampling:
         # detected by comparing --approx against its default, so
         # `--exact --approx 100000` passes silently instead of being rejected.
         # Fixing it means a ParameterSource check and is a behaviour change; it
-        # is tracked in #919, not made here.
+        # is tracked in #951, not made here.
         assert resolve_kdtree_options(8, None, 100_000, True) == (3, None, None)
 
 
