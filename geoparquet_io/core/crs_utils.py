@@ -850,6 +850,47 @@ def is_geographic_crs(crs: dict | str | None) -> bool:
     return False
 
 
+def merge_longitude_ranges(ranges: list[tuple[float, float]]) -> tuple[float, float]:
+    """Union of ``(xmin, xmax)`` longitude ranges, antimeridian-aware.
+
+    ``xmin > xmax`` marks a range that wraps the antimeridian -- the convention
+    of RFC 7946 5.2, which GeoParquet's ``bbox`` and Parquet's own geospatial
+    statistics both follow. Plain ``min``/``max`` over such a pair yields the
+    *complement* of the real extent, so the union is taken on the circle: the
+    arcs are merged and the result is the complement of the widest gap left
+    between them.
+
+    With no wrapping input the result is exactly ``(min(xmin), max(xmax))``, so
+    data from a producer that never wraps is reported as before.
+    """
+    if not ranges:
+        raise ValueError("merge_longitude_ranges() needs at least one range")
+    if all(xmin <= xmax for xmin, xmax in ranges):
+        return min(r[0] for r in ranges), max(r[1] for r in ranges)
+
+    arcs: list[list[float]] = []
+    for xmin, xmax in ranges:
+        arcs.extend([[xmin, xmax]] if xmin <= xmax else [[xmin, 180.0], [-180.0, xmax]])
+    arcs.sort()
+
+    merged = [arcs[0]]
+    for start, end in arcs[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    if len(merged) == 1:
+        return merged[0][0], merged[0][1]
+
+    # The widest gap is the part of the circle the data does not cover, so the
+    # answer is everything else. Reaching here means some range wrapped, which
+    # put arcs on both sides of the antimeridian: the -180/180 seam is covered
+    # and the gaps between the merged arcs are the only candidates.
+    _, at = max((merged[i + 1][0] - merged[i][1], i) for i in range(len(merged) - 1))
+    return merged[at + 1][0], merged[at][1]
+
+
 def parse_crs_string_to_projjson(crs_string, con=None):
     """Convert a CRS string (like "EPSG:5070") to full PROJJSON dict."""
     identifier = _extract_crs_identifier(crs_string)

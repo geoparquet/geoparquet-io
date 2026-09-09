@@ -2489,6 +2489,9 @@ def _check_native_geo_stats_contains_data(
                 category="parquet_geo_types",
             )
 
+        # Native statistics order Z after XY ([xmin, ymin, xmax, ymax, zmin,
+        # zmax]), unlike GeoParquet's interleaved metadata bbox -- so the first
+        # four values are the X/Y bounds here and _bbox_xy does not apply.
         geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox[:4], strict=True))
 
         # Validate that bbox values are reasonable (not garbage from parsing errors)
@@ -2506,6 +2509,9 @@ def _check_native_geo_stats_contains_data(
         ymin = geo_bbox["ymin"]
         xmax = geo_bbox["xmax"]
         ymax = geo_bbox["ymax"]
+        # Parquet's geospatial statistics may legally wrap the antimeridian
+        # (xmin > xmax), the same reading _check_bbox_contains_data applies.
+        wrapped = xmin > xmax
 
         limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 
@@ -2513,9 +2519,8 @@ def _check_native_geo_stats_contains_data(
         query = f"""
             SELECT COUNT(*) as total,
                    COUNT(CASE WHEN
-                       ST_XMin({quote_identifier(geom_col)}) >= {xmin} AND
+                       {_x_within_sql(quote_identifier(geom_col), xmin, xmax)} AND
                        ST_YMin({quote_identifier(geom_col)}) >= {ymin} AND
-                       ST_XMax({quote_identifier(geom_col)}) <= {xmax} AND
                        ST_YMax({quote_identifier(geom_col)}) <= {ymax}
                    THEN 1 END) as within_bbox
             FROM (
@@ -2539,17 +2544,25 @@ def _check_native_geo_stats_contains_data(
                     message="no non-empty geometries to check against geospatial statistics",
                     category="parquet_geo_types",
                 )
+            # The wrap reading must never be invisible in the check output.
+            wrap_note = (
+                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)"
+                if wrapped
+                else ""
+            )
             if total == within:
                 return ValidationCheck(
                     name=f"native_geo_stats_contains_data_{geom_col}",
                     status=CheckStatus.PASSED,
-                    message=f"all geometries fall within geospatial statistics ({total} checked)",
+                    message=f"all geometries fall within geospatial statistics "
+                    f"({total} checked){wrap_note}",
                     category="parquet_geo_types",
                 )
             return ValidationCheck(
                 name=f"native_geo_stats_contains_data_{geom_col}",
                 status=CheckStatus.FAILED,
-                message=f"{total - within} of {total} geometries fall outside geospatial statistics",
+                message=f"{total - within} of {total} geometries fall outside "
+                f"geospatial statistics{wrap_note}",
                 category="parquet_geo_types",
             )
 

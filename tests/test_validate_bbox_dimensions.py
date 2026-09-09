@@ -1,4 +1,9 @@
-"""bbox checks for 6-element (XYZ) and 8-element (XYZM) bboxes and antimeridian extents (#603)."""
+"""bbox checks for 6-element (XYZ) and 8-element (XYZM) bboxes and antimeridian extents.
+
+Covers the validate checks (#603) and the same two bug classes where they survived
+outside them: the partition summary's bbox merge and the native geospatial
+statistics aggregate (#886).
+"""
 
 import json
 
@@ -6,10 +11,14 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.common import get_duckdb_connection
+from geoparquet_io.core.crs_utils import merge_longitude_ranges
+from geoparquet_io.core.duckdb_metadata import aggregate_native_geo_stats
+from geoparquet_io.core.inspect_utils import extract_partition_summary
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_bbox_contains_data,
     _check_bbox_valid,
+    _check_native_geo_stats_contains_data,
     validate_geoparquet,
 )
 
@@ -228,3 +237,108 @@ class TestBboxContainsData:
         assert all(c.status == CheckStatus.PASSED for c in bbox_checks.values()), [
             (c.name, c.message) for c in bbox_checks.values()
         ]
+
+
+def _chunk(xmin, ymin, xmax, ymax, **extra):
+    return {
+        "row_group_id": 0,
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
+        "zmin": None,
+        "zmax": None,
+        "geometry_types": [],
+        **extra,
+    }
+
+
+class TestMergeLongitudeRanges:
+    """The union is taken on the circle, so a wrapping range is not inverted (#886)."""
+
+    def test_plain_ranges_are_min_max(self):
+        assert merge_longitude_ranges([(0.0, 10.0), (-5.0, 4.0)]) == (-5.0, 10.0)
+
+    def test_wrapping_range_survives(self):
+        assert merge_longitude_ranges([(170.0, -170.0)]) == (170.0, -170.0)
+
+    def test_union_with_a_wrapping_range_keeps_the_short_way_round(self):
+        assert merge_longitude_ranges([(170.0, -170.0), (-179.0, -175.0)]) == (170.0, -170.0)
+
+    def test_union_widens_the_wrapping_range(self):
+        # 170 east to -90 spans 100 degrees; -100 west to -170 would span 290.
+        assert merge_longitude_ranges([(170.0, -170.0), (-100.0, -90.0)]) == (170.0, -90.0)
+
+    def test_plain_ranges_that_meet_at_the_antimeridian_stay_min_max(self):
+        # Deliberate: with nothing declaring a wrap, the producer's own reading
+        # of its two extents is kept rather than guessed at.
+        assert merge_longitude_ranges([(170.0, 180.0), (-180.0, -170.0)]) == (-180.0, 180.0)
+
+    def test_no_ranges_is_a_programming_error(self):
+        with pytest.raises(ValueError):
+            merge_longitude_ranges([])
+
+    def test_full_circle_collapses_to_the_whole_world(self):
+        xmin, xmax = merge_longitude_ranges([(170.0, -170.0), (-175.0, 175.0)])
+        assert (xmin, xmax) == (-180.0, 180.0)
+
+
+class TestNativeGeoStatsWrap:
+    """Parquet's own geospatial statistics may wrap the antimeridian (#886)."""
+
+    def test_aggregate_keeps_a_wrapping_extent(self):
+        stats = aggregate_native_geo_stats(
+            [_chunk(175.0, 0.0, -175.0, 5.0), _chunk(178.0, 1.0, 179.0, 2.0)]
+        )
+        assert stats["bbox"] == [175.0, 0.0, -175.0, 5.0]
+
+    def test_aggregate_without_wrap_is_unchanged(self):
+        stats = aggregate_native_geo_stats(
+            [_chunk(0.0, 0.0, 10.0, 5.0), _chunk(-5.0, 1.0, 4.0, 20.0)]
+        )
+        assert stats["bbox"] == [-5.0, 0.0, 10.0, 20.0]
+
+    def test_check_accepts_data_inside_a_wrapping_stat(self, antimeridian_file, con, monkeypatch):
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
+            lambda *a, **k: {"bbox": [170.0, -10.0, -170.0, 10.0]},
+        )
+        check = _check_native_geo_stats_contains_data(str(antimeridian_file), "geometry", con, 0)
+        assert check.status == CheckStatus.PASSED, check.message
+        assert "antimeridian" in check.message
+
+    def test_check_still_fails_geometry_in_the_wrap_gap(self, tmp_path, con, monkeypatch):
+        path = _write_v2(tmp_path / "gap_stats.parquet", ["POINT (175 0)", "POINT (0 0)"])
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
+            lambda *a, **k: {"bbox": [170.0, -10.0, -170.0, 10.0]},
+        )
+        check = _check_native_geo_stats_contains_data(str(path), "geometry", con, 0)
+        assert check.status == CheckStatus.FAILED
+        assert "1 of 2" in check.message
+
+
+class TestPartitionSummaryBbox:
+    """extract_partition_summary read indices 2/3 as xmax/ymax (#886)."""
+
+    def test_six_element_bboxes_merge_on_x_and_y(self, tmp_path, xyz_file):
+        other = _write_v2(
+            tmp_path / "xyz2.parquet",
+            ["POLYGON Z ((10 10 5, 12 10 5, 12 12 5, 10 12 5, 10 10 5))"],
+        )
+        assert len(_declared_bbox(xyz_file)) == 6
+        summary = extract_partition_summary([str(xyz_file), str(other)])
+        assert summary["combined_bbox"] == [0.0, 0.0, 12.0, 12.0]
+
+    def test_wrapping_bboxes_merge_on_the_circle(self, tmp_path, xyz_file):
+        wrapped = _rewrite_geo(
+            xyz_file, tmp_path / "wrap.parquet", bbox=[170.0, -10.0, -170.0, 10.0]
+        )
+        near = _rewrite_geo(xyz_file, tmp_path / "near.parquet", bbox=[-179.0, -5.0, -175.0, 5.0])
+        summary = extract_partition_summary([str(wrapped), str(near)])
+        assert summary["combined_bbox"] == [170.0, -10.0, -170.0, 10.0]
+
+    def test_short_bbox_is_ignored(self, tmp_path, xyz_file):
+        broken = _rewrite_geo(xyz_file, tmp_path / "broken.parquet", bbox=[0.0, 0.0, 1.0])
+        summary = extract_partition_summary([str(broken)])
+        assert summary["combined_bbox"] is None
