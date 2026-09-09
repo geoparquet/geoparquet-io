@@ -389,8 +389,8 @@ class TestBboxFiltersWithVarchar:
             "0,0,10,10", "geom", use_server_side=True, is_native_geometry=True
         )
         assert len(bq_filters) == 1
-        assert "ST_INTERSECTS(geom," in bq_filters[0]
-        assert "ST_GEOGFROMTEXT(geom" not in bq_filters[0]
+        assert "ST_INTERSECTS(`geom`," in bq_filters[0]
+        assert "ST_GEOGFROMTEXT(`geom`" not in bq_filters[0]
 
     def test_bbox_filter_varchar_wkt(self):
         """Test that VARCHAR WKT columns wrap with ST_GEOGFROMTEXT."""
@@ -404,7 +404,7 @@ class TestBboxFiltersWithVarchar:
             geometry_format="wkt",
         )
         assert len(bq_filters) == 1
-        assert "ST_GEOGFROMTEXT(geom)" in bq_filters[0]
+        assert "ST_GEOGFROMTEXT(`geom`)" in bq_filters[0]
 
     def test_bbox_filter_varchar_geojson(self):
         """Test that VARCHAR GeoJSON columns wrap with ST_GEOGFROMGEOJSON."""
@@ -418,7 +418,7 @@ class TestBboxFiltersWithVarchar:
             geometry_format="geojson",
         )
         assert len(bq_filters) == 1
-        assert "ST_GEOGFROMGEOJSON(geom)" in bq_filters[0]
+        assert "ST_GEOGFROMGEOJSON(`geom`)" in bq_filters[0]
 
     def test_local_filter_varchar_wkt(self):
         """Test that local filtering wraps VARCHAR WKT with ST_GeomFromText."""
@@ -558,6 +558,210 @@ class TestWhereClauseCannotSwallowLaterClauses:
         live_sql = _strip_line_comments(sql)
         assert "ST_Intersects" in live_sql
         assert "LIMIT 10" in live_sql
+
+
+def _filter_literal(sql: str) -> str:
+    """Decode the ``filter='...'`` DuckDB string literal out of a bigquery_scan call.
+
+    DuckDB itself does the decoding, so the assertion is about what the BigQuery
+    extension actually receives, not about how the Python f-string looked.
+    """
+    literal = sql.split("filter=", 1)[1].rsplit(")", 1)[0]
+    con = duckdb.connect()
+    try:
+        return con.execute(f"SELECT {literal}").fetchone()[0]
+    finally:
+        con.close()
+
+
+class TestGeometryIdentifierQuoting:
+    """The geometry column name is BigQuery schema text, so it must be quoted.
+
+    ``geom_col`` comes from ``_detect_geometry_column_from_schema`` (a DESCRIBE
+    over the remote table), so the *table publisher* chooses the string. A
+    BigQuery flexible column name may legally contain an apostrophe, and the
+    server-side filter is carried inside a DuckDB ``filter='...'`` literal, so an
+    unescaped name breaks out of that literal. See gpio #932.
+
+    Two dialects are in play and they disagree: DuckDB quotes identifiers with
+    ``"..."`` while BigQuery reads ``"..."`` as a STRING literal and quotes
+    identifiers with backticks.
+    """
+
+    # Legal as a BigQuery flexible column name (apostrophe is in the allowed
+    # set), and an apostrophe is exactly what closes the DuckDB filter literal.
+    HOSTILE = "geom') OR (1=1) OR ('x"
+    # DuckDB's own delimiter, for the local-filter branch.
+    HOSTILE_DUCKDB = 'geom") OR (1=1) OR ("x'
+
+    def test_bq_native_filter_backtick_quotes_the_column(self):
+        from geoparquet_io.core.extract_bigquery import _build_bbox_filters
+
+        bq_filters, _ = _build_bbox_filters(
+            "0,0,10,10", "geom", use_server_side=True, is_native_geometry=True
+        )
+        assert bq_filters[0].startswith("ST_INTERSECTS(`geom`,")
+        # A double-quoted name would be a BigQuery STRING literal, not the column.
+        assert '"geom"' not in bq_filters[0]
+
+    def test_bq_varchar_wkt_filter_backtick_quotes_the_column(self):
+        from geoparquet_io.core.extract_bigquery import _build_bbox_filters
+
+        bq_filters, _ = _build_bbox_filters(
+            "0,0,10,10",
+            "geom",
+            use_server_side=True,
+            is_native_geometry=False,
+            geometry_format="wkt",
+        )
+        assert "ST_GEOGFROMTEXT(`geom`)" in bq_filters[0]
+
+    def test_bq_varchar_geojson_filter_backtick_quotes_the_column(self):
+        from geoparquet_io.core.extract_bigquery import _build_bbox_filters
+
+        bq_filters, _ = _build_bbox_filters(
+            "0,0,10,10",
+            "geom",
+            use_server_side=True,
+            is_native_geometry=False,
+            geometry_format="geojson",
+        )
+        assert "ST_GEOGFROMGEOJSON(`geom`)" in bq_filters[0]
+
+    @pytest.mark.parametrize(
+        ("is_native", "geometry_format", "expected"),
+        [
+            (True, "wkt", 'ST_Intersects("weird ""geom""",'),
+            (False, "wkt", 'ST_GeomFromText("weird ""geom""")'),
+            (False, "geojson", 'ST_GeomFromGeoJSON("weird ""geom""")'),
+        ],
+    )
+    def test_local_filter_quotes_the_column_for_duckdb(self, is_native, geometry_format, expected):
+        """The local branch is DuckDB SQL, so it needs doubled double quotes."""
+        from geoparquet_io.core.extract_bigquery import _build_bbox_filters
+
+        _, local = _build_bbox_filters(
+            "0,0,10,10",
+            'weird "geom"',
+            use_server_side=False,
+            is_native_geometry=is_native,
+            geometry_format=geometry_format,
+        )
+        assert expected in local[0]
+
+    def test_local_filter_with_hostile_name_stays_one_expression(self):
+        from geoparquet_io.core.extract_bigquery import _build_bbox_filters
+
+        _, local = _build_bbox_filters(
+            "0,0,10,10", self.HOSTILE_DUCKDB, use_server_side=False, is_native_geometry=True
+        )
+        # The whole hostile name stays inside one quoted identifier: the ')' and
+        # 'OR' are data, not query structure.
+        assert local[0].startswith('ST_Intersects("geom"") OR (1=1) OR (""x",')
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            # Parses as one expression referencing a column that does not exist,
+            # rather than as an injected disjunction that evaluates to TRUE.
+            with pytest.raises(duckdb.Error, match="not found|Referenced column"):
+                con.execute(f"SELECT {local[0]}")
+        finally:
+            con.close()
+
+    def test_apostrophe_column_round_trips_through_the_filter_literal(self):
+        """A legal BigQuery flexible column name with an apostrophe must survive."""
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="project.dataset.table",
+            select_cols="*",
+            bbox="0,0,10,10",
+            bbox_mode="server",
+            bbox_threshold=1000,
+            geom_col="o'brien geom",
+            where=None,
+            limit=None,
+        )
+        assert len(duckdb.extract_statements(sql)) == 1
+        assert _filter_literal(sql).startswith("ST_INTERSECTS(`o'brien geom`,")
+
+    def test_hostile_column_cannot_change_the_query_shape(self):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="project.dataset.table",
+            select_cols="*",
+            bbox="0,0,10,10",
+            bbox_mode="server",
+            bbox_threshold=1000,
+            geom_col=self.HOSTILE,
+            where=None,
+            limit=None,
+        )
+        # One DuckDB statement, and the whole hostile name is still one
+        # backtick-quoted BigQuery identifier.
+        assert len(duckdb.extract_statements(sql)) == 1
+        assert _filter_literal(sql).startswith(f"ST_INTERSECTS(`{self.HOSTILE}`,")
+
+    def test_backtick_in_name_is_escaped_for_bigquery(self):
+        from geoparquet_io.core.extract_bigquery import _quote_bigquery_identifier
+
+        assert _quote_bigquery_identifier("a`b") == "`a\\`b`"
+        assert _quote_bigquery_identifier("a\\b") == "`a\\\\b`"
+
+    @pytest.mark.parametrize("bad", ["", "a\x00b"])
+    def test_unquotable_bigquery_name_is_rejected(self, bad):
+        from geoparquet_io.core.extract_bigquery import _quote_bigquery_identifier
+
+        with pytest.raises(ValueError):
+            _quote_bigquery_identifier(bad)
+
+    def test_local_schema_lookup_quotes_the_table_name(self):
+        """The table_source="local" branch interpolated the table name bare."""
+        from geoparquet_io.core.extract_bigquery import _resolve_column_name
+
+        con = duckdb.connect()
+        try:
+            con.execute('CREATE TABLE "odd ""name"" tbl" AS SELECT 1 AS Id')
+            assert _resolve_column_name(con, 'odd "name" tbl', "id", table_source="local") == "Id"
+        finally:
+            con.close()
+
+    def test_dry_run_server_sql_is_unchanged(self):
+        """The dry-run display escapes once too, and must render identically."""
+        from geoparquet_io.core.extract_bigquery import _build_dry_run_query
+
+        query = _build_dry_run_query(
+            "project.dataset.table", "*", "0,0,1,1", bbox_mode="server", bbox_threshold=1000
+        )
+        assert query == (
+            "SELECT * FROM bigquery_scan('project.dataset.table', "
+            "filter='ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT(''POLYGON((0.0 0.0, "
+            "1.0 0.0, 1.0 1.0, 0.0 1.0, 0.0 0.0))''))')"
+        )
+
+    def test_plain_name_query_text_is_unchanged(self):
+        """Relayering the escape must not alter the SQL emitted for ordinary names."""
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        sql = _build_bigquery_query(
+            con=None,
+            validated_table_id="project.dataset.table",
+            select_cols="*",
+            bbox="0,0,1,1",
+            bbox_mode="server",
+            bbox_threshold=1000,
+            geom_col="geom",
+            where=None,
+            limit=None,
+        )
+        assert sql == (
+            "SELECT * FROM bigquery_scan('project.dataset.table', "
+            "filter='ST_INTERSECTS(`geom`, ST_GEOGFROMTEXT(''POLYGON((0.0 0.0, "
+            "1.0 0.0, 1.0 1.0, 0.0 1.0, 0.0 0.0))''))')"
+        )
 
 
 class TestPythonAPI:

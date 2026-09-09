@@ -15,6 +15,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
     get_duckdb_connection,
     quote_identifier,
     validate_where_clause,
@@ -37,6 +38,38 @@ from geoparquet_io.core.write_strategies.duckdb_kv import validate_memory_limit
 _PROJECT_ID_PATTERN = r"^[a-z][a-z0-9\-]{5,29}$"
 # Table ID parts: alphanumeric with underscores and hyphens
 _TABLE_PART_PATTERN = r"^[a-zA-Z0-9_\-]+$"
+
+
+def _quote_bigquery_identifier(name: str) -> str:
+    """Quote a RAW identifier for **BigQuery** (GoogleSQL), not for DuckDB.
+
+    The two dialects disagree about the delimiter, so they need different
+    helpers. GoogleSQL quotes identifiers with backticks and reads ``"..."`` as
+    a *string literal*: running :func:`quote_identifier` output through BigQuery
+    would silently compare a constant instead of the column. Inside backticks
+    GoogleSQL applies the string-literal escape sequences, so a backslash and
+    the delimiter itself are backslash-escaped.
+
+    Like :func:`quote_identifier`, this takes a **bare** name exactly as it
+    appears in the table's schema and is deliberately not idempotent -- escaping
+    an already-quoted name embeds the backticks in the identifier.
+
+    Args:
+        name: The identifier to quote, raw and unescaped
+
+    Returns:
+        The name as a backtick-quoted GoogleSQL identifier
+
+    Raises:
+        ValueError: If the name is empty or contains a NUL byte, neither of
+            which has a quoted GoogleSQL spelling.
+    """
+    if not name:
+        raise ValueError("Cannot quote an empty BigQuery identifier")
+    if "\x00" in name:
+        raise ValueError(f"BigQuery identifier contains a NUL byte: {name!r}")
+    escaped = name.replace("\\", "\\\\").replace("`", "\\`")
+    return f"`{escaped}`"
 
 
 def _validate_project_id(project: str) -> str:
@@ -398,7 +431,7 @@ def _detect_geometry_column_from_schema(
     if table_source == "bigquery":
         schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
     else:
-        schema_query = f"DESCRIBE SELECT * FROM {table_id} LIMIT 0"
+        schema_query = f"DESCRIBE SELECT * FROM {quote_identifier(table_id)} LIMIT 0"
     schema_result = con.execute(schema_query).fetchall()
 
     geometry_cols = []
@@ -478,7 +511,7 @@ def _resolve_column_name(
     if table_source == "bigquery":
         schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
     else:
-        schema_query = f"DESCRIBE SELECT * FROM {table_id} LIMIT 0"
+        schema_query = f"DESCRIBE SELECT * FROM {quote_identifier(table_id)} LIMIT 0"
     schema_result = con.execute(schema_query).fetchall()
     for row in schema_result:
         if row[0].lower() == column_name.lower():
@@ -618,9 +651,13 @@ def _build_dry_run_query(
         query = f"SELECT {select_cols} FROM bigquery_scan('{table_id}')"
         query += f" WHERE ST_Intersects(<geometry_column>, ST_GeomFromText('{wkt}'))"
     else:
-        # Server or auto mode - show server-side as example
-        bq_filter = f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT(''{wkt}''))"
-        query = f"SELECT {select_cols} FROM bigquery_scan('{table_id}', filter='{bq_filter}')"
+        # Server or auto mode - show server-side as example. Escaped once here,
+        # mirroring the real path in _build_bigquery_query.
+        bq_filter = f"ST_INTERSECTS(<geometry_column>, ST_GEOGFROMTEXT('{wkt}'))"
+        query = (
+            f"SELECT {select_cols} FROM bigquery_scan("
+            f"'{table_id}', filter='{_escape_sql_string(bq_filter)}')"
+        )
 
     return query
 
@@ -709,7 +746,9 @@ def _build_bbox_filters(
         geometry_format: Format of VARCHAR geometry columns ("wkt" or "geojson")
 
     Returns:
-        Tuple of (bq_filters list, local_conditions list)
+        Tuple of (bq_filters list, local_conditions list). The BigQuery filters
+        are returned as plain GoogleSQL -- the caller escapes them once when
+        embedding them in the ``filter='...'`` DuckDB string literal.
     """
     xmin, ymin, xmax, ymax = parse_bbox(bbox)
     wkt = f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, {xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
@@ -718,35 +757,34 @@ def _build_bbox_filters(
     local_conditions = []
 
     if use_server_side:
-        # BigQuery server-side filter
+        # BigQuery server-side filter. GoogleSQL dialect: identifiers are
+        # backtick-quoted, because "..." is a STRING literal here.
+        bq_col = _quote_bigquery_identifier(geom_col)
         if is_native_geometry:
             # Native GEOGRAPHY column - use directly
-            bbox_filter = f"ST_INTERSECTS({geom_col}, ST_GEOGFROMTEXT(''{wkt}''))"
+            bbox_filter = f"ST_INTERSECTS({bq_col}, ST_GEOGFROMTEXT('{wkt}'))"
         elif geometry_format == "geojson":
             # VARCHAR with GeoJSON - parse first
-            bbox_filter = (
-                f"ST_INTERSECTS(ST_GEOGFROMGEOJSON({geom_col}), ST_GEOGFROMTEXT(''{wkt}''))"
-            )
+            bbox_filter = f"ST_INTERSECTS(ST_GEOGFROMGEOJSON({bq_col}), ST_GEOGFROMTEXT('{wkt}'))"
         else:
             # VARCHAR with WKT - parse first
-            bbox_filter = f"ST_INTERSECTS(ST_GEOGFROMTEXT({geom_col}), ST_GEOGFROMTEXT(''{wkt}''))"
+            bbox_filter = f"ST_INTERSECTS(ST_GEOGFROMTEXT({bq_col}), ST_GEOGFROMTEXT('{wkt}'))"
         bq_filters.append(bbox_filter)
         debug(f"BigQuery filter: {bbox_filter}")
     else:
-        # DuckDB local filter
+        # DuckDB local filter - DuckDB dialect, so quote_identifier applies.
+        local_col = quote_identifier(geom_col)
         if is_native_geometry:
             # Native GEOMETRY column - use directly
-            bbox_filter = f"ST_Intersects(\"{geom_col}\", ST_GeomFromText('{wkt}'))"
+            bbox_filter = f"ST_Intersects({local_col}, ST_GeomFromText('{wkt}'))"
         elif geometry_format == "geojson":
             # VARCHAR with GeoJSON - parse first
             bbox_filter = (
-                f"ST_Intersects(ST_GeomFromGeoJSON(\"{geom_col}\"), ST_GeomFromText('{wkt}'))"
+                f"ST_Intersects(ST_GeomFromGeoJSON({local_col}), ST_GeomFromText('{wkt}'))"
             )
         else:
             # VARCHAR with WKT - parse first
-            bbox_filter = (
-                f"ST_Intersects(ST_GeomFromText(\"{geom_col}\"), ST_GeomFromText('{wkt}'))"
-            )
+            bbox_filter = f"ST_Intersects(ST_GeomFromText({local_col}), ST_GeomFromText('{wkt}'))"
         local_conditions.append(bbox_filter)
         debug(f"DuckDB filter: {bbox_filter}")
 
@@ -1073,7 +1111,10 @@ def _build_bigquery_query(
 
     # Build base query
     if bq_filters:
-        filter_str = " AND ".join(bq_filters)
+        # The GoogleSQL filter travels inside a DuckDB string literal, so it is
+        # escaped once, here, at the point of interpolation. A BigQuery flexible
+        # column name may legally contain an apostrophe (gpio #932).
+        filter_str = _escape_sql_string(" AND ".join(bq_filters))
         query = (
             f"SELECT {select_cols} FROM bigquery_scan('{validated_table_id}', "
             f"filter='{filter_str}')"

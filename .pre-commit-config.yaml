@@ -127,12 +127,13 @@ repos:
             # f-string: extract.py's `f"ST_Intersects(\"{geometry_col}\", ...)"`
             # (#936) was the same bug mid-string and slipped straight past the
             # anchored version of this rule.
-            # core/extract_bigquery.py is exempt by path, not because it is
-            # clean: BigQuery reads "..." as a STRING literal, so its sites need
-            # backticks rather than quote_identifier and are tracked in #932.
+            # core/extract_bigquery.py used to be exempt by path (#932). Its
+            # DuckDB-side sites now use quote_identifier and its BigQuery-side
+            # sites use _quote_bigquery_identifier -- GoogleSQL reads "..." as a
+            # STRING literal, so identifiers there are backtick-quoted -- so the
+            # rule applies to it like everywhere else.
             if grep -rnE 'f'"'"'"\{|\\"\{|\.replace\('"'"'"'"'"', '"'"'""'"'"'\)' geoparquet_io/ --include="*.py" \
                 | grep -v '^geoparquet_io/core/duckdb_utils.py:' \
-                | grep -v '^geoparquet_io/core/extract_bigquery.py:' \
                 | grep -v 'allow-manual-quote' \
                 | awk -F: '$3 !~ /^[[:space:]]*#/' | grep .; then
               echo "ERROR: Do not hand-roll SQL identifier quoting."
