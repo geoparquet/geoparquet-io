@@ -153,8 +153,13 @@ passed at 2.0.
 
 Checks row group size optimization for cloud-native access.
 
+The check reports two numbers, and they answer different questions:
+
+- **The verdict is 10,000-200,000 rows per group.** This is what passes or fails, and it is deliberately wide: it has to accept the layouts mainstream writers produce at their own defaults — DuckDB writes 122,880 rows per group, gpio's general write default lands at 100,352, and `gpio sort` writes 51,200. A pass/fail band that excluded all of those would be reporting on the ecosystem rather than on your file. Outside it the check reports `suboptimal`, and below 2,000 or above 1,000,000 rows, `poor`.
+- **The advice is 10,000-50,000 rows per group**, for spatial queries. This is the band with measurements behind it, so a file can sit inside the verdict band and still be worth re-sorting.
+
 !!! tip "Spatial filter pushdown and row group sizing"
-    For GeoParquet 2.0 or parquet-geo-only files with Hilbert sorting, row groups of 10,000-50,000 rows create tighter bounding boxes that enable more row group skipping during spatial queries. The `gpio sort` commands default to 50,000 rows per group, the top of that band, so a freshly sorted file already sits inside it.
+    For GeoParquet 2.0 or parquet-geo-only files with Hilbert sorting, row groups of 10,000-50,000 rows create tighter bounding boxes that enable more row group skipping during spatial queries. Re-sorting nine published catalog files from 100,000 to 50,000 rows per group cut the share of the file a query window covering 10% of each dimension has to read from 43-100% down to 10-28% ([#775](https://github.com/geoparquet/geoparquet-io/issues/775)). The `gpio sort` commands default to 50,000 rows per group, the top of that band, so a freshly sorted file already sits inside it, and `gpio check optimization` scores the same band as one of its five factors.
 
 ### Optimization Check
 

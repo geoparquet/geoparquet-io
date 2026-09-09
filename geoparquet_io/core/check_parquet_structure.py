@@ -12,6 +12,35 @@ from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 #: Shared with ``check_optimization`` so both checks word it the same way (#823).
 _NO_COMPRESSION_INFO = "No compression information available (file has no row groups)"
 
+#: The band ``check row-group`` passes or fails a file on.
+#:
+#: It is deliberately wide, because a *verdict* has to accept the layouts the
+#: writers people actually use produce at their own defaults: DuckDB writes
+#: 122,880 rows per group, gpio's own general write default lands at 100,352
+#: (100,000 rounded up to a multiple of 2,048), and ``gpio sort`` writes 51,200.
+#: A pass/fail band that excludes all of those is reporting on the ecosystem
+#: rather than on the file in front of it.
+GENERAL_ROW_COUNT_RANGE = (10_000, 200_000)
+
+#: The narrower band that makes *spatial* filters prune, which the check gives
+#: as advice rather than as a verdict.
+#:
+#: A row group is the unit a spatial predicate skips, so fewer rows per group
+#: means tighter per-group bounding boxes and less of the file read. Measured on
+#: nine published catalogue files (#775), moving from 100,000 to 50,000 rows per
+#: group cut the share of the file a query window covering 10% of each dimension
+#: must read from 43-100% down to 10-28%. Nothing measures the top of
+#: GENERAL_ROW_COUNT_RANGE the same way, so where the two bands disagree this is
+#: the one with evidence behind it -- it is what ``gpio sort`` defaults to (the
+#: top of the band), what ``gpio check optimization`` scores, and what
+#: docs/guide/check.md and docs/guide/sort.md quote.
+#:
+#: The two bands are not rival answers to one question (#795): a file can sit
+#: inside the general band and still prune badly, so the messages below say
+#: which band they are talking about instead of calling one of them "optimal"
+#: full stop.
+SPATIAL_ROW_COUNT_RANGE = (10_000, 50_000)
+
 
 class CheckProfile(str, Enum):
     """
@@ -118,13 +147,18 @@ def assess_row_count(avg_rows, total_size_bytes=None, num_groups=None):
             - "poor"
 
     Note:
-        The 10,000-200,000 band below is wider than the 10,000-50,000 this same
-        command *advises* for spatial queries, so a file can be reported optimal
-        and still miss the advice printed under it. Narrowing it would reclassify
-        already-published files and change the optimization score, so it is a
-        product decision tracked in #795 rather than something #775 changed while
-        lowering the ``gpio sort`` default.
+        The verdict is GENERAL_ROW_COUNT_RANGE; SPATIAL_ROW_COUNT_RANGE is
+        narrower and is advice. A file inside the first but outside the second
+        is still "optimal" -- it is laid out the way mainstream writers lay
+        files out -- but the message says so rather than claiming the file has
+        nothing left to gain, which is what made the verdict contradict the
+        guidelines printed under it (#795).
     """
+    general_low, general_high = GENERAL_ROW_COUNT_RANGE
+    spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
+    general_band = f"{general_low:,}-{general_high:,}"
+    spatial_band = f"{spatial_low:,}-{spatial_high:,}"
+
     # For small files with a single row group, any row count is fine
     if total_size_bytes is not None and num_groups is not None:
         total_size_mb = total_size_bytes / (1024 * 1024)
@@ -134,21 +168,28 @@ def assess_row_count(avg_rows, total_size_bytes=None, num_groups=None):
     if avg_rows < 2000:
         return (
             "poor",
-            "Row count per group is very low. Target 10,000-200,000 rows per group",
+            f"Row count per group is very low. Target {general_band} rows per group",
             "red",
         )
     elif avg_rows > 1000000:
         return (
             "poor",
-            "Row count per group is very high. Target 10,000-200,000 rows per group",
+            f"Row count per group is very high. Target {general_band} rows per group",
             "red",
         )
-    elif 10000 <= avg_rows <= 200000:
+    elif general_low <= avg_rows <= general_high:
+        if avg_rows > spatial_high:
+            return (
+                "optimal",
+                f"Row count per group is optimal for general use ({general_band}); "
+                f"spatial queries prune more with {spatial_band} rows per group",
+                "green",
+            )
         return "optimal", "Row count per group is optimal", "green"
     else:
         return (
             "suboptimal",
-            "Row count per group is outside recommended range (10,000-200,000)",
+            f"Row count per group is outside recommended range ({general_band})",
             "yellow",
         )
 
@@ -215,7 +256,9 @@ def check_row_groups(
 
     if row_status != "optimal":
         issues.append(row_message)
-        recommendations.append("Target 10,000-200,000 rows per group")
+        recommendations.append(
+            f"Target {GENERAL_ROW_COUNT_RANGE[0]:,}-{GENERAL_ROW_COUNT_RANGE[1]:,} rows per group"
+        )
 
     results = {
         "passed": passed,
@@ -260,13 +303,18 @@ def check_row_groups(
         progress(f"\nTotal file size: {format_size(stats['total_size'])}")
 
         if size_status != "optimal" or row_status != "optimal":
+            general_low, general_high = GENERAL_ROW_COUNT_RANGE
+            spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
             progress("\nRow Group Guidelines:")
             progress("- Optimal size: 64-256 MB per row group")
-            progress("- Optimal rows: 10,000-200,000 rows per group")
+            progress(
+                f"- Optimal rows: {general_low:,}-{general_high:,} rows per group (general use)"
+            )
             progress("- Small files (<64 MB): single row group is fine")
             progress(
-                "- Spatial queries: 10,000-50,000 rows per group with Hilbert sorting "
-                "and GeoParquet v2.0 enables optimal row group skipping"
+                f"- Spatial queries: {spatial_low:,}-{spatial_high:,} rows per group with "
+                "Hilbert sorting and GeoParquet v2.0 enables optimal row group skipping "
+                f"(gpio sort defaults to {spatial_high:,})"
             )
 
     if return_results:

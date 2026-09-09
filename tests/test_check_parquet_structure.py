@@ -6,6 +6,8 @@ Fixtures used in this module:
 """
 
 from geoparquet_io.core.check_parquet_structure import (
+    GENERAL_ROW_COUNT_RANGE,
+    SPATIAL_ROW_COUNT_RANGE,
     CheckProfile,
     assess_row_count,
     assess_row_group_size,
@@ -161,6 +163,101 @@ class TestAssessRowCount:
         assert status == "optimal"
         assert color == "green"
         assert "appropriate for small file" in message
+
+
+class TestRowCountBands:
+    """The two row-count bands must not contradict each other (#795).
+
+    ``gpio check`` carries a wide pass/fail band and a narrower band it
+    *advises* for spatial pruning. Both are legitimate, but every place that
+    quotes either one has to quote the same numbers.
+    """
+
+    def test_general_band_accepts_mainstream_writer_defaults(self):
+        """The pass/fail band must not fail files at a writer's own default.
+
+        gpio's general write default lands at 100,352 rows (100,000 rounded up
+        to a multiple of 2,048), DuckDB writes 122,880, and ``gpio sort``
+        writes 51,200. A verdict band that fails those is reporting on the
+        ecosystem, not on the file.
+        """
+        for rows in (51_200, 100_352, 122_880):
+            status, _message, _color = assess_row_count(rows)
+            assert status == "optimal", f"{rows:,} rows per group should not fail the check"
+
+    def test_spatial_band_top_is_the_sort_default(self):
+        """``gpio sort``'s default is the top of the band ``check`` advises."""
+        from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
+
+        assert SPATIAL_ROW_COUNT_RANGE[1] == DEFAULT_SORT_ROW_GROUP_ROWS
+
+    def test_optimization_check_scores_the_same_spatial_band(self, monkeypatch):
+        """``check optimization``'s row-group factor scores this exact band."""
+        from geoparquet_io.core import check_parquet_structure as structure
+        from geoparquet_io.core.check_optimization import _check_row_group_size
+
+        low, high = SPATIAL_ROW_COUNT_RANGE
+
+        def scored(avg_rows):
+            monkeypatch.setattr(
+                structure,
+                "get_row_group_stats",
+                lambda _f: {
+                    "avg_rows_per_group": avg_rows,
+                    "total_size": 200 * 1024 * 1024,
+                    "num_groups": 8,
+                },
+            )
+            return _check_row_group_size("ignored.parquet")["passed"]
+
+        assert scored(low) is True
+        assert scored(high) is True
+        assert scored(low - 1) is False
+        assert scored(high + 1) is False
+
+    def test_optimal_above_the_spatial_band_names_the_spatial_band(self):
+        """A verdict of "optimal" must say what it is optimal *for*.
+
+        Otherwise ``check row-group`` prints "Row count per group is optimal"
+        for a 150,000-row group and, in the next breath, advises 10,000-50,000.
+        """
+        status, message, color = assess_row_count(150_000)
+        assert status == "optimal"
+        assert color == "green"
+        assert "10,000-50,000" in message
+
+    def test_optimal_inside_the_spatial_band_is_unqualified(self):
+        """Inside both bands there is nothing to qualify."""
+        status, message, _color = assess_row_count(30_000)
+        assert status == "optimal"
+        assert "10,000-50,000" not in message
+
+    def test_printed_guidelines_label_each_band(self, monkeypatch, caplog):
+        """The two printed guideline lines must say which workload each is for."""
+        import logging
+
+        from geoparquet_io.core import check_parquet_structure as structure
+
+        monkeypatch.setattr(
+            structure,
+            "get_row_group_stats",
+            lambda _f: {
+                "avg_rows_per_group": 5_000,  # suboptimal, so guidelines print
+                "total_size": 200 * 1024 * 1024,
+                "num_groups": 40,
+                "avg_group_size": 5 * 1024 * 1024,
+            },
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            check_row_groups("ignored.parquet", verbose=False, return_results=False)
+
+        printed = "\n".join(record.message for record in caplog.records)
+        general_low, general_high = GENERAL_ROW_COUNT_RANGE
+        spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
+        assert f"{general_low:,}-{general_high:,} rows per group (general use)" in printed
+        assert f"{spatial_low:,}-{spatial_high:,} rows per group" in printed
+        assert f"gpio sort defaults to {spatial_high:,}" in printed
 
 
 class TestGetRowGroupStats:
