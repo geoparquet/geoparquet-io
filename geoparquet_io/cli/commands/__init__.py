@@ -2,7 +2,8 @@
 
 One module per top-level command group. Each module declares its group with
 ``@click.group()`` - passing ``cls=`` when the group needs a default subcommand
-or custom argument parsing, as ``convert``, ``extract`` and ``inspect`` do - and
+or custom argument parsing, as ``check``, ``convert``, ``extract`` and
+``inspect`` do - and
 its subcommands with ``@<group>.command(...)``. A group may also nest a subgroup
 with ``@<group>.group(...)``, as ``process`` does for ``gpio process aggregate``.
 ``cli/main.py`` imports the group object and attaches it to the root group with

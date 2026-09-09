@@ -44,8 +44,8 @@ docs = ["docs/guide/stac.md"]
 code = "geoparquet_io/cli/main.py"
 docs = ["docs/contributing.md"]
 
-# main.py keeps the root group, global options and the `check`/`skills` commands;
-# every other group now lives in cli/commands/<group>.py. Adding or changing a
+# main.py keeps the root group, global options and the `skills` command; every
+# command group now lives in cli/commands/<group>.py. Adding or changing a
 # subcommand there goes stale in exactly the same docs, so the group modules carry
 # the same links. Without this, a new `gpio add foo` touches only cli/commands/add.py
 # and menard reports "up-to-date" while the prose it guards rots.
