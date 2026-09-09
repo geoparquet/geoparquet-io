@@ -224,6 +224,7 @@ module = [
     # before it was moved out into its own group module, unchanged.
     "geoparquet_io.cli.commands.add",
     "geoparquet_io.cli.commands.benchmark",
+    "geoparquet_io.cli.commands.partition",
     "geoparquet_io.cli.decorators",
     "geoparquet_io.cli.main",
     "geoparquet_io.core.add.a5",

@@ -88,6 +88,7 @@ from geoparquet_io.api import table as table_module
 from geoparquet_io.cli import main as cli_main
 from geoparquet_io.cli.commands import add as cli_add
 from geoparquet_io.cli.commands import convert as cli_convert
+from geoparquet_io.cli.commands import partition as cli_partition
 from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.core import extract as core_extract
 from geoparquet_io.core import hilbert_order as core_hilbert
@@ -541,6 +542,7 @@ CASES: list[ParityCase] = [
             "partition_by_h3_impl",
             core_part_h3.partition_by_h3,
             lambda c: ["partition", "h3", c.input_file, c.output_dir, "--resolution", "6"],
+            module=cli_partition,
         ),
         ops=_ops_via_table(
             core_part_h3,
@@ -588,6 +590,7 @@ CASES: list[ParityCase] = [
                 "--partition-resolution",
                 "6",
             ],
+            module=cli_partition,
         ),
         ops=_ops_via_table(
             core_part_quadkey,
