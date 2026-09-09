@@ -121,6 +121,46 @@ class TestStripDerivedStats:
         assert strip_derived_stats(meta)["vecorel"] == '{"a": 1}'
 
 
+class TestStripDerivedStatsColumns:
+    """``columns=`` scopes the strip to the columns a caller actually touched (#890)."""
+
+    def _geo(self):
+        return {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "bbox": [1, 1, 3, 3],
+                    "geometry_types": ["Point"],
+                },
+                "other_geom": {
+                    "encoding": "WKB",
+                    "bbox": [0, 0, 9, 9],
+                    "geometry_types": ["Polygon"],
+                },
+            },
+        }
+
+    def test_scoped_strip_leaves_untouched_column_intact(self):
+        out = strip_derived_stats({"geo": self._geo()}, columns={"geometry"})
+        cols = out["geo"]["columns"]
+        assert "bbox" not in cols["geometry"]
+        assert "geometry_types" not in cols["geometry"]
+        assert cols["other_geom"]["bbox"] == [0, 0, 9, 9]
+        assert cols["other_geom"]["geometry_types"] == ["Polygon"]
+
+    def test_none_still_strips_every_column(self):
+        out = strip_derived_stats({"geo": self._geo()})
+        for col in out["geo"]["columns"].values():
+            assert "bbox" not in col
+            assert "geometry_types" not in col
+
+    def test_unknown_column_name_strips_nothing(self):
+        meta = {"geo": self._geo()}
+        assert strip_derived_stats(meta, columns={"nope"}) == meta
+
+
 def _write_points(path, points, version="1.1"):
     """Write a CRS84 GeoParquet file from ``[(id, wkt), ...]``."""
     from geoparquet_io.core.common import write_parquet_with_metadata

@@ -548,16 +548,9 @@ def _rewrite_geo_metadata(metadata: dict | None, rewrite) -> dict | None:
     return result
 
 
-def _drop_derived_stats(geo_dict: dict) -> dict:
-    """Remove :data:`DERIVED_STAT_KEYS` from every column entry, in place."""
-    for col_meta in (geo_dict.get("columns") or {}).values():
-        if isinstance(col_meta, dict):
-            for key in DERIVED_STAT_KEYS:
-                col_meta.pop(key, None)
-    return geo_dict
-
-
-def strip_derived_stats(metadata: dict | None) -> dict | None:
+def strip_derived_stats(
+    metadata: dict | None, columns: Collection[str] | None = None
+) -> dict | None:
     """Return a copy of Parquet KV ``metadata`` without derived geo stats.
 
     Drops the per-column ``bbox`` and ``geometry_types`` (see
@@ -570,11 +563,30 @@ def strip_derived_stats(metadata: dict | None) -> dict | None:
     per-partition splits, and multi-file merges whose carried metadata came from
     only the first input file.
 
+    ``columns`` limits the strip to those column entries, for a caller that
+    changes coordinates in some geometry columns but not others: reproject
+    transforms only the primary column, so a secondary column's bytes reach the
+    output unchanged and its carried stats still describe them (#890). Dropping
+    them anyway left the output without the ``geometry_types`` GeoParquet 1.1
+    requires — nothing recomputes a secondary column's — and DuckDB then refuses
+    to open the file at all. ``None`` strips every column, which is right for a
+    row filter or a merge: those change every column's rows.
+
     Both ``"geo"`` and ``b"geo"`` keys are handled, and the value is returned in
     the same form (``bytes``/``str``/``dict``) it arrived in. The input is never
     mutated; unparsable ``geo`` values are passed through untouched.
     """
-    return _rewrite_geo_metadata(metadata, _drop_derived_stats)
+
+    def _drop(geo_dict: dict) -> dict:
+        for col_name, col_meta in (geo_dict.get("columns") or {}).items():
+            if columns is not None and col_name not in columns:
+                continue
+            if isinstance(col_meta, dict):
+                for key in DERIVED_STAT_KEYS:
+                    col_meta.pop(key, None)
+        return geo_dict
+
+    return _rewrite_geo_metadata(metadata, _drop)
 
 
 def strip_orientation(metadata: dict | None, column: str) -> dict | None:
