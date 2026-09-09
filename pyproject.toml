@@ -221,7 +221,6 @@ module = [
     "geoparquet_io.api.table",
     "geoparquet_io.benchmarks.profile_report",
     "geoparquet_io.cli.decorators",
-    "geoparquet_io.cli.main",
     "geoparquet_io.core.add.a5",
     "geoparquet_io.core.add.admin_divisions",
     "geoparquet_io.core.add.bbox",
