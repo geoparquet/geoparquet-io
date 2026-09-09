@@ -78,6 +78,28 @@ _DIMENSION_SUFFIXES = {
     3: " ZM",  # ZM dimensions (codes 3001-3007)
 }
 
+# geoarrow's Dimensions enum (XY=1, XYZ=2, XYM=3, XYZM=4) to the WKB type
+# code's dimensional modifier above. UNSPECIFIED (-1) and UNKNOWN (0) have no
+# entry and fall back to 2D, the only reading that claims nothing extra.
+_GEOARROW_DIMENSION_CODES = {1: 0, 2: 1, 3: 2, 4: 3}
+
+
+def geoarrow_wkb_codes(types_struct) -> list[int]:
+    """WKB type codes for a geoarrow ``unique_geometry_types`` result.
+
+    geoarrow reports the base type and the dimensions in two *separate* struct
+    fields, so reading only ``geometry_type`` spells ``Polygon M`` data as
+    ``Polygon`` — dropping a suffix the spec makes part of the type name, and
+    which every other gpio write path emits (#892). Recombining the two fields
+    yields the code :func:`_get_geometry_type_name` already understands.
+    """
+    bases = types_struct.field("geometry_type").to_pylist()
+    dims = types_struct.field("dimensions").to_pylist()
+    return [
+        1000 * _GEOARROW_DIMENSION_CODES.get(dim, 0) + base
+        for base, dim in zip(bases, dims, strict=True)
+    ]
+
 
 # =============================================================================
 # Carried-block shape check
@@ -1237,8 +1259,11 @@ def _compute_geometry_types(table: pa.Table, geometry_column: str, verbose: bool
         wkb_arr = ga.as_wkb(geom_col)
         types_struct = ga.unique_geometry_types(wkb_arr)
 
-        # Extract geometry type codes from struct array
-        type_codes = types_struct.field("geometry_type").to_pylist()
+        # Extract geometry type codes from struct array. geoarrow reports the
+        # base type and the dimensions separately, so the two are recombined
+        # into a WKB code -- reading `geometry_type` alone dropped the " Z" /
+        # " M" / " ZM" the spec makes part of the type name (#892).
+        type_codes = geoarrow_wkb_codes(types_struct)
 
         # Map codes to GeoParquet standard names (avoid duplicates)
         type_names = []

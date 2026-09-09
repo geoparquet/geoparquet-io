@@ -46,6 +46,7 @@ from geoparquet_io.core.geo_metadata import (
     build_bbox_covering,
     create_geo_metadata,
     detect_bbox_column_from_schema,
+    geoarrow_wkb_codes,
     prune_geo_metadata_to_columns,
     sanitize_geo_metadata,
     strip_derived_stats,
@@ -1333,8 +1334,11 @@ def _compute_geometry_types(table, geometry_column: str, verbose: bool) -> list[
         wkb_arr = ga.as_wkb(geom_col)
         types_struct = ga.unique_geometry_types(wkb_arr)
 
-        # Extract geometry type codes from struct array
-        type_codes = types_struct.field("geometry_type").to_pylist()
+        # Extract geometry type codes from struct array. geoarrow reports the
+        # base type and the dimensions separately, so the two are recombined
+        # into a WKB code -- reading `geometry_type` alone dropped the " Z" /
+        # " M" / " ZM" the spec makes part of the type name (#892).
+        type_codes = geoarrow_wkb_codes(types_struct)
 
         # Map codes to GeoParquet standard names (avoid duplicates)
         type_names = []
