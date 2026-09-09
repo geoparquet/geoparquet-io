@@ -88,6 +88,7 @@ from geoparquet_io.api import table as table_module
 from geoparquet_io.cli import main as cli_main
 from geoparquet_io.cli.commands import add as cli_add
 from geoparquet_io.cli.commands import convert as cli_convert
+from geoparquet_io.cli.commands import extract as cli_extract
 from geoparquet_io.cli.commands import partition as cli_partition
 from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.core import extract as core_extract
@@ -486,6 +487,7 @@ CASES: list[ParityCase] = [
             "extract_impl",
             core_extract.extract,
             lambda c: ["extract", "geoparquet", c.input_file, c.output_file],
+            module=cli_extract,
         ),
         ops=_ops("extract_table", core_extract.extract_table, lambda c: ops.extract(c.table)),
         table=_table(
