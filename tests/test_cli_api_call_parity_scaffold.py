@@ -86,6 +86,7 @@ from click.testing import CliRunner
 from geoparquet_io.api import ops
 from geoparquet_io.api import table as table_module
 from geoparquet_io.cli import main as cli_main
+from geoparquet_io.cli.commands import convert as cli_convert
 from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.core import extract as core_extract
 from geoparquet_io.core import hilbert_order as core_hilbert
@@ -503,6 +504,7 @@ CASES: list[ParityCase] = [
             "convert_to_geoparquet",
             convert_to_geoparquet,
             lambda c: ["convert", "geoparquet", c.convert_input, c.output_file],
+            module=cli_convert,
         ),
         # `Table.write` has no core twin of `convert_to_geoparquet`: it resolves a
         # write strategy and calls `strategy.write_from_table`. That call *is* the
