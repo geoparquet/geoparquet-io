@@ -13,7 +13,11 @@ from geoparquet_io.core.common import (
     get_parquet_metadata,
     write_parquet_with_metadata,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
+    quote_identifier,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.hilbert_order import hilbert_order
@@ -219,8 +223,12 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
     try:
-        # Select all columns EXCEPT the bbox column
-        query = f"SELECT * EXCLUDE ({bbox_column_name}) FROM {sql_path(raw_url)}"
+        # Select all columns EXCEPT the bbox column. The column name is read from
+        # the file's own schema (see ``_detect_bbox_column_from_table``), so it is
+        # attacker-controlled and must be quoted as an identifier -- a bare
+        # interpolation lets a crafted column name inject arbitrary SQL into the
+        # projection (#918).
+        query = f"SELECT * EXCLUDE ({quote_identifier(bbox_column_name)}) FROM {sql_path(raw_url)}"
 
         write_parquet_with_metadata(
             con=con,

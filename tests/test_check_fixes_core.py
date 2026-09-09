@@ -3,11 +3,13 @@
 import os
 import shutil
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.check_fixes import (
     fix_bbox_column,
     fix_bbox_metadata,
+    fix_bbox_removal,
     fix_compression,
     fix_spatial_ordering,
 )
@@ -207,6 +209,91 @@ class TestFixBboxRemoval:
         )
 
         assert fix_result["success"] is True
+
+
+class TestFixBboxRemovalSqlInjection:
+    """The bbox column name reaches the ``EXCLUDE`` rewrite from the file's own
+    schema (``_detect_bbox_column_from_table``), so it is attacker-controlled.
+    A bare interpolation let a crafted column name inject arbitrary SQL into the
+    projection of ``gpio check --fix`` (#918)."""
+
+    # A struct column NAME (pyarrow allows any name) that breaks out of the
+    # ``SELECT * EXCLUDE (<name>) FROM ...`` template: it closes the EXCLUDE
+    # list, appends an attacker-chosen projection column, and opens a final
+    # scalar subquery that the template's own trailing ``)`` closes.
+    _PAYLOAD = "filler) , (SELECT 42) AS pwn, (SELECT 1 LIMIT 0"
+
+    def _write_malicious_file(self, path, places_test_file):
+        """A GeoParquet file whose bbox struct column is named with an injection
+        payload, plus a benign ``filler`` column the payload references so the
+        injected SQL is valid on the vulnerable code path."""
+        places = pq.read_table(places_test_file)
+        n = places.num_rows
+        struct_arr = pa.StructArray.from_arrays(
+            [
+                pa.array([0.0] * n),
+                pa.array([0.0] * n),
+                pa.array([1.0] * n),
+                pa.array([1.0] * n),
+            ],
+            names=["xmin", "ymin", "xmax", "ymax"],
+        )
+        table = pa.table(
+            {
+                "geometry": places.column("geometry"),
+                "filler": pa.array(list(range(n))),
+                self._PAYLOAD: struct_arr,
+            }
+        ).replace_schema_metadata(places.schema.metadata or {})
+        pq.write_table(table, path)
+
+    def test_injection_payload_in_bbox_name_does_not_execute(
+        self, places_test_file, temp_output_dir
+    ):
+        src = os.path.join(temp_output_dir, "malicious.parquet")
+        out = os.path.join(temp_output_dir, "fixed.parquet")
+        self._write_malicious_file(src, places_test_file)
+
+        fix_bbox_removal(src, out, bbox_column_name=self._PAYLOAD, verbose=False)
+
+        result_cols = pq.read_table(out).column_names
+        # The injected projection must never materialise.
+        assert "pwn" not in result_cols
+        assert "(SELECT 1 LIMIT 0)" not in result_cols
+        # The named column is treated as a single identifier and removed cleanly;
+        # the legitimate columns survive untouched.
+        assert self._PAYLOAD not in result_cols
+        assert result_cols == ["geometry", "filler"]
+
+    def test_bbox_name_with_embedded_quote_is_escaped(self, places_test_file, temp_output_dir):
+        """A payload carrying a literal double quote must have it doubled, not
+        interpreted as an identifier delimiter."""
+        payload = 'weird") , (SELECT 99) AS pwn2 FROM (SELECT 1) t("x'
+        src = os.path.join(temp_output_dir, "malicious_quote.parquet")
+        out = os.path.join(temp_output_dir, "fixed_quote.parquet")
+
+        places = pq.read_table(places_test_file)
+        n = places.num_rows
+        struct_arr = pa.StructArray.from_arrays(
+            [
+                pa.array([0.0] * n),
+                pa.array([0.0] * n),
+                pa.array([1.0] * n),
+                pa.array([1.0] * n),
+            ],
+            names=["xmin", "ymin", "xmax", "ymax"],
+        )
+        table = pa.table(
+            {"geometry": places.column("geometry"), payload: struct_arr}
+        ).replace_schema_metadata(places.schema.metadata or {})
+        pq.write_table(table, src)
+
+        fix_bbox_removal(src, out, bbox_column_name=payload, verbose=False)
+
+        result_cols = pq.read_table(out).column_names
+        assert "pwn2" not in result_cols
+        assert payload not in result_cols
+        assert result_cols == ["geometry"]
 
 
 class TestGetGeoparquetVersionFromCheckResults:
