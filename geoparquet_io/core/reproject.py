@@ -64,6 +64,24 @@ class ReprojectResult:
     feature_count: int
 
 
+def _carried_geo(metadata) -> dict:
+    """The carried ``geo`` block on ``metadata``, sanitized, or ``{}``.
+
+    ``reproject`` is a write path: the column name it reads is quoted into SQL
+    and the CRS it reads decides the transform, so the block it indexes goes
+    through the same shape check every other write-path reader uses (#887).
+    Without it a ``primary_column: 123`` reached ``quote_identifier`` as a bare
+    ``TypeError`` and a string-, list- or null-shaped block crashed the CRS
+    lookups with a bare ``AttributeError``.
+    """
+    from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
+
+    if not metadata or b"geo" not in metadata:
+        return {}
+    geo_meta = sanitize_geo_metadata(decode_carried_geo(metadata[b"geo"]))
+    return geo_meta if isinstance(geo_meta, dict) else {}
+
+
 def _detect_geometry_column_from_table(table: pa.Table) -> str:
     """Detect geometry column from table metadata.
 
@@ -71,16 +89,18 @@ def _detect_geometry_column_from_table(table: pa.Table) -> str:
         table: PyArrow Table with geo metadata
 
     Returns:
-        Geometry column name, defaults to 'geometry'
+        Geometry column name — the block's primary column, else the standard
+        name the table's own schema carries, else 'geometry'.
     """
-    if table.schema.metadata and b"geo" in table.schema.metadata:
-        try:
-            geo_meta = json.loads(table.schema.metadata[b"geo"].decode("utf-8"))
-            if "primary_column" in geo_meta:
-                return geo_meta["primary_column"]
-        except (json.JSONDecodeError, KeyError):
-            pass
-    return "geometry"
+    from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
+
+    primary = _carried_geo(table.schema.metadata).get("primary_column")
+    if isinstance(primary, str) and primary:
+        return primary
+    # Sanitizing dropped a malformed `primary_column` and could not repair it
+    # from a single column. Falling back to the literal "geometry" would name a
+    # column the table may not have (#887 review).
+    return detect_geometry_column_from_names(table.schema.names) or "geometry"
 
 
 def _resolve_crs_to_string(crs_info) -> str | None:
@@ -102,30 +122,16 @@ def _detect_crs_from_table(table: pa.Table, geom_col: str) -> str:
     Returns:
         CRS string like "EPSG:4326" or PROJJSON string for ST_Transform
     """
-    if table.schema.metadata and b"geo" in table.schema.metadata:
-        try:
-            geo_meta = json.loads(table.schema.metadata[b"geo"].decode("utf-8"))
-            columns = geo_meta.get("columns", {})
-            if geom_col in columns:
-                crs_info = columns[geom_col].get("crs")
-                resolved = _resolve_crs_to_string(crs_info)
-                if resolved:
-                    return resolved
-        except (json.JSONDecodeError, KeyError):
-            pass
+    resolved = _resolve_crs_to_string(_table_geo_column_meta(table, geom_col).get("crs"))
     # Default to WGS84 per GeoParquet spec
-    return "EPSG:4326"
+    return resolved or "EPSG:4326"
 
 
 def _table_geo_column_meta(table: pa.Table, geom_col: str) -> dict:
     """Return the geo-metadata dict for ``geom_col``, or ``{}`` if unavailable."""
-    if table.schema.metadata and b"geo" in table.schema.metadata:
-        try:
-            geo_meta = json.loads(table.schema.metadata[b"geo"].decode("utf-8"))
-            return geo_meta.get("columns", {}).get(geom_col, {})
-        except (json.JSONDecodeError, KeyError):
-            return {}
-    return {}
+    columns = _carried_geo(table.schema.metadata).get("columns", {})
+    entry = columns.get(geom_col) if isinstance(columns, dict) else None
+    return entry if isinstance(entry, dict) else {}
 
 
 def _target_crs_is_projected(target_crs: str, con=None) -> bool:
@@ -183,6 +189,25 @@ def _drop_nonplanar_edges_from_geo_meta(geo_meta: dict, target_crs: str, geom_co
     if edges and edges != "planar":
         del col_meta["edges"]
         _warn_edges_dropped(geom_col, edges, target_crs)
+
+
+def _retarget_carried_geo(metadata: dict, geom_col: str, target_crs: str, con) -> bool:
+    """Rewrite ``metadata[b"geo"]`` for ``target_crs``; False when there is nothing to rewrite.
+
+    The single place the Arrow and streaming paths update the carried block, so
+    the same sanitizing applies to both: the block written back out is the
+    cleaned one, and ``apply_target_crs_to_geo_meta`` -- which indexes
+    ``columns`` -- is never handed a list-, string- or null-shaped block (#887).
+    """
+    geo_meta = _carried_geo(metadata)
+    if not geo_meta:
+        debug("Could not update CRS in geo metadata, leaving as-is")
+        return False
+    apply_target_crs_to_geo_meta(geo_meta, geom_col, target_crs, con)
+    if _target_crs_is_projected(target_crs, con):
+        _drop_nonplanar_edges_from_geo_meta(geo_meta, target_crs, geom_col)
+    metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+    return True
 
 
 #: Raised by the Arrow/Python-API path on an explicit ``crs: null`` input.
@@ -287,15 +312,8 @@ def reproject_table(
         if table.schema.metadata:
             new_metadata = dict(table.schema.metadata)
             if b"geo" in new_metadata:
-                try:
-                    geo_meta = json.loads(new_metadata[b"geo"].decode("utf-8"))
-                    apply_target_crs_to_geo_meta(geo_meta, geom_col, target_crs, con)
-                    if _target_crs_is_projected(target_crs, con):
-                        _drop_nonplanar_edges_from_geo_meta(geo_meta, target_crs, geom_col)
-                    new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+                if _retarget_carried_geo(new_metadata, geom_col, target_crs, con):
                     result = result.replace_schema_metadata(new_metadata)
-                except (json.JSONDecodeError, KeyError) as e:
-                    debug(f"Could not update CRS in geo metadata, leaving as-is: {e}")
             else:
                 result = result.replace_schema_metadata(table.schema.metadata)
 
@@ -823,14 +841,7 @@ def _reproject_streaming(
 
             # Update metadata with target CRS
             if metadata and b"geo" in metadata:
-                try:
-                    geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-                    apply_target_crs_to_geo_meta(geo_meta, geom_col, target_crs, con)
-                    if _target_crs_is_projected(target_crs, con):
-                        _drop_nonplanar_edges_from_geo_meta(geo_meta, target_crs, geom_col)
-                    metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-                except (json.JSONDecodeError, KeyError) as e:
-                    debug(f"Could not update CRS in geo metadata, leaving as-is: {e}")
+                _retarget_carried_geo(metadata, geom_col, target_crs, con)
 
             # Reprojection moves coordinates, so the carried bbox (and, for a
             # geometry-repairing transform, geometry_types) no longer describes

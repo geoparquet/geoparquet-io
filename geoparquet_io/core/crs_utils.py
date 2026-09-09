@@ -324,9 +324,29 @@ def geoparquet_crs_is_null(parquet_file) -> bool:
     geo_meta = sanitize_geo_metadata(get_geo_metadata(str(parquet_file)))
     if not geo_meta:
         return False
-    primary_col = geo_meta.get("primary_column", "geometry")
+    primary_col = _primary_column_of_file(geo_meta, parquet_file)
+    if primary_col is None:
+        return False
     col_meta = geo_meta.get("columns", {}).get(primary_col, {})
     return crs_is_explicitly_null(col_meta)
+
+
+def _primary_column_of_file(geo_meta: dict, parquet_file) -> str | None:
+    """The column a sanitized block names as primary, or the one the schema shows.
+
+    Sanitizing *drops* a malformed ``primary_column``, so a block can reach a
+    reader without one. Defaulting to the literal string ``"geometry"`` there is
+    silently wrong on a file whose column is called ``geom``: the lookup misses,
+    the CRS reads as absent, and ``reproject`` then transforms unknown or
+    projected coordinates as if they were lon/lat -- where the raw block used to
+    raise (#887 review). Ask the file instead.
+    """
+    from geoparquet_io.core.geometry_detection import detect_parquet_geometry_column
+
+    primary_col = geo_meta.get("primary_column")
+    if isinstance(primary_col, str):
+        return primary_col
+    return detect_parquet_geometry_column(str(parquet_file))
 
 
 @lru_cache(maxsize=256)
@@ -610,6 +630,7 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     treated the way an absent one is (#887).
     """
     from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
+    from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
 
     metadata = table.schema.metadata
     if not metadata or b"geo" not in metadata:
@@ -618,7 +639,14 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     if not isinstance(geo_meta, dict):
         return None
     columns = geo_meta.get("columns", {})
-    col = geometry_column or geo_meta.get("primary_column", "geometry")
+    col = geometry_column or geo_meta.get("primary_column")
+    if not isinstance(col, str):
+        # Sanitizing dropped a malformed `primary_column`; the table's own
+        # schema names the column, where the literal "geometry" would miss a
+        # `geom` one and report a projected CRS as absent (#887 review).
+        col = detect_geometry_column_from_names(table.schema.names)
+    if col is None:
+        return None
     crs = columns.get(col, {}).get("crs")
     if crs and not is_default_crs(crs):
         return crs
@@ -655,7 +683,7 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
 
     geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
     if geo_meta:
-        primary_col = geo_meta.get("primary_column", "geometry")
+        primary_col = _primary_column_of_file(geo_meta, parquet_file)
         columns = geo_meta.get("columns", {})
         if primary_col in columns:
             if crs_is_explicitly_null(columns[primary_col]):

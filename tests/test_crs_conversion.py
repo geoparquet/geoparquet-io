@@ -699,14 +699,20 @@ class TestCRSDetectionHelpers:
         assert geom_col == "geometry"
 
     def test_detect_geometry_column_from_table_handles_invalid_json(self):
-        """Test geometry column detection handles invalid JSON gracefully."""
+        """Undecodable metadata falls back to the schema, not to the literal 'geometry'.
+
+        This asserted ``"geometry"`` until #887's review: the table's only
+        column is ``geom``, so answering ``"geometry"`` names a column that is
+        not there, and every reader downstream then reports the CRS as absent
+        and reprojects or grid-keys the data as if it were lon/lat.
+        """
         import pyarrow as pa
 
         schema = pa.schema([pa.field("geom", pa.binary())]).with_metadata({b"geo": b"invalid json"})
         table = pa.table({"geom": [b""]}, schema=schema)
 
         geom_col = _detect_geometry_column_from_table(table)
-        assert geom_col == "geometry"
+        assert geom_col == "geom"
 
     def test_detect_crs_from_table_with_epsg_code(self):
         """Test CRS detection from table metadata with EPSG code."""
