@@ -7,10 +7,11 @@ cyclic. It lives here instead, so both sides import downwards.
 
 The split against the neighbouring modules:
 
-* :mod:`geoparquet_io.cli.decorators` - reusable Click *option* decorators and
+* :mod:`geoparquet_io.cli.decorators` - reusable Click *option* decorators,
   the ``click.Command`` subclasses commands declare with ``cls=``
-  (``GlobAwareCommand``, ``SingleFileCommand``, ``parse_row_group_options``).
-  That is still their home; nothing was moved out of it.
+  (``GlobAwareCommand``, ``SingleFileCommand``), and small option-parsing
+  helpers such as ``parse_row_group_options``. That is still their home;
+  nothing was moved out of it.
 * this module - the group-neutral runtime plumbing that is not a decorator and
   not a Click option: S3 activation, and the default-subcommand group factory.
 
@@ -52,7 +53,6 @@ def _activate_s3(ctx, aws_profile=None, s3_endpoint=None, s3_region=None, s3_no_
             os.environ["AWS_PROFILE"] = previous_profile
 
 
-# Check commands group - use custom command class for default subcommand
 def create_default_group(default_subcommand: str, description: str) -> type:
     """Factory to create a click.Group subclass that defaults to a specific subcommand.
 
