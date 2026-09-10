@@ -20,6 +20,12 @@ _NO_COMPRESSION_INFO = "No compression information available (file has no row gr
 #: (100,000 rounded up to a multiple of 2,048), and ``gpio sort`` writes 51,200.
 #: A pass/fail band that excludes all of those is reporting on the ecosystem
 #: rather than on the file in front of it.
+#:
+#: Be honest about how firm the endpoints are: that argument justifies an upper
+#: bound somewhere *above* DuckDB's 122,880, not 200,000 specifically. 200,000
+#: is the value this check has always used, kept deliberately so no published
+#: file changes status -- inherited, not derived. Only SPATIAL_ROW_COUNT_RANGE
+#: below has a measurement behind it.
 GENERAL_ROW_COUNT_RANGE = (10_000, 200_000)
 
 #: The narrower band that makes *spatial* filters prune, which the check gives
@@ -31,9 +37,11 @@ GENERAL_ROW_COUNT_RANGE = (10_000, 200_000)
 #: group cut the share of the file a query window covering 10% of each dimension
 #: must read from 43-100% down to 10-28%. Nothing measures the top of
 #: GENERAL_ROW_COUNT_RANGE the same way, so where the two bands disagree this is
-#: the one with evidence behind it -- it is what ``gpio sort`` defaults to (the
-#: top of the band), what ``gpio check optimization`` scores, and what
-#: docs/guide/check.md and docs/guide/sort.md quote.
+#: the one with evidence behind it -- it is what ``gpio sort`` asks for (the top
+#: of the band, though DuckDB rounds the request up to 51,200, just outside it:
+#: #961), what ``gpio check optimization`` scores (it imports this constant
+#: rather than repeating the numbers), and what docs/guide/check.md and
+#: docs/guide/sort.md quote.
 #:
 #: The two bands are not rival answers to one question (#795): a file can sit
 #: inside the general band and still prune badly, so the messages below say

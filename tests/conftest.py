@@ -443,6 +443,13 @@ def unsorted_test_file(test_data_dir):
     groups are what make that visible: a single-row-group file has no pairs to
     compare, so the check calls it well ordered whatever the rows contain
     (#940). Regenerate with tests/data/generate_test_fixtures.py.
+
+    Not a general-purpose "one bad property" fixture: 15 groups of ~96 rows is
+    far below the row-count band, so this file now also reads ``poor`` from
+    ``check row-group`` and scores 0/5 from ``check optimization`` (it was
+    ``optimal`` and 2/5 as a single group). Reach for it when you want bad
+    spatial order; reach for something else when you want a file that is
+    otherwise healthy.
     """
     return str(test_data_dir / "unsorted.parquet")
 
