@@ -326,6 +326,30 @@ def test_extract_crs_from_table_survives_a_malformed_block():
 #: geometry ``geometry``" is exactly the assumption these readers must not make:
 #: a recovery that falls back to the literal ``"geometry"`` looks correct on a
 #: ``geometry`` file and silently reports no CRS on a ``geom`` one (#887 review).
+#: A ``version`` that is not a string (#979). Every *other* key on these blocks
+#: is well formed, which is the point: the keys the four earlier batches
+#: hardened all read cleanly, so a reader that guards those still walks straight
+#: into ``version.startswith`` / ``version.split``. ``true`` is here because it
+#: is the shape a truthiness guard is least likely to be written for, and
+#: ``2.0`` because an unquoted version in a YAML-ish config comes out a float.
+NON_STRING_VERSIONS = [
+    ("a_number", 2),
+    ("an_object", {"major": 2}),
+    ("a_float", 2.0),
+    ("a_list", ["2.0"]),
+    ("true", True),
+]
+
+
+def _version_block(version, col: str = "geometry") -> dict:
+    """A block that is well formed except for ``version``."""
+    return {
+        "version": version,
+        "primary_column": col,
+        "columns": {col: {"encoding": "WKB", "geometry_types": ["Point"]}},
+    }
+
+
 def _malformed_blocks(col: str):
     return [
         ("columns_null", {"version": "1.1.0", "primary_column": col, "columns": None}),
@@ -364,6 +388,10 @@ def _malformed_blocks(col: str):
                 "primary_column": col,
                 "columns": {col: {"encoding": 123, "geometry_types": ["Point"]}},
             },
+        ),
+        *(
+            (f"version_is_{case}", _version_block(bad_version, col))
+            for case, bad_version in NON_STRING_VERSIONS[:2]
         ),
     ]
 
@@ -1952,3 +1980,278 @@ def test_extract_crs_from_table_reads_the_named_column_not_the_literal_one(col):
     )
     crs = extract_crs_from_table(table)
     assert isinstance(crs, dict) and crs["id"]["code"] == 5070
+
+
+# =============================================================================
+# A `version` that is not a string (#979)
+# =============================================================================
+#
+# The fifth batch, and the one all four earlier PRs walked past because they all
+# read the same two keys. `version` is a *third* key, and the readers that reach
+# it guarded truthiness only:
+#
+#     version = geo_meta.get("version")
+#     if version and version.startswith("2."):     # common.py
+#     if version: parts = version.split(".")       # streaming.py
+#
+# so `2`, `2.0`, `["2.0"]`, `{"major": 2}` and `true` all sail past the guard and
+# raise `AttributeError` several frames from anything a user can act on. In
+# `streaming.py` the `except` beside it catches `json.JSONDecodeError` and
+# `UnicodeDecodeError` specifically, so the `AttributeError` passes straight
+# through it.
+#
+# These are version *readers*, shared between `gpio check` and the write paths,
+# so they take #945's line the way `carried_column_name` does: guard, hand back
+# nothing rather than a value that cannot be one, name the ignored key once, and
+# let the caller fall through to its own default. "Unknown version", not a
+# traceback -- `gpio check` exists to *report* that a file is malformed.
+
+
+@pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)
+def test_carried_version_refuses_a_non_string(case, bad, caplog):
+    from geoparquet_io.core.geo_metadata import carried_version
+
+    reset_malformed_geo_warnings()
+    with caplog.at_level(logging.WARNING):
+        assert carried_version(bad) is None
+    assert any("'version'" in message for message in _malformed_warnings(caplog.records))
+
+
+@pytest.mark.parametrize("good", ["1.0.0", "1.1.0", "2.0.0", "1.1.0-dev"])
+def test_carried_version_passes_a_real_version_through(good, caplog):
+    from geoparquet_io.core.geo_metadata import carried_version
+
+    reset_malformed_geo_warnings()
+    with caplog.at_level(logging.WARNING):
+        assert carried_version(good) == good
+    assert not _malformed_warnings(caplog.records)
+
+
+@pytest.mark.parametrize("absent", [None, ""])
+def test_carried_version_is_quiet_about_an_absent_version(absent, caplog):
+    """An absent key is not malformed; an empty string is not a version either."""
+    from geoparquet_io.core.geo_metadata import carried_version
+
+    reset_malformed_geo_warnings()
+    with caplog.at_level(logging.WARNING):
+        assert carried_version(absent) is None
+    assert not _malformed_warnings(caplog.records)
+
+
+@pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_detect_file_type_survives_a_non_string_version(case, bad, col, tmp_path):
+    """`check spec`, `check bbox`, `check optimization` and `add bbox` all land here."""
+    from geoparquet_io.core.common import (
+        detect_geoparquet_file_type,
+        detect_geoparquet_file_type_cache_clear,
+    )
+
+    reset_malformed_geo_warnings()
+    detect_geoparquet_file_type_cache_clear()
+    path = _file_with_geo(tmp_path, f"ftype_{col}_{case}", _version_block(bad, col), col=col)
+
+    info = detect_geoparquet_file_type(path)
+
+    # The block is there, so the file is GeoParquet; it just does not say which
+    # version, and a version nobody can read is not a 2.x claim.
+    assert info["has_geo_metadata"] is True
+    assert info["geo_version"] is None
+    assert info["file_type"] == "geoparquet_v1"
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"), [("2.0.0", "geoparquet_v2"), ("1.1.0", "geoparquet_v1")]
+)
+def test_detect_file_type_still_reads_a_real_version(version, expected, tmp_path):
+    """The guard must not cost a well-formed file its version."""
+    from geoparquet_io.core.common import (
+        detect_geoparquet_file_type,
+        detect_geoparquet_file_type_cache_clear,
+    )
+
+    detect_geoparquet_file_type_cache_clear()
+    path = _file_with_geo(tmp_path, f"ftype_ok_{version}", _version_block(version))
+
+    info = detect_geoparquet_file_type(path)
+    assert info["geo_version"] == version
+    assert info["file_type"] == expected
+
+
+@pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)
+def test_extract_version_from_metadata_survives_a_non_string_version(case, bad):
+    """`sort hilbert` resolves its output version through here (#979)."""
+    from geoparquet_io.core.streaming import extract_version_from_metadata
+
+    reset_malformed_geo_warnings()
+    metadata = {b"geo": json.dumps(_version_block(bad)).encode("utf-8")}
+    assert extract_version_from_metadata(metadata) is None
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"), [("1.0.0", "1.1"), ("1.1.0", "1.1"), ("2.0.0", "2.0")]
+)
+def test_extract_version_from_metadata_still_reads_a_real_version(version, expected):
+    from geoparquet_io.core.streaming import extract_version_from_metadata
+
+    metadata = {b"geo": json.dumps(_version_block(version)).encode("utf-8")}
+    assert extract_version_from_metadata(metadata) == expected
+
+
+@pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)
+def test_detect_version_from_table_survives_a_non_string_version(case, bad):
+    """The API-side twin: `gpio.read(f).write(out)` resolves auto-mode through here."""
+    from geoparquet_io.core.common import resolve_geoparquet_version_from_table
+
+    reset_malformed_geo_warnings()
+    assert resolve_geoparquet_version_from_table(_table_with_geo(_version_block(bad))) is None
+
+
+@pytest.mark.parametrize(("version", "expected"), [("1.0.0", "1.1"), ("2.0.0", "2.0")])
+def test_detect_version_from_table_still_reads_a_real_version(version, expected):
+    from geoparquet_io.core.common import resolve_geoparquet_version_from_table
+
+    assert (
+        resolve_geoparquet_version_from_table(_table_with_geo(_version_block(version))) == expected
+    )
+
+
+@pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)
+def test_check_bbox_survives_a_non_string_version(case, bad, tmp_path):
+    """`_check_geoparquet_v1` compares `version < "1.1.0"`, which a number cannot do.
+
+    Masked on `origin/main` behind the `detect_geoparquet_file_type` crash one
+    frame earlier, so it becomes reachable the moment that one is fixed -- the
+    half-fix this issue warns about, one file further on.
+    """
+    from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(tmp_path, f"ckbboxver_{case}", _version_block(bad))
+    results = check_metadata_and_bbox(path, verbose=False, return_results=True, quiet=True)
+
+    # A version nobody can read is no version, which is what "0.0.0" says here
+    # and what the outdated-version issue reports.
+    assert results["version"] == "0.0.0"
+    assert any("outdated" in issue for issue in results["issues"])
+
+
+@pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)
+def test_check_spec_reports_a_non_string_version_as_a_finding(case, bad, tmp_path):
+    """The whole point of the fix: a validation *finding*, not a traceback."""
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(tmp_path, f"specver_{case}", _version_block(bad))
+    reported = {c.name: c.status.value for c in validate_geoparquet(path).checks}
+
+    assert reported["version_present"] == "failed"
+    assert reported["version_known"] == "failed"
+
+
+@pytest.mark.parametrize(("case", "bad"), NON_STRING_VERSIONS)
+def test_check_fix_version_resolution_survives_a_non_string_version(case, bad, tmp_path):
+    """`check bbox --fix` picks the rewrite version off the check results."""
+    from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+    from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(tmp_path, f"fixver_{case}", _version_block(bad))
+    bbox = check_metadata_and_bbox(path, verbose=False, return_results=True, quiet=True)
+    assert get_geoparquet_version_from_check_results({"bbox": bbox}) in {"1.0", "1.1", "2.0", None}
+
+
+# =============================================================================
+# The sweep: every malformed shape against the command surface
+# =============================================================================
+#
+# The per-site tests above each pin one reader. None of them would have found
+# #979, because the crash was in a *third* key that no per-site test was written
+# for -- the sweep is what found it, so the sweep is what gets committed.
+#
+# Every shape is run against every command that reads a carried `geo` block, and
+# the set of commands that die with a raw `TypeError`/`AttributeError` is
+# asserted against `KNOWN_UNGUARDED` below. Both directions matter: a new
+# unguarded reader fails this, and so does fixing one of the known ones without
+# striking it off the list.
+
+SWEEP_COMMANDS: list[tuple[str, list[str]]] = [
+    ("check all", ["check", "all", "{in}"]),
+    ("check bbox", ["check", "bbox", "{in}"]),
+    ("check compression", ["check", "compression", "{in}"]),
+    ("check optimization", ["check", "optimization", "{in}"]),
+    ("check row-group", ["check", "row-group", "{in}"]),
+    ("check spatial", ["check", "spatial", "{in}"]),
+    ("check spec", ["check", "spec", "{in}"]),
+    ("check stac", ["check", "stac", "{in}"]),
+    ("inspect head", ["inspect", "head", "{in}"]),
+    ("inspect meta", ["inspect", "meta", "{in}"]),
+    ("inspect stats", ["inspect", "stats", "{in}"]),
+    ("inspect summary", ["inspect", "summary", "{in}"]),
+    ("inspect tail", ["inspect", "tail", "{in}"]),
+    ("add bbox", ["add", "bbox", "{in}", "{out}"]),
+    ("add bbox-metadata", ["add", "bbox-metadata", "{in}", "{out}"]),
+    ("add geometry-metrics", ["add", "geometry-metrics", "{in}", "{out}"]),
+    ("add quadkey", ["add", "quadkey", "{in}", "{out}"]),
+    ("sort hilbert", ["sort", "hilbert", "{in}", "{out}"]),
+    ("sort quadkey", ["sort", "quadkey", "{in}", "{out}"]),
+    ("sort column", ["sort", "column", "{in}", "{out}", "--column", "id"]),
+    ("sort str", ["sort", "str", "{in}", "{out}"]),
+    ("convert geojson", ["convert", "geojson", "{in}", "{out_geojson}"]),
+    ("convert csv", ["convert", "csv", "{in}", "{out_csv}"]),
+    ("convert geoparquet", ["convert", "geoparquet", "{in}", "{out}"]),
+    ("extract geoparquet", ["extract", "geoparquet", "{in}", "{out}"]),
+    ("publish stac", ["publish", "stac", "{in}", "--output", "{out_json}"]),
+]
+
+#: Readers that still die on a raw block, with the issue that owns each. Not a
+#: waiver: the sweep fails if one of these stops crashing and the entry is left
+#: behind, so a fix cannot land without this list being updated.
+KNOWN_UNGUARDED: dict[str, set[str]] = {
+    # #982: `add quadkey._validate_crs_from_geo_metadata` reads
+    # `geo_meta.get("columns", {})[col].get("crs")` with no shape check at all.
+    # A write path, so the fix is `sanitized_carried_geo`, not another guard --
+    # a different batch from #979's, and out of its scope.
+    "columns_null": {"add quadkey"},
+    "columns_list": {"add quadkey"},
+    "columns_string": {"add quadkey"},
+    "entry_not_an_object": {"add quadkey"},
+    "block_is_a_list": {"add quadkey"},
+    "block_is_a_string": {"add quadkey"},
+}
+
+#: One column name only: the sweep's job is breadth across *commands*, and the
+#: `geometry`-versus-`geom` axis is covered per reader above.
+SWEEP_SHAPES = [(case, block) for col, case, block in MALFORMED_BLOCKS if col == "geometry"] + [
+    (f"version_is_{case}", _version_block(bad)) for case, bad in NON_STRING_VERSIONS[2:]
+]
+
+
+@pytest.mark.parametrize(("case", "block"), SWEEP_SHAPES, ids=[c for c, _ in SWEEP_SHAPES])
+def test_no_command_dies_with_a_raw_type_error_on_a_malformed_block(case, block, tmp_path):
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    reset_malformed_geo_warnings()
+    src = _file_with_geo(tmp_path, f"sweep_{case}", block)
+
+    crashed: dict[str, str] = {}
+    for i, (name, argv) in enumerate(SWEEP_COMMANDS):
+        args = [
+            arg.format(
+                **{
+                    "in": src,
+                    "out": str(tmp_path / f"{case}_{i}.parquet"),
+                    "out_geojson": str(tmp_path / f"{case}_{i}.geojson"),
+                    "out_csv": str(tmp_path / f"{case}_{i}.csv"),
+                    "out_json": str(tmp_path / f"{case}_{i}.json"),
+                }
+            )
+            for arg in argv
+        ]
+        exc = CliRunner().invoke(cli, args).exception
+        if isinstance(exc, (TypeError, AttributeError)):
+            crashed[name] = f"{type(exc).__name__}: {exc}"
+
+    assert set(crashed) == KNOWN_UNGUARDED.get(case, set()), crashed

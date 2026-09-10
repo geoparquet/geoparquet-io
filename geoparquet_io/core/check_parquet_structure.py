@@ -541,7 +541,7 @@ def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results, 
 def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, quiet=False):
     """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-    from geoparquet_io.core.geo_metadata import covering_supported
+    from geoparquet_io.core.geo_metadata import carried_version, covering_supported
 
     geo_meta = get_geo_metadata(parquet_file)
     # `get_geo_metadata` is a read-only reader: it hands the block back exactly
@@ -550,7 +550,14 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, 
     # (#968). A validation reader guards and reports the truth rather than
     # sanitizing: a block that declares no version has none, which is what
     # "0.0.0" says and what the outdated-version issue below reports.
-    version = geo_meta.get("version", "0.0.0") if isinstance(geo_meta, dict) else "0.0.0"
+    #
+    # A version that is not a *string* is the same answer, and has to be: the
+    # comparison two lines down is `version < "1.1.0"`, which a number cannot
+    # make (#979). That crash sat behind the `detect_geoparquet_file_type` one
+    # `check bbox` hit a frame earlier, so it only becomes reachable once that
+    # is guarded -- fix one without the other and the traceback just moves.
+    version = carried_version(geo_meta.get("version") if isinstance(geo_meta, dict) else None)
+    version = version or "0.0.0"
     bbox_info = check_bbox_structure(parquet_file, verbose)
 
     # Build results

@@ -637,10 +637,16 @@ def extract_version_from_metadata(metadata: dict | None) -> str | None:
     """
     if not metadata or b"geo" not in metadata:
         return None
+    from geoparquet_io.core.geo_metadata import carried_version
+
     try:
         geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
         if isinstance(geo_meta, dict):
-            version = geo_meta.get("version")
+            # A truthiness guard let `2`, `2.0`, `["2.0"]` and `true` through to
+            # `.split`, and the `except` below names the two decoder errors
+            # specifically, so the `AttributeError` passed straight through it
+            # and out of `gpio sort hilbert` as a traceback (#979).
+            version = carried_version(geo_meta.get("version"))
             if version:
                 parts = version.split(".")
                 if len(parts) >= 2:

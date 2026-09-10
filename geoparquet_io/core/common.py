@@ -45,6 +45,7 @@ from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     build_bbox_covering,
     carried_geometry_column,
+    carried_version,
     create_geo_metadata,
     detect_bbox_column_from_schema,
     geoarrow_wkb_codes,
@@ -184,7 +185,12 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
     if geo_meta:
         result["has_geo_metadata"] = True
         if isinstance(geo_meta, dict) and "version" in geo_meta:
-            result["geo_version"] = geo_meta["version"]
+            # A version that is not a string is no version this can report:
+            # `2` reached `.startswith` below and took `check spec`,
+            # `check bbox`, `check optimization` and `add bbox` down with a bare
+            # `AttributeError` (#979). `geo_version` is documented as the
+            # version *or None*, and every consumer already handles None.
+            result["geo_version"] = carried_version(geo_meta["version"], source=str(parquet_file))
 
     # Check for native Parquet geo types using schema
     geo_columns = detect_geometry_columns(parquet_file, con=con)
@@ -1020,7 +1026,10 @@ def _detect_version_from_table(table, verbose: bool = False) -> str | None:
     try:
         geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
         if isinstance(geo_meta, dict):
-            version = geo_meta.get("version")
+            # Guarded, not truthiness-checked: a non-string version crashed
+            # `.split` here on the write path too -- `write_geoparquet_table`
+            # resolves auto-mode through this function (#979).
+            version = carried_version(geo_meta.get("version"))
             if version:
                 parts = version.split(".")
                 if len(parts) >= 2:
