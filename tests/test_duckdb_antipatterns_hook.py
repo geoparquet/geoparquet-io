@@ -17,9 +17,17 @@ BigQuery-dialect lines the rationale covered, and nothing in the suite noticed.
 
 * the spelling tests run their hostile source **from that exact path**, so any
   path-scoped exclusion for it turns straight back into a failure, and
-* :class:`TestManualQuoteRuleHasNoPathExemptions` reads the config and asserts
-  that ``core/duckdb_utils.py`` -- which implements the two helpers and so
-  cannot use them -- is the only path the hook exempts at all.
+* :class:`TestManualQuoteRuleHasNoPathExemptions` reads the config and pins the
+  arm's pipeline stage by stage, so any added filter fails whatever spelling it
+  uses -- and the one path it may name is ``core/duckdb_utils.py``, which
+  implements the two helpers and so cannot use them.
+
+The stage list is deliberately a whitelist rather than a list of exclusion
+spellings to recognise. A blacklist is only as good as its list, and a
+whole-module exemption has many shapes: ``grep -v`` without the ``^``, a
+double-quoted path, an ``awk`` regex match, a ``--exclude=`` on the search, or
+the path held in a shell variable. Pinning the stages catches all of them,
+including shapes nobody has thought of.
 
 The sibling arm that bans bare ``duckdb.connect(`` is self-tested in
 ``tests/test_duckdb_connection_factory_bypass.py``.
@@ -67,15 +75,20 @@ _NEEDS_BASH = pytest.mark.skipif(
 )
 
 
-def _hook_script() -> str:
-    """The duckdb-antipatterns script from .pre-commit-config.yaml, exactly as
-    pre-commit invokes it."""
+def _hook_entry() -> dict:
+    """The duckdb-antipatterns hook's own YAML entry."""
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     for repo in config["repos"]:
         for hook in repo.get("hooks", []):
             if hook["id"] == "duckdb-antipatterns":
-                return str(hook["args"][-1])
+                return hook
     raise AssertionError("duckdb-antipatterns hook not found in .pre-commit-config.yaml")
+
+
+def _hook_script() -> str:
+    """The duckdb-antipatterns script from .pre-commit-config.yaml, exactly as
+    pre-commit invokes it."""
+    return str(_hook_entry()["args"][-1])
 
 
 # Each spelling the rule has to catch. The escaped-quote one is #936's shape:
@@ -195,34 +208,104 @@ class TestHookRejectsManualQuoting:
 class TestManualQuoteRuleHasNoPathExemptions:
     """#946's structural half: a whole-file exclusion must not come back.
 
-    The spelling tests above catch an exclusion for *this* module; this one
-    catches an exclusion for any module, in either shape the hook script uses
-    (``grep -v '^<path>:'`` and ``awk -F: '$1 != "<path>"'``).
+    The spelling tests above catch an exclusion for *this* module, whatever
+    shape it takes, because ``extract_bigquery.py`` is their fixture. This one
+    has to catch an exclusion for **any** module, and it does that by pinning
+    the arm's pipeline rather than by recognising exclusion spellings.
+
+    The difference matters. A blacklist of known spellings is only ever as good
+    as the list: ``grep -v '...'`` without the ``^``, a double-quoted path, an
+    ``awk`` regex match instead of ``!=``, a ``--exclude=`` on the ``grep -r``,
+    or the path in a shell variable are all whole-module exemptions, and none of
+    them looks like the two shapes the arm happens to use today. Asserting the
+    stage list instead inverts that: any new filter fails, in any spelling,
+    including ones nobody has thought of.
+
+    Scoping to the arm matters too. The script has six arms and two of the
+    others legitimately exempt ``duckdb_utils.py`` as well, so a check that
+    scanned the whole script would stay green on their matches while this arm
+    was reworded out from under it.
     """
 
-    # grep -v '^geoparquet_io/...:'  and  awk -F: '$1 != "geoparquet_io/..."'
-    _EXEMPT_PATH_PATTERNS = (
-        re.compile(r"""grep\s+-v\s+'\^(geoparquet_io/[^:']+)"""),
-        re.compile(r"""\$1\s*!=\s*"(geoparquet_io/[^"]+)"""),
+    #: Every stage of the manual-quote pipeline, in order, normalised for
+    #: whitespace. `grep -rnE` finds the banned spellings; the exemption for the
+    #: module that *implements* the helpers; the per-line escape hatch; a filter
+    #: dropping commented-out lines; and `grep .` to set the exit status.
+    _EXPECTED_STAGES = (
+        "grep -rnE",
+        "grep -v '^geoparquet_io/core/duckdb_utils.py:'",
+        "grep -v 'allow-manual-quote'",
+        "awk -F: '$3 !~ /^[[:space:]]*#/'",
+        "grep .",
     )
 
-    def test_duckdb_utils_is_the_only_exempt_path(self):
+    @staticmethod
+    def _manual_quote_stages() -> list[str]:
+        """The pipeline stages of the manual-quote arm, and only that arm."""
         script = _hook_script()
+        marker = "Do not hand-roll SQL identifier quoting."
+        assert marker in script, (
+            "The manual-quote arm's error message has changed, so this test can "
+            "no longer find the arm it is meant to pin. Update the marker rather "
+            "than deleting the test."
+        )
+        # The arm is the `if <pipeline>; then` immediately above its message.
+        head = script[: script.index(marker)]
+        condition = head[head.rindex("if ") :]
+        condition = condition[: condition.index("; then")]
+        condition = condition[len("if ") :]
+        # Undo the shell's backslash-newline line continuations.
+        condition = condition.replace("\\\n", " ")
+        # Split on pipeline pipes only. The grep pattern itself contains `|`
+        # alternations, but those are never surrounded by whitespace.
+        return [" ".join(stage.split()) for stage in re.split(r"\s\|\s", condition)]
 
-        exempted = {
-            match.group(1).rstrip(":")
-            for pattern in self._EXEMPT_PATH_PATTERNS
-            for match in pattern.finditer(script)
-        }
+    def test_the_manual_quote_arm_has_exactly_the_expected_stages(self):
+        stages = self._manual_quote_stages()
 
-        assert exempted == {FACTORY_MODULE}, (
-            "duckdb-antipatterns exempts a module by path. Only "
-            f"{FACTORY_MODULE} may be exempt (it implements the helpers the "
-            "rule points at). A file-scoped exclusion switches the whole rule "
-            "off over that module -- #939 did exactly that to "
-            f"core/{FORMERLY_EXEMPT_MODULE} and it went unnoticed until #946. "
-            "Use a trailing '# allow-manual-quote' on the one line instead. "
-            f"Found: {sorted(exempted)}"
+        assert len(stages) == len(self._EXPECTED_STAGES), (
+            "The manual-quote arm gained or lost a pipeline stage. A new stage "
+            "is how a whole-module exemption gets in -- that is what #939 did to "
+            f"core/{FORMERLY_EXEMPT_MODULE}, unnoticed until #946. Silence one "
+            "line with a trailing '# allow-manual-quote' instead.\n"
+            f"Expected {len(self._EXPECTED_STAGES)} stages, found {len(stages)}:\n"
+            + "\n".join(f"  {stage}" for stage in stages)
+        )
+        for found, expected in zip(stages, self._EXPECTED_STAGES, strict=True):
+            assert found.startswith(expected), (
+                f"Manual-quote pipeline stage changed.\n  expected: {expected}\n  found:    {found}"
+            )
+
+    def test_the_only_path_the_arm_exempts_is_the_factory_module(self):
+        """Read as a path question rather than a stage-list one, for the message."""
+        # Stage 0 is the search itself, which names `geoparquet_io/` as its
+        # root; only the filter stages after it can exempt anything.
+        exempted = [
+            stage
+            for stage in self._manual_quote_stages()[1:]
+            if ".py" in stage and FACTORY_MODULE not in stage
+        ]
+
+        assert not exempted, (
+            "The manual-quote arm names a module other than "
+            f"{FACTORY_MODULE}, which is the only path that may ever be exempt "
+            "(it implements the helpers the rule points at). A file-scoped "
+            "exclusion switches the whole rule off over that module.\n"
+            + "\n".join(f"  {stage}" for stage in exempted)
+        )
+
+    def test_the_hook_is_not_narrowed_by_a_files_or_exclude_key(self):
+        """`files:`/`exclude:` in the YAML would silence the hook above the script."""
+        hook = _hook_entry()
+
+        narrowing = {key: hook[key] for key in ("files", "exclude") if key in hook}
+
+        assert not narrowing, (
+            "The duckdb-antipatterns hook declares a files/exclude key. The "
+            "script scans geoparquet_io/ itself (pass_filenames: false), so "
+            "these do not narrow what is scanned -- but a 'files' pattern that "
+            "matches nothing turns the whole hook into a skip. Leave both unset "
+            f"so the hook always runs. Found: {narrowing}"
         )
 
     def test_the_real_extract_bigquery_module_needs_no_exemption(self):
