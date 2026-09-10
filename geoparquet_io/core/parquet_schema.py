@@ -10,16 +10,55 @@ listing with the file's root group element -- every row carries a ``file_name``
 and the root alone has no ``type`` -- while the pyarrow fast path starts straight
 at the first column and always renders a ``type`` string.
 
+Both shapes must keep one invariant: an entry's ``num_children`` counts the rows
+the listing goes on to emit for it, not the fields its type declares. Skipping a
+subtree by a count the rows do not back up consumes the parent's next *sibling*,
+which is how root-level list and map columns hid the column after them (#931).
+
 This module deliberately imports nothing from the rest of the package: it sits
 below ``duckdb_metadata``, ``duckdb_utils``, ``metadata_utils`` and ``validate``,
 all of which share it.
 """
 
 
+def _is_leaf_entry(entry: dict) -> bool:
+    """True when the entry's own type rules out any subtree beneath it.
+
+    Both shapes make a leaf recognisable. DuckDB renders a physical type on
+    leaves only (``BYTE_ARRAY``, ``INT64``...) and leaves a group's ``type`` at
+    ``None``; pyarrow renders every field-bearing type with a ``<``
+    (``struct<...>``, ``list<...>``, ``map<...>``) that no primitive spelling
+    carries.
+    """
+    entry_type = entry.get("type")
+    return isinstance(entry_type, str) and "<" not in entry_type
+
+
+def schema_entry_is_group(entry: dict) -> bool:
+    """True when ``entry`` is a nested (group) field rather than a leaf.
+
+    ``num_children`` alone does not answer this: the pyarrow fast path renders
+    no child rows for a list or map, so a nested column there declares none.
+    """
+    return not _is_leaf_entry(entry)
+
+
+def _declared_children(entry: dict) -> int:
+    """How many following rows ``entry`` may claim as its children.
+
+    Belt and braces around a malformed listing: a leaf can never own a subtree,
+    so a leaf entry's ``num_children`` is ignored rather than allowed to eat the
+    columns after it.
+    """
+    if _is_leaf_entry(entry):
+        return 0
+    return entry.get("num_children") or 0
+
+
 def schema_subtree_end(schema_info: list, index: int) -> int:
     """Index just past the depth-first subtree rooted at ``schema_info[index]``."""
     end = index + 1
-    for _ in range(schema_info[index].get("num_children") or 0):
+    for _ in range(_declared_children(schema_info[index])):
         if end >= len(schema_info):
             break
         end = schema_subtree_end(schema_info, end)
@@ -72,7 +111,7 @@ def schema_direct_children(schema_info: list, index: int) -> list[dict]:
     """Direct children of ``schema_info[index]``, grandchildren excluded."""
     children = []
     child = index + 1
-    for _ in range(schema_info[index].get("num_children") or 0):
+    for _ in range(_declared_children(schema_info[index])):
         if child >= len(schema_info):
             break
         children.append(schema_info[child])

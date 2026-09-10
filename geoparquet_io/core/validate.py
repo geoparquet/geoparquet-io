@@ -33,7 +33,11 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.parquet_schema import root_schema_index, schema_direct_children
+from geoparquet_io.core.parquet_schema import (
+    root_schema_index,
+    schema_direct_children,
+    schema_entry_is_group,
+)
 
 
 class CheckStatus(Enum):
@@ -802,9 +806,11 @@ def _check_geometry_not_grouped(
                     "group at the schema root",
                     category="parquet_schema",
                 )
-            # Check if it has children (would indicate a struct/group)
-            num_children = col.get("num_children") or 0
-            if num_children > 0:
+            # A group field is one the listing renders as nested, whether or not
+            # it renders child rows: the pyarrow fast path gives a list or map
+            # column no children at all, so counting them would wave through a
+            # geometry column stored as a list under a declared "WKB" encoding.
+            if schema_entry_is_group(col):
                 return ValidationCheck(
                     name=f"geometry_not_grouped_{geom_col}",
                     status=CheckStatus.FAILED,

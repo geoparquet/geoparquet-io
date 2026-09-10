@@ -166,12 +166,23 @@ def _pyarrow_get_schema_info(parquet_file: str) -> list[dict] | None:
             if isinstance(field_type, pa.BaseExtensionType):
                 field_type = field_type.storage_type
 
+            # Only field-bearing types are iterable, so a list/map column
+            # renders as a single row with no children while a struct renders
+            # its fields. ``num_children`` therefore has to count the rows this
+            # listing actually goes on to emit, not the type's fields --
+            # consumers read the listing as a depth-first tree and skip a
+            # subtree by that count, so a column claiming children it never
+            # emits swallows the next root column (issue #931). Nested struct
+            # children are emitted with ``num_children: 0`` for the same
+            # reason: their own fields are not rendered either.
+            children = list(field.type) if hasattr(field.type, "__iter__") else []
+
             col_info = {
                 "name": field.name,
                 "type": str(field_type),
                 "type_length": None,
                 "repetition_type": "OPTIONAL" if field.nullable else "REQUIRED",
-                "num_children": 0,
+                "num_children": len(children),
                 "converted_type": None,
                 "scale": None,
                 "precision": None,
@@ -181,28 +192,22 @@ def _pyarrow_get_schema_info(parquet_file: str) -> list[dict] | None:
                 "logical_type": logical_type,
             }
 
-            # Handle struct types
-            if hasattr(field.type, "num_fields"):
-                col_info["num_children"] = field.type.num_fields
-
             result.append(col_info)
 
-            # Add child fields for struct types
-            if hasattr(field.type, "__iter__"):
-                for child_field in field.type:
-                    child_info = {
-                        "name": child_field.name,
-                        "type": str(child_field.type),
-                        "type_length": None,
-                        "repetition_type": "OPTIONAL" if child_field.nullable else "REQUIRED",
-                        "num_children": 0,
-                        "converted_type": None,
-                        "scale": None,
-                        "precision": None,
-                        "field_id": None,
-                        "logical_type": None,
-                    }
-                    result.append(child_info)
+            for child_field in children:
+                child_info = {
+                    "name": child_field.name,
+                    "type": str(child_field.type),
+                    "type_length": None,
+                    "repetition_type": "OPTIONAL" if child_field.nullable else "REQUIRED",
+                    "num_children": 0,
+                    "converted_type": None,
+                    "scale": None,
+                    "precision": None,
+                    "field_id": None,
+                    "logical_type": None,
+                }
+                result.append(child_info)
 
         return result
     except ValueError as e:
