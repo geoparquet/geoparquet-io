@@ -70,8 +70,19 @@ class TestCheckSpatialOrder:
         # When return_results=False, returns the ratio directly
         assert result is None or isinstance(result, float)
 
+    def test_unsorted_fixture_has_row_groups_to_compare(self, unsorted_test_file):
+        """The fixture needs several row groups or the check cannot see anything.
+
+        With one row group there are no pairs to compare, so the check
+        short-circuits to "well ordered" no matter how the rows are arranged --
+        which is how a fixture named "unsorted" came to report ratio 0.0 (#940).
+        """
+        import pyarrow.parquet as pq
+
+        assert pq.ParquetFile(unsorted_test_file).metadata.num_row_groups >= 3
+
     def test_poorly_ordered_file(self, unsorted_test_file):
-        """Test check_spatial_order with poorly ordered file."""
+        """The unsorted fixture must actually fail the spatial-order check."""
         result = check_spatial_order(
             unsorted_test_file,
             random_sample_size=50,
@@ -80,21 +91,15 @@ class TestCheckSpatialOrder:
             return_results=True,
         )
         assert isinstance(result, dict)
-        assert "method" in result
-        # Different thresholds for different methods
-        if result["method"] == "sampling":
-            # Sampling method: passed=False when ratio >= 0.5
-            if result["ratio"] >= 0.5:
-                assert result["passed"] is False
-        elif result["method"] == "bbox_stats":
-            # Bbox-stats method: passed=False when ratio >= 0.3
-            if result["ratio"] >= 0.3:
-                assert result["passed"] is False
-        # Check that failure includes proper feedback
-        if not result["passed"]:
-            assert len(result["issues"]) > 0
-            assert len(result["recommendations"]) > 0
-            assert "spatial ordering" in str(result["issues"]).lower()
+        # The fixture carries a bbox column, so the fast path is the one under test.
+        assert result["method"] == "bbox_stats"
+        # Bbox-stats method: passed=False when ratio >= 0.3
+        assert result["ratio"] >= 0.3
+        assert result["passed"] is False
+        assert result["fix_available"] is True
+        assert len(result["issues"]) > 0
+        assert len(result["recommendations"]) > 0
+        assert "spatial ordering" in str(result["issues"]).lower()
 
 
 class TestBboxOverlap:
@@ -234,11 +239,11 @@ class TestCheckSpatialOrderBboxStats:
         result = check_spatial_order_bbox_stats(
             unsorted_test_file, verbose=False, return_results=True, quiet=False
         )
-        if not result["passed"]:
-            assert len(result["issues"]) > 0
-            assert len(result["recommendations"]) > 0
-            assert "spatial ordering" in str(result["issues"]).lower()
-            assert "Hilbert" in str(result["recommendations"])
+        assert result["passed"] is False
+        assert len(result["issues"]) > 0
+        assert len(result["recommendations"]) > 0
+        assert "spatial ordering" in str(result["issues"]).lower()
+        assert "Hilbert" in str(result["recommendations"])
 
     def test_without_return_results(self, places_test_file):
         """Test bbox-stats method with return_results=False."""

@@ -151,7 +151,7 @@ def csv_large_wkt_input(tmp_path):
 
 @pytest.fixture
 def unsorted_parquet_input(test_data_dir):
-    """Return path to larger unsorted parquet file (1445 rows, ~115 KB uncompressed)."""
+    """Return path to larger unsorted parquet file (1445 rows, 15 row groups)."""
     return str(test_data_dir / "unsorted.parquet")
 
 

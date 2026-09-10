@@ -104,7 +104,10 @@ def _check_row_group_size(parquet_file, verbose=False):
     Returns:
         dict with 'passed' (bool) and 'detail' (str)
     """
-    from geoparquet_io.core.check_parquet_structure import get_row_group_stats
+    from geoparquet_io.core.check_parquet_structure import (
+        SPATIAL_ROW_COUNT_RANGE,
+        get_row_group_stats,
+    )
 
     stats = get_row_group_stats(parquet_file)
     avg_rows = stats["avg_rows_per_group"]
@@ -117,15 +120,16 @@ def _check_row_group_size(parquet_file, verbose=False):
             "detail": f"Small file ({total_size_mb:.1f} MB), single row group is appropriate",
         }
 
-    if 10000 <= avg_rows <= 50000:
-        return {
-            "passed": True,
-            "detail": f"Average {avg_rows:,.0f} rows per group (optimal 10k-50k for spatial queries)",
-        }
-
+    spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
+    # The band is imported rather than repeated: its docstring names this
+    # function as one of the things it governs, which was only true by
+    # coincidence while the numbers were spelled out here as well.
     return {
-        "passed": False,
-        "detail": f"Average {avg_rows:,.0f} rows per group (optimal 10k-50k for spatial queries)",
+        "passed": spatial_low <= avg_rows <= spatial_high,
+        "detail": (
+            f"Average {avg_rows:,.0f} rows per group "
+            f"(optimal {spatial_low // 1000}k-{spatial_high // 1000}k for spatial queries)"
+        ),
     }
 
 

@@ -12,10 +12,17 @@ from dataclasses import dataclass
 #
 # Sorting exists to make spatial filters prune row groups, and gpio's own
 # advice for that workload -- printed by ``gpio check`` and repeated in the
-# guide -- is 10,000-50,000 rows per group. This is the top of that band: the
-# largest groups the band allows, so bounding boxes stay tight enough to prune
-# without multiplying per-group footer overhead. It is deliberately *not* the
-# general write default: only the sort commands are sized for spatial pruning.
+# guide -- is 10,000-50,000 rows per group. This asks for the top of that band:
+# the largest groups the band allows, so bounding boxes stay tight enough to
+# prune without multiplying per-group footer overhead. It is deliberately *not*
+# the general write default: only the sort commands are sized for spatial
+# pruning.
+#
+# Note this is the value REQUESTED, not the one written. DuckDB rounds a
+# row-group request up to a multiple of its 2,048-row vector size, so a sorted
+# file actually carries 51,200 rows per group -- outside the very band this
+# default aims at, which is why ``gpio check optimization`` can fail a file
+# ``gpio sort`` just wrote (#961).
 DEFAULT_SORT_ROW_GROUP_ROWS = 50_000
 
 
