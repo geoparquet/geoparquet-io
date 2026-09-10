@@ -929,7 +929,7 @@ def partition_kdtree(
 @partition.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
-@click.option(
+@column_name_option(
     "--quadkey-column",
     default="quadkey",
     help="Name of quadkey column to partition by (default: quadkey)",

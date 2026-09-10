@@ -418,8 +418,26 @@ gpio check all partitions/ --all-files
 gpio check all partitions/ --sample-files 3
 ```
 
-!!! note "--fix not available for partitions"
-    The `--fix` option only works with single files. To fix issues in partitioned data, first consolidate with `gpio extract`, apply fixes, then re-partition if needed.
+!!! warning "--fix rewrites every file it checks"
+    `--fix` applies to whichever files the check ran on. With `--all-files` or
+    `--sample-files N` on a directory that means **every file it checked is
+    rewritten in place**, not just the first one:
+
+    <!-- doctest: skip="needs partitions/, which the harness does not seed" -->
+    ```bash
+    # Rewrites all 4 files in the partition, in place
+    gpio check spatial partitions/ --fix --all-files
+    ```
+
+    Each rewritten file gets a `.bak` alongside it (unless you pass
+    `--no-backup`), and the run ends with a `Fixed N files:` list naming what it
+    wrote. There is no confirmation prompt, so check the file count in the
+    `📁 Checking ...` notice before adding `--fix`.
+
+    To write the fixed files somewhere else instead, `gpio check all` takes a
+    directory as `--fix-output` (it refuses a single file path when more than
+    one file is being fixed). Alternatively, consolidate the partition with
+    `gpio extract` first, fix that, then re-partition.
 
 ## See Also
 

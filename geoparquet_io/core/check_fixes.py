@@ -19,7 +19,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
 from geoparquet_io.core.hilbert_order import hilbert_order
 from geoparquet_io.core.logging_config import debug, info, progress
 from geoparquet_io.core.remote import (
@@ -312,10 +312,9 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     # (#941).
     actual_output = output_file
     temp_output_file = None
-    if parquet_file == output_file:
-        fd, temp_output_file = tempfile.mkstemp(suffix=".parquet")
-        os.close(fd)
-        os.unlink(temp_output_file)
+    moved_into_place = False
+    if is_same_file_path(parquet_file, output_file):
+        temp_output_file = _staging_path_beside(output_file)
         actual_output = temp_output_file
 
     try:
@@ -333,11 +332,34 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
 
         if temp_output_file:
             _move_temp_output_into_place(temp_output_file, output_file, profile)
+            moved_into_place = True
     finally:
-        if temp_output_file and os.path.exists(temp_output_file):
+        # Only ever discard the rewrite when it did NOT reach the destination.
+        # Deleting it unconditionally destroyed the only good copy of the data
+        # whenever the move failed -- ENOSPC, a read-only mount, a quota -- and
+        # under `--fix --no-backup` there is no .bak to fall back on (#959).
+        if temp_output_file and not moved_into_place and os.path.exists(temp_output_file):
             os.remove(temp_output_file)
 
     return {"fix_applied": "Applied Hilbert spatial ordering", "success": True}
+
+
+def _staging_path_beside(output_file):
+    """Reserve a temp path on the same filesystem as *output_file*.
+
+    ``$TMPDIR`` is routinely a different filesystem (a Linux ``/tmp`` tmpfs, a
+    container, an NFS home, an external volume), so staging there makes a
+    multi-GB in-place fix exhaust a tmpfs the destination would have
+    accommodated, and degrades the move back into a copy+unlink -- which is what
+    makes it non-atomic. Co-locating keeps ``os.replace()`` a rename. The dot
+    prefix keeps the in-flight file out of the ``*.parquet`` globs that walk a
+    partition directory.
+    """
+    directory = None if is_remote_url(output_file) else (os.path.dirname(output_file) or ".")
+    fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".gpio-fix-", suffix=".parquet")
+    os.close(fd)
+    os.unlink(temp_path)
+    return temp_path
 
 
 def _move_temp_output_into_place(temp_output_file, output_file, profile):
@@ -345,11 +367,14 @@ def _move_temp_output_into_place(temp_output_file, output_file, profile):
     if is_remote_url(output_file):
         with remote_write_context(output_file, profile=profile) as remote_path:
             shutil.copy2(temp_output_file, remote_path)
+        os.remove(temp_output_file)
         return
 
-    if os.path.exists(output_file):
-        os.remove(output_file)
-    shutil.move(temp_output_file, output_file)
+    # os.replace() is atomic on POSIX and Windows for two paths on one
+    # filesystem, which _staging_path_beside() guarantees. The destination is
+    # never unlinked or truncated first, so a failure here leaves the original
+    # file intact and the rewrite still sitting in the temp file (#959).
+    os.replace(temp_output_file, output_file)
 
 
 def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geoparquet_version=None):

@@ -58,6 +58,7 @@ class MultiFileCheckRunner:
         self.warnings = 0
         self.failed = 0
         self.issues: list[tuple[str, str, str]] = []  # (file, level, message)
+        self.fixed: list[tuple[str, str | None]] = []  # (output path, backup path)
         self.current_index = 0
         self.is_multi_file = len(files) > 1
 
@@ -118,6 +119,30 @@ class MultiFileCheckRunner:
                     self._record_issue(file_path, "warning", issue)
         self._update_progress()
 
+    def record_fix(self, output_path: str, backup_path: str | None):
+        """Record a file this run rewrote, for the end-of-run summary."""
+        self.fixed.append((output_path, backup_path))
+
+    def _print_fix_summary(self):
+        """List what ``--fix`` rewrote.
+
+        In multi-file mode the per-file "Optimized file:" lines are suppressed,
+        so a run that rewrote every file in a partition in place used to end on
+        a summary that mentioned only the checks. Naming the files is the
+        minimum a mass in-place rewrite owes the user.
+        """
+        if not self.fixed:
+            return
+
+        plural = "" if len(self.fixed) == 1 else "s"
+        click.echo(click.style(f"Fixed {len(self.fixed)} file{plural}:", fg="green"))
+        for output_path, backup_path in self.fixed[: self.max_issues_shown]:
+            suffix = f" (backup: {backup_path})" if backup_path else ""
+            click.echo(f"  - {output_path}{suffix}")
+        extra_fixes = len(self.fixed) - self.max_issues_shown
+        if extra_fixes > 0:
+            click.echo(click.style(f"  ... and {extra_fixes} more", fg="cyan"))
+
     def print_summary(self):
         """Print final summary after all files are checked."""
         if not self.is_multi_file:
@@ -147,6 +172,7 @@ class MultiFileCheckRunner:
 
         summary = ", ".join(summary_parts) if summary_parts else "0 checked"
         click.echo(f"Summary: {summary} ({total} files checked)")
+        self._print_fix_summary()
 
 
 @check.command(name="all", cls=GlobAwareCommand)
@@ -564,6 +590,7 @@ def check_spatial(
                 output_path, backup_path = handle_fix_common(
                     file_path, fix_output, no_backup, fix_spatial_ordering, verbose, overwrite, None
                 )
+                runner.record_fix(output_path, backup_path)
 
                 if show_output:
                     click.echo(
@@ -653,6 +680,7 @@ def check_compression_cmd(
                 output_path, backup_path = handle_fix_common(
                     file_path, fix_output, no_backup, fix_compression, verbose, overwrite, None
                 )
+                runner.record_fix(output_path, backup_path)
 
                 if show_output:
                     click.echo(click.style("\n✓ Compression optimized successfully!", fg="green"))
@@ -753,6 +781,7 @@ def check_bbox_cmd(
                     output_path, backup_path = handle_fix_common(
                         file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, None
                     )
+                    runner.record_fix(output_path, backup_path)
 
                     if show_output:
                         click.echo(click.style("\n✓ Bbox column removed successfully!", fg="green"))
@@ -784,6 +813,7 @@ def check_bbox_cmd(
                     output_path, backup_path = handle_fix_common(
                         file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, None
                     )
+                    runner.record_fix(output_path, backup_path)
 
                     if show_output:
                         click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
@@ -883,6 +913,7 @@ def check_row_group_cmd(
                 output_path, backup_path = handle_fix_common(
                     file_path, fix_output, no_backup, fix_row_groups, verbose, overwrite, None
                 )
+                runner.record_fix(output_path, backup_path)
 
                 if show_output:
                     click.echo(click.style("\n✓ Row groups optimized successfully!", fg="green"))

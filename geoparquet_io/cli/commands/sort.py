@@ -39,7 +39,7 @@ def sort(ctx):
 @sort.command(name="hilbert", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path(), required=False, default=None)
-@click.option(
+@column_name_option(
     "--geometry-column",
     "-g",
     default="geometry",
@@ -109,7 +109,7 @@ def hilbert_order(
 @sort.command(name="str", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path(), required=False, default=None)
-@click.option(
+@column_name_option(
     "--geometry-column",
     "-g",
     default="geometry",

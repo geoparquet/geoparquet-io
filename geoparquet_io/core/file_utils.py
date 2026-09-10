@@ -239,6 +239,35 @@ def guard_output_not_read_as_input(input_path: str | None, output_path: str | No
     )
 
 
+def is_same_file_path(first: str | None, second: str | None) -> bool:
+    """Whether two paths name one file.
+
+    ``./a.parquet``, ``a.parquet``, an absolute spelling of either and a symlink
+    alias are all the same file, and every caller that decides "am I about to
+    write back over my own input?" has to agree on that. Comparing the raw
+    strings instead is what let an aliased ``--fix-output`` slip past a caller's
+    in-place branch and then get refused by this module's ``resolve()``-based
+    guard -- reproducing the very failure the in-place path exists to avoid
+    (#941, #959).
+
+    Remote URLs are compared verbatim: there is no local filesystem to resolve
+    them against.
+    """
+    if not first or not second:
+        return False
+    if first == second:
+        return True
+
+    from geoparquet_io.core.remote import is_remote_url
+
+    if is_remote_url(first) or is_remote_url(second):
+        return False
+    try:
+        return Path(first).resolve() == Path(second).resolve()
+    except OSError:
+        return False
+
+
 def handle_output_overwrite(
     output_path: str | None, overwrite: bool, input_path: str | None = None
 ) -> None:
@@ -254,15 +283,8 @@ def handle_output_overwrite(
     if not output_file.exists():
         return
 
-    if input_path:
-        input_file = Path(input_path)
-        try:
-            if output_file.resolve() == input_file.resolve():
-                raise GeoParquetError(f"Cannot overwrite input file: {output_path}")
-        except (OSError, GeoParquetError) as e:
-            if isinstance(e, GeoParquetError):
-                raise
-            pass
+    if input_path and is_same_file_path(output_path, input_path):
+        raise GeoParquetError(f"Cannot overwrite input file: {output_path}")
 
     if not overwrite:
         raise GeoParquetError(f"Output file already exists: {output_path}")
