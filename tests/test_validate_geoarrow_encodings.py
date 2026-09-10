@@ -528,3 +528,39 @@ class TestGeoArrowDepthTwinsAreDistinguished:
         generic = "LIST<ELEMENT: STRUCT<X: DOUBLE, Y: DOUBLE>>"
         check = _check_geoarrow_layout(generic, "geometry", "multipoint")
         assert check.status == CheckStatus.PASSED, check.message
+
+
+class TestPyArrowSchemaPath:
+    """The pyarrow fast path renders nesting in the type string, not in rows.
+
+    It emits child rows only for structs, so a list or map column declares
+    ``num_children: 0`` (issue #931). "Is this a group?" therefore has to be
+    read off the type, or a geometry column stored as a list under a declared
+    "WKB" encoding sails through the not-grouped check on local files.
+    """
+
+    def test_wkb_geometry_stored_as_a_list_is_grouped(self):
+        schema_info = [{"name": "geometry", "type": "list<item: double>", "num_children": 0}]
+
+        check = _check_geometry_not_grouped(schema_info, "geometry", "WKB")
+
+        assert check.status == CheckStatus.FAILED, check.message
+        assert "must not be grouped" in check.message
+
+    def test_wkb_geometry_stored_as_a_struct_is_grouped(self):
+        schema_info = [
+            {"name": "geometry", "type": "struct<x: double, y: double>", "num_children": 2},
+            {"name": "x", "type": "double", "num_children": 0},
+            {"name": "y", "type": "double", "num_children": 0},
+        ]
+
+        check = _check_geometry_not_grouped(schema_info, "geometry", "WKB")
+
+        assert check.status == CheckStatus.FAILED, check.message
+
+    def test_wkb_geometry_stored_as_binary_is_not_grouped(self):
+        schema_info = [{"name": "geometry", "type": "binary", "num_children": 0}]
+
+        check = _check_geometry_not_grouped(schema_info, "geometry", "WKB")
+
+        assert check.status == CheckStatus.PASSED, check.message

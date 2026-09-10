@@ -15,6 +15,7 @@ from contextvars import ContextVar
 import duckdb
 
 from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.parquet_schema import root_schema_columns
 
 # Per-bucket cache for S3 buckets that require authentication
 # Buckets not in this set are accessed without credentials (works for public buckets)
@@ -791,7 +792,7 @@ class _DuckDBSchemaWrapper:
     """Wrapper to provide PyArrow-like interface for DuckDB schema info."""
 
     def __init__(self, schema_info):
-        self._columns = [c for c in schema_info if c.get("name") and "." not in c.get("name", "")]
+        self._columns = root_schema_columns(schema_info)
 
     def __len__(self):
         return len(self._columns)

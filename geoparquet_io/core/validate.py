@@ -33,6 +33,11 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.parquet_schema import (
+    root_schema_index,
+    schema_direct_children,
+    schema_entry_is_group,
+)
 
 
 class CheckStatus(Enum):
@@ -801,9 +806,11 @@ def _check_geometry_not_grouped(
                     "group at the schema root",
                     category="parquet_schema",
                 )
-            # Check if it has children (would indicate a struct/group)
-            num_children = col.get("num_children") or 0
-            if num_children > 0:
+            # A group field is one the listing renders as nested, whether or not
+            # it renders child rows: the pyarrow fast path gives a list or map
+            # column no children at all, so counting them would wave through a
+            # geometry column stored as a list under a declared "WKB" encoding.
+            if schema_entry_is_group(col):
                 return ValidationCheck(
                     name=f"geometry_not_grouped_{geom_col}",
                     status=CheckStatus.FAILED,
@@ -1780,60 +1787,6 @@ def _check_covering_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck
     )
 
 
-def _schema_subtree_end(schema_info: list, index: int) -> int:
-    """Index just past the depth-first subtree rooted at ``schema_info[index]``."""
-    end = index + 1
-    for _ in range(schema_info[index].get("num_children") or 0):
-        if end >= len(schema_info):
-            break
-        end = _schema_subtree_end(schema_info, end)
-    return end
-
-
-def _schema_root_offset(schema_info: list) -> int:
-    """Index at which the root-level columns start: 0 or 1.
-
-    ``get_schema_info()`` returns the same flat depth-first listing in two
-    shapes. DuckDB's ``parquet_schema()`` prefixes it with the file's root group
-    element -- every row carries a ``file_name`` and the root alone has no
-    ``type`` -- while the pyarrow fast path starts straight at the first column
-    and always renders a ``type`` string.
-    """
-    if not schema_info:
-        return 0
-    first = schema_info[0]
-    return 1 if "file_name" in first and first.get("type") is None else 0
-
-
-def _root_schema_index(schema_info: list, name: str) -> int | None:
-    """Index of the root-level schema entry called ``name``, else ``None``.
-
-    The listing is depth first, so a struct's children sit between their parent
-    and the next root column: scanning it for the first entry of a given name can
-    return a *nested* field (say ``meta.bbox``) and shadow the real root column
-    of the same name. Skipping whole subtrees is also what enforces the v1.1.0
-    rule that the covering bbox column is at the root of the schema.
-    """
-    index = _schema_root_offset(schema_info)
-    while index < len(schema_info):
-        if schema_info[index].get("name") == name:
-            return index
-        index = _schema_subtree_end(schema_info, index)
-    return None
-
-
-def _schema_direct_children(schema_info: list, index: int) -> list[dict]:
-    """Direct children of ``schema_info[index]``, grandchildren excluded."""
-    children = []
-    child = index + 1
-    for _ in range(schema_info[index].get("num_children") or 0):
-        if child >= len(schema_info):
-            break
-        children.append(schema_info[child])
-        child = _schema_subtree_end(schema_info, child)
-    return children
-
-
 def _bbox_column_missing(check_name: str, bbox_col_name: str, schema_info: list) -> ValidationCheck:
     """FAILED for a covering bbox column that is not a root-level column."""
     nested = any(col.get("name") == bbox_col_name for col in schema_info)
@@ -1878,7 +1831,7 @@ def _check_covering_bbox_column_exists(
         )
 
     check_name = f"covering_bbox_column_exists_{col_name}"
-    if _root_schema_index(schema_info, bbox_col_name) is None:
+    if root_schema_index(schema_info, bbox_col_name) is None:
         return _bbox_column_missing(check_name, bbox_col_name, schema_info)
 
     return ValidationCheck(
@@ -1922,11 +1875,11 @@ def _check_covering_bbox_structure(
         )
 
     check_name = f"covering_bbox_structure_{col_name}"
-    index = _root_schema_index(schema_info, bbox_col_name)
+    index = root_schema_index(schema_info, bbox_col_name)
     if index is None:
         return _bbox_column_missing(check_name, bbox_col_name, schema_info)
 
-    found_fields = [c.get("name") for c in _schema_direct_children(schema_info, index)]
+    found_fields = [c.get("name") for c in schema_direct_children(schema_info, index)]
 
     if found_fields != _BBOX_FIELDS.get(len(found_fields)):
         return ValidationCheck(
@@ -1971,7 +1924,7 @@ def _check_covering_bbox_field_types(
         )
 
     check_name = f"covering_bbox_field_types_{col_name}"
-    index = _root_schema_index(schema_info, bbox_col_name)
+    index = root_schema_index(schema_info, bbox_col_name)
     if index is None:
         return _bbox_column_missing(check_name, bbox_col_name, schema_info)
 
@@ -1979,7 +1932,7 @@ def _check_covering_bbox_field_types(
     # Same trap as _check_geometry_byte_array: a group child's type is an
     # explicit None, so `or ""` is the guard here too.
     field_types = {
-        (child.get("type") or "").upper() for child in _schema_direct_children(schema_info, index)
+        (child.get("type") or "").upper() for child in schema_direct_children(schema_info, index)
     }
 
     # Check if all types are valid
