@@ -344,8 +344,18 @@ class TestIsSameFilePath:
     def test_relative_and_absolute_spellings(self, tmp_path):
         target = tmp_path / "a.parquet"
         target.write_bytes(b"")
-        # Relative to the real CWD, so the test never has to change it.
-        relative = os.path.relpath(str(target))
+        # Relative to the real CWD, so the test never has to change it
+        # (no-cwd-change-in-tests forbids chdir and points here instead).
+        try:
+            relative = os.path.relpath(str(target))
+        except ValueError:
+            # Windows only: os.path.relpath raises "path is on mount 'C:',
+            # start on mount 'D:'" when tmp_path and the CWD are on different
+            # drives, which is how GitHub's windows runners are laid out. A
+            # relative spelling can only name the same file when it is
+            # reachable from the CWD, so there is nothing to assert here --
+            # and chdir is not available to make one.
+            pytest.skip("tmp_path is on a different drive than the CWD")
         assert relative != str(target)
         assert is_same_file_path(relative, str(target)) is True
 

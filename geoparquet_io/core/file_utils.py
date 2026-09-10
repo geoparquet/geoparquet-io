@@ -264,7 +264,11 @@ def is_same_file_path(first: str | None, second: str | None) -> bool:
         return False
     try:
         return Path(first).resolve() == Path(second).resolve()
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError is a Windows path shape -- a malformed drive spec or an
+        # embedded NUL. "I cannot tell" answers no: the callers use this to
+        # decide whether they are about to overwrite their own input, and the
+        # safe direction is to take the not-in-place branch.
         return False
 
 
