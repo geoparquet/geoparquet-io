@@ -104,6 +104,7 @@ from geoparquet_io.core.add import kdtree as core_kdtree
 from geoparquet_io.core.add import quadkey as core_quadkey
 from geoparquet_io.core.add import s2 as core_s2
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
 from geoparquet_io.core.partition import by_h3 as core_part_h3
 from geoparquet_io.core.partition import by_quadkey as core_part_quadkey
 
@@ -672,22 +673,22 @@ KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
         "ops",
         "tile_size",
         "None",
-        "50000",
+        str(DEFAULT_SORT_ROW_GROUP_ROWS),
     ): (
-        "The file core resolves row_group_rows=None to the sort default of 50,000 rows "
-        "(DEFAULT_SORT_ROW_GROUP_ROWS); the in-memory API spells that same effective default "
-        "explicitly as tile_size=50000."
+        f"The file core resolves row_group_rows=None to the sort default of "
+        f"{DEFAULT_SORT_ROW_GROUP_ROWS:,} rows (DEFAULT_SORT_ROW_GROUP_ROWS); the in-memory API "
+        f"spells that same effective default explicitly as tile_size={DEFAULT_SORT_ROW_GROUP_ROWS}."
     ),
     (
         "sort str",
         "table",
         "tile_size",
         "None",
-        "50000",
+        str(DEFAULT_SORT_ROW_GROUP_ROWS),
     ): (
-        "The file core resolves row_group_rows=None to the sort default of 50,000 rows "
-        "(DEFAULT_SORT_ROW_GROUP_ROWS); the fluent API spells that same effective default "
-        "explicitly as tile_size=50000."
+        f"The file core resolves row_group_rows=None to the sort default of "
+        f"{DEFAULT_SORT_ROW_GROUP_ROWS:,} rows (DEFAULT_SORT_ROW_GROUP_ROWS); the fluent API "
+        f"spells that same effective default explicitly as tile_size={DEFAULT_SORT_ROW_GROUP_ROWS}."
     ),
 }
 

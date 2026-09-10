@@ -6,19 +6,25 @@ DuckDB as *nothing at all*, so DuckDB's own 122,880-row default applied while
 group for the spatial queries sorting exists to serve. Four numbers, none of
 them agreeing.
 
-The sort commands now resolve their own default -- ``DEFAULT_SORT_ROW_GROUP_ROWS``,
-the top of gpio's recommended band -- and hand it down explicitly, so the
-advertised default *is* the effective default on every write path.
+The sort commands now resolve their own default -- ``DEFAULT_SORT_ROW_GROUP_ROWS``
+-- and hand it down explicitly, so the advertised default *is* the effective
+default on every write path.
 
-Note the writer rounds a row-group target up to a multiple of 2048, so a 50,000
-target lands on 51,200-row groups. The assertions below use that rounding
-rather than an exact equality.
+"Effective" has a second half, added for #961. DuckDB's Parquet writer emits row
+groups in whole vectors and rounds a ``ROW_GROUP_SIZE`` request *up* to a
+multiple of 2,048, so a 50,000-row request used to land on 51,200-row groups --
+outside the 10,000-50,000 band ``gpio check`` advises, which scored a freshly
+sorted file ``[fail]``. gpio now snaps a row-group request to the nearest whole
+vector before handing it to the writer, so the number it asks for is the number
+that lands, and the assertions below are exact equalities rather than
+round-ups.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import logging
 import math
 import random
 import re
@@ -33,17 +39,23 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.check_parquet_structure import SPATIAL_ROW_COUNT_RANGE
 from geoparquet_io.core.hilbert_order import hilbert_order
-from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
+from geoparquet_io.core.parquet_writer import (
+    DEFAULT_SORT_ROW_GROUP_ROWS,
+    WRITER_VECTOR_ROWS,
+    align_to_writer_vector,
+    resolve_sort_row_group_rows,
+)
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 
-# Enough rows that the old 122,880-row default and the new 50,000-row one are
-# unambiguously different layouts (3 groups vs 5), while staying fast to build
-# and sort.
+# Enough rows that the old 122,880-row default and the new one are unambiguously
+# different layouts (3 groups vs 6), while staying fast to build and sort.
 ROW_COUNT = 250_000
 
 # DuckDB's Parquet writer rounds a ROW_GROUP_SIZE up to a multiple of its
-# vector-chunk size, so an exact row count is not what lands on disk.
+# vector-chunk size, so an exact row count is not what lands on disk unless the
+# request is already a whole number of vectors.
 WRITER_CHUNK_ROWS = 2048
 
 
@@ -161,13 +173,16 @@ def test_default_is_inside_the_recommended_spatial_band(points_file, tmp_path):
 
     ``gpio check`` prints that band as advice; a default outside it means the
     tool contradicts itself the moment a user runs ``sort`` then ``check``.
+    This is the #961 regression: the band has to hold for the rows that land on
+    disk, not merely for the number gpio asked the writer for.
     """
-    assert 10_000 <= DEFAULT_SORT_ROW_GROUP_ROWS <= 50_000
+    spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
+    assert spatial_low <= DEFAULT_SORT_ROW_GROUP_ROWS <= spatial_high
 
     output = tmp_path / "band.parquet"
     result = CliRunner().invoke(cli, ["sort", "hilbert", points_file, str(output)])
     assert result.exit_code == 0, result.output
-    assert max(_row_group_rows(output)) <= _round_up_to_chunk(50_000)
+    assert spatial_low <= max(_row_group_rows(output)) <= spatial_high
 
 
 def test_explicit_row_group_size_still_wins(points_file, tmp_path):
@@ -239,4 +254,138 @@ def test_str_tile_size_tracks_the_sort_default():
     different strips depending on whether ``--row-group-size-mb`` was passed,
     and the documented Python default stops matching the CLI's.
     """
-    assert DEFAULT_STR_TILE_SIZE == DEFAULT_SORT_ROW_GROUP_ROWS == 50_000
+    assert DEFAULT_STR_TILE_SIZE == DEFAULT_SORT_ROW_GROUP_ROWS
+
+
+class TestWriterVectorAlignment:
+    """A row-group request must survive the writer intact (#961).
+
+    ``gpio sort`` asked for 50,000 rows per group -- the top of the
+    10,000-50,000 band ``gpio check`` advises -- and DuckDB wrote 51,200,
+    because it rounds a ``ROW_GROUP_SIZE`` request *up* to a whole 2,048-row
+    vector. ``gpio check optimization`` then scored the file gpio had just
+    written ``[fail]`` on its row-group factor and told the user to
+    re-partition it. gpio now snaps the request to the nearest whole vector
+    itself, so what it asks for is what lands.
+    """
+
+    def test_the_writer_rounds_a_request_up_to_a_whole_vector(self, tmp_path):
+        """The premise of #961, measured rather than assumed.
+
+        The rounding is a *ceiling*, not a nearest: 3,000 rows becomes 4,096,
+        not the nearer 2,048. That direction is what pushes a 50,000-row
+        request out of the top of the band, and it is why gpio's own alignment
+        has to happen before the request reaches the writer.
+        """
+        import duckdb
+
+        connection = duckdb.connect()
+        try:
+            connection.execute("CREATE TABLE t AS SELECT i AS id FROM range(60000) tbl(i)")
+            measured = {}
+            for request in (3_000, 50_000, DEFAULT_SORT_ROW_GROUP_ROWS):
+                out = tmp_path / f"vector_{request}.parquet"
+                connection.execute(f"COPY t TO '{out}' (FORMAT PARQUET, ROW_GROUP_SIZE {request})")
+                measured[request] = max(_row_group_rows(out))
+        finally:
+            connection.close()
+
+        assert measured[3_000] == 4_096, measured
+        assert measured[50_000] == 51_200, measured
+        # The default is a whole number of vectors, so the writer leaves it be.
+        assert measured[DEFAULT_SORT_ROW_GROUP_ROWS] == DEFAULT_SORT_ROW_GROUP_ROWS, measured
+
+    def test_the_default_is_a_whole_number_of_writer_vectors(self):
+        """The default is the largest whole vector at or below the band's top."""
+        spatial_high = SPATIAL_ROW_COUNT_RANGE[1]
+        assert DEFAULT_SORT_ROW_GROUP_ROWS % WRITER_VECTOR_ROWS == 0
+        assert DEFAULT_SORT_ROW_GROUP_ROWS <= spatial_high
+        assert DEFAULT_SORT_ROW_GROUP_ROWS + WRITER_VECTOR_ROWS > spatial_high
+
+    @pytest.mark.parametrize(
+        ("requested", "expected"),
+        [
+            (1, 2_048),  # below one vector: the writer's own minimum
+            (2_048, 2_048),
+            (3_000, 2_048),  # nearest, where the writer would round up to 4,096
+            (10_000, 10_240),  # the band floor rounds up, so it stays in band
+            (20_000, 20_480),
+            (49_152, 49_152),
+            (50_000, 49_152),  # the band top rounds down, so it stays in band
+            (51_200, 51_200),
+            (100_000, 100_352),
+        ],
+    )
+    def test_alignment_snaps_to_the_nearest_vector(self, requested, expected):
+        assert align_to_writer_vector(requested) == expected
+
+    def test_every_request_inside_the_spatial_band_stays_inside_it(self):
+        """Nearest, not floor -- and this is the test that pins the difference.
+
+        Rounding every request *down* would fix the top of the band and break
+        the bottom: a user who types the band's own floor, ``--row-group-size
+        10000``, would get 8,192-row groups and the same ``[fail]`` one end
+        further along. Snapping to the nearest vector is monotonic and maps
+        both endpoints inside the band, so every value between them lands
+        inside it too.
+        """
+        spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
+        assert align_to_writer_vector(spatial_low) >= spatial_low
+        assert align_to_writer_vector(spatial_high) <= spatial_high
+        for requested in range(spatial_low, spatial_high + 1, 137):
+            aligned = align_to_writer_vector(requested)
+            assert spatial_low <= aligned <= spatial_high, requested
+
+    def test_an_adjusted_explicit_request_is_announced(self, caplog):
+        """Changing what the user typed must not be silent."""
+        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+            resolved = resolve_sort_row_group_rows(50_000, None)
+
+        assert resolved == 49_152
+        assert "50,000" in caplog.text
+        assert "49,152" in caplog.text
+
+    def test_an_already_aligned_request_is_left_alone_and_silent(self, caplog):
+        """No note when there is nothing to report."""
+        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+            resolved = resolve_sort_row_group_rows(20_480, None)
+
+        assert resolved == 20_480
+        assert caplog.text == ""
+
+    def test_the_default_needs_no_adjustment_note(self, caplog):
+        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+            resolved = resolve_sort_row_group_rows(None, None)
+
+        assert resolved == DEFAULT_SORT_ROW_GROUP_ROWS
+        assert caplog.text == ""
+
+    def test_sorted_output_lands_on_exactly_the_advertised_default(self, points_file, tmp_path):
+        """No rounding left for the writer to do, so equality is exact."""
+        output = tmp_path / "exact.parquet"
+        result = CliRunner().invoke(cli, ["sort", "hilbert", points_file, str(output)])
+        assert result.exit_code == 0, result.output
+        assert max(_row_group_rows(output)) == DEFAULT_SORT_ROW_GROUP_ROWS
+
+    def test_sorted_output_passes_the_optimization_row_group_factor(self, points_file, tmp_path):
+        """The #961 repro: ``gpio check optimization`` must not fail gpio's own output."""
+        from geoparquet_io.core.check_optimization import _check_row_group_size
+
+        output = tmp_path / "scored.parquet"
+        result = CliRunner().invoke(cli, ["sort", "hilbert", points_file, str(output)])
+        assert result.exit_code == 0, result.output
+
+        factor = _check_row_group_size(str(output))
+        assert factor["passed"] is True, factor["detail"]
+
+    @pytest.mark.parametrize("requested", [10_000, 25_000, 50_000])
+    def test_an_explicit_in_band_request_is_written_in_band(self, requested, points_file, tmp_path):
+        """The band has to hold for a value the user typed, not just for the default."""
+        spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
+        output = tmp_path / f"explicit_{requested}.parquet"
+        result = CliRunner().invoke(
+            cli,
+            ["sort", "hilbert", points_file, str(output), "--row-group-size", str(requested)],
+        )
+        assert result.exit_code == 0, result.output
+        assert spatial_low <= max(_row_group_rows(output)) <= spatial_high

@@ -16,6 +16,7 @@ import pytest
 
 from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.parquet_writer import align_to_writer_vector
 from geoparquet_io.core.str_order import _str_layout, str_order, str_order_table
 
 
@@ -443,7 +444,15 @@ def test_str_order_streaming_uses_the_streams_own_primary_column(tmp_path, monke
 
 
 def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path):
-    """The written row order is str_order_table's order - the write does not reshuffle."""
+    """The written row order is str_order_table's order - the write does not reshuffle.
+
+    The tile size the file path uses is ``--row-group-size`` snapped to a whole
+    2,048-row writer vector (#961), because STR's tile size is meant to be "the
+    rows you intend to put in a row group" and that is now the number a row
+    group will actually hold. So the in-memory comparison has to be made at the
+    same snapped size; comparing against the raw request would be asserting that
+    the file path ignores the alignment.
+    """
     source = tmp_path / "order-source.parquet"
     output = tmp_path / "order-str.parquet"
     table = _point_table(_SPREAD_POINTS)
@@ -452,6 +461,6 @@ def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path):
     str_order(str(source), str(output), row_group_rows=20, geoparquet_version="1.1")
 
     written = pq.read_table(output)
-    expected = str_order_table(table, tile_size=20)
+    expected = str_order_table(table, tile_size=align_to_writer_vector(20))
     assert written["id"].to_pylist() == expected["id"].to_pylist()
     assert written["geometry"].to_pylist() == expected["geometry"].to_pylist()
