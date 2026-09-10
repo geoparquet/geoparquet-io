@@ -253,10 +253,10 @@ def str_order(
 ) -> None:
     """Reorder a GeoParquet file with Sort-Tile-Recursive packing."""
     configure_verbose(verbose)
-    # Validate the value the user actually typed, so the error names
-    # --row-group-size rather than the internal tile_size it is derived into.
-    if row_group_rows is not None and row_group_rows < 1:
-        raise InvalidParameterError("--row-group-size", "must be at least 1")
+    # ``resolve_sort_row_group_rows`` validates the value the user actually
+    # typed -- the error names --row-group-size rather than the internal
+    # tile_size it is derived into -- and every sort subcommand goes through it,
+    # so all four reject a non-positive request the same way.
     row_group_rows = resolve_sort_row_group_rows(row_group_rows, row_group_size_mb)
     tile_size = DEFAULT_STR_TILE_SIZE if row_group_rows is None else row_group_rows
     _validate_tile_size(tile_size)

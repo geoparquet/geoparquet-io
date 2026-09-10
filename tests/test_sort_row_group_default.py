@@ -14,10 +14,12 @@ default on every write path.
 groups in whole vectors and rounds a ``ROW_GROUP_SIZE`` request *up* to a
 multiple of 2,048, so a 50,000-row request used to land on 51,200-row groups --
 outside the 10,000-50,000 band ``gpio check`` advises, which scored a freshly
-sorted file ``[fail]``. gpio now snaps a row-group request to the nearest whole
-vector before handing it to the writer, so the number it asks for is the number
-that lands, and the assertions below are exact equalities rather than
-round-ups.
+sorted file ``[fail]``. gpio now snaps a row-group request to a whole vector
+itself, *the same way the writer would* -- upwards -- except where that would
+push a request that is inside the band out of the top of it, where it snaps
+down to the largest whole vector the band allows. So the number gpio asks for
+is the number that lands, and the assertions below are exact equalities rather
+than round-ups.
 """
 
 from __future__ import annotations
@@ -40,9 +42,11 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.check_parquet_structure import SPATIAL_ROW_COUNT_RANGE
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.hilbert_order import hilbert_order
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_SORT_ROW_GROUP_ROWS,
+    SPATIAL_BAND_TOP_ROWS,
     WRITER_VECTOR_ROWS,
     align_to_writer_vector,
     resolve_sort_row_group_rows,
@@ -59,8 +63,15 @@ ROW_COUNT = 250_000
 WRITER_CHUNK_ROWS = 2048
 
 
-def _round_up_to_chunk(rows: int) -> int:
-    return math.ceil(rows / WRITER_CHUNK_ROWS) * WRITER_CHUNK_ROWS
+def _writer_ceiling(rows: int) -> int:
+    """What the writer itself would make of a request, independent of gpio.
+
+    Measured in ``test_the_writer_rounds_a_request_up_to_a_whole_vector``: a
+    strict ceiling to a whole vector, never a nearest. Spelled out here so the
+    alignment tests below compare gpio's rule against the writer's rather than
+    against a restatement of gpio's own code.
+    """
+    return max(1, math.ceil(rows / WRITER_CHUNK_ROWS)) * WRITER_CHUNK_ROWS
 
 
 def _pseudo_quadkey(value: int, digits: int = 13) -> str:
@@ -125,16 +136,24 @@ SORT_COMMANDS = {
 
 
 def _help_default_rows(command: str) -> int:
-    """The row count ``--row-group-size --help`` advertises as its default."""
+    """The row count ``--row-group-size --help`` advertises as its default.
+
+    Read off the option's own help string rather than the rendered block:
+    Click wraps that block to the terminal width and breaks long words at
+    hyphens, so a regex spanning the rendered text depends on where the wrap
+    happens to fall. The rendered output is still checked -- it has to carry
+    the option and the number -- but the number is parsed from the source.
+    """
     result = CliRunner().invoke(cli, ["sort", command, "--help"])
     assert result.exit_code == 0, result.output
-    # Collapse the wrapped help block so the option text is one line.
-    flat = " ".join(result.output.split())
-    match = re.search(r"--row-group-size INTEGER\s+(.*?)--row-group-size-mb", flat)
-    assert match, f"could not locate --row-group-size help in:\n{result.output}"
-    number = re.search(r"default: ([\d,]+)", match.group(1))
-    assert number, f"--row-group-size help states no default: {match.group(1)!r}"
-    return int(number.group(1).replace(",", ""))
+    subcommand = cli.commands["sort"].commands[command]
+    option = next(param for param in subcommand.params if "--row-group-size" in param.opts)
+    number = re.search(r"default: ([\d,]+)", option.help or "")
+    assert number, f"--row-group-size help states no default: {option.help!r}"
+    rows = int(number.group(1).replace(",", ""))
+    assert "--row-group-size INTEGER" in result.output, result.output
+    assert str(rows) in " ".join(result.output.split()), result.output
+    return rows
 
 
 @pytest.mark.parametrize("command", sorted(SORT_COMMANDS))
@@ -157,7 +176,7 @@ def test_default_row_groups_match_the_advertised_default(command, points_file, t
     assert result.exit_code == 0, result.output
 
     advertised = _help_default_rows(command)
-    ceiling = _round_up_to_chunk(advertised)
+    ceiling = align_to_writer_vector(advertised)
     groups = _row_group_rows(output)
 
     assert sum(groups) == ROW_COUNT
@@ -193,7 +212,7 @@ def test_explicit_row_group_size_still_wins(points_file, tmp_path):
         ["sort", "hilbert", points_file, str(output), "--row-group-size", "20000"],
     )
     assert result.exit_code == 0, result.output
-    assert max(_row_group_rows(output)) <= _round_up_to_chunk(20_000)
+    assert max(_row_group_rows(output)) == align_to_writer_vector(20_000)
 
 
 def test_row_group_size_mb_is_not_overridden_by_the_default(points_file, tmp_path):
@@ -242,7 +261,7 @@ def test_streaming_path_receives_the_resolved_default(points_file, tmp_path, mon
 
     rows = _row_group_rows(output)
     assert sum(rows) == table.num_rows
-    assert max(rows) == _round_up_to_chunk(DEFAULT_SORT_ROW_GROUP_ROWS)
+    assert max(rows) == DEFAULT_SORT_ROW_GROUP_ROWS
 
 
 def test_str_tile_size_tracks_the_sort_default():
@@ -265,8 +284,16 @@ class TestWriterVectorAlignment:
     because it rounds a ``ROW_GROUP_SIZE`` request *up* to a whole 2,048-row
     vector. ``gpio check optimization`` then scored the file gpio had just
     written ``[fail]`` on its row-group factor and told the user to
-    re-partition it. gpio now snaps the request to the nearest whole vector
-    itself, so what it asks for is what lands.
+    re-partition it. gpio now snaps the request to a whole vector itself, so
+    what it asks for is what lands.
+
+    The rule is the writer's own -- ceiling -- with one exception: a request
+    that is inside the band but whose ceiling would leave it (anything above
+    49,152 up to 50,000) snaps *down* to 49,152 instead. Rounding to the
+    *nearest* vector was tried and reverted: it rounds down wherever the
+    fractional part is under a half, so ``--row-group-size 9000`` produced
+    8,192-row groups -- below the band's 10,000 floor, which is #961 again at
+    the other end.
     """
 
     def test_the_writer_rounds_a_request_up_to_a_whole_vector(self, tmp_path):
@@ -279,11 +306,12 @@ class TestWriterVectorAlignment:
         """
         import duckdb
 
+        requests = (3_000, 8_193, 9_000, 9_215, 50_000, DEFAULT_SORT_ROW_GROUP_ROWS)
         connection = duckdb.connect()
         try:
             connection.execute("CREATE TABLE t AS SELECT i AS id FROM range(60000) tbl(i)")
             measured = {}
-            for request in (3_000, 50_000, DEFAULT_SORT_ROW_GROUP_ROWS):
+            for request in requests:
                 out = tmp_path / f"vector_{request}.parquet"
                 connection.execute(f"COPY t TO '{out}' (FORMAT PARQUET, ROW_GROUP_SIZE {request})")
                 measured[request] = max(_row_group_rows(out))
@@ -294,6 +322,24 @@ class TestWriterVectorAlignment:
         assert measured[50_000] == 51_200, measured
         # The default is a whole number of vectors, so the writer leaves it be.
         assert measured[DEFAULT_SORT_ROW_GROUP_ROWS] == DEFAULT_SORT_ROW_GROUP_ROWS, measured
+        # It is a ceiling at every measured point, never a nearest: 8,193 and
+        # 9,000 both land on 10,240 rather than 8,192.
+        assert measured == {request: _writer_ceiling(request) for request in requests}, measured
+
+    def test_the_writer_vector_matches_the_one_duckdb_publishes(self):
+        """The premise is a DuckDB build constant, so read it rather than trust it."""
+        import duckdb
+
+        assert WRITER_VECTOR_ROWS == duckdb.__standard_vector_size__
+
+    def test_the_local_band_top_matches_the_band_check_uses(self):
+        """``parquet_writer`` cannot import the band (``check`` imports *it*).
+
+        It keeps its own copy of the top of ``SPATIAL_ROW_COUNT_RANGE`` so the
+        two modules do not form an import cycle. This is what keeps the copy
+        honest.
+        """
+        assert SPATIAL_BAND_TOP_ROWS == SPATIAL_ROW_COUNT_RANGE[1]
 
     def test_the_default_is_a_whole_number_of_writer_vectors(self):
         """The default is the largest whole vector at or below the band's top."""
@@ -307,34 +353,84 @@ class TestWriterVectorAlignment:
         [
             (1, 2_048),  # below one vector: the writer's own minimum
             (2_048, 2_048),
-            (3_000, 2_048),  # nearest, where the writer would round up to 4,096
+            (3_000, 4_096),  # ceiling, exactly as the writer would
+            (8_193, 10_240),  # the window where "nearest" rounded down to 8,192
+            (9_000, 10_240),
+            (9_215, 10_240),
             (10_000, 10_240),  # the band floor rounds up, so it stays in band
             (20_000, 20_480),
             (49_152, 49_152),
+            (49_153, 49_152),  # the only window that snaps down: it would leave the band
             (50_000, 49_152),  # the band top rounds down, so it stays in band
+            (50_001, 51_200),  # above the band, the writer's ceiling again
             (51_200, 51_200),
             (100_000, 100_352),
+            (200_000, 200_704),
         ],
     )
-    def test_alignment_snaps_to_the_nearest_vector(self, requested, expected):
+    def test_alignment_snaps_to_a_whole_vector(self, requested, expected):
         assert align_to_writer_vector(requested) == expected
 
-    def test_every_request_inside_the_spatial_band_stays_inside_it(self):
-        """Nearest, not floor -- and this is the test that pins the difference.
+    def test_alignment_is_the_writers_own_rounding_outside_the_band_top(self):
+        """gpio must agree with the writer everywhere it can.
 
-        Rounding every request *down* would fix the top of the band and break
-        the bottom: a user who types the band's own floor, ``--row-group-size
-        10000``, would get 8,192-row groups and the same ``[fail]`` one end
-        further along. Snapping to the nearest vector is monotonic and maps
-        both endpoints inside the band, so every value between them lands
-        inside it too.
+        The only requests where gpio deliberately differs are the ones inside
+        the band whose ceiling would leave it -- 49,153 to 50,000. Everywhere
+        else, aligning here and letting the writer round produce the same file,
+        which is what lets gpio state the number that will land.
         """
+        for requested in range(1, 210_001, 97):
+            aligned = align_to_writer_vector(requested)
+            if requested <= SPATIAL_BAND_TOP_ROWS < _writer_ceiling(requested):
+                assert aligned == DEFAULT_SORT_ROW_GROUP_ROWS, requested
+            else:
+                assert aligned == _writer_ceiling(requested), requested
+
+    def test_no_request_below_the_band_floor_is_rounded_down(self):
+        """The regression a band-only sweep could not see.
+
+        Snapping to the *nearest* vector rounds down whenever the fractional
+        part is under a half, and below the band's 10,000-row floor that window
+        starts at 8,193: ``--row-group-size 9000`` produced 8,192-row groups,
+        under the floor, so ``gpio check optimization`` failed the file for the
+        opposite reason to #961. Walking only ``[10_000, 50_000]`` is
+        structurally blind to it, so this walks from 1 up to the floor.
+        """
+        spatial_low = SPATIAL_ROW_COUNT_RANGE[0]
+        for requested in range(1, spatial_low + 1):
+            aligned = align_to_writer_vector(requested)
+            assert aligned >= requested, requested
+            assert aligned == _writer_ceiling(requested), requested
+
+        # The band floor is reached from below without ever dipping under it.
+        assert align_to_writer_vector(8_193) == 10_240
+        assert align_to_writer_vector(9_000) == 10_240
+        assert align_to_writer_vector(9_215) == 10_240
+
+    def test_a_request_is_only_ever_reduced_to_keep_it_inside_the_band(self):
+        """gpio may write more rows than asked, but fewer only to stay in band."""
+        for requested in range(1, 210_001, 89):
+            aligned = align_to_writer_vector(requested)
+            if aligned < requested:
+                assert aligned == DEFAULT_SORT_ROW_GROUP_ROWS, requested
+                assert requested <= SPATIAL_BAND_TOP_ROWS, requested
+
+    def test_every_request_inside_the_spatial_band_stays_inside_it(self):
+        """The band property #961 exists to defend, walked end to end."""
         spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
         assert align_to_writer_vector(spatial_low) >= spatial_low
         assert align_to_writer_vector(spatial_high) <= spatial_high
         for requested in range(spatial_low, spatial_high + 1, 137):
             aligned = align_to_writer_vector(requested)
             assert spatial_low <= aligned <= spatial_high, requested
+
+    def test_alignment_is_monotonic(self):
+        """A bigger request may never produce a smaller row group."""
+        previous = 0
+        for requested in range(1, 120_001, 61):
+            aligned = align_to_writer_vector(requested)
+            assert aligned >= previous, requested
+            previous = aligned
 
     def test_an_adjusted_explicit_request_is_announced(self, caplog):
         """Changing what the user typed must not be silent."""
@@ -378,9 +474,14 @@ class TestWriterVectorAlignment:
         factor = _check_row_group_size(str(output))
         assert factor["passed"] is True, factor["detail"]
 
-    @pytest.mark.parametrize("requested", [10_000, 25_000, 50_000])
+    @pytest.mark.parametrize("requested", [9_000, 10_000, 25_000, 50_000])
     def test_an_explicit_in_band_request_is_written_in_band(self, requested, points_file, tmp_path):
-        """The band has to hold for a value the user typed, not just for the default."""
+        """The band has to hold for a value the user typed, not just for the default.
+
+        9,000 is deliberately *below* the band: a user asking for less than the
+        floor should still land on it rather than under it, which is where
+        rounding to the nearest vector put them.
+        """
         spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
         output = tmp_path / f"explicit_{requested}.parquet"
         result = CliRunner().invoke(
@@ -389,3 +490,54 @@ class TestWriterVectorAlignment:
         )
         assert result.exit_code == 0, result.output
         assert spatial_low <= max(_row_group_rows(output)) <= spatial_high
+
+    def test_a_below_floor_request_still_passes_the_optimization_factor(
+        self, points_file, tmp_path
+    ):
+        """``--row-group-size 9000`` end to end: 10,240-row groups, and a pass.
+
+        Under the nearest-vector rule this wrote 8,192-row groups and
+        ``gpio check optimization`` scored the result ``[fail]`` -- #961
+        relocated from the top of the band to just under the bottom.
+        """
+        from geoparquet_io.core.check_optimization import _check_row_group_size
+
+        output = tmp_path / "below_floor.parquet"
+        result = CliRunner().invoke(
+            cli, ["sort", "hilbert", points_file, str(output), "--row-group-size", "9000"]
+        )
+        assert result.exit_code == 0, result.output
+        assert max(_row_group_rows(output)) == 10_240
+        assert _check_row_group_size(str(output))["passed"] is True
+
+    @pytest.mark.parametrize("requested", [0, -5])
+    def test_a_non_positive_request_is_rejected_rather_than_clamped(self, requested):
+        """A garbage row count must not be quietly turned into one vector.
+
+        Before the guard moved here, ``sort str`` raised and the other three
+        clamped to 2,048 and wrote a file, so the four subcommands disagreed
+        about the same option.
+        """
+        with pytest.raises(InvalidParameterError):
+            resolve_sort_row_group_rows(requested, None)
+
+    @pytest.mark.parametrize("command", sorted(SORT_COMMANDS))
+    def test_every_sort_subcommand_rejects_a_non_positive_request(
+        self, command, points_file, tmp_path
+    ):
+        output = tmp_path / f"negative_{command}.parquet"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "sort",
+                command,
+                points_file,
+                str(output),
+                *SORT_COMMANDS[command],
+                "--row-group-size",
+                "-5",
+            ],
+        )
+        assert result.exit_code != 0
+        assert not output.exists()
+        assert "--row-group-size" in result.output

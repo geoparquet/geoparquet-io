@@ -46,11 +46,15 @@ GENERAL_ROW_COUNT_RANGE = (10_000, 200_000)
 #: Both endpoints are stated in requested rows, and no file can have either of
 #: them: the Parquet writer emits row groups in whole 2,048-row vectors. That
 #: is the writer's job to reconcile, not this band's -- ``gpio sort`` snaps its
-#: request to the nearest whole vector (``align_to_writer_vector``), which maps
-#: 10,000 to 10,240 and 50,000 to 49,152, both inside the band. Before #961 it
-#: asked for 50,000 and the writer rounded that *up* to 51,200, so
-#: ``check optimization`` failed a file ``gpio sort`` had just written. The band
-#: did not move; the request did.
+#: request to a whole vector (``align_to_writer_vector``), which maps 10,000 to
+#: 10,240 and 50,000 to 49,152, both inside the band. Before #961 it asked for
+#: 50,000 and the writer rounded that *up* to 51,200, so ``check optimization``
+#: failed a file ``gpio sort`` had just written. The band did not move; the
+#: request did.
+#:
+#: ``align_to_writer_vector`` keeps its own copy of this band's top, because
+#: this module imports ``parquet_writer`` and so it cannot import back.
+#: ``tests/test_sort_row_group_default.py`` asserts the two agree.
 #:
 #: The two bands are not rival answers to one question (#795): a file can sit
 #: inside the general band and still prune badly, so the messages below say

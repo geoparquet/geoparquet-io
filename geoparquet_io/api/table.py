@@ -1436,8 +1436,8 @@ class Table:
 
         Args:
             tile_size: Roughly the number of rows you intend to put in a Parquet
-                row group. STR uses it only to pick the number of X strips
-                (default: 50,000).
+                row group. STR uses it only to pick the number of X strips.
+                Defaults to ``core.str_order.DEFAULT_STR_TILE_SIZE``.
 
         Returns:
             New Table with rows packed into spatially compact tiles

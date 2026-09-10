@@ -178,15 +178,23 @@ def _row_group_size_help(default_rows: int | None) -> str:
     option falls through as ``None`` and the writer picks -- DuckDB's COPY uses
     122,880 rows -- so quoting a figure would repeat the #775 bug of advertising
     a default that nothing applies.
+
+    The two branches also differ in what the number *does*, which is why
+    neither says "exact" any more (#961): the sort commands snap the value to a
+    whole 2,048-row writer vector and write what they snapped to, while every
+    other command hands it to the writer, which rounds it up to that same
+    vector on its own.
     """
     if default_rows is None:
         return (
-            "Exact number of rows per row group. Mutually exclusive with "
-            "--row-group-size-mb; if neither is given the Parquet writer's own "
-            "default applies (122,880 rows for DuckDB-backed writes)."
+            "Rows per row group; the Parquet writer rounds this up to a whole "
+            "2,048-row vector. Mutually exclusive with --row-group-size-mb; if "
+            "neither is given the writer's own default applies (122,880 rows "
+            "for DuckDB-backed writes)."
         )
     return (
-        f"Exact number of rows per row group (default: {default_rows} "
+        f"Rows per row group, snapped to a whole 2,048-row writer vector so the "
+        f"file gets what you asked for (default: {default_rows} "
         "if --row-group-size-mb not set)"
     )
 
@@ -196,7 +204,7 @@ def row_group_options(func=None, *, default_rows: int | None = None):
     Add row group sizing options to a command.
 
     Adds:
-    - --row-group-size: Exact number of rows per row group
+    - --row-group-size: Number of rows per row group
     - --row-group-size-mb: Target row group size in MB or with units (e.g., '256MB', '1GB')
 
     These options are mutually exclusive. Both default to ``None``: a Click default
@@ -206,7 +214,7 @@ def row_group_options(func=None, *, default_rows: int | None = None):
     text matches what the command actually does.
 
     Usable bare (``@row_group_options``) or called
-    (``@row_group_options(default_rows=50_000)``).
+    (``@row_group_options(default_rows=DEFAULT_SORT_ROW_GROUP_ROWS)``).
     """
     if func is None:
         return lambda inner: row_group_options(inner, default_rows=default_rows)

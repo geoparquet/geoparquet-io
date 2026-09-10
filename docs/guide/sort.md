@@ -104,7 +104,9 @@ gpio sort hilbert input.parquet output.parquet --row-group-size-mb 1GB
 !!! tip "Optimal row group size for spatial queries"
     Every `gpio sort` subcommand's CLI defaults to **49,152 rows per group** - the top of the 10,000-50,000 band that suits GeoParquet 2.0 or parquet-geo-only files with Hilbert sorting, as the Parquet writer can actually express it. Smaller row groups create tighter bounding boxes that enable more row group skipping during spatial queries. Benchmarks show 10k rows + Hilbert + v2.0 enables ~67% row group skipping vs 0% with large row groups, so pass a smaller `--row-group-size` when query selectivity matters more than file size.
 
-    **Why 49,152 and not 50,000.** The writer emits row groups in whole 2,048-row vectors, and it rounds a request *up* to a multiple of that: 50,000 becomes 51,200, which is outside the band `gpio check` advises - so `gpio check optimization` used to score a freshly sorted file `[fail]` on its row-group factor and tell you to re-partition it ([#961](https://github.com/geoparquet/geoparquet-io/issues/961)). 49,152 is 24 whole vectors, so the writer passes it through unchanged. gpio snaps whatever you pass to `--row-group-size` to the nearest whole vector for the same reason, and prints a line naming both numbers when the value moves; `--row-group-size 50000` writes 49,152-row groups, and `--row-group-size 10000` writes 10,240-row groups. Nearest rather than down, so a request at either end of the band stays inside it.
+    **Why 49,152 and not 50,000.** The writer emits row groups in whole 2,048-row vectors, and it rounds a request *up* to a multiple of that: 50,000 becomes 51,200, which is outside the band `gpio check` advises - so `gpio check optimization` used to score a freshly sorted file `[fail]` on its row-group factor and tell you to re-partition it ([#961](https://github.com/geoparquet/geoparquet-io/issues/961)). 49,152 is 24 whole vectors, so the writer passes it through unchanged. gpio snaps whatever you pass to `--row-group-size` to a whole vector for the same reason, and prints a line naming both numbers when the value moves.
+
+    It snaps the way the writer does - **up** - so you never get fewer rows per group than you asked for: `--row-group-size 9000` writes 10,240-row groups, and `--row-group-size 10000` writes 10,240 too. The one exception is a request inside the band whose next vector up would leave it: anything from 49,153 to 50,000 snaps *down* to 49,152, so `--row-group-size 50000` writes 49,152-row groups rather than the out-of-band 51,200. Above the band gpio rounds up like the writer and leaves you there - `--row-group-size 100000` writes 100,352-row groups.
 
     The default applies to the sort commands only; other write paths (`convert`, `add`, `partition`) leave the choice to the Parquet writer unless you pass `--row-group-size` yourself, and they do not snap the value - the writer rounds it up instead.
 
@@ -149,12 +151,13 @@ strip, rows are simply sorted on Y.
 Strips and row groups do line up, which they did not before
 [#961](https://github.com/geoparquet/geoparquet-io/issues/961). The writer
 emits row groups in whole 2,048-row vectors and used to round the request up on
-its own, so `--row-group-size 100000` wrote 100,352-row groups while strips
+its own, so `--row-group-size 100000` wrote 100,352-row groups while tiles
 stayed a whole number of the 100,000 rows you asked for, and the two drifted
-apart. The sort commands now snap `--row-group-size` to the nearest whole vector
-*before* either use, so both take the same number and strips end on row-group
-boundaries whatever you pass. `--row-group-size 100000` builds 100,352-row
-strips and 100,352-row groups.
+apart. The sort commands now snap `--row-group-size` to a whole vector *before*
+either use, so both take the same number and every strip is a whole number of
+row groups whatever you pass. `--row-group-size 100000` builds 100,352-row
+tiles and 100,352-row groups; a strip is a whole number of those tiles (two of
+them, on 250,000 rows), so its boundaries fall on row-group boundaries.
 
 Left unset, both uses take the sort default of 49,152 rows. With
 `--row-group-size-mb`, STR falls back to 49,152 rows per tile, because the row
