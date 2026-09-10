@@ -303,19 +303,53 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     if verbose:
         debug("Applying Hilbert spatial ordering (this may take a while)...")
 
-    hilbert_order(
-        input_parquet=parquet_file,
-        output_parquet=output_file,
-        add_bbox_flag=False,  # bbox should already be added if needed
-        verbose=verbose,
-        compression="ZSTD",
-        compression_level=15,
-        row_group_rows=100000,
-        profile=profile,
-        overwrite=True,  # check --fix manages file lifecycle
-    )
+    # An in-place fix has to be routed through a temp file: hilbert_order() reads
+    # the whole input while writing, so handle_output_overwrite() refuses an
+    # output that resolves to its own input, and `overwrite=True` does not lift
+    # that. This function was the only fix_* that handed the path straight
+    # through, which is why `check spatial --fix` alone could not repair a file
+    # in place; fix_compression() and fix_bbox_all() already route the same way
+    # (#941).
+    actual_output = output_file
+    temp_output_file = None
+    if parquet_file == output_file:
+        fd, temp_output_file = tempfile.mkstemp(suffix=".parquet")
+        os.close(fd)
+        os.unlink(temp_output_file)
+        actual_output = temp_output_file
+
+    try:
+        hilbert_order(
+            input_parquet=parquet_file,
+            output_parquet=actual_output,
+            add_bbox_flag=False,  # bbox should already be added if needed
+            verbose=verbose,
+            compression="ZSTD",
+            compression_level=15,
+            row_group_rows=100000,
+            profile=profile,
+            overwrite=True,  # check --fix manages file lifecycle
+        )
+
+        if temp_output_file:
+            _move_temp_output_into_place(temp_output_file, output_file, profile)
+    finally:
+        if temp_output_file and os.path.exists(temp_output_file):
+            os.remove(temp_output_file)
 
     return {"fix_applied": "Applied Hilbert spatial ordering", "success": True}
+
+
+def _move_temp_output_into_place(temp_output_file, output_file, profile):
+    """Put a temp-file rewrite back over the path it was produced from."""
+    if is_remote_url(output_file):
+        with remote_write_context(output_file, profile=profile) as remote_path:
+            shutil.copy2(temp_output_file, remote_path)
+        return
+
+    if os.path.exists(output_file):
+        os.remove(output_file)
+    shutil.move(temp_output_file, output_file)
 
 
 def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geoparquet_version=None):

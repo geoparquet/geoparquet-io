@@ -3427,6 +3427,22 @@
        "type": "boolean"
       },
       {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "overwrite",
+       "nargs": 1,
+       "opts": [
+        "--overwrite"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
        "default": "<unset>",
        "hidden": false,
        "is_flag": false,

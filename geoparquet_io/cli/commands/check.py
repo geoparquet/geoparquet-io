@@ -448,6 +448,7 @@ def check_all(
     is_flag=True,
     help="Skip .bak backup when fixing",
 )
+@overwrite_option
 @check_partition_options
 @click.pass_context
 def check_spatial(
@@ -459,6 +460,7 @@ def check_spatial(
     fix,
     fix_output,
     no_backup,
+    overwrite,
     check_all_files,
     check_sample,
 ):
@@ -560,7 +562,7 @@ def check_spatial(
                 if show_output:
                     click.echo("\nApplying Hilbert spatial ordering...")
                 output_path, backup_path = handle_fix_common(
-                    file_path, fix_output, no_backup, fix_spatial_ordering, verbose, False, None
+                    file_path, fix_output, no_backup, fix_spatial_ordering, verbose, overwrite, None
                 )
 
                 if show_output:

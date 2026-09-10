@@ -311,10 +311,6 @@ class TestSpatialFixReporting:
     """``check spatial --fix`` reports the file it rewrote."""
 
     def test_fix_reports_the_optimized_output(self, poorly_ordered_file, tmp_path):
-        # NOTE: --fix-output, not an in-place fix. `check spatial` has no
-        # --overwrite option, so handle_fix_common refuses to write back over
-        # its own input; the in-place backup message is pinned by the
-        # row-group test below instead.
         fixed = tmp_path / "sorted.parquet"
 
         runner = CliRunner()
@@ -338,6 +334,43 @@ class TestSpatialFixReporting:
         assert "Spatial ordering applied successfully!" in result.output
         assert f"Optimized file: {fixed}" in result.output
         assert fixed.exists()
+
+    def test_in_place_fix_reports_output_and_backup(self, poorly_ordered_file):
+        """#941: ``--fix`` with no ``--fix-output`` rewrites the input in place.
+
+        ``fix_spatial_ordering`` used to hand the input path straight to
+        ``hilbert_order`` as its output, and ``handle_output_overwrite`` refused
+        it with "Cannot overwrite input file" -- *after* the backup had already
+        been written. Every other fix function routes an in-place rewrite
+        through a temp file; this one now does too.
+        """
+        before = pq.read_table(poorly_ordered_file).column("fsq_place_id").to_pylist()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["check", "spatial", poorly_ordered_file, "--fix", "--random-sample-size", "50"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Cannot overwrite input file" not in result.output
+        assert "Spatial ordering applied successfully!" in result.output
+        assert f"Optimized file: {poorly_ordered_file}" in result.output
+        assert f"Backup: {poorly_ordered_file}.bak" in result.output
+        assert Path(f"{poorly_ordered_file}.bak").exists()
+
+        # The input really was rewritten, and the backup holds the original.
+        after = pq.read_table(poorly_ordered_file).column("fsq_place_id").to_pylist()
+        assert sorted(after) == sorted(before)
+        assert after != before
+        assert (
+            pq.read_table(f"{poorly_ordered_file}.bak").column("fsq_place_id").to_pylist() == before
+        )
+
+    def test_overwrite_option_exists_for_parity_with_the_other_fixes(self):
+        """``check spatial`` accepts ``--overwrite``, like its fix-capable siblings."""
+        spatial = cli.commands["check"].commands["spatial"]
+        assert any("--overwrite" in param.opts for param in spatial.params)
 
 
 class TestRowGroupFixReporting:
