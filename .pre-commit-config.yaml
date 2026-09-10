@@ -132,6 +132,13 @@ repos:
             # sites use _quote_bigquery_identifier -- GoogleSQL reads "..." as a
             # STRING literal, so identifiers there are backtick-quoted -- so the
             # rule applies to it like everywhere else.
+            # Do NOT silence a new site with another `grep -v '^<path>:'`: that
+            # switches this rule off over the whole module, which is how #939's
+            # exemption hid three unrelated DuckDB-dialect sites until #946.
+            # duckdb_utils.py below is the only path that may ever be exempt;
+            # tests/test_duckdb_antipatterns_hook.py enforces that, and covers
+            # each spelling this arm has to catch. Silence one line instead,
+            # with a trailing "# allow-manual-quote".
             if grep -rnE 'f'"'"'"\{|\\"\{|\.replace\('"'"'"'"'"', '"'"'""'"'"'\)' geoparquet_io/ --include="*.py" \
                 | grep -v '^geoparquet_io/core/duckdb_utils.py:' \
                 | grep -v 'allow-manual-quote' \
