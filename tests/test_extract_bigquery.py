@@ -800,6 +800,22 @@ class TestColumnValidation:
         result = validate_bigquery_columns(["ID", "GeoM"], ["id", "geom"], "--exclude-cols")
         assert result == ["id", "geom"]
 
+    def test_an_exact_match_wins_over_a_case_fold(self):
+        """Case folding cannot be allowed to collapse two distinct columns.
+
+        ``_schema_column_names`` also serves ``table_source="local"``, and DuckDB
+        lets a local table carry both ``id`` and ``ID``. A ``{col.lower(): col}``
+        map keeps only the last of those, so an exactly-spelled request has to be
+        honoured as itself before any folding is tried.
+        """
+        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+
+        schema = ["id", "ID", "geom"]
+        assert validate_bigquery_columns(["id"], schema, "--exclude-cols") == ["id"]
+        assert validate_bigquery_columns(["ID"], schema, "--exclude-cols") == ["ID"]
+        # A spelling that matches neither exactly still folds, as before.
+        assert validate_bigquery_columns(["GeoM"], schema, "--include-cols") == ["geom"]
+
     def test_missing_column_is_an_invalid_parameter(self):
         from geoparquet_io.core.exceptions import InvalidParameterError
         from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
@@ -867,12 +883,8 @@ class TestColumnValidation:
         with (
             patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
             patch(
-                "geoparquet_io.core.extract_bigquery._schema_column_names",
-                return_value=["id", "geom"],
-            ),
-            patch(
-                "geoparquet_io.core.extract_bigquery._detect_geometry_column_from_schema",
-                return_value="geom",
+                "geoparquet_io.core.extract_bigquery._schema_rows",
+                return_value=[("id", "BIGINT"), ("geom", "GEOMETRY")],
             ),
         ):
             mock_conn.return_value.__enter__.return_value = con
@@ -899,12 +911,8 @@ class TestColumnValidation:
         with (
             patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
             patch(
-                "geoparquet_io.core.extract_bigquery._schema_column_names",
-                return_value=["id", "geom"],
-            ),
-            patch(
-                "geoparquet_io.core.extract_bigquery._detect_geometry_column_from_schema",
-                return_value="geom",
+                "geoparquet_io.core.extract_bigquery._schema_rows",
+                return_value=[("id", "BIGINT"), ("geom", "GEOMETRY")],
             ),
         ):
             mock_conn.return_value.__enter__.return_value = MagicMock()
@@ -922,6 +930,109 @@ class TestColumnValidation:
 
         assert result.exit_code == 2, result.output
         assert "nope" in result.output
+
+
+class TestSchemaIsReadOnce:
+    """Every schema read in this module goes through ``_schema_rows``.
+
+    Five call sites each spelled out their own
+    ``DESCRIBE SELECT * FROM bigquery_scan(...) LIMIT 0``. Consolidating them
+    has two payoffs beyond the duplication: the raw ``{table_id}``
+    interpolation that ``bigquery_scan`` forces (it takes a string literal, so
+    ``sql_path``/``quote_identifier`` do not apply) now exists in exactly one
+    place with the pre-validation contract written next to it; and a caller that
+    already holds the rows can hand them on instead of paying for a second
+    round-trip against BigQuery.
+    """
+
+    def test_describe_is_spelled_in_exactly_one_helper(self):
+        """A new inline DESCRIBE fails here rather than quietly becoming a sixth."""
+        import inspect
+
+        from geoparquet_io.core import extract_bigquery
+
+        module_source = Path(inspect.getsourcefile(extract_bigquery)).read_text(encoding="utf-8")
+        helper_source = inspect.getsource(extract_bigquery._schema_rows)
+
+        # Two: the bigquery_scan branch and the local-table branch.
+        assert helper_source.count("DESCRIBE SELECT") == 2
+        assert module_source.count("DESCRIBE SELECT") == 2
+
+    def test_given_rows_are_used_without_touching_the_connection(self):
+        from geoparquet_io.core.extract_bigquery import _detect_geometry_column_from_schema
+
+        rows = [("id", "BIGINT"), ("geom", "GEOMETRY")]
+        # con is None: reusing the rows means no query can possibly be issued.
+        assert _detect_geometry_column_from_schema(None, "p.d.t", schema_rows=rows) == "geom"
+
+    def test_an_explicit_geography_column_resolves_from_the_given_rows(self):
+        from geoparquet_io.core.extract_bigquery import _detect_geometry_column_from_schema
+
+        rows = [("id", "BIGINT"), ("Geom", "GEOMETRY")]
+        assert (
+            _detect_geometry_column_from_schema(None, "p.d.t", "GEOM", schema_rows=rows) == "Geom"
+        )
+
+    def test_column_type_comes_from_the_shared_read(self):
+        from geoparquet_io.core.extract_bigquery import _get_column_type
+
+        con = MagicMock()
+        con.execute.return_value.fetchall.return_value = [("id", "BIGINT"), ("geom", "GEOMETRY")]
+
+        assert _get_column_type(con, "p.d.t", "GEOM") == "GEOMETRY"
+        assert _get_column_type(con, "p.d.t", "absent") == "VARCHAR"
+
+    def test_selecting_all_columns_reads_them_through_the_helper(self):
+        from geoparquet_io.core.extract_bigquery import _build_select_with_wkb
+
+        con = MagicMock()
+        con.execute.return_value.fetchall.return_value = [("id", "BIGINT"), ("geom", "GEOMETRY")]
+
+        select_cols, _ = _build_select_with_wkb(None, None, con, "p.d.t")
+        assert '"id"' in select_cols and '"geom"' in select_cols
+
+    def test_column_validation_costs_no_extra_schema_read(self):
+        """``--include-cols`` used to add a DESCRIBE the detection already paid for.
+
+        The invariant: by the time ``_build_column_list`` is reached, the schema
+        has been read exactly once, whether or not either column option was
+        given.
+        """
+        import functools
+
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        class _Stop(Exception):
+            pass
+
+        rows = [("id", "BIGINT"), ("name", "VARCHAR"), ("geom", "GEOMETRY")]
+
+        def _spy(con, table_id, table_source="bigquery", *, _reads):
+            _reads.append(table_id)
+            return rows
+
+        for kwargs in ({}, {"include_cols": "id"}, {"exclude_cols": "name"}):
+            reads: list[str] = []
+            with (
+                patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+                patch(
+                    "geoparquet_io.core.extract_bigquery._schema_rows",
+                    side_effect=functools.partial(_spy, _reads=reads),
+                ),
+                patch(
+                    "geoparquet_io.core.extract_bigquery._build_column_list",
+                    side_effect=_Stop,
+                ),
+            ):
+                mock_conn.return_value.__enter__.return_value = MagicMock()
+                with pytest.raises(_Stop):
+                    extract_bigquery(
+                        table_id="project-name.dataset.table",
+                        output_parquet=None,
+                        **kwargs,
+                    )
+
+            assert reads == ["project-name.dataset.table"], kwargs
 
 
 class TestPythonAPI:

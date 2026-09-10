@@ -354,8 +354,19 @@ def _validate_column_list(ctx, param, value):
     BigQuery), which reports it as ``InvalidParameterError`` -- also exit 2.
     Catching blanks here matters even so: ``--dry-run`` builds the same SELECT
     without ever opening a connection, so there is no schema to check against.
+
+    A **wholly empty** value is not a blank entry, it is an unset option, and is
+    normalised to ``None``. Every backend reads these options as
+    ``[c.strip() for c in v.split(",")] if v else None``
+    (``core/extract.py``, ``core/extract_bigquery.py``, ``core/carto.py``,
+    ``core/pmtiles.py``), so ``""`` has always meant "not given" -- which is what
+    ``--include-cols "$COLS"`` expands to when ``COLS`` is unset. Rejecting it
+    would break working invocations without catching anything: ``"".split(",")``
+    is ``[""]`` only because there is nothing there to name. ``"   "`` and
+    ``"id,,name"`` are a different case -- both are truthy, so both reach
+    ``quote_identifier()`` on main, and both stay rejected.
     """
-    if value is None:
+    if value is None or value == "":
         return None
     if any(not entry.strip() for entry in value.split(",")):
         raise click.BadParameter(
