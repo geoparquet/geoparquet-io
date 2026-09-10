@@ -1551,3 +1551,118 @@ def test_api_table_metadata_still_reports_a_well_formed_block(tmp_path):
     assert meta["geo_metadata"] == block
     assert meta["geometry_types"] == ["Point"]
     assert meta["edges"] == "planar"
+
+
+# =============================================================================
+# The column pruner: a malformed `primary_column` must not cost the file its CRS
+# =============================================================================
+#
+# `_prune_geo_dict_to_columns` compared the *raw* `primary_column` against the
+# surviving `columns` keys. `123` is not None and is not a key, so the whole
+# `geo` block was dropped -- CRS included -- and an absent `crs` is spec-defined
+# as OGC:CRS84. A projected file came out of `gpio extract geoparquet` and
+# `gpio sort hilbert` silently relabelled lon/lat: corruption, not a crash
+# (#968). This is a write path -- what survives here is written to the output --
+# so it goes through the shared `sanitize_geo_metadata`, which drops the
+# malformed key and repairs it from the one surviving column.
+
+
+def _projected_file(tmp_path, name: str, primary, col: str = "geometry") -> str:
+    """A one-row EPSG:5070 file whose block declares ``primary`` as its primary."""
+    block = {
+        "version": "1.1.0",
+        "primary_column": primary,
+        "columns": {col: {"encoding": "WKB", "crs": _crs_5070(), "geometry_types": ["Point"]}},
+    }
+    return _file_with_geo(tmp_path, name, block, col=col)
+
+
+def _crs_epsg_of(path) -> int | None:
+    """The EPSG code the written file declares for its primary column, if any."""
+    geo = _geo_of_file(path)
+    if not geo:
+        return None
+    entry = (geo.get("columns") or {}).get(geo.get("primary_column"))
+    crs = entry.get("crs") if isinstance(entry, dict) else None
+    if not isinstance(crs, dict):
+        return None
+    return (crs.get("id") or {}).get("code")
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_prune_keeps_the_block_when_the_primary_column_is_malformed(col):
+    """The pruner must not read `primary_column` raw (#968)."""
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "1.1.0",
+        "primary_column": 123,
+        "columns": {col: {"encoding": "WKB", "crs": _crs_5070()}},
+    }
+    pruned = prune_geo_metadata_to_columns({b"geo": json.dumps(block).encode("utf-8")}, ["id", col])
+
+    assert b"geo" in pruned, "the whole block was dropped, taking the CRS with it"
+    geo = json.loads(pruned[b"geo"])
+    assert geo["primary_column"] == col
+    assert geo["columns"][col]["crs"]["id"]["code"] == 5070
+
+
+def test_prune_still_drops_a_block_whose_primary_column_is_gone():
+    """The pruner's real job is untouched: no surviving geometry column, no block."""
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB"}},
+    }
+    pruned = prune_geo_metadata_to_columns({b"geo": json.dumps(block).encode("utf-8")}, ["id"])
+    assert b"geo" not in pruned
+
+
+def test_prune_leaves_no_primary_when_two_columns_could_be_meant():
+    """Two survivors is a guess; the block keeps its columns and names no primary."""
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "1.1.0",
+        "primary_column": 123,
+        "columns": {"geom_a": {"encoding": "WKB"}, "geom_b": {"encoding": "WKB"}},
+    }
+    pruned = prune_geo_metadata_to_columns(
+        {b"geo": json.dumps(block).encode("utf-8")}, ["geom_a", "geom_b"]
+    )
+    geo = json.loads(pruned[b"geo"])
+    assert "primary_column" not in geo
+    assert set(geo["columns"]) == {"geom_a", "geom_b"}
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+@pytest.mark.parametrize("command", [["extract", "geoparquet"], ["sort", "hilbert"]])
+def test_projected_crs_survives_a_malformed_primary_column(command, col, tmp_path):
+    """A projected file must not come out of gpio relabelled lon/lat (#968).
+
+    The control run pins what the command does with a well-formed block; the
+    malformed run has to match it. Comparing the two is the point: an assertion
+    on the malformed run alone would pass just as well if the command had
+    stopped writing a CRS at all.
+    """
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    reset_malformed_geo_warnings()
+    runner = CliRunner()
+    codes = {}
+    for label, primary in (("control", col), ("malformed", 123)):
+        src = _projected_file(tmp_path, f"{label}_{col}_{command[0]}", primary, col=col)
+        out = tmp_path / f"{label}_{col}_{command[0]}_out.parquet"
+        result = runner.invoke(cli, [*command, src, str(out)])
+        assert result.exit_code == 0, result.output
+        codes[label] = _crs_epsg_of(out)
+
+    assert codes["control"] == 5070, "the control lost the CRS; the fixture is wrong"
+    assert codes["malformed"] == codes["control"]

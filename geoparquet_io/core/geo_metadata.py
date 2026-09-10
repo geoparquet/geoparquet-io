@@ -854,7 +854,23 @@ def _prune_geo_dict_to_columns(geo_dict: dict, columns: set[str], repoint_primar
     itself is gone but another declared geometry column remains,
     ``repoint_primary`` decides between naming that survivor as the new primary
     and dropping the whole block.
+
+    This is a write path -- whatever survives is re-encoded into the output's
+    ``geo`` key -- so the carried block goes through the shared shape check
+    first. It used to compare the *raw* ``primary_column`` against the surviving
+    keys, and ``123`` is neither ``None`` nor a key, so the whole block was
+    dropped: the file lost its ``crs`` too, and an absent ``crs`` is spec-defined
+    as OGC:CRS84, silently relabelling a projected file lon/lat (#968).
     """
+    # Sanitizing drops a non-string `primary_column` and repairs it from a lone
+    # surviving column, which is the recovery this function needs and #883/#945
+    # already shared out. A block it cannot make usable is an absent one.
+    declared_primary = isinstance(geo_dict, dict) and "primary_column" in geo_dict
+    sanitized = sanitize_geo_metadata(geo_dict)
+    if not isinstance(sanitized, dict):
+        return _DROP_GEO
+    geo_dict = sanitized
+
     col_entries = geo_dict.get("columns")
     if not isinstance(col_entries, dict):
         return geo_dict
@@ -863,6 +879,13 @@ def _prune_geo_dict_to_columns(geo_dict: dict, columns: set[str], repoint_primar
         del col_entries[name]
 
     primary = geo_dict.get("primary_column")
+    if primary is None and declared_primary:
+        # Sanitizing dropped a malformed `primary_column` and could not repair
+        # it, because `columns` held more than one entry at the time. Pruning
+        # may just have left exactly one, which is an unambiguous primary.
+        _repair_primary_column(geo_dict)
+        primary = geo_dict.get("primary_column")
+
     if primary is not None and primary not in col_entries:
         if not (repoint_primary and col_entries):
             return _DROP_GEO
