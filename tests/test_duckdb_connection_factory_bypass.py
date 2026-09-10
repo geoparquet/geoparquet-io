@@ -20,19 +20,16 @@ Also covers the pre-commit `duckdb-antipatterns` hook extension that bans
 bare `duckdb.connect(` outside `core/duckdb_utils.py`.
 """
 
-import subprocess
 from pathlib import Path
 
 import pyarrow as pa
 import pytest
-import yaml
 
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection as real_get_duckdb_connection
+from tests._precommit_hook import core_tree, hook_script, needs_bash, run_hook_script
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 GEOJSON_FILE = TEST_DATA_DIR / "buildings_test.geojson"
-
-REPO_ROOT = Path(__file__).parent.parent
 
 # Standard ISO WKB point (x=1, y=2), matches the byte-order-0x01 path.
 WKB_POINT = b"\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0?\x00\x00\x00\x00\x00\x00\x00@"
@@ -274,33 +271,7 @@ class TestDiskRewriteWriteFromTable:
         assert captured == [{"load_httpfs": False}]
 
 
-def _bash_can_run_scripts() -> bool:
-    """True when ``bash`` on PATH can actually execute a script.
-
-    ``shutil.which("bash")`` is not enough on Windows runners: there ``bash``
-    resolves to WSL's ``bash.exe``, which exits non-zero with an "install a
-    distribution" notice when no WSL distro is present. That makes every hook
-    invocation return 1 -- failing the tests that expect a clean tree, and
-    passing the rejection tests for entirely the wrong reason.
-    """
-    try:
-        probe = subprocess.run(
-            ["bash", "-c", "exit 0"],
-            capture_output=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return probe.returncode == 0
-
-
-_NEEDS_BASH = pytest.mark.skipif(
-    not _bash_can_run_scripts(),
-    reason="pre-commit hook scripts are POSIX shell; no usable bash on this platform",
-)
-
-
-@_NEEDS_BASH
+@needs_bash
 class TestAntipatternHookBansBareConnect:
     """Self-test that the extended duckdb-antipatterns hook rejects a bare
     ``duckdb.connect(`` reintroduced outside core/duckdb_utils.py."""
@@ -309,41 +280,27 @@ class TestAntipatternHookBansBareConnect:
     def _hook_script():
         """Extract the duckdb-antipatterns hook script from
         .pre-commit-config.yaml, exactly as pre-commit would invoke it."""
-        config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
-        for repo in config["repos"]:
-            for hook in repo.get("hooks", []):
-                if hook["id"] == "duckdb-antipatterns":
-                    return hook["args"][-1]
-        raise AssertionError("duckdb-antipatterns hook not found in .pre-commit-config.yaml")
+        return hook_script("duckdb-antipatterns")
 
     def _run_hook(self, cwd):
-        return subprocess.run(
-            ["bash", "-c", self._hook_script()],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        return run_hook_script(self._hook_script(), cwd)
 
     def _write_workspace(self, tmp_path, extra_files):
         """Build an isolated `geoparquet_io/` tree under tmp_path so these
         tests never mutate the real, shared repo tree — this test suite runs
         under pytest-xdist with parallel workers.
         """
-        core_dir = tmp_path / "geoparquet_io" / "core"
-        core_dir.mkdir(parents=True)
         # A minimal stand-in for the factory's own internal connect, which
         # must stay exempt.
-        (core_dir / "duckdb_utils.py").write_text(
-            "def get_duckdb_connection(config=None):\n"
-            "    con = duckdb.connect(config=config) if config else duckdb.connect()\n"
-            "    return con\n",
-            encoding="utf-8",
-        )
-        for name, content in extra_files.items():
-            (core_dir / name).write_text(content, encoding="utf-8")
-        return tmp_path
+        files = {
+            "duckdb_utils.py": (
+                "def get_duckdb_connection(config=None):\n"
+                "    con = duckdb.connect(config=config) if config else duckdb.connect()\n"
+                "    return con\n"
+            ),
+            **extra_files,
+        }
+        return core_tree(tmp_path, files)
 
     def test_hook_rejects_reintroduced_bare_connect(self, tmp_path):
         """A bare `duckdb.connect(` in a core module other than

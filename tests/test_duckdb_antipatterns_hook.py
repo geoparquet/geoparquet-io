@@ -40,9 +40,17 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
 
-REPO_ROOT = Path(__file__).parent.parent
+from tests._precommit_hook import (
+    REPO_ROOT,
+    core_tree,
+    hook_entry,
+    hook_script,
+    needs_bash,
+    run_hook_script,
+)
+
+HOOK_ID = "duckdb-antipatterns"
 
 # The one module the hook is allowed to exempt: quote_identifier() and
 # _escape_sql_string() live there, so their own implementations necessarily
@@ -54,41 +62,18 @@ FACTORY_MODULE = "geoparquet_io/core/duckdb_utils.py"
 FORMERLY_EXEMPT_MODULE = "extract_bigquery.py"
 
 
-def _bash_can_run_scripts() -> bool:
-    """Whether ``bash`` on this platform can actually execute a script.
-
-    ``shutil.which("bash")`` is not enough on Windows runners: there ``bash``
-    resolves to WSL's ``bash.exe``, which exits non-zero with an "install a
-    distribution" notice when no WSL distro is present -- which would pass
-    every rejection test below for entirely the wrong reason.
-    """
-    try:
-        probe = subprocess.run(["bash", "-c", "exit 0"], capture_output=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return probe.returncode == 0
-
-
-_NEEDS_BASH = pytest.mark.skipif(
-    not _bash_can_run_scripts(),
-    reason="pre-commit hook scripts are POSIX shell; no usable bash on this platform",
-)
+_NEEDS_BASH = needs_bash
 
 
 def _hook_entry() -> dict:
     """The duckdb-antipatterns hook's own YAML entry."""
-    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
-    for repo in config["repos"]:
-        for hook in repo.get("hooks", []):
-            if hook["id"] == "duckdb-antipatterns":
-                return hook
-    raise AssertionError("duckdb-antipatterns hook not found in .pre-commit-config.yaml")
+    return hook_entry(HOOK_ID)
 
 
 def _hook_script() -> str:
     """The duckdb-antipatterns script from .pre-commit-config.yaml, exactly as
     pre-commit invokes it."""
-    return str(_hook_entry()["args"][-1])
+    return hook_script(HOOK_ID)
 
 
 # Each spelling the rule has to catch. The escaped-quote one is #936's shape:
@@ -108,23 +93,12 @@ class TestHookRejectsManualQuoting:
     one #939 exempted by path."""
 
     def _run_hook(self, cwd: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["bash", "-c", _hook_script()],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        return run_hook_script(_hook_script(), cwd)
 
     def _workspace(self, tmp_path: Path, files: dict[str, str]) -> Path:
         """An isolated ``geoparquet_io/`` tree, so these tests never mutate the
         real repo tree -- the suite runs under pytest-xdist."""
-        core_dir = tmp_path / "geoparquet_io" / "core"
-        core_dir.mkdir(parents=True)
-        for name, content in files.items():
-            (core_dir / name).write_text(content, encoding="utf-8")
-        return tmp_path
+        return core_tree(tmp_path, files)
 
     @pytest.mark.parametrize("spelling", sorted(MANUAL_QUOTE_SPELLINGS))
     def test_rejected_in_the_formerly_exempt_module(self, tmp_path, spelling):
@@ -177,11 +151,8 @@ class TestHookRejectsManualQuoting:
 
     def test_a_nested_duckdb_utils_is_not_exempt(self, tmp_path):
         """The exemption names one path, not any file called duckdb_utils.py."""
-        nested = tmp_path / "geoparquet_io" / "core" / "partition"
-        workspace = self._workspace(tmp_path, {})
-        nested.mkdir(parents=True)
-        (nested / "duckdb_utils.py").write_text(
-            MANUAL_QUOTE_SPELLINGS["f_string_quotes"], encoding="utf-8"
+        workspace = self._workspace(
+            tmp_path, {"partition/duckdb_utils.py": MANUAL_QUOTE_SPELLINGS["f_string_quotes"]}
         )
 
         result = self._run_hook(workspace)
