@@ -21,6 +21,7 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_condition_fragment,
 )
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
@@ -404,11 +405,46 @@ def extract_bigquery_table(
     return result
 
 
+def _schema_rows(
+    con: duckdb.DuckDBPyConnection,
+    table_id: str,
+    table_source: str = "bigquery",
+) -> list[tuple[str, str]]:
+    """Return ``(column name, column type)`` for every column, in schema order.
+
+    The module's single ``DESCRIBE``. Every function here that needs a schema
+    goes through this one, and a caller holding the result can pass it on
+    (``schema_rows=``) instead of paying for a second round-trip against
+    BigQuery.
+
+    ``table_id`` is interpolated raw on the BigQuery branch, and that is not an
+    oversight to be fixed with ``sql_path()`` or ``quote_identifier()``:
+    ``bigquery_scan`` takes a ``project.dataset.table`` **string literal**, not
+    a path or an identifier. **The caller must have run the id through**
+    :func:`_normalize_table_id`, whose ``_TABLE_PART_PATTERN`` admits only
+    ``[A-Za-z0-9_-]`` per part and so cannot carry a quote. Consolidating the
+    five copies of this query is what makes that contract statable in one
+    place; ``tests/test_extract_bigquery.py::TestSchemaIsReadOnce`` keeps it
+    there. The local branch takes a real table name and quotes it.
+
+    Args:
+        con: DuckDB connection
+        table_id: Pre-validated BigQuery table ID, or a local table name
+        table_source: "bigquery" for bigquery_scan, "local" for local tables
+    """
+    if table_source == "bigquery":
+        schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
+    else:
+        schema_query = f"DESCRIBE SELECT * FROM {quote_identifier(table_id)} LIMIT 0"
+    return [(row[0], str(row[1])) for row in con.execute(schema_query).fetchall()]
+
+
 def _detect_geometry_column_from_schema(
     con: duckdb.DuckDBPyConnection,
     table_id: str,
     geography_column: str | None = None,
     table_source: str = "bigquery",
+    schema_rows: list[tuple[str, str]] | None = None,
 ) -> str | None:
     """
     Detect native GEOMETRY-typed column from table schema.
@@ -424,23 +460,20 @@ def _detect_geometry_column_from_schema(
         geography_column: If provided and matches a native GEOMETRY column,
             returns it. Otherwise returns None (caller handles VARCHAR columns).
         table_source: "bigquery" for bigquery_scan, "local" for local tables
+        schema_rows: The schema, when the caller has already read it. Saves a
+            DESCRIBE round-trip against BigQuery.
 
     Returns:
         Name of detected GEOMETRY column, or None
     """
-    if table_source == "bigquery":
-        schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
-    else:
-        schema_query = f"DESCRIBE SELECT * FROM {quote_identifier(table_id)} LIMIT 0"
-    schema_result = con.execute(schema_query).fetchall()
+    if schema_rows is None:
+        schema_rows = _schema_rows(con, table_id, table_source)
 
     geometry_cols = []
     all_cols = []
-    for row in schema_result:
-        col_name = row[0]
-        col_type = str(row[1]).upper()
+    for col_name, col_type in schema_rows:
         all_cols.append(col_name)
-        if "GEOMETRY" in col_type:
+        if "GEOMETRY" in col_type.upper():
             geometry_cols.append(col_name)
 
     # If explicit column provided and it's a native GEOMETRY column, use it
@@ -466,6 +499,88 @@ def _detect_geometry_column_from_schema(
     return None
 
 
+def _schema_column_names(
+    con: duckdb.DuckDBPyConnection,
+    table_id: str,
+    table_source: str = "bigquery",
+) -> list[str]:
+    """Return the table's column names, in schema order.
+
+    Args:
+        con: DuckDB connection
+        table_id: BigQuery table ID or local table name
+        table_source: "bigquery" for bigquery_scan, "local" for local tables
+    """
+    return [name for name, _ in _schema_rows(con, table_id, table_source)]
+
+
+def validate_bigquery_columns(
+    requested_cols: list[str] | None,
+    all_columns: list[str],
+    option_name: str,
+) -> list[str] | None:
+    """Check requested column names against the BigQuery table's schema.
+
+    The BigQuery backend's equivalent of ``core.extract.validate_columns``,
+    which the parquet backend has run since #731. Without it a name the table
+    does not carry was quoted straight into the SELECT and failed as a DuckDB
+    binder error, and a blank entry raised
+    ``ValueError: cannot quote an empty SQL identifier`` (#969).
+
+    Blank entries are also rejected here, not only by the Click callback: the
+    Python API (``ops.read_bigquery``, ``Table.from_bigquery``) never goes
+    through Click.
+
+    Matching is case-insensitive and the **schema spelling is returned**,
+    following the rest of this module (``_resolve_column_name``,
+    ``_get_column_type``). DuckDB resolves a quoted identifier
+    case-insensitively, so ``--include-cols ID`` always worked; but
+    ``_build_column_list`` filters ``--exclude-cols`` by string comparison, so
+    ``--exclude-cols ID`` silently excluded nothing. Resolving makes the two
+    agree.
+
+    An **exact** match is preferred to a folded one, because folding is not
+    injective: ``_schema_column_names`` also serves ``table_source="local"``,
+    where DuckDB permits a table carrying both ``id`` and ``ID``, and a
+    ``{col.lower(): col}`` map keeps only the last of those.
+
+    Args:
+        requested_cols: Column names the user asked for (or None)
+        all_columns: Every column in the table's schema
+        option_name: Option to name in the error message, e.g. "--include-cols"
+
+    Returns:
+        The requested columns in their schema spelling, or None
+
+    Raises:
+        InvalidParameterError: If any entry is blank or absent from the schema
+    """
+    if not requested_cols:
+        return None
+
+    if any(not col.strip() for col in requested_cols):
+        raise InvalidParameterError(option_name, "column names cannot be empty or whitespace-only")
+
+    exact = set(all_columns)
+    folded = {col.lower(): col for col in all_columns}
+
+    def _resolve(col: str) -> str | None:
+        if col in exact:
+            return col
+        return folded.get(col.lower())
+
+    resolved = [(col, _resolve(col)) for col in requested_cols]
+    missing = [col for col, match in resolved if match is None]
+    if missing:
+        raise InvalidParameterError(
+            option_name,
+            f"Columns not found in schema: {', '.join(sorted(missing))}. "
+            f"Available columns: {', '.join(all_columns)}",
+        )
+
+    return [match for _, match in resolved if match is not None]
+
+
 def _get_column_type(
     con: duckdb.DuckDBPyConnection,
     table_id: str,
@@ -482,11 +597,9 @@ def _get_column_type(
     Returns:
         Uppercase type string (e.g. "GEOMETRY", "VARCHAR")
     """
-    schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
-    schema_result = con.execute(schema_query).fetchall()
-    for row in schema_result:
-        if row[0].lower() == column_name.lower():
-            return str(row[1]).upper()
+    for name, col_type in _schema_rows(con, table_id):
+        if name.lower() == column_name.lower():
+            return col_type.upper()
     return "VARCHAR"
 
 
@@ -508,14 +621,9 @@ def _resolve_column_name(
     Returns:
         The actual column name from the schema, or the input if not found
     """
-    if table_source == "bigquery":
-        schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
-    else:
-        schema_query = f"DESCRIBE SELECT * FROM {quote_identifier(table_id)} LIMIT 0"
-    schema_result = con.execute(schema_query).fetchall()
-    for row in schema_result:
-        if row[0].lower() == column_name.lower():
-            return row[0]
+    for name in _schema_column_names(con, table_id, table_source):
+        if name.lower() == column_name.lower():
+            return name
     return column_name
 
 
@@ -577,9 +685,7 @@ def _build_select_with_wkb(
     """
     # Get all column names if selecting all
     if columns is None:
-        schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
-        schema_result = con.execute(schema_query).fetchall()
-        columns = [row[0] for row in schema_result]
+        columns = _schema_column_names(con, table_id)
 
     # Detect geometry column type if we have one
     geom_col_type = ""
@@ -668,9 +774,15 @@ def _build_column_list(
     include_list: list[str] | None,
     exclude_list: list[str] | None,
     geom_col: str | None,
+    schema_columns: list[str] | None = None,
 ) -> list[str] | None:
     """
     Build the column list for SELECT based on include/exclude lists.
+
+    Args:
+        schema_columns: The table's columns, when the caller has already read
+            them (``_execute_bigquery_extraction`` always has). Saves a DESCRIBE
+            round-trip against BigQuery on the exclude branch.
 
     Returns:
         List of columns to select, or None for all columns
@@ -685,9 +797,9 @@ def _build_column_list(
 
     if exclude_list is not None:
         # Push down exclusions: get all columns, then remove excluded ones
-        schema_query = f"DESCRIBE SELECT * FROM bigquery_scan('{table_id}') LIMIT 0"
-        schema_result = con.execute(schema_query).fetchall()
-        all_schema_cols = [row[0] for row in schema_result]
+        all_schema_cols = (
+            schema_columns if schema_columns is not None else _schema_column_names(con, table_id)
+        )
         return [c for c in all_schema_cols if c not in exclude_list]
 
     return None  # All columns
@@ -969,8 +1081,16 @@ def _execute_bigquery_extraction(
             con.execute(f"SET memory_limit = '{validate_memory_limit(memory_limit)}'")
             debug(f"DuckDB memory limit: {memory_limit}")
 
+        # One DESCRIBE serves everything that needs the schema here: the
+        # geometry detection below and the --include-cols/--exclude-cols check
+        # further down. Validation therefore costs no BigQuery round-trip at
+        # all, on either branch.
+        schema_rows = _schema_rows(con, validated_table_id)
+
         # Detect geometry column from schema (native GEOMETRY type only)
-        geom_col = _detect_geometry_column_from_schema(con, validated_table_id, geography_column)
+        geom_col = _detect_geometry_column_from_schema(
+            con, validated_table_id, geography_column, schema_rows=schema_rows
+        )
         is_native_geometry = geom_col is not None  # Track whether geometry is native GEOGRAPHY type
         if geom_col:
             debug(f"Detected geometry column: {geom_col}")
@@ -1001,9 +1121,15 @@ def _execute_bigquery_extraction(
         else:
             final_edges = None  # Planar (no edges metadata)
 
+        # Check the requested columns against the table before any of them is
+        # quoted into the SELECT (#969), reusing the schema read above.
+        schema_columns = [name for name, _ in schema_rows]
+        include_list = validate_bigquery_columns(include_list, schema_columns, "--include-cols")
+        exclude_list = validate_bigquery_columns(exclude_list, schema_columns, "--exclude-cols")
+
         # Build column list and SELECT clause
         cols_to_select = _build_column_list(
-            con, validated_table_id, include_list, exclude_list, geom_col
+            con, validated_table_id, include_list, exclude_list, geom_col, schema_columns
         )
         select_cols, _ = _build_select_with_wkb(
             cols_to_select, geom_col, con, validated_table_id, geometry_format

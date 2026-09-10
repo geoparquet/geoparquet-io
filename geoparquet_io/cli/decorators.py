@@ -363,6 +363,62 @@ def column_name_option(*param_decls, **kwargs):
     return click.option(*param_decls, **kwargs)
 
 
+def _validate_column_list(ctx, param, value):
+    """Reject a blank entry in an option carrying a comma-separated column list.
+
+    The list-valued sibling of :func:`_validate_column_name`. ``--include-cols``
+    and ``--exclude-cols`` are split on commas by each backend, and the entries
+    become delimited SQL identifiers: ``gpio extract bigquery ... --include-cols
+    '   '`` split to ``['']`` and raised a raw
+    ``ValueError: cannot quote an empty SQL identifier`` traceback out of
+    ``quote_identifier()`` (#969); ``gpio extract carto`` hit the same call one
+    network round-trip later.
+
+    #959 could not cover these with :func:`_validate_column_name` because that
+    callback validates *the value*, and here the value is a list -- ``"id,,name"``
+    is not blank but carries a blank entry.
+
+    This layer owns blank entries only. Whether a non-blank name exists is a
+    schema question, so it stays with whichever backend can see the schema
+    (``validate_columns`` for parquet, ``validate_bigquery_columns`` for
+    BigQuery), which reports it as ``InvalidParameterError`` -- also exit 2.
+    Catching blanks here matters even so: ``--dry-run`` builds the same SELECT
+    without ever opening a connection, so there is no schema to check against.
+
+    A **wholly empty** value is not a blank entry, it is an unset option, and is
+    normalised to ``None``. Every backend reads these options as
+    ``[c.strip() for c in v.split(",")] if v else None``
+    (``core/extract.py``, ``core/extract_bigquery.py``, ``core/carto.py``,
+    ``core/pmtiles.py``), so ``""`` has always meant "not given" -- which is what
+    ``--include-cols "$COLS"`` expands to when ``COLS`` is unset. Rejecting it
+    would break working invocations without catching anything: ``"".split(",")``
+    is ``[""]`` only because there is nothing there to name. ``"   "`` and
+    ``"id,,name"`` are a different case -- both are truthy, so both reach
+    ``quote_identifier()`` on main, and both stay rejected.
+    """
+    if value is None or value == "":
+        return None
+    if any(not entry.strip() for entry in value.split(",")):
+        raise click.BadParameter(
+            "column list cannot contain an empty or whitespace-only entry",
+            ctx=ctx,
+            param=param,
+        )
+    return value
+
+
+def column_list_option(*param_decls, **kwargs):
+    """``click.option`` for an option whose value is a comma-separated column list.
+
+    Identical to :func:`click.option` except that the shared
+    :func:`_validate_column_list` callback is wired up. Declaring a new
+    list-valued column option with this rather than a bare ``@click.option`` is
+    what ``tests/test_cli_column_list_guard.py`` enforces.
+    """
+    kwargs.setdefault("callback", _validate_column_list)
+    return click.option(*param_decls, **kwargs)
+
+
 def repair_geometry_option(func):
     """
     Add --repair-geometry/--no-repair-geometry option to a command.

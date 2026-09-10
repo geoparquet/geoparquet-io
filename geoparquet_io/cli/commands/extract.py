@@ -18,6 +18,7 @@ from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     any_extension_option,
     aws_profile_option,
+    column_list_option,
     compression_options,
     dry_run_option,
     geoparquet_version_option,
@@ -69,11 +70,11 @@ def extract(ctx):
 @extract.command(name="geoparquet", cls=GlobAwareCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
-@click.option(
+@column_list_option(
     "--include-cols",
     help="Comma-separated columns to include (geometry and bbox auto-added unless in --exclude-cols)",
 )
-@click.option(
+@column_list_option(
     "--exclude-cols",
     help="Comma-separated columns to exclude (can be used with --include-cols to exclude geometry/bbox)",
 )
@@ -286,11 +287,11 @@ def extract_geoparquet(
     "--bbox",
     help="Bounding box filter: xmin,ymin,xmax,ymax in WGS84 (pushed to server)",
 )
-@click.option(
+@column_list_option(
     "--include-cols",
     help="Comma-separated columns to include (pushed to server for efficiency)",
 )
-@click.option(
+@column_list_option(
     "--exclude-cols",
     help="Comma-separated columns to exclude (applied after download)",
 )
@@ -508,11 +509,11 @@ def extract_arcgis(
     help="Path to GCP service account JSON file (otherwise uses gcloud auth or "
     "GOOGLE_APPLICATION_CREDENTIALS)",
 )
-@click.option(
+@column_list_option(
     "--include-cols",
     help="Comma-separated columns to include",
 )
-@click.option(
+@column_list_option(
     "--exclude-cols",
     help="Comma-separated columns to exclude",
 )
@@ -1052,11 +1053,11 @@ def extract_wfs_cmd(
     type=click.IntRange(0, None),
     help="Maximum number of rows to extract",
 )
-@click.option(
+@column_list_option(
     "--include-cols",
     help="Comma-separated columns to include (default: all)",
 )
-@click.option(
+@column_list_option(
     "--exclude-cols",
     help="Comma-separated columns to exclude",
 )
