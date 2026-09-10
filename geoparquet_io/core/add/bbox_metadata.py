@@ -32,7 +32,12 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import covering_supported, parse_geo_metadata
+from geoparquet_io.core.geo_metadata import (
+    covering_supported,
+    parse_geo_metadata,
+    sanitize_geo_metadata,
+    sanitized_carried_geo,
+)
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success
 
@@ -218,12 +223,12 @@ def add_bbox_metadata_table(
 
     schema_metadata = dict(table.schema.metadata) if table.schema.metadata else {}
 
-    geo_meta: object = None
-    if b"geo" in schema_metadata:
-        try:
-            geo_meta = json.loads(schema_metadata[b"geo"].decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            geo_meta = None
+    # A write path: this block is re-serialized onto the returned table, so a
+    # malformed carried one goes through the shared shape check first (#947).
+    # Without it a `columns` mapping to a non-object let the covering be
+    # assigned into a string, and a wrong-typed `crs` was carried straight into
+    # the output.
+    geo_meta: object = sanitized_carried_geo(schema_metadata)
 
     # Same refusal as the file path: a table with no usable `geo` block has
     # nothing describing the geometry column, and the skeleton this used to
@@ -311,7 +316,12 @@ def add_bbox_metadata(
 
     # Get existing metadata
     metadata, _ = get_parquet_metadata(parquet_file)
-    geo_meta = parse_geo_metadata(metadata, False)
+    # `parse_geo_metadata` is the read-only reader and hands the block back as
+    # the file holds it; this command rewrites the file from it, so the
+    # malformed parts are dropped here the way every other write path drops
+    # them (#947). A `columns` entry that is not an object used to fail with
+    # `'str' object does not support item assignment` at the assignment below.
+    geo_meta = sanitize_geo_metadata(parse_geo_metadata(metadata, False))
 
     geo_meta = require_geo_metadata_for_covering(geo_meta, parquet_file)
 

@@ -44,11 +44,13 @@ from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
     build_bbox_covering,
+    carried_geometry_column,
     create_geo_metadata,
     detect_bbox_column_from_schema,
     geoarrow_wkb_codes,
     prune_geo_metadata_to_columns,
     sanitize_geo_metadata,
+    sanitized_carried_geo,
     strip_derived_stats,
     strip_nonplanar_edges,
 )
@@ -57,7 +59,6 @@ from geoparquet_io.core.geoarrow_encoding import (
     is_wkb_extension_field,
 )
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
     _detect_geometry_from_query,
     find_primary_geometry_column,
 )
@@ -2759,7 +2760,7 @@ def _geo_block_to_carry_on_fast_path(
     would not write itself — the caller then keeps its existing behaviour.
     """
     from geoparquet_io.core.crs_utils import apply_output_crs
-    from geoparquet_io.core.geo_metadata import _decode_geo_value, declare_carried_bbox_column
+    from geoparquet_io.core.geo_metadata import declare_carried_bbox_column
 
     if effective_version != "2.0" or not geometry_column or not original_metadata:
         return None
@@ -2777,35 +2778,35 @@ def _geo_block_to_carry_on_fast_path(
             )
         return None
 
-    for geo_key in ("geo", b"geo"):
-        if geo_key not in original_metadata:
-            continue
-        geo_dict = _decode_geo_value(original_metadata[geo_key])
-        if not geo_dict:
-            return None
-        col_meta = (geo_dict.get("columns") or {}).get(geometry_column)
-        if not isinstance(col_meta, dict):
-            return None
-        if any(field not in col_meta for field in _REQUIRED_CARRIED_GEO_FIELDS):
-            return None
-        carried = copy.deepcopy(geo_dict)
-        carried["version"] = "2.0.0"
-        # Before the gate: a block whose only extra key was a default or null
-        # `crs` says nothing DuckDB would not write once that key is stripped.
-        apply_output_crs(carried["columns"][geometry_column], input_crs)
-        if con is not None and query is not None:
-            declare_carried_bbox_column(
-                con,
-                query,
-                carried["columns"][geometry_column],
-                verbose,
-                effective_version,
-                output_columns=output_columns,
-            )
-        if not _carries_more_than_duckdb_generates(carried):
-            return None
-        return carried
-    return None
+    # A write-path reader in the strongest sense: whatever comes back is written
+    # to the output file verbatim, so the block goes through the shared shape
+    # check first. `columns` as a list or a string used to abort the write with
+    # `'list' object has no attribute 'get'` on the next line (#947).
+    geo_dict = sanitized_carried_geo(original_metadata)
+    if not geo_dict:
+        return None
+    col_meta = (geo_dict.get("columns") or {}).get(geometry_column)
+    if not isinstance(col_meta, dict):
+        return None
+    if any(field not in col_meta for field in _REQUIRED_CARRIED_GEO_FIELDS):
+        return None
+    carried = copy.deepcopy(geo_dict)
+    carried["version"] = "2.0.0"
+    # Before the gate: a block whose only extra key was a default or null
+    # `crs` says nothing DuckDB would not write once that key is stripped.
+    apply_output_crs(carried["columns"][geometry_column], input_crs)
+    if con is not None and query is not None:
+        declare_carried_bbox_column(
+            con,
+            query,
+            carried["columns"][geometry_column],
+            verbose,
+            effective_version,
+            output_columns=output_columns,
+        )
+    if not _carries_more_than_duckdb_generates(carried):
+        return None
+    return carried
 
 
 def write_parquet_with_metadata(
@@ -3241,24 +3242,15 @@ def write_geoparquet_table(
                Pass the RFC 7946 5.2 wrap form (xmin > xmax) for data that
                crosses the antimeridian; None computes a plain extent.
     """
-    # Auto-detect geometry column if not provided
+    # A write path: the column name is quoted into the output's metadata and the
+    # CRS is written to the output file, so the carried block goes through the
+    # shared shape check rather than being indexed raw. `columns: null` used to
+    # raise `argument of type 'NoneType' is not iterable` here, and a list-,
+    # string- or non-object-entry `columns` a `TypeError` one line later (#947).
+    geo_meta = sanitized_carried_geo(table.schema.metadata)
+
     if geometry_column is None:
-        # Try to detect from table metadata
-        metadata = table.schema.metadata or {}
-        if b"geo" in metadata:
-            try:
-                geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-                geometry_column = geo_meta.get("primary_column", "geometry")
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                geometry_column = "geometry"
-        else:
-            # Check for common geometry column names
-            for name in STANDARD_GEOMETRY_NAMES:
-                if name in table.column_names:
-                    geometry_column = name
-                    break
-            if geometry_column is None:
-                geometry_column = "geometry"
+        geometry_column = carried_geometry_column(geo_meta, table.column_names) or "geometry"
 
     # Check if geometry column exists
     has_geometry = geometry_column in table.column_names
@@ -3267,15 +3259,8 @@ def write_geoparquet_table(
     original_metadata = table.schema.metadata
 
     # Extract CRS from original metadata if available
-    input_crs = None
-    if original_metadata and b"geo" in original_metadata:
-        try:
-            geo_meta = json.loads(original_metadata[b"geo"].decode("utf-8"))
-            columns = geo_meta.get("columns", {})
-            if geometry_column in columns:
-                input_crs = columns[geometry_column].get("crs")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
+    col_meta = (geo_meta.get("columns") or {}).get(geometry_column)
+    input_crs = col_meta.get("crs") if isinstance(col_meta, dict) else None
 
     # Validate and normalize compression settings
     validated_compression, validated_level, _ = validate_compression_settings(
@@ -3455,11 +3440,18 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
         debug("\nParsed geo metadata:")
         debug(json.dumps(geo_meta, indent=2))
 
-    if isinstance(geo_meta, dict) and "columns" in geo_meta:
-        columns = geo_meta["columns"]
+    # Validation-shared, so the block stays as the file really holds it (#883's
+    # line) and this guards instead of sanitizing: `gpio check bbox` and `check
+    # all` report through here. A `columns` that is not an object, or a
+    # `covering` that is not one, simply declares no covering -- the truthful
+    # answer, where iterating it raised an `AttributeError` from someone else's
+    # file (#947).
+    columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+    if isinstance(columns, dict):
         for _col_name, col_info in columns.items():
-            if isinstance(col_info, dict) and col_info.get("covering", {}).get("bbox"):
-                bbox_refs = col_info["covering"]["bbox"]
+            covering = col_info.get("covering") if isinstance(col_info, dict) else None
+            if isinstance(covering, dict) and covering.get("bbox"):
+                bbox_refs = covering["bbox"]
                 # Check if the bbox covering has the required structure
                 if (
                     isinstance(bbox_refs, dict)

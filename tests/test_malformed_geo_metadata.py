@@ -1217,3 +1217,337 @@ def test_detect_all_geometry_columns_on_a_non_parquet_input(tmp_path):
     assert info["primary"] == "geom"
     assert info["metadata"] == {"geom": {"encoding": "WKB"}}
     assert info["secondary"] == []
+
+
+# =============================================================================
+# The readers #883 and #887 left behind (#947)
+# =============================================================================
+
+# The third and last instalment. Every reader below indexed the raw block, and
+# each is classified the way #883 and #887 classified theirs:
+#
+#   write path -- the block it reads becomes an output file, a transform or a
+#     published artifact, so it goes through `sanitize_geo_metadata`:
+#       common._geo_block_to_carry_on_fast_path   (written to the output verbatim)
+#       common.write_geoparquet_table             (names the column, reads the CRS)
+#       add.bbox_metadata (table and file paths)  (rewrites the block)
+#       stac._add_projection_properties           (emits proj:* on a STAC Item)
+#       stream_io._extract_crs_from_metadata      (CRS of the streamed output)
+#
+#   validation-shared -- `gpio check bbox` reads through it and has to see the
+#     file as it really is, so it guards rather than sanitizes:
+#       common._check_bbox_metadata_covering
+#
+#   read-only -- documented as handing the caller the file's own `geo` block:
+#       api.Table.metadata
+
+
+def _bbox_struct_column() -> pa.Array:
+    return pa.array(
+        [{"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}],
+        type=pa.struct(
+            [
+                ("xmin", pa.float64()),
+                ("ymin", pa.float64()),
+                ("xmax", pa.float64()),
+                ("ymax", pa.float64()),
+            ]
+        ),
+    )
+
+
+def _table_with_geo_and_bbox(geo_block, col: str = "geometry") -> pa.Table:
+    return _table_with_geo(geo_block, col=col).append_column("bbox", _bbox_struct_column())
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_fast_path_carry_survives_a_malformed_block(col, case, block):
+    """The 2.0 fast path decides what to write from the carried block (#947).
+
+    ``columns`` as a list or a string crashed it with
+    ``'list' object has no attribute 'get'`` -- and this block would then have
+    been written to the output verbatim.
+    """
+    from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+
+    reset_malformed_geo_warnings()
+    metadata = {"geo": json.dumps(block)}
+    carried = _geo_block_to_carry_on_fast_path(metadata, col, "2.0")
+    assert carried is None or isinstance(carried["columns"], dict)
+
+
+def test_fast_path_carry_drops_a_wrong_typed_value_before_writing_it():
+    """A carried ``crs: 42`` must not reach the output through the fast path."""
+    from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "2.0.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "crs": 42,
+                "orientation": "counterclockwise",
+            }
+        },
+    }
+    carried = _geo_block_to_carry_on_fast_path({"geo": json.dumps(block)}, "geometry", "2.0")
+    assert carried is not None
+    assert "crs" not in carried["columns"]["geometry"]
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_write_geoparquet_table_survives_a_malformed_block(col, case, block, tmp_path):
+    """``write_geoparquet_table`` named the column and read the CRS from the raw block.
+
+    ``columns: null`` raised ``argument of type 'NoneType' is not iterable`` and
+    a list-, string- or non-object-entry ``columns`` raised a ``TypeError`` or
+    ``AttributeError`` one line later (#947).
+    """
+    from geoparquet_io.core.common import write_geoparquet_table
+
+    reset_malformed_geo_warnings()
+    out = tmp_path / f"wgt_{col}_{case}.parquet"
+    write_geoparquet_table(_table_with_geo(block, col=col), str(out))
+
+    geo = _geo_of_file(out)
+    _assert_fresh_and_valid(geo, col=col)
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_check_bbox_structure_survives_a_malformed_block(col, case, block, tmp_path):
+    """``gpio check bbox`` reads the covering out of the block (#947).
+
+    Validation-shared: it reports on the file, so the block stays as the file
+    holds it and the reader guards instead. A ``columns`` that is not an object
+    declares no covering, which is the truthful answer, not a crash.
+    """
+    from geoparquet_io.core.common import check_bbox_structure
+
+    reset_malformed_geo_warnings()
+    path = tmp_path / f"checkbbox_{col}_{case}.parquet"
+    pq.write_table(_table_with_geo_and_bbox(block, col=col), path)
+
+    info = check_bbox_structure(str(path))
+    assert info["has_bbox_column"] is True
+    assert info["has_bbox_metadata"] is False
+
+
+def test_check_bbox_structure_survives_a_non_object_covering(tmp_path):
+    """``covering`` itself can be the wrong type; ``.get('bbox')`` crashed on it."""
+    from geoparquet_io.core.common import check_bbox_structure
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "covering": "bbox"}},
+    }
+    path = tmp_path / "covering_not_an_object.parquet"
+    pq.write_table(_table_with_geo_and_bbox(block), path)
+
+    assert check_bbox_structure(str(path))["has_bbox_metadata"] is False
+
+
+def test_check_bbox_structure_still_finds_a_real_covering(tmp_path):
+    """The guard must not cost a well-formed file its covering."""
+    from geoparquet_io.core.common import check_bbox_structure
+
+    covering = {
+        "bbox": {
+            "xmin": ["bbox", "xmin"],
+            "ymin": ["bbox", "ymin"],
+            "xmax": ["bbox", "xmax"],
+            "ymax": ["bbox", "ymax"],
+        }
+    }
+    block = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "covering": covering}},
+    }
+    path = tmp_path / "real_covering.parquet"
+    pq.write_table(_table_with_geo_and_bbox(block), path)
+
+    assert check_bbox_structure(str(path))["has_bbox_metadata"] is True
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_add_bbox_metadata_table_survives_a_malformed_block(col, case, block):
+    """``Table.add_bbox_metadata`` rewrites the carried block, so it sanitizes (#947)."""
+    from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata_table
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    reset_malformed_geo_warnings()
+    table = _table_with_geo_and_bbox(block, col=col)
+    try:
+        result = add_bbox_metadata_table(table, geometry_column=col)
+    except (GeoParquetError, ValueError):
+        pass  # a domain error naming the real cause is the contract
+    else:
+        geo = _geo_of(result)
+        assert geo["columns"][col]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_add_bbox_metadata_file_survives_a_malformed_block(col, case, block, tmp_path):
+    """The file path crashed with ``'str' object does not support item assignment``."""
+    from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    reset_malformed_geo_warnings()
+    path = tmp_path / f"addbboxmeta_{col}_{case}.parquet"
+    pq.write_table(_table_with_geo_and_bbox(block, col=col), path)
+    try:
+        add_bbox_metadata(str(path))
+    except (GeoParquetError, ValueError, duckdb.Error):
+        pass  # a domain error naming the real cause is the contract
+    else:
+        # Read the Parquet key-value block, not the Arrow schema: a fixture
+        # written by pyarrow also carries an `ARROW:schema` key holding the
+        # *original* metadata, and pyarrow prefers it on the way back in.
+        columns = get_geo_metadata(str(path))["columns"]
+        assert isinstance(columns, dict)
+        assert columns[col]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_stream_crs_reader_survives_a_malformed_block(col, case, block):
+    """The Arrow-stream write reads the output's CRS through here (#947).
+
+    ``columns: null`` raised ``argument of type 'NoneType' is not iterable``;
+    the ``except`` beside it caught only the JSON errors.
+    """
+    from geoparquet_io.core.stream_io import _extract_crs_from_metadata
+
+    reset_malformed_geo_warnings()
+    metadata = {b"geo": json.dumps(block).encode("utf-8")}
+    assert _extract_crs_from_metadata(metadata) is None
+
+
+def test_stream_crs_reader_still_finds_a_real_crs():
+    """The sanitizing must not cost a well-formed file its CRS."""
+    from geoparquet_io.core.stream_io import _extract_crs_from_metadata
+
+    crs = _crs_5070()
+    block = {
+        "version": "1.1.0",
+        "primary_column": "geom",
+        "columns": {"geom": {"encoding": "WKB", "crs": crs}},
+    }
+    metadata = {b"geo": json.dumps(block).encode("utf-8")}
+    assert _extract_crs_from_metadata(metadata) == crs
+    # And for the column the stream is actually attaching it to, named by the
+    # caller rather than guessed from a `primary_column` sanitizing may have
+    # dropped.
+    assert _extract_crs_from_metadata(metadata, "geom") == crs
+    assert _extract_crs_from_metadata(metadata, "id") is None
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_stac_projection_properties_survive_a_malformed_block(col, case, block, tmp_path):
+    """``gpio publish stac`` writes proj:* out of the carried block (#947).
+
+    A write path in the sense that matters here: the values leave gpio inside a
+    published STAC Item, so a malformed block is sanitized rather than copied.
+    ``columns: null`` raised ``argument of type 'NoneType' is not iterable``.
+    """
+    import datetime as dt
+
+    import pystac
+
+    from geoparquet_io.core.stac import _add_projection_properties
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(tmp_path, f"stac_{col}_{case}", block, col=col)
+    item = pystac.Item(
+        id="x",
+        geometry=None,
+        bbox=None,
+        datetime=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+        properties={},
+    )
+    _add_projection_properties(item, block, path)
+    assert "proj:epsg" not in item.properties
+
+
+def test_stac_projection_properties_still_read_a_real_crs(tmp_path):
+    """The sanitizing must not cost a well-formed file its ``proj:*`` properties."""
+    import datetime as dt
+
+    import pystac
+
+    from geoparquet_io.core.stac import _add_projection_properties
+
+    block = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "crs": _crs_5070(),
+                "geometry_types": ["Point"],
+            }
+        },
+    }
+    path = _file_with_geo(tmp_path, "stac_ok", block)
+    item = pystac.Item(
+        id="x",
+        geometry=None,
+        bbox=None,
+        datetime=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+        properties={},
+    )
+    _add_projection_properties(item, block, path)
+    assert item.properties["proj:epsg"] == 5070
+    assert item.properties["geoparquet:geometry_types"] == ["Point"]
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_api_table_metadata_survives_a_malformed_block(col, case, block, tmp_path):
+    """``Table.metadata()`` is a read-only reader: it guards, it does not sanitize.
+
+    It is the Python API's ``gpio inspect meta``, and its ``geo_metadata`` key is
+    documented as the file's full ``geo`` block, so the caller must get the block
+    the file really holds -- while the *derived* keys beside it stop crashing
+    with ``'list' object has no attribute 'get'`` (#947).
+    """
+    from geoparquet_io.api import read as gpio_read
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(tmp_path, f"apimeta_{col}_{case}", block, col=col)
+    meta = gpio_read(path).metadata()
+
+    # The block comes back exactly as the file holds it -- that is the contract
+    # of a read-only reader, and the whole reason this one guards rather than
+    # sanitizes. Only a block whose `columns` is usable yields derived keys.
+    assert meta["geo_metadata"] == block
+    usable = isinstance(block, dict) and isinstance(block.get("columns"), dict)
+    if not (usable and isinstance(block["columns"].get(col), dict)):
+        assert meta.get("geometry_types") is None
+
+
+def test_api_table_metadata_still_reports_a_well_formed_block(tmp_path):
+    """The guard must not cost a well-formed file its derived keys."""
+    from geoparquet_io.api import read as gpio_read
+
+    block = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "edges": "planar",
+            }
+        },
+    }
+    path = _file_with_geo(tmp_path, "apimeta_ok", block)
+    meta = gpio_read(path).metadata()
+
+    assert meta["geo_metadata"] == block
+    assert meta["geometry_types"] == ["Point"]
+    assert meta["edges"] == "planar"
