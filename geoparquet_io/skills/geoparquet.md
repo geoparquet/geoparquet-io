@@ -132,7 +132,9 @@ gpio sort quadkey <input> <output>
 # Sort-Tile-Recursive: X strips, each sorted on Y with alternating direction.
 # --row-group-size sets the writer's row-group target AND picks the strip count
 # as ceil(sqrt(rows / row-group-size)); it is not an exact tile capacity.
-gpio sort str <input> <output> --row-group-size 50000
+# It is snapped to a whole 2,048-row writer vector, so pass a multiple of 2,048
+# (49,152 is the sort default) to avoid an adjustment note.
+gpio sort str <input> <output> --row-group-size 49152
 ```
 
 ### Adding Columns

@@ -24,8 +24,10 @@ The `convert` command transforms between GeoParquet and other vector formats wit
       [GeoParquet Version](#geoparquet-version); 1.1 for non-GeoParquet inputs)
 
     Row groups are left to the Parquet writer's own default (122,880 rows for
-    DuckDB-backed writes). `convert` does not apply the 50,000-row default
-    `gpio sort` uses — pass `--row-group-size` if you want it.
+    DuckDB-backed writes). `convert` does not apply the 49,152-row default
+    `gpio sort` uses — pass `--row-group-size` if you want it. It also does not
+    snap the value to the writer's 2,048-row vector the way the sort commands
+    do, so the writer rounds whatever you pass *up* to a multiple of 2,048.
 
 === "Python"
 

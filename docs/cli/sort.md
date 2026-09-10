@@ -28,7 +28,7 @@ Options:
 | `--add-bbox` | - | Add bbox column if missing |
 | `--compression` | ZSTD | Compression codec (ZSTD, SNAPPY, GZIP, etc.) |
 | `--compression-level` | - | Compression level |
-| `--row-group-size` | 50,000 | Exact row count per group (10k-50k recommended for spatial pushdown) |
+| `--row-group-size` | 49,152 | Row count per group, snapped up to a whole 2,048-row writer vector (10k-50k recommended for spatial pushdown; 50,000 snaps down to 49,152 to stay in that band) |
 | `--row-group-size-mb` | - | Target group size in MB/GB |
 | `--geoparquet-version` | 1.1 | Output version: `1.1`, `2.0`, or `parquet-geo-only` |
 | `--overwrite` | - | Overwrite existing output file |
@@ -40,7 +40,7 @@ Options:
 Pack rows with Sort-Tile-Recursive ordering for compact row-group bounding boxes:
 
 ```bash
-gpio sort str input.parquet output.parquet --row-group-size 50000 [OPTIONS]
+gpio sort str input.parquet output.parquet --row-group-size 49152 [OPTIONS]
 ```
 
 STR sorts geometry bounding-box centers into X strips, sorts each strip on Y,
@@ -50,10 +50,9 @@ and alternates the Y direction between strips.
 it selects how many X strips STR builds, as
 `ceil(sqrt(num_rows / row-group-size))`. That is a coarse control - nearby
 values often produce an identical ordering. STR does not pack rows into
-row-group-sized tiles, and because the writer rounds row groups up to a
-multiple of 2048, strips and row groups only line up when `--row-group-size` is
-itself a multiple of 2048. Left unset, both uses take the sort default of
-50,000 rows (written as 51,200-row groups after that rounding).
+row-group-sized tiles, but both uses take the same value - snapped to a whole
+2,048-row writer vector - so every strip is a whole number of row groups
+whatever you pass. Left unset, both take the sort default of 49,152 rows.
 
 The `str` subcommand supports the same geometry, bbox, compression, row-group,
 GeoParquet version, overwrite, verbosity, and SQL-display options as `hilbert`.

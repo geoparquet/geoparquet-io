@@ -149,9 +149,9 @@ def str_order_command(
     it selects how many X strips STR builds, as
     ceil(sqrt(num_rows / row-group-size)). That makes it a coarse control -
     nearby values often produce an identical ordering. Rows are not packed into
-    row-group-sized tiles, and because the writer rounds row groups up to a
-    multiple of 2048, tiles and row groups only line up when --row-group-size
-    is itself a multiple of 2048.
+    row-group-sized tiles, but the value is snapped to a whole 2048-row writer
+    vector before either use, so tiles and row groups line up whatever you
+    pass.
     """
     with _activate_s3(ctx):
         row_group_mb = prepare_output(

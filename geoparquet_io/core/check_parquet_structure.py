@@ -7,6 +7,7 @@ from geoparquet_io.core.common import check_bbox_structure, detect_geoparquet_fi
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
+from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
 
 #: What a file with no row groups can be told about its compression: nothing.
 #: Shared with ``check_optimization`` so both checks word it the same way (#823).
@@ -17,7 +18,7 @@ _NO_COMPRESSION_INFO = "No compression information available (file has no row gr
 #: It is deliberately wide, because a *verdict* has to accept the layouts the
 #: writers people actually use produce at their own defaults: DuckDB writes
 #: 122,880 rows per group, gpio's own general write default lands at 100,352
-#: (100,000 rounded up to a multiple of 2,048), and ``gpio sort`` writes 51,200.
+#: (100,000 rounded up to a multiple of 2,048), and ``gpio sort`` writes 49,152.
 #: A pass/fail band that excludes all of those is reporting on the ecosystem
 #: rather than on the file in front of it.
 #:
@@ -37,11 +38,23 @@ GENERAL_ROW_COUNT_RANGE = (10_000, 200_000)
 #: group cut the share of the file a query window covering 10% of each dimension
 #: must read from 43-100% down to 10-28%. Nothing measures the top of
 #: GENERAL_ROW_COUNT_RANGE the same way, so where the two bands disagree this is
-#: the one with evidence behind it -- it is what ``gpio sort`` asks for (the top
-#: of the band, though DuckDB rounds the request up to 51,200, just outside it:
-#: #961), what ``gpio check optimization`` scores (it imports this constant
-#: rather than repeating the numbers), and what docs/guide/check.md and
-#: docs/guide/sort.md quote.
+#: the one with evidence behind it -- it is what ``gpio sort`` aims at, what
+#: ``gpio check optimization`` scores (it imports this constant rather than
+#: repeating the numbers), and what docs/guide/check.md and docs/guide/sort.md
+#: quote.
+#:
+#: Both endpoints are stated in requested rows, and no file can have either of
+#: them: the Parquet writer emits row groups in whole 2,048-row vectors. That
+#: is the writer's job to reconcile, not this band's -- ``gpio sort`` snaps its
+#: request to a whole vector (``align_to_writer_vector``), which maps 10,000 to
+#: 10,240 and 50,000 to 49,152, both inside the band. Before #961 it asked for
+#: 50,000 and the writer rounded that *up* to 51,200, so ``check optimization``
+#: failed a file ``gpio sort`` had just written. The band did not move; the
+#: request did.
+#:
+#: ``align_to_writer_vector`` keeps its own copy of this band's top, because
+#: this module imports ``parquet_writer`` and so it cannot import back.
+#: ``tests/test_sort_row_group_default.py`` asserts the two agree.
 #:
 #: The two bands are not rival answers to one question (#795): a file can sit
 #: inside the general band and still prune badly, so the messages below say
@@ -322,7 +335,7 @@ def check_row_groups(
             progress(
                 f"- Spatial queries: {spatial_low:,}-{spatial_high:,} rows per group with "
                 "Hilbert sorting and GeoParquet v2.0 enables optimal row group skipping "
-                f"(gpio sort defaults to {spatial_high:,})"
+                f"(gpio sort defaults to {DEFAULT_SORT_ROW_GROUP_ROWS:,})"
             )
 
     if return_results:

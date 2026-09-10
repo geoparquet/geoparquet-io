@@ -178,18 +178,31 @@ class TestRowCountBands:
 
         gpio's general write default lands at 100,352 rows (100,000 rounded up
         to a multiple of 2,048), DuckDB writes 122,880, and ``gpio sort``
-        writes 51,200. A verdict band that fails those is reporting on the
-        ecosystem, not on the file.
+        writes 49,152 (51,200 before #961). A verdict band that fails those is
+        reporting on the ecosystem, not on the file.
         """
-        for rows in (51_200, 100_352, 122_880):
+        for rows in (49_152, 51_200, 100_352, 122_880):
             status, _message, _color = assess_row_count(rows)
             assert status == "optimal", f"{rows:,} rows per group should not fail the check"
 
-    def test_spatial_band_top_is_the_sort_default(self):
-        """``gpio sort``'s default is the top of the band ``check`` advises."""
-        from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
+    def test_the_sort_default_is_the_top_of_the_spatial_band_the_writer_can_reach(self):
+        """``gpio sort``'s default is the top of the band ``check`` advises...
 
-        assert SPATIAL_ROW_COUNT_RANGE[1] == DEFAULT_SORT_ROW_GROUP_ROWS
+        ...expressed in the units the writer can actually emit. DuckDB writes
+        row groups in whole 2,048-row vectors, so the band's literal top of
+        50,000 is not a layout any file can have: a request for it lands at
+        51,200, outside the band (#961). The default is therefore the largest
+        whole vector at or below the top, and it must sit inside the band.
+        """
+        from geoparquet_io.core.parquet_writer import (
+            DEFAULT_SORT_ROW_GROUP_ROWS,
+            WRITER_VECTOR_ROWS,
+        )
+
+        spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
+        assert spatial_low <= DEFAULT_SORT_ROW_GROUP_ROWS <= spatial_high
+        assert DEFAULT_SORT_ROW_GROUP_ROWS % WRITER_VECTOR_ROWS == 0
+        assert DEFAULT_SORT_ROW_GROUP_ROWS + WRITER_VECTOR_ROWS > spatial_high
 
     def test_optimization_check_scores_the_same_spatial_band(self, monkeypatch):
         """``check optimization``'s row-group factor scores this exact band."""
@@ -237,6 +250,7 @@ class TestRowCountBands:
         import logging
 
         from geoparquet_io.core import check_parquet_structure as structure
+        from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
 
         monkeypatch.setattr(
             structure,
@@ -257,7 +271,10 @@ class TestRowCountBands:
         spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
         assert f"{general_low:,}-{general_high:,} rows per group (general use)" in printed
         assert f"{spatial_low:,}-{spatial_high:,} rows per group" in printed
-        assert f"gpio sort defaults to {spatial_high:,}" in printed
+        # The line must name the number ``gpio sort`` actually writes. Quoting
+        # the band's top instead was true only while the two coincided, and it
+        # stopped being true the moment the default moved off it (#961).
+        assert f"gpio sort defaults to {DEFAULT_SORT_ROW_GROUP_ROWS:,}" in printed
 
 
 class TestGetRowGroupStats:

@@ -237,7 +237,9 @@ def sort_str(
         tile_size: Roughly the rows you intend to put in a row group. STR uses
             it only to choose the number of X strips, as
             ``ceil(sqrt(num_rows / tile_size))``, so it is a coarse control
-            rather than an exact tile capacity (default: 50,000)
+            rather than an exact tile capacity. Defaults to
+            ``core.str_order.DEFAULT_STR_TILE_SIZE``, which tracks the sort
+            commands' own row-group default.
 
     Returns:
         New table with rows reordered into spatially compact tiles
