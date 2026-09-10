@@ -183,7 +183,13 @@ repos:
         args:
           - -c
           - |
-            if grep -rn "click\.echo" geoparquet_io/core/ --include="*.py" | grep -v "logging_config.py"; then
+            # The exemption is anchored to the path field. `grep -v` sees the
+            # whole `path:line:text` line, so the bare `grep -v
+            # "logging_config.py"` this used to be was switched off by a comment
+            # that merely mentioned the module -- `click.echo("hi")  # port to
+            # logging_config.py later` was not flagged (#970). Same shape as
+            # #946, one hook over. Keep the `^...:` form.
+            if grep -rn "click\.echo" geoparquet_io/core/ --include="*.py" | grep -v '^geoparquet_io/core/logging_config.py:'; then
               echo "ERROR: Use logger instead of click.echo in core/. See CLAUDE.md Logging section."
               exit 1
             fi
@@ -202,7 +208,12 @@ repos:
         args:
           - -c
           - |
-            if grep -rnE 'def _(align|unify|reconcile)[a-zA-Z_]*schema' geoparquet_io/core/ --include="*.py" | grep -v "common.py"; then
+            # Anchored to the path field, for the reason above and for one
+            # more: as a substring, "common.py" also matched
+            # core/partition/common.py, core/process/aggregate/common.py and
+            # core/process/aggregate/grid_common.py, so three modules nobody
+            # meant to exempt were outside the guard (#970).
+            if grep -rnE 'def _(align|unify|reconcile)[a-zA-Z_]*schema' geoparquet_io/core/ --include="*.py" | grep -v '^geoparquet_io/core/common.py:'; then
               echo "ERROR: Reuse _compute_unified_schema / _cast_table_to_schema from core/common.py"
               echo "       instead of hand-rolling schema reconciliation. See the WFS/ArcGIS history"
               echo "       and docs/contributing.md (External extractors)."
