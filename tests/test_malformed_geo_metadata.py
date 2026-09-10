@@ -1666,3 +1666,79 @@ def test_projected_crs_survives_a_malformed_primary_column(command, col, tmp_pat
 
     assert codes["control"] == 5070, "the control lost the CRS; the fixture is wrong"
     assert codes["malformed"] == codes["control"]
+
+
+# =============================================================================
+# `gpio check`: the commands that exist to *diagnose* a malformed file
+# =============================================================================
+#
+# These are validation readers, so they follow the line #883 drew and #945/#960
+# upheld: they do NOT sanitize, because `gpio check` has to see the file as it
+# really is. They guard and report the truth instead -- a `columns` that is not
+# an object declares no geometry columns, and a block that is not an object
+# declares no version (#968).
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_check_spec_reports_a_malformed_block_instead_of_crashing(col, case, block, tmp_path):
+    """`check spec` is the command run to be *told* the file is malformed."""
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(tmp_path, f"spec_{col}_{case}", block, col=col)
+    result = validate_geoparquet(path)
+
+    reported = {c.name: c.status.value for c in result.checks}
+    if not isinstance(block, dict):
+        # A block that is not a JSON object cannot be checked key by key; one
+        # honest failure says so.
+        assert reported.get("geo_metadata_parse") == "failed"
+        return
+    if not isinstance(block.get("columns"), dict):
+        assert reported.get("columns_present") == "failed"
+
+
+@pytest.mark.parametrize("bad", [["geometry"], None, "geometry", 5])
+def test_check_spec_columns_guard_does_not_hide_a_declared_covering(bad, tmp_path):
+    """The 1.1-only 'covering' check must survive a non-object `columns` (#968).
+
+    It crashed at `_columns_declaring_covering` with
+    `'list' object has no attribute 'items'` before reaching any of the checks
+    that would have told the user what was wrong.
+    """
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(
+        tmp_path,
+        f"covering_{type(bad).__name__}",
+        {"version": "1.0.0", "primary_column": "geometry", "columns": bad},
+    )
+    reported = {c.name: c.status.value for c in validate_geoparquet(path).checks}
+    assert reported["columns_present"] == "failed"
+    # No columns can be read, so none can declare a 1.1-only key: not a failure
+    # to pin on the version.
+    assert reported["version_features_match"] == "passed"
+
+
+def test_check_spec_still_catches_a_covering_declared_by_a_1_0_file(tmp_path):
+    """The guard must not cost a real 1.0-with-covering file its failure."""
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    path = _file_with_geo(
+        tmp_path,
+        "covering_on_1_0",
+        {
+            "version": "1.0.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": ["Point"],
+                    "covering": {"bbox": {"xmin": ["bbox", "xmin"]}},
+                }
+            },
+        },
+    )
+    reported = {c.name: c.status.value for c in validate_geoparquet(path).checks}
+    assert reported["version_features_match"] == "failed"
