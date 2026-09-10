@@ -1775,3 +1775,97 @@ def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
     results = check_metadata_and_bbox(path, verbose=False, return_results=True, quiet=True)
     assert results["version"] == "1.0.0"
     assert any("outdated" in issue for issue in results["issues"])
+
+
+# =============================================================================
+# The metadata-only column-name reader
+# =============================================================================
+#
+# `find_geometry_column_from_metadata` returned `primary_column` with no type
+# check, so `123` travelled through `extract` into `quote_identifier` and failed
+# there with `TypeError: argument of type 'int' is not iterable`, four frames
+# from anything a user can act on (#968). It is a column-name reader shared with
+# read-only callers (`Table.geometry_column`), so it takes #945's line: guard,
+# do not sanitize, and hand back nothing rather than a name that cannot be one.
+#
+# The same line carried the literal `"geometry"` default #945's review named as
+# the cause of its silently-wrong-coordinates bug: on a file whose column is
+# `geom`, that default names a column that does not exist. Every caller already
+# asks the schema when this reader says nothing, which is the right answer.
+
+
+@pytest.mark.parametrize("bad", [123, ["geometry"], {"name": "geometry"}, None, ""])
+def test_find_geometry_column_from_metadata_never_returns_a_non_name(bad):
+    from geoparquet_io.core.streaming import find_geometry_column_from_metadata
+
+    reset_malformed_geo_warnings()
+    block = {"version": "1.1.0", "primary_column": bad, "columns": {"geom": {"encoding": "WKB"}}}
+    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) is None
+
+
+def test_find_geometry_column_from_metadata_still_reads_a_real_name():
+    from geoparquet_io.core.streaming import find_geometry_column_from_metadata
+
+    block = {"version": "1.1.0", "primary_column": "geom", "columns": {"geom": {}}}
+    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) == "geom"
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_find_geometry_column_from_table_recovers_from_a_non_string_primary(col):
+    """The table-level reader asks the schema, and must find the real column."""
+    from geoparquet_io.core.streaming import find_geometry_column_from_table
+
+    reset_malformed_geo_warnings()
+    table = _table_with_geo(
+        {"version": "1.1.0", "primary_column": 123, "columns": {col: {"encoding": "WKB"}}}, col=col
+    )
+    assert find_geometry_column_from_table(table) == col
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_extract_to_stdout_survives_a_non_string_primary_column(col, tmp_path):
+    """`gpio extract geoparquet <file> -` reached `quote_identifier` with an int."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    reset_malformed_geo_warnings()
+    src = _file_with_geo(
+        tmp_path,
+        f"stdout_{col}",
+        {
+            "version": "1.1.0",
+            "primary_column": 123,
+            # A complete entry otherwise: DuckDB's own reader refuses a 1.1
+            # column with no `geometry_types`, and that domain error is outside
+            # gpio's reach (#945). The `primary_column` is the only thing wrong.
+            "columns": {col: {"encoding": "WKB", "geometry_types": ["Point"]}},
+        },
+        col=col,
+    )
+    result = CliRunner().invoke(cli, ["extract", "geoparquet", src, "-"])
+    assert not isinstance(result.exception, TypeError), result.exception
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_extract_crs_from_table_reads_the_named_column_not_the_literal_one(col):
+    """`streaming.extract_crs_from_table` carried the same `"geometry"` default.
+
+    Reached only when the caller passes no `geometry_column`, which no caller
+    does today -- but the default is wrong for a `geom` file either way, and
+    #960 called the one it fixed "the one place still open to it".
+    """
+    from geoparquet_io.core.streaming import extract_crs_from_table
+
+    reset_malformed_geo_warnings()
+    table = _table_with_geo(
+        {
+            "version": "1.1.0",
+            "primary_column": col,
+            "columns": {col: {"encoding": "WKB", "crs": _crs_5070()}},
+        },
+        col=col,
+    )
+    crs = extract_crs_from_table(table)
+    assert isinstance(crs, dict) and crs["id"]["code"] == 5070

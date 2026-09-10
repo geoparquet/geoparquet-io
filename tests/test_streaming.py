@@ -280,10 +280,18 @@ class TestGeometryColumnDetection:
         metadata = {b"geo": json.dumps({"primary_column": "geom"}).encode("utf-8")}
         assert find_geometry_column_from_metadata(metadata) == "geom"
 
-    def test_find_geometry_column_from_metadata_default(self):
-        """Test default geometry column when not specified."""
-        metadata = {b"geo": json.dumps({}).encode("utf-8")}
-        assert find_geometry_column_from_metadata(metadata) == "geometry"
+    def test_find_geometry_column_from_metadata_names_nothing_it_cannot_read(self):
+        """A block that names no usable primary column names none (#968).
+
+        This used to answer with the literal ``"geometry"``, which is a guess:
+        on a file whose column is ``geom`` it names a column that does not
+        exist, and #945's review traced silently-wrong coordinates to exactly
+        that default. Every caller asks the file's schema when this reader says
+        nothing -- see ``test_find_geometry_column_from_table_common_names``.
+        """
+        assert find_geometry_column_from_metadata({b"geo": json.dumps({}).encode("utf-8")}) is None
+        malformed = {b"geo": json.dumps({"primary_column": 123}).encode("utf-8")}
+        assert find_geometry_column_from_metadata(malformed) is None
 
     def test_find_geometry_column_from_metadata_missing(self):
         """Test None when no geo metadata."""
