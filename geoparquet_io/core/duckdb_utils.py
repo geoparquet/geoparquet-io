@@ -7,6 +7,7 @@ with appropriate extensions loaded for GeoParquet operations.
 
 import os
 import re
+import shutil
 import tempfile
 import threading
 import uuid
@@ -550,18 +551,106 @@ def _install_and_load_extension(con, name: str) -> None:
         raise
 
 
-#: Marks the scratch directories gpio hands to DuckDB, so a stray one left by a
-#: killed process is recognisable in a temp directory listing.
+#: Marks the scratch directories gpio hands to DuckDB. The prefix is not
+#: decoration: :func:`sweep_orphaned_spill_dirs` matches on it, so only a
+#: directory gpio minted itself is ever a candidate for removal.
 _SPILL_DIR_PREFIX = "gpio-spill-"
+
+#: The exact shape :func:`spill_directory` mints, with the owning pid captured.
+#: Anything else under the base -- a cached dataset, another tool's scratch, a
+#: hand-made directory that merely starts with the prefix -- does not match and
+#: is never touched.
+_SPILL_DIR_RE = re.compile(rf"^{re.escape(_SPILL_DIR_PREFIX)}(\d+)-[0-9a-f]{{12}}$")
+
+
+def _process_is_alive(pid: int) -> bool:
+    """Whether ``pid`` is still running. Answers True whenever it cannot tell.
+
+    Only ever used to decide *not* to delete something, so the unsure answer has
+    to be "alive": a false "dead" would take a running sibling's scratch space
+    away mid-query, while a false "alive" merely leaves one more directory for
+    the next run (or the OS tmp reaper) to collect.
+    """
+    try:
+        import psutil
+
+        return psutil.pid_exists(pid)
+    except Exception:  # pragma: no cover - psutil is a hard dependency
+        return True
+
+
+def orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
+    """Spill directories under ``base_dir`` whose owning process has exited.
+
+    Ownership is decided by the pid in the name, never by age: a gpio run that
+    takes six hours must not have its scratch space swept out from under it.
+    Pid reuse can only make this *more* conservative -- a recycled pid reads as
+    alive, so the leftover simply survives another round.
+
+    The one case pids cannot decide is two *pid namespaces* sharing one spill
+    volume: point ``TMPDIR`` at the same bind-mounted directory from two
+    containers and each sees the other's pids as absent. Give each container its
+    own ``TMPDIR`` (the default already does) if you share a volume between them.
+    """
+    found: list[str] = []
+    try:
+        entries = list(os.scandir(base_dir))
+    except OSError:
+        return found
+    for entry in entries:
+        match = _SPILL_DIR_RE.match(entry.name)
+        if match is None:
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:  # pragma: no cover - raced with another sweeper
+            continue
+        if _process_is_alive(int(match.group(1))):
+            continue
+        found.append(entry.path)
+    return found
+
+
+def sweep_orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
+    """Remove the spill directories under ``base_dir`` that nobody owns any more.
+
+    DuckDB removes its temp directory when the *query* completes, not when the
+    process dies. A run killed mid-spill (SIGINT, SIGTERM, SIGKILL) therefore
+    orphans a directory that can hold gigabytes, however carefully the caller
+    closes the connection in a ``finally``. DuckDB's own fixed ``.tmp`` made
+    that self-limiting by accident -- the next run reuses the same path and the
+    same ``duckdb_temp_storage_*.tmp`` filenames -- so the unique names gpio
+    needs for correctness would otherwise turn a bounded leak into a growing
+    one. This is the other half of that trade.
+
+    Best effort by design: a leftover owned by another user, or on a read-only
+    volume, is skipped rather than raised, because failing to tidy up must never
+    fail the run that was only trying to start.
+
+    Returns:
+        The paths actually removed, for callers that report what they freed.
+    """
+    removed: list[str] = []
+    for path in orphaned_spill_dirs(base_dir):
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            continue
+        removed.append(path)
+    return removed
 
 
 def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
     """Path to a private directory DuckDB may spill intermediate results into.
 
     The path is *not* created. DuckDB creates its temp directory the first time
-    a query exceeds ``memory_limit``, and removes it again when the connection
-    closes -- so a connection that never spills leaves nothing behind, and one
-    that does cleans up after itself.
+    a query exceeds ``memory_limit``, and removes it again once the query
+    completes -- so a connection that never spills leaves nothing behind, and an
+    ordinary run, error or not, cleans up after itself. A run *killed* mid-spill
+    does not, which is why every call first sweeps ``base_dir`` for the leavings
+    of processes that are gone (see :func:`sweep_orphaned_spill_dirs`). The
+    sweep is best effort and never raises.
 
     Every call returns a fresh path, and that uniqueness is a correctness
     requirement rather than tidiness. DuckDB names its spill files after the
@@ -576,13 +665,66 @@ def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
     Args:
         base_dir: Volume to spill onto. Defaults to the OS temp directory, which
             follows ``TMPDIR``: that is the knob for a machine whose root volume
-            is too small to hold a large sort's spill.
+            is too small to hold a large sort's spill. Not validated here --
+            DuckDB creates the leaf lazily, so a base that is missing, read-only
+            or not a directory surfaces as an ``IO Error`` naming the path at
+            the first spill rather than at this call. Callers that name a base
+            create it first.
 
     Returns:
         An absolute path, safe to hand to ``SET temp_directory``.
     """
     base = os.fspath(base_dir) if base_dir is not None else tempfile.gettempdir()
+    sweep_orphaned_spill_dirs(base)
     return os.path.join(base, f"{_SPILL_DIR_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:12]}")
+
+
+#: DuckDB's own words when the *spill volume* fills up. The message it prints is
+#: an "Out of Memory Error" that never mentions ``TMPDIR``, so it sends users
+#: after the one knob that cannot help them; this is the phrase that tells the
+#: disk shortage apart from a real memory one.
+_SPILL_EXHAUSTED_SIGNATURE = "max_temp_directory_size"
+
+
+def spill_space_hint(exc: BaseException | str | None) -> str | None:
+    """gpio's guidance for DuckDB's "ran out of spill space" error, or ``None``.
+
+    Accepts an exception (whose ``__cause__``/``__context__`` chain is walked)
+    or the raw error text, mirroring
+    :func:`~geoparquet_io.core.exceptions.is_unpublished_extension_error`.
+    """
+    if exc is None:
+        return None
+    if isinstance(exc, str):
+        blob = exc
+    else:
+        parts: list[str] = []
+        seen: set[int] = set()
+        cur: BaseException | None = exc
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            parts.append(str(cur))
+            cur = cur.__cause__ or cur.__context__
+        blob = " ".join(parts)
+    if _SPILL_EXHAUSTED_SIGNATURE not in blob:
+        return None
+    return (
+        "This is a disk shortage, not a memory one, whatever the wording says: "
+        "DuckDB spills intermediate results to a scratch directory and that "
+        f"volume ran out of room. gpio spills under the system temp directory "
+        f"(currently {tempfile.gettempdir()}); the admin-boundary commands spill "
+        "onto the admin cache volume instead.\n"
+        "\n"
+        "Point TMPDIR (%TEMP% on Windows) at a volume with room to spare:\n"
+        "\n"
+        "    TMPDIR=/path/with/space gpio ...\n"
+        "\n"
+        "Check first whether /tmp is RAM-backed: systemd mounts a tmpfs there by "
+        "default on Fedora, Arch and openSUSE, as do Kubernetes' "
+        "'emptyDir: {medium: Memory}' and 'docker run --tmpfs /tmp'. Spilling "
+        "onto a tmpfs spends the very memory the spill was meant to save, so "
+        "TMPDIR needs to name real storage."
+    )
 
 
 def get_duckdb_connection(

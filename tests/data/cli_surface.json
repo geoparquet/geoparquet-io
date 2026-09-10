@@ -1,5 +1,5 @@
 {
- "class": "Group",
+ "class": "SpillAwareGroup",
  "commands": {
   "add": {
    "class": "Group",

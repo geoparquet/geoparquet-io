@@ -15,21 +15,42 @@ in. Two things follow, and both are pinned here:
 The fix is central: :func:`get_duckdb_connection` gives every connection its
 own private spill directory under the OS temp directory unless the caller names
 one.
+
+A private *unique* directory has a cost the fixed ``.tmp`` did not, and it is
+pinned here too. DuckDB removes its temp directory when the **query** finishes,
+so a run killed mid-spill (SIGINT, SIGTERM, SIGKILL) leaves the leaf behind
+however carefully the caller closes the connection. With a fixed name that leak
+is self-limiting -- the next run reuses the same path and the same
+``duckdb_temp_storage_*.tmp`` filenames -- while unique names would let three
+killed runs leave three multi-GB directories. So ``spill_directory()`` sweeps
+the base it is about to write into, removing leaves whose owning process is
+gone, and ``--clear-cache`` does the same for the admin cache directory.
 """
 
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 
+import click
+import duckdb
 import pytest
+from click.testing import CliRunner
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, spill_directory
+from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
+    spill_directory,
+    spill_space_hint,
+    sweep_orphaned_spill_dirs,
+)
 
 # A sort that comfortably exceeds the memory limit below, and still runs in
 # well under a second.
@@ -186,8 +207,14 @@ class TestSpillsActuallyLandThere:
             assert list(spill_dir.glob("duckdb_temp_storage*"))
         finally:
             con.close()
-        # DuckDB removes a temp directory it created itself.
-        assert not spill_dir.exists()
+        # DuckDB removes a temp directory it created itself -- when the query
+        # finished, which it did here. On Windows a still-open handle can defeat
+        # that removal (this repo has a long history of WinError 32 on
+        # unlink/replace), and a leftover is not the thing this test is about:
+        # what bounds leftovers is the sweep in ``spill_directory()``, pinned in
+        # TestOrphanedSpillDirectoriesAreReaped below.
+        if os.name != "nt":
+            assert not spill_dir.exists()
 
     def test_concurrent_connections_do_not_corrupt_each_other(self):
         """Regression guard for the shared-directory hazard in the docstring."""
@@ -301,3 +328,263 @@ def test_spilling_write_survives_a_read_only_working_directory(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "OK" in result.stdout
+
+
+ONE_MB = 1024 * 1024
+
+
+def _dead_pid() -> int:
+    """A pid that has certainly exited and been reaped."""
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
+
+
+def _plant_leaf(base: Path, pid: int, payload: int = ONE_MB) -> Path:
+    """A spill leaf shaped exactly like one gpio would leave behind."""
+    leaf = base / f"gpio-spill-{pid}-{uuid.uuid4().hex[:12]}"
+    leaf.mkdir(parents=True)
+    (leaf / "duckdb_temp_storage_S192K-0.tmp").write_bytes(b"\0" * payload)
+    return leaf
+
+
+def _bytes_under(base: Path) -> int:
+    return sum(p.stat().st_size for p in base.rglob("*") if p.is_file())
+
+
+class TestOrphanedSpillDirectoriesAreReaped:
+    """A killed run leaves its leaf behind; the next run takes it away.
+
+    DuckDB removes a temp directory when the *query* completes, not when the
+    process dies, so an interrupted spill orphans it no matter what the caller
+    does in a ``finally``. Unique names remove the accidental self-healing the
+    fixed ``.tmp`` had, which is why the sweep exists.
+    """
+
+    def test_a_leaf_whose_owner_is_gone_is_removed(self, tmp_path):
+        leaf = _plant_leaf(tmp_path, _dead_pid())
+
+        spill_directory(tmp_path)
+
+        assert not leaf.exists()
+
+    def test_a_leaf_belonging_to_a_live_process_survives(self, tmp_path):
+        """Never take a *sibling's* scratch space away mid-query."""
+        leaf = _plant_leaf(tmp_path, os.getpid())
+
+        spill_directory(tmp_path)
+
+        assert leaf.is_dir()
+
+    def test_an_unparseable_pid_is_left_alone(self, tmp_path):
+        """When ownership cannot be decided, keep the directory."""
+        odd = tmp_path / "gpio-spill-notapid-abcdef123456"
+        odd.mkdir()
+
+        spill_directory(tmp_path)
+
+        assert odd.is_dir()
+
+    def test_neighbours_are_never_touched(self, tmp_path):
+        cached = tmp_path / "overture-2025-10-22.0.parquet"
+        cached.write_bytes(b"cached dataset")
+        unrelated = tmp_path / "someone-elses-scratch"
+        unrelated.mkdir()
+        # A *file* whose name happens to match: gpio only ever makes directories.
+        decoy = tmp_path / f"gpio-spill-{_dead_pid()}-abcdef123456"
+        decoy.write_bytes(b"not a directory")
+
+        spill_directory(tmp_path)
+
+        assert cached.exists()
+        assert unrelated.is_dir()
+        assert decoy.exists()
+
+    def test_the_sweep_recognises_the_names_gpio_actually_mints(self, tmp_path):
+        """Couples the minting and the matching so they cannot drift apart."""
+        minted = Path(spill_directory(tmp_path)).name
+        prefix, pid, suffix = minted.rsplit("-", 2)[0], os.getpid(), minted.rsplit("-", 1)[1]
+        assert f"{prefix}-{pid}-{suffix}" == minted
+
+        orphan = tmp_path / f"{prefix}-{_dead_pid()}-{suffix}"
+        orphan.mkdir()
+
+        spill_directory(tmp_path)
+
+        assert not orphan.exists()
+
+    def test_repeated_interrupted_runs_do_not_accumulate(self, tmp_path):
+        """The accumulation the reviewer measured: 28MB -> 133MB -> 202MB.
+
+        Each iteration is one gpio run that picks a spill path, spills, and is
+        killed before DuckDB can clean up. Without a sweep the base grows by a
+        leaf per run; with one it plateaus at the single leaf the *last* run
+        left, because every run reaps its dead predecessors first.
+        """
+        sizes = []
+        for _ in range(3):
+            leaf = Path(spill_directory(tmp_path))
+            # Pretend this run is a separate process, since the sweep -- rightly
+            # -- refuses to delete a live process's directory.
+            leaf = leaf.parent / leaf.name.replace(f"-{os.getpid()}-", f"-{_dead_pid()}-")
+            leaf.mkdir()
+            (leaf / "duckdb_temp_storage_S192K-0.tmp").write_bytes(b"\0" * ONE_MB)
+            sizes.append(_bytes_under(tmp_path))
+
+        assert sizes == [ONE_MB, ONE_MB, ONE_MB]
+
+    def test_an_unremovable_leaf_does_not_fail_the_connection(self, tmp_path, monkeypatch):
+        """Best effort: a permission error on someone else's leftovers is not fatal."""
+        leaf = _plant_leaf(tmp_path, _dead_pid())
+
+        def refuse(*args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(leaf))
+
+        monkeypatch.setattr(shutil, "rmtree", refuse)
+
+        con = get_duckdb_connection(
+            load_spatial=False, load_httpfs=False, temp_directory=spill_directory(tmp_path)
+        )
+        try:
+            assert con.execute("SELECT 1").fetchone()[0] == 1
+        finally:
+            con.close()
+        assert leaf.is_dir()
+
+    def test_a_missing_base_directory_is_not_an_error(self, tmp_path):
+        """The default base always exists; an explicit one need not yet."""
+        assert spill_directory(tmp_path / "not-created-yet")
+
+    def test_opening_a_default_connection_reaps_the_temp_directory(self, tmp_path, monkeypatch):
+        """The sweep is on the path every gpio connection already takes."""
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+        leaf = _plant_leaf(tmp_path, _dead_pid())
+
+        con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
+        try:
+            assert Path(_temp_directory(con)).parent == tmp_path
+        finally:
+            con.close()
+
+        assert not leaf.exists()
+
+    def test_sweep_reports_what_it_removed(self, tmp_path):
+        dead = _plant_leaf(tmp_path, _dead_pid())
+        alive = _plant_leaf(tmp_path, os.getpid())
+
+        removed = sweep_orphaned_spill_dirs(tmp_path)
+
+        assert [Path(p) for p in removed] == [dead]
+        assert alive.is_dir()
+
+
+#: The real DuckDB error, provoked with a tiny ``max_temp_directory_size``
+#: rather than a tiny volume: the message is byte-for-byte what a user on a
+#: 64MB or RAM-backed ``/tmp`` sees.
+def _out_of_spill_space_error(tmp_path) -> duckdb.Error:
+    con = duckdb.connect()
+    try:
+        con.execute(f"SET temp_directory = '{tmp_path.as_posix()}'")
+        con.execute("SET max_temp_directory_size = '16MB'")
+        con.execute("SET threads = 1")
+        con.execute(f"SET memory_limit = '{SPILL_MEMORY_LIMIT}'")
+        with pytest.raises(duckdb.Error) as excinfo:
+            con.execute(SPILL_QUERY)
+        return excinfo.value
+    finally:
+        con.close()
+
+
+class TestOutOfSpillSpaceIsExplained:
+    """DuckDB says "Out of Memory Error" for a *disk* shortage, and never says TMPDIR."""
+
+    def test_duckdbs_own_message_says_memory_and_never_says_tmpdir(self, tmp_path):
+        text = str(_out_of_spill_space_error(tmp_path))
+        assert "Out of Memory Error" in text
+        assert "TMPDIR" not in text
+
+    def test_the_real_error_is_recognised(self, tmp_path):
+        hint = spill_space_hint(_out_of_spill_space_error(tmp_path))
+        assert hint is not None
+        assert "TMPDIR" in hint
+        assert "tmpfs" in hint
+
+    def test_an_ordinary_memory_error_is_not_claimed(self):
+        con = duckdb.connect()
+        try:
+            con.execute("SET memory_limit = '10MB'")
+            con.execute("SET temp_directory = ''")
+            with pytest.raises(duckdb.Error) as excinfo:
+                con.execute(SPILL_QUERY)
+        finally:
+            con.close()
+        assert "max_temp_directory_size" not in str(excinfo.value)
+        assert spill_space_hint(excinfo.value) is None
+
+    def test_nothing_and_unrelated_errors_return_none(self):
+        assert spill_space_hint(None) is None
+        assert spill_space_hint(ValueError("no such file")) is None
+
+    def test_raw_error_text_is_accepted_too(self):
+        assert spill_space_hint("... the 'max_temp_directory_size' setting.") is not None
+        assert spill_space_hint("IO Error: no such file") is None
+
+    def test_a_wrapped_error_is_found_through_the_cause_chain(self):
+        inner = duckdb.Error("Out of Memory Error: ... the 'max_temp_directory_size' setting.")
+        outer = RuntimeError("write failed")
+        outer.__cause__ = inner
+        assert spill_space_hint(outer) is not None
+
+
+class TestTheCliNamesTmpdir:
+    """The hint has to reach the user, on every command, not just the ones with a decorator."""
+
+    def test_the_group_replaces_an_out_of_spill_space_message(self):
+        from geoparquet_io.cli.decorators import SpillAwareGroup
+
+        @click.group(cls=SpillAwareGroup)
+        def root():
+            pass
+
+        @root.command()
+        def boom():
+            raise duckdb.OutOfMemoryException(
+                "Out of Memory Error: failed to offload data block of size 256.0 KiB.\n"
+                "This limit was set by the 'max_temp_directory_size' setting."
+            )
+
+        result = CliRunner().invoke(root, ["boom"])
+
+        assert result.exit_code != 0
+        assert "TMPDIR" in result.output
+        # The original text is kept: it names the sizes involved.
+        assert "failed to offload data block" in result.output
+
+    def test_other_errors_pass_through_untouched(self):
+        from geoparquet_io.cli.decorators import SpillAwareGroup
+
+        @click.group(cls=SpillAwareGroup)
+        def root():
+            pass
+
+        @root.command()
+        def boom():
+            raise duckdb.IOException("IO Error: No files found that match the pattern")
+
+        result = CliRunner().invoke(root, ["boom"])
+
+        assert isinstance(result.exception, duckdb.IOException)
+
+    def test_the_real_cli_group_uses_it(self):
+        from geoparquet_io.cli.decorators import SpillAwareGroup
+        from geoparquet_io.cli.main import cli
+
+        assert isinstance(cli, SpillAwareGroup)
+
+
+def test_the_reaper_pattern_is_not_hand_written_twice():
+    """One regex owns the naming convention; ``--clear-cache`` reuses it."""
+    from geoparquet_io.core import admin_datasets, duckdb_utils
+
+    assert isinstance(duckdb_utils._SPILL_DIR_RE, re.Pattern)
+    assert admin_datasets.sweep_orphaned_spill_dirs is duckdb_utils.sweep_orphaned_spill_dirs

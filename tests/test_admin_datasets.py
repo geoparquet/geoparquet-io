@@ -26,6 +26,16 @@ from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 TEST_DATA_DIR = Path(__file__).parent / "data"
 
 
+def _dead_pid() -> int:
+    """A pid that has certainly exited and been reaped."""
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
+
+
 def _spatial_connection(duckdb):
     """An in-memory DuckDB with spatial loaded, configured as gpio configures it."""
     con = duckdb.connect()
@@ -1161,6 +1171,60 @@ class TestClearCache:
                 # Non-parquet files should remain
                 assert (cache_dir / "readme.txt").exists()
                 assert (cache_dir / ".gitkeep").exists()
+
+    def test_clear_cache_removes_orphaned_spill_directories(self):
+        """The worst orphan lands here, in ``$HOME``, where no tmp-reaper runs.
+
+        ``gpio add admin-divisions`` spills onto the admin cache volume, so an
+        interrupted Overture run leaves a multi-GB ``gpio-spill-*`` directory in
+        ``~/.geoparquet-io/cache/admin/``. Globbing ``*.parquet`` reported it as
+        nothing and deleted nothing.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            orphan = cache_dir / f"gpio-spill-{_dead_pid()}-abcdef123456"
+            orphan.mkdir()
+            (orphan / "duckdb_temp_storage_S192K-0.tmp").write_bytes(b"x" * 2048)
+
+            with patch("geoparquet_io.core.admin_datasets.get_cache_dir") as mock_get_cache:
+                mock_get_cache.return_value = cache_dir
+                result = clear_cache(confirm=True)
+
+            assert not orphan.exists()
+            assert result["spill_dirs_deleted"] == 1
+            assert result["spill_bytes_freed"] == 2048
+            # Cached-dataset accounting is unchanged: a spill directory is not a file.
+            assert result["files_deleted"] == 0
+            assert result["bytes_freed"] == 0
+
+    def test_clear_cache_on_an_absent_directory_reports_the_same_shape(self):
+        """Callers read four keys off the result; a no-op must still carry them."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "never-created"
+            with patch("geoparquet_io.core.admin_datasets.get_cache_dir") as mock_get_cache:
+                mock_get_cache.return_value = missing
+                result = clear_cache(confirm=True)
+
+            assert result == {
+                "files_deleted": 0,
+                "bytes_freed": 0,
+                "spill_dirs_deleted": 0,
+                "spill_bytes_freed": 0,
+            }
+
+    def test_clear_cache_leaves_a_running_process_spill_directory(self):
+        """A concurrent run's scratch space is not ours to delete."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            live = cache_dir / f"gpio-spill-{os.getpid()}-abcdef123456"
+            live.mkdir()
+
+            with patch("geoparquet_io.core.admin_datasets.get_cache_dir") as mock_get_cache:
+                mock_get_cache.return_value = cache_dir
+                result = clear_cache(confirm=True)
+
+            assert live.is_dir()
+            assert result["spill_dirs_deleted"] == 0
 
 
 class TestGetOrCacheDataset:

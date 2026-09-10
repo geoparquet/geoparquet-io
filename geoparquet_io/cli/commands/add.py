@@ -35,6 +35,57 @@ from geoparquet_io.core.add.s2 import add_s2_column as add_s2_column_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.streaming import StreamingError
 
+ONE_MB = 1024 * 1024
+
+
+def _clear_admin_cache_interactively(cache_dir, clear_admin_cache):
+    """Price the admin cache, confirm, then delete: datasets *and* spill leftovers.
+
+    The leftovers are listed on their own line because they are not cached data.
+    ``gpio add admin-divisions`` spills onto the cache volume, so a run killed
+    mid-spill orphans a directory that can hold gigabytes -- in ``$HOME``, where
+    no OS tmp reaper will ever collect it. Reporting only ``*.parquet`` told the
+    user there was nothing there and then deleted nothing (#977).
+    """
+    from geoparquet_io.core.admin_datasets import cache_spill_dirs, spill_dir_bytes
+    from geoparquet_io.core.logging_config import info, success
+
+    if not cache_dir.exists():
+        click.echo("No cache directory found.")
+        return
+
+    parquet_files = list(cache_dir.glob("*.parquet"))
+    spill_dirs = cache_spill_dirs()
+    if not parquet_files and not spill_dirs:
+        click.echo("No cached datasets found.")
+        return
+
+    click.echo(f"Cache directory: {cache_dir}")
+    click.echo(f"Files to delete: {len(parquet_files)}")
+    click.echo(f"Total size: {sum(f.stat().st_size for f in parquet_files) / ONE_MB:.2f} MB")
+    if spill_dirs:
+        click.echo(
+            f"Leftover spill directories: {len(spill_dirs)} "
+            f"({spill_dir_bytes(spill_dirs) / ONE_MB:.2f} MB)"
+        )
+
+    if not click.confirm("Delete all cached admin datasets?"):
+        info("Cache clear cancelled.")
+        return
+
+    result = clear_admin_cache(confirm=True)
+    success(
+        f"Cleared cache: {result['files_deleted']} files, "
+        f"{result['bytes_freed'] / ONE_MB:.2f} MB freed"
+    )
+    swept = result["spill_dirs_deleted"]
+    if swept:
+        noun = "directory" if swept == 1 else "directories"
+        success(
+            f"plus {swept} leftover spill {noun}, "
+            f"{result['spill_bytes_freed'] / ONE_MB:.2f} MB freed"
+        )
+
 
 @click.group()
 @click.pass_context
@@ -190,34 +241,11 @@ def add_country_codes(
         default_admin_levels,
         get_cache_dir,
     )
-    from geoparquet_io.core.logging_config import info, success
     from geoparquet_io.core.streaming import is_stdin, should_stream_output
 
     # Handle --clear-cache flag first
     if clear_cache:
-        cache_dir = get_cache_dir()
-        if cache_dir.exists():
-            # Get list of files to show size
-            parquet_files = list(cache_dir.glob("*.parquet"))
-            if parquet_files:
-                total_size = sum(f.stat().st_size for f in parquet_files)
-                size_mb = total_size / (1024 * 1024)
-                click.echo(f"Cache directory: {cache_dir}")
-                click.echo(f"Files to delete: {len(parquet_files)}")
-                click.echo(f"Total size: {size_mb:.2f} MB")
-
-                if click.confirm("Delete all cached admin datasets?"):
-                    result = clear_admin_cache(confirm=True)
-                    success(
-                        f"Cleared cache: {result['files_deleted']} files, "
-                        f"{result['bytes_freed'] / (1024 * 1024):.2f} MB freed"
-                    )
-                else:
-                    info("Cache clear cancelled.")
-            else:
-                click.echo("No cached datasets found.")
-        else:
-            click.echo("No cache directory found.")
+        _clear_admin_cache_interactively(get_cache_dir(), clear_admin_cache)
 
     # Check for streaming mode - not supported yet for admin-divisions
     if is_stdin(input_parquet) or should_stream_output(output_parquet):

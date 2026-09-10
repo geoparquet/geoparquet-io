@@ -17,6 +17,7 @@ from geoparquet_io.cli.commands.publish import publish
 from geoparquet_io.cli.commands.sort import sort
 from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
+    SpillAwareGroup,
     handle_geoparquet_errors,
 )
 from geoparquet_io.core.logging_config import setup_cli_logging
@@ -57,7 +58,7 @@ class OptionalIntCommand(GlobAwareCommand):
 
 
 @with_plugins(entry_points(group="gpio.plugins"))
-@click.group()
+@click.group(cls=SpillAwareGroup)
 @click.version_option(prog_name="geoparquet-io")
 @click.option("--timestamps", is_flag=True, help="Show timestamps in output messages")
 @click.option(

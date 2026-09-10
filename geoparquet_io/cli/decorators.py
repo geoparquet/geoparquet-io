@@ -11,6 +11,36 @@ import math
 import click
 
 
+class SpillAwareGroup(click.Group):
+    """Root group that names ``TMPDIR`` when DuckDB runs out of room to spill.
+
+    DuckDB caps its spill at ``max_temp_directory_size`` (90% of the volume by
+    default), so a small or RAM-backed temp volume fails cleanly rather than
+    filling the disk -- but it fails saying "Out of Memory Error", and its list
+    of "possible solutions" is entirely about memory. It never mentions the one
+    knob that fixes a disk shortage. This adds that line.
+
+    It belongs on the *root* group rather than on a decorator because every
+    command spills: ``handle_geoparquet_errors`` is applied to four command
+    modules, and ``gpio sort hilbert`` -- the worked example in the docs -- is
+    not one of them. ``Group.invoke`` is the single funnel every subcommand
+    passes through.
+
+    Anything that is not this specific failure is re-raised untouched.
+    """
+
+    def invoke(self, ctx):
+        from geoparquet_io.core.duckdb_utils import spill_space_hint
+
+        try:
+            return super().invoke(ctx)
+        except Exception as exc:
+            hint = spill_space_hint(exc)
+            if hint is None:
+                raise
+            raise click.ClickException(f"{exc}\n\n{hint}") from exc
+
+
 def handle_geoparquet_errors(func):
     """
     Decorator to convert GeoParquetError exceptions to user-friendly Click errors.
