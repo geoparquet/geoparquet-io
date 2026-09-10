@@ -1742,3 +1742,36 @@ def test_check_spec_still_catches_a_covering_declared_by_a_1_0_file(tmp_path):
     )
     reported = {c.name: c.status.value for c in validate_geoparquet(path).checks}
     assert reported["version_features_match"] == "failed"
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_check_bbox_reports_a_malformed_block_instead_of_crashing(col, case, block, tmp_path):
+    """`gpio check bbox` died at `_check_geoparquet_v1` on a non-object block."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(tmp_path, f"ckbbox_{col}_{case}", block, col=col)
+    result = CliRunner().invoke(cli, ["check", "bbox", path])
+
+    assert "Traceback" not in result.output, result.output
+    assert not isinstance(result.exception, (AttributeError, TypeError)), result.exception
+
+
+def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
+    """The guard must not cost a real 1.0 file its "outdated version" report."""
+    from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+    path = _file_with_geo(
+        tmp_path,
+        "ckbbox_ok",
+        {
+            "version": "1.0.0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        },
+    )
+    results = check_metadata_and_bbox(path, verbose=False, return_results=True, quiet=True)
+    assert results["version"] == "1.0.0"
+    assert any("outdated" in issue for issue in results["issues"])
