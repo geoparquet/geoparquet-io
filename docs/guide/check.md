@@ -165,6 +165,8 @@ The check reports two numbers, and they answer different questions:
 
     `--fix` writes those same 49,152-row groups. It is a repair, so the file it leaves behind has to pass the checks gpio runs next, and this is the narrower of the two bands. Until [#972](https://github.com/geoparquet/geoparquet-io/issues/972) it asked for 100,000 rows per group — landing at 100,352, inside the general 10,000-200,000 band that `gpio check row-group` passes a file on but outside this one — so `gpio check optimization` scored a freshly fixed file `[fail]` on its row-group factor and advised re-partitioning it.
 
+    **`--fix` follows this band, not the verdict band.** A file inside 10,000-200,000 but outside 10,000-50,000 still passes `gpio check row-group` — it is laid out the way mainstream writers lay files out — and `--fix` will still offer to rewrite it, because 49,152 rows per group is what it writes. Offering the fix off the verdict band instead meant `gpio check row-group --fix` printed "No fix needed" for a 100,352-row-group file while `gpio check optimization` on the same file printed `[fail] Row Group Size`; it also made the result depend on which subcommand you ran, since `check spatial --fix`, `check compression --fix` and `check bbox --fix` each rewrote the file for their own reasons and fixed the row groups in passing. The report says which band it is talking about, so a green "optimal for general use" line is followed by a note that `--fix` has something to do.
+
 ### Optimization Check
 
 === "CLI"

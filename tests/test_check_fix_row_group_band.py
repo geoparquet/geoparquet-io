@@ -214,5 +214,179 @@ class TestAFixedFilePassesTheRowGroupFactor:
         assert "55,000 rows per group" in verdict["detail"]
 
 
+@pytest.fixture
+def spatially_oversized_file(places_test_file, tmp_path) -> str:
+    """110,000 rows in two 55,000-row groups.
+
+    Sized so the file sits *inside* ``GENERAL_ROW_COUNT_RANGE`` and *outside*
+    ``SPATIAL_ROW_COUNT_RANGE`` -- the exact band gap #972 is about. Two groups
+    rather than one, because a sub-64 MB file with a single row group is exempt
+    from the row-count assessment altogether.
+    """
+    source = pq.read_table(places_test_file).select(["fsq_place_id", "geometry"])
+    schema_metadata = pq.ParquetFile(places_test_file).schema_arrow.metadata
+    copies = -(-110_000 // source.num_rows)
+    table = (
+        pa.concat_tables([source] * copies)
+        .slice(0, 110_000)
+        .combine_chunks()
+        .replace_schema_metadata(schema_metadata)
+    )
+    path = tmp_path / "spatially_oversized.parquet"
+    pq.write_table(table, path, compression="ZSTD", row_group_size=55_000)
+    return str(path)
+
+
+def _row_group_factor(output: str) -> str:
+    """The ``check optimization`` checklist line for the row-group factor."""
+    lines = [line for line in output.splitlines() if "Row Group Size" in line]
+    assert lines, f"no row-group line in:\n{output}"
+    return lines[0]
+
+
+class TestTheIssuesOwnReproductionThroughTheCli:
+    """``--fix`` then ``check optimization``, as the user runs it (#972).
+
+    The fix that closed #972 changed what ``--fix`` *writes*. It did not change
+    what *triggers* it: ``fix_available`` came from ``assess_row_count``, whose
+    verdict is deliberately the **general** band, so a 100,352-row-group file was
+    "optimal", no fix ran, and the issue's transcript still reproduced verbatim
+    after the fix. Worse, whether ``check all --fix`` left a
+    ``check optimization``-clean file depended on whether some *unrelated*
+    repair happened to force a rewrite: ``check spatial --fix``,
+    ``check compression --fix`` and ``check bbox --fix`` all fixed the row groups
+    as a side effect, while ``check row-group --fix`` -- the one named after the
+    problem -- declined.
+
+    The tests above call ``check_fixes.fix_*`` directly, so they cannot see that
+    gate. These go through the CLI.
+    """
+
+    def test_check_row_group_fix_leaves_a_file_that_passes_check_optimization(
+        self, spatially_oversized_file
+    ):
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        runner = CliRunner()
+        fix = runner.invoke(
+            cli,
+            ["check", "row-group", spatially_oversized_file, "--fix", "--no-backup"],
+            input="y\n",
+        )
+        assert fix.exit_code == 0, fix.output
+        assert "No fix needed" not in fix.output, fix.output
+
+        after = runner.invoke(cli, ["check", "optimization", spatially_oversized_file])
+        assert "[pass]" in _row_group_factor(after.output), after.output
+
+    def test_check_all_fix_leaves_a_file_that_passes_check_optimization(
+        self, spatially_oversized_file
+    ):
+        """The issue's literal transcript: ``check all --fix``, then ``check optimization``."""
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        runner = CliRunner()
+        fix = runner.invoke(
+            cli,
+            ["check", "all", spatially_oversized_file, "--fix", "--no-backup"],
+            input="y\n",
+        )
+        assert fix.exit_code == 0, fix.output
+
+        after = runner.invoke(cli, ["check", "optimization", spatially_oversized_file])
+        assert "[pass]" in _row_group_factor(after.output), after.output
+
+    def test_a_file_already_in_the_spatial_band_is_left_alone(
+        self, spatially_oversized_file, tmp_path
+    ):
+        """The other half: ``--fix`` must still decline when there is nothing to do."""
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            ["check", "row-group", spatially_oversized_file, "--fix", "--no-backup"],
+            input="y\n",
+        )
+        before = Path(spatially_oversized_file).read_bytes()
+
+        again = runner.invoke(
+            cli,
+            ["check", "row-group", spatially_oversized_file, "--fix", "--no-backup"],
+            input="y\n",
+        )
+
+        assert "No fix needed" in again.output, again.output
+        assert Path(spatially_oversized_file).read_bytes() == before
+
+
+class TestTheTriggerFollowsTheSpatialBand:
+    """``fix_available`` derives from the band ``--fix`` actually writes into."""
+
+    def test_a_general_band_file_still_reads_as_optimal_but_offers_a_fix(
+        self, spatially_oversized_file
+    ):
+        """#795/#958 settled the *verdict* on the general band. Do not move it.
+
+        Only the trigger moves: the file is laid out the way mainstream writers
+        lay files out, so it is not "wrong" -- but ``--fix`` writes 49,152 rows
+        per group, so there is something for it to do.
+        """
+        from geoparquet_io.core.check_parquet_structure import check_row_groups
+
+        results = check_row_groups(spatially_oversized_file, return_results=True, quiet=True)
+
+        assert results["row_status"] == "optimal"
+        assert results["passed"] is True
+        assert results["fix_available"] is True
+
+    def test_a_spatial_band_file_offers_nothing(self, spatially_oversized_file, tmp_path):
+        from geoparquet_io.core.check_parquet_structure import check_row_groups
+
+        table = pq.read_table(spatially_oversized_file)
+        inside = tmp_path / "inside.parquet"
+        pq.write_table(
+            table, inside, compression="ZSTD", row_group_size=DEFAULT_SORT_ROW_GROUP_ROWS
+        )
+
+        results = check_row_groups(str(inside), return_results=True, quiet=True)
+
+        assert results["row_status"] == "optimal"
+        assert results["fix_available"] is False
+
+    def test_a_small_single_group_file_is_still_exempt(self, places_test_file):
+        """The leniency has to survive: 766 rows is below both bands, but
+        rewriting a one-group file into 49,152-row groups changes nothing."""
+        from geoparquet_io.core.check_parquet_structure import check_row_groups
+
+        results = check_row_groups(places_test_file, return_results=True, quiet=True)
+
+        assert results["fix_available"] is False
+
+    def test_the_report_does_not_call_a_file_optimal_and_offer_a_fix_in_silence(
+        self, spatially_oversized_file, caplog
+    ):
+        """The user sees *why* a green line is about to be acted on."""
+        import logging
+
+        from geoparquet_io.core.check_parquet_structure import check_row_groups
+
+        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+            results = check_row_groups(spatially_oversized_file, return_results=True)
+        printed = caplog.text
+
+        assert results["fix_available"] is True
+        assert "--fix rewrites at 49,152 rows per group" in printed
+        assert any("10,000-50,000" in rec for rec in results["recommendations"]), results[
+            "recommendations"
+        ]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

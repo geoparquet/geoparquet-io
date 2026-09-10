@@ -37,6 +37,8 @@ between the guards and a hole nobody would notice. That is what happened to
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests._precommit_hook import (
@@ -181,16 +183,26 @@ class TestGuardExemptionsStayAnchored:
 
     EXEMPT_PATHS = {CLICK_ECHO_HOOK: CLICK_ECHO_EXEMPT, SCHEMA_HOOK: SCHEMA_EXEMPT}
 
-    @staticmethod
-    def _pipeline(hook_id: str) -> list[str]:
+    #: ``if`` where a shell statement can begin. A bare ``"if "`` substring
+    #: count -- which is what this used to do -- also matches ``elif``, a
+    #: comment mentioning "if ", and a grep pattern that happens to contain it:
+    #: spelling-sensitivity inside a module whose whole thesis is not to depend
+    #: on spellings. It failed loudly rather than silently, but that is a reason
+    #: to fix it, not to keep it.
+    _IF_STATEMENT = re.compile(r"(?m)^[ \t]*if[ \t]")
+
+    @classmethod
+    def _pipeline(cls, hook_id: str) -> list[str]:
         """The stages of the guard's single ``if <pipeline>; then`` condition."""
         script = hook_script(hook_id)
-        assert script.count("if ") == 1, (
+        statements = list(cls._IF_STATEMENT.finditer(script))
+        assert len(statements) == 1, (
             f"The {hook_id} script grew a second `if`, so this test can no "
             "longer identify the pipeline it pins. Update the test rather than "
-            "deleting it."
+            f"deleting it. Found {len(statements)}."
         )
-        condition = script[script.index("if ") + len("if ") : script.index("; then")]
+        start = statements[0].end()
+        condition = script[start : script.index("; then", start)]
         condition = condition.replace("\\\n", " ")
         # Split on pipeline pipes only: the grep patterns contain `|`
         # alternations, but those are never surrounded by whitespace.

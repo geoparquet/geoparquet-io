@@ -152,6 +152,58 @@ def assess_row_group_size(
         )
 
 
+def _is_small_single_group(total_size_bytes=None, num_groups=None) -> bool:
+    """A sub-64 MB file already written as one row group.
+
+    Any row count is fine there and no rewrite can improve it -- splitting one
+    group of a small file only costs metadata -- so both the verdict and the
+    ``--fix`` trigger exempt it, from this one definition.
+    """
+    if total_size_bytes is None or num_groups is None:
+        return False
+    return total_size_bytes / (1024 * 1024) < 64 and num_groups == 1
+
+
+def row_count_fix_available(avg_rows, total_size_bytes=None, num_groups=None) -> bool:
+    """Whether ``check row-group --fix`` has anything to do to this file.
+
+    Deliberately **not** ``assess_row_count(...) != "optimal"``, which is what
+    it used to be. The two answer different questions and #972 is the gap
+    between them:
+
+    * the *verdict* is ``GENERAL_ROW_COUNT_RANGE``, settled that way on purpose
+      (#795, #958) -- a file laid out the way mainstream writers lay files out
+      is not wrong, and calling it wrong would fail most published GeoParquet;
+    * ``--fix`` writes ``DEFAULT_SORT_ROW_GROUP_ROWS``, which comes from
+      ``SPATIAL_ROW_COUNT_RANGE`` -- the narrower band, and the one
+      ``check optimization`` scores.
+
+    Triggering off the verdict meant a 100,352-row-group file was "optimal", so
+    ``gpio check row-group --fix`` printed "No fix needed" while
+    ``gpio check optimization`` on the same file printed ``[fail] Row Group
+    Size`` -- #972's transcript, which survived the write-side half of the fix.
+    It also made the outcome depend on which subcommand you asked: ``check
+    spatial --fix``, ``check compression --fix`` and ``check bbox --fix`` each
+    forced a rewrite for their own reasons and so fixed the row groups by
+    accident, while the subcommand named after the problem did not.
+
+    So the trigger follows the band ``--fix`` writes into. The verdict does not
+    move.
+
+    Args:
+        avg_rows: Average rows per row group
+        total_size_bytes: Total file size in bytes (optional)
+        num_groups: Number of row groups (optional)
+
+    Returns:
+        True if a rewrite would move the file into SPATIAL_ROW_COUNT_RANGE
+    """
+    if _is_small_single_group(total_size_bytes, num_groups):
+        return False
+    spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
+    return not (spatial_low <= avg_rows <= spatial_high)
+
+
 def assess_row_count(avg_rows, total_size_bytes=None, num_groups=None):
     """
     Assess if average row count per group is optimal.
@@ -181,10 +233,8 @@ def assess_row_count(avg_rows, total_size_bytes=None, num_groups=None):
     spatial_band = f"{spatial_low:,}-{spatial_high:,}"
 
     # For small files with a single row group, any row count is fine
-    if total_size_bytes is not None and num_groups is not None:
-        total_size_mb = total_size_bytes / (1024 * 1024)
-        if total_size_mb < 64 and num_groups == 1:
-            return "optimal", "Row count is appropriate for small file", "green"
+    if _is_small_single_group(total_size_bytes, num_groups):
+        return "optimal", "Row count is appropriate for small file", "green"
 
     if avg_rows < 2000:
         return (
@@ -281,6 +331,22 @@ def check_row_groups(
             f"Target {GENERAL_ROW_COUNT_RANGE[0]:,}-{GENERAL_ROW_COUNT_RANGE[1]:,} rows per group"
         )
 
+    # We fix by row count, not size, and --fix writes DEFAULT_SORT_ROW_GROUP_ROWS
+    # -- so the trigger is the spatial band, not the verdict's general one (#972).
+    fix_available = row_count_fix_available(
+        stats["avg_rows_per_group"], stats["total_size"], stats["num_groups"]
+    )
+    spatial_band = f"{SPATIAL_ROW_COUNT_RANGE[0]:,}-{SPATIAL_ROW_COUNT_RANGE[1]:,}"
+    # A file inside the general band but outside the spatial one passes, and
+    # still has a fix waiting. Say so, rather than reporting "optimal" and then
+    # silently rewriting the file.
+    fix_but_optimal = fix_available and row_status == "optimal"
+    if fix_but_optimal:
+        recommendations.append(
+            f"Rewrite with {spatial_band} rows per group so spatial filters prune "
+            f"(gpio check row-group --fix writes {DEFAULT_SORT_ROW_GROUP_ROWS:,})"
+        )
+
     results = {
         "passed": passed,
         "stats": stats,
@@ -288,8 +354,7 @@ def check_row_groups(
         "row_status": row_status,
         "issues": issues,
         "recommendations": recommendations,
-        # Only offer fix if row count needs optimization (we fix by row count, not size)
-        "fix_available": row_status != "optimal",
+        "fix_available": fix_available,
     }
 
     # Print results (skip if quiet mode)
@@ -321,9 +386,15 @@ def check_row_groups(
             error(row_msg)
             error(row_message)
 
+        if fix_but_optimal:
+            warn(
+                f"Row groups are larger than the spatial band ({spatial_band}); "
+                f"--fix rewrites at {DEFAULT_SORT_ROW_GROUP_ROWS:,} rows per group"
+            )
+
         progress(f"\nTotal file size: {format_size(stats['total_size'])}")
 
-        if size_status != "optimal" or row_status != "optimal":
+        if size_status != "optimal" or row_status != "optimal" or fix_but_optimal:
             general_low, general_high = GENERAL_ROW_COUNT_RANGE
             spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
             progress("\nRow Group Guidelines:")
