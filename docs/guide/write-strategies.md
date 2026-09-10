@@ -112,6 +112,38 @@ Override the default strategy when needed:
 
 ## Memory Configuration
 
+### Where Spilled Data Goes
+
+A memory limit only helps if DuckDB has somewhere to put the data that does not
+fit. gpio gives every DuckDB connection its own scratch directory under the
+system temp directory — `$TMPDIR` on macOS and Linux, `%TEMP%` on Windows — and
+DuckDB removes it again when the connection closes. A run that never exceeds its
+memory limit writes nothing there.
+
+This matters in two situations:
+
+- **A read-only working directory.** DuckDB's own default spill location is the
+  relative path `.tmp`, so out of the box a large sort fails with
+  `IO Error: Failed to create directory ".tmp"` even when the input and output
+  volumes are perfectly writable. gpio never spills into the working directory.
+- **A small root volume.** A sort of a very large file can spill more bytes than
+  the output itself. If `/tmp` is too small, point `TMPDIR` at a volume that is
+  not:
+
+    <!-- doctest: skip="names /mnt/scratch and huge.parquet, neither of which the harness seeds" -->
+    ```bash
+    TMPDIR=/mnt/scratch gpio sort hilbert huge.parquet sorted.parquet
+    ```
+
+!!! warning "Do not point two runs at one spill directory"
+    DuckDB names its spill files after the block size alone
+    (`duckdb_temp_storage_S192K-0.tmp`), with nothing in the name identifying
+    the connection or the process. Two DuckDB connections sharing one temp
+    directory therefore overwrite each other's blocks, and the loser fails with
+    `IO Error: Could not read enough bytes from file`. `TMPDIR` is safe because
+    gpio still gives each connection a private subdirectory beneath it; a fixed
+    `temp_directory` passed straight to DuckDB is not.
+
 ### Automatic Detection
 
 gpio automatically detects available memory and configures DuckDB to use 50% of it. This detection is container-aware:
@@ -155,10 +187,9 @@ Override auto-detection when needed:
 
         It is **not** a cap on the command's peak memory. The whole result set
         is materialized as an Arrow table before the write, and that copy is
-        allocated by PyArrow, outside DuckDB's `memory_limit` accounting; the
-        scan connection is also built without a `temp_directory`, so DuckDB has
-        no spill path. Size a BigQuery extract against the result set, not
-        against `--write-memory`.
+        allocated by PyArrow, outside DuckDB's `memory_limit` accounting — so
+        the scan spills but the Arrow table it produces does not. Size a
+        BigQuery extract against the result set, not against `--write-memory`.
 
         The flag keeps its name here — it is the same knob, spelled the same way
         — but `gpio extract bigquery --help` describes it accurately: "Memory

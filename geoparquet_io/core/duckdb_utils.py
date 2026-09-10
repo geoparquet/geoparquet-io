@@ -7,7 +7,9 @@ with appropriate extensions loaded for GeoParquet operations.
 
 import os
 import re
+import tempfile
 import threading
+import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -548,6 +550,41 @@ def _install_and_load_extension(con, name: str) -> None:
         raise
 
 
+#: Marks the scratch directories gpio hands to DuckDB, so a stray one left by a
+#: killed process is recognisable in a temp directory listing.
+_SPILL_DIR_PREFIX = "gpio-spill-"
+
+
+def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
+    """Path to a private directory DuckDB may spill intermediate results into.
+
+    The path is *not* created. DuckDB creates its temp directory the first time
+    a query exceeds ``memory_limit``, and removes it again when the connection
+    closes -- so a connection that never spills leaves nothing behind, and one
+    that does cleans up after itself.
+
+    Every call returns a fresh path, and that uniqueness is a correctness
+    requirement rather than tidiness. DuckDB names its spill files after the
+    block size alone (``duckdb_temp_storage_S192K-0.tmp``): nothing in the name
+    identifies the connection, the database or the process. Two connections
+    pointed at one directory therefore write over each other's blocks, and the
+    loser fails with ``IO Error: Could not read enough bytes from file`` or, worse,
+    reads back another query's bytes as its own. That applies to two gpio
+    processes as much as to two connections inside one, so a shared constant --
+    ``/tmp/gpio-spill``, an admin cache directory -- is never a safe answer.
+
+    Args:
+        base_dir: Volume to spill onto. Defaults to the OS temp directory, which
+            follows ``TMPDIR``: that is the knob for a machine whose root volume
+            is too small to hold a large sort's spill.
+
+    Returns:
+        An absolute path, safe to hand to ``SET temp_directory``.
+    """
+    base = os.fspath(base_dir) if base_dir is not None else tempfile.gettempdir()
+    return os.path.join(base, f"{_SPILL_DIR_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:12]}")
+
+
 def get_duckdb_connection(
     load_spatial=True,
     load_httpfs=None,
@@ -577,11 +614,16 @@ def get_duckdb_connection(
         threads: Number of threads for DuckDB to use (default: None = all cores).
                 Limiting threads is useful for parallel test execution to prevent
                 CPU saturation when multiple pytest workers create connections.
-        temp_directory: Directory for DuckDB to spill intermediate results to disk.
-                    Bounds peak memory on large spatial joins (e.g. admin-divisions
-                    against a 400k-feature input) so they don't OOM.
-        memory_limit: DuckDB memory limit (e.g. "8GB"). When set, DuckDB spills to
-                    temp_directory once this is exceeded rather than crashing.
+        temp_directory: Volume for DuckDB to spill intermediate results onto.
+                    Defaults to a private directory under the OS temp directory
+                    (see :func:`spill_directory`); pass a path to put the spill on
+                    another volume, e.g. beside a very large output. Never share
+                    one path between connections -- ``spill_directory(that_path)``
+                    gives each its own leaf under the volume you chose.
+        memory_limit: DuckDB memory limit (e.g. "8GB"). Opt-in: DuckDB's own
+                    default (roughly 80% of RAM) is the right cap for most work,
+                    and a lower one only pushes queries to disk that fit in RAM.
+                    Once set, DuckDB spills to temp_directory rather than crashing.
 
     Returns:
         duckdb.DuckDBPyConnection: Configured connection with extensions loaded
@@ -597,10 +639,18 @@ def get_duckdb_connection(
     # regular string buffers is 2147483647" errors.
     con.execute("SET arrow_large_buffer_size = true;")
 
-    # Spill-to-disk: bound peak memory on large joins/aggregations.
-    if temp_directory is not None:
-        safe_temp_dir = _escape_sql_string(str(temp_directory))
-        con.execute(f"SET temp_directory = '{safe_temp_dir}';")
+    # Spill-to-disk. DuckDB's own default is the *relative* path ".tmp", so a
+    # spill lands wherever the process happens to be running: a read-only working
+    # directory turns a large sort into a hard failure, and a small root volume
+    # into a mid-sort ENOSPC, however much room the input and output volumes have.
+    # Decide it here, once, for all connections -- and decide it now, because
+    # DuckDB refuses to move a temp directory that has already been used
+    # ("Cannot switch temporary directory after the current one has been used"),
+    # so a per-write override cannot be applied to the connections gpio shares
+    # across writes (a partition loop finalizes N files on one connection).
+    effective_temp_dir = temp_directory if temp_directory is not None else spill_directory()
+    safe_temp_dir = _escape_sql_string(str(effective_temp_dir))
+    con.execute(f"SET temp_directory = '{safe_temp_dir}';")
     if memory_limit is not None:
         safe_memory_limit = _escape_sql_string(str(memory_limit))
         con.execute(f"SET memory_limit = '{safe_memory_limit}';")

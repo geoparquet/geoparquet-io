@@ -15,7 +15,12 @@ from pathlib import Path
 
 import duckdb
 
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
+    get_duckdb_connection,
+    spill_directory,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     InvalidParameterError,
@@ -415,9 +420,14 @@ class AdminDataset(ABC):
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
         with s3_config_scope(self.get_s3_config()):
-            # Spill to the cache dir to bound memory on the remote scan (todo 013).
+            # Spill onto the cache volume to bound memory on the remote scan
+            # (todo 013). A private leaf under it, never the cache dir itself:
+            # DuckDB's spill filenames carry no connection identity, so two runs
+            # sharing this well-known directory overwrite each other's blocks.
             con = get_duckdb_connection(
-                load_spatial=True, load_httpfs=True, temp_directory=str(cache_path.parent)
+                load_spatial=True,
+                load_httpfs=True,
+                temp_directory=spill_directory(cache_path.parent),
             )
             try:
                 # Get read options
@@ -1038,10 +1048,11 @@ class OvertureAdminDataset(AdminDataset):
         info("This is a one-time download. Future runs will use the cached version.")
 
         with s3_config_scope(self.get_s3_config()):
-            # Spill to the cache dir so the remote scan + simplification of the
-            # ~4.5GB dataset bounds peak memory rather than OOM-ing (todo 013).
+            # Spill onto the cache volume so the remote scan + simplification of
+            # the ~4.5GB dataset bounds peak memory rather than OOM-ing (todo
+            # 013), into a leaf of its own so concurrent runs cannot collide.
             con = get_duckdb_connection(
-                load_spatial=True, load_httpfs=True, temp_directory=str(cache_dir)
+                load_spatial=True, load_httpfs=True, temp_directory=spill_directory(cache_dir)
             )
             version = self.get_version()
             try:
