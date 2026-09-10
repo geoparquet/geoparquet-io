@@ -312,10 +312,17 @@ def sanitize_geo_metadata(geo_meta):
     cleaned = geo_meta
 
     primary = geo_meta.get("primary_column")
-    dropped_primary = "primary_column" in geo_meta and not isinstance(primary, str)
+    # An empty string is a string, but it is not a column name -- and it lands in
+    # the same place a non-string does: `"" not in col_entries`, so pruning drops
+    # the whole block and the CRS with it. `carried_column_name` and the spec
+    # check in `validate` both already reject it; this is the third reader and
+    # has to agree, or the write paths corrupt what the check correctly flags.
+    dropped_primary = "primary_column" in geo_meta and not (isinstance(primary, str) and primary)
     if dropped_primary:
         problems.append(
-            f"'primary_column' is {_article(_json_type_name(primary))}, expected a string"
+            "'primary_column' is an empty string, expected a column name"
+            if isinstance(primary, str)
+            else f"'primary_column' is {_article(_json_type_name(primary))}, expected a string"
         )
         cleaned = dict(cleaned)
         cleaned.pop("primary_column")

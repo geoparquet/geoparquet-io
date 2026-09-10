@@ -346,6 +346,18 @@ def _malformed_blocks(col: str):
             },
         ),
         (
+            # An empty string passes an `isinstance(..., str)` check but is not a
+            # column name, so it reaches `"" not in col_entries` and takes the
+            # whole block -- CRS included -- with it. Same symptom as the number
+            # above, from the shape most likely to survive a naive guard.
+            "primary_column_is_empty",
+            {
+                "version": "1.1.0",
+                "primary_column": "",
+                "columns": {col: {"encoding": "WKB", "geometry_types": ["Point"]}},
+            },
+        ),
+        (
             "encoding_is_a_number",
             {
                 "version": "1.1.0",
@@ -1063,6 +1075,43 @@ def test_extract_crs_from_parquet_finds_a_projected_crs_after_recovery(col, tmp_
         tmp_path, "proj_bad_primary", col, {"encoding": "WKB", "crs": _crs_5070()}
     )
     assert extract_crs_from_parquet(src) is not None
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_an_empty_primary_column_keeps_the_projected_crs_through_a_write(col, tmp_path):
+    """The shape most likely to survive a naive guard: `""` IS a string.
+
+    An `isinstance(..., str)` check passes it, so it reaches
+    `"" not in col_entries` and takes the whole block -- CRS included -- exactly
+    as a number does. `carried_column_name` and `validate`'s spec check both
+    already reject it, so a sanitizer that accepts it makes the write paths
+    corrupt precisely what `gpio check spec` correctly flags.
+    """
+    import json
+
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    reset_malformed_geo_warnings()
+    src = _file_with_geo(
+        tmp_path,
+        "empty_primary_projected",
+        {
+            "version": "1.1.0",
+            "primary_column": "",
+            "columns": {col: {"encoding": "WKB", "geometry_types": ["Point"], "crs": _crs_5070()}},
+        },
+        col=col,
+    )
+    out = tmp_path / "out.parquet"
+    result = CliRunner().invoke(cli, ["extract", "geoparquet", src, str(out)])
+    assert result.exit_code == 0, result.output
+
+    written = json.loads(pq.read_schema(str(out)).metadata[b"geo"])
+    # Absent would mean OGC:CRS84 per spec -- a projected file relabelled lon/lat.
+    assert written["columns"][col]["crs"] is not None
+    assert written["primary_column"] == col
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
