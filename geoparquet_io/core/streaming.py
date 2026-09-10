@@ -207,21 +207,33 @@ def find_geometry_column_from_metadata(metadata: dict | None) -> str | None:
     """
     Find the primary geometry column name from metadata.
 
+    A column-name reader shared with read-only callers (``Table.geometry_column``),
+    so it takes the line #945 drew: it guards rather than sanitizes, and refuses
+    to hand back the one thing that cannot be a column name. A carried
+    ``primary_column: 123`` used to travel from here through ``extract`` into
+    ``quote_identifier`` and fail with ``TypeError: argument of type 'int' is
+    not iterable``, four frames from anything a user can act on (#968).
+
+    It also no longer falls back to the literal ``"geometry"``: on a file whose
+    column is called ``geom`` that default names a column that does not exist,
+    which is the silently-wrong-coordinates bug #945's review identified. Every
+    caller asks the file's schema when this reader says nothing, which is the
+    answer a block-less file already gets.
+
     Args:
         metadata: Schema metadata dict (with bytes keys)
 
     Returns:
-        Geometry column name or None if not found
+        Geometry column name or None if the block does not name a usable one
     """
+    from geoparquet_io.core.geo_metadata import carried_column_name, decode_carried_geo
+
     if not metadata or b"geo" not in metadata:
         return None
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        if isinstance(geo_meta, dict):
-            return geo_meta.get("primary_column", "geometry")
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        pass
-    return None
+    geo_meta = decode_carried_geo(metadata[b"geo"])
+    if not isinstance(geo_meta, dict):
+        return None
+    return carried_column_name(geo_meta.get("primary_column"))
 
 
 def find_geometry_column_from_table(table: pa.Table) -> str | None:
@@ -572,7 +584,10 @@ def extract_crs_from_table(
     if table.schema.metadata and b"geo" in table.schema.metadata:
         try:
             from geoparquet_io.core.crs_utils import crs_is_explicitly_null, warn_null_crs_once
-            from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
+            from geoparquet_io.core.geo_metadata import (
+                carried_geometry_column,
+                sanitize_geo_metadata,
+            )
 
             geo_bytes = table.schema.metadata[b"geo"]
             # `Table.write()` resolves the CRS through here before it builds any
@@ -581,7 +596,13 @@ def extract_crs_from_table(
             geo_meta = sanitize_geo_metadata(json.loads(geo_bytes.decode("utf-8")))
             if isinstance(geo_meta, dict):
                 columns = geo_meta.get("columns", {})
-                geom_col_name = geometry_column or geo_meta.get("primary_column", "geometry")
+                # The literal `"geometry"` default named a column that does not
+                # exist on a file whose column is `geom`, and reported its CRS
+                # as absent (#887 review). Ask the table's schema instead — the
+                # shared recovery #960 shared out (#968).
+                geom_col_name = geometry_column or carried_geometry_column(
+                    geo_meta, table.column_names
+                )
                 if geom_col_name in columns:
                     if crs_is_explicitly_null(columns[geom_col_name]):
                         warn_null_crs_once(

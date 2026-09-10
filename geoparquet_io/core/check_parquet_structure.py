@@ -473,7 +473,13 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, 
     from geoparquet_io.core.geo_metadata import covering_supported
 
     geo_meta = get_geo_metadata(parquet_file)
-    version = geo_meta.get("version", "0.0.0") if geo_meta else "0.0.0"
+    # `get_geo_metadata` is a read-only reader: it hands the block back exactly
+    # as the file holds it, so a block that is not a JSON object arrives here
+    # verbatim and used to crash with `'list' object has no attribute 'get'`
+    # (#968). A validation reader guards and reports the truth rather than
+    # sanitizing: a block that declares no version has none, which is what
+    # "0.0.0" says and what the outdated-version issue below reports.
+    version = geo_meta.get("version", "0.0.0") if isinstance(geo_meta, dict) else "0.0.0"
     bbox_info = check_bbox_structure(parquet_file, verbose)
 
     # Build results

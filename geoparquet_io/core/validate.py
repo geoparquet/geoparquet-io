@@ -227,16 +227,51 @@ def _check_primary_column_present(geo_meta: dict) -> ValidationCheck:
     )
 
 
-def _check_columns_present(geo_meta: dict) -> ValidationCheck:
-    """Check 5: metadata must include a 'columns' object."""
+def _checkable_column_entries(geo_meta: dict) -> dict:
+    """The ``columns`` entries the per-column checks can actually read.
+
+    A ``geo`` block is arbitrary JSON written by some other tool, and every
+    per-column check indexes its entry as an object. The shapes that are not one
+    are reported by :func:`_check_columns_present` and then left out here, so a
+    malformed block gets diagnosed instead of crashing the diagnosis (#968).
+    """
     columns = geo_meta.get("columns")
-    valid = isinstance(columns, dict)
+    if not isinstance(columns, dict):
+        return {}
+    return {name: col for name, col in columns.items() if isinstance(col, dict)}
+
+
+def _check_columns_present(geo_meta: dict) -> ValidationCheck:
+    """Check 5: metadata must include a 'columns' object of per-column objects.
+
+    The spec requires each value in ``columns`` to be an object too, and every
+    per-column check below reads it as one. Reporting a non-object entry here
+    is what lets those checks skip it instead of crashing ``check spec`` with
+    ``'str' object has no attribute 'get'`` (#968).
+    """
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return ValidationCheck(
+            name="columns_present",
+            status=CheckStatus.FAILED,
+            message='metadata must include a "columns" object',
+            category="core_metadata",
+        )
+
+    not_objects = sorted(str(name) for name, col in columns.items() if not isinstance(col, dict))
+    if not_objects:
+        return ValidationCheck(
+            name="columns_present",
+            status=CheckStatus.FAILED,
+            message=f'"columns" entries must be objects: {", ".join(not_objects)}',
+            details="Each key in 'columns' maps to an object describing that column",
+            category="core_metadata",
+        )
+
     return ValidationCheck(
         name="columns_present",
-        status=CheckStatus.PASSED if valid else CheckStatus.FAILED,
-        message='metadata includes a "columns" object'
-        if valid
-        else 'metadata must include a "columns" object',
+        status=CheckStatus.PASSED,
+        message='metadata includes a "columns" object',
         category="core_metadata",
     )
 
@@ -724,11 +759,19 @@ def _check_version_known(geo_meta: dict) -> ValidationCheck:
 
 
 def _columns_declaring_covering(geo_meta: dict) -> list[str]:
-    """Names of geometry columns whose metadata declares the 'covering' key (added in 1.1)."""
+    """Names of geometry columns whose metadata declares the 'covering' key (added in 1.1).
+
+    A ``columns`` that is not an object declares no columns, so it declares no
+    ``covering`` either — the truthful answer, and the one ``columns_present``
+    is already reporting as a failure beside this check. ``or {}`` only covered
+    the falsy shapes; an array or a string reached ``.items()`` and crashed the
+    one command a user runs to be *told* their file is malformed (#968).
+    """
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return []
     return sorted(
-        name
-        for name, col in (geo_meta.get("columns") or {}).items()
-        if isinstance(col, dict) and "covering" in col
+        name for name, col in columns.items() if isinstance(col, dict) and "covering" in col
     )
 
 
@@ -3917,7 +3960,14 @@ def _run_geoparquet_checks(
     checks.append(_check_columns_present(geo_meta))
     checks.append(_check_primary_column_in_columns(geo_meta))
 
-    columns = geo_meta.get("columns", {})
+    # `_check_columns_present` above already FAILs both a `columns` that is not
+    # an object and an entry inside it that is not one, naming each. The
+    # per-column loops below read every entry as an object, so they run on the
+    # entries that are: iterating the raw value crashed `check spec` with
+    # `'list' object has no attribute 'items'`, and reading a string entry with
+    # `'str' object has no attribute 'get'` (#968). A validation reader guards
+    # and reports — it does not sanitize, and nothing usable is hidden.
+    columns = _checkable_column_entries(geo_meta)
 
     # A missing version is reported by _check_version_present above; guard the
     # string comparisons below against None so validation never crashes on it.

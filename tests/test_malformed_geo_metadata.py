@@ -346,6 +346,18 @@ def _malformed_blocks(col: str):
             },
         ),
         (
+            # An empty string passes an `isinstance(..., str)` check but is not a
+            # column name, so it reaches `"" not in col_entries` and takes the
+            # whole block -- CRS included -- with it. Same symptom as the number
+            # above, from the shape most likely to survive a naive guard.
+            "primary_column_is_empty",
+            {
+                "version": "1.1.0",
+                "primary_column": "",
+                "columns": {col: {"encoding": "WKB", "geometry_types": ["Point"]}},
+            },
+        ),
+        (
             "encoding_is_a_number",
             {
                 "version": "1.1.0",
@@ -1066,6 +1078,43 @@ def test_extract_crs_from_parquet_finds_a_projected_crs_after_recovery(col, tmp_
 
 
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_an_empty_primary_column_keeps_the_projected_crs_through_a_write(col, tmp_path):
+    """The shape most likely to survive a naive guard: `""` IS a string.
+
+    An `isinstance(..., str)` check passes it, so it reaches
+    `"" not in col_entries` and takes the whole block -- CRS included -- exactly
+    as a number does. `carried_column_name` and `validate`'s spec check both
+    already reject it, so a sanitizer that accepts it makes the write paths
+    corrupt precisely what `gpio check spec` correctly flags.
+    """
+    import json
+
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    reset_malformed_geo_warnings()
+    src = _file_with_geo(
+        tmp_path,
+        "empty_primary_projected",
+        {
+            "version": "1.1.0",
+            "primary_column": "",
+            "columns": {col: {"encoding": "WKB", "geometry_types": ["Point"], "crs": _crs_5070()}},
+        },
+        col=col,
+    )
+    out = tmp_path / "out.parquet"
+    result = CliRunner().invoke(cli, ["extract", "geoparquet", src, str(out)])
+    assert result.exit_code == 0, result.output
+
+    written = json.loads(pq.read_schema(str(out)).metadata[b"geo"])
+    # Absent would mean OGC:CRS84 per spec -- a projected file relabelled lon/lat.
+    assert written["columns"][col]["crs"] is not None
+    assert written["primary_column"] == col
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
 def test_extract_crs_from_table_finds_a_projected_crs_after_recovery(col):
     """The table-centric sibling, used by ``process aggregate`` before grid keying."""
     from geoparquet_io.core.crs_utils import extract_crs_from_table
@@ -1551,3 +1600,355 @@ def test_api_table_metadata_still_reports_a_well_formed_block(tmp_path):
     assert meta["geo_metadata"] == block
     assert meta["geometry_types"] == ["Point"]
     assert meta["edges"] == "planar"
+
+
+# =============================================================================
+# The column pruner: a malformed `primary_column` must not cost the file its CRS
+# =============================================================================
+#
+# `_prune_geo_dict_to_columns` compared the *raw* `primary_column` against the
+# surviving `columns` keys. `123` is not None and is not a key, so the whole
+# `geo` block was dropped -- CRS included -- and an absent `crs` is spec-defined
+# as OGC:CRS84. A projected file came out of `gpio extract geoparquet` and
+# `gpio sort hilbert` silently relabelled lon/lat: corruption, not a crash
+# (#968). This is a write path -- what survives here is written to the output --
+# so it goes through the shared `sanitize_geo_metadata`, which drops the
+# malformed key and repairs it from the one surviving column.
+
+
+def _projected_file(tmp_path, name: str, primary, col: str = "geometry") -> str:
+    """A one-row EPSG:5070 file whose block declares ``primary`` as its primary."""
+    block = {
+        "version": "1.1.0",
+        "primary_column": primary,
+        "columns": {col: {"encoding": "WKB", "crs": _crs_5070(), "geometry_types": ["Point"]}},
+    }
+    return _file_with_geo(tmp_path, name, block, col=col)
+
+
+def _crs_epsg_of(path) -> int | None:
+    """The EPSG code the written file declares for its primary column, if any."""
+    geo = _geo_of_file(path)
+    if not geo:
+        return None
+    entry = (geo.get("columns") or {}).get(geo.get("primary_column"))
+    crs = entry.get("crs") if isinstance(entry, dict) else None
+    if not isinstance(crs, dict):
+        return None
+    return (crs.get("id") or {}).get("code")
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_prune_keeps_the_block_when_the_primary_column_is_malformed(col):
+    """The pruner must not read `primary_column` raw (#968)."""
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "1.1.0",
+        "primary_column": 123,
+        "columns": {col: {"encoding": "WKB", "crs": _crs_5070()}},
+    }
+    pruned = prune_geo_metadata_to_columns({b"geo": json.dumps(block).encode("utf-8")}, ["id", col])
+
+    assert b"geo" in pruned, "the whole block was dropped, taking the CRS with it"
+    geo = json.loads(pruned[b"geo"])
+    assert geo["primary_column"] == col
+    assert geo["columns"][col]["crs"]["id"]["code"] == 5070
+
+
+def test_prune_still_drops_a_block_whose_primary_column_is_gone():
+    """The pruner's real job is untouched: no surviving geometry column, no block."""
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB"}},
+    }
+    pruned = prune_geo_metadata_to_columns({b"geo": json.dumps(block).encode("utf-8")}, ["id"])
+    assert b"geo" not in pruned
+
+
+@pytest.mark.parametrize("block", [["geometry"], "geometry", 7])
+def test_prune_passes_a_block_that_is_not_an_object_through_untouched(block):
+    """`_rewrite_geo_metadata` never hands the pruner a block that is not decoded.
+
+    Pinned because the pruner now sanitizes, and sanitizing *would* drop such a
+    block: the guarantee is what makes the shape check inside it a dict-to-dict
+    one. `check spec` is what reports these shapes; a write on one is refused by
+    DuckDB's own reader first.
+    """
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    raw = json.dumps(block).encode("utf-8")
+    assert prune_geo_metadata_to_columns({b"geo": raw}, ["id", "geometry"])[b"geo"] == raw
+
+
+def test_prune_repairs_the_primary_from_the_column_pruning_leaves():
+    """Two entries at sanitize time, one after pruning: an unambiguous primary."""
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "1.1.0",
+        "primary_column": 123,
+        "columns": {"geom_a": {"encoding": "WKB", "crs": _crs_5070()}, "geom_b": {}},
+    }
+    pruned = prune_geo_metadata_to_columns(
+        {b"geo": json.dumps(block).encode("utf-8")}, ["id", "geom_a"]
+    )
+    geo = json.loads(pruned[b"geo"])
+    assert geo["primary_column"] == "geom_a"
+    assert geo["columns"]["geom_a"]["crs"]["id"]["code"] == 5070
+
+
+def test_prune_leaves_no_primary_when_two_columns_could_be_meant():
+    """Two survivors is a guess; the block keeps its columns and names no primary."""
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "1.1.0",
+        "primary_column": 123,
+        "columns": {"geom_a": {"encoding": "WKB"}, "geom_b": {"encoding": "WKB"}},
+    }
+    pruned = prune_geo_metadata_to_columns(
+        {b"geo": json.dumps(block).encode("utf-8")}, ["geom_a", "geom_b"]
+    )
+    geo = json.loads(pruned[b"geo"])
+    assert "primary_column" not in geo
+    assert set(geo["columns"]) == {"geom_a", "geom_b"}
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+@pytest.mark.parametrize("command", [["extract", "geoparquet"], ["sort", "hilbert"]])
+def test_projected_crs_survives_a_malformed_primary_column(command, col, tmp_path):
+    """A projected file must not come out of gpio relabelled lon/lat (#968).
+
+    The control run pins what the command does with a well-formed block; the
+    malformed run has to match it. Comparing the two is the point: an assertion
+    on the malformed run alone would pass just as well if the command had
+    stopped writing a CRS at all.
+    """
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    reset_malformed_geo_warnings()
+    runner = CliRunner()
+    codes = {}
+    for label, primary in (("control", col), ("malformed", 123)):
+        src = _projected_file(tmp_path, f"{label}_{col}_{command[0]}", primary, col=col)
+        out = tmp_path / f"{label}_{col}_{command[0]}_out.parquet"
+        result = runner.invoke(cli, [*command, src, str(out)])
+        assert result.exit_code == 0, result.output
+        codes[label] = _crs_epsg_of(out)
+
+    assert codes["control"] == 5070, "the control lost the CRS; the fixture is wrong"
+    assert codes["malformed"] == codes["control"]
+
+
+# =============================================================================
+# `gpio check`: the commands that exist to *diagnose* a malformed file
+# =============================================================================
+#
+# These are validation readers, so they follow the line #883 drew and #945/#960
+# upheld: they do NOT sanitize, because `gpio check` has to see the file as it
+# really is. They guard and report the truth instead -- a `columns` that is not
+# an object declares no geometry columns, and a block that is not an object
+# declares no version (#968).
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_check_spec_reports_a_malformed_block_instead_of_crashing(col, case, block, tmp_path):
+    """`check spec` is the command run to be *told* the file is malformed."""
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(tmp_path, f"spec_{col}_{case}", block, col=col)
+    result = validate_geoparquet(path)
+
+    reported = {c.name: c.status.value for c in result.checks}
+    if not isinstance(block, dict):
+        # A block that is not a JSON object cannot be checked key by key; one
+        # honest failure says so.
+        assert reported.get("geo_metadata_parse") == "failed"
+        return
+    if not isinstance(block.get("columns"), dict):
+        assert reported.get("columns_present") == "failed"
+
+
+@pytest.mark.parametrize("bad", [["geometry"], None, "geometry", 5])
+def test_check_spec_columns_guard_does_not_hide_a_declared_covering(bad, tmp_path):
+    """The 1.1-only 'covering' check must survive a non-object `columns` (#968).
+
+    It crashed at `_columns_declaring_covering` with
+    `'list' object has no attribute 'items'` before reaching any of the checks
+    that would have told the user what was wrong.
+    """
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(
+        tmp_path,
+        f"covering_{type(bad).__name__}",
+        {"version": "1.0.0", "primary_column": "geometry", "columns": bad},
+    )
+    reported = {c.name: c.status.value for c in validate_geoparquet(path).checks}
+    assert reported["columns_present"] == "failed"
+    # No columns can be read, so none can declare a 1.1-only key: not a failure
+    # to pin on the version.
+    assert reported["version_features_match"] == "passed"
+
+
+def test_check_spec_still_catches_a_covering_declared_by_a_1_0_file(tmp_path):
+    """The guard must not cost a real 1.0-with-covering file its failure."""
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    path = _file_with_geo(
+        tmp_path,
+        "covering_on_1_0",
+        {
+            "version": "1.0.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": ["Point"],
+                    "covering": {"bbox": {"xmin": ["bbox", "xmin"]}},
+                }
+            },
+        },
+    )
+    reported = {c.name: c.status.value for c in validate_geoparquet(path).checks}
+    assert reported["version_features_match"] == "failed"
+
+
+@pytest.mark.parametrize(("col", "case", "block"), MALFORMED_BLOCKS, ids=MALFORMED_BLOCK_IDS)
+def test_check_bbox_reports_a_malformed_block_instead_of_crashing(col, case, block, tmp_path):
+    """`gpio check bbox` died at `_check_geoparquet_v1` on a non-object block."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    reset_malformed_geo_warnings()
+    path = _file_with_geo(tmp_path, f"ckbbox_{col}_{case}", block, col=col)
+    result = CliRunner().invoke(cli, ["check", "bbox", path])
+
+    assert "Traceback" not in result.output, result.output
+    assert not isinstance(result.exception, (AttributeError, TypeError)), result.exception
+
+
+def test_check_bbox_still_reads_the_version_of_a_well_formed_file(tmp_path):
+    """The guard must not cost a real 1.0 file its "outdated version" report."""
+    from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
+
+    path = _file_with_geo(
+        tmp_path,
+        "ckbbox_ok",
+        {
+            "version": "1.0.0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        },
+    )
+    results = check_metadata_and_bbox(path, verbose=False, return_results=True, quiet=True)
+    assert results["version"] == "1.0.0"
+    assert any("outdated" in issue for issue in results["issues"])
+
+
+# =============================================================================
+# The metadata-only column-name reader
+# =============================================================================
+#
+# `find_geometry_column_from_metadata` returned `primary_column` with no type
+# check, so `123` travelled through `extract` into `quote_identifier` and failed
+# there with `TypeError: argument of type 'int' is not iterable`, four frames
+# from anything a user can act on (#968). It is a column-name reader shared with
+# read-only callers (`Table.geometry_column`), so it takes #945's line: guard,
+# do not sanitize, and hand back nothing rather than a name that cannot be one.
+#
+# The same line carried the literal `"geometry"` default #945's review named as
+# the cause of its silently-wrong-coordinates bug: on a file whose column is
+# `geom`, that default names a column that does not exist. Every caller already
+# asks the schema when this reader says nothing, which is the right answer.
+
+
+@pytest.mark.parametrize("bad", [123, ["geometry"], {"name": "geometry"}, None, ""])
+def test_find_geometry_column_from_metadata_never_returns_a_non_name(bad):
+    from geoparquet_io.core.streaming import find_geometry_column_from_metadata
+
+    reset_malformed_geo_warnings()
+    block = {"version": "1.1.0", "primary_column": bad, "columns": {"geom": {"encoding": "WKB"}}}
+    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) is None
+
+
+def test_find_geometry_column_from_metadata_still_reads_a_real_name():
+    from geoparquet_io.core.streaming import find_geometry_column_from_metadata
+
+    block = {"version": "1.1.0", "primary_column": "geom", "columns": {"geom": {}}}
+    assert find_geometry_column_from_metadata({b"geo": json.dumps(block).encode("utf-8")}) == "geom"
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_find_geometry_column_from_table_recovers_from_a_non_string_primary(col):
+    """The table-level reader asks the schema, and must find the real column."""
+    from geoparquet_io.core.streaming import find_geometry_column_from_table
+
+    reset_malformed_geo_warnings()
+    table = _table_with_geo(
+        {"version": "1.1.0", "primary_column": 123, "columns": {col: {"encoding": "WKB"}}}, col=col
+    )
+    assert find_geometry_column_from_table(table) == col
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_extract_to_stdout_survives_a_non_string_primary_column(col, tmp_path):
+    """`gpio extract geoparquet <file> -` reached `quote_identifier` with an int."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    reset_malformed_geo_warnings()
+    src = _file_with_geo(
+        tmp_path,
+        f"stdout_{col}",
+        {
+            "version": "1.1.0",
+            "primary_column": 123,
+            # A complete entry otherwise: DuckDB's own reader refuses a 1.1
+            # column with no `geometry_types`, and that domain error is outside
+            # gpio's reach (#945). The `primary_column` is the only thing wrong.
+            "columns": {col: {"encoding": "WKB", "geometry_types": ["Point"]}},
+        },
+        col=col,
+    )
+    result = CliRunner().invoke(cli, ["extract", "geoparquet", src, "-"])
+    assert not isinstance(result.exception, TypeError), result.exception
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
+def test_extract_crs_from_table_reads_the_named_column_not_the_literal_one(col):
+    """`streaming.extract_crs_from_table` carried the same `"geometry"` default.
+
+    Reached only when the caller passes no `geometry_column`, which no caller
+    does today -- but the default is wrong for a `geom` file either way, and
+    #960 called the one it fixed "the one place still open to it".
+    """
+    from geoparquet_io.core.streaming import extract_crs_from_table
+
+    reset_malformed_geo_warnings()
+    table = _table_with_geo(
+        {
+            "version": "1.1.0",
+            "primary_column": col,
+            "columns": {col: {"encoding": "WKB", "crs": _crs_5070()}},
+        },
+        col=col,
+    )
+    crs = extract_crs_from_table(table)
+    assert isinstance(crs, dict) and crs["id"]["code"] == 5070
