@@ -2558,12 +2558,23 @@ class Table:
         if schema_metadata and b"geo" in schema_metadata:
             try:
                 geo_meta = json.loads(schema_metadata[b"geo"].decode("utf-8"))
+                # A read-only reader, the Python API's `gpio inspect meta`:
+                # `geo_metadata` is documented as the file's full `geo` block,
+                # so it is handed back exactly as the file holds it and is NOT
+                # sanitized -- the same line #883 drew around `parse_geo_metadata`
+                # and `check`. Only the derived keys below need guarding: they
+                # indexed the raw block and crashed on a `columns` that is not
+                # an object, or an entry that is not one (#947).
                 result["geo_metadata"] = geo_meta
 
                 # Extract geometry_types from geo metadata
-                columns_meta = geo_meta.get("columns", {})
-                if self._geometry_column and self._geometry_column in columns_meta:
-                    col_meta = columns_meta[self._geometry_column]
+                columns_meta = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+                col_meta = (
+                    columns_meta.get(self._geometry_column)
+                    if isinstance(columns_meta, dict) and self._geometry_column
+                    else None
+                )
+                if isinstance(col_meta, dict):
                     result["geometry_types"] = col_meta.get("geometry_types")
                     result["edges"] = col_meta.get("edges")
                     result["orientation"] = col_meta.get("orientation")

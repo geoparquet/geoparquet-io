@@ -365,6 +365,46 @@ def _repair_primary_column(cleaned: dict) -> None:
         cleaned["primary_column"] = next(iter(columns))
 
 
+def sanitized_carried_geo(metadata) -> dict:
+    """The ``geo`` block on a Parquet/Arrow metadata mapping, sanitized, or ``{}``.
+
+    The three steps every write-path reader of a carried block repeats -- find
+    the key, decode it, check its shape -- in one place, so a reader is one call
+    away from the rule rather than three lines of its own (#947). Both key
+    spellings are accepted: PyArrow hands back ``bytes`` keys and DuckDB's KV
+    metadata ``str`` ones, and several callers see both.
+
+    Returns ``{}``, never ``None``, so callers can index the result directly;
+    a block that sanitizing leaves unusable is indistinguishable from an absent
+    one, which is exactly how #883 decided a malformed block should read.
+    """
+    if not metadata:
+        return {}
+    for key in (b"geo", "geo"):
+        if key in metadata:
+            cleaned = sanitize_geo_metadata(decode_carried_geo(metadata[key]))
+            return cleaned if isinstance(cleaned, dict) else {}
+    return {}
+
+
+def carried_geometry_column(geo_meta, column_names) -> str | None:
+    """The column a *sanitized* block names as primary, else the one the schema shows.
+
+    Sanitizing *drops* a malformed ``primary_column`` (and repairs it only from
+    a single surviving column), so a block reaches a reader without one.
+    Defaulting to the literal string ``"geometry"`` there is silently wrong on a
+    file whose column is called ``geom`` -- the write then names a column that
+    is not in the table (#887 review). ``column_names`` is the schema to ask
+    instead; the caller supplies the last-resort default, if it wants one.
+    """
+    from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
+
+    primary = geo_meta.get("primary_column") if isinstance(geo_meta, dict) else None
+    if isinstance(primary, str) and primary:
+        return primary
+    return detect_geometry_column_from_names(column_names)
+
+
 def _article(type_name: str) -> str:
     """``"a list"`` / ``"an object"`` -- correct article for a JSON type name."""
     if type_name == "null":

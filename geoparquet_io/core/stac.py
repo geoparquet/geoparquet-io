@@ -16,7 +16,7 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
 )
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.geo_metadata import parse_geo_metadata, sanitize_geo_metadata
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.remote import is_remote_url
@@ -208,15 +208,29 @@ def construct_asset_href(filename: str, bucket_prefix: str, public_url: str | No
 
 
 def _add_projection_properties(item: pystac.Item, geo_meta: dict | None, parquet_file: str) -> None:
-    """Add projection info to STAC Item properties if available."""
+    """Add projection info to STAC Item properties if available.
+
+    A write-path reader despite reading nothing but metadata: the CRS and
+    geometry types it lifts out leave gpio inside a *published* STAC Item, so
+    the block goes through the shared shape check rather than being copied out
+    of somebody else's file as-is (#947). ``parse_geo_metadata``, which the two
+    callers read with, is the read-only reader and stays untouched -- ``gpio
+    check`` needs it to show the file as it really is.
+
+    Before the check, a ``columns: null`` block aborted ``gpio publish stac``
+    with ``argument of type 'NoneType' is not iterable``, and a list- or
+    string-shaped ``columns`` with a ``TypeError`` one line later.
+    """
+    geo_meta = sanitize_geo_metadata(geo_meta)
     if not geo_meta:
         return
 
     geom_col = find_primary_geometry_column(parquet_file, verbose=False)
-    if "columns" not in geo_meta or geom_col not in geo_meta["columns"]:
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict) or geom_col not in columns:
         return
 
-    col_info = geo_meta["columns"][geom_col]
+    col_info = columns[geom_col]
 
     # Add CRS if available
     if "crs" in col_info:

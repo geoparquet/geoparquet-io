@@ -74,12 +74,9 @@ def _carried_geo(metadata) -> dict:
     ``TypeError`` and a string-, list- or null-shaped block crashed the CRS
     lookups with a bare ``AttributeError``.
     """
-    from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
+    from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
-    if not metadata or b"geo" not in metadata:
-        return {}
-    geo_meta = sanitize_geo_metadata(decode_carried_geo(metadata[b"geo"]))
-    return geo_meta if isinstance(geo_meta, dict) else {}
+    return sanitized_carried_geo(metadata)
 
 
 def _detect_geometry_column_from_table(table: pa.Table) -> str:
@@ -92,15 +89,14 @@ def _detect_geometry_column_from_table(table: pa.Table) -> str:
         Geometry column name — the block's primary column, else the standard
         name the table's own schema carries, else 'geometry'.
     """
-    from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
+    from geoparquet_io.core.geo_metadata import carried_geometry_column
 
-    primary = _carried_geo(table.schema.metadata).get("primary_column")
-    if isinstance(primary, str) and primary:
-        return primary
-    # Sanitizing dropped a malformed `primary_column` and could not repair it
-    # from a single column. Falling back to the literal "geometry" would name a
-    # column the table may not have (#887 review).
-    return detect_geometry_column_from_names(table.schema.names) or "geometry"
+    # Sanitizing may have dropped a malformed `primary_column` without being
+    # able to repair it from a single column; `carried_geometry_column` then
+    # asks the schema, because falling back to the literal "geometry" would
+    # name a column the table may not have (#887 review).
+    geo_meta = _carried_geo(table.schema.metadata)
+    return carried_geometry_column(geo_meta, table.schema.names) or "geometry"
 
 
 def _resolve_crs_to_string(crs_info) -> str | None:

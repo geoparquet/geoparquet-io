@@ -24,7 +24,11 @@ import pyarrow as pa
 from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import backfill_derived_stats, prune_geo_metadata_to_columns
+from geoparquet_io.core.geo_metadata import (
+    backfill_derived_stats,
+    prune_geo_metadata_to_columns,
+    sanitized_carried_geo,
+)
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
@@ -276,22 +280,31 @@ def write_output(
         return None
 
 
-def _extract_crs_from_metadata(metadata: dict | None) -> dict | str | None:
-    """Extract CRS from GeoParquet metadata."""
-    if not metadata or b"geo" not in metadata:
-        return None
-    try:
-        import json
+def _extract_crs_from_metadata(
+    metadata: dict | None, geometry_column: str | None = None
+) -> dict | str | None:
+    """Extract CRS from GeoParquet metadata.
 
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        if isinstance(geo_meta, dict):
-            columns = geo_meta.get("columns", {})
-            primary_col = geo_meta.get("primary_column", "geometry")
-            if primary_col in columns:
-                return columns[primary_col].get("crs")
-    except (json.JSONDecodeError, UnicodeDecodeError, KeyError):
-        pass
-    return None
+    A write-path reader: the answer becomes the geoarrow extension type's CRS on
+    the Arrow stream this process writes to stdout, so a malformed carried block
+    goes through the shared shape check (#947). It used to be indexed raw, and
+    the ``except`` beside it caught only the JSON errors -- ``columns: null``
+    escaped as ``argument of type 'NoneType' is not iterable``, and a list- or
+    string-shaped ``columns`` as a ``TypeError`` from the line after it.
+
+    ``geometry_column`` names the column the CRS is about to be attached to.
+    The caller knows it, and reading some other column's CRS onto it is the
+    silent half of #887: a block whose ``primary_column`` sanitizing had to
+    drop would otherwise fall back to the literal ``"geometry"`` and stream a
+    ``geom`` column as if its CRS were absent.
+    """
+    geo_meta = sanitized_carried_geo(metadata)
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return None
+    col = geometry_column or geo_meta.get("primary_column", "geometry")
+    col_meta = columns.get(col)
+    return col_meta.get("crs") if isinstance(col_meta, dict) else None
 
 
 def _write_stream_output(
@@ -320,7 +333,7 @@ def _write_stream_output(
     # Convert WKB binary to geoarrow extension type for streaming
     # This enables native geometry performance in downstream operations
     if geometry_column:
-        crs = _extract_crs_from_metadata(original_metadata)
+        crs = _extract_crs_from_metadata(original_metadata, geometry_column)
         table = apply_geoarrow_extension_type(table, geometry_column, crs)
 
     # Apply metadata to output table, the way the file path does (#722):
