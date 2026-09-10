@@ -287,6 +287,44 @@ def overwrite_option(func):
     return click.option("--overwrite", is_flag=True, help="Overwrite existing files")(func)
 
 
+def _validate_column_name(ctx, param, value):
+    """Reject an empty or whitespace-only value for an option naming a column.
+
+    Every ``--*-name`` option (and ``partition string --column``) ends up as a
+    delimited SQL identifier. An empty value used to travel all the way into
+    ``quote_identifier()`` and surface as a raw
+    ``ValueError: cannot quote an empty SQL identifier`` traceback, after the
+    command had already read the input file; a whitespace-only value was
+    accepted outright and produced a column literally named ``'   '`` (#933).
+
+    Failing here turns both into the usage error every other bad option value
+    already raises -- ``sort quadkey --quadkey-name nope`` and
+    ``partition string --column nope`` both exit 2 -- and it fails before any
+    work starts. ``click.BadParameter`` names the offending flag itself, so the
+    message does not have to repeat it.
+    """
+    if value is None:
+        return None
+    if not value.strip():
+        raise click.BadParameter(
+            "column name cannot be empty or whitespace-only", ctx=ctx, param=param
+        )
+    return value
+
+
+def column_name_option(*param_decls, **kwargs):
+    """``click.option`` for an option whose value names a column.
+
+    Identical to :func:`click.option` except that the shared
+    :func:`_validate_column_name` callback is wired up, so the whole
+    ``--*-name`` family gets the guard from one place. Declaring a new
+    column-naming option with this rather than a bare ``@click.option`` is what
+    ``tests/test_cli_column_name_guard.py`` enforces.
+    """
+    kwargs.setdefault("callback", _validate_column_name)
+    return click.option(*param_decls, **kwargs)
+
+
 def repair_geometry_option(func):
     """
     Add --repair-geometry/--no-repair-geometry option to a command.
