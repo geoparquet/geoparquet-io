@@ -163,6 +163,8 @@ The check reports two numbers, and they answer different questions:
 
     Neither end of that band is a size a row group can actually have. The Parquet writer emits row groups in whole 2,048-row vectors and rounds a request *up* to a multiple of that, so a request for the band's top of 50,000 lands at 51,200 — just outside it. That used to be exactly what `gpio sort` asked for, so `gpio check optimization`, which scores this band as one of its five factors, marked a freshly sorted file `[fail]` and advised re-partitioning it ([#961](https://github.com/geoparquet/geoparquet-io/issues/961)). The band did not move; `gpio sort` now snaps its request to a whole vector itself, which maps the band's endpoints to 10,240 and 49,152, and writes 49,152 rows per group by default. It snaps up, as the writer does, except where that would push a request out of the top of the band — 50,000 becomes 49,152 rather than 51,200. Other write paths do not snap — if you pass `--row-group-size 50000` to `gpio convert`, the writer still rounds it up to 51,200.
 
+    `--fix` writes those same 49,152-row groups. It is a repair, so the file it leaves behind has to pass the checks gpio runs next, and this is the narrower of the two bands. Until [#972](https://github.com/geoparquet/geoparquet-io/issues/972) it asked for 100,000 rows per group — landing at 100,352, inside the general 10,000-200,000 band that `gpio check row-group` passes a file on but outside this one — so `gpio check optimization` scored a freshly fixed file `[fail]` on its row-group factor and advised re-partitioning it.
+
 ### Optimization Check
 
 === "CLI"
