@@ -10,6 +10,7 @@ import click
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     aws_profile_option,
+    column_list_option,
     repair_geometry_option,
     verbose_option,
 )
@@ -42,7 +43,7 @@ def pmtiles(ctx):
 @click.option("--max-zoom", type=int, help="Maximum zoom level (auto-detected if not set)")
 @click.option("--bbox", help="Bounding box filter: minx,miny,maxx,maxy")
 @click.option("--where", help="SQL WHERE clause for filtering")
-@click.option("--include-cols", help="Comma-separated list of columns to include")
+@column_list_option("--include-cols", help="Comma-separated list of columns to include")
 @click.option(
     "--precision",
     type=int,

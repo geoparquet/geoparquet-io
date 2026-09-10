@@ -764,6 +764,139 @@ class TestGeometryIdentifierQuoting:
         )
 
 
+class TestColumnValidation:
+    """``--include-cols``/``--exclude-cols`` are checked against the table (#969).
+
+    The parquet backend has run ``validate_columns`` since #731; the BigQuery
+    backend had no equivalent, so a name the table does not carry was quoted
+    into the SELECT and failed as a DuckDB binder error (or, for
+    ``--exclude-cols``, silently excluded nothing). A blank entry was worse
+    still: it reached ``quote_identifier()`` and raised
+    ``ValueError: cannot quote an empty SQL identifier``.
+
+    The Click layer rejects blank entries before any connection is opened
+    (``tests/test_cli_column_list_guard.py``); this is the schema half, which
+    only the backend can do, and it matches the parquet precedent by raising
+    ``InvalidParameterError`` -- mapped to exit 2 by ``handle_core_exception``.
+    """
+
+    def test_none_is_passed_through(self):
+        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+
+        assert validate_bigquery_columns(None, ["id", "geom"], "--include-cols") is None
+
+    def test_known_columns_are_returned(self):
+        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+
+        result = validate_bigquery_columns(["id", "geom"], ["id", "name", "geom"], "--include-cols")
+        assert result == ["id", "geom"]
+
+    def test_case_is_resolved_to_the_schema_spelling(self):
+        """DuckDB matches a quoted identifier case-insensitively, but the exclude
+        filter in ``_build_column_list`` compares strings, so ``--exclude-cols
+        ID`` used to exclude nothing at all. Resolving here makes both agree."""
+        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+
+        result = validate_bigquery_columns(["ID", "GeoM"], ["id", "geom"], "--exclude-cols")
+        assert result == ["id", "geom"]
+
+    def test_missing_column_is_an_invalid_parameter(self):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+
+        with pytest.raises(InvalidParameterError) as exc_info:
+            validate_bigquery_columns(["id", "nope"], ["id", "geom"], "--include-cols")
+
+        message = str(exc_info.value)
+        assert "--include-cols" in message
+        assert "nope" in message
+        # The available columns are listed, as the parquet backend does.
+        assert "id, geom" in message
+
+    def test_blank_entry_is_an_invalid_parameter(self):
+        """The Python API bypasses Click, so core must reject a blank too."""
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+
+        with pytest.raises(InvalidParameterError, match="empty or whitespace-only"):
+            validate_bigquery_columns(["id", "   "], ["id", "geom"], "--exclude-cols")
+
+    def test_blank_entry_never_reaches_quote_identifier(self):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+
+        with pytest.raises(InvalidParameterError):
+            validate_bigquery_columns([""], ["id"], "--include-cols")
+
+    def test_schema_column_names_reads_the_table(self):
+        from geoparquet_io.core.extract_bigquery import _schema_column_names
+
+        con = duckdb.connect()
+        try:
+            con.execute("CREATE TABLE test_cols AS SELECT 1 AS id, 'x' AS Name")
+            assert _schema_column_names(con, "test_cols", table_source="local") == ["id", "Name"]
+        finally:
+            con.close()
+
+    def test_extraction_validates_before_building_the_select(self):
+        """The wiring: a bad name fails against the schema, not in the binder."""
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        con = MagicMock()
+        with (
+            patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+            patch(
+                "geoparquet_io.core.extract_bigquery._schema_column_names",
+                return_value=["id", "geom"],
+            ),
+            patch(
+                "geoparquet_io.core.extract_bigquery._detect_geometry_column_from_schema",
+                return_value="geom",
+            ),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            with pytest.raises(InvalidParameterError, match="--include-cols"):
+                extract_bigquery(
+                    table_id="project-name.dataset.table",
+                    output_parquet=None,
+                    include_cols="id,nope",
+                )
+        # Failed before any query was executed against the table.
+        assert not any("SELECT" in str(call) for call in con.execute.call_args_list)
+
+    def test_cli_reports_a_missing_column_as_a_usage_error(self, tmp_path):
+        """Exit 2, matching ``gpio extract geoparquet --include-cols nope``."""
+        from geoparquet_io.cli.main import cli
+
+        with (
+            patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+            patch(
+                "geoparquet_io.core.extract_bigquery._schema_column_names",
+                return_value=["id", "geom"],
+            ),
+            patch(
+                "geoparquet_io.core.extract_bigquery._detect_geometry_column_from_schema",
+                return_value="geom",
+            ),
+        ):
+            mock_conn.return_value.__enter__.return_value = MagicMock()
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "extract",
+                    "bigquery",
+                    "project-name.dataset.table",
+                    str(tmp_path / "out.parquet"),
+                    "--include-cols",
+                    "nope",
+                ],
+            )
+
+        assert result.exit_code == 2, result.output
+        assert "nope" in result.output
+
+
 class TestPythonAPI:
     """Test the Python API for BigQuery."""
 
