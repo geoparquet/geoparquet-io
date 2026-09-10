@@ -69,14 +69,15 @@ def _stub_stream(tmp_path, geometries):
 def run_extract(tmp_path, monkeypatch):
     """Run ``arcgis_to_table`` over stubbed network calls, returning its geo block."""
 
-    def _run(geometry_type, geometries):
+    def _run(geometry_type, geometries, **kwargs):
         from geoparquet_io.core import arcgis
 
         monkeypatch.setattr(arcgis, "get_layer_info", lambda *a, **k: _layer(geometry_type))
         monkeypatch.setattr(
             arcgis, "_stream_features_to_parquet", _stub_stream(tmp_path, geometries)
         )
-        table = arcgis_to_table("https://example.com/FeatureServer/0")
+        table = arcgis_to_table("https://example.com/FeatureServer/0", **kwargs)
+        _run.table = table
         return json.loads(table.schema.metadata[b"geo"])["columns"]["geometry"]
 
     return _run
@@ -125,6 +126,47 @@ def test_mixed_geometries_are_all_declared(run_extract):
     column = run_extract("esriGeometryMultiPatch", geometries)
 
     assert sorted(column["geometry_types"]) == ["Point", "Polygon"]
+
+
+#: A self-intersecting "bowtie". ``ST_MakeValid`` splits it into two triangles,
+#: so it comes back a MultiPolygon -- the cheapest geometry whose TYPE changes
+#: under repair, which is what makes it the right probe for the ordering below.
+BOWTIE = Polygon([(0, 0), (2, 2), (2, 0), (0, 2), (0, 0)])
+
+
+def _actual_types(table):
+    """The geometry types really present in a table's WKB, read back independently."""
+    return sorted({shapely_wkb.loads(bytes(v.as_py())).geom_type for v in table.column("geometry")})
+
+
+def test_repair_runs_before_the_geo_block_is_built(run_extract):
+    """The declaration must describe the REPAIRED data that is actually written.
+
+    ``ST_MakeValid`` can change a geometry's type, so building the geo block
+    before the repair declares the input's types over the output's bytes. That
+    is not a cosmetic ordering: it writes a file whose own metadata under-declares
+    it, which ``gpio check spec`` fails and which makes a conformant reader skip
+    rows. Moving the repair back below the block flips this to ``["Polygon"]``
+    over MultiPolygon data, so this test is what pins the order.
+    """
+    column = run_extract("esriGeometryPolygon", [shapely_wkb.dumps(BOWTIE)])
+
+    assert column["geometry_types"] == ["MultiPolygon"]
+    # ...and that is genuinely what landed in the column, not just what was claimed.
+    assert _actual_types(run_extract.table) == ["MultiPolygon"]
+
+
+def test_declaration_follows_the_data_when_repair_is_off(run_extract):
+    """The mirror of the above: no repair, no type change, so ``Polygon`` is right.
+
+    Together the two pin the declaration to the data rather than to a fixed
+    answer -- a hardcoded ``["MultiPolygon"]`` would pass the test above and
+    fail this one.
+    """
+    column = run_extract("esriGeometryPolygon", [shapely_wkb.dumps(BOWTIE)], repair_geometry=False)
+
+    assert column["geometry_types"] == ["Polygon"]
+    assert _actual_types(run_extract.table) == ["Polygon"]
 
 
 def test_written_file_validates_for_an_unknown_esri_type(tmp_path, monkeypatch):
