@@ -447,7 +447,11 @@ def _setup_duckdb_connection():
     Overture) are run under the same memory discipline DuckDB needs to reliably
     spill rather than OOM (see todo 013):
 
-    - ``temp_directory`` (the admin cache dir) enables spill-to-disk.
+    - ``temp_directory`` enables spill-to-disk, onto the admin cache volume
+      (which already holds the multi-GB cached dataset, so it has the room) in a
+      private leaf per connection -- DuckDB's spill filenames carry no
+      connection identity, so two runs sharing the cache dir itself would
+      overwrite each other's blocks.
     - ``threads = 1`` is required for memory control: parallel spatial-join /
       window operators each grab memory and cannot coordinate spilling, so they
       OOM even with a temp directory set (DuckDB #8270). Single-threaded
@@ -459,12 +463,15 @@ def _setup_duckdb_connection():
       is not contractual anyway.
     """
     from geoparquet_io.core.admin_datasets import get_cache_dir
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, spill_directory
 
     temp_dir = get_cache_dir()
     temp_dir.mkdir(parents=True, exist_ok=True)
     con = get_duckdb_connection(
-        load_spatial=True, load_httpfs=True, temp_directory=str(temp_dir), threads=1
+        load_spatial=True,
+        load_httpfs=True,
+        temp_directory=spill_directory(temp_dir),
+        threads=1,
     )
     con.execute("SET preserve_insertion_order = false")
     # Reproject (CRS-aware admin join, #525) emits lon/lat order to match CRS84.

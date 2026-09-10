@@ -209,7 +209,7 @@ class TestGetDuckdbConnection:
         con.close()
 
     def test_temp_directory_is_set(self, tmp_path):
-        """temp_directory enables spill-to-disk (OOM guard, todo 013)."""
+        """An explicit temp_directory is used verbatim (OOM guard, todo 013)."""
         spill = str(tmp_path / "spill")
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False, temp_directory=spill)
         try:
@@ -228,11 +228,19 @@ class TestGetDuckdbConnection:
         finally:
             con.close()
 
-    def test_no_temp_directory_by_default(self):
-        """Default connection is unchanged (no behavior change on small inputs)."""
+    def test_default_temp_directory_is_private_and_off_the_cwd(self):
+        """No caller named one, so gpio picks one (see tests/test_spill_strategy.py).
+
+        DuckDB's own default is the relative path ".tmp", which puts every spill
+        under the working directory. Nothing is created unless a query actually
+        spills, so small inputs behave exactly as before.
+        """
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         try:
-            # Default temp_directory is empty/unset; the connection still works.
+            value = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+            assert value != ".tmp"
+            assert os.path.isabs(value)
+            assert not os.path.exists(value)
             assert con.execute("SELECT 1").fetchone() == (1,)
         finally:
             con.close()

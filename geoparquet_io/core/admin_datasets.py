@@ -11,11 +11,19 @@ or remote URLs, with automatic caching and error handling.
 import os
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from pathlib import Path
 
 import duckdb
 
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
+    get_duckdb_connection,
+    orphaned_spill_dirs,
+    spill_directory,
+    sql_path,
+    sweep_orphaned_spill_dirs,
+)
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     InvalidParameterError,
@@ -249,15 +257,49 @@ def check_cache_age(cache_file: Path) -> str | None:
     return None
 
 
+def spill_dir_bytes(paths: Iterable[Path]) -> int:
+    """Total size of the files under each of ``paths``.
+
+    Unreadable entries count as zero rather than raising: this only ever prices
+    a directory that is about to be deleted anyway.
+    """
+    total = 0
+    for path in paths:
+        for entry in Path(path).rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def cache_spill_dirs() -> list[Path]:
+    """Leftover spill directories in the admin cache, priced before deletion.
+
+    ``gpio add admin-divisions`` and ``gpio partition admin`` spill onto the
+    admin cache volume, so a run killed mid-spill orphans a directory that can
+    hold gigabytes -- in ``~/.geoparquet-io/cache/admin/``, where no OS tmp
+    reaper will ever collect it. Only directories whose owning process has
+    exited are listed; a concurrent run's scratch space is not ours to price or
+    delete.
+    """
+    return [Path(p) for p in orphaned_spill_dirs(get_cache_dir())]
+
+
 def clear_cache(confirm: bool = False) -> dict | None:
     """
-    Clear all cached admin datasets.
+    Clear all cached admin datasets, and any spill directories left in the cache.
 
     Args:
         confirm: If True, actually delete files. If False, return without action.
 
     Returns:
-        Dictionary with deletion stats: {"files_deleted": int, "bytes_freed": int}
+        Dictionary with deletion stats: ``files_deleted``/``bytes_freed`` for the
+        cached datasets, ``spill_dirs_deleted``/``spill_bytes_freed`` for the
+        leftovers of interrupted runs. The two are counted apart because a spill
+        directory is not a cached dataset: it is a bug's residue, and saying so
+        is the point of reporting it at all.
         Returns None or {"cancelled": True} if confirm is False.
     """
     if not confirm:
@@ -265,8 +307,14 @@ def clear_cache(confirm: bool = False) -> dict | None:
 
     cache_dir = get_cache_dir()
 
+    empty = {
+        "files_deleted": 0,
+        "bytes_freed": 0,
+        "spill_dirs_deleted": 0,
+        "spill_bytes_freed": 0,
+    }
     if not cache_dir.exists():
-        return {"files_deleted": 0, "bytes_freed": 0}
+        return empty
 
     files_deleted = 0
     bytes_freed = 0
@@ -280,7 +328,19 @@ def clear_cache(confirm: bool = False) -> dict | None:
         except OSError:
             pass  # Ignore deletion errors
 
-    return {"files_deleted": files_deleted, "bytes_freed": bytes_freed}
+    # ...and the spill directories an interrupted run left behind, which the
+    # ``*.parquet`` glob above reported as nothing and deleted nothing of. Price
+    # them first: after the sweep there is nothing left to measure, and only
+    # what the sweep actually removed is counted as freed.
+    sizes = {path: spill_dir_bytes([path]) for path in cache_spill_dirs()}
+    removed = sweep_orphaned_spill_dirs(cache_dir)
+
+    return {
+        "files_deleted": files_deleted,
+        "bytes_freed": bytes_freed,
+        "spill_dirs_deleted": len(removed),
+        "spill_bytes_freed": sum(sizes.get(Path(path), 0) for path in removed),
+    }
 
 
 def get_or_cache_dataset(
@@ -415,9 +475,14 @@ class AdminDataset(ABC):
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
         with s3_config_scope(self.get_s3_config()):
-            # Spill to the cache dir to bound memory on the remote scan (todo 013).
+            # Spill onto the cache volume to bound memory on the remote scan
+            # (todo 013). A private leaf under it, never the cache dir itself:
+            # DuckDB's spill filenames carry no connection identity, so two runs
+            # sharing this well-known directory overwrite each other's blocks.
             con = get_duckdb_connection(
-                load_spatial=True, load_httpfs=True, temp_directory=str(cache_path.parent)
+                load_spatial=True,
+                load_httpfs=True,
+                temp_directory=spill_directory(cache_path.parent),
             )
             try:
                 # Get read options
@@ -1038,10 +1103,11 @@ class OvertureAdminDataset(AdminDataset):
         info("This is a one-time download. Future runs will use the cached version.")
 
         with s3_config_scope(self.get_s3_config()):
-            # Spill to the cache dir so the remote scan + simplification of the
-            # ~4.5GB dataset bounds peak memory rather than OOM-ing (todo 013).
+            # Spill onto the cache volume so the remote scan + simplification of
+            # the ~4.5GB dataset bounds peak memory rather than OOM-ing (todo
+            # 013), into a leaf of its own so concurrent runs cannot collide.
             con = get_duckdb_connection(
-                load_spatial=True, load_httpfs=True, temp_directory=str(cache_dir)
+                load_spatial=True, load_httpfs=True, temp_directory=spill_directory(cache_dir)
             )
             version = self.get_version()
             try:

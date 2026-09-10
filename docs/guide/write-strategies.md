@@ -112,6 +112,85 @@ Override the default strategy when needed:
 
 ## Memory Configuration
 
+### Where Spilled Data Goes
+
+A memory limit only helps if DuckDB has somewhere to put the data that does not
+fit. gpio gives every DuckDB connection its own scratch directory under the
+system temp directory — `$TMPDIR` on macOS and Linux, `%TEMP%` on Windows — and
+DuckDB removes it again when the query finishes. A run that never exceeds its
+memory limit writes nothing there.
+
+This matters in three situations:
+
+- **A read-only working directory.** DuckDB's own default spill location is the
+  relative path `.tmp`, so out of the box a large sort fails with
+  `IO Error: Failed to create directory ".tmp"` even when the input and output
+  volumes are perfectly writable. gpio never spills into the working directory.
+- **A small root volume.** A sort of a very large file can spill more bytes than
+  the output itself. If `/tmp` is too small, point `TMPDIR` at a volume that is
+  not:
+
+    <!-- doctest: skip="names /mnt/scratch and huge.parquet, neither of which the harness seeds" -->
+    ```bash
+    TMPDIR=/mnt/scratch gpio sort hilbert huge.parquet sorted.parquet
+    ```
+
+- **A RAM-backed `/tmp`.** systemd mounts `/tmp` as a tmpfs sized at half of RAM
+  by default on Fedora, Arch and openSUSE, and so do Kubernetes'
+  `emptyDir: {medium: Memory}` and `docker run --tmpfs /tmp`. Spilling onto a
+  tmpfs spends the very memory the spill was meant to save, so on those systems
+  `TMPDIR` should name real storage — `df -h /tmp` and `findmnt /tmp` say which
+  you have.
+
+!!! warning "\"Out of Memory Error\" can mean out of *disk*"
+    DuckDB caps its own spill at `max_temp_directory_size` (90% of the spill
+    volume by default), so a small or RAM-backed temp volume fails cleanly
+    rather than filling the disk. The message it raises, though, says
+    `Out of Memory Error: failed to offload data block of size 256.0 KiB` and
+    suggests only memory-side remedies. gpio appends a line naming `TMPDIR`
+    whenever DuckDB's error mentions `max_temp_directory_size`, because that is
+    the knob that actually fixes it.
+
+!!! warning "Do not point two runs at one spill directory"
+    DuckDB names its spill files after the block size alone
+    (`duckdb_temp_storage_S192K-0.tmp`), with nothing in the name identifying
+    the connection or the process. Two DuckDB connections sharing one temp
+    directory therefore overwrite each other's blocks, and the loser fails with
+    `IO Error: Could not read enough bytes from file`. `TMPDIR` is safe because
+    gpio still gives each connection a private subdirectory beneath it; a fixed
+    `temp_directory` passed straight to DuckDB is not.
+
+### Cleaning Up After an Interrupted Run
+
+DuckDB removes its scratch directory when the query finishes — including when it
+fails. A run **killed** mid-spill (Ctrl-C, `SIGTERM`, the OOM killer) is the
+exception: the process is gone before that cleanup can run, and a directory
+holding gigabytes stays on disk.
+
+gpio names those directories `gpio-spill-<pid>-<random>` and sweeps them at the
+start of every run: any leftover whose owning process has exited is removed
+before a new one is created, so interrupted runs do not accumulate. A directory
+belonging to a process that is still running is never touched. (Pids are the
+test, so give each container its own `TMPDIR` rather than bind-mounting one
+spill volume into several — across pid namespaces the test cannot tell a live
+run from a dead one.)
+
+The one place an OS temp reaper would never help is the admin cache, because the
+admin-boundary commands spill onto the cache volume rather than into `/tmp`.
+`--clear-cache` prices and deletes those leftovers too:
+
+<!-- doctest: skip="deletes the user's real admin cache" -->
+```bash
+gpio add admin-divisions in.parquet out.parquet --clear-cache
+```
+
+```
+Cache directory: /home/you/.geoparquet-io/cache/admin
+Files to delete: 1
+Total size: 3.00 MB
+Leftover spill directories: 1 (250.00 MB)
+```
+
 ### Automatic Detection
 
 gpio automatically detects available memory and configures DuckDB to use 50% of it. This detection is container-aware:
@@ -155,10 +234,9 @@ Override auto-detection when needed:
 
         It is **not** a cap on the command's peak memory. The whole result set
         is materialized as an Arrow table before the write, and that copy is
-        allocated by PyArrow, outside DuckDB's `memory_limit` accounting; the
-        scan connection is also built without a `temp_directory`, so DuckDB has
-        no spill path. Size a BigQuery extract against the result set, not
-        against `--write-memory`.
+        allocated by PyArrow, outside DuckDB's `memory_limit` accounting — so
+        the scan spills but the Arrow table it produces does not. Size a
+        BigQuery extract against the result set, not against `--write-memory`.
 
         The flag keeps its name here — it is the same knob, spelled the same way
         — but `gpio extract bigquery --help` describes it accurately: "Memory

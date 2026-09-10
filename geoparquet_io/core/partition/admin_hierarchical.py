@@ -273,18 +273,27 @@ def _setup_admin_join_connection(dataset, get_duckdb_connection):
 
     Per-level datasets (Overture) can join multi-million-feature inputs and need
     the same memory discipline as ``gpio add admin-divisions`` to spill rather
-    than OOM (see add_divisions todo 013): a temp directory for spill,
+    than OOM (see add_divisions todo 013): spill onto the admin cache volume,
     single-threaded execution (parallel spatial-join operators each grab memory
     and cannot coordinate spilling, so they OOM even with a temp dir), and no
-    insertion-order buffering. Other datasets keep the simple default connection.
+    insertion-order buffering. Other datasets keep the simple default connection,
+    which spills under the OS temp directory.
+
+    The spill goes in a private leaf of the cache dir, never the cache dir
+    itself: DuckDB's spill filenames carry no connection identity, so two runs
+    sharing that well-known path would overwrite each other's blocks.
     """
     if dataset.supports_per_level_sources():
         from geoparquet_io.core.admin_datasets import get_cache_dir
+        from geoparquet_io.core.duckdb_utils import spill_directory
 
         temp_dir = get_cache_dir()
         temp_dir.mkdir(parents=True, exist_ok=True)
         con = get_duckdb_connection(
-            load_spatial=True, load_httpfs=True, temp_directory=str(temp_dir), threads=1
+            load_spatial=True,
+            load_httpfs=True,
+            temp_directory=spill_directory(temp_dir),
+            threads=1,
         )
         con.execute("SET preserve_insertion_order = false")
         # Reproject (CRS-aware admin join, #525) emits lon/lat order to match CRS84.

@@ -53,6 +53,16 @@ def _write_mb(path):
     return path
 
 
+def _dead_pid():
+    """A pid that has certainly exited, so its spill leaf counts as orphaned."""
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
+
+
 class TestAddAdminDivisionsClearCache:
     """``gpio add admin-divisions --clear-cache`` reports, prompts, then deletes."""
 
@@ -155,6 +165,68 @@ class TestAddAdminDivisionsClearCache:
 
         assert result.exit_code == 0, result.output
         assert "No cache directory found." in result.output
+
+    def test_leftover_spill_directories_are_priced_and_deleted(
+        self, admin_cache_dir, places_test_file, tmp_path
+    ):
+        """An interrupted admin run leaves a spill directory *in the cache dir*.
+
+        It is the worst orphan gpio can leave -- multi-GB, in ``$HOME``, where
+        no OS tmp-reaper will ever touch it -- and globbing ``*.parquet`` made
+        ``--clear-cache`` report it as nothing and delete nothing.
+        """
+        admin_cache_dir.mkdir(parents=True)
+        gaul = _write_mb(admin_cache_dir / "gaul.parquet")
+        orphan = admin_cache_dir / f"gpio-spill-{_dead_pid()}-abcdef123456"
+        orphan.mkdir()
+        _write_mb(orphan / "duckdb_temp_storage_S192K-0.tmp")
+
+        runner = CliRunner()
+        with patch.object(admin_divisions, "add_admin_divisions_multi"):
+            result = runner.invoke(
+                add,
+                [
+                    "admin-divisions",
+                    places_test_file,
+                    str(tmp_path / "out.parquet"),
+                    "--clear-cache",
+                ],
+                input="y\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Leftover spill directories: 1 (1.00 MB)" in result.output
+        assert "Cleared cache: 1 files, 1.00 MB freed" in result.output
+        assert "plus 1 leftover spill directory, 1.00 MB freed" in result.output
+        assert not orphan.exists()
+        assert not gaul.exists()
+
+    def test_a_spill_directory_alone_is_still_worth_clearing(
+        self, admin_cache_dir, places_test_file, tmp_path
+    ):
+        """No cached datasets but a multi-GB orphan is not "nothing to delete"."""
+        admin_cache_dir.mkdir(parents=True)
+        orphan = admin_cache_dir / f"gpio-spill-{_dead_pid()}-abcdef123456"
+        orphan.mkdir()
+        _write_mb(orphan / "duckdb_temp_storage_S192K-0.tmp")
+
+        runner = CliRunner()
+        with patch.object(admin_divisions, "add_admin_divisions_multi"):
+            result = runner.invoke(
+                add,
+                [
+                    "admin-divisions",
+                    places_test_file,
+                    str(tmp_path / "out.parquet"),
+                    "--clear-cache",
+                ],
+                input="y\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "No cached datasets found." not in result.output
+        assert "Leftover spill directories: 1 (1.00 MB)" in result.output
+        assert not orphan.exists()
 
 
 class TestAddAdminDivisionsArgumentGuards:
