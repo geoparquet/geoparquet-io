@@ -243,6 +243,21 @@ def test_excluding_the_geometry_column_declares_nothing(run_extract):
     assert column["geometry_types"] == []
 
 
+def test_an_excluded_column_is_not_blamed_on_the_fetch(run_extract, caplog):
+    """The warning must name the cause the user can act on.
+
+    The fetch here returned a perfectly good polygon; the column is missing
+    because the user passed ``--exclude-cols geometry``. Reporting "fetched data
+    holds no geometries" points at the service and leaves the user nothing to
+    do, so the excluded case gets its own message.
+    """
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        run_extract("esriGeometryPolygon", [VALID_POLYGON], exclude_cols="geometry")
+
+    assert "was excluded" in caplog.text
+    assert "Fetched data holds no geometries" not in caplog.text
+
+
 def test_could_not_read_and_nothing_to_read_are_told_apart(run_extract, caplog):
     """Both declare ``[]``, but the user is told which of the two happened.
 

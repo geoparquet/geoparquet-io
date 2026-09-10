@@ -1221,7 +1221,16 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     non-NULL geometries are counted first.
     """
     geometry = table.column("geometry") if "geometry" in table.column_names else None
-    if geometry is None or geometry.null_count == len(geometry):
+    if geometry is None:
+        # The user dropped the column with --exclude-cols; the service may well
+        # have returned geometry. Blaming the fetch here would point at the
+        # wrong thing and give the user nothing to act on.
+        warn(
+            "The geometry column was excluded, so there is nothing to describe; "
+            "declaring geometry_types as [] (types not known)."
+        )
+        return []
+    if geometry.null_count == len(geometry):
         warn("Fetched data holds no geometries; declaring geometry_types as [] (types not known).")
         return []
 
