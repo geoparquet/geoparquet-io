@@ -864,12 +864,11 @@ def _prune_geo_dict_to_columns(geo_dict: dict, columns: set[str], repoint_primar
     """
     # Sanitizing drops a non-string `primary_column` and repairs it from a lone
     # surviving column, which is the recovery this function needs and #883/#945
-    # already shared out. A block it cannot make usable is an absent one.
-    declared_primary = isinstance(geo_dict, dict) and "primary_column" in geo_dict
-    sanitized = sanitize_geo_metadata(geo_dict)
-    if not isinstance(sanitized, dict):
-        return _DROP_GEO
-    geo_dict = sanitized
+    # already shared out. `_rewrite_geo_metadata` only calls this with a decoded
+    # object -- a block that is not one never gets here -- so sanitizing a dict
+    # hands back a dict.
+    declared_primary = "primary_column" in geo_dict
+    geo_dict = sanitize_geo_metadata(geo_dict)
 
     col_entries = geo_dict.get("columns")
     if not isinstance(col_entries, dict):

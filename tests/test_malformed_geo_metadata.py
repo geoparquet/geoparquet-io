@@ -1622,6 +1622,40 @@ def test_prune_still_drops_a_block_whose_primary_column_is_gone():
     assert b"geo" not in pruned
 
 
+@pytest.mark.parametrize("block", [["geometry"], "geometry", 7])
+def test_prune_passes_a_block_that_is_not_an_object_through_untouched(block):
+    """`_rewrite_geo_metadata` never hands the pruner a block that is not decoded.
+
+    Pinned because the pruner now sanitizes, and sanitizing *would* drop such a
+    block: the guarantee is what makes the shape check inside it a dict-to-dict
+    one. `check spec` is what reports these shapes; a write on one is refused by
+    DuckDB's own reader first.
+    """
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    raw = json.dumps(block).encode("utf-8")
+    assert prune_geo_metadata_to_columns({b"geo": raw}, ["id", "geometry"])[b"geo"] == raw
+
+
+def test_prune_repairs_the_primary_from_the_column_pruning_leaves():
+    """Two entries at sanitize time, one after pruning: an unambiguous primary."""
+    from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
+
+    reset_malformed_geo_warnings()
+    block = {
+        "version": "1.1.0",
+        "primary_column": 123,
+        "columns": {"geom_a": {"encoding": "WKB", "crs": _crs_5070()}, "geom_b": {}},
+    }
+    pruned = prune_geo_metadata_to_columns(
+        {b"geo": json.dumps(block).encode("utf-8")}, ["id", "geom_a"]
+    )
+    geo = json.loads(pruned[b"geo"])
+    assert geo["primary_column"] == "geom_a"
+    assert geo["columns"]["geom_a"]["crs"]["id"]["code"] == 5070
+
+
 def test_prune_leaves_no_primary_when_two_columns_could_be_meant():
     """Two survivors is a guess; the block keeps its columns and names no primary."""
     from geoparquet_io.core.geo_metadata import prune_geo_metadata_to_columns
