@@ -838,6 +838,26 @@ class TestColumnValidation:
         finally:
             con.close()
 
+    def test_schema_column_names_scans_the_remote_table(self):
+        """The BigQuery branch reads through ``bigquery_scan``, not a table name."""
+        from geoparquet_io.core.extract_bigquery import _schema_column_names
+
+        con = MagicMock()
+        con.execute.return_value.fetchall.return_value = [("id", "BIGINT"), ("geom", "GEOMETRY")]
+
+        assert _schema_column_names(con, "project.dataset.table") == ["id", "geom"]
+        query = con.execute.call_args[0][0]
+        assert "bigquery_scan('project.dataset.table')" in query
+
+    def test_build_column_list_reuses_the_schema_it_was_given(self):
+        """The exclude branch takes the caller's schema instead of a DESCRIBE."""
+        from geoparquet_io.core.extract_bigquery import _build_column_list
+
+        # con is None: reusing the schema means no query is issued at all.
+        assert _build_column_list(
+            None, "project.dataset.table", None, ["name"], "geom", ["id", "name", "geom"]
+        ) == ["id", "geom"]
+
     def test_extraction_validates_before_building_the_select(self):
         """The wiring: a bad name fails against the schema, not in the binder."""
         from geoparquet_io.core.exceptions import InvalidParameterError
@@ -861,6 +881,13 @@ class TestColumnValidation:
                     table_id="project-name.dataset.table",
                     output_parquet=None,
                     include_cols="id,nope",
+                )
+            # --exclude-cols runs through the same schema read.
+            with pytest.raises(InvalidParameterError, match="--exclude-cols"):
+                extract_bigquery(
+                    table_id="project-name.dataset.table",
+                    output_parquet=None,
+                    exclude_cols="nope",
                 )
         # Failed before any query was executed against the table.
         assert not any("SELECT" in str(call) for call in con.execute.call_args_list)
