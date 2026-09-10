@@ -12,9 +12,17 @@ longer than five — wrote a file that failed validation on its own metadata.
 The types are now computed from the fetched WKB with the same helper the write
 paths use, so they carry the spec's " Z"/" M"/" ZM" suffixes and match the data
 rather than the layer's advertisement.
+
+That fix kept the table as a fallback for whenever the compute came back empty,
+which put the guess straight back on three reachable paths (#962): one malformed
+row makes the all-or-nothing compute return nothing for the whole column, an
+all-NULL geometry column has nothing to describe, and ``--exclude-cols geometry``
+leaves no geometry column at all. The fallback is gone: when the data does not
+say, the file says ``[]``.
 """
 
 import json
+import logging
 import re
 
 import pyarrow as pa
@@ -93,9 +101,15 @@ def test_unknown_esri_geometry_type_is_computed_not_invented(run_extract):
         assert GEOMETRY_TYPE_PATTERN.match(name), f"{name!r} is not a valid geometry_types entry"
 
 
-def test_unknown_esri_geometry_type_falls_back_to_empty_not_invalid(run_extract):
-    """When the WKB cannot be read, an unknown Esri type declares nothing."""
-    column = run_extract("esriGeometryMultiPatch", [b"not wkb at all"])
+@pytest.mark.parametrize("esri_type", ["esriGeometryMultiPatch", "esriGeometryPolygon"])
+def test_unreadable_wkb_declares_nothing_whatever_the_layer_says(run_extract, esri_type):
+    """Unreadable WKB declares nothing — including for a type the table covered.
+
+    The mapped half is the regression: ``esriGeometryPolygon`` used to reach the
+    five-entry table here and write ``["MultiPolygon"]`` over bytes nobody could
+    read, which is the invented declaration #928 exists to stop.
+    """
+    column = run_extract(esri_type, [b"not wkb at all"])
 
     # An empty array is the spec's way to say the types are not known.
     assert column["geometry_types"] == []
@@ -167,6 +181,89 @@ def test_declaration_follows_the_data_when_repair_is_off(run_extract):
 
     assert column["geometry_types"] == ["Polygon"]
     assert _actual_types(run_extract.table) == ["Polygon"]
+
+
+# ---------------------------------------------------------------------------
+# #962: the compute coming back empty is not a licence to guess
+# ---------------------------------------------------------------------------
+
+VALID_POLYGON = shapely_wkb.dumps(Polygon([(0, 0), (1, 0), (1, 1), (0, 0)]))
+
+
+def test_one_malformed_row_does_not_resurrect_the_declared_guess(run_extract):
+    """A single unreadable row must not turn the whole column into a guess.
+
+    ``unique_geometry_types`` is all-or-nothing: it raises on the bad row rather
+    than reporting the types it managed to read, so the compute returns nothing
+    for a column that is almost entirely fine. Testing that emptiness for
+    truthiness sent an ``esriGeometryPolygon`` layer back to the table, which
+    declared ``["MultiPolygon"]`` over data whose only readable geometry is a
+    single ``Polygon`` — a type that is not in the file at all.
+    """
+    column = run_extract("esriGeometryPolygon", [VALID_POLYGON, b"junk"])
+
+    assert column["geometry_types"] == []
+    # The guess is not merely different from the data, it names a type the file
+    # does not contain -- which is why [] is the honest answer and not a cop-out.
+    readable = []
+    for value in run_extract.table.column("geometry"):
+        try:
+            readable.append(shapely_wkb.loads(bytes(value.as_py())).geom_type)
+        except Exception:  # the malformed row, which is the whole point
+            pass
+    assert readable == ["Polygon"]
+
+
+def test_all_null_geometry_column_declares_nothing(run_extract):
+    """Zero geometries means zero types, not the layer's advertised one.
+
+    FeatureServer records can carry ``"geometry": null``, and a ``--where`` can
+    select only those. NULLs are filtered by the compute by design, so this is
+    the "nothing to describe" case landing in the "compute failed" branch.
+    """
+    column = run_extract("esriGeometryPolygon", [None, None])
+
+    assert column["geometry_types"] == []
+
+
+def test_excluding_the_geometry_column_declares_nothing(run_extract):
+    """``--exclude-cols geometry`` leaves nothing to read, so nothing is declared.
+
+    The repair helper passes a table with no geometry column straight through,
+    so this reaches the geo block, where the fallback used to describe a column
+    that is not in the file.
+
+    Only the declaration is asserted here. The block still names ``geometry`` as
+    the primary_column when that column was excluded, which ``gpio check spec``
+    fails -- a separate bug from this one, left for its own change.
+    """
+    column = run_extract("esriGeometryPolygon", [VALID_POLYGON], exclude_cols="geometry")
+
+    assert "geometry" not in run_extract.table.column_names
+    assert column["geometry_types"] == []
+
+
+def test_could_not_read_and_nothing_to_read_are_told_apart(run_extract, caplog):
+    """Both declare ``[]``, but the user is told which of the two happened.
+
+    ``_compute_geometry_types`` swallows the geoarrow error and returns ``[]``,
+    so the two outcomes are indistinguishable at the call site unless the
+    non-NULL geometries are counted first. They are worth telling apart: one is
+    a data-quality problem worth chasing, the other is just an empty column.
+    """
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        assert run_extract("esriGeometryPolygon", [VALID_POLYGON, b"junk"])
+        unreadable = caplog.text
+        caplog.clear()
+        assert run_extract("esriGeometryPolygon", [None, None])
+        empty = caplog.text
+
+    assert "could not be read" in unreadable
+    # The layer's declared type survives as context for the warning, not as a
+    # value written to the file.
+    assert "esriGeometryPolygon" in unreadable
+    assert "could not be read" not in empty
+    assert "no geometries" in empty
 
 
 def test_written_file_validates_for_an_unknown_esri_type(tmp_path, monkeypatch):

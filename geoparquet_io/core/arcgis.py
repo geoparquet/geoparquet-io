@@ -49,15 +49,6 @@ WKID_TO_EPSG = {
     102113: 3785,  # Legacy Web Mercator
 }
 
-# Map ArcGIS geometry types to GeoJSON types
-ARCGIS_GEOM_TYPES = {
-    "esriGeometryPoint": "Point",
-    "esriGeometryMultipoint": "MultiPoint",
-    "esriGeometryPolyline": "MultiLineString",
-    "esriGeometryPolygon": "MultiPolygon",
-    "esriGeometryEnvelope": "Polygon",
-}
-
 
 @dataclass
 class ArcGISAuth:
@@ -1199,25 +1190,48 @@ def _stream_features_to_parquet(
 def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: bool) -> list[str]:
     """Geometry types for the geo block, read from the fetched WKB (#928).
 
-    The layer's advertised ``geometryType`` is only a fallback. It is coarser
-    than the data (Esri's ``esriGeometryPolyline`` covers both LineString and
-    MultiLineString, and says nothing about Z/M), it does not cover every Esri
-    type, and it used to fall back to the literal ``"Geometry"`` -- which the
+    The layer's advertised ``geometryType`` does not describe the file. It is
+    coarser than the data (Esri's ``esriGeometryPolyline`` covers both
+    LineString and MultiLineString, and says nothing about Z/M), it does not
+    cover every Esri type, and it used to fall back to ``"Geometry"`` -- which the
     GeoParquet schema does not allow, so unmapped layers wrote files that
     failed validation on their own metadata.
 
     Computing from the data instead is what every gpio write path does, gives
     the spec's " Z"/" M"/" ZM" suffixes for free, and keeps the declaration
-    consistent with the statistics a reader checks it against. When the WKB
-    cannot be read the mapping table still serves as a fallback, and an Esri
-    type outside it yields ``[]`` -- the spec's way of saying the types are
-    not known.
+    consistent with the statistics a reader checks it against.
+
+    The declared type is no longer a fallback either (#962). Falling back
+    whenever the compute came back empty put the invented value straight back on
+    three reachable paths, because an empty result does not mean "the data was
+    fine and said nothing": ``unique_geometry_types`` is all-or-nothing, so one
+    malformed row empties the answer for a whole column of good geometry; an
+    all-NULL column has nothing to describe; and ``--exclude-cols geometry``
+    leaves no column to read. In each case the layer's coarse advertisement
+    (``esriGeometryPolygon`` -> MultiPolygon, over data holding a single
+    Polygon or no geometry at all) named a type the file does not contain.
+    ``[]`` -- the spec's way of saying the types are not known -- is the honest
+    answer wherever the data does not supply one, and gpio's own
+    geometry_types-vs-statistics check would flag the guess anyway.
+
+    The two ways of arriving at ``[]`` are still worth telling apart for the
+    user: unreadable geometry is a data-quality problem worth chasing, an empty
+    column is not. They cannot be told apart by catching, because
+    ``_compute_geometry_types`` swallows the geoarrow error itself, so the
+    non-NULL geometries are counted first.
     """
+    geometry = table.column("geometry") if "geometry" in table.column_names else None
+    if geometry is None or geometry.null_count == len(geometry):
+        warn("Fetched data holds no geometries; declaring geometry_types as [] (types not known).")
+        return []
+
     computed = _compute_geometry_types(table, "geometry", verbose)
-    if computed:
-        return computed
-    declared = ARCGIS_GEOM_TYPES.get(esri_geometry_type)
-    return [declared] if declared else []
+    if not computed:
+        warn(
+            "Fetched geometry could not be read, so geometry_types is declared as [] "
+            f"rather than guessed from the layer's {esri_geometry_type}."
+        )
+    return computed
 
 
 def arcgis_to_table(
