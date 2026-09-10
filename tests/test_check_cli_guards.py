@@ -13,6 +13,7 @@ Every test is offline and unmarked, so it runs in the fast lane.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from unittest import mock
@@ -307,14 +308,86 @@ class TestPmtilesGeneration:
         assert f"PMTiles failed for {places_test_file}: tippecanoe blew up" in result.output
 
 
+class TestMultiFileFixSummary:
+    """A multi-file ``--fix`` says which files it rewrote."""
+
+    @pytest.fixture
+    def poorly_ordered_partition(self, tmp_path, places_test_file):
+        """Three shuffled copies of places in one directory."""
+        table = pq.read_table(places_test_file)
+        partition = tmp_path / "partition"
+        partition.mkdir()
+        for index, seed in enumerate((0, 1, 2)):
+            shuffled = table.take(pa.array(np.random.RandomState(seed).permutation(table.num_rows)))
+            pq.write_table(shuffled, partition / f"p{index}.parquet", row_group_size=50)
+        return partition
+
+    def test_summary_names_the_rewritten_files(self, poorly_ordered_partition):
+        """``--all-files --fix`` rewrites every file in place; say so at the end.
+
+        In multi-file mode the per-file "Optimized file:" lines are suppressed,
+        so the run used to finish on ``Summary: 3 warnings (3 files checked)``
+        -- which reads as if nothing had been written, when in fact every file
+        in the directory had just been rewritten in place.
+        """
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "check",
+                "spatial",
+                str(poorly_ordered_partition),
+                "--all-files",
+                "--fix",
+                "--random-sample-size",
+                "50",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Fixed 3 files" in result.output
+        for index in range(3):
+            target = poorly_ordered_partition / f"p{index}.parquet"
+            assert str(target) in result.output
+            assert Path(f"{target}.bak").exists()
+
+    def test_a_long_fix_list_is_truncated(self, capsys):
+        """Past ``max_issues_shown`` the list is capped, like the issue list."""
+        runner = cli_check.MultiFileCheckRunner([f"f{i}.parquet" for i in range(5)])
+        for index in range(5):
+            runner.record_fix(f"f{index}.parquet", f"f{index}.parquet.bak" if index else None)
+        runner.print_summary()
+
+        output = capsys.readouterr().out
+        assert "Fixed 5 files:" in output
+        assert "  - f0.parquet\n" in output  # no backup: no suffix
+        assert "  - f1.parquet (backup: f1.parquet.bak)" in output
+        assert "f3.parquet" not in output
+        assert "... and 2 more" in output
+
+    def test_a_single_fix_is_not_pluralised(self, capsys):
+        runner = cli_check.MultiFileCheckRunner(["a.parquet", "b.parquet"])
+        runner.record_fix("a.parquet", None)
+        runner.print_summary()
+
+        assert "Fixed 1 file:" in capsys.readouterr().out
+
+    def test_nothing_is_reported_when_no_fix_was_applied(self, poorly_ordered_partition):
+        """A check-only run says nothing about fixes."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["check", "spatial", str(poorly_ordered_partition), "--all-files"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Fixed" not in result.output
+
+
 class TestSpatialFixReporting:
     """``check spatial --fix`` reports the file it rewrote."""
 
     def test_fix_reports_the_optimized_output(self, poorly_ordered_file, tmp_path):
-        # NOTE: --fix-output, not an in-place fix. `check spatial` has no
-        # --overwrite option, so handle_fix_common refuses to write back over
-        # its own input; the in-place backup message is pinned by the
-        # row-group test below instead.
         fixed = tmp_path / "sorted.parquet"
 
         runner = CliRunner()
@@ -338,6 +411,82 @@ class TestSpatialFixReporting:
         assert "Spatial ordering applied successfully!" in result.output
         assert f"Optimized file: {fixed}" in result.output
         assert fixed.exists()
+
+    def test_in_place_fix_reports_output_and_backup(self, poorly_ordered_file):
+        """#941: ``--fix`` with no ``--fix-output`` rewrites the input in place.
+
+        ``fix_spatial_ordering`` used to hand the input path straight to
+        ``hilbert_order`` as its output, and ``handle_output_overwrite`` refused
+        it with "Cannot overwrite input file" -- *after* the backup had already
+        been written. Every other fix function routes an in-place rewrite
+        through a temp file; this one now does too.
+        """
+        before = pq.read_table(poorly_ordered_file).column("fsq_place_id").to_pylist()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["check", "spatial", poorly_ordered_file, "--fix", "--random-sample-size", "50"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Cannot overwrite input file" not in result.output
+        assert "Spatial ordering applied successfully!" in result.output
+        assert f"Optimized file: {poorly_ordered_file}" in result.output
+        assert f"Backup: {poorly_ordered_file}.bak" in result.output
+        assert Path(f"{poorly_ordered_file}.bak").exists()
+
+        # The input really was rewritten, and the backup holds the original.
+        after = pq.read_table(poorly_ordered_file).column("fsq_place_id").to_pylist()
+        assert sorted(after) == sorted(before)
+        assert after != before
+        assert (
+            pq.read_table(f"{poorly_ordered_file}.bak").column("fsq_place_id").to_pylist() == before
+        )
+
+    def test_an_aliased_fix_output_is_treated_as_an_in_place_fix(self, poorly_ordered_file):
+        """``--fix-output ./same.parquet`` is in place, backup and all.
+
+        ``handle_fix_common`` decided "am I writing over my own input?" by
+        comparing the raw strings, so an aliased spelling took the *not*
+        in-place branch: no ``.bak``, no confirmation under ``--no-backup`` --
+        and then ``handle_output_overwrite``, which compares ``resolve()``,
+        refused the write outright. Both halves have to agree.
+        """
+        target = Path(poorly_ordered_file)
+        # Built as a string: pathlib normalises a "." component straight back out.
+        alias = f"{target.parent}{os.sep}.{os.sep}{target.name}"
+        assert alias != poorly_ordered_file
+        before = pq.read_table(poorly_ordered_file).column("fsq_place_id").to_pylist()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "check",
+                "spatial",
+                alias,
+                "--fix",
+                "--fix-output",
+                poorly_ordered_file,
+                "--random-sample-size",
+                "50",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Cannot overwrite input file" not in result.output
+        backup = Path(f"{alias}.bak")
+        assert backup.exists(), result.output
+        assert pq.read_table(backup).column("fsq_place_id").to_pylist() == before
+        after = pq.read_table(poorly_ordered_file).column("fsq_place_id").to_pylist()
+        assert sorted(after) == sorted(before)
+        assert after != before
+
+    def test_overwrite_option_exists_for_parity_with_the_other_fixes(self):
+        """``check spatial`` accepts ``--overwrite``, like its fix-capable siblings."""
+        spatial = cli.commands["check"].commands["spatial"]
+        assert any("--overwrite" in param.opts for param in spatial.params)
 
 
 class TestRowGroupFixReporting:

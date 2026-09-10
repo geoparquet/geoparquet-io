@@ -12,6 +12,7 @@ from geoparquet_io.cli.decorators import (
     DEFAULT_KDTREE_APPROX,
     DEFAULT_KDTREE_TARGET_ROWS,
     SingleFileCommand,
+    column_name_option,
     geoparquet_version_option,
     handle_directory_sub_partition,
     output_format_options,
@@ -189,7 +190,7 @@ def partition_admin(
 @partition.command(name="string", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
-@click.option("--column", required=True, help="Column name to partition by (required)")
+@column_name_option("--column", required=True, help="Column name to partition by (required)")
 @click.option("--chars", type=int, help="Number of characters to use as prefix for partitioning")
 @partition_options_base
 @output_format_options
@@ -279,7 +280,7 @@ def partition_string(
 @partition.command(name="h3", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
-@click.option(
+@column_name_option(
     "--h3-name",
     default="h3_cell",
     help="Name of H3 column to partition by (default: h3_cell)",
@@ -450,7 +451,7 @@ def partition_h3(
 @partition.command(name="s2", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
-@click.option(
+@column_name_option(
     "--s2-name",
     default="s2_cell",
     help="Name of S2 column to partition by (default: s2_cell)",
@@ -623,7 +624,7 @@ def partition_s2(
 @partition.command(name="a5", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
-@click.option(
+@column_name_option(
     "--a5-name",
     default="a5_cell",
     help="Name of A5 column to partition by (default: a5_cell)",
@@ -792,7 +793,7 @@ def partition_a5(
 @partition.command(name="kdtree", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
-@click.option(
+@column_name_option(
     "--kdtree-name",
     default="kdtree_cell",
     help="Name of KD-tree column to partition by (default: kdtree_cell)",
@@ -928,7 +929,7 @@ def partition_kdtree(
 @partition.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_folder", required=False)
-@click.option(
+@column_name_option(
     "--quadkey-column",
     default="quadkey",
     help="Name of quadkey column to partition by (default: quadkey)",

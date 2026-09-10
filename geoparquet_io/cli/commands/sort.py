@@ -13,6 +13,7 @@ from geoparquet_io.cli.decorators import (
     allow_schema_diff_option,
     any_extension_option,
     bbox_option,
+    column_name_option,
     geoparquet_version_option,
     output_format_options,
     overwrite_option,
@@ -38,7 +39,7 @@ def sort(ctx):
 @sort.command(name="hilbert", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path(), required=False, default=None)
-@click.option(
+@column_name_option(
     "--geometry-column",
     "-g",
     default="geometry",
@@ -108,7 +109,7 @@ def hilbert_order(
 @sort.command(name="str", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path(), required=False, default=None)
-@click.option(
+@column_name_option(
     "--geometry-column",
     "-g",
     default="geometry",
@@ -249,7 +250,7 @@ def sort_column(
 @sort.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", type=click.Path())
-@click.option(
+@column_name_option(
     "--quadkey-name",
     default="quadkey",
     help="Name of the quadkey column to sort by (default: quadkey)",

@@ -25,6 +25,7 @@ from geoparquet_io.core.file_utils import (
     handle_output_overwrite,
     has_glob_pattern,
     is_partition_path,
+    is_same_file_path,
     resolve_partition_path,
     safe_file_url,
     validate_output_path,
@@ -312,6 +313,83 @@ class TestValidateParquetExtension:
         """Extension check is case insensitive."""
         validate_parquet_extension("output.PARQUET")
         validate_parquet_extension("output.Parquet")
+
+
+# =============================================================================
+# Tests for is_same_file_path()
+# =============================================================================
+
+
+class TestIsSameFilePath:
+    """Two spellings of one file compare equal; everything else does not.
+
+    Every caller that decides "am I about to write back over my own input?" has
+    to reach the same verdict. When ``handle_fix_common`` compared raw strings
+    and ``handle_output_overwrite`` compared ``resolve()``, an aliased
+    ``--fix-output`` took the "different file" branch in one and the "same file"
+    branch in the other -- no backup, then a refusal (#959).
+    """
+
+    def test_identical_strings(self, tmp_path):
+        target = str(tmp_path / "a.parquet")
+        assert is_same_file_path(target, target) is True
+
+    def test_dot_prefixed_alias(self, tmp_path):
+        target = tmp_path / "a.parquet"
+        target.write_bytes(b"")
+        alias = f"{tmp_path}{os.sep}.{os.sep}a.parquet"
+        assert alias != str(target)
+        assert is_same_file_path(alias, str(target)) is True
+
+    def test_relative_and_absolute_spellings(self, tmp_path):
+        target = tmp_path / "a.parquet"
+        target.write_bytes(b"")
+        # Relative to the real CWD, so the test never has to change it
+        # (no-cwd-change-in-tests forbids chdir and points here instead).
+        try:
+            relative = os.path.relpath(str(target))
+        except ValueError:
+            # Windows only: os.path.relpath raises "path is on mount 'C:',
+            # start on mount 'D:'" when tmp_path and the CWD are on different
+            # drives, which is how GitHub's windows runners are laid out. A
+            # relative spelling can only name the same file when it is
+            # reachable from the CWD, so there is nothing to assert here --
+            # and chdir is not available to make one.
+            pytest.skip("tmp_path is on a different drive than the CWD")
+        assert relative != str(target)
+        assert is_same_file_path(relative, str(target)) is True
+
+    def test_symlink_alias(self, tmp_path):
+        target = tmp_path / "a.parquet"
+        target.write_bytes(b"")
+        link = tmp_path / "link.parquet"
+        link.symlink_to(target)
+        assert is_same_file_path(str(link), str(target)) is True
+
+    def test_different_files(self, tmp_path):
+        assert is_same_file_path(str(tmp_path / "a.parquet"), str(tmp_path / "b.parquet")) is False
+
+    @pytest.mark.parametrize(
+        "first,second",
+        [(None, "a.parquet"), ("a.parquet", None), ("", "a.parquet"), ("a.parquet", "")],
+    )
+    def test_a_missing_path_is_never_the_same_file(self, first, second):
+        assert is_same_file_path(first, second) is False
+
+    def test_remote_urls_are_compared_verbatim(self):
+        """There is no local filesystem to resolve a remote URL against."""
+        assert is_same_file_path("s3://bucket/a.parquet", "s3://bucket/a.parquet") is True
+        assert is_same_file_path("s3://bucket/a.parquet", "s3://bucket/b.parquet") is False
+        assert is_same_file_path("s3://bucket/a.parquet", "/tmp/a.parquet") is False
+
+    def test_an_unresolvable_path_is_not_a_match(self, tmp_path, monkeypatch):
+        """A resolve() that raises means "cannot tell", which must not read as "same"."""
+
+        def explode(self, *args, **kwargs):
+            raise OSError("resolve blew up")
+
+        monkeypatch.setattr("pathlib.Path.resolve", explode)
+        assert is_same_file_path(str(tmp_path / "a.parquet"), str(tmp_path / "b.parquet")) is False
 
 
 # =============================================================================

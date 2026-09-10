@@ -2,11 +2,17 @@
 
 import os
 import shutil
+from contextlib import contextmanager
+from pathlib import Path
+from unittest import mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
+from geoparquet_io.core import check_fixes
 from geoparquet_io.core.check_fixes import (
+    _move_temp_output_into_place,
     fix_bbox_column,
     fix_bbox_metadata,
     fix_bbox_removal,
@@ -382,6 +388,184 @@ class TestFixSpatialOrdering:
         assert fix_result["success"] is True
         assert "Hilbert" in fix_result["fix_applied"]
         assert os.path.exists(output_file)
+
+    def test_inplace_fix_reorders_the_input(self, places_test_file, temp_output_dir):
+        """#941: input == output is routed through a temp file, not refused.
+
+        ``hilbert_order`` reads the whole input while writing, so it refuses an
+        output that resolves to its own input. Every other ``fix_*`` already
+        routes an in-place rewrite through a temp file; this one used to hand
+        the path straight through and die with "Cannot overwrite input file".
+        """
+        target = os.path.join(temp_output_dir, "inplace_spatial.parquet")
+        table = pq.read_table(places_test_file)
+        shuffled = table.take(pa.array(list(reversed(range(table.num_rows)))))
+        pq.write_table(shuffled, target)
+        before = pq.read_table(target).column("fsq_place_id").to_pylist()
+
+        fix_result = fix_spatial_ordering(target, target, verbose=False)
+
+        assert fix_result["success"] is True
+        after = pq.read_table(target).column("fsq_place_id").to_pylist()
+        assert sorted(after) == sorted(before)
+        assert after != before
+
+    def test_temp_file_is_removed_when_the_sort_fails(self, places_test_file, temp_output_dir):
+        """A failed in-place sort leaves no stray temp file behind."""
+        target = os.path.join(temp_output_dir, "doomed.parquet")
+        shutil.copy2(places_test_file, target)
+        seen = []
+
+        def explode(*_args, output_parquet, **_kwargs):
+            seen.append(output_parquet)
+            Path(output_parquet).write_bytes(b"partial")
+            raise RuntimeError("sort blew up")
+
+        with mock.patch.object(check_fixes, "hilbert_order", side_effect=explode):
+            with pytest.raises(RuntimeError, match="sort blew up"):
+                fix_spatial_ordering(target, target, verbose=False)
+
+        assert seen and seen[0] != target
+        assert not os.path.exists(seen[0])
+        # The original is untouched: nothing was moved over it.
+        assert pq.read_table(target).num_rows == pq.read_table(places_test_file).num_rows
+
+    def test_temp_output_is_written_beside_the_target(self, places_test_file, temp_output_dir):
+        """The rewrite stages next to the target, not in ``$TMPDIR``.
+
+        ``$TMPDIR`` is routinely on another filesystem (a Linux ``/tmp`` tmpfs,
+        a container, an NFS home, an external volume). Staging there makes a
+        multi-GB in-place fix exhaust a tmpfs the destination would have
+        accommodated, and turns the move back into a copy+unlink -- which is
+        also what makes it non-atomic.
+        """
+        target = os.path.join(temp_output_dir, "beside.parquet")
+        shutil.copy2(places_test_file, target)
+        seen = []
+
+        def capture(*_args, output_parquet, **_kwargs):
+            seen.append(output_parquet)
+            shutil.copy2(places_test_file, output_parquet)
+
+        with mock.patch.object(check_fixes, "hilbert_order", side_effect=capture):
+            fix_spatial_ordering(target, target, verbose=False)
+
+        assert seen, "hilbert_order was never called"
+        assert os.path.dirname(os.path.abspath(seen[0])) == os.path.abspath(temp_output_dir)
+
+    def test_an_aliased_output_path_is_still_an_in_place_fix(
+        self, places_test_file, temp_output_dir
+    ):
+        """``./a.parquet`` and ``a.parquet`` name one file, so route through a temp.
+
+        ``handle_output_overwrite`` compares ``Path.resolve()``, so it sees the
+        two spellings as the same file and refuses the write. Comparing the raw
+        strings here missed that and reproduced the original #941 failure for
+        any ``./`` prefix, relative-vs-absolute mix or symlink alias.
+        """
+        target = os.path.join(temp_output_dir, "aliased.parquet")
+        shutil.copy2(places_test_file, target)
+        alias = os.path.join(temp_output_dir, ".", "aliased.parquet")
+        before = pq.read_table(target).column("fsq_place_id").to_pylist()
+
+        fix_result = fix_spatial_ordering(alias, target, verbose=False)
+
+        assert fix_result["success"] is True
+        after = pq.read_table(target).column("fsq_place_id").to_pylist()
+        assert sorted(after) == sorted(before)
+
+    def test_a_failed_move_leaves_the_original_intact(self, places_test_file, temp_output_dir):
+        """A move that fails must not take the only good copy of the data with it.
+
+        The whole destructive step lives in ``_move_temp_output_into_place``, so
+        if it raises, the ``finally`` must not go on to delete the rewrite *and*
+        leave the caller with nothing. Under ``--fix --no-backup`` there is no
+        ``.bak`` to fall back on, and a direct caller of this function has no
+        ``.bak`` concept at all.
+        """
+        target = os.path.join(temp_output_dir, "precious.parquet")
+        shutil.copy2(places_test_file, target)
+        original_bytes = Path(target).read_bytes()
+
+        def copy_into_place(*_args, output_parquet, **_kwargs):
+            shutil.copy2(places_test_file, output_parquet)
+
+        def no_space(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        with (
+            mock.patch.object(check_fixes, "hilbert_order", side_effect=copy_into_place),
+            mock.patch.object(check_fixes, "_move_temp_output_into_place", side_effect=no_space),
+            pytest.raises(OSError, match="No space left on device"),
+        ):
+            fix_spatial_ordering(target, target, verbose=False)
+
+        assert os.path.exists(target), "the in-place fix destroyed the original file"
+        assert Path(target).read_bytes() == original_bytes
+
+
+class TestMoveTempOutputIntoPlace:
+    """The temp-file rewrite lands on both local and remote destinations."""
+
+    def test_local_destination_is_replaced(self, tmp_path):
+        temp_file = tmp_path / "temp.parquet"
+        temp_file.write_bytes(b"new")
+        destination = tmp_path / "dest.parquet"
+        destination.write_bytes(b"old")
+
+        _move_temp_output_into_place(str(temp_file), str(destination), None)
+
+        assert destination.read_bytes() == b"new"
+        assert not temp_file.exists()
+
+    def test_a_failed_replace_does_not_destroy_the_destination(self, tmp_path):
+        """ENOSPC mid-move must leave the destination exactly as it was.
+
+        Unlinking the destination and *then* moving leaves a window in which an
+        ``OSError`` -- ENOSPC (likely precisely when fixing a large file in
+        place), a read-only mount, a quota, EXDEV -- destroys the original with
+        the rewrite still only in the temp file. ``os.replace()`` is atomic on
+        POSIX and Windows for two paths on one filesystem, which co-locating the
+        temp guarantees, so there is no such window.
+        """
+        temp_file = tmp_path / "temp.parquet"
+        temp_file.write_bytes(b"new")
+        destination = tmp_path / "dest.parquet"
+        destination.write_bytes(b"old")
+
+        def no_space(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        # Whichever primitive puts the rewrite back, a failure must be survivable.
+        with (
+            mock.patch("os.replace", side_effect=no_space),
+            mock.patch("shutil.move", side_effect=no_space),
+            pytest.raises(OSError, match="No space left on device"),
+        ):
+            _move_temp_output_into_place(str(temp_file), str(destination), None)
+
+        assert destination.exists(), "the destination was destroyed by a failed move"
+        assert destination.read_bytes() == b"old"
+        assert temp_file.read_bytes() == b"new"
+
+    def test_remote_destination_is_uploaded(self, tmp_path):
+        temp_file = tmp_path / "temp.parquet"
+        temp_file.write_bytes(b"new")
+        staged = tmp_path / "staged.parquet"
+
+        @contextmanager
+        def fake_remote_write_context(path, profile=None):
+            yield str(staged)
+
+        with (
+            mock.patch.object(check_fixes, "is_remote_url", return_value=True),
+            mock.patch.object(
+                check_fixes, "remote_write_context", side_effect=fake_remote_write_context
+            ),
+        ):
+            _move_temp_output_into_place(str(temp_file), "s3://bucket/dest.parquet", "myprofile")
+
+        assert staged.read_bytes() == b"new"
 
 
 class TestInPlaceFixOperations:

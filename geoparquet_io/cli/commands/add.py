@@ -15,6 +15,7 @@ from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     any_extension_option,
     bbox_option,
+    column_name_option,
     dry_run_option,
     geoparquet_version_option,
     output_format_options,
@@ -370,7 +371,7 @@ def add_geometry_metrics_cmd(
 @add.command(name="bbox", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
-@click.option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
+@column_name_option("--bbox-name", default="bbox", help="Name for the bbox column (default: bbox)")
 @click.option(
     "--force",
     is_flag=True,
@@ -498,7 +499,9 @@ def add_bbox_metadata_cmd(ctx, parquet_file, verbose):
 @add.command(name="h3", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
-@click.option("--h3-name", default="h3_cell", help="Name for the H3 column (default: h3_cell)")
+@column_name_option(
+    "--h3-name", default="h3_cell", help="Name for the H3 column (default: h3_cell)"
+)
 @click.option(
     "--resolution",
     default=9,
@@ -571,7 +574,9 @@ def add_h3(
 @add.command(name="a5", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
-@click.option("--a5-name", default="a5_cell", help="Name for the A5 column (default: a5_cell)")
+@column_name_option(
+    "--a5-name", default="a5_cell", help="Name for the A5 column (default: a5_cell)"
+)
 @click.option(
     "--resolution",
     default=15,
@@ -644,7 +649,9 @@ def add_a5(
 @add.command(name="s2", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
-@click.option("--s2-name", default="s2_cell", help="Name for the S2 column (default: s2_cell)")
+@column_name_option(
+    "--s2-name", default="s2_cell", help="Name for the S2 column (default: s2_cell)"
+)
 @click.option(
     "--level",
     default=13,
@@ -717,7 +724,7 @@ def add_s2(
 @add.command(name="kdtree", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet")
-@click.option(
+@column_name_option(
     "--kdtree-name",
     default="kdtree_cell",
     help="Name for the KD-tree column (default: kdtree_cell)",
@@ -830,7 +837,7 @@ def add_kdtree(
 @add.command(name="quadkey", cls=SingleFileCommand)
 @click.argument("input_parquet")
 @click.argument("output_parquet", required=False, default=None)
-@click.option(
+@column_name_option(
     "--quadkey-name",
     default="quadkey",
     help="Name for the quadkey column (default: quadkey)",

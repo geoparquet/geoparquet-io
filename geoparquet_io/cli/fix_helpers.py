@@ -5,6 +5,7 @@ import shutil
 
 import click
 
+from geoparquet_io.core.file_utils import is_same_file_path
 from geoparquet_io.core.remote import is_remote_url
 
 
@@ -104,7 +105,7 @@ def handle_fix_error(e, no_backup, output_path, parquet_file, backup_path):
     # Restore from backup if it exists
     if (
         not no_backup
-        and output_path == parquet_file
+        and is_same_file_path(output_path, parquet_file)
         and backup_path
         and os.path.exists(backup_path)
     ):
@@ -153,14 +154,20 @@ def handle_fix_common(
     output_path = fix_output or parquet_file
     backup_path = f"{parquet_file}.bak"
 
+    # `--fix-output ./same.parquet` is an in-place fix: comparing the raw strings
+    # sent it down the "different file" branch, so it got no .bak and no
+    # confirmation, while handle_output_overwrite -- which compares resolve() --
+    # refused the write anyway (#959).
+    fixing_in_place = is_same_file_path(output_path, parquet_file)
+
     # Confirm overwrite without backup for local files
-    if no_backup and not fix_output and not is_remote_url(parquet_file):
+    if no_backup and fixing_in_place and not is_remote_url(parquet_file):
         click.confirm("This will overwrite the original file without backup. Continue?", abort=True)
 
     # Create backup if needed (only for local files)
     if (
         not no_backup
-        and output_path == parquet_file
+        and fixing_in_place
         and os.path.exists(parquet_file)
         and not is_remote_url(parquet_file)
     ):
