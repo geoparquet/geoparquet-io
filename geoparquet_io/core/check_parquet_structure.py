@@ -556,7 +556,10 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, 
     # make (#979). That crash sat behind the `detect_geoparquet_file_type` one
     # `check bbox` hit a frame earlier, so it only becomes reachable once that
     # is guarded -- fix one without the other and the traceback just moves.
-    version = carried_version(geo_meta.get("version") if isinstance(geo_meta, dict) else None)
+    version = carried_version(
+        geo_meta.get("version") if isinstance(geo_meta, dict) else None,
+        source=str(parquet_file),
+    )
     version = version or "0.0.0"
     bbox_info = check_bbox_structure(parquet_file, verbose)
 
