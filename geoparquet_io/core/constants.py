@@ -157,7 +157,27 @@ def _fix_vecorel_schema(parquet_file: str, non_nullable_columns: list[str]) -> N
 
     Preserves all existing Parquet metadata, compression, and row group structure.
     Processes one row group at a time to avoid loading the entire file into memory.
+
+    This is a pyarrow read/write of the whole file, so it has to preserve the
+    things pyarrow does not carry by default. A Parquet ``GEOMETRY``/``GEOGRAPHY``
+    logical type is one: plain pyarrow reads such a column as ``binary`` and
+    writes it back as ``binary``, dropping the logical type **and the CRS stored
+    inside it**, which for a native-geo-only file is the only place the CRS
+    lives. Importing ``geoarrow.pyarrow`` registers the extension types that make
+    pyarrow materialise those columns as ``geoarrow.wkb`` instead, so the read ->
+    cast -> write below round-trips the type, the CRS and a GEOGRAPHY's edge type
+    unchanged.
+
+    That import is a process-wide registration, which is why it has to happen
+    *here* rather than be relied on: before #993 this function's behaviour
+    depended on whether something else in the process had already imported it.
+    Measured on ``gpio add geometry-metrics`` over a native-geo-only EPSG:5070
+    input, the same code scored ``0 failed`` under pytest (whose fixtures import
+    ``geoarrow.pyarrow`` to write their files) and ``4 failed`` from a fresh CLI
+    process. ``tests/test_add_preserves_native_geo.py`` runs that command in a
+    subprocess for exactly that reason.
     """
+    import geoarrow.pyarrow  # noqa: F401  -- registers the extension types; see above
     import pyarrow as pa
     import pyarrow.parquet as pq
 

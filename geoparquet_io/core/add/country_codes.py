@@ -747,6 +747,9 @@ def add_country_codes(
             row_group_size_mb=row_group_size_mb,
             row_group_rows=row_group_rows,
             verbose=verbose,
+            # The join keeps the input's own geometry column, so the input is
+            # the witness auto mode resolves the output version from (#993).
+            input_file=input_path,
         )
 
         _print_results_summary(con, output_parquet)

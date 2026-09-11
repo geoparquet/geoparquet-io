@@ -703,6 +703,12 @@ def _add_quadkey_file_based(
             profile=profile,
             geoparquet_version=geoparquet_version,
             custom_metadata=quadkey_metadata,
+            # The rows this write reads are the input's, so the input is the
+            # witness auto mode resolves the output version from. Without it a
+            # native-geo-only input was re-encoded as 1.1 WKB and lost the CRS
+            # its GEOMETRY logical type carried -- which `gpio sort quadkey`
+            # then read back as its data (#993).
+            input_file=input_parquet,
             memory_limit=memory_limit,
         )
 

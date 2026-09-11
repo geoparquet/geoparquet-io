@@ -2,6 +2,32 @@
 
 The `add` commands enhance GeoParquet files with spatial indices, geometry metrics, and administrative metadata.
 
+!!! note "The output keeps the input's GeoParquet version and CRS"
+    Every `add` command rewrites the whole file to append its column, and with
+    no `--geoparquet-version` that rewrite preserves what the input was: a 1.1
+    file stays 1.1, a 2.0 file stays 2.0, and a file that carries a native
+    Parquet `GEOMETRY` type with no `geo` key is written as native 2.0. Until
+    [#993](https://github.com/geoparquet/geoparquet-io/issues/993) that last
+    case was re-encoded as 1.1 WKB, which stripped the logical type **and the
+    CRS stored inside it** — an `EPSG:5070` file came back out declaring
+    nothing, which every reader resolves as `OGC:CRS84`. Pass
+    `--geoparquet-version` to ask for something other than the input's version;
+    the CRS is preserved either way, including when you ask for 1.1, which has
+    nowhere but the `geo` block to record it.
+
+    It is the same rewrite behind `gpio sort quadkey` and
+    `gpio partition quadkey/h3/s2/a5/kdtree`, which add their index column to a
+    scratch file first, so those commands preserve the version and the CRS now
+    too.
+
+    Two shapes are not fully covered yet, both pinned by failing-on-purpose
+    tests: a native `GEOGRAPHY` column comes back as a planar `GEOMETRY` while
+    the metadata still declares spherical edges
+    ([#999](https://github.com/geoparquet/geoparquet-io/issues/999)), and a
+    *secondary* geometry column keeps its own Parquet type but is left out of
+    `geo.columns` and loses its CRS
+    ([#1000](https://github.com/geoparquet/geoparquet-io/issues/1000)).
+
 !!! note "Coordinate Reference Systems"
     The grid-index commands (`h3`, `s2`, `a5`, `quadkey`) and `admin-divisions` are
     **CRS-aware**. If your input declares a projected CRS (e.g. EPSG:5070 or

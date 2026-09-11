@@ -12,23 +12,36 @@ identical CLI request wrote 49,152 (#971), ``convert geoparquet`` documenting
 ``convert`` downgrading a native-geo-only input to 1.1 WKB (#600).
 
 This module is the single owner of those shared decisions. It owns exactly
-three, because each one is a fact about the *output file* that no individual
+four, because each one is a fact about the *output file* that no individual
 write path is entitled to answer for itself:
 
 1. **How many rows go in a row group** -- :func:`resolve_row_group_rows`, and
    the constants it derives the default from.
 2. **Which GeoParquet version the output declares** when the caller did not ask
    for one -- :func:`resolve_output_geoparquet_version`.
-3. **Whether a ``geo`` key appears in the output's file-level metadata at all**
+3. **Which CRS the output declares** when the caller did not name one --
+   :func:`resolve_input_crs`.
+4. **Whether a ``geo`` key appears in the output's file-level metadata at all**
    -- :func:`apply_output_kv_metadata`.
+
+The third exists because it is the *same question as the second*, asked of the
+same witness. Both are "what did the input declare", and a rewrite that answers
+one from the input file and the other from the carried ``geo`` key produces a
+file that contradicts itself: native 2.0 with EPSG:5070 in the Parquet
+``GEOMETRY`` logical type and no ``crs`` key in the ``geo`` block, which
+GeoParquet resolves as ``OGC:CRS84`` (#993). Splitting the two answers between
+two owners is what made that possible, so they are answered together.
 
 It deliberately does **not** own the rest of the write. Compression validation
 (``common.validate_compression_settings``), the contents of the ``geo`` block
-(``write_strategies.base.build_geo_metadata``), CRS resolution
+(``write_strategies.base.build_geo_metadata``), the null-vs-default CRS rule
 (``crs_utils.apply_output_crs``), bbox coverings and geometry-type computation
 all already have a single owner each, and pulling them in here would turn a
 facade into a rewrite. The line is: this module decides what the paths were
-*disagreeing* about; the existing owners keep what they already own.
+*disagreeing* about; the existing owners keep what they already own. In
+particular :func:`resolve_input_crs` only *finds* the input's CRS; what a write
+does with it -- omit it when it is the default, strip a stale one, refuse to
+overwrite an explicit null -- stays with ``apply_output_crs``.
 """
 
 from __future__ import annotations
@@ -270,13 +283,16 @@ def resolve_output_geoparquet_version(
     ``input_file`` must be the file whose *rows* the write will read, or a file
     that is lossless with respect to it. Handing this the user's input while
     reading the data from a scratch rewrite that dropped the native type and
-    the CRS produces the worst of both: a native 2.0 output declaring the
+    the CRS produced the worst of both: a native 2.0 output declaring the
     default CRS over projected data, which reads as an assertion rather than an
     omission and which ``gpio check spec`` then blesses. ``gpio sort quadkey``
-    does exactly that today, and it is why the index-adding ``gpio partition``
-    drivers were left resolving from their scratch file rather than "fixed" the
-    same way. See ``partition/staging.py`` and the strict xfails in
-    ``tests/test_write_facade_version_owner.py``.
+    and the five index-adding ``gpio partition`` drivers did exactly that until
+    #993 made their scratch write pass the same witness, so the intermediate is
+    now lossless with respect to the user's file. See ``partition/staging.py``.
+
+    The same witness answers :func:`resolve_input_crs`, and it has to: this
+    function is what makes the output native, and a native output states its
+    CRS in two places that must agree.
 
     Returns ``None`` when nothing can be detected, leaving the caller's own
     default in charge.
@@ -298,12 +314,65 @@ def resolve_output_geoparquet_version(
     return _resolve_auto_version(extract_version_from_metadata(original_metadata))
 
 
+def resolve_input_crs(
+    input_crs: dict | None,
+    *,
+    input_file: str | None = None,
+    verbose: bool = False,
+) -> dict | None:
+    """Decide which CRS the output describes its geometry with. The third decision.
+
+    A caller that names a CRS always wins -- ``reproject`` and ``convert`` pass
+    the CRS they are transforming *to*, which is a fact about the output that no
+    reading of the input could supply. Everything else is a rewrite that keeps
+    its input's coordinates, and for those the input file is the witness, the
+    same one :func:`resolve_output_geoparquet_version` consults.
+
+    Without this, a rewrite answered the CRS question from whatever ``geo``
+    block it happened to carry. A native-geo-only input has none, so nothing
+    described the output's CRS at all -- while the version question, answered
+    from the file, made that output *native 2.0*. The two answers then landed in
+    two different places: EPSG:5070 in the Parquet ``GEOMETRY`` logical type
+    (DuckDB writes it there from the column it read) and nothing in the ``geo``
+    block, which GeoParquet reads as ``OGC:CRS84``. One file, two CRSs, and
+    ``gpio check spec`` printing ``✗ CRS in geo metadata must match CRS in
+    Parquet schema`` over it (#993).
+
+    It also repairs a quieter loss on the same inputs: an explicit
+    ``--geoparquet-version 1.1`` has nowhere but the ``geo`` block to put a CRS,
+    so before this the 1.1 rewrite of a native-geo-only file declared no CRS
+    anywhere.
+
+    ``extract_crs_from_parquet`` returns ``None`` for the default CRS and for an
+    explicit ``crs: null``, both of which mean "do not state a CRS here" -- so a
+    miss leaves ``input_crs`` ``None`` and ``apply_output_crs`` keeps its
+    existing behaviour of preserving whatever the carried block said. A file
+    that cannot be inspected (remote without credentials, a path that is not
+    Parquet) is a miss too, not an error: the write worked before this function
+    existed and must keep working.
+    """
+    if input_crs is not None:
+        return input_crs
+    if not input_file:
+        return None
+
+    from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+    from geoparquet_io.core.logging_config import debug
+
+    try:
+        # RAW path: extract_crs_from_parquet escapes its own argument (#718).
+        return extract_crs_from_parquet(input_file, verbose=verbose)
+    except Exception as exc:  # pragma: no cover - defensive, see docstring
+        debug(f"CRS auto-detect failed for {input_file}: {exc}; leaving the CRS unstated")
+        return None
+
+
 def apply_output_kv_metadata(
     table: pa.Table,
     geoparquet_version: str | None,
     extra_kv_metadata: dict[str, str] | None = None,
 ) -> pa.Table:
-    """Decide the output's file-level KV metadata. The third decision.
+    """Decide the output's file-level KV metadata. The fourth decision.
 
     Two rules, and the version decides both:
 
