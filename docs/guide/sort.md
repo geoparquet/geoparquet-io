@@ -114,6 +114,8 @@ gpio sort hilbert input.parquet output.parquet --row-group-size-mb 1GB
 
     A request of one writer vector or less - 2,048 rows or fewer - is passed through rather than snapped. DuckDB quantises those to 2,048 whatever gpio does, but pyarrow honours them exactly, so rounding could only change the output on the writer that would have obeyed you.
 
+    For `gpio sort str` that has a second effect, because the STR tile size *is* the row-group request: `--row-group-size 20` now packs 20-row tiles, where the old rounding turned them into 2,048-row tiles. That changes the row **order**, not only the row-group layout.
+
 ## Sort-Tile-Recursive Ordering
 
 STR is an alternative spatial ordering. It sorts geometry bounding-box centers

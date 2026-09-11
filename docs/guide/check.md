@@ -155,7 +155,7 @@ Checks row group size optimization for cloud-native access.
 
 The check reports two numbers, and they answer different questions:
 
-- **The verdict is 10,000-200,000 rows per group.** This is what passes or fails, and it is deliberately wide: it has to accept the layouts mainstream writers produce at their own defaults — DuckDB writes 122,880 rows per group, pyarrow's own default is 1,048,576, and gpio writes 49,152. A pass/fail band that excluded all of those would be reporting on the ecosystem rather than on your file. Outside it the check reports `suboptimal`, and below 2,000 or above 1,000,000 rows, `poor`.
+- **The verdict is 10,000-200,000 rows per group.** This is what passes or fails, and it is deliberately wide: it has to accept the layouts mainstream writers produce at their own defaults — DuckDB writes 122,880 rows per group, and gpio writes 49,152. A pass/fail band that excluded both of those would be reporting on the ecosystem rather than on your file. Outside it the check reports `suboptimal`, and below 2,000 or above 1,000,000 rows, `poor`. Not every default fits: pyarrow's is `min(num_rows, 1048576)`, so a 300,000-row table becomes one 300,000-row group (`suboptimal`) and anything past a million rows starts producing 1,048,576-row groups (`poor`). The band accepts the defaults that are usable over a network, not all of them.
 - **The advice is 10,000-50,000 rows per group**, for spatial queries. This is the band with measurements behind it, so a file can sit inside the verdict band and still be worth re-sorting.
 
 !!! tip "Spatial filter pushdown and row group sizing"

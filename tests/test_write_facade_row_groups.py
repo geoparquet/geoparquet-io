@@ -21,6 +21,7 @@ patch points sit on opposite sides of the facade call.
 
 from __future__ import annotations
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
@@ -191,3 +192,112 @@ def test_the_default_is_inside_the_band_check_scores(many_rows, tmp_path):
 
     low, high = SPATIAL_ROW_COUNT_RANGE
     assert all(low <= size <= high for size in _full_groups(out))
+
+
+# ---------------------------------------------------------------------------
+# `--help` has to state the rule the facade actually applies
+# ---------------------------------------------------------------------------
+#
+# The facade moved the effective default onto every write path, and the help
+# text was left describing the rule it replaced: "if neither is given the
+# writer's own default applies (122,880 rows for DuckDB-backed writes)". Both
+# halves were false the moment this landed -- gpio snaps *down* to 49,152 and
+# does not fall through to the writer -- while `docs/guide/convert.md`, edited
+# in the same commit, correctly said 49,152. A tool contradicting its own new
+# docs in one commit is #967's failure shape, and the repo had shipped it twice.
+#
+# `tests/data/cli_surface.json` structurally cannot catch this: it records
+# Click's *declared* default, which is still `None` (a real Click default would
+# collide with `--row-group-size-mb` and raise the mutually-exclusive error).
+# Only the help string names the effective default, so only the help string can
+# be checked.
+
+
+def _leaf_commands(group, path=()):
+    """Every leaf command in the CLI tree, as ``("convert geoparquet", cmd)``."""
+    for name, command in sorted(getattr(group, "commands", {}).items()):
+        if hasattr(command, "commands"):
+            yield from _leaf_commands(command, (*path, name))
+        else:
+            yield " ".join((*path, name)), command
+
+
+def _row_group_size_option(command):
+    return next((p for p in command.params if "--row-group-size" in p.opts), None)
+
+
+def _row_group_help_text(command_path: str) -> str:
+    return _row_group_size_option(dict(_leaf_commands(cli))[command_path]).help or ""
+
+
+#: Every command that offers ``--row-group-size``. Discovered rather than
+#: listed, so a new write command is covered the day it is registered.
+ROW_GROUP_COMMANDS = sorted(
+    path for path, command in _leaf_commands(cli) if _row_group_size_option(command)
+)
+
+
+def test_the_help_sweep_is_not_vacuous():
+    """A walk that found nothing would make every test below pass silently."""
+    assert len(ROW_GROUP_COMMANDS) > 20, ROW_GROUP_COMMANDS
+    # The four sort subcommands already named a default; the interesting half is
+    # everything else, which did not.
+    assert len([c for c in ROW_GROUP_COMMANDS if not c.startswith("sort ")]) > 15
+
+
+@pytest.mark.parametrize("command", ROW_GROUP_COMMANDS)
+def test_help_names_the_default_that_actually_lands(command):
+    """One default, so one number in every ``--row-group-size`` help string."""
+    help_text = _row_group_help_text(command)
+
+    assert f"default: {DEFAULT_ROW_GROUP_ROWS:,}" in help_text, help_text
+
+
+@pytest.mark.parametrize("command", ROW_GROUP_COMMANDS)
+def test_help_does_not_advertise_the_rule_the_facade_deleted(command):
+    """No help string may still hand the choice to the writer."""
+    help_text = _row_group_help_text(command)
+
+    assert "122,880" not in help_text, help_text
+    assert "writer's own default" not in help_text, help_text
+
+
+# ---------------------------------------------------------------------------
+# The facade is shared, so its errors have to name the caller's own parameter
+# ---------------------------------------------------------------------------
+
+
+def test_the_api_rejection_names_the_python_argument_not_the_cli_flag():
+    """``Table.write(row_group_rows=0)`` must not blame ``--row-group-size``.
+
+    The facade is one function serving two front ends. A Python caller never
+    typed a flag, and telling them "Invalid parameter '--row-group-size'" sends
+    them looking for something that is not in their code.
+    """
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    with pytest.raises(InvalidParameterError) as raised:
+        gpio.Table(pa.table({"id": [1]})).write("unused.parquet", row_group_rows=0)
+
+    assert "row_group_rows" in str(raised.value)
+    assert "--row-group-size" not in str(raised.value)
+
+
+def test_the_cli_rejection_still_names_the_flag(many_rows, tmp_path):
+    """The other half: the CLI error must keep naming what the user typed."""
+    result = CliRunner().invoke(
+        cli,
+        ["sort", "hilbert", str(many_rows), str(tmp_path / "o.parquet"), "--row-group-size", "0"],
+    )
+
+    assert result.exit_code != 0
+    assert "--row-group-size" in result.output
+
+
+@pytest.mark.parametrize("command", ["convert geoparquet", "extract geoparquet", "add bbox"])
+def test_the_rendered_help_block_carries_the_number(command):
+    """Parsed from the option, but the user reads the rendered block."""
+    result = CliRunner().invoke(cli, [*command.split(), "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert f"{DEFAULT_ROW_GROUP_ROWS:,}" in " ".join(result.output.split()), result.output

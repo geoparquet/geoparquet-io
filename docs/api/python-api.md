@@ -760,7 +760,15 @@ means the same thing on both front ends:
 | `None` (default) | 49,152 |
 | `50000` | 49,152 — snapped to a whole 2,048-row writer vector, as `gpio sort --row-group-size 50000` does |
 | `10240` | 10,240 — already a whole number of vectors |
-| `10` | 10 — a request of one vector or less is passed through |
+| `10` | **2,048** on the default `duckdb-kv` strategy; 10 on the Arrow strategies |
+
+The last row is the one place the two writers behind `write_strategy` differ.
+gpio passes a request of one vector or less through unsnapped rather than
+rounding it, because DuckDB's `COPY` quantises anything below 2,048 up to 2,048
+whatever gpio does, while `pq.write_table` honours it exactly — so rounding
+could only change the output on the writer that would have obeyed you. Pass
+`write_strategy='in-memory'` (or `'streaming'`, or `'disk-rewrite'`) if you
+actually want sub-vector row groups.
 
 Until [#971](https://github.com/geoparquet/geoparquet-io/issues/971) this path
 handed the writer the raw value: `row_group_rows=50000` wrote 51,200-row groups

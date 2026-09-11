@@ -152,7 +152,9 @@ def _help_default_rows(command: str) -> int:
     assert number, f"--row-group-size help states no default: {option.help!r}"
     rows = int(number.group(1).replace(",", ""))
     assert "--row-group-size INTEGER" in result.output, result.output
-    assert str(rows) in " ".join(result.output.split()), result.output
+    # Compare the string as written, not a reformatting of it: the help text
+    # groups thousands, and Click never breaks a line inside "49,152".
+    assert number.group(1) in " ".join(result.output.split()), result.output
     return rows
 
 

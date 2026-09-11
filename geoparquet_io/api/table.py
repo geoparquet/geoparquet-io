@@ -1110,8 +1110,12 @@ class Table:
         # directly, so `row_group_rows=50000` reached the writer unaligned and
         # landed at 51,200 while the identical `gpio sort --row-group-size
         # 50000` wrote 49,152 (#971), and passing nothing at all inherited
-        # DuckDB's 122,880.
-        row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+        # DuckDB's 122,880. The parameter name travels with the call so a
+        # rejected value blames `row_group_rows`, not a CLI flag this caller
+        # never typed.
+        row_group_rows = resolve_row_group_rows(
+            row_group_rows, row_group_size_mb, param_name="row_group_rows"
+        )
 
         # Auto mode: resolve to a concrete version with the same decision the
         # CLI uses (native-geo-only → 2.0), falling back to the hint captured

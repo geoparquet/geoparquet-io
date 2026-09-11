@@ -134,6 +134,7 @@ DEFAULT_ROW_GROUP_ROWS = align_to_writer_vector(SPATIAL_BAND_TOP_ROWS)  # 49,152
 def resolve_row_group_rows(
     row_group_rows: int | None,
     row_group_size_mb: float | None,
+    param_name: str = "--row-group-size",
 ) -> int | None:
     """Decide how many rows a row group gets. The facade's first decision.
 
@@ -168,9 +169,13 @@ def resolve_row_group_rows(
 
     A row count below 1 is rejected, not clamped: ``sort str`` raised on
     ``--row-group-size -5`` while the other three quietly wrote 2,048-row groups.
+    ``param_name`` is what that rejection blames. One function now serves both
+    front ends, so the default names the CLI flag and ``Table.write`` passes its
+    own keyword instead -- a Python caller never typed ``--row-group-size`` and
+    should not be sent looking for it in their code.
     """
     if row_group_rows is not None and row_group_rows < 1:
-        raise InvalidParameterError("--row-group-size", "must be at least 1")
+        raise InvalidParameterError(param_name, "must be at least 1")
     if row_group_rows is None and row_group_size_mb is None:
         return DEFAULT_ROW_GROUP_ROWS
     if row_group_rows is None:
@@ -213,6 +218,17 @@ def resolve_output_geoparquet_version(
     interesting case is the one with no ``geo`` key, so the file is consulted
     first and the metadata is the fallback for callers that have no path to
     offer (an in-memory query, a remote input that cannot be inspected).
+
+    ``input_file`` must be the file whose *rows* the write will read, or a file
+    that is lossless with respect to it. Handing this the user's input while
+    reading the data from a scratch rewrite that dropped the native type and
+    the CRS produces the worst of both: a native 2.0 output declaring the
+    default CRS over projected data, which reads as an assertion rather than an
+    omission and which ``gpio check spec`` then blesses. ``gpio sort quadkey``
+    does exactly that today, and it is why the index-adding ``gpio partition``
+    drivers were left resolving from their scratch file rather than "fixed" the
+    same way. See ``partition/staging.py`` and the strict xfails in
+    ``tests/test_write_facade_version_owner.py``.
 
     Returns ``None`` when nothing can be detected, leaving the caller's own
     default in charge.
