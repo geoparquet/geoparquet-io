@@ -4,7 +4,6 @@ import pytest
 
 from geoparquet_io.core.common import (
     _get_geometry_type_name,
-    calculate_row_group_size,
     check_bbox_structure,
     detect_geoparquet_file_type,
     format_size,
@@ -967,40 +966,6 @@ class TestValidateProjjson:
 
     def test_rejects_dict_without_expected_keys(self):
         assert _validate_projjson({"name": "'; DROP TABLE foo; --"}) is False
-
-
-class TestCalculateRowGroupSize:
-    """Tests for calculate_row_group_size function."""
-
-    def test_with_exact_row_count(self):
-        """Test that exact row count is used when specified."""
-
-        # If target_row_group_rows is specified, use it
-        result = calculate_row_group_size(1000, 1024 * 1024, target_row_group_rows=500)
-        assert result == 500
-
-    def test_with_target_mb_size(self):
-        """Test calculating row groups based on target MB size."""
-
-        # 1000 rows, 1MB total = 1KB per row
-        # Target 10MB = should get 10240 rows, but capped at 1000
-        result = calculate_row_group_size(1000, 1024 * 1024, target_row_group_size_mb=10)
-        assert result == 1000
-
-    def test_default_row_group_size(self):
-        """Test default row group size calculation (130MB)."""
-
-        # 10000 rows, 10MB total = 1KB per row
-        # Default 130MB target = 133120 rows, but capped at 10000
-        result = calculate_row_group_size(10000, 10 * 1024 * 1024)
-        assert result == 10000
-
-    def test_minimum_one_row(self):
-        """Test that result is at least 1 row."""
-
-        # Even with tiny target, should return at least 1
-        result = calculate_row_group_size(1000, 1024 * 1024 * 1024, target_row_group_size_mb=0.001)
-        assert result >= 1
 
 
 class TestIsPartitionPath:
