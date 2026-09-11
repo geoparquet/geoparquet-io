@@ -1953,10 +1953,11 @@ Names are matched case-insensitively and resolved to the source's own spelling,
 so `--exclude-cols OWNER` drops a column named `Owner` rather than silently
 dropping nothing.
 
-`--exclude-cols` names columns of the *fetched* table, so `geometry` is always
-an accepted name there even where the source calls it something else (Carto's
-`the_geom`, an ArcGIS layer's shape). Excluding it from GeoParquet output is
-still refused, with a warning — the column is required.
+On `carto` and `arcgis`, `--exclude-cols` names columns of the *fetched* table
+rather than of the service, so `geometry` is an accepted name there even though
+the source calls it something else (Carto's `the_geom`, an ArcGIS layer's
+shape). On `carto` it is then refused with a warning, since GeoParquet output
+requires the column — including when you spell it `GEOMETRY`.
 
 On `carto`, passing `--geometry` or `--no-geometry` skips the shape probe that
 normally supplies that schema; if you also pass a column option, one bounded
