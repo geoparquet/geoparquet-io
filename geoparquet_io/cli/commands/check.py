@@ -16,6 +16,7 @@ from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_g
 from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
     check_partition_options,
+    enable_verbose_logging,
     handle_geoparquet_errors,
     overwrite_option,
     verbose_option,
@@ -177,7 +178,13 @@ class MultiFileCheckRunner:
 
 @check.command(name="all", cls=GlobAwareCommand)
 @click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Print detailed diagnostics",
+    callback=enable_verbose_logging,
+    is_eager=True,
+)
 @click.option("--fix", is_flag=True, help="Fix detected issues")
 @click.option(
     "--fix-output",
@@ -462,7 +469,13 @@ def check_all(
     show_default=True,
     help="Max rows for spatial order check",
 )
-@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Print detailed diagnostics",
+    callback=enable_verbose_logging,
+    is_eager=True,
+)
 @click.option("--fix", is_flag=True, help="Fix with Hilbert ordering")
 @click.option(
     "--fix-output",
@@ -606,7 +619,13 @@ def check_spatial(
 
 @check.command(name="compression", cls=GlobAwareCommand)
 @click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Print detailed diagnostics",
+    callback=enable_verbose_logging,
+    is_eager=True,
+)
 @click.option("--fix", is_flag=True, help="Recompress geometry with ZSTD")
 @click.option(
     "--fix-output",
@@ -694,7 +713,13 @@ def check_compression_cmd(
 
 @check.command(name="bbox", cls=GlobAwareCommand)
 @click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Print detailed diagnostics",
+    callback=enable_verbose_logging,
+    is_eager=True,
+)
 @click.option("--fix", is_flag=True, help="Fix bbox (add for v1.x, remove for v2/parquet-geo)")
 @click.option(
     "--fix-output",
@@ -827,7 +852,13 @@ def check_bbox_cmd(
 
 @check.command(name="row-group", cls=GlobAwareCommand)
 @click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Print detailed diagnostics",
+    callback=enable_verbose_logging,
+    is_eager=True,
+)
 @click.option("--fix", is_flag=True, help="Optimize row group size")
 @click.option(
     "--fix-output",
@@ -1075,7 +1106,13 @@ def check_spec(
 
 @check.command(name="optimization", cls=GlobAwareCommand)
 @click.argument("parquet_file")
-@click.option("--verbose", is_flag=True, help="Print detailed diagnostics")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Print detailed diagnostics",
+    callback=enable_verbose_logging,
+    is_eager=True,
+)
 @check_partition_options
 @click.pass_context
 def check_optimization_cmd(

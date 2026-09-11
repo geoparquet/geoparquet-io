@@ -1,27 +1,12 @@
 """A DuckDB-rejected input gets an error line, not a traceback (#983).
 
-The ``geo`` key on an input file is arbitrary JSON written by somebody else's
-tool, and DuckDB's Parquet reader refuses several shapes of it outright --
-``{"version": "1.1.0"}`` with no ``columns``, a non-string ``version``, a column
-entry with no ``encoding``. That refusal is a property of the *input*, not a
-gpio bug, and DuckDB's message ("Geoparquet metadata does not have a columns
-object") says exactly what is wrong with the file.
-
-``gpio inspect head`` and ``gpio convert geoparquet`` already answered such a
-file with ``Error: <duckdb's message>`` and exit 1. Eleven other commands
-answered it with a raw Python traceback, because the handling lived in per-site
-``except`` blocks rather than at the boundary every command passes through.
-
-The fix is the boundary: the root group converts a DuckDB failure that nobody
-underneath owned into a ``ClickException``. One funnel, so a command added
-tomorrow inherits it.
-
-The catch is deliberately *not* ``duckdb.Error``. gpio authors every SQL string
-it runs, so a query that will not parse or bind is a bug in something we
-generated, and answering it with the same ``Error:`` line used for a bad input
-would tell a user their data is broken when the broken thing is ours. Both
-directions are pinned below: the input-caused failures become an error line, and
-the gpio-caused ones keep their traceback.
+The root group converts a DuckDB failure that no gpio frame owned into gpio's
+error line. Which failures those are, and why the set is narrower than
+``duckdb.Error``, is reasoned once on
+:data:`geoparquet_io.core.duckdb_utils.INPUT_FILE_DUCKDB_ERRORS`; this file
+pins the behaviour in both directions -- input-caused failures become an error
+line, gpio-caused ones keep their traceback -- and pins the ``--verbose``
+promise that makes hiding a traceback recoverable.
 """
 
 from __future__ import annotations
@@ -38,9 +23,10 @@ import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
-from geoparquet_io.cli.decorators import ErrorBoundaryGroup
-from geoparquet_io.cli.exception_handler import INPUT_FILE_DUCKDB_ERRORS, cli_error_for
+from geoparquet_io.cli.decorators import ErrorBoundaryGroup, verbose_option
+from geoparquet_io.cli.exception_handler import cli_error_for
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import INPUT_FILE_DUCKDB_ERRORS
 
 # One WKB point (1.0, 2.0), little-endian.
 POINT_WKB = struct.pack("<BI2d", 1, 1, 1.0, 2.0)
@@ -58,6 +44,15 @@ def rejected_file(tmp_path):
     path = tmp_path / "rejected.parquet"
     pq.write_table(table, path)
     return str(path)
+
+
+@pytest.fixture
+def restore_log_level():
+    """``configure_verbose`` is one-way and the logger is a module global."""
+    package_logger = logging.getLogger("geoparquet_io")
+    before = package_logger.level
+    yield
+    package_logger.setLevel(before)
 
 
 def _group_raising(exc: BaseException):
@@ -93,16 +88,15 @@ class TestCliErrorFor:
         [
             duckdb.InvalidInputException("Invalid Input Error: no columns"),
             duckdb.IOException("IO Error: No files found that match the pattern"),
-            duckdb.HTTPException("HTTP Error: 404"),
-            duckdb.ConversionException("Conversion Error: could not convert"),
+            duckdb.HTTPException("HTTP Error: 403 Forbidden"),
         ],
     )
     def test_every_input_caused_failure_is_covered_not_just_the_reproductions(self, exc):
         """The trigger is any input DuckDB refuses, not one particular block.
 
-        ``HTTPException`` is in the list because it hangs below ``IOException``:
-        a remote URL that will not fetch is a property of the path the user
-        named, and ``isinstance`` picks it up without a separate entry.
+        ``HTTPException`` is covered because it hangs below ``IOException``: a
+        remote URL that will not fetch is a property of the path the user named,
+        and ``isinstance`` picks it up without a separate entry.
         """
         assert isinstance(cli_error_for(exc), click.ClickException)
 
@@ -150,6 +144,20 @@ class TestCliErrorFor:
 
         assert cli_error_for(raised.value) is None
 
+    def test_the_tuple_cannot_be_collapsed_to_a_shared_base_class(self):
+        """Why the entries are enumerated instead of named by an ancestor.
+
+        A tripwire on duckdb's own class tree rather than on gpio's code: if
+        duckdb ever reorganises so that an ancestor *does* split along this
+        line, the enumeration can be replaced -- and until then, any base class
+        wide enough to include ``InvalidInputException`` is wide enough to
+        include the three classes that are its opposite.
+        """
+        assert issubclass(duckdb.InvalidInputException, duckdb.ProgrammingError)
+        for gpio_authored in (duckdb.ParserException, duckdb.BinderException):
+            assert issubclass(gpio_authored, duckdb.ProgrammingError)
+            assert not issubclass(gpio_authored, INPUT_FILE_DUCKDB_ERRORS)
+
     def test_the_spill_hint_still_wins_over_the_generic_translation(self):
         """An out-of-spill-space failure is a ``duckdb.Error`` too, and it keeps
         the ``TMPDIR`` line the generic translation would have dropped."""
@@ -160,6 +168,101 @@ class TestCliErrorFor:
         message = cli_error_for(exc).format_message()
         assert "TMPDIR" in message
         assert "failed to offload data block" in message
+
+
+class TestAnUnpublishedExtensionIsNotABadInputFile:
+    """A 404 from the extension registry hangs below ``IOException`` (#778).
+
+    Without asking first, ``INSTALL geography FROM community`` failing because
+    the registry has no build for this platform would be answered with the line
+    gpio uses for "your input file is unreachable" -- and lose the guidance
+    ``_UNPUBLISHED_EXTENSION_HINTS`` exists to give. Three ``INSTALL`` sites are
+    unwrapped (``core/duckdb_utils._install_and_load_extension``,
+    ``core/extract_bigquery``, ``core/partition/admin_hierarchical``), so their
+    failures arrive here raw.
+    """
+
+    NOT_PUBLISHED = (
+        'HTTP Error: Failed to download extension "geography" at URL '
+        '"https://community-extensions.duckdb.org/v1.5.5/osx_arm64/geography.duckdb_extension.gz" '
+        "(HTTP 404)"
+    )
+
+    def test_the_404_is_named_as_the_registry_not_the_input(self):
+        message = cli_error_for(duckdb.HTTPException(self.NOT_PUBLISHED)).format_message()
+        assert "not your input file" in message
+        assert "not published for this one" in message
+
+    def test_the_extension_specific_hint_survives(self):
+        message = cli_error_for(duckdb.HTTPException(self.NOT_PUBLISHED)).format_message()
+        assert "gpio add a5" in message
+
+    def test_a_remote_input_file_that_404s_is_still_a_bad_input_file(self):
+        """The guard that keeps the check from over-claiming.
+
+        ``is_unpublished_extension_error`` matches on "http 404" anywhere in the
+        message, and a remote *input* that is simply not there 404s too. Naming
+        an extension is what separates the two, so a missing file keeps the
+        plain error line and gets no advice about the extension registry.
+        """
+        missing = duckdb.HTTPException(
+            "HTTP Error: HTTP GET error on 'https://host/missing.parquet' (HTTP 404)"
+        )
+        error = cli_error_for(missing)
+
+        assert error is not None
+        assert "community-extensions" not in error.format_message()
+        assert error.format_message().endswith("(HTTP 404)")
+
+    def test_an_offline_download_failure_is_not_blamed_on_the_registry(self):
+        """#778's own distinction: only the 404 means "no build exists"."""
+        offline = duckdb.IOException(
+            'IO Error: Failed to download extension "geography" at URL '
+            '"https://community-extensions.duckdb.org/..." '
+            "(ERROR Could not establish connection)"
+        )
+        message = cli_error_for(offline).format_message()
+        assert "not published" not in message
+
+
+class TestTheMessageIsSanitized:
+    """DuckDB's message carries text gpio did not author (#983 review).
+
+    Pre-existing at every other site that prints one -- ``cli_error_for`` is
+    where it can be fixed once, because it is the single funnel.
+    """
+
+    def test_a_presigned_signature_does_not_reach_the_error_line(self):
+        exc = duckdb.HTTPException(
+            "HTTP GET error on 'https://bucket.s3.amazonaws.com/data/x.parquet"
+            "?X-Amz-Credential=AKIAEXAMPLE&X-Amz-Signature=deadbeefsecret' (HTTP 403)"
+        )
+        message = cli_error_for(exc).format_message()
+
+        assert "deadbeefsecret" not in message
+        assert "X-Amz-Credential" not in message
+        assert "x.parquet" in message, "the filename is what makes the message useful"
+
+    def test_a_url_without_a_query_string_is_left_readable(self):
+        exc = duckdb.IOException("IO Error: No files found for 'https://host/a.parquet'")
+        assert "https://host/a.parquet" in cli_error_for(exc).format_message()
+
+    def test_an_input_cannot_author_the_error_line_with_ansi_escapes(self):
+        """A value the *file* chose is quoted back verbatim by DuckDB. With the
+        escapes intact it could rewind the line and print an ``Error:`` of its
+        own choosing."""
+        exc = duckdb.InvalidInputException(
+            "Invalid Input Error: bad value '\x1b[2K\rError: everything is fine\x1b[0m'"
+        )
+        message = cli_error_for(exc).format_message()
+
+        assert "\x1b" not in message
+        assert "\r" not in message
+        assert "[2K" not in message, "the escape has to go whole, not just its introducer"
+
+    def test_a_tab_or_newline_is_not_stripped(self):
+        exc = duckdb.InvalidInputException("Invalid Input Error: a\n\tb")
+        assert cli_error_for(exc).format_message() == "Invalid Input Error: a\n\tb"
 
 
 # =============================================================================
@@ -212,66 +315,52 @@ class TestTheRootGroupIsTheBoundary:
         assert isinstance(result.exception, duckdb.ParserException)
         assert not isinstance(result.exception, click.ClickException)
 
-    def test_the_traceback_is_still_available_at_debug_level(self, caplog):
-        """Nothing is lost: the hidden traceback is logged, not dropped."""
-        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
-            CliRunner().invoke(
-                _group_raising(duckdb.InvalidInputException("Invalid Input Error: oops")), ["boom"]
-            )
 
-        assert any(record.exc_info for record in caplog.records)
+class TestVerboseRestoresTheHiddenTraceback:
+    """Hiding a traceback is only acceptable if it is recoverable.
 
-
-class TestInnerHandlersStillRunFirst:
-    """The boundary is outermost, so it never preempts a recovery (#988).
-
-    ``convert`` identifies DuckDB's curved-geometry refusal by matching
-    "Unsupported geometry type in WKB" on the exception, linearizes the source
-    and writes again. That error is an ``InvalidInputException``, which is
-    exactly what ``INPUT_FILE_DUCKDB_ERRORS`` claims -- so if the boundary ran
-    anywhere but last, it would convert the error into a ``ClickException`` and
-    the retry would never happen. It runs last because it lives on
-    ``Group.invoke``, and these pin that rather than trusting it.
+    It was not, on four of the eleven commands, until ``--verbose`` stopped
+    depending on the failing path having reached a core function first. See
+    :func:`geoparquet_io.cli.decorators.enable_verbose_logging`.
     """
 
-    #: The real string ``_is_linearizable_curve_error`` matches on, and the real
-    #: class DuckDB raises with it -- both measured against the curved FileGDB
-    #: fixture, not invented here.
-    CURVE_REFUSAL = "Conversion Error: Unsupported geometry type in WKB"
+    #: The four that were measured *not* to restore it before the flag's own
+    #: callback raised the level (their paths fail before any
+    #: ``configure_verbose`` call), plus one that did, so a regression in either
+    #: direction shows up.
+    COMMANDS = [
+        ("add bbox", ["add", "bbox", "{in}", "{out}"]),
+        ("sort hilbert", ["sort", "hilbert", "{in}", "{out}"]),
+        ("extract geoparquet", ["extract", "geoparquet", "{in}", "{out}"]),
+        ("add geometry-metrics", ["add", "geometry-metrics", "{in}", "{out}"]),
+        ("check optimization", ["check", "optimization", "{in}"]),
+    ]
 
-    def test_the_curve_refusal_is_a_class_the_boundary_would_otherwise_claim(self):
-        """Without this being true, the tests below would prove nothing."""
-        exc = duckdb.InvalidInputException(self.CURVE_REFUSAL)
-        assert isinstance(exc, INPUT_FILE_DUCKDB_ERRORS)
-        assert cli_error_for(exc) is not None
+    @pytest.mark.usefixtures("restore_log_level")
+    @pytest.mark.parametrize(("name", "argv"), COMMANDS, ids=[n for n, _ in COMMANDS])
+    def test_verbose_prints_the_traceback_the_error_line_replaced(
+        self, name, argv, rejected_file, tmp_path
+    ):
+        args = [
+            a.format(**{"in": rejected_file, "out": str(tmp_path / f"{name}-v.parquet")})
+            for a in argv
+        ]
 
-    def test_an_inner_handler_recovers_before_the_boundary_sees_it(self):
-        """A command that catches and recovers still succeeds, untouched."""
-        attempts = []
+        quiet = CliRunner().invoke(cli, args)
+        verbose = CliRunner().invoke(cli, [*args, "--verbose"])
 
-        @click.group(cls=ErrorBoundaryGroup)
-        def root():
-            pass
+        assert quiet.exit_code == 1 and "Traceback" not in quiet.output
+        assert verbose.exit_code == 1, verbose.output
+        assert "Traceback (most recent call last)" in verbose.output, verbose.output
+        assert "InvalidInputException" in verbose.output
 
-        @root.command()
-        def convert():
-            try:
-                attempts.append("first")
-                raise duckdb.InvalidInputException(TestInnerHandlersStillRunFirst.CURVE_REFUSAL)
-            except duckdb.Error as e:
-                if "Unsupported geometry type in WKB" not in str(e):
-                    raise
-                attempts.append("linearized retry")
-
-        result = CliRunner().invoke(root, ["convert"])
-
-        assert result.exit_code == 0, result.output
-        assert attempts == ["first", "linearized retry"]
-
-    def test_the_inner_handler_sees_the_raw_exception_not_a_click_exception(self):
-        """The retry matches on the message and the DuckDB class. Both have to
-        arrive intact -- a reshaped exception would silently stop matching and
-        the fallback would turn into a hard failure."""
+    @pytest.mark.usefixtures("restore_log_level")
+    def test_the_flag_raises_the_level_before_the_command_body_runs(self):
+        """The mechanism, without a failure in the way: by the time any gpio
+        code runs, DEBUG is already on. Nothing inside the command is asked to
+        arrange it, which is exactly what the four commands above could not do.
+        """
+        logging.getLogger("geoparquet_io").setLevel(logging.INFO)
         seen = {}
 
         @click.group(cls=ErrorBoundaryGroup)
@@ -279,17 +368,47 @@ class TestInnerHandlersStillRunFirst:
             pass
 
         @root.command()
-        def convert():
-            try:
-                raise duckdb.InvalidInputException(TestInnerHandlersStillRunFirst.CURVE_REFUSAL)
-            except Exception as e:
-                seen["type"] = type(e)
-                seen["message"] = str(e)
+        @verbose_option
+        def noisy(verbose):
+            seen["level"] = logging.getLogger("geoparquet_io").level
 
-        CliRunner().invoke(root, ["convert"])
+        CliRunner().invoke(root, ["noisy", "--verbose"])
 
-        assert seen["type"] is duckdb.InvalidInputException
-        assert "Unsupported geometry type in WKB" in seen["message"]
+        assert seen["level"] == logging.DEBUG
+
+    def test_verbose_is_a_per_command_flag(self, rejected_file):
+        """Where it goes, pinned so the docs and the PR cannot drift from it:
+        the root group has no ``--verbose``, so before the subcommand it is a
+        usage error, not a quiet no-op."""
+        result = CliRunner().invoke(cli, ["--verbose", "check", "optimization", rejected_file])
+
+        assert result.exit_code == 2
+        assert "No such option" in result.output and "--verbose" in result.output
+
+
+class TestInnerHandlersStillRunFirst:
+    """The boundary is outermost, so it never preempts a recovery (#988).
+
+    ``convert`` identifies DuckDB's curved-geometry refusal by matching
+    "Unsupported geometry type in WKB" on the exception, linearizes the source
+    and writes again. That refusal is an ``InvalidInputException``, which is
+    exactly what ``INPUT_FILE_DUCKDB_ERRORS`` claims -- so if the boundary ran
+    anywhere but last, it would convert the error into a ``ClickException`` and
+    the retry would never happen.
+    """
+
+    #: Measured, all of it, against ``tests/data/curved_geometry_test.gdb``:
+    #: ``ST_AsWKB(geom)`` over ``ST_Read`` on that fixture raises
+    #: ``duckdb.InvalidInputException`` with exactly this message. The substring
+    #: ``_is_linearizable_curve_error`` matches on is the tail of it; the
+    #: "Invalid Input Error:" prefix is DuckDB's, not this test's.
+    CURVE_REFUSAL = "Invalid Input Error: Unsupported geometry type in WKB"
+
+    def test_the_curve_refusal_is_a_class_the_boundary_would_otherwise_claim(self):
+        """Without this being true, the test below would prove nothing."""
+        exc = duckdb.InvalidInputException(self.CURVE_REFUSAL)
+        assert isinstance(exc, INPUT_FILE_DUCKDB_ERRORS)
+        assert cli_error_for(exc) is not None
 
     def test_the_real_curved_filegdb_still_converts_through_the_boundary(self, tmp_path):
         """End to end on #988's own fixture, through the real ``cli``.
@@ -332,38 +451,6 @@ class TestInnerHandlersStillRunFirst:
         assert "Traceback" not in result.output
 
 
-class TestTheLineTheTupleDraws:
-    """Guards on ``INPUT_FILE_DUCKDB_ERRORS`` itself.
-
-    The first version of this fix caught ``duckdb.Error``, which is every DuckDB
-    failure there is -- its only direct subclass is ``DatabaseError`` and
-    everything hangs below that. These pin the narrowing so it cannot be widened
-    back without a failing test.
-    """
-
-    def test_it_is_not_the_base_class_in_disguise(self):
-        assert duckdb.Error not in INPUT_FILE_DUCKDB_ERRORS
-        assert duckdb.DatabaseError not in INPUT_FILE_DUCKDB_ERRORS
-
-    @pytest.mark.parametrize(
-        "gpio_authored",
-        [duckdb.ParserException, duckdb.BinderException, duckdb.CatalogException],
-    )
-    def test_gpio_authored_sql_failures_are_excluded(self, gpio_authored):
-        assert not issubclass(gpio_authored, INPUT_FILE_DUCKDB_ERRORS)
-
-    def test_the_tuple_cannot_be_collapsed_to_a_shared_base_class(self):
-        """Why the entries are enumerated instead of named by an ancestor.
-
-        Measured against duckdb 1.5.5: ``InvalidInputException`` shares
-        ``ProgrammingError`` with the three classes above, so any base class
-        wide enough to include the first is wide enough to include the others.
-        """
-        assert issubclass(duckdb.InvalidInputException, duckdb.ProgrammingError)
-        for gpio_authored in (duckdb.ParserException, duckdb.BinderException):
-            assert issubclass(gpio_authored, duckdb.ProgrammingError)
-
-
 # =============================================================================
 # The four commands the issue reproduces on, end to end
 # =============================================================================
@@ -387,6 +474,15 @@ ALREADY_CLEAN = [
     ("name", "argv"), REPORTED + ALREADY_CLEAN, ids=[n for n, _ in REPORTED + ALREADY_CLEAN]
 )
 def test_a_rejected_file_gets_an_error_line_and_exit_one(name, argv, rejected_file, tmp_path):
+    """Both halves in one pass: what the user sees, and what it was underneath.
+
+    The class matters because the fix only keeps #983 fixed if the exception
+    these four really raise is in ``INPUT_FILE_DUCKDB_ERRORS`` -- so a future
+    narrowing that excluded one of them fails loudly here rather than quietly
+    restoring a traceback. ``standalone_mode=False`` is what leaves the
+    ``ClickException`` itself in reach; under the default Click has already
+    turned it into the ``SystemExit`` that carries exit code 1.
+    """
     args = [
         a.format(**{"in": rejected_file, "out": str(tmp_path / f"{name}.parquet")}) for a in argv
     ]
@@ -398,28 +494,7 @@ def test_a_rejected_file_gets_an_error_line_and_exit_one(name, argv, rejected_fi
     assert "Error: " in result.output
     assert "Traceback" not in result.output
 
-
-@pytest.mark.parametrize(("name", "argv"), REPORTED, ids=[n for n, _ in REPORTED])
-def test_each_reported_command_fails_with_an_error_the_narrowed_tuple_admits(
-    name, argv, rejected_file, tmp_path
-):
-    """The narrowing keeps #983 fixed *because* of what DuckDB actually raises.
-
-    The four reproductions are only covered if their underlying class is in
-    ``INPUT_FILE_DUCKDB_ERRORS``. That is checked here against the exception the
-    boundary wrapped, so a future narrowing that excluded one of them would fail
-    loudly rather than quietly restoring a traceback.
-    """
-    args = [
-        a.format(**{"in": rejected_file, "out": str(tmp_path / f"{name}-cause.parquet")})
-        for a in argv
-    ]
-
-    # standalone_mode=False so the ClickException itself surfaces; under the
-    # default, Click has already turned it into the SystemExit that carries
-    # exit code 1, and the cause chain is one frame further down.
-    result = CliRunner().invoke(cli, args, standalone_mode=False)
-    cause = result.exception.__cause__
-
-    assert isinstance(cause, duckdb.InvalidInputException), f"{name}: {cause!r}"
-    assert isinstance(cause, INPUT_FILE_DUCKDB_ERRORS)
+    if (name, argv) in REPORTED:
+        cause = CliRunner().invoke(cli, args, standalone_mode=False).exception.__cause__
+        assert isinstance(cause, duckdb.InvalidInputException), f"{name}: {cause!r}"
+        assert isinstance(cause, INPUT_FILE_DUCKDB_ERRORS)
