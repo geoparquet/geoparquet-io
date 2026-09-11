@@ -2057,142 +2057,143 @@ def convert_to_geoparquet(
         # surfaces as a DuckDB error the first time something parses it. With
         # Hilbert on, that is the bounds pass and it linearizes on the spot.
         # With --skip-hilbert nothing parses before the write, so the write is
-        # where the curves show up: linearize the source and write again (#985).
-        # This costs one extra read of the source, and only when it holds curves.
-        force_linearize = False
-        while True:
-            try:
-                if is_csv:
-                    query, bbox_covering_column = _convert_csv_path(
-                        con,
-                        input_url,
-                        delimiter,
-                        wkt_column,
-                        lat_column,
-                        lon_column,
-                        crs,
-                        skip_hilbert,
-                        skip_invalid,
-                        verbose,
-                        geoparquet_version=geoparquet_version,
-                    )
-                    geometry_info = None
-                else:
-                    query, geometry_info, bbox_covering_column = _convert_spatial_path(
-                        con,
-                        input_file,
-                        skip_hilbert,
-                        verbose,
-                        is_parquet=is_parquet,
-                        layer=layer,
-                        geoparquet_version=geoparquet_version,
-                        linearize_curves=linearize_curves,
-                        max_angle_deg=max_angle_deg,
-                        force_linearize=force_linearize,
-                    )
-
-                # No geometry detected — error unless explicitly allowed
-                has_geometry = query is not None
-                if not has_geometry:
-                    if not allow_no_geometry:
-                        raise GeoParquetError(
-                            "No geometry column detected in input file. "
-                            "Expected column named 'geom', 'geometry', 'wkb_geometry', or 'shape'. "
-                            "Use --allow-no-geometry to convert as plain Parquet without GeoParquet metadata."
-                        )
-
-                    # Error if Hilbert sorting was requested but no geometry found
-                    if not skip_hilbert:
-                        raise GeoParquetError(
-                            "Cannot apply Hilbert sorting - no geometry column found. "
-                            "Use --skip-hilbert if you want to convert without spatial indexing."
-                        )
-
-                    warn(
-                        "No geometry column detected. "
-                        "Converting as plain Parquet without GeoParquet metadata."
-                    )
-                    query = _build_plain_select_query(
-                        input_url, is_parquet=is_parquet, is_csv=is_csv, delimiter=delimiter
-                    )
-                    geoparquet_version = "parquet-geo-only"
-                    effective_crs = None
-
-                # Geometry repair (issue #506). At this point `query` exposes the geometry
-                # column before WKB conversion (which happens later in the write strategy).
-                # repair_query_geometry auto-detects native GEOMETRY vs WKB and skips
-                # GeoArrow STRUCT encodings it cannot repair in place. It warns with the
-                # invalid count (whether repairing or, on opt-out, leaving as-is).
-                # ST_MakeValid never expands a geometry's envelope, so any bbox already
-                # computed upstream stays correct.
-                if has_geometry:
-                    geom_col = "geometry" if is_csv else geometry_info["primary"]
-                    query = repair_query_geometry(con, query, geom_col, repair=repair_geometry)
-
-                    # This convert rebuilds the output's `geo` block from the converted
-                    # data (`original_metadata=None` below, and at 2.0 DuckDB regenerates
-                    # the block outright on the plain-COPY fast path), so an input `crs`
-                    # that spelled out the default never reaches `apply_output_crs` and
-                    # its note never fired here. Emit the same note from the same helper
-                    # so the key does not vanish unannounced on this path alone (#844).
-                    note_default_crs_normalized(
-                        (geometry_info or {}).get("metadata", {}).get(geom_col, {}).get("crs")
-                    )
-
-                # Sidecar KV payloads (fiboa, vecorel, STAC fragments) live next to the
-                # 'geo' key and are rebuilt from scratch by every write strategy, so a
-                # parquet→parquet convert has to hand them to the writer explicitly or
-                # they vanish (#690). Only the non-geo keys travel: 'geo' is regenerated
-                # from the converted data, never copied.
-                preserved_kv = read_preserved_kv_metadata(input_file, verbose) if is_parquet else {}
-
-                # A covering is declared only for a column this conversion computed, or
-                # one the input's metadata already declared -- never inferred from a
-                # column name by the writer. strip_unsupported_covering drops the key
-                # for 1.0 output, and 2.0/parquet-geo-only carry no bbox column at all.
-                custom_metadata = (
-                    {"covering": {"bbox": build_bbox_covering(bbox_covering_column)}}
-                    if has_geometry and bbox_covering_column
-                    else None
-                )
-
-                write_parquet_with_metadata(
+        # where the curves show up: linearize the source and write again, once
+        # (#985). This costs one extra read of the source, and only when it
+        # holds curves; a second failure raises as before.
+        def _convert_once(force_linearize):
+            nonlocal geoparquet_version, effective_crs
+            if is_csv:
+                query, bbox_covering_column = _convert_csv_path(
                     con,
-                    query,
-                    output_file,
-                    original_metadata=None,
-                    custom_metadata=custom_metadata,
-                    extra_kv_metadata=preserved_kv or None,
-                    compression=compression,
-                    compression_level=compression_level,
-                    row_group_rows=row_group_rows,
-                    row_group_size_mb=row_group_size_mb,
-                    verbose=verbose,
-                    profile=profile,
+                    input_url,
+                    delimiter,
+                    wkt_column,
+                    lat_column,
+                    lon_column,
+                    crs,
+                    skip_hilbert,
+                    skip_invalid,
+                    verbose,
                     geoparquet_version=geoparquet_version,
-                    input_crs=effective_crs,
-                    geometry_info=geometry_info,
-                    # Geography inputs: DuckDB demotes GEOGRAPHY to GEOMETRY and drops
-                    # the edges declaration; the shared write path restores it (#588).
-                    input_file=input_file if is_parquet and has_geometry else None,
-                    memory_limit=memory_limit,
                 )
-                break
-            except Exception as e:
-                if (
-                    force_linearize
-                    or is_parquet
-                    or is_csv
-                    or not linearize_curves
-                    or "Unsupported geometry type in WKB" not in str(e)
-                ):
-                    raise
+                geometry_info = None
+            else:
+                query, geometry_info, bbox_covering_column = _convert_spatial_path(
+                    con,
+                    input_file,
+                    skip_hilbert,
+                    verbose,
+                    is_parquet=is_parquet,
+                    layer=layer,
+                    geoparquet_version=geoparquet_version,
+                    linearize_curves=linearize_curves,
+                    max_angle_deg=max_angle_deg,
+                    force_linearize=force_linearize,
+                )
+
+            # No geometry detected — error unless explicitly allowed
+            has_geometry = query is not None
+            if not has_geometry:
+                if not allow_no_geometry:
+                    raise GeoParquetError(
+                        "No geometry column detected in input file. "
+                        "Expected column named 'geom', 'geometry', 'wkb_geometry', or 'shape'. "
+                        "Use --allow-no-geometry to convert as plain Parquet without GeoParquet metadata."
+                    )
+
+                # Error if Hilbert sorting was requested but no geometry found
+                if not skip_hilbert:
+                    raise GeoParquetError(
+                        "Cannot apply Hilbert sorting - no geometry column found. "
+                        "Use --skip-hilbert if you want to convert without spatial indexing."
+                    )
+
                 warn(
-                    "Curved geometries detected while writing; linearizing the "
-                    "source and writing again"
+                    "No geometry column detected. "
+                    "Converting as plain Parquet without GeoParquet metadata."
                 )
-                _discard_partial_output(output_file)
-                force_linearize = True
+                query = _build_plain_select_query(
+                    input_url, is_parquet=is_parquet, is_csv=is_csv, delimiter=delimiter
+                )
+                geoparquet_version = "parquet-geo-only"
+                effective_crs = None
+
+            # Geometry repair (issue #506). At this point `query` exposes the geometry
+            # column before WKB conversion (which happens later in the write strategy).
+            # repair_query_geometry auto-detects native GEOMETRY vs WKB and skips
+            # GeoArrow STRUCT encodings it cannot repair in place. It warns with the
+            # invalid count (whether repairing or, on opt-out, leaving as-is).
+            # ST_MakeValid never expands a geometry's envelope, so any bbox already
+            # computed upstream stays correct.
+            if has_geometry:
+                geom_col = "geometry" if is_csv else geometry_info["primary"]
+                query = repair_query_geometry(con, query, geom_col, repair=repair_geometry)
+
+                # This convert rebuilds the output's `geo` block from the converted
+                # data (`original_metadata=None` below, and at 2.0 DuckDB regenerates
+                # the block outright on the plain-COPY fast path), so an input `crs`
+                # that spelled out the default never reaches `apply_output_crs` and
+                # its note never fired here. Emit the same note from the same helper
+                # so the key does not vanish unannounced on this path alone (#844).
+                note_default_crs_normalized(
+                    (geometry_info or {}).get("metadata", {}).get(geom_col, {}).get("crs")
+                )
+
+            # Sidecar KV payloads (fiboa, vecorel, STAC fragments) live next to the
+            # 'geo' key and are rebuilt from scratch by every write strategy, so a
+            # parquet→parquet convert has to hand them to the writer explicitly or
+            # they vanish (#690). Only the non-geo keys travel: 'geo' is regenerated
+            # from the converted data, never copied.
+            preserved_kv = read_preserved_kv_metadata(input_file, verbose) if is_parquet else {}
+
+            # A covering is declared only for a column this conversion computed, or
+            # one the input's metadata already declared -- never inferred from a
+            # column name by the writer. strip_unsupported_covering drops the key
+            # for 1.0 output, and 2.0/parquet-geo-only carry no bbox column at all.
+            custom_metadata = (
+                {"covering": {"bbox": build_bbox_covering(bbox_covering_column)}}
+                if has_geometry and bbox_covering_column
+                else None
+            )
+
+            write_parquet_with_metadata(
+                con,
+                query,
+                output_file,
+                original_metadata=None,
+                custom_metadata=custom_metadata,
+                extra_kv_metadata=preserved_kv or None,
+                compression=compression,
+                compression_level=compression_level,
+                row_group_rows=row_group_rows,
+                row_group_size_mb=row_group_size_mb,
+                verbose=verbose,
+                profile=profile,
+                geoparquet_version=geoparquet_version,
+                input_crs=effective_crs,
+                geometry_info=geometry_info,
+                # Geography inputs: DuckDB demotes GEOGRAPHY to GEOMETRY and drops
+                # the edges declaration; the shared write path restores it (#588).
+                input_file=input_file if is_parquet and has_geometry else None,
+                memory_limit=memory_limit,
+            )
+            return has_geometry
+
+        try:
+            has_geometry = _convert_once(force_linearize=False)
+        except Exception as e:
+            if (
+                is_parquet
+                or is_csv
+                or not linearize_curves
+                or "Unsupported geometry type in WKB" not in str(e)
+            ):
+                raise
+            warn(
+                "Curved geometries detected while writing; linearizing the source and writing again"
+            )
+            _discard_partial_output(output_file)
+            has_geometry = _convert_once(force_linearize=True)
 
         _report_conversion_results(output_file, start_time, is_geo=has_geometry)
 
