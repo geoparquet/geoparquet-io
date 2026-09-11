@@ -1150,6 +1150,18 @@ def _convert_csv_path(
     return query, (None if skip_bbox else "bbox")
 
 
+def _is_linearizable_curve_error(e, *, is_parquet, linearize_curves):
+    """True when ``e`` is DuckDB refusing WKB that gpio may try to linearize.
+
+    Parquet inputs have no keep_wkb escape hatch and ``--no-linearize-curves``
+    turns the fallback off; otherwise this is the one string DuckDB raises for
+    every WKB type it cannot parse, curves and the surface family alike. The
+    bounds pass, the Arrow read and the retry in ``convert_to_geoparquet``
+    share it so they stay in step if that string ever changes.
+    """
+    return not is_parquet and linearize_curves and "Unsupported geometry type in WKB" in str(e)
+
+
 def _bounds_with_curve_fallback(
     con,
     input_file,
@@ -1183,11 +1195,8 @@ def _bounds_with_curve_fallback(
         return bounds, table_expr
     except duckdb.Error as e:
         already_linearized = table_expr is not None
-        if (
-            is_parquet
-            or already_linearized
-            or not linearize_curves
-            or "Unsupported geometry type in WKB" not in str(e)
+        if already_linearized or not _is_linearizable_curve_error(
+            e, is_parquet=is_parquet, linearize_curves=linearize_curves
         ):
             raise
         if verbose:
@@ -1662,7 +1671,9 @@ def _read_spatial_to_arrow(
         # (issue #643). The pre-scan above already caught local GeoPackages —
         # this fallback covers formats without a cheap scan (e.g. FileGDB).
         # Parquet inputs have no keep_wkb escape hatch.
-        if is_parquet or not linearize_curves or "Unsupported geometry type in WKB" not in str(e):
+        if not _is_linearizable_curve_error(
+            e, is_parquet=is_parquet, linearize_curves=linearize_curves
+        ):
             raise
         if verbose:
             debug("Curved geometries detected; linearizing via keep_wkb read")
@@ -1941,14 +1952,6 @@ def _report_conversion_results(output_file: str, start_time: float, is_geo: bool
         )
 
 
-def _discard_partial_output(output_file):
-    """Remove a local output a failed write may have left behind before a retry."""
-    from geoparquet_io.core.remote import is_remote_url
-
-    if output_file and not is_remote_url(output_file) and os.path.exists(output_file):
-        os.remove(output_file)
-
-
 def convert_to_geoparquet(
     input_file,
     output_file,
@@ -2056,12 +2059,16 @@ def convert_to_geoparquet(
         # Curved geometry the pre-scan cannot see (FileGDB, a GeoPackage on S3)
         # surfaces as a DuckDB error the first time something parses it. With
         # Hilbert on, that is the bounds pass and it linearizes on the spot.
-        # With --skip-hilbert nothing parses before the write, so the write is
-        # where the curves show up: linearize the source and write again, once
-        # (#985). This costs one extra read of the source, and only when it
-        # holds curves; a second failure raises as before.
+        # With --skip-hilbert nothing parses before the write, so the write (or
+        # the repair count just before it) is where the curves show up:
+        # linearize the source and convert again, once (#985). This costs one
+        # extra read of the source, and only when it holds curves; a second
+        # failure raises as before. Each attempt decides its own output version
+        # and CRS from the outer values, so nothing the first attempt did leaks
+        # into the second.
         def _convert_once(force_linearize):
-            nonlocal geoparquet_version, effective_crs
+            output_version = geoparquet_version
+            output_crs = effective_crs
             if is_csv:
                 query, bbox_covering_column = _convert_csv_path(
                     con,
@@ -2115,8 +2122,8 @@ def convert_to_geoparquet(
                 query = _build_plain_select_query(
                     input_url, is_parquet=is_parquet, is_csv=is_csv, delimiter=delimiter
                 )
-                geoparquet_version = "parquet-geo-only"
-                effective_crs = None
+                output_version = "parquet-geo-only"
+                output_crs = None
 
             # Geometry repair (issue #506). At this point `query` exposes the geometry
             # column before WKB conversion (which happens later in the write strategy).
@@ -2169,8 +2176,8 @@ def convert_to_geoparquet(
                 row_group_size_mb=row_group_size_mb,
                 verbose=verbose,
                 profile=profile,
-                geoparquet_version=geoparquet_version,
-                input_crs=effective_crs,
+                geoparquet_version=output_version,
+                input_crs=output_crs,
                 geometry_info=geometry_info,
                 # Geography inputs: DuckDB demotes GEOGRAPHY to GEOMETRY and drops
                 # the edges declaration; the shared write path restores it (#588).
@@ -2182,17 +2189,18 @@ def convert_to_geoparquet(
         try:
             has_geometry = _convert_once(force_linearize=False)
         except Exception as e:
-            if (
-                is_parquet
-                or is_csv
-                or not linearize_curves
-                or "Unsupported geometry type in WKB" not in str(e)
+            if is_csv or not _is_linearizable_curve_error(
+                e, is_parquet=is_parquet, linearize_curves=linearize_curves
             ):
                 raise
+            # DuckDB raises the same string for curves and for the surface
+            # family, so this cannot yet claim curves. Nothing is removed from
+            # the output path: the first attempt dies before its COPY starts,
+            # and COPY overwrites the destination itself, so whatever sits
+            # there is either the user's own file or about to be replaced.
             warn(
-                "Curved geometries detected while writing; linearizing the source and writing again"
+                "Geometry DuckDB cannot read directly; linearizing the source and converting again"
             )
-            _discard_partial_output(output_file)
             has_geometry = _convert_once(force_linearize=True)
 
         _report_conversion_results(output_file, start_time, is_geo=has_geometry)

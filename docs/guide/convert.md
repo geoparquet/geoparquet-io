@@ -540,8 +540,10 @@ Curved input is spotted either by a header scan of local GeoPackages or on the
 first pass that parses geometry. `--skip-hilbert` removes that pass, so for a
 curved source which is not a local `.gpkg` (FileGDB, a GeoPackage on S3) the
 write is where the curves first show up. gpio then linearizes the source and
-writes again. That costs one extra read of the source, and only when it holds
-curves. `--no-linearize-curves` keeps the error instead.
+converts again. That costs one extra read of the source, and only when it holds
+geometry DuckDB cannot read; a file already at the output path is overwritten
+by the second attempt or, if that fails too, left as it was.
+`--no-linearize-curves` keeps the error instead.
 
 ### Skip Hilbert Ordering
 
