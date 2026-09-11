@@ -7,6 +7,7 @@ Creates:
 - fields_v1_1_5070.parquet - GeoParquet 1.1 with EPSG:5070
 - fields_v2_5070.parquet - GeoParquet 2.0 with EPSG:5070 in both locations
 - unsorted.parquet - spatially unsorted places, in enough row groups to prove it
+- curved_geometry_test.gdb - the curved GeoPackage as a FileGDB, which has no pre-scan
 """
 
 import sys
@@ -77,6 +78,45 @@ def generate_buildings_32632():
 
     except Exception as e:
         print(f"  ERROR: {e}")
+        return False
+
+
+def generate_curved_gdb():
+    """
+    Generate curved_geometry_test.gdb from curved_geometry_test.gpkg.
+
+    A FileGDB has no header pre-scan for curved types, so it is the input
+    shape that reaches the write before anything parses its geometry (#985).
+    Needs GDAL's ogr2ogr with the OpenFileGDB driver (GDAL >= 3.6). The
+    optional ``timestamps`` file is removed: it is one line of text without a
+    trailing newline, which the end-of-file-fixer hook would rewrite, and the
+    driver reads the dataset without it. A rerun gives the same file set; two
+    system tables (a00000004, a00000006) differ in bytes because they record
+    the creation time, so do not expect a clean ``git status`` afterwards.
+    """
+    print("Generating curved_geometry_test.gdb...")
+
+    import shutil
+    import subprocess
+
+    input_file = TEST_DATA_DIR / "curved_geometry_test.gpkg"
+    output_dir = TEST_DATA_DIR / "curved_geometry_test.gdb"
+
+    try:
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        subprocess.run(
+            ["ogr2ogr", "-f", "OpenFileGDB", str(output_dir), str(input_file)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (output_dir / "timestamps").unlink(missing_ok=True)
+        print(f"  ✓ Created {output_dir.name} ({len(list(output_dir.iterdir()))} files)")
+        return True
+    except (OSError, subprocess.CalledProcessError) as e:
+        detail = getattr(e, "stderr", None) or str(e)
+        print(f"  ✗ Error creating {output_dir.name}: {detail}")
         return False
 
 
@@ -356,6 +396,7 @@ def main():
     results["buildings_32632"] = generate_buildings_32632()
     results["fields_v1_1_5070"] = generate_fields_v1_1_5070()
     results["fields_v2_5070"] = generate_fields_v2_5070()
+    results["curved_gdb"] = generate_curved_gdb()
     results["unsorted"] = generate_unsorted()
 
     # Verify generated files

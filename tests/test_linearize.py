@@ -16,6 +16,7 @@ from geoparquet_io.core.linearize import (
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 CURVED_GPKG = TEST_DATA_DIR / "curved_geometry_test.gpkg"
+CURVED_GDB = TEST_DATA_DIR / "curved_geometry_test.gdb"
 LINEAR_GPKG = TEST_DATA_DIR / "buildings_test.gpkg"
 
 
@@ -613,8 +614,35 @@ class TestCliCurveParityWithoutPrescan:
         shutil.copy(CURVED_GPKG, target)
         return target
 
-    def test_cli_linearizes_source_the_prescan_cannot_see(self, tmp_path):
+    def _surface_copy(self, tmp_path):
+        """The curved fixture with its one WKB type code flipped to
+        PolyhedralSurface (15): DuckDB raises the same "Unsupported geometry
+        type in WKB" for it, but the linearized read cannot stroke a surface,
+        so the retry fails too. Not *.gpkg, so no pre-scan sees it first."""
+        import sqlite3
+
+        target = self._unscannable_copy(tmp_path).with_name("surface.db")
+        self._unscannable_copy(tmp_path).rename(target)
+        con = sqlite3.connect(target)
+        for (name,) in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'"):
+            con.execute(f'DROP TRIGGER "{name}"')  # GPKG triggers need SpatiaLite
+        blob = bytearray(con.execute("SELECT geom FROM curve").fetchone()[0])
+        wkb = 8 + 32  # GeoPackage binary header + its 32-byte envelope
+        assert int.from_bytes(blob[wkb + 1 : wkb + 5], "little") == 10  # CurvePolygon
+        blob[wkb + 1 : wkb + 5] = (15).to_bytes(4, "little")
+        con.execute("UPDATE curve SET geom = ?", (bytes(blob),))
+        con.commit()
+        con.close()
+        return target
+
+    def _area(self, out):
         import duckdb
+
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        return con.execute(f"SELECT ST_Area(geom) FROM '{out}'").fetchone()[0]
+
+    def test_cli_linearizes_source_the_prescan_cannot_see(self, tmp_path):
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
@@ -625,14 +653,12 @@ class TestCliCurveParityWithoutPrescan:
         )
 
         assert result.exit_code == 0, result.output
-        con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        area = con.execute(f"SELECT ST_Area(geom) FROM '{out}'").fetchone()[0]
-        assert area == pytest.approx(math.pi, rel=0.005)
+        assert self._area(out) == pytest.approx(math.pi, rel=0.005)
 
-    def test_cli_error_names_the_remedy_when_it_cannot_linearize(self, tmp_path):
-        """--skip-hilbert skips the pass that linearizes, so the conversion still
-        fails — but with the actionable message, not DuckDB's raw one."""
+    def test_cli_linearizes_under_skip_hilbert_too(self, tmp_path):
+        """--skip-hilbert removes the bounds pass that used to catch curves, so
+        the write is where they first show up. gpio linearizes the source and
+        writes again instead of failing (#985)."""
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
@@ -642,10 +668,81 @@ class TestCliCurveParityWithoutPrescan:
             cli,
             ["convert", str(self._unscannable_copy(tmp_path)), str(out), "--skip-hilbert"],
         )
+        assert result.exit_code == 0, result.output
+        assert "linearizing the source and converting again" in result.output
+        assert self._area(out) == pytest.approx(math.pi, rel=0.005)
 
+    def test_cli_skip_hilbert_linearizes_a_filegdb(self, tmp_path):
+        """The real shape of #985: a FileGDB, which has no pre-scan."""
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        out = tmp_path / "out.parquet"
+        result = CliRunner().invoke(cli, ["convert", str(CURVED_GDB), str(out), "--skip-hilbert"])
+        assert result.exit_code == 0, result.output
+        assert self._area(out) == pytest.approx(math.pi, rel=0.005)
+
+    def test_cli_retry_overwrites_a_pre_existing_output(self, tmp_path):
+        """The retry converts on top of whatever sits at the output path, the
+        way a single-attempt convert does: COPY overwrites it, nothing unlinks
+        it first."""
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        out = tmp_path / "out.parquet"
+        out.write_bytes(b"stale bytes the user put here")
+        result = CliRunner().invoke(
+            cli,
+            ["convert", str(self._unscannable_copy(tmp_path)), str(out), "--skip-hilbert"],
+        )
+        assert result.exit_code == 0, result.output
+        assert self._area(out) == pytest.approx(math.pi, rel=0.005)
+
+    def test_cli_failed_retry_leaves_a_pre_existing_output_alone(self, tmp_path):
+        """A surface type trips the same DuckDB error as a curve, so the retry
+        runs and fails. The user's file at the output path must survive that,
+        as it does on a single-attempt failure: the first attempt never reached
+        its COPY, so there is no partial output to clean up."""
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        out = tmp_path / "out.parquet"
+        precious = b"the user's own file"
+        out.write_bytes(precious)
+        result = CliRunner().invoke(
+            cli, ["convert", str(self._surface_copy(tmp_path)), str(out), "--skip-hilbert"]
+        )
+        assert result.exit_code != 0
+        assert "CONVERT_TO_LINEAR" in result.output
+        assert out.read_bytes() == precious
+
+    def test_cli_skip_hilbert_keeps_the_error_when_linearizing_is_off(self, tmp_path):
+        """--no-linearize-curves still fails, with the actionable message and
+        not DuckDB's raw one, and leaves the output path as it found it."""
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        out = tmp_path / "out.parquet"
+        precious = b"the user's own file"
+        out.write_bytes(precious)
+        result = CliRunner().invoke(
+            cli,
+            [
+                "convert",
+                str(self._unscannable_copy(tmp_path)),
+                str(out),
+                "--skip-hilbert",
+                "--no-linearize-curves",
+            ],
+        )
         assert result.exit_code != 0
         assert "CONVERT_TO_LINEAR" in result.output
         assert "Unsupported geometry type in WKB" not in result.output.split("Original error")[0]
+        assert out.read_bytes() == precious
 
 
 class TestArcCounting:
