@@ -34,7 +34,9 @@ class ErrorBoundaryGroup(click.Group):
       file, not a gpio bug -- and DuckDB's message already says what is wrong
       with it. Eleven commands answered such a file with a traceback because the
       handling lived in per-site ``except`` blocks that those paths never
-      reached (#983).
+      reached (#983). Only the DuckDB errors the *input* causes are translated;
+      the ones gpio's own generated SQL causes keep their traceback, which is
+      the line ``INPUT_FILE_DUCKDB_ERRORS`` draws.
 
     Both belong on the *root* group rather than on a decorator, because every
     command can hit them: ``handle_geoparquet_errors`` is applied to four
