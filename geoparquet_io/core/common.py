@@ -74,6 +74,7 @@ from geoparquet_io.core.logging_config import (
 )
 from geoparquet_io.core.parquet_writer import (
     ParquetWriteSettings,
+    note_duckdb_copy_rounding,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
 )
@@ -3038,6 +3039,11 @@ def write_parquet_with_metadata(
                 debug(f"Writing GeoParquet version: {effective_version}")
                 debug(f"No metadata rewrite needed for {effective_version} - using plain COPY TO")
 
+            # Nothing but a bare DuckDB COPY writes this file, so a sub-vector
+            # request lands at 2,048 whatever was asked for. Say so here, where
+            # that is certain, rather than let the footer be the first to tell
+            # the user (#986).
+            note_duckdb_copy_rounding(row_group_rows)
             _plain_copy_to(
                 con=con,
                 query=query,
@@ -3135,6 +3141,14 @@ def write_parquet_with_metadata(
             }
             if strategy_enum == WriteStrategy.DUCKDB_KV:
                 write_kwargs["memory_limit"] = memory_limit
+            # duckdb-kv alone lets DuckDB's COPY have the last word on row-group
+            # size, so it alone rounds a sub-vector request up to 2,048 (#986).
+            # Measured with --row-group-size 249 on a 10,000-row input:
+            # duckdb-kv writes 2,048-row groups; in-memory, streaming and
+            # disk-rewrite all write 249-row ones -- disk-rewrite because its
+            # pyarrow pass regroups the COPY output at the requested size.
+            if strategy_enum == WriteStrategy.DUCKDB_KV:
+                note_duckdb_copy_rounding(row_group_rows)
 
             strategy.write_from_query(**write_kwargs)
 

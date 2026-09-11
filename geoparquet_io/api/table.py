@@ -1100,7 +1100,10 @@ class Table:
 
         import pyarrow as pa
 
-        from geoparquet_io.core.parquet_writer import resolve_row_group_rows
+        from geoparquet_io.core.parquet_writer import (
+            note_duckdb_copy_rounding,
+            resolve_row_group_rows,
+        )
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
         from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
@@ -1167,6 +1170,15 @@ class Table:
             # Get the appropriate write strategy
             strategy_enum = WriteStrategy(write_strategy)
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
+
+            # duckdb-kv -- the default -- lets DuckDB's COPY have the last word
+            # on row-group size, so a sub-vector request lands at 2,048 rows
+            # whatever was asked for, while the other three strategies write it
+            # exactly. The CLI says so (#986); saying it here too keeps the
+            # Python API and the CLI from disagreeing about what a number means,
+            # which is what #971 was.
+            if strategy_enum == WriteStrategy.DUCKDB_KV:
+                note_duckdb_copy_rounding(row_group_rows)
 
             # Forward the input CRS so a non-default CRS survives the write (otherwise
             # the geometry silently defaults to OGC:CRS84). write_from_table expects a

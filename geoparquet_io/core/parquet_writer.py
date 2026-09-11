@@ -167,6 +167,12 @@ def resolve_row_group_rows(
     ceiling-everywhere rule: it answers "what would the DuckDB writer do", and
     that answer is still 2,048.
 
+    Passing the request through is not the same as pretending it lands. A
+    DuckDB-backed write still produces 2,048-row groups for a request of 249,
+    and used to do it without a word, so the user read 249 in the command and
+    2,048 in the footer (#986). :func:`note_duckdb_copy_rounding` says it, at
+    the funnels that know the write reaches DuckDB's ``COPY``.
+
     A row count below 1 is rejected, not clamped: ``sort str`` raised on
     ``--row-group-size -5`` while the other three quietly wrote 2,048-row groups.
     ``param_name`` is what that rejection blames. One function now serves both
@@ -185,13 +191,55 @@ def resolve_row_group_rows(
 
     aligned = align_to_writer_vector(row_group_rows)
     if aligned != row_group_rows:
-        info(
-            f"Writing {aligned:,} rows per row group rather than the requested "
-            f"{row_group_rows:,}: the Parquet writer emits row groups in whole "
-            f"{WRITER_VECTOR_ROWS:,}-row vectors, so {row_group_rows:,} is not a "
-            "size a row group can have."
-        )
+        info(_rounding_note(row_group_rows, aligned))
     return aligned
+
+
+def _rounding_note(requested: int, landed: int) -> str:
+    """The one sentence gpio says when a row-group request does not land.
+
+    One string, so the note the sort commands print when *gpio* snaps a value
+    and the note the DuckDB funnels print when the *writer* does are the same
+    sentence. They are the same fact about the same file.
+    """
+    return (
+        f"Writing {landed:,} rows per row group rather than the requested "
+        f"{requested:,}: the Parquet writer emits row groups in whole "
+        f"{WRITER_VECTOR_ROWS:,}-row vectors, so {requested:,} is not a "
+        "size a row group can have."
+    )
+
+
+def note_duckdb_copy_rounding(row_group_rows: int | None) -> None:
+    """Say what DuckDB's ``COPY`` will make of an already-resolved row count.
+
+    :func:`resolve_row_group_rows` announces every value *it* moves, so by the
+    time a write funnel calls this the only request still able to surprise
+    anyone is a sub-vector one: resolve passes 1-2,047 through untouched
+    because ``pq.write_table`` honours it exactly, and DuckDB's ``COPY`` then
+    rounds it up to 2,048 regardless. The note therefore fires for exactly that
+    window, and calling it after resolve is silent for everything else --
+    including a resolve that already spoke, whose value is a whole vector by
+    construction.
+
+    Which writer a request reaches is not something the facade can see, so this
+    is deliberately a *funnel* decision rather than part of resolve. Measured on
+    a 10,000-row input with ``--row-group-size 249``: the plain ``COPY`` fast
+    path and the ``duckdb-kv`` strategy both write 2,048-row groups, while
+    ``in-memory``, ``streaming`` and ``disk-rewrite`` write 249-row groups --
+    ``disk-rewrite`` because its pyarrow pass regroups the ``COPY`` output at
+    the requested size afterwards. Call this only where DuckDB's ``COPY`` has
+    the last word on the file the user gets.
+
+    ``None`` -- no row count asked for, or only a ``--row-group-size-mb``
+    target -- says nothing: naming a row count the user never typed would be
+    the inverse of the fix (#986).
+    """
+    if row_group_rows is None:
+        return
+    landed = align_to_writer_vector(row_group_rows)
+    if landed != row_group_rows:
+        info(_rounding_note(row_group_rows, landed))
 
 
 def resolve_output_geoparquet_version(
