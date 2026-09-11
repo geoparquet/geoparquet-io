@@ -2873,9 +2873,10 @@ def write_parquet_with_metadata(
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         input_crs: PROJJSON dict naming the CRS the output declares. Set by a
-            write that changes the coordinates (reproject, convert --to-crs),
-            where the output's CRS is not a fact any reading of the input could
-            supply. Left None by every rewrite that keeps its input's
+            write whose output CRS is not a reading of the input's: `gpio convert
+            reproject`, which transforms the coordinates, and `gpio convert`,
+            which names the CRS a non-Parquet source's geometry is in (`--crs`,
+            for CSV/TSV input). Left None by every rewrite that keeps its input's
             coordinates: the facade then resolves it from ``input_file``, so a
             native-geo-only input's CRS — which lives only in the Parquet
             GEOMETRY logical type — reaches the output's ``geo`` block too

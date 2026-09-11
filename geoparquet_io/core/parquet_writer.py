@@ -341,9 +341,11 @@ def resolve_input_crs(
     handed ``crs_utils._wrap_query_with_crs`` a CRS with no column to
     ``ST_SetCRS``, which raises rather than writes.
 
-    A caller that names a CRS otherwise wins -- ``reproject`` and ``convert`` pass
-    the CRS they are transforming *to*, which is a fact about the output that no
-    reading of the input could supply. Everything else is a rewrite that keeps
+    A caller that names a CRS otherwise wins -- ``gpio convert reproject`` passes
+    the CRS it is transforming *to*, and ``gpio convert`` the one a non-Parquet
+    source's geometry is in (``--crs``, for CSV/TSV input). Both are facts about
+    the output that no reading of the input could supply. Everything else is a
+    rewrite that keeps
     its input's coordinates, and for those the input file is the witness, the
     same one :func:`resolve_output_geoparquet_version` consults.
 
