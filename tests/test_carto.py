@@ -297,6 +297,24 @@ class TestDetectTableShape:
                 ["id", "the_geom"],
             )
 
+    @pytest.mark.parametrize(
+        "payload",
+        [{"rows": []}, {"fields": None, "rows": []}, {"fields": "garbage"}],
+        ids=["absent", "null", "not-a-mapping"],
+    )
+    def test_a_malformed_schema_block_decides_exactly_as_it_did_before(self, payload):
+        """A *succeeded* probe that carries no usable schema is still tabular.
+
+        ``_table_has_geometry`` returned False for all three of these on main,
+        because ``_geometry_column_from_fields`` returns None for a non-mapping
+        and "no geometry-typed column" means plain extraction. Only a *failed
+        request* has ever fallen back to assuming geometry. Splitting the
+        column names out of the same block must not move that line, so it is
+        asserted rather than argued.
+        """
+        with self._patch(self._payloads(payload)):
+            assert _detect_table_shape("https://x.carto.com/api/v2/sql", "tbl") == (False, None)
+
     def test_a_failed_schema_probe_assumes_geometry_and_reports_no_schema(self):
         with self._patch(self._payloads(CartoError("boom"))):
             assert _detect_table_shape("https://x.carto.com/api/v2/sql", "tbl") == (True, None)
