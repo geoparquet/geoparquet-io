@@ -105,12 +105,12 @@ class TestHilbertRgSizeGuidance:
                 row_group_rows=100000,
                 geoparquet_version="2.0",
             )
-        from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
+        from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 
         assert "10000" in caplog.text or "10,000" in caplog.text
         # The guidance quotes the sort default, so it must not be a literal here
         # either -- it moved to 49,152 in #961.
-        assert f"{DEFAULT_SORT_ROW_GROUP_ROWS:,}" in caplog.text
+        assert f"{DEFAULT_ROW_GROUP_ROWS:,}" in caplog.text
 
     @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
     def test_large_rg_with_pgo_shows_guidance(self, _mock_file_based, caplog):

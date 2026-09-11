@@ -153,6 +153,27 @@
       "reviewed_at": "2026-04-09T17:04:35.724313+00:00",
       "code_commit_at_review": "bd892e0",
       "reviewed_by": "Claude"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/sort.py",
+      "doc_target": "geoparquet_io/skills/geoparquet.md#Command Reference",
+      "reviewed_at": "2026-09-11T07:50:22.603962+00:00",
+      "code_commit_at_review": "5ce725e",
+      "reviewed_by": "write-facade PR (generated target, doc-sync reports up to date)"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/sort.py",
+      "doc_target": "CLAUDE.md#CLI Command Groups",
+      "reviewed_at": "2026-09-11T07:50:22.694863+00:00",
+      "code_commit_at_review": "5ce725e",
+      "reviewed_by": "write-facade PR (generated target, doc-sync reports up to date)"
+    },
+    {
+      "code_file": "geoparquet_io/cli/commands/sort.py",
+      "doc_target": "docs/contributing.md",
+      "reviewed_at": "2026-09-11T07:50:22.784820+00:00",
+      "code_commit_at_review": "5ce725e",
+      "reviewed_by": "write-facade PR (generated target, doc-sync reports up to date)"
     }
   ]
 }

@@ -84,43 +84,13 @@ def _kv_keys(path) -> list[str]:
     return sorted(k.decode() for k in metadata if k != b"ARROW:schema")
 
 
-#: The three strategies whose ``write_from_table`` guards its metadata work on
-#: the geometry column being present and otherwise writes ``table.schema``
-#: verbatim (arrow_memory.py, arrow_streaming.py, disk_rewrite.py).
-_GEO_LEAK_REASON = (
-    "#773: {strategy} returns early when the geometry column is absent and "
-    "writes the carried 'geo' key through, even though parquet-geo-only was "
-    "asked for explicitly"
-)
-
-
-@pytest.mark.parametrize(
-    "strategy",
-    [
-        pytest.param(
-            "in-memory",
-            marks=pytest.mark.xfail(
-                strict=True, reason=_GEO_LEAK_REASON.format(strategy="in-memory")
-            ),
-        ),
-        pytest.param(
-            "streaming",
-            marks=pytest.mark.xfail(
-                strict=True, reason=_GEO_LEAK_REASON.format(strategy="streaming")
-            ),
-        ),
-        pytest.param(
-            "disk-rewrite",
-            marks=pytest.mark.xfail(
-                strict=True, reason=_GEO_LEAK_REASON.format(strategy="disk-rewrite")
-            ),
-        ),
-        # Control: duckdb-kv (the Table.write() default) already lands here. The
-        # issue also reported it dropping the sidecar key; that half no longer
-        # reproduces, so this param is the proof the assertion is satisfiable.
-        "duckdb-kv",
-    ],
-)
+#: Was: the three strategies whose ``write_from_table`` guarded its metadata
+#: work on the geometry column being present and otherwise wrote
+#: ``table.schema`` verbatim (arrow_memory.py, arrow_streaming.py,
+#: disk_rewrite.py). All four now route their file-level keys through
+#: ``parquet_writer.apply_output_kv_metadata``, which runs before any such
+#: guard, so the xfail markers are gone and the assertion is unchanged.
+@pytest.mark.parametrize("strategy", WRITE_STRATEGIES)
 def test_parquet_geo_only_drops_geo_and_keeps_sidecar(strategy, tmp_path):
     """Explicit parquet-geo-only writes no ``geo`` key and keeps unrelated keys.
 
@@ -238,30 +208,25 @@ def _run_cli(*args) -> None:
     assert result.exit_code == 0, result.output
 
 
-_DOWNGRADE_REASON = (
-    "#600: {command} passes geoparquet_version=None straight to "
-    "write_parquet_with_metadata, whose extract_version_from_metadata returns "
-    "None for a native-geo-only input, so the write defaults to 1.1.0 WKB and "
-    "strips the native GEOMETRY logical type"
-)
+def _downgrade_param(command: str, *args):
+    return pytest.param(command, args, id=command.replace(" ", "-"))
 
 
-def _downgrade_param(command: str, *args, control: bool = False):
-    marks = (
-        ()
-        if control
-        else (pytest.mark.xfail(strict=True, reason=_DOWNGRADE_REASON.format(command=command)),)
-    )
-    return pytest.param(command, args, marks=marks, id=command.replace(" ", "-"))
-
-
+#: Was: every entry point but ``convert`` passed ``geoparquet_version=None``
+#: straight to ``write_parquet_with_metadata``, whose
+#: ``extract_version_from_metadata`` returns None for a native-geo-only input,
+#: so the write defaulted to 1.1.0 WKB and stripped the native GEOMETRY logical
+#: type. ``write_parquet_with_metadata`` now resolves auto mode through
+#: ``parquet_writer.resolve_output_geoparquet_version``, which consults the
+#: input file the way ``convert`` always did, so the xfail markers are gone and
+#: the assertions are unchanged.
 @pytest.mark.parametrize(
     ("command", "extra_args"),
     [
-        # Control: convert already resolves the version from the input file, so
+        # Control: convert already resolved the version from the input file, so
         # this param proves the oracle above is reachable -- and pins the
-        # behavior every other entry point has to reach.
-        _downgrade_param("convert geoparquet", control=True),
+        # behavior every other entry point now reaches.
+        _downgrade_param("convert geoparquet"),
         _downgrade_param("sort hilbert"),
         _downgrade_param("sort column", "id"),
         _downgrade_param("sort quadkey"),
@@ -282,9 +247,14 @@ def test_auto_mode_preserves_native_geo(command, extra_args, parquet_geo_only_fi
     _assert_native_geo_preserved(out)
 
 
-@pytest.mark.xfail(strict=True, reason=_DOWNGRADE_REASON.format(command="partition string"))
 def test_partition_auto_mode_preserves_native_geo(parquet_geo_only_file, tmp_path):
-    """The partition staging write takes the same fall-through (staging.py).
+    """The partition staging write took the same fall-through (staging.py).
+
+    It could not be fixed the same way as the four above: a partition write sees
+    only the staging file, which is always written ``GEOPARQUET_VERSION 'NONE'``,
+    so resolving auto mode from what it reads would call every input
+    native-geo-only. The driver resolves once from the real input instead and
+    hands every partition the concrete answer.
 
     ``--force`` only silences the tiny-partition advisory; 50 rows over three
     groups is deliberately small so the test stays fast.

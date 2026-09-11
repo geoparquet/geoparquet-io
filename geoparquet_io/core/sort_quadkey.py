@@ -21,7 +21,7 @@ from geoparquet_io.core.file_utils import (
     resolve_file_url,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
-from geoparquet_io.core.parquet_writer import resolve_sort_row_group_rows
+from geoparquet_io.core.parquet_writer import resolve_row_group_rows
 from geoparquet_io.core.partition.reader import (
     build_read_parquet_expr,
     raise_for_schema_mismatch,
@@ -136,7 +136,7 @@ def sort_by_quadkey(
         row_group_size_mb: Target row group size in MB
         row_group_rows: Exact number of rows per row group. When neither this
             nor ``row_group_size_mb`` is given, the sort default
-            (``DEFAULT_SORT_ROW_GROUP_ROWS``) applies.
+            (``DEFAULT_ROW_GROUP_ROWS``) applies.
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
@@ -145,7 +145,7 @@ def sort_by_quadkey(
             schema, which silently drops any column the others add
     """
     configure_verbose(verbose)
-    row_group_rows = resolve_sort_row_group_rows(row_group_rows, row_group_size_mb)
+    row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)

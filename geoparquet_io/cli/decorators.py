@@ -10,6 +10,12 @@ import math
 
 import click
 
+from geoparquet_io.core.parquet_writer import (
+    DEFAULT_ROW_GROUP_ROWS,
+    SPATIAL_BAND_TOP_ROWS,
+    WRITER_VECTOR_ROWS,
+)
+
 
 class SpillAwareGroup(click.Group):
     """Root group that names ``TMPDIR`` when DuckDB runs out of room to spill.
@@ -200,36 +206,34 @@ def compression_options(func):
     return func
 
 
-def _row_group_size_help(default_rows: int | None) -> str:
-    """Help text for --row-group-size, naming a default only where one exists.
-
-    Only commands that resolve their own default (the ``gpio sort`` family, via
-    ``resolve_sort_row_group_rows``) may name a number here. Everywhere else the
-    option falls through as ``None`` and the writer picks -- DuckDB's COPY uses
-    122,880 rows -- so quoting a figure would repeat the #775 bug of advertising
-    a default that nothing applies.
-
-    The two branches also differ in what the number *does*, which is why
-    neither says "exact" any more (#961): the sort commands snap the value to a
-    whole 2,048-row writer vector and write what they snapped to, while every
-    other command hands it to the writer, which rounds it up to that same
-    vector on its own.
-    """
-    if default_rows is None:
-        return (
-            "Rows per row group; the Parquet writer rounds this up to a whole "
-            "2,048-row vector. Mutually exclusive with --row-group-size-mb; if "
-            "neither is given the writer's own default applies (122,880 rows "
-            "for DuckDB-backed writes)."
-        )
-    return (
-        f"Rows per row group, snapped to a whole 2,048-row writer vector so the "
-        f"file gets what you asked for (default: {default_rows} "
-        "if --row-group-size-mb not set)"
-    )
+# Help text for --row-group-size. One string, because there is now one rule.
+#
+# It used to have two branches: the ``gpio sort`` family named
+# ``DEFAULT_SORT_ROW_GROUP_ROWS`` and everybody else was told "the writer's own
+# default applies (122,880 rows for DuckDB-backed writes)", because everybody
+# else really did fall through to whichever writer they reached. The write
+# facade (``core/parquet_writer.resolve_row_group_rows``) ended that: every
+# write path now resolves through it, so both halves of that sentence became
+# false in the same commit that made ``docs/guide/convert.md`` say 49,152 --
+# the tool contradicting its own new docs, which is #967's shape.
+#
+# The number is imported rather than typed. ``tests/data/cli_surface.json``
+# records Click's *declared* default, which stays ``None`` (a real Click default
+# would collide with --row-group-size-mb and raise the mutually-exclusive usage
+# error), so the help string is the only place the effective default is stated
+# and ``test_write_facade_row_groups.py`` checks it on every command that
+# offers the option.
+_ROW_GROUP_SIZE_HELP = (
+    "Rows per row group, snapped to a whole "
+    f"{WRITER_VECTOR_ROWS:,}-row writer vector so the file gets what you asked "
+    f"for -- {SPATIAL_BAND_TOP_ROWS:,} writes {DEFAULT_ROW_GROUP_ROWS:,}. A "
+    f"request of {WRITER_VECTOR_ROWS:,} rows or fewer is passed through "
+    "unsnapped. Mutually exclusive with --row-group-size-mb (default: "
+    f"{DEFAULT_ROW_GROUP_ROWS:,} if --row-group-size-mb not set)"
+)
 
 
-def row_group_options(func=None, *, default_rows: int | None = None):
+def row_group_options(func):
     """
     Add row group sizing options to a command.
 
@@ -237,22 +241,18 @@ def row_group_options(func=None, *, default_rows: int | None = None):
     - --row-group-size: Number of rows per row group
     - --row-group-size-mb: Target row group size in MB or with units (e.g., '256MB', '1GB')
 
-    These options are mutually exclusive. Both default to ``None``: a Click default
-    would make ``--row-group-size-mb`` collide with it and raise the
-    mutually-exclusive usage error, so a command that wants a default resolves it
-    downstream and declares the number here via ``default_rows`` purely so the help
-    text matches what the command actually does.
-
-    Usable bare (``@row_group_options``) or called
-    (``@row_group_options(default_rows=DEFAULT_SORT_ROW_GROUP_ROWS)``).
+    These options are mutually exclusive, and both declare ``None`` to Click: a
+    real Click default would make ``--row-group-size-mb`` collide with it and
+    raise the mutually-exclusive usage error. The effective default is resolved
+    downstream by the write facade and stated in the help text, which is why
+    that text is a constant here rather than a per-command argument -- one
+    number, one owner, one sentence.
     """
-    if func is None:
-        return lambda inner: row_group_options(inner, default_rows=default_rows)
     func = click.option(
         "--row-group-size",
         type=int,
         default=None,
-        help=_row_group_size_help(default_rows),
+        help=_ROW_GROUP_SIZE_HELP,
     )(func)
     func = click.option(
         "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
@@ -260,23 +260,19 @@ def row_group_options(func=None, *, default_rows: int | None = None):
     return func
 
 
-def output_format_options(
-    func=None, *, default_rows: int | None = None, write_memory_help: str | None = None
-):
+def output_format_options(func=None, *, write_memory_help: str | None = None):
     """
     Add all output format options (compression + row groups + memory limit).
 
     This is a convenience decorator that combines compression_options, row_group_options,
-    and write_memory_option. ``default_rows`` is forwarded to ``row_group_options``;
-    ``write_memory_help`` is forwarded to ``write_memory_option`` for the one command
-    where the limit governs a read rather than a write (see ``write_memory_option``).
+    and write_memory_option. ``write_memory_help`` is forwarded to ``write_memory_option``
+    for the one command where the limit governs a read rather than a write (see
+    ``write_memory_option``).
     """
     if func is None:
-        return lambda inner: output_format_options(
-            inner, default_rows=default_rows, write_memory_help=write_memory_help
-        )
+        return lambda inner: output_format_options(inner, write_memory_help=write_memory_help)
     func = compression_options(func)
-    func = row_group_options(func, default_rows=default_rows)
+    func = row_group_options(func)
     func = write_memory_option(func, help=write_memory_help)
     return func
 

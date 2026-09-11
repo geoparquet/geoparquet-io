@@ -9,7 +9,6 @@ import pyarrow as pa
 
 from geoparquet_io.core.common import (
     add_bbox,
-    extract_version_from_metadata,
     get_bbox_advice,
     get_dataset_bounds,
     get_parquet_metadata,
@@ -25,8 +24,9 @@ from geoparquet_io.core.geometry_detection import (
 )
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.parquet_writer import (
-    DEFAULT_SORT_ROW_GROUP_ROWS,
-    resolve_sort_row_group_rows,
+    DEFAULT_ROW_GROUP_ROWS,
+    resolve_output_geoparquet_version,
+    resolve_row_group_rows,
 )
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
@@ -53,16 +53,29 @@ def _resolve_output_version(
 ) -> str | None:
     """The GeoParquet version this run will actually write, or None if unknowable.
 
-    Mirrors ``write_parquet_with_metadata``: an explicit version wins, and auto
-    mode preserves the input's version. Guessing "1.1" for auto mode instead
-    told users sorting a 2.0 file to "consider --geoparquet-version 2.0" --
-    noise that hides real gaps (#738).
+    Whether ``gpio sort hilbert`` and ``gpio sort str`` advise
+    ``--geoparquet-version 2.0``, and whether they offer their row-group
+    guidance at all, both hang off this answer -- so it has to be the *write's*
+    answer. It asks the write facade the same question the write asks it, with
+    the same two witnesses (the input file, then its carried metadata) and the
+    same ``or DEFAULT_GEOPARQUET_VERSION`` fallback that
+    ``write_parquet_with_metadata`` applies.
+
+    It used to re-implement that decision instead, reading only the carried
+    ``geo`` key. Once the facade started consulting the file, the two answers
+    diverged on exactly the input class the facade exists to fix: for a
+    native-geo-only input this said "1.1" and advised switching to 2.0 over a
+    file it was writing as 2.0 -- #738's bug arriving from the other side --
+    while the row-group guidance, gated on 2.0, could never fire for it.
 
     Returns None rather than a default when the version cannot be established:
     a stdin stream (whose version the writer resolves from the stream's own
     metadata, not from anything visible here) or an input that will not open.
     Callers use None to stay silent. Defaulting instead is what produced the
     original wrong warning -- a failed read is not evidence of a 1.1 input.
+    The facade cannot make that distinction on its own: it swallows a failed
+    read and returns None, which the ``or`` below would turn straight back into
+    the guess. So the read stays here, as the gate on saying anything at all.
     """
     if geoparquet_version:
         return geoparquet_version
@@ -80,7 +93,15 @@ def _resolve_output_version(
     except Exception as e:  # noqa: BLE001 - any read failure means "stay quiet"
         debug(f"Could not read {input_parquet} to resolve output version: {e}")
         return None
-    return extract_version_from_metadata(metadata) or DEFAULT_GEOPARQUET_VERSION
+    return (
+        resolve_output_geoparquet_version(
+            None,
+            input_file=input_parquet,
+            original_metadata=metadata,
+            verbose=verbose,
+        )
+        or DEFAULT_GEOPARQUET_VERSION
+    )
 
 
 def hilbert_order_table(
@@ -276,12 +297,12 @@ def hilbert_order(
         row_group_size_mb: Target row group size in MB
         row_group_rows: Exact number of rows per row group. When neither this
             nor ``row_group_size_mb`` is given, the sort default
-            (``DEFAULT_SORT_ROW_GROUP_ROWS``) applies.
+            (``DEFAULT_ROW_GROUP_ROWS``) applies.
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for streaming writes (e.g., '2GB', '512MB')
     """
-    row_group_rows = resolve_sort_row_group_rows(row_group_rows, row_group_size_mb)
+    row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
     effective_version = _resolve_output_version(input_parquet, geoparquet_version, verbose, profile)
     if effective_version == "1.1":
         warn(
@@ -291,12 +312,12 @@ def hilbert_order(
 
     if (
         row_group_rows
-        and row_group_rows > DEFAULT_SORT_ROW_GROUP_ROWS
+        and row_group_rows > DEFAULT_ROW_GROUP_ROWS
         and effective_version in ("2.0", "parquet-geo-only")
     ):
         info(
             "For optimal spatial filter pushdown with Hilbert sorting, consider using "
-            f"--row-group-size between 10,000 and {DEFAULT_SORT_ROW_GROUP_ROWS:,}. Smaller row "
+            f"--row-group-size between 10,000 and {DEFAULT_ROW_GROUP_ROWS:,}. Smaller row "
             "groups create tighter bounding boxes that enable more row group skipping."
         )
 

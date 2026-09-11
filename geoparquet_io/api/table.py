@@ -994,7 +994,13 @@ class Table:
             compression: Compression type for GeoParquet (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
             compression_level: Compression level for GeoParquet
             row_group_size_mb: Target row group size in MB for GeoParquet
-            row_group_rows: Exact rows per row group for GeoParquet
+            row_group_rows: Rows per row group for GeoParquet. Resolved through
+                the same write facade the CLI uses, so the number that lands is
+                the number ``gpio sort --row-group-size`` would land: ``None``
+                means 49,152, and a request above one 2,048-row writer vector is
+                snapped to a whole vector (50,000 → 49,152). Before that this
+                path handed the writer the raw value and 50,000 became 51,200,
+                outside the band ``gpio check optimization`` scores (#971).
             geoparquet_version: GeoParquet version (1.0, 1.1, 1.1-geoarrow, 2.0, or None to preserve).
                 1.1-geoarrow converts geometry from any input to native GeoArrow nested-coordinate
                 encoding and omits the bbox column; columns with incompatible mixed types fall back to WKB.
@@ -1094,9 +1100,22 @@ class Table:
 
         import pyarrow as pa
 
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
         from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
+
+        # The facade's row-group decision, so the Python API and the CLI agree
+        # about what a number means. This path called the write strategy
+        # directly, so `row_group_rows=50000` reached the writer unaligned and
+        # landed at 51,200 while the identical `gpio sort --row-group-size
+        # 50000` wrote 49,152 (#971), and passing nothing at all inherited
+        # DuckDB's 122,880. The parameter name travels with the call so a
+        # rejected value blames `row_group_rows`, not a CLI flag this caller
+        # never typed.
+        row_group_rows = resolve_row_group_rows(
+            row_group_rows, row_group_size_mb, param_name="row_group_rows"
+        )
 
         # Auto mode: resolve to a concrete version with the same decision the
         # CLI uses (native-geo-only → 2.0), falling back to the hint captured

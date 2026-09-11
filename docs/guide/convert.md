@@ -22,12 +22,16 @@ The `convert` command transforms between GeoParquet and other vector formats wit
     - Hilbert spatial ordering
     - GeoParquet metadata (version auto-detected — see
       [GeoParquet Version](#geoparquet-version); 1.1 for non-GeoParquet inputs)
+    - 49,152-row row groups, the same default every other gpio write uses
 
-    Row groups are left to the Parquet writer's own default (122,880 rows for
-    DuckDB-backed writes). `convert` does not apply the 49,152-row default
-    `gpio sort` uses — pass `--row-group-size` if you want it. It also does not
-    snap the value to the writer's 2,048-row vector the way the sort commands
-    do, so the writer rounds whatever you pass *up* to a multiple of 2,048.
+    Row groups used to be left to the Parquet writer's own default — 122,880
+    rows for DuckDB-backed writes — which is outside the 10,000-50,000 band
+    `gpio check optimization` scores, so `convert` produced files its own
+    spatial check marked `[fail]`
+    ([#981](https://github.com/geoparquet/geoparquet-io/issues/981)). Pass
+    `--row-group-size` to choose your own; it is snapped to the writer's
+    2,048-row vector the same way the sort commands snap it, so the number you
+    ask for is the number that lands.
 
 === "Python"
 

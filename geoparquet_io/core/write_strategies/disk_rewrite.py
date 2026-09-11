@@ -26,6 +26,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
+from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -275,6 +276,12 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
+
+        # The facade has the last word on the output's file-level keys, and it
+        # runs before the non-geo early return below -- which is exactly the
+        # return that wrote a carried `geo` key through under an explicit
+        # parquet-geo-only request (#773).
+        table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
         # Handle non-geo tables: write plain Parquet without geo metadata
         if geometry_column is None:

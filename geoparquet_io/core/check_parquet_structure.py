@@ -7,7 +7,7 @@ from geoparquet_io.core.common import check_bbox_structure, detect_geoparquet_fi
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
-from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
+from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 
 #: What a file with no row groups can be told about its compression: nothing.
 #: Shared with ``check_optimization`` so both checks word it the same way (#823).
@@ -174,7 +174,7 @@ def row_count_fix_available(avg_rows, total_size_bytes=None, num_groups=None) ->
     * the *verdict* is ``GENERAL_ROW_COUNT_RANGE``, settled that way on purpose
       (#795, #958) -- a file laid out the way mainstream writers lay files out
       is not wrong, and calling it wrong would fail most published GeoParquet;
-    * ``--fix`` writes ``DEFAULT_SORT_ROW_GROUP_ROWS``, which comes from
+    * ``--fix`` writes ``DEFAULT_ROW_GROUP_ROWS``, which comes from
       ``SPATIAL_ROW_COUNT_RANGE`` -- the narrower band, and the one
       ``check optimization`` scores.
 
@@ -331,7 +331,7 @@ def check_row_groups(
             f"Target {GENERAL_ROW_COUNT_RANGE[0]:,}-{GENERAL_ROW_COUNT_RANGE[1]:,} rows per group"
         )
 
-    # We fix by row count, not size, and --fix writes DEFAULT_SORT_ROW_GROUP_ROWS
+    # We fix by row count, not size, and --fix writes DEFAULT_ROW_GROUP_ROWS
     # -- so the trigger is the spatial band, not the verdict's general one (#972).
     fix_available = row_count_fix_available(
         stats["avg_rows_per_group"], stats["total_size"], stats["num_groups"]
@@ -344,7 +344,7 @@ def check_row_groups(
     if fix_but_optimal:
         recommendations.append(
             f"Rewrite with {spatial_band} rows per group so spatial filters prune "
-            f"(gpio check row-group --fix writes {DEFAULT_SORT_ROW_GROUP_ROWS:,})"
+            f"(gpio check row-group --fix writes {DEFAULT_ROW_GROUP_ROWS:,})"
         )
 
     results = {
@@ -389,7 +389,7 @@ def check_row_groups(
         if fix_but_optimal:
             warn(
                 f"Row groups are larger than the spatial band ({spatial_band}); "
-                f"--fix rewrites at {DEFAULT_SORT_ROW_GROUP_ROWS:,} rows per group"
+                f"--fix rewrites at {DEFAULT_ROW_GROUP_ROWS:,} rows per group"
             )
 
         progress(f"\nTotal file size: {format_size(stats['total_size'])}")
@@ -406,7 +406,7 @@ def check_row_groups(
             progress(
                 f"- Spatial queries: {spatial_low:,}-{spatial_high:,} rows per group with "
                 "Hilbert sorting and GeoParquet v2.0 enables optimal row group skipping "
-                f"(gpio sort defaults to {DEFAULT_SORT_ROW_GROUP_ROWS:,})"
+                f"(gpio writes {DEFAULT_ROW_GROUP_ROWS:,} by default)"
             )
 
     if return_results:

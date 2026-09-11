@@ -103,6 +103,13 @@ geoparquet_io/
 2. **Common Utilities**: Always check `core/common.py` before writing new utilities
 3. **Shared Decorators**: Use existing decorators from `cli/decorators.py`
 4. **Error Handling**: Use `ClickException` for user-facing errors
+5. **The write facade**: `core/parquet_writer.py` owns the three facts every write
+   path used to decide for itself — the row-group row count
+   (`resolve_row_group_rows`, default `DEFAULT_ROW_GROUP_ROWS` = 49,152), the
+   auto-mode output version (`resolve_output_geoparquet_version`), and whether a
+   `geo` key is written at all (`apply_output_kv_metadata`). A new write path
+   calls those; it must not re-derive a row-group number, re-implement auto
+   version detection, or copy a table's schema metadata through verbatim.
 
 ### Critical Rules
 

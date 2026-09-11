@@ -33,8 +33,8 @@ from geoparquet_io.core.hilbert_order import (
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
 from geoparquet_io.core.parquet_writer import (
-    DEFAULT_SORT_ROW_GROUP_ROWS,
-    resolve_sort_row_group_rows,
+    DEFAULT_ROW_GROUP_ROWS,
+    resolve_row_group_rows,
 )
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
@@ -56,7 +56,7 @@ from geoparquet_io.core.streaming import (
 # with, so its fallback tracks the sort default rather than the general write
 # default: a bare `gpio sort str` and `gpio sort str --row-group-size-mb ...`
 # then build the same ordering (#775).
-DEFAULT_STR_TILE_SIZE = DEFAULT_SORT_ROW_GROUP_ROWS
+DEFAULT_STR_TILE_SIZE = DEFAULT_ROW_GROUP_ROWS
 
 
 def _validate_tile_size(tile_size: int) -> None:
@@ -253,11 +253,11 @@ def str_order(
 ) -> None:
     """Reorder a GeoParquet file with Sort-Tile-Recursive packing."""
     configure_verbose(verbose)
-    # ``resolve_sort_row_group_rows`` validates the value the user actually
+    # ``resolve_row_group_rows`` validates the value the user actually
     # typed -- the error names --row-group-size rather than the internal
     # tile_size it is derived into -- and every sort subcommand goes through it,
     # so all four reject a non-positive request the same way.
-    row_group_rows = resolve_sort_row_group_rows(row_group_rows, row_group_size_mb)
+    row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
     tile_size = DEFAULT_STR_TILE_SIZE if row_group_rows is None else row_group_rows
     _validate_tile_size(tile_size)
     effective_version = _resolve_output_version(input_parquet, geoparquet_version, verbose, profile)

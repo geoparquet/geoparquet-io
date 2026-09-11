@@ -30,6 +30,7 @@ from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, progress, success, warn
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.common import raise_if_no_rows, sanitize_filename
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
@@ -598,6 +599,7 @@ def _create_all_partitions(
     filename_prefix,
     overwrite,
     metadata,
+    input_parquet,
     verbose,
     profile,
     original_cols,
@@ -616,13 +618,23 @@ def _create_all_partitions(
     ``COPY ... PARTITION_BY`` (no per-combination re-scan, issue #478), then
     rewrites each (small) staging partition into its final nested file with the
     correct per-partition metadata.
+
+    ``input_parquet`` is the user's own file, and it is here for one reason: the
+    version this run writes has to be resolved from it, not from the staging
+    file each partition write actually reads. See ``PartitionWriteOptions``.
+    Unlike the index-adding partition drivers, the admin join reads the user's
+    file directly -- the enriched table is ``a.*`` plus the admin columns, with
+    only the join predicate reprojected -- so this file is a truthful witness
+    for the geometry that will be written.
     """
     # Aliases must not collide with kept columns (originals + admin columns).
     aliases = make_partition_aliases(
         len(output_column_names), list(original_cols) + list(output_column_names)
     )
     write_options = PartitionWriteOptions(
-        geoparquet_version=geoparquet_version,
+        geoparquet_version=resolve_output_geoparquet_version(
+            geoparquet_version, input_file=input_parquet, verbose=verbose
+        ),
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,
@@ -866,6 +878,7 @@ def partition_by_admin_hierarchical(
                 filename_prefix,
                 overwrite,
                 metadata,
+                actual_input,
                 verbose,
                 profile,
                 original_cols,

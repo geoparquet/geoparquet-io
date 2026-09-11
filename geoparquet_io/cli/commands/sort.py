@@ -23,7 +23,6 @@ from geoparquet_io.cli.decorators import (
 )
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
-from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
 from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_impl
 from geoparquet_io.core.str_order import str_order as str_impl
@@ -46,7 +45,7 @@ def sort(ctx):
     help="Name of the geometry column (default: geometry)",
 )
 @bbox_option
-@output_format_options(default_rows=DEFAULT_SORT_ROW_GROUP_ROWS)
+@output_format_options
 @geoparquet_version_option
 @overwrite_option
 @verbose_option
@@ -116,7 +115,7 @@ def hilbert_order(
     help="Name of the geometry column (default: geometry)",
 )
 @bbox_option
-@output_format_options(default_rows=DEFAULT_SORT_ROW_GROUP_ROWS)
+@output_format_options
 @geoparquet_version_option
 @overwrite_option
 @verbose_option
@@ -185,7 +184,7 @@ def str_order_command(
     help="Sort in descending order (default: ascending)",
 )
 @allow_schema_diff_option
-@output_format_options(default_rows=DEFAULT_SORT_ROW_GROUP_ROWS)
+@output_format_options
 @geoparquet_version_option
 @overwrite_option
 @verbose_option
@@ -272,7 +271,7 @@ def sort_column(
     help="Exclude quadkey column from output after sorting",
 )
 @allow_schema_diff_option
-@output_format_options(default_rows=DEFAULT_SORT_ROW_GROUP_ROWS)
+@output_format_options
 @geoparquet_version_option
 @overwrite_option
 @verbose_option
