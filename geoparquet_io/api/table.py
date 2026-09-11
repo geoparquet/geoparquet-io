@@ -681,18 +681,14 @@ class Table:
             ...     geometry_format='wkt'
             ... )
         """
-        from geoparquet_io.core.column_selection import reject_blank_column_entries
+        from geoparquet_io.core.column_selection import join_column_list
         from geoparquet_io.core.extract_bigquery import extract_bigquery
 
-        # See ops.read_bigquery: [""] joins to "", which the core reads as
-        # "option not given", silently widening the request to every column
-        # (#992). Checked before the join, where the list shape still exists.
-        reject_blank_column_entries(columns, "columns")
-        reject_blank_column_entries(exclude_columns, "exclude_columns")
-
-        # Convert columns list to comma-separated string for the core function
-        include_cols = ",".join(columns) if columns else None
-        exclude_cols = ",".join(exclude_columns) if exclude_columns else None
+        # Convert the list arguments to the comma-separated options the core
+        # takes. See ops.read_bigquery: the check belongs inside the join, not
+        # beside it, because [""] joining to "" is exactly #992.
+        include_cols = join_column_list(columns, "columns")
+        exclude_cols = join_column_list(exclude_columns, "exclude_columns")
 
         # Get PyArrow table (don't write to file)
         arrow_table = extract_bigquery(

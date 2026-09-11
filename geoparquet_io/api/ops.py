@@ -1814,19 +1814,16 @@ def read_bigquery(
         ...     geometry_format='wkt'
         ... )
     """
-    from geoparquet_io.core.column_selection import reject_blank_column_entries
+    from geoparquet_io.core.column_selection import join_column_list
     from geoparquet_io.core.extract_bigquery import extract_bigquery
 
-    # A blank entry is a mistake in a *list* argument, and must be caught before
-    # the join: [""] joins to "", which the core reads as "option not given" and
-    # so widens the request to every column -- the widest possible answer to a
-    # caller's typo (#992). A wholly absent list (None or []) is the unset one.
-    reject_blank_column_entries(columns, "columns")
-    reject_blank_column_entries(exclude_columns, "exclude_columns")
-
-    # Convert columns list to comma-separated string for the core function
-    include_cols = ",".join(columns) if columns else None
-    exclude_cols = ",".join(exclude_columns) if exclude_columns else None
+    # Convert the list arguments to the comma-separated options the core takes.
+    # join_column_list checks and joins in one call because the gap between the
+    # two steps *is* #992: [""] joins to "", which the core reads as "option not
+    # given" and so widens the request to every column. None or [] is the unset
+    # a list argument has.
+    include_cols = join_column_list(columns, "columns")
+    exclude_cols = join_column_list(exclude_columns, "exclude_columns")
 
     # Validate bbox_mode
     valid_bbox_modes = {"auto", "server", "local"}

@@ -30,6 +30,7 @@ from __future__ import annotations
 from geoparquet_io.core.exceptions import InvalidParameterError
 
 __all__ = [
+    "join_column_list",
     "reject_blank_column_entries",
     "resolve_columns_against_schema",
     "split_column_list",
@@ -83,6 +84,41 @@ def split_column_list(value: str | None, option_name: str) -> list[str] | None:
     return entries
 
 
+def join_column_list(columns: list[str] | None, argument_name: str) -> str | None:
+    """Join a list argument into the comma-separated option the core backends take.
+
+    The inverse of :func:`split_column_list`, and it exists because of the seam
+    *between* the two. The Python API's BigQuery entry points take ``columns`` as
+    a **list** and join it for a core function that takes a string, and ``[""]``
+    joins to ``""`` -- which the splitting side correctly reads as "option not
+    given", silently widening the request to every column (#992). Validating and
+    joining in one call closes that seam so the next list argument cannot reopen
+    it by spelling the two steps out again.
+
+    The two shapes have different "unset" values, and that is the whole point:
+
+    - a **string** option is unset when it is wholly empty, so
+      ``--include-cols "$COLS"`` keeps working when ``COLS`` is (#973);
+    - a **list** argument is unset when it is None or ``[]``. A list holding a
+      blank entry is a caller's mistake, never an absent argument.
+
+    Args:
+        columns: The column names, or None
+        argument_name: The *argument* to name in the error message, e.g.
+            "columns" -- these callers have no CLI option to point at
+
+    Returns:
+        The comma-separated value, or None when the argument was not given
+
+    Raises:
+        InvalidParameterError: If any entry is empty or whitespace-only
+    """
+    reject_blank_column_entries(columns, argument_name)
+    if not columns:
+        return None
+    return ",".join(columns)
+
+
 def resolve_columns_against_schema(
     requested_cols: list[str] | None,
     all_columns: list[str],
@@ -106,8 +142,13 @@ def resolve_columns_against_schema(
     ``--exclude-cols ID`` against a column ``id`` silently excluded nothing.
 
     An **exact** match is preferred to a folded one, because folding is not
-    injective: DuckDB permits a local table carrying both ``id`` and ``ID``, and
-    a ``{col.lower(): col}`` map keeps only the last of those.
+    injective: DuckDB permits a local table carrying both ``id`` and ``ID``.
+
+    Where folding is genuinely ambiguous -- a third spelling like ``Id`` against
+    a schema holding both ``id`` and ``ID`` -- this **raises** rather than
+    picking one. A ``{col.lower(): col}`` map silently kept the last, which is
+    an arbitrary choice; on ``--exclude-cols`` that arbitrary choice deletes a
+    column, so the caller is asked to disambiguate instead.
 
     Args:
         requested_cols: Column names the caller asked for (or None)
@@ -126,15 +167,27 @@ def resolve_columns_against_schema(
     reject_blank_column_entries(requested_cols, option_name)
 
     exact = set(all_columns)
-    folded = {col.lower(): col for col in all_columns}
+    folded: dict[str, list[str]] = {}
+    for col in all_columns:
+        folded.setdefault(col.lower(), []).append(col)
 
-    def _resolve(col: str) -> str | None:
-        if col in exact:
-            return col
-        return folded.get(col.lower())
+    def _candidates(col: str) -> list[str]:
+        """Every schema spelling this name could mean: the exact one, else the folds."""
+        return [col] if col in exact else folded.get(col.lower(), [])
 
-    resolved = [(col, _resolve(col)) for col in requested_cols]
-    missing = [col for col, match in resolved if match is None]
+    matches = [(col, _candidates(col)) for col in requested_cols]
+
+    ambiguous = {col: cands for col, cands in matches if len(cands) > 1}
+    if ambiguous:
+        detail = "; ".join(
+            f"{col} matches {', '.join(sorted(cands))}" for col, cands in sorted(ambiguous.items())
+        )
+        raise InvalidParameterError(
+            option_name,
+            f"Ambiguous column names: {detail}. Use the exact spelling.",
+        )
+
+    missing = [col for col, cands in matches if not cands]
     if missing:
         raise InvalidParameterError(
             option_name,
@@ -142,4 +195,4 @@ def resolve_columns_against_schema(
             f"Available columns: {', '.join(all_columns)}",
         )
 
-    return [match for _, match in resolved if match is not None]
+    return [cands[0] for _, cands in matches]

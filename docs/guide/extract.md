@@ -1946,23 +1946,28 @@ gpio extract data.parquet output.parquet --include-cols invalid_column
 ```
 
 The same check runs on `gpio extract bigquery`, `carto` and `arcgis`, for both
-`--include-cols` and `--exclude-cols`, against the schema each already reads to
-plan the extraction — so an unknown name fails locally instead of becoming a
-backend error or, for ArcGIS, an `outFields` entry the server quietly ignores.
-Names are matched case-insensitively and resolved to the source's own spelling,
-so `--exclude-cols OWNER` drops a column named `Owner` rather than silently
+`--include-cols` and `--exclude-cols`, against a column list each command
+already has — so an unknown name fails locally instead of becoming a backend
+error or, for ArcGIS, an `outFields` entry the server quietly ignores. Names are
+matched case-insensitively and resolved to that list's own spelling, so
+`--exclude-cols OWNER` drops a column named `Owner` rather than silently
 dropping nothing.
 
-On `carto` and `arcgis`, `--exclude-cols` names columns of the *fetched* table
-rather than of the service, so `geometry` is an accepted name there even though
-the source calls it something else (Carto's `the_geom`, an ArcGIS layer's
-shape). On `carto` it is then refused with a warning, since GeoParquet output
-requires the column — including when you spell it `GEOMETRY`.
+`--exclude-cols` names columns of the table you get back, not of the source. On
+`carto` it is therefore checked against that table once it is fetched, so the
+name to use is `geometry` — the post-fetch name of the geometry column — and not
+the source's `the_geom`. Excluding `geometry` from a spatial extraction is
+refused with a warning, since GeoParquet output requires the column; on a
+geometry-less (tabular) table there is no such column, so naming it is an
+unknown-column error like any other.
 
-On `carto`, passing `--geometry` or `--no-geometry` skips the shape probe that
-normally supplies that schema; if you also pass a column option, one bounded
-`SELECT * … LIMIT 0` is issued so the check still runs. If it cannot be reached,
-extraction proceeds unchecked rather than failing.
+Because that check reads the fetched table, it needs no extra request and holds
+whatever else you pass — including `--geometry`/`--no-geometry`, which skip the
+shape probe. It does report after the fetch rather than before it. `--include-cols`
+is checked *before* the fetch instead, since it becomes the SELECT list: under
+`--geometry`/`--no-geometry` it issues one bounded `SELECT * … LIMIT 0` of its
+own to do so, and if that cannot be reached, extraction proceeds unchecked
+rather than failing.
 
 A **blank entry** in the list — `--include-cols id,,name`, or `--include-cols '   '` —
 is a usage error and is rejected before anything is opened or contacted. That

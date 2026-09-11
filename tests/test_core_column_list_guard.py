@@ -20,6 +20,7 @@ stands in for a request is reached, since fast failure is half the point.
 
 from __future__ import annotations
 
+import contextlib
 from unittest import mock
 
 import pyarrow as pa
@@ -31,7 +32,11 @@ from geoparquet_io.api import ops
 from geoparquet_io.core import arcgis, carto, pmtiles
 from geoparquet_io.core import extract_bigquery as extract_bigquery_module
 from geoparquet_io.core.carto import CartoError
-from geoparquet_io.core.column_selection import reject_blank_column_entries, split_column_list
+from geoparquet_io.core.column_selection import (
+    join_column_list,
+    reject_blank_column_entries,
+    split_column_list,
+)
 from geoparquet_io.core.exceptions import InvalidParameterError
 
 CARTO_URL = "https://example.carto.com/api/v2/sql"
@@ -68,26 +73,39 @@ def _patch_carto_probes(fields: dict | None = None, **kwargs):
     )
 
 
-def _run_carto(fetched: pa.Table, fields: dict | None = None, **kwargs) -> pa.Table:
+def _run_carto(
+    fetched: pa.Table, fields: dict | None = None, *, probes: bool = True, **kwargs
+) -> pa.Table:
     """Run ``ops.from_carto`` end to end with every request mocked out.
 
-    ``--exclude-cols`` is applied to the *fetched* table, so only a full run
-    shows whether a name actually dropped a column or silently did nothing.
+    ``--exclude-cols`` is resolved and applied against the *fetched* table, so
+    only a full run shows whether a name dropped a column or silently did
+    nothing. ``probes=False`` leaves ``_carto_sql_json`` to the caller, which is
+    how the no-probe claims are asserted rather than argued.
     """
-    with (
-        _patch_carto_probes(fields),
-        mock.patch.object(carto, "_fetch_with_retry", return_value=fetched),
-        mock.patch.object(carto, "_get_row_count", return_value=fetched.num_rows),
-        mock.patch.object(
-            carto, "repair_arrow_table_geometry", side_effect=lambda t, col, repair: (t, 0)
-        ),
-    ):
+    with contextlib.ExitStack() as stack:
+        if probes:
+            stack.enter_context(_patch_carto_probes(fields))
+        stack.enter_context(mock.patch.object(carto, "_fetch_with_retry", return_value=fetched))
+        stack.enter_context(
+            mock.patch.object(carto, "_get_row_count", return_value=fetched.num_rows)
+        )
+        stack.enter_context(
+            mock.patch.object(
+                carto, "repair_arrow_table_geometry", side_effect=lambda t, col, repair: (t, 0)
+            )
+        )
         return ops.from_carto(CARTO_URL, "tbl", **kwargs)
 
 
 def _geo_fetch() -> pa.Table:
     """What ST_Read hands back for :data:`CARTO_FIELDS`: ``the_geom`` is ``geom``."""
     return pa.table({"cartodb_id": [1], "Owner": ["acme"], "geom": [b"\x00"]})
+
+
+def _plain_fetch() -> pa.Table:
+    """What the CSV fetch hands back for :data:`CARTO_TABULAR_FIELDS`: no rename."""
+    return pa.table({"cartodb_id": [1], "Owner": ["acme"]})
 
 
 def _layer_info() -> arcgis.ArcGISLayerInfo:
@@ -200,29 +218,30 @@ class TestCartoSchemaCheck:
                 ops.from_carto(CARTO_URL, "tbl", include_cols="owner,CARTODB_ID")
         assert build.call_args.kwargs["columns"] == ["Owner", "cartodb_id"]
 
-    def test_exclude_geometry_is_not_a_schema_error(self):
-        """``exclude_cols`` names post-fetch columns, where ``the_geom`` is ``geometry``."""
-        with (
-            _patch_carto_probes(),
-            mock.patch.object(carto, "_build_carto_query", side_effect=SystemExit("query built")),
-        ):
-            with pytest.raises(SystemExit):
-                ops.from_carto(CARTO_URL, "tbl", exclude_cols="geometry")
+    def test_exclude_is_not_checked_against_the_source_schema(self):
+        """``the_geom`` is a source column but not a fetched one, so it is an error.
+
+        The fetched table is what ``--exclude-cols`` filters, and the probe's
+        schema is a different set. Checking against the probe would have made
+        ``the_geom`` a tolerated no-op; checking against the fetch does not.
+        """
+        with pytest.raises(InvalidParameterError) as exc:
+            _run_carto(_geo_fetch(), exclude_cols="the_geom")
+        assert "the_geom" in str(exc.value)
 
 
-class TestCartoExcludeSchemaCheck:
-    """``--exclude-cols`` is checked and resolved too (#991).
+class TestCartoExcludeIsCheckedAgainstTheFetchedTable:
+    """``--exclude-cols`` is resolved against the table it actually filters (#991).
 
     #989 left it matched exactly, on the grounds that the post-fetch rename made
-    the fetched column set unknowable. It is knowable: ``geometry`` plus the
-    schema the probe already read, which is exactly what ``arcgis.py`` checks
-    ``--exclude-cols`` against.
+    the fetched column set unknowable. The fetched table knows it exactly, and
+    is already in hand where the exclusion is applied -- so the check is free,
+    needs no probe, and is exact rather than a superset of the source schema.
     """
 
     def test_a_typo_is_an_error_not_a_silent_no_op(self):
-        with _patch_carto_probes():
-            with pytest.raises(InvalidParameterError) as exc:
-                ops.from_carto(CARTO_URL, "tbl", exclude_cols="Ownre")
+        with pytest.raises(InvalidParameterError) as exc:
+            _run_carto(_geo_fetch(), exclude_cols="Ownre")
         assert "--exclude-cols" in str(exc.value)
         assert "Ownre" in str(exc.value)
         assert "cartodb_id" in str(exc.value)
@@ -235,38 +254,53 @@ class TestCartoExcludeSchemaCheck:
 
     def test_the_tabular_path_is_checked_too(self):
         """``_carto_plain_table`` has no rename at all, so the excuse never applied."""
-        with _patch_carto_probes(CARTO_TABULAR_FIELDS):
-            with pytest.raises(InvalidParameterError) as exc:
-                ops.from_carto(CARTO_URL, "tbl", exclude_cols="Ownre")
+        with pytest.raises(InvalidParameterError) as exc:
+            _run_carto(_plain_fetch(), CARTO_TABULAR_FIELDS, exclude_cols="Ownre")
         assert "Ownre" in str(exc.value)
 
     def test_the_tabular_path_resolves_the_spelling_too(self):
-        table = _run_carto(
-            pa.table({"cartodb_id": [1], "Owner": ["acme"]}),
-            CARTO_TABULAR_FIELDS,
-            exclude_cols="owner",
-        )
+        table = _run_carto(_plain_fetch(), CARTO_TABULAR_FIELDS, exclude_cols="owner")
         assert table.column_names == ["cartodb_id"]
 
-    def test_excluding_geometry_in_any_spelling_is_refused_not_obeyed(self):
-        """``geometry`` is required for GeoParquet output, so it is warned about.
+    def test_geometry_is_not_a_column_on_the_tabular_path(self):
+        """The path whose own comment said "no geometry to protect here".
 
-        On main ``GEOMETRY`` missed that guard by exact match and then silently
-        dropped nothing; now it resolves to ``geometry`` and is refused out loud.
+        It had no guard at all, so ``--exclude-cols geometry`` was a silent
+        no-op there. The fetched table simply has no such column, so it is now
+        an error like any other name the table does not carry.
+        """
+        with pytest.raises(InvalidParameterError) as exc:
+            _run_carto(_plain_fetch(), CARTO_TABULAR_FIELDS, exclude_cols="geometry")
+        assert "geometry" in str(exc.value)
+
+    @pytest.mark.parametrize("exclude_cols", ["geometry", "GEOMETRY"])
+    def test_excluding_geometry_is_refused_out_loud_on_the_geometry_path(self, exclude_cols):
+        """``geometry`` is a real fetched column there, and GeoParquet requires it.
+
+        ``GEOMETRY`` used to miss the guard by exact match and then silently drop
+        nothing; it now folds to ``geometry`` and reaches the refusal.
         """
         with mock.patch.object(carto, "warn") as warn:
-            table = _run_carto(_geo_fetch(), exclude_cols="GEOMETRY")
+            table = _run_carto(_geo_fetch(), exclude_cols=exclude_cols)
         assert table.column_names == ["cartodb_id", "Owner", "geometry"]
         assert any("Cannot exclude" in str(call.args[0]) for call in warn.call_args_list)
+
+    def test_a_second_name_still_applies_when_geometry_is_dropped_from_the_list(self):
+        """Refusing ``geometry`` must not swallow the rest of the list."""
+        with mock.patch.object(carto, "warn"):
+            table = _run_carto(_geo_fetch(), exclude_cols="geometry,owner")
+        assert table.column_names == ["cartodb_id", "geometry"]
 
 
 class TestCartoForcedModeStillChecks:
     """``--geometry``/``--no-geometry`` no longer skips the check (#991).
 
     #989 pinned the skip as deliberate: the shape probe is what supplies the
-    schema, and forcing the mode skips it. But the guarantee "a typo is an
-    error" should not hinge on an unrelated flag, so the column options now pay
-    for their own ``SELECT * ... LIMIT 0`` -- and only when one is given.
+    schema, and forcing the mode skips it. The guarantee "a typo is an error"
+    should not hinge on an unrelated flag, so ``--include-cols`` buys its own
+    ``SELECT * ... LIMIT 0`` -- that list becomes the SELECT list, where an
+    unresolved name costs a retry budget and an opaque ST_Read failure.
+    ``--exclude-cols`` needs no probe at all: it is checked against the fetch.
     """
 
     @pytest.mark.parametrize("geometry", [True, False])
@@ -276,11 +310,22 @@ class TestCartoForcedModeStillChecks:
                 ops.from_carto(CARTO_URL, "tbl", include_cols="nope", geometry=geometry)
         assert "nope" in str(exc.value)
 
-    def test_an_unknown_exclude_column_is_still_rejected(self):
-        with _patch_carto_probes():
+    def test_an_unknown_exclude_column_is_still_rejected_without_a_probe(self):
+        """No schema probe runs, yet the typo is still caught -- after the fetch."""
+        with mock.patch.object(
+            carto, "_carto_sql_json", side_effect=AssertionError("probed Carto")
+        ):
             with pytest.raises(InvalidParameterError) as exc:
-                ops.from_carto(CARTO_URL, "tbl", exclude_cols="Ownre", geometry=True)
+                _run_carto(_geo_fetch(), exclude_cols="Ownre", geometry=True, probes=False)
         assert "Ownre" in str(exc.value)
+
+    def test_exclude_alone_buys_no_probe(self):
+        """The cost of the check for --exclude-cols is zero requests, not one."""
+        with mock.patch.object(
+            carto, "_carto_sql_json", side_effect=AssertionError("probed Carto")
+        ):
+            table = _run_carto(_geo_fetch(), exclude_cols="owner", geometry=True, probes=False)
+        assert table.column_names == ["cartodb_id", "geometry"]
 
     def test_no_column_option_means_no_probe(self):
         """The flags' whole point is to skip the probe, so nothing else pays for it."""
@@ -317,112 +362,38 @@ class TestCartoForcedModeStillChecks:
         assert "empty or whitespace-only" in str(exc.value)
 
 
-class TestArcGISBlankEntries:
-    """``ops.from_arcgis`` rejects a blank entry instead of sending it."""
+class TestJoinColumnList:
+    """The joiner: the list side's "unset", and why it is not the string side's.
 
-    def test_blank_include_entry_rejected_before_any_request(self):
-        """The #980 misbehavior: ``outFields=name,,pop`` went to the server."""
-        with mock.patch.object(
-            arcgis, "get_layer_info", side_effect=AssertionError("contacted the service")
-        ):
-            with pytest.raises(InvalidParameterError) as exc:
-                ops.from_arcgis(ARCGIS_URL, include_cols="name,,pop")
-        assert "--include-cols" in str(exc.value)
-        assert "empty or whitespace-only" in str(exc.value)
+    ``split_column_list`` and this are inverses, and #992 lived in the gap
+    between them -- so the check belongs *inside* the join, not beside it at
+    each call site.
+    """
 
-    def test_blank_exclude_entry_rejected_before_any_request(self):
-        with mock.patch.object(
-            arcgis, "get_layer_info", side_effect=AssertionError("contacted the service")
-        ):
-            with pytest.raises(InvalidParameterError) as exc:
-                ops.from_arcgis(ARCGIS_URL, exclude_cols="name,,pop")
-        assert "--exclude-cols" in str(exc.value)
+    @pytest.mark.parametrize("columns", [None, []])
+    def test_an_absent_list_is_an_unset_option(self, columns):
+        assert join_column_list(columns, "columns") is None
 
+    def test_a_list_is_joined(self):
+        assert join_column_list(["id", "name"], "columns") == "id,name"
 
-class TestArcGISSchemaCheck:
-    """Non-blank names are checked against the layer metadata already fetched."""
+    @pytest.mark.parametrize("columns", [[""], ["  "], ["id", ""], ["", ""]])
+    def test_a_blank_entry_is_rejected(self, columns):
+        """``[""]`` is the one that used to join to ``""`` and read as unset."""
+        with pytest.raises(InvalidParameterError, match="empty or whitespace-only"):
+            join_column_list(columns, "columns")
 
-    def test_unknown_include_field_rejected(self):
-        with mock.patch.object(arcgis, "get_layer_info", return_value=_layer_info()):
-            with pytest.raises(InvalidParameterError) as exc:
-                ops.from_arcgis(ARCGIS_URL, include_cols="name,nope")
-        assert "nope" in str(exc.value)
-        assert "OBJECTID" in str(exc.value)
-
-    def test_unknown_exclude_field_rejected(self):
-        with mock.patch.object(arcgis, "get_layer_info", return_value=_layer_info()):
-            with pytest.raises(InvalidParameterError) as exc:
-                ops.from_arcgis(ARCGIS_URL, exclude_cols="nope")
-        assert "nope" in str(exc.value)
-
-    def test_exclude_geometry_is_accepted(self):
-        """``geometry`` is not a layer field but is the table's first column."""
-        with (
-            mock.patch.object(arcgis, "get_layer_info", return_value=_layer_info()),
-            mock.patch.object(
-                arcgis, "_stream_features_to_parquet", side_effect=SystemExit("streamed")
-            ),
-        ):
-            with pytest.raises(SystemExit):
-                ops.from_arcgis(ARCGIS_URL, exclude_cols="geometry")
-
-    def test_include_field_resolved_to_layer_spelling(self):
-        with (
-            mock.patch.object(arcgis, "get_layer_info", return_value=_layer_info()),
-            mock.patch.object(
-                arcgis, "_stream_features_to_parquet", side_effect=SystemExit("streamed")
-            ) as stream,
-        ):
-            with pytest.raises(SystemExit):
-                ops.from_arcgis(ARCGIS_URL, include_cols="objectid,Name")
-        assert stream.call_args.kwargs["out_fields"] == "OBJECTID,name"
-
-    def test_wholly_empty_value_still_means_unset(self):
-        """``--include-cols "$COLS"`` with COLS unset must keep working (#973)."""
-        with (
-            mock.patch.object(arcgis, "get_layer_info", return_value=_layer_info()),
-            mock.patch.object(
-                arcgis, "_stream_features_to_parquet", side_effect=SystemExit("streamed")
-            ) as stream,
-        ):
-            with pytest.raises(SystemExit):
-                ops.from_arcgis(ARCGIS_URL, include_cols="", exclude_cols="")
-        assert stream.call_args.kwargs["out_fields"] == "*"
-
-    def test_star_is_still_the_all_fields_wildcard(self):
-        """``outFields=*`` is ArcGIS's own spelling for "every field"."""
-        with (
-            mock.patch.object(arcgis, "get_layer_info", return_value=_layer_info()),
-            mock.patch.object(
-                arcgis, "_stream_features_to_parquet", side_effect=SystemExit("streamed")
-            ) as stream,
-        ):
-            with pytest.raises(SystemExit):
-                ops.from_arcgis(ARCGIS_URL, include_cols="*")
-        assert stream.call_args.kwargs["out_fields"] == "*"
-
-
-class TestParquetBackendSaysWhatIsWrong:
-    """``ops.extract`` already raised; the message now names the real problem."""
-
-    @staticmethod
-    def _table() -> pa.Table:
-        return pa.table({"id": [1], "name": ["a"]})
-
-    def test_blank_column_entry_message(self):
+    def test_the_argument_is_named_in_the_message(self):
+        """These callers have a Python argument to point at, not a CLI option."""
         with pytest.raises(InvalidParameterError) as exc:
-            ops.extract(self._table(), columns=["id", ""])
-        assert "empty or whitespace-only" in str(exc.value)
+            join_column_list([""], "exclude_columns")
+        assert "exclude_columns" in str(exc.value)
 
-    def test_blank_exclude_entry_message(self):
-        with pytest.raises(InvalidParameterError) as exc:
-            ops.extract(self._table(), exclude_columns=["   "])
-        assert "empty or whitespace-only" in str(exc.value)
-
-    def test_unknown_column_still_reports_the_schema(self):
-        with pytest.raises(InvalidParameterError) as exc:
-            ops.extract(self._table(), columns=["nope"])
-        assert "Columns not found in schema: nope" in str(exc.value)
+    def test_it_round_trips_with_the_splitter(self):
+        assert split_column_list(join_column_list(["id", "name"], "columns"), "--include-cols") == [
+            "id",
+            "name",
+        ]
 
 
 class TestBigQueryListArguments:
