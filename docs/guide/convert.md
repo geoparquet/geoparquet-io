@@ -29,9 +29,18 @@ The `convert` command transforms between GeoParquet and other vector formats wit
     `gpio check optimization` scores, so `convert` produced files its own
     spatial check marked `[fail]`
     ([#981](https://github.com/geoparquet/geoparquet-io/issues/981)). Pass
-    `--row-group-size` to choose your own; it is snapped to the writer's
-    2,048-row vector the same way the sort commands snap it, so the number you
-    ask for is the number that lands.
+    `--row-group-size` to choose your own; anything above one 2,048-row writer
+    vector is snapped to a whole vector the same way the sort commands snap it,
+    so the number you ask for is the number that lands.
+
+    A request of **2,048 rows or fewer** is the exception: gpio passes it
+    through untouched, because pyarrow honours it exactly while DuckDB's
+    `COPY` rounds it up to 2,048 regardless — so what lands depends on which
+    writer runs, and gpio cannot snap it without overriding the one writer that
+    could have obeyed. `convert` writes through DuckDB, so
+    `--row-group-size 249` really does produce 2,048-row groups; it now prints
+    one line naming both numbers before the footer does
+    ([#986](https://github.com/geoparquet/geoparquet-io/issues/986)).
 
 === "Python"
 
