@@ -659,6 +659,10 @@ def add_kdtree_column(
         verbose=verbose,
         profile=profile,
         geoparquet_version=geoparquet_version,
+        # The rows this write reads are the input's, so auto mode resolves the
+        # output version from the input file rather than from a `geo` key a
+        # native-geo-only input does not have (#993).
+        input_file=input_parquet,
         memory_limit=memory_limit,
     )
 

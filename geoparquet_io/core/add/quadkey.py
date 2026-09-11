@@ -703,6 +703,9 @@ def _add_quadkey_file_based(
             profile=profile,
             geoparquet_version=geoparquet_version,
             custom_metadata=quadkey_metadata,
+            # The precondition: this query is `SELECT *` plus the quadkey
+            # column, so the rows it writes are `input_parquet`'s own.
+            input_file=input_parquet,
             memory_limit=memory_limit,
         )
 

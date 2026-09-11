@@ -1,9 +1,9 @@
-"""One owner for the auto-version decision -- and what still is not covered.
+"""One owner for the auto-version decision -- and the CRS that travels with it.
 
 ``tests/test_write_facade_contract.py`` pins the contracts the facade turned
 green. This file pins the three things review found *around* them, each a case
-where something other than the facade still answers the facade's own question,
-or where the facade's answer reaches an output the input never described.
+where something other than the facade answered the facade's own question, or
+where the facade's answer reached an output the input never described.
 
 * **A stale second owner.** ``hilbert_order._resolve_output_version`` decides
   which version ``gpio sort hilbert`` and ``gpio sort str`` *say* they are
@@ -13,23 +13,34 @@ or where the facade's answer reaches an output the input never described.
   side, and the exact input class the facade exists to fix.
 * **A version resolved from a lossy intermediate.** ``gpio sort quadkey`` and
   the five index-adding ``gpio partition`` drivers rewrite their input into a
-  scratch file first (to add the index column), and that scratch write does not
+  scratch file first (to add the index column), and that scratch write did not
   preserve native geo or the input's CRS. Resolving the *version* from the
   user's real file while reading the *data* from the scratch file is how
-  ``sort quadkey`` came to stamp ``OGC:CRS84`` on an EPSG:5070 input.
-* **A behaviour claimed wholesale.** Only ``partition string`` and
-  ``partition admin`` read the user's file directly, so only they deliver the
-  #600 fix; the index-adding drivers still write 1.1 WKB.
+  ``sort quadkey`` came to stamp ``OGC:CRS84`` on an EPSG:5070 input. #993 made
+  the scratch write pass the same witness, so the intermediate is now lossless
+  and the two markers here were deleted with their assertions unchanged.
+* **A behaviour claimed wholesale.** Before #993 only ``partition string`` and
+  ``partition admin`` read the user's file directly, so only they delivered the
+  #600 fix.
 
-The gaps are marked ``xfail(strict=True)`` rather than left untested or
+The gaps were marked ``xfail(strict=True)`` rather than left untested or
 asserted as correct: strict mode means whoever fixes the underlying scratch-file
 write has to come here and delete the marker, which is the signal. Certifying
 them green -- which the contract file's ``crs=<null>`` fixture does by
 omission -- is what let ``gpio check spec`` print
 ``✓ valid inline PROJJSON CRS`` over the wrong CRS.
 
+The two assertions the markers guarded are kept exactly as they were written,
+so the deletion means what it is supposed to mean. They are *not* the evidence,
+though: ``source_crs_string`` reads the ``geo`` block, falls back to the Parquet
+logical type and returns the first answer, so it cannot report the two
+disagreeing -- which is a file's own way of being wrong. The tests below them
+add that oracle, reading each source separately and then asking
+``gpio check spec`` whether they agree.
+
 Refs: https://github.com/geoparquet/geoparquet-io/issues/600
 Refs: https://github.com/geoparquet/geoparquet-io/issues/738
+Refs: https://github.com/geoparquet/geoparquet-io/issues/993
 """
 
 from __future__ import annotations
@@ -44,6 +55,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.crs_utils import source_crs_string
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from tests.native_geo_probes import EPSG_5070, geo_block_crs_id, logical_crs_id, spec_problems
 
 #: A native-geo-only input whose CRS is *not* the default. The distinction the
 #: contract file's DuckDB-written fixture cannot make: it carries ``crs=<null>``,
@@ -197,18 +209,6 @@ def test_auto_mode_keeps_the_input_crs_while_upgrading_to_native_2_0(command, ex
     assert source_crs_string(str(out), False) == PROJECTED_CRS
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "sort quadkey resolves the version from the user's file but reads the data "
-        "from the scratch file `add quadkey` wrote, and that write drops the native "
-        "GEOMETRY type and the CRS with it. The output is therefore native 2.0 "
-        "declaring OGC:CRS84 over EPSG:5070 data -- a wrong CRS asserted where "
-        "before it was merely absent, which `gpio check spec` blesses. Fixing it "
-        "means making the index-adding scratch write preserve the input's version "
-        "and CRS (the other half of #600); delete this marker then."
-    ),
-)
 def test_sort_quadkey_keeps_the_input_crs(tmp_path):
     """Same assertion as the four above, on the one path with an intermediate."""
     out = tmp_path / "quadkey.parquet"
@@ -216,6 +216,26 @@ def test_sort_quadkey_keeps_the_input_crs(tmp_path):
     _run_cli("sort", "quadkey", PROJECTED_PGO, out)
 
     assert source_crs_string(str(out), False) == PROJECTED_CRS
+
+
+def test_sort_quadkey_does_not_leave_the_two_crs_sources_disagreeing(projected_conus, tmp_path):
+    """What the assertion above cannot see, and why it needed a second test.
+
+    ``source_crs_string`` returns the ``geo`` block's answer when there is one
+    and the Parquet logical type's otherwise, so it reports *an* answer for a
+    file that holds two. Passing ``input_file=`` alone made this exact output
+    native 2.0 with EPSG:5070 in the logical type and no ``crs`` key in the
+    ``geo`` block -- ``source_crs_string`` still said EPSG:5070, and
+    ``gpio check spec`` said ``✗ CRS in geo metadata must match CRS in Parquet
+    schema``.
+    """
+    out = tmp_path / "quadkey.parquet"
+
+    _run_cli("sort", "quadkey", projected_conus, out)
+
+    assert geo_block_crs_id(out) == EPSG_5070
+    assert logical_crs_id(out) == EPSG_5070
+    assert spec_problems(out) == []
 
 
 # ---------------------------------------------------------------------------
@@ -275,23 +295,89 @@ def test_partition_string_delivers_native_2_0(native_geo_only, tmp_path):
 
 
 @pytest.mark.parametrize("driver", ["quadkey", "h3", "s2", "a5", "kdtree"])
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The index-adding partition drivers hand `partition_by_column` the scratch "
-        "file their `add <index>` step wrote, not the user's input, so the facade "
-        "resolves auto mode from a file that is already a 1.1 WKB rewrite. "
-        "Resolving from the user's file instead would fix the version and import "
-        "`sort quadkey`'s wrong-CRS defect (see test_sort_quadkey_keeps_the_input_crs) "
-        "onto five more commands, so the scratch write is the thing to fix. Until "
-        "then `gpio partition <index>` does not deliver #600."
-    ),
-)
 def test_index_partition_drivers_deliver_native_2_0(driver, native_geo_only, tmp_path):
-    """Pins the gap the PR body must not claim as fixed."""
+    """The five drivers that reach ``partition_by_column`` through a scratch file."""
     out_dir = tmp_path / driver
     extra = ["--auto"] if driver != "kdtree" else []
 
     _run_cli("partition", driver, native_geo_only, out_dir, "--force", *extra)
 
     assert _partition_versions(out_dir) == {("2.0.0", True)}
+
+
+@pytest.mark.parametrize("driver", ["quadkey", "h3", "s2", "a5", "kdtree"])
+def test_index_partition_drivers_keep_a_projected_crs_in_both_places(
+    driver, projected_conus, tmp_path
+):
+    """The version half is not the whole fix, and this fixture is what shows it.
+
+    ``native_geo_only`` above is written in lon/lat, where an absent ``crs``
+    already means the right thing -- so a driver that loses the CRS and one that
+    keeps it produce the same file and ``{("2.0.0", True)}`` passes either way.
+    Every part file here has to name EPSG:5070 in both places and survive
+    ``check spec``.
+    """
+    out_dir = tmp_path / driver
+    extra = ["--auto"] if driver != "kdtree" else []
+
+    _run_cli("partition", driver, projected_conus, out_dir, "--force", *extra)
+
+    parts = sorted(Path(out_dir).rglob("*.parquet"))
+    assert parts, "partition wrote no files"
+    assert [geo_block_crs_id(part) for part in parts] == [EPSG_5070] * len(parts)
+    assert [logical_crs_id(part) for part in parts] == [EPSG_5070] * len(parts)
+    assert [spec_problems(part) for part in parts] == [[]] * len(parts)
+
+
+# ---------------------------------------------------------------------------
+# A CRS the output has nothing to attach to
+# ---------------------------------------------------------------------------
+
+
+#: Both input shapes that reach the plain-COPY fast path with a CRS to resolve:
+#: a native-geo-only file whose CRS lives only in the Parquet logical type, and
+#: a 2.0 file that also has a ``geo`` block. Neither is in the default CRS, so
+#: the facade has a non-``None`` answer to give in both cases.
+PROJECTED_INPUTS = [
+    pytest.param(PROJECTED_PGO, id="native-geo-only"),
+    pytest.param(Path(__file__).parent / "data" / "fields_gpq2_5070_brotli.parquet", id="gpq2"),
+]
+
+
+@pytest.mark.parametrize("source", PROJECTED_INPUTS)
+def test_a_projection_that_drops_the_geometry_column_still_writes(source, tmp_path):
+    """The output declares no CRS because it has no geometry to declare one for.
+
+    The facade answers "which CRS does the output describe its geometry with",
+    and a projection that drops the geometry column leaves that question with no
+    subject. Answering it anyway handed ``_wrap_query_with_crs`` a CRS and no
+    column to ``ST_SetCRS``, which raised ``ValueError: geometry_column is
+    required when input_crs is specified`` out of a command that worked before
+    #993 -- a traceback, not even an error line.
+    """
+    out = tmp_path / "attributes.parquet"
+
+    _run_cli("extract", "geoparquet", source, out, "--exclude-cols", "geometry")
+
+    schema = pq.ParquetFile(str(out)).schema_arrow
+    assert "geometry" not in schema.names
+    assert "id" in schema.names
+    assert pq.ParquetFile(str(out)).metadata.num_rows == 100
+
+
+def test_the_facade_states_no_crs_for_an_output_with_no_geometry_column():
+    """The gate, at the one place that owns the decision.
+
+    Stated here as well as through the CLI above because it is the whole rule:
+    the witness is only consulted for an output that has somewhere to put the
+    answer, and an explicitly named CRS gets the same treatment -- there is no
+    column for ``apply_output_crs`` to write it onto either.
+    """
+    from geoparquet_io.core.parquet_writer import resolve_input_crs
+
+    assert resolve_input_crs(None, input_file=str(PROJECTED_PGO), geometry_column=None) is None
+    assert resolve_input_crs({"id": EPSG_5070}, geometry_column=None) is None
+    assert (
+        resolve_input_crs(None, input_file=str(PROJECTED_PGO), geometry_column="geometry")
+        is not None
+    )

@@ -776,6 +776,11 @@ def _execute_per_level_joins(
                 profile=profile,
                 geoparquet_version=geoparquet_version,
                 extra_kv_metadata=extra_kv,
+                # Every level is `SELECT a.*` over the one before it, so the
+                # geometry column the last write emits is the input's own --
+                # the witness auto mode needs to keep a native-geo-only input
+                # native rather than rewriting it as 1.1 WKB (#993).
+                input_file=input_source,
                 memory_limit=memory_limit,
             )
         else:
@@ -986,6 +991,9 @@ def add_admin_divisions_multi(
                     profile=profile,
                     geoparquet_version=geoparquet_version,
                     extra_kv_metadata=extra_kv,
+                    # The join is `SELECT a.*` plus admin columns, so the
+                    # geometry reaching the output is the input's own (#993).
+                    input_file=input_path,
                     memory_limit=memory_limit,
                 )
 

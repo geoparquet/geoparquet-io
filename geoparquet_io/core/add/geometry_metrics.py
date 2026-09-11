@@ -298,6 +298,11 @@ def _add_vecorel_metadata_to_file(
                 original_metadata=metadata,
                 extra_kv_metadata=extra_kv,
                 verbose=verbose,
+                # A whole-file rewrite to attach one sidecar key must not also
+                # change the geometry encoding. Without this witness auto mode
+                # read the carried `geo` key, which does not say whether the
+                # column is native, and the rewrite re-encoded it as WKB (#993).
+                input_file=parquet_file,
                 memory_limit=memory_limit,
             )
         finally:

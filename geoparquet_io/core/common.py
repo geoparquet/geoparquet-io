@@ -75,6 +75,7 @@ from geoparquet_io.core.logging_config import (
 from geoparquet_io.core.parquet_writer import (
     ParquetWriteSettings,
     note_duckdb_copy_rounding,
+    resolve_input_crs,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
 )
@@ -2871,7 +2872,15 @@ def write_parquet_with_metadata(
         show_sql: Whether to print SQL statements before execution
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
-        input_crs: PROJJSON dict with CRS from input file
+        input_crs: PROJJSON dict naming the CRS the output declares. Set by a
+            write whose output CRS is not a reading of the input's: `gpio convert
+            reproject`, which transforms the coordinates, and `gpio convert`,
+            which names the CRS a non-Parquet source's geometry is in (`--crs`,
+            for CSV/TSV input). Left None by every rewrite that keeps its input's
+            coordinates: the facade then resolves it from ``input_file``, so a
+            native-geo-only input's CRS — which lives only in the Parquet
+            GEOMETRY logical type — reaches the output's ``geo`` block too
+            (#993).
         write_strategy: Write strategy to use. Options:
             - "duckdb-kv" (default): Use DuckDB COPY TO with KV_METADATA
             - "in-memory": Load entire dataset into memory
@@ -2886,9 +2895,15 @@ def write_parquet_with_metadata(
         extra_kv_metadata: Additional Parquet file-level KV metadata as {key: json_string}.
             Written alongside the 'geo' key (e.g., for Vecorel collection metadata).
         input_file: Path to the input parquet file, when the write rewrites an
-            existing file. Enables full-fidelity non-planar edges preservation
-            (native GEOGRAPHY logical types are only visible in the file's
-            schema); without it, edges still fall back to original_metadata.
+            existing file. The witness the facade resolves the output's version
+            and CRS from, and what enables full-fidelity non-planar edges
+            preservation (native GEOMETRY/GEOGRAPHY logical types, and the CRS
+            stored inside them, are only visible in the file's schema); without
+            it, both fall back to original_metadata's ``geo`` key, which a
+            native-geo-only input does not have. Must be the file whose *rows*
+            this write reads, or one lossless with respect to it: naming the
+            user's file while reading a scratch rewrite that dropped the native
+            type is how a wrong CRS comes to be asserted rather than omitted.
         invalidate_derived_stats: When True, strip the carried per-column
             ``bbox`` and ``geometry_types`` from ``original_metadata`` before
             building output geo metadata. Set by callers that transform geometry
@@ -2970,18 +2985,28 @@ def write_parquet_with_metadata(
         con, query, original_metadata, geometry_column, verbose
     )
 
-    # The facade owns both of these: how many rows a row group gets, and which
-    # version auto mode resolves to. Every caller of this function -- 21 of them
-    # -- used to inherit whatever its writer defaulted to and whatever its own
-    # `geo` key happened to say, which is how `convert` came to write 122,880-row
-    # groups (#981) and how `sort`/`extract`/`partition` came to rewrite a
+    # The facade owns all three of these: how many rows a row group gets, which
+    # version auto mode resolves to, and which CRS the output describes its
+    # geometry with. Every caller of this function -- 21 of them -- used to
+    # inherit whatever its writer defaulted to and whatever its own `geo` key
+    # happened to say, which is how `convert` came to write 122,880-row groups
+    # (#981) and how `sort`/`extract`/`partition` came to rewrite a
     # native-geo-only input as 1.1 WKB while `convert` kept it native (#600).
+    #
+    # The version and the CRS are resolved from the same `input_file` witness,
+    # together, because they are the same question asked of the same file.
+    # Answering only the version made the output native 2.0 while leaving its
+    # `geo` block with no `crs` key -- EPSG:5070 in the Parquet GEOMETRY logical
+    # type, OGC:CRS84 in the geo block, one file disagreeing with itself (#993).
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
     geoparquet_version = resolve_output_geoparquet_version(
         geoparquet_version,
         input_file=input_file,
         original_metadata=original_metadata,
         verbose=verbose,
+    )
+    input_crs = resolve_input_crs(
+        input_crs, input_file=input_file, geometry_column=geometry_column, verbose=verbose
     )
 
     effective_version = geoparquet_version or "1.1"
@@ -3981,6 +4006,9 @@ TO {sql_path(output_parquet)}
         verbose=verbose,
         profile=profile,
         geoparquet_version=geoparquet_version,
+        # The precondition: the query above is `SELECT *` plus one computed
+        # column, so the rows this write reads are `input_parquet`'s own.
+        input_file=input_parquet,
         memory_limit=memory_limit,
     )
 

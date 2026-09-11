@@ -389,6 +389,34 @@ def fields_geom_type_only_5070_file(test_data_dir):
     return str(test_data_dir / "fields_pgo_5070_snappy.parquet")
 
 
+@pytest.fixture(scope="session")
+def projected_conus(tmp_path_factory):
+    """A clean native-geo-only EPSG:5070 file: 200 polygons spread over CONUS.
+
+    Three things at once, which no committed fixture is:
+
+    * **Native geo with no ``geo`` key**, the input class the write facade has to
+      answer the version *and* the CRS question about from the schema alone.
+    * **Not CRS84.** A file in the default CRS cannot tell a path that keeps the
+      CRS from one that loses it, because an absent ``crs`` already means CRS84.
+    * **Really inside EPSG:5070's area of use.** ``fields_pgo_5070_snappy.parquet``
+      is labelled 5070 but its coordinates are over Europe, so ``check spec``
+      scores it ``✗ coordinates outside valid range for CRS`` whatever the
+      command under test did -- and "clean" has to mean *zero* failures, or the
+      assertion stops being able to see a new failure appear (#993).
+    """
+    import geoarrow.pyarrow as ga
+
+    from tests.native_geo_probes import conus_wkb, projjson, write_native_geo_only
+
+    rows = conus_wkb("ST_Transform(cell, 'EPSG:4326', 'EPSG:5070', always_xy := true)")
+    return write_native_geo_only(
+        tmp_path_factory.mktemp("projected_conus") / "pgo.parquet",
+        rows,
+        {"geometry": (2, ga.wkb().with_crs(projjson(5070)))},
+    )
+
+
 @pytest.fixture
 def austria_bbox_covering_file(test_data_dir):
     """Return path to the austria_bbox_covering.parquet test file.

@@ -58,15 +58,20 @@ class PartitionWriteOptions:
     ``test_write_facade_version_owner.py`` checks every construction site obeys
     this, because an invariant with an exempt site is a comment.
 
-    "The real input" means the file the *user* named. Only ``partition string``
-    and ``partition admin`` hand that file to the resolver; the index-adding
-    drivers (quadkey, h3, s2, a5, kdtree) resolve from the scratch file their
-    ``add <index>`` step wrote, which is already a 1.1 WKB rewrite -- so they do
-    not yet deliver #600. Pointing them at the user's file would fix the version
-    and import ``sort quadkey``'s wrong-CRS defect, because the *data* would
-    still come from a scratch file that lost the CRS; the scratch write is the
-    thing to fix. Both gaps are pinned ``xfail(strict=True)`` in
-    ``test_write_facade_version_owner.py``.
+    "The real input" means the file whose rows the partition write will read.
+    ``partition string`` and ``partition admin`` hand the resolver the file the
+    user named; the index-adding drivers (quadkey, h3, s2, a5, kdtree) hand it
+    the scratch file their ``add <index>`` step wrote, and that is correct
+    *because* the scratch write is now lossless: it carries the same
+    ``input_file`` witness, so it preserves the user's version, native geometry
+    type and CRS (#993). Until it did, resolving here from the scratch file
+    called every input native-geo-only and the five drivers wrote 1.1 WKB, while
+    pointing them at the user's file instead would have fixed the version and
+    imported ``sort quadkey``'s wrong-CRS defect -- the *data* still coming from
+    a scratch file that had lost the CRS. Fixing the scratch write is what made
+    both correct at once. ``test_write_facade_version_owner.py`` measures every
+    driver's output against the user's file, in the ``geo`` block and the Parquet
+    logical type separately.
     """
 
     geoparquet_version: str | None = None
