@@ -1951,6 +1951,15 @@ locally instead of becoming a backend error or, for ArcGIS, an `outFields`
 entry the server quietly ignores. Names are matched case-insensitively and
 resolved to the source's own spelling.
 
+Two limits on that, both because the check can only use a schema the command
+already had in hand:
+
+- On `carto` it applies to `--include-cols` only. `--exclude-cols` names
+  columns of the *fetched* table and is still matched exactly, so
+  `--exclude-cols OWNER` does not drop a column named `Owner`.
+- On `carto`, passing `--geometry` or `--no-geometry` skips the schema probe
+  that the check reads, so neither list is checked against the table.
+
 A **blank entry** in the list — `--include-cols id,,name`, or `--include-cols '   '` —
 is a usage error and is rejected before anything is opened or contacted. That
 holds for the Python API too (`ops.from_carto`, `ops.from_arcgis`,

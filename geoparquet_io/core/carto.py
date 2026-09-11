@@ -670,10 +670,15 @@ def carto_to_table(
         has_geometry = geometry
 
     # --include-cols becomes the SELECT list, so it is checked against the
-    # schema the probe above already read — for free, and only when it ran.
-    # --exclude-cols is not: it is applied to the *fetched* table, where
-    # ``the_geom`` has become ``geometry``, so a Carto-schema check would reject
-    # the documented ``--exclude-cols geometry``.
+    # schema the probe above already read -- for free, and only when it ran.
+    #
+    # --exclude-cols is not checked, and that is a gap rather than a decision:
+    # it names columns of the *fetched* table, where ``the_geom`` has become
+    # ``geometry``, so the set to check against is ``["geometry",
+    # *schema_columns]`` -- which is exactly what arcgis.py does. (``geometry``
+    # itself is not the obstacle: it is warned about and dropped below, before
+    # any filtering.) Until that lands, ``--exclude-cols OWNER`` silently fails
+    # to drop a column named ``Owner``. Tracked separately.
     if schema_columns is not None:
         include_list = resolve_columns_against_schema(
             include_list, schema_columns, "--include-cols"
