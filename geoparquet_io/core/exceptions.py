@@ -17,6 +17,8 @@ Exception Hierarchy:
 
 from __future__ import annotations
 
+import re
+
 
 def sanitize_url_for_logging(url: str) -> str:
     """Remove credentials and query params from URL for safe logging.
@@ -42,6 +44,45 @@ def sanitize_url_for_logging(url: str) -> str:
     if len(parts) > 5:
         return "/".join(parts[:4]) + "/..." + "/" + parts[-1]
     return url
+
+
+#: A URL embedded in free text. Quotes are excluded from the body because
+#: DuckDB writes URLs inside single quotes -- ``HTTP GET error on '<url>'`` --
+#: and the closing quote is not part of the URL.
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"<>]+")
+
+#: A complete ANSI escape sequence, removed whole so no readable tail is left
+#: behind when the introducing ESC goes.
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+#: C0/C1 control characters, minus tab and newline, which error text legitimately
+#: uses. ``\r`` is not spared: on a terminal it rewinds the line and can hide
+#: what was printed before it.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def sanitize_error_message(text: str) -> str:
+    """Make a low-level error message safe to print as gpio's own error line.
+
+    Two things can ride into an error message from outside gpio, and neither is
+    safe to echo verbatim:
+
+    * **Credentials.** DuckDB names the URL it failed on, query string and all
+      -- ``HTTP GET error on 'https://bucket/x.parquet?X-Amz-Signature=...'``.
+      A presigned URL carries its signature there, which is why
+      :func:`sanitize_url_for_logging` exists and is applied at ~25 sites. Every
+      URL in the text goes through it.
+    * **Control characters.** DuckDB quotes the offending value back in a
+      conversion or parse error, so a value a *file* chose reaches the terminal.
+      ANSI escapes in it can rewrite the line, so an input could author a clean
+      ``Error:`` line of its own choosing. They are stripped; tab and newline
+      stay.
+    """
+    if not text:
+        return text
+    text = _URL_IN_TEXT.sub(lambda m: sanitize_url_for_logging(m.group(0)), text)
+    text = _ANSI_ESCAPE.sub("", text)
+    return _CONTROL_CHARS.sub("", text)
 
 
 class GeoParquetError(Exception):
@@ -175,6 +216,43 @@ _UNPUBLISHED_EXTENSION_HINTS = {
         "meanwhile, use `gpio add a5` or `gpio partition a5`."
     ),
 }
+
+
+#: The extension name inside DuckDB's download failure, e.g. ``Failed to
+#: download extension "geography" at URL "..." (HTTP 404)``.
+_EXTENSION_NAME_IN_ERROR = re.compile(r'extension\s+"([^"]+)"')
+
+
+def unpublished_extension_hint(exc: BaseException | str | None) -> str | None:
+    """gpio's guidance for DuckDB's "not published for this version" 404, or ``None``.
+
+    The same shape as
+    :func:`~geoparquet_io.core.duckdb_utils.spill_space_hint`: a paragraph to
+    append to DuckDB's own message, or ``None`` when this is not that failure.
+
+    It exists because the 404 arrives as an ``HTTPException``, which hangs below
+    ``IOException`` and so is otherwise classified as "the input file is
+    unreachable" -- true of the extension registry, useless to a user who named
+    a perfectly good file. :class:`ExtensionUnavailableError` already says the
+    right thing wherever the ``INSTALL`` is wrapped, but three sites are not
+    (``core/duckdb_utils._install_and_load_extension``,
+    ``core/extract_bigquery``, ``core/partition/admin_hierarchical``), and their
+    failures reach the CLI raw.
+    """
+    if not is_unpublished_extension_error(exc):
+        return None
+    match = _EXTENSION_NAME_IN_ERROR.search(exc if isinstance(exc, str) else str(exc))
+    if match is None:
+        return None
+    name = match.group(1)
+    listing = f"https://community-extensions.duckdb.org/extensions/{name}.html"
+    hint = (
+        f"This is the extension registry answering, not your input file: community "
+        f"extensions are built per DuckDB release, and '{name}' is not published for "
+        f"this one (see {listing})."
+    )
+    extra = _UNPUBLISHED_EXTENSION_HINTS.get(name)
+    return f"{hint} {extra}" if extra else hint
 
 
 class ExtensionUnavailableError(GeoParquetError):

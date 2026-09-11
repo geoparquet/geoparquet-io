@@ -17,34 +17,58 @@ from geoparquet_io.core.parquet_writer import (
 )
 
 
-class SpillAwareGroup(click.Group):
-    """Root group that names ``TMPDIR`` when DuckDB runs out of room to spill.
+class ErrorBoundaryGroup(click.Group):
+    """Root group that turns a DuckDB failure into gpio's error line.
 
-    DuckDB caps its spill at ``max_temp_directory_size`` (90% of the volume by
-    default), so a small or RAM-backed temp volume fails cleanly rather than
-    filling the disk -- but it fails saying "Out of Memory Error", and its list
-    of "possible solutions" is entirely about memory. It never mentions the one
-    knob that fixes a disk shortage. This adds that line.
+    Failures reach this point with no gpio frame willing to own them, and used
+    to leave a raw Python traceback on the terminal -- an out-of-spill-space
+    error with no ``TMPDIR`` line (#752), and a ``geo`` block DuckDB's Parquet
+    reader refuses, on eleven commands whose paths never reached a per-site
+    ``except`` (#983). :func:`~geoparquet_io.cli.exception_handler.cli_error_for`
+    decides what is answered and what is not; the reasoning for where that line
+    falls lives once, on
+    :data:`~geoparquet_io.core.duckdb_utils.INPUT_FILE_DUCKDB_ERRORS`.
 
-    It belongs on the *root* group rather than on a decorator because every
-    command spills: ``handle_geoparquet_errors`` is applied to four command
-    modules, and ``gpio sort hilbert`` -- the worked example in the docs -- is
-    not one of them. ``Group.invoke`` is the single funnel every subcommand
-    passes through.
+    This belongs on the *root* group rather than on a decorator, because every
+    command can hit those failures: ``handle_geoparquet_errors`` is applied to
+    four command modules, and ``gpio sort hilbert`` -- the worked example in the
+    docs -- is not one of them. ``Group.invoke`` is the single funnel every
+    subcommand passes through, so a command added tomorrow inherits this, and
+    inner handlers are strictly inside it and still run first (#988's
+    curved-geometry retry depends on that).
 
-    Anything that is not this specific failure is re-raised untouched.
+    A caveat worth naming: an ``IOException`` on a scratch file gpio itself
+    minted -- partition staging, an ``add <index>`` intermediate -- is reported
+    with the same line as one on the user's input, because the class is all the
+    exception says. No live case has been constructed (apostrophe and
+    glob-metacharacter paths behave identically with and without this boundary),
+    and the message still names the path that failed, so it is a known,
+    reasoned cost rather than an unnoticed one.
+
+    Anything ``cli_error_for`` does not claim is re-raised untouched: a genuine
+    gpio bug still gets its traceback.
     """
 
     def invoke(self, ctx):
-        from geoparquet_io.core.duckdb_utils import spill_space_hint
+        from geoparquet_io.cli.exception_handler import cli_error_for
+        from geoparquet_io.core.logging_config import get_logger
 
         try:
             return super().invoke(ctx)
         except Exception as exc:
-            hint = spill_space_hint(exc)
-            if hint is None:
+            error = cli_error_for(exc)
+            if error is None:
                 raise
-            raise click.ClickException(f"{exc}\n\n{hint}") from exc
+            # The traceback is hidden, not discarded: --verbose prints it, which
+            # is what a gpio bug that surfaces as a DuckDB error needs. That
+            # holds because `verbose_option` raises the package logger to DEBUG
+            # as the flag is parsed -- before the command body runs, so before
+            # anything can fail on the way to a core function's own
+            # `configure_verbose` call.
+            get_logger(__name__).debug(
+                "Converted a low-level failure to an error line", exc_info=exc
+            )
+            raise error from exc
 
 
 def handle_geoparquet_errors(func):
@@ -290,13 +314,46 @@ def dry_run_option(func):
     )(func)
 
 
+def enable_verbose_logging(ctx, param, value):
+    """Raise the package logger to DEBUG the moment ``--verbose`` is parsed.
+
+    ``configure_verbose`` is also called from ~60 core functions that take a
+    ``verbose`` argument, but always *inside* them -- so a command that fails
+    before reaching one has left the logger at INFO, and everything the run was
+    asked to say at DEBUG is dropped. Measured on a DuckDB-rejected input: of
+    the eleven commands #983 covers, seven had reached a ``configure_verbose``
+    call by the time they failed and four had not, so ``--verbose`` printed the
+    boundary's hidden traceback on seven of them and nothing on the rest.
+
+    A Click option callback runs during ``make_context`` for the subcommand,
+    which is after the root group's ``setup_cli_logging(verbose=False)`` and
+    before the command body -- the only point early enough to be unconditional.
+    ``is_eager`` puts it ahead of any other callback that might log.
+
+    Used as the ``callback`` of every ``--verbose`` flag; see
+    :class:`ErrorBoundaryGroup` for what depends on it.
+    """
+    if value:
+        from geoparquet_io.core.logging_config import configure_verbose
+
+        configure_verbose(True)
+    return value
+
+
 def verbose_option(func):
     """
     Add --verbose/-v option to a command.
 
     Enables detailed logging and information output.
     """
-    return click.option("--verbose", "-v", is_flag=True, help="Print verbose output")(func)
+    return click.option(
+        "--verbose",
+        "-v",
+        is_flag=True,
+        help="Print verbose output",
+        callback=enable_verbose_logging,
+        is_eager=True,
+    )(func)
 
 
 def show_sql_option(func):

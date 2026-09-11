@@ -679,6 +679,65 @@ def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
     return os.path.join(base, f"{_SPILL_DIR_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:12]}")
 
 
+#: The DuckDB failures whose cause is the *input*, not gpio.
+#:
+#: This is gpio's one answer to "is this DuckDB error news about the user's
+#: file, or a bug in something we generated?" -- the question the CLI asks
+#: before it replaces a traceback with an error line (#983), and the same
+#: question ``api/`` has to answer without Click, which is why the taxonomy
+#: lives in ``core/`` rather than at the boundary that happens to consume it.
+#:
+#: Enumerated one by one rather than named by a base class, because DuckDB's
+#: hierarchy does not split along this line. Measured against duckdb 1.5.5:
+#: ``InvalidInputException`` sits under ``ProgrammingError`` next to
+#: ``ParserException``, ``BinderException`` and ``CatalogException``, which are
+#: its exact opposite, and ``duckdb.Error``'s only direct subclass is
+#: ``DatabaseError`` -- so every shorthand available is either too wide or
+#: splits the wrong set.
+#:
+#: * ``InvalidInputException`` -- the file's own bytes or metadata are
+#:   unreadable. A ``geo`` block with no ``columns`` object raises this, as do
+#:   all four of #983's reproductions and DuckDB's curved-WKB refusal (#988).
+#: * ``IOException`` -- missing, unreachable or unreadable. ``HTTPException``
+#:   hangs below it, so a remote URL that will not fetch is covered too; both
+#:   are properties of the path the user named.
+#:
+#: What is deliberately *not* here is everything gpio itself can get wrong.
+#: ``ParserException``, ``BinderException`` and ``CatalogException`` are decided
+#: by the SQL text and the schema before a single row is read: they reproduce on
+#: every file, so they are never news about one of them, and always a bug in a
+#: query we generated -- the defect class behind #700, #718 and #944. Those keep
+#: their traceback.
+#:
+#: ``ConversionException`` is not here either, and that is a decision rather
+#: than an oversight: no reproduction reaches an unowned boundary with one.
+#: ``core/convert.py`` already owns the live conversion site with a better
+#: message, and the one refusal known to carry "Conversion Error" in its *text*
+#: -- #988's curved WKB -- is raised as an ``InvalidInputException`` and so is
+#: covered by the first entry anyway. gpio writes every ``CAST`` it runs, so
+#: whether such a failure is the data's fault or gpio's choice of target type is
+#: not decidable from the exception, and membership here has to be decidable.
+INPUT_FILE_DUCKDB_ERRORS = (
+    duckdb.InvalidInputException,
+    duckdb.IOException,
+)
+
+
+def is_input_file_duckdb_error(exc: BaseException) -> bool:
+    """True when `exc` is a DuckDB failure the *input* caused, not gpio.
+
+    Tests the exception itself and not its ``__cause__`` chain, unlike
+    :func:`spill_space_hint` and
+    :func:`~geoparquet_io.core.exceptions.is_unpublished_extension_error`. Those
+    two match on *text*, which survives being re-raised inside a wrapper, so
+    they have to look down the chain to find it. This matches on *class*, and a
+    class that has been wrapped by a gpio frame is no longer unowned: the
+    wrapper is gpio saying what it thinks happened, and its own class is the
+    answer to use.
+    """
+    return isinstance(exc, INPUT_FILE_DUCKDB_ERRORS)
+
+
 #: DuckDB's own words when the *spill volume* fills up. The message it prints is
 #: an "Out of Memory Error" that never mentions ``TMPDIR``, so it sends users
 #: after the one knob that cannot help them; this is the phrase that tells the
