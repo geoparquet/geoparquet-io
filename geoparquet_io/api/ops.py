@@ -1782,8 +1782,8 @@ def read_bigquery(
         bbox_mode: Filtering mode - "auto" (default), "server", or "local"
         bbox_threshold: Row count threshold for auto mode (default: 500000)
         limit: Maximum rows to extract
-        columns: Columns to include (None = all)
-        exclude_columns: Columns to exclude
+        columns: Columns to include (None or [] = all; a blank entry raises)
+        exclude_columns: Columns to exclude (a blank entry raises)
         geography_column: Column containing geometry data. Auto-detected
             for native GEOGRAPHY columns. Specify to parse VARCHAR columns.
         geometry_format: Format of VARCHAR geometry ("wkt" or "geojson")
@@ -1814,7 +1814,15 @@ def read_bigquery(
         ...     geometry_format='wkt'
         ... )
     """
+    from geoparquet_io.core.column_selection import reject_blank_column_entries
     from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+    # A blank entry is a mistake in a *list* argument, and must be caught before
+    # the join: [""] joins to "", which the core reads as "option not given" and
+    # so widens the request to every column -- the widest possible answer to a
+    # caller's typo (#992). A wholly absent list (None or []) is the unset one.
+    reject_blank_column_entries(columns, "columns")
+    reject_blank_column_entries(exclude_columns, "exclude_columns")
 
     # Convert columns list to comma-separated string for the core function
     include_cols = ",".join(columns) if columns else None
