@@ -3,19 +3,22 @@
 import json
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core import carto as carto_module
 from geoparquet_io.core.carto import (
     CartoError,
     _build_carto_count_query,
     _build_carto_query,
+    _column_names_from_fields,
     _create_empty_geoparquet_table,
     _detect_geometry_column,
+    _detect_table_shape,
     _geometry_column_from_fields,
-    _table_has_geometry,
     _validate_carto_url,
     _validate_table_name,
     carto_to_table,
@@ -226,6 +229,98 @@ class TestGeometryColumnFromFields:
         assert _geometry_column_from_fields(None) is None
         assert _geometry_column_from_fields("not a dict") is None
         assert _geometry_column_from_fields({"x": "not a dict"}) is None
+
+
+class TestColumnNamesFromFields:
+    """The other half of the same ``fields`` block: the column names (#980).
+
+    ``--include-cols`` is checked against these, so the probe that decides
+    geometry-vs-tabular pays for both answers with one request.
+    """
+
+    def test_names_come_back_in_order(self):
+        fields = {
+            "cartodb_id": {"type": "number"},
+            "Owner": {"type": "string"},
+            "the_geom": {"type": "geometry"},
+        }
+        assert _column_names_from_fields(fields) == ["cartodb_id", "Owner", "the_geom"]
+
+    def test_empty_block_is_an_empty_list_not_none(self):
+        """An empty schema is "no columns", which is not "no schema"."""
+        assert _column_names_from_fields({}) == []
+
+    @pytest.mark.parametrize("fields", [None, "not a dict", 42, []])
+    def test_malformed_block_is_none(self, fields):
+        """None means "nothing to check against", so the caller skips the check."""
+        assert _column_names_from_fields(fields) is None
+
+
+class TestDetectTableShape:
+    """The probe, with the network mocked: both answers, one request each step."""
+
+    @staticmethod
+    def _payloads(schema_response, has_values=True):
+        def _respond(url, sql, *args, **kwargs):
+            if "IS NOT NULL" in sql:
+                return {"rows": [{"has_geom": 1}] if has_values else []}
+            if isinstance(schema_response, Exception):
+                raise schema_response
+            return schema_response
+
+        return _respond
+
+    def _patch(self, responder):
+        return mock.patch.object(carto_module, "_carto_sql_json", side_effect=responder)
+
+    def test_populated_geometry_column(self):
+        fields = {"cartodb_id": {"type": "number"}, "the_geom": {"type": "geometry"}}
+        with self._patch(self._payloads({"fields": fields, "rows": []})):
+            assert _detect_table_shape("https://x.carto.com/api/v2/sql", "tbl") == (
+                True,
+                ["cartodb_id", "the_geom"],
+            )
+
+    def test_no_geometry_column_is_tabular_and_still_yields_the_schema(self):
+        fields = {"id": {"type": "number"}, "name": {"type": "string"}}
+        with self._patch(self._payloads({"fields": fields, "rows": []})):
+            assert _detect_table_shape("https://x.carto.com/api/v2/sql", "tbl") == (
+                False,
+                ["id", "name"],
+            )
+
+    def test_all_null_geometry_is_tabular_and_still_yields_the_schema(self):
+        fields = {"id": {"type": "number"}, "the_geom": {"type": "geometry"}}
+        with self._patch(self._payloads({"fields": fields, "rows": []}, has_values=False)):
+            assert _detect_table_shape("https://x.carto.com/api/v2/sql", "tbl") == (
+                False,
+                ["id", "the_geom"],
+            )
+
+    def test_a_failed_schema_probe_assumes_geometry_and_reports_no_schema(self):
+        with self._patch(self._payloads(CartoError("boom"))):
+            assert _detect_table_shape("https://x.carto.com/api/v2/sql", "tbl") == (True, None)
+
+    def test_a_failed_values_probe_assumes_geometry_but_keeps_the_schema(self):
+        """Step 2 failing does not throw away what step 1 already read."""
+        fields = {"id": {"type": "number"}, "the_geom": {"type": "geometry"}}
+
+        def _respond(url, sql, *args, **kwargs):
+            if "IS NOT NULL" in sql:
+                raise CartoError("boom")
+            return {"fields": fields, "rows": []}
+
+        with self._patch(_respond):
+            assert _detect_table_shape("https://x.carto.com/api/v2/sql", "tbl") == (
+                True,
+                ["id", "the_geom"],
+            )
+
+    def test_detect_geometry_column_reads_the_same_probe(self):
+        fields = {"id": {"type": "number"}, "the_geom": {"type": "geometry"}}
+        with self._patch(self._payloads({"fields": fields, "rows": []})) as probe:
+            assert _detect_geometry_column("https://x.carto.com/api/v2/sql", "tbl") == "the_geom"
+        assert probe.call_count == 1
 
 
 class TestEmptyGeoparquetTable:
@@ -494,9 +589,14 @@ class TestCartoToTable:
 
     def test_table_has_geometry_true_for_spatial(self):
         """A populated spatial table is detected as geometry."""
-        assert (
-            _table_has_geometry("https://phl.carto.com/api/v2/sql", "opa_properties_public") is True
+        has_geometry, columns = _detect_table_shape(
+            "https://phl.carto.com/api/v2/sql", "opa_properties_public"
         )
+        assert has_geometry is True
+        # The same probe carries the schema, which --include-cols is checked
+        # against without a second request (#980).
+        assert columns is not None
+        assert "the_geom" in columns
 
     def test_table_has_geometry_false_for_tabular(self):
         """A tabular table whose Carto the_geom is all-NULL is detected as plain.
@@ -505,7 +605,11 @@ class TestCartoToTable:
         tables, so schema inspection alone is insufficient; the non-NULL probe
         must classify hr_pay_range (0 non-null geometries) as plain.
         """
-        assert _table_has_geometry("https://phl.carto.com/api/v2/sql", "hr_pay_range") is False
+        has_geometry, columns = _detect_table_shape(
+            "https://phl.carto.com/api/v2/sql", "hr_pay_range"
+        )
+        assert has_geometry is False
+        assert columns
 
     def test_autodetect_tabular_returns_plain_table(self):
         """Auto-detect (geometry=None) on a tabular table yields no geo metadata."""

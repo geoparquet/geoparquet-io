@@ -194,7 +194,7 @@ gpio publish upload <local_dir> s3://bucket/path/ --recursive
 
 ---
 
-<!-- freshness: last-verified: 2026-04-02, maps-to: geoparquet_io/cli/decorators.py -->
+<!-- freshness: last-verified: 2026-09-11, maps-to: geoparquet_io/cli/decorators.py -->
 <!-- BEGIN GENERATED: compression-options -->
 ### Compression Options
 

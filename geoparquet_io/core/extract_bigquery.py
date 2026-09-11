@@ -13,6 +13,10 @@ import os
 import duckdb
 import pyarrow as pa
 
+from geoparquet_io.core.column_selection import (
+    resolve_columns_against_schema,
+    split_column_list,
+)
 from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
@@ -21,7 +25,6 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_condition_fragment,
 )
-from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
@@ -514,73 +517,6 @@ def _schema_column_names(
     return [name for name, _ in _schema_rows(con, table_id, table_source)]
 
 
-def validate_bigquery_columns(
-    requested_cols: list[str] | None,
-    all_columns: list[str],
-    option_name: str,
-) -> list[str] | None:
-    """Check requested column names against the BigQuery table's schema.
-
-    The BigQuery backend's equivalent of ``core.extract.validate_columns``,
-    which the parquet backend has run since #731. Without it a name the table
-    does not carry was quoted straight into the SELECT and failed as a DuckDB
-    binder error, and a blank entry raised
-    ``ValueError: cannot quote an empty SQL identifier`` (#969).
-
-    Blank entries are also rejected here, not only by the Click callback: the
-    Python API (``ops.read_bigquery``, ``Table.from_bigquery``) never goes
-    through Click.
-
-    Matching is case-insensitive and the **schema spelling is returned**,
-    following the rest of this module (``_resolve_column_name``,
-    ``_get_column_type``). DuckDB resolves a quoted identifier
-    case-insensitively, so ``--include-cols ID`` always worked; but
-    ``_build_column_list`` filters ``--exclude-cols`` by string comparison, so
-    ``--exclude-cols ID`` silently excluded nothing. Resolving makes the two
-    agree.
-
-    An **exact** match is preferred to a folded one, because folding is not
-    injective: ``_schema_column_names`` also serves ``table_source="local"``,
-    where DuckDB permits a table carrying both ``id`` and ``ID``, and a
-    ``{col.lower(): col}`` map keeps only the last of those.
-
-    Args:
-        requested_cols: Column names the user asked for (or None)
-        all_columns: Every column in the table's schema
-        option_name: Option to name in the error message, e.g. "--include-cols"
-
-    Returns:
-        The requested columns in their schema spelling, or None
-
-    Raises:
-        InvalidParameterError: If any entry is blank or absent from the schema
-    """
-    if not requested_cols:
-        return None
-
-    if any(not col.strip() for col in requested_cols):
-        raise InvalidParameterError(option_name, "column names cannot be empty or whitespace-only")
-
-    exact = set(all_columns)
-    folded = {col.lower(): col for col in all_columns}
-
-    def _resolve(col: str) -> str | None:
-        if col in exact:
-            return col
-        return folded.get(col.lower())
-
-    resolved = [(col, _resolve(col)) for col in requested_cols]
-    missing = [col for col, match in resolved if match is None]
-    if missing:
-        raise InvalidParameterError(
-            option_name,
-            f"Columns not found in schema: {', '.join(sorted(missing))}. "
-            f"Available columns: {', '.join(all_columns)}",
-        )
-
-    return [match for _, match in resolved if match is not None]
-
-
 def _get_column_type(
     con: duckdb.DuckDBPyConnection,
     table_id: str,
@@ -999,8 +935,8 @@ def extract_bigquery(
     normalized_project = validated_table_id.split(".")[0]
 
     # Parse column lists
-    include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
-    exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
+    include_list = split_column_list(include_cols, "--include-cols")
+    exclude_list = split_column_list(exclude_cols, "--exclude-cols")
 
     # Check if output file exists and handle overwrite (fixes issue #278)
     if output_parquet and not dry_run:
@@ -1124,8 +1060,12 @@ def _execute_bigquery_extraction(
         # Check the requested columns against the table before any of them is
         # quoted into the SELECT (#969), reusing the schema read above.
         schema_columns = [name for name, _ in schema_rows]
-        include_list = validate_bigquery_columns(include_list, schema_columns, "--include-cols")
-        exclude_list = validate_bigquery_columns(exclude_list, schema_columns, "--exclude-cols")
+        include_list = resolve_columns_against_schema(
+            include_list, schema_columns, "--include-cols"
+        )
+        exclude_list = resolve_columns_against_schema(
+            exclude_list, schema_columns, "--exclude-cols"
+        )
 
         # Build column list and SELECT clause
         cols_to_select = _build_column_list(

@@ -1945,6 +1945,20 @@ gpio extract data.parquet output.parquet --include-cols invalid_column
 # Available columns: id, name, geometry, bbox, ...
 ```
 
+The same check runs on `gpio extract bigquery`, `carto` and `arcgis`, against
+the schema each already reads to plan the extraction — so an unknown name fails
+locally instead of becoming a backend error or, for ArcGIS, an `outFields`
+entry the server quietly ignores. Names are matched case-insensitively and
+resolved to the source's own spelling.
+
+A **blank entry** in the list — `--include-cols id,,name`, or `--include-cols '   '` —
+is a usage error and is rejected before anything is opened or contacted. That
+holds for the Python API too (`ops.from_carto`, `ops.from_arcgis`,
+`ops.read_bigquery`, `ops.extract`, `ops.create_pmtiles`), which never goes
+through the CLI's option parsing. A **wholly empty** value is not a blank entry:
+`--include-cols ""` means "option not given", so `--include-cols "$COLS"` keeps
+working when `COLS` is unset.
+
 ### Invalid WHERE Clause
 
 SQL syntax errors are reported with details:

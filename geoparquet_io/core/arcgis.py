@@ -19,6 +19,10 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.column_selection import (
+    resolve_columns_against_schema,
+    split_column_list,
+)
 from geoparquet_io.core.common import _cast_table_to_schema, write_geoparquet_table
 from geoparquet_io.core.crs_utils import _extract_crs_identifier, parse_crs_string_to_projjson
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
@@ -891,6 +895,33 @@ def _extract_crs_from_spatial_reference(spatial_ref: dict) -> dict | None:
     return parse_crs_string_to_projjson("EPSG:4326")
 
 
+def _resolve_field_selection(
+    layer_info: ArcGISLayerInfo,
+    include_list: list[str] | None,
+    exclude_list: list[str] | None,
+) -> tuple[list[str] | None, list[str] | None]:
+    """Check the requested field names against the layer's advertised fields.
+
+    ``include_list`` becomes ``outFields`` and so names *service* fields;
+    ``exclude_list`` is applied to the downloaded table, whose columns are
+    ``geometry`` plus those same fields (see
+    :func:`_build_schema_from_layer_info`) — hence the extra allowed name.
+
+    ``*`` is ArcGIS's own spelling for "every field" in ``outFields`` and passes
+    through untouched; it is not a field name, so there is nothing to resolve.
+
+    Returns:
+        Both lists in the layer's own spelling of each name.
+    """
+    field_names = [str(field["name"]) for field in layer_info.fields]
+    if include_list != ["*"]:
+        include_list = resolve_columns_against_schema(include_list, field_names, "--include-cols")
+    exclude_list = resolve_columns_against_schema(
+        exclude_list, ["geometry", *field_names], "--exclude-cols"
+    )
+    return include_list, exclude_list
+
+
 def _build_schema_from_layer_info(layer_info: ArcGISLayerInfo) -> pa.Schema:
     """
     Build a fixed PyArrow schema from ArcGIS layer metadata.
@@ -1318,6 +1349,13 @@ def arcgis_to_table(
             "max_allowable_offset", "must be a positive number (units of the output CRS)."
         )
 
+    # Split the column lists before any network work. A blank entry is rejected
+    # here, not only by the Click callback: the Python API never goes through
+    # Click, and ``include_cols="name,,pop"`` went to the server verbatim as
+    # ``outFields=name,,pop``, with no local error at all (#980).
+    include_list = split_column_list(include_cols, "--include-cols")
+    exclude_list = split_column_list(exclude_cols, "--exclude-cols")
+
     # Validate URL
     service_url, layer_id = validate_arcgis_url(service_url)
 
@@ -1331,6 +1369,13 @@ def arcgis_to_table(
     debug(f"Layer: {layer_info.name}")
     debug(f"Geometry type: {layer_info.geometry_type}")
     debug(f"Total features matching filter: {layer_info.total_count}")
+
+    # Check the requested names against the layer metadata just fetched, so a
+    # typo fails here rather than being handed to the server (--include-cols) or
+    # silently excluding nothing (--exclude-cols). ``_build_schema_from_layer_info``
+    # builds the downloaded table as "geometry" plus these fields, which is why
+    # --exclude-cols is checked against that column too.
+    include_list, exclude_list = _resolve_field_selection(layer_info, include_list, exclude_list)
 
     # Resolve "native" to the layer's advertised SR
     if output_crs == "native":
@@ -1351,11 +1396,8 @@ def arcgis_to_table(
         return pa.table({"geometry": pa.array([], type=pa.binary())})
 
     # Determine outFields for server-side column selection
-    out_fields = "*"
-    if include_cols:
-        # Always include geometry-related fields
-        fields = [f.strip() for f in include_cols.split(",")]
-        out_fields = ",".join(fields)
+    out_fields = ",".join(include_list) if include_list else "*"
+    if include_list:
         debug(f"Requesting fields: {out_fields}")
 
     # Pass 1: Stream features to temp parquet file (memory-efficient)
@@ -1388,8 +1430,8 @@ def arcgis_to_table(
         table = pq.read_table(temp_parquet)
 
         # Apply client-side column exclusion if specified
-        if exclude_cols:
-            cols_to_exclude = {c.strip() for c in exclude_cols.split(",")}
+        if exclude_list:
+            cols_to_exclude = set(exclude_list)
             # Keep geometry column unless explicitly excluded
             cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
             if cols_to_keep:

@@ -17,6 +17,10 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from geoparquet_io.core.column_selection import (
+    reject_blank_column_entries,
+    split_column_list,
+)
 from geoparquet_io.core.common import (
     check_bbox_structure,
     get_parquet_metadata,
@@ -509,16 +513,26 @@ def validate_columns(
     """
     Validate that requested columns exist in schema.
 
+    Matching is exact, because the caller selects from an Arrow schema, where
+    a column name is case-sensitive. Contrast
+    ``column_selection.resolve_columns_against_schema``, which the backends that
+    build SQL or a service request use to *resolve* the spelling.
+
     Args:
         requested_cols: Columns requested by user
         all_columns: All columns in schema
         option_name: Name of the option for error message
 
     Raises:
-        InvalidParameterError: If any columns not found
+        InvalidParameterError: If any entry is blank, or any column not found
     """
     if not requested_cols:
         return
+
+    # A blank entry is not a missing column, and saying so beat reporting
+    # "Columns not found in schema: ." at a caller who passed columns=["id", ""]
+    # from the Python API (#980).
+    reject_blank_column_entries(requested_cols, option_name)
 
     missing = set(requested_cols) - set(all_columns)
     if missing:
@@ -1305,8 +1319,8 @@ def _extract_impl(
     repair_geometry: bool = True,
 ) -> None:
     """Internal implementation of extract with auto-detecting S3 access."""
-    include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
-    exclude_list = [c.strip() for c in exclude_cols.split(",")] if exclude_cols else None
+    include_list = split_column_list(include_cols, "--include-cols")
+    exclude_list = split_column_list(exclude_cols, "--exclude-cols")
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
     # Check if output file exists and handle overwrite (fixes issue #278)
