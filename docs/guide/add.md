@@ -15,6 +15,11 @@ The `add` commands enhance GeoParquet files with spatial indices, geometry metri
     the CRS is preserved either way, including when you ask for 1.1, which has
     nowhere but the `geo` block to record it.
 
+    A native 2.0 output needs a reader that understands the Parquet `GEOMETRY`
+    logical type — older pyarrow, geopandas and DuckDB builds may not open one.
+    `--geoparquet-version 1.1` is the escape hatch: it writes plain WKB, and
+    keeps the CRS in the `geo` block.
+
     It is the same rewrite behind `gpio sort quadkey` and
     `gpio partition quadkey/h3/s2/a5/kdtree`, which add their index column to a
     scratch file first, so those commands preserve the version and the CRS now

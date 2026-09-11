@@ -3004,7 +3004,9 @@ def write_parquet_with_metadata(
         original_metadata=original_metadata,
         verbose=verbose,
     )
-    input_crs = resolve_input_crs(input_crs, input_file=input_file, verbose=verbose)
+    input_crs = resolve_input_crs(
+        input_crs, input_file=input_file, geometry_column=geometry_column, verbose=verbose
+    )
 
     effective_version = geoparquet_version or "1.1"
 
@@ -4003,13 +4005,8 @@ TO {sql_path(output_parquet)}
         verbose=verbose,
         profile=profile,
         geoparquet_version=geoparquet_version,
-        # The query above is `SELECT *` plus one computed column, so the rows
-        # this write reads are the rows of `input_parquet` -- exactly the
-        # witness `resolve_output_geoparquet_version` asks for. Without it,
-        # auto mode saw only the carried `geo` key, which a native-geo-only
-        # input does not have, and every `gpio add` re-encoded such a file as
-        # 1.1 WKB, stripping the Parquet GEOMETRY logical type and the CRS
-        # stored in it (#993).
+        # The precondition: the query above is `SELECT *` plus one computed
+        # column, so the rows this write reads are `input_parquet`'s own.
         input_file=input_parquet,
         memory_limit=memory_limit,
     )

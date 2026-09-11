@@ -42,6 +42,17 @@ facade into a rewrite. The line is: this module decides what the paths were
 particular :func:`resolve_input_crs` only *finds* the input's CRS; what a write
 does with it -- omit it when it is the default, strip a stale one, refuse to
 overwrite an explicit null -- stays with ``apply_output_crs``.
+
+"Only finds" is not "only informs one place", though: a non-``None`` answer
+where the write previously had ``None`` moves three things at once.
+``apply_output_crs`` writes an explicit ``crs`` into the ``geo`` block,
+``crs_utils._wrap_query_with_crs`` wraps the query in ``ST_SetCRS`` so DuckDB
+stamps the CRS into the Parquet ``GEOMETRY`` logical type (``common._plain_copy_to``
+and both ``write_strategies/duckdb_kv`` writers), and
+``geoarrow_encoding`` attaches it to the Arrow extension type it emits. The
+``ST_SetCRS`` wrap is the load-bearing one: without it DuckDB restates whatever
+the column it read carried, which is how ``gpio sort quadkey`` stamped
+``OGC:CRS84`` onto EPSG:5070 data.
 """
 
 from __future__ import annotations
@@ -318,11 +329,19 @@ def resolve_input_crs(
     input_crs: dict | None,
     *,
     input_file: str | None = None,
+    geometry_column: str | None = None,
     verbose: bool = False,
 ) -> dict | None:
     """Decide which CRS the output describes its geometry with. The third decision.
 
-    A caller that names a CRS always wins -- ``reproject`` and ``convert`` pass
+    An output with no geometry column describes no geometry, so the question has
+    no subject and the answer is ``None`` -- before any witness is consulted, and
+    whatever the caller named. A column projection can drop the geometry column
+    (``gpio extract geoparquet --exclude-cols geometry``), and answering anyway
+    handed ``crs_utils._wrap_query_with_crs`` a CRS with no column to
+    ``ST_SetCRS``, which raises rather than writes.
+
+    A caller that names a CRS otherwise wins -- ``reproject`` and ``convert`` pass
     the CRS they are transforming *to*, which is a fact about the output that no
     reading of the input could supply. Everything else is a rewrite that keeps
     its input's coordinates, and for those the input file is the witness, the
@@ -351,6 +370,8 @@ def resolve_input_crs(
     Parquet) is a miss too, not an error: the write worked before this function
     existed and must keep working.
     """
+    if not geometry_column:
+        return None
     if input_crs is not None:
         return input_crs
     if not input_file:

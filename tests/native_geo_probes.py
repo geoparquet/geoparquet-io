@@ -9,7 +9,7 @@ the defect. #993 shipped green under exactly that oracle.
 
 Everything here therefore comes in pairs. :func:`geo_block_crs_id` reads the
 ``geo`` block and only the ``geo`` block; :func:`logical_crs_id` reads the
-Parquet schema and only the Parquet schema; :func:`spec_failures` asks gpio's
+Parquet schema and only the Parquet schema; :func:`spec_problems` asks gpio's
 own validator whether what they say adds up.
 
 Refs: https://github.com/geoparquet/geoparquet-io/issues/993
@@ -111,9 +111,23 @@ def spec_report(path) -> dict:
 
     result = CliRunner().invoke(cli, ["check", "spec", "--json", str(path)])
     # `check spec` exits non-zero when the file fails, which is the thing under
-    # test, so only a crash (no parseable report) is an error here.
-    payload = result.output[result.output.index("{") :]
-    return json.loads(payload)
+    # test, so a failing report is not an error here. A crash before the report
+    # is, and it has to say so: slicing from the first `{` raised `ValueError:
+    # substring not found` when there was no report at all, and sliced from the
+    # wrong place when a log line printed ahead of it happened to contain one.
+    # So try each `{` in turn and take the first that decodes.
+    decoder = json.JSONDecoder()
+    for start, char in enumerate(result.output):
+        if char != "{":
+            continue
+        try:
+            return decoder.raw_decode(result.output, start)[0]
+        except json.JSONDecodeError:
+            continue
+    raise AssertionError(
+        f"`check spec --json` emitted no JSON report for {path} "
+        f"(exit {result.exit_code}): {result.output or result.exception!r}"
+    )
 
 
 def spec_problems(path, status: str = "failed") -> list[str]:
@@ -123,10 +137,6 @@ def spec_problems(path, status: str = "failed") -> list[str]:
         for check in spec_report(path)["checks"]
         if check["status"] == status
     ]
-
-
-def spec_failures(path) -> list[str]:
-    return spec_problems(path, "failed")
 
 
 # ---------------------------------------------------------------------------

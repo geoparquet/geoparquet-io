@@ -55,8 +55,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.crs_utils import source_crs_string
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
-from tests.native_geo_probes import EPSG_5070, logical_crs_id, spec_failures
-from tests.native_geo_probes import geo_block_crs_id as _geo_block_crs_id
+from tests.native_geo_probes import EPSG_5070, geo_block_crs_id, logical_crs_id, spec_problems
 
 #: A native-geo-only input whose CRS is *not* the default. The distinction the
 #: contract file's DuckDB-written fixture cannot make: it carries ``crs=<null>``,
@@ -234,9 +233,9 @@ def test_sort_quadkey_does_not_leave_the_two_crs_sources_disagreeing(projected_c
 
     _run_cli("sort", "quadkey", projected_conus, out)
 
-    assert _geo_block_crs_id(out) == EPSG_5070
+    assert geo_block_crs_id(out) == EPSG_5070
     assert logical_crs_id(out) == EPSG_5070
-    assert spec_failures(out) == []
+    assert spec_problems(out) == []
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +324,60 @@ def test_index_partition_drivers_keep_a_projected_crs_in_both_places(
 
     parts = sorted(Path(out_dir).rglob("*.parquet"))
     assert parts, "partition wrote no files"
-    assert [_geo_block_crs_id(part) for part in parts] == [EPSG_5070] * len(parts)
+    assert [geo_block_crs_id(part) for part in parts] == [EPSG_5070] * len(parts)
     assert [logical_crs_id(part) for part in parts] == [EPSG_5070] * len(parts)
-    assert [spec_failures(part) for part in parts] == [[]] * len(parts)
+    assert [spec_problems(part) for part in parts] == [[]] * len(parts)
+
+
+# ---------------------------------------------------------------------------
+# A CRS the output has nothing to attach to
+# ---------------------------------------------------------------------------
+
+
+#: Both input shapes that reach the plain-COPY fast path with a CRS to resolve:
+#: a native-geo-only file whose CRS lives only in the Parquet logical type, and
+#: a 2.0 file that also has a ``geo`` block. Neither is in the default CRS, so
+#: the facade has a non-``None`` answer to give in both cases.
+PROJECTED_INPUTS = [
+    pytest.param(PROJECTED_PGO, id="native-geo-only"),
+    pytest.param(Path(__file__).parent / "data" / "fields_gpq2_5070_brotli.parquet", id="gpq2"),
+]
+
+
+@pytest.mark.parametrize("source", PROJECTED_INPUTS)
+def test_a_projection_that_drops_the_geometry_column_still_writes(source, tmp_path):
+    """The output declares no CRS because it has no geometry to declare one for.
+
+    The facade answers "which CRS does the output describe its geometry with",
+    and a projection that drops the geometry column leaves that question with no
+    subject. Answering it anyway handed ``_wrap_query_with_crs`` a CRS and no
+    column to ``ST_SetCRS``, which raised ``ValueError: geometry_column is
+    required when input_crs is specified`` out of a command that worked before
+    #993 -- a traceback, not even an error line.
+    """
+    out = tmp_path / "attributes.parquet"
+
+    _run_cli("extract", "geoparquet", source, out, "--exclude-cols", "geometry")
+
+    schema = pq.ParquetFile(str(out)).schema_arrow
+    assert "geometry" not in schema.names
+    assert "id" in schema.names
+    assert pq.ParquetFile(str(out)).metadata.num_rows == 100
+
+
+def test_the_facade_states_no_crs_for_an_output_with_no_geometry_column():
+    """The gate, at the one place that owns the decision.
+
+    Stated here as well as through the CLI above because it is the whole rule:
+    the witness is only consulted for an output that has somewhere to put the
+    answer, and an explicitly named CRS gets the same treatment -- there is no
+    column for ``apply_output_crs`` to write it onto either.
+    """
+    from geoparquet_io.core.parquet_writer import resolve_input_crs
+
+    assert resolve_input_crs(None, input_file=str(PROJECTED_PGO), geometry_column=None) is None
+    assert resolve_input_crs({"id": EPSG_5070}, geometry_column=None) is None
+    assert (
+        resolve_input_crs(None, input_file=str(PROJECTED_PGO), geometry_column="geometry")
+        is not None
+    )

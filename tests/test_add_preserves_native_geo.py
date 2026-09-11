@@ -48,13 +48,13 @@ from tests.native_geo_probes import (
     EPSG_5070,
     conus_wkb,
     geo_block,
+    geo_block_crs_id,
     geo_version,
     logical_geo_types,
     projjson,
     spec_problems,
     write_native_geo_only,
 )
-from tests.native_geo_probes import geo_block_crs_id as _geo_block_crs_id
 
 
 def _run_cli(*args) -> None:
@@ -83,6 +83,12 @@ def _run_cli_in_a_fresh_process(*args) -> None:
         ],
         capture_output=True,
         text=True,
+        # A wedge cap, not a performance budget, and deliberately not the 30 s
+        # most subprocess tests here use: this one pays a cold interpreter's
+        # full CLI import (pyarrow, geoarrow, duckdb) with no warm process to
+        # share it. 0.8 s idle, and over 30 s under `-n auto` with coverage on
+        # 12 workers -- measured, after a 30 s cap turned that into a failure.
+        timeout=300,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
@@ -144,13 +150,13 @@ def two_native_geometry_columns(tmp_path_factory) -> Path:
 #: ``admin-divisions`` because it needs a boundary dataset to join against
 #: (covered by the network lane).
 ROW_REWRITING_ADD_COMMANDS = [
-    pytest.param("bbox", (), id="bbox"),
-    pytest.param("quadkey", (), id="quadkey"),
-    pytest.param("h3", (), id="h3"),
-    pytest.param("s2", (), id="s2"),
-    pytest.param("a5", (), id="a5"),
-    pytest.param("kdtree", (), id="kdtree"),
-    pytest.param("geometry-metrics", (), id="geometry-metrics"),
+    "bbox",
+    "quadkey",
+    "h3",
+    "s2",
+    "a5",
+    "kdtree",
+    "geometry-metrics",
 ]
 
 
@@ -165,10 +171,8 @@ def test_the_fixture_is_a_clean_native_geo_only_epsg_5070_file(projected_conus):
     assert spec_problems(projected_conus) == []
 
 
-@pytest.mark.parametrize(("subcommand", "extra_args"), ROW_REWRITING_ADD_COMMANDS)
-def test_add_keeps_the_file_describing_itself_consistently(
-    subcommand, extra_args, projected_conus, tmp_path
-):
+@pytest.mark.parametrize("subcommand", ROW_REWRITING_ADD_COMMANDS)
+def test_add_keeps_the_file_describing_itself_consistently(subcommand, projected_conus, tmp_path):
     """One run, four facts: version, encoding, CRS *in the geo block*, agreement.
 
     The fourth is what the old oracle could not see. The third is what makes the
@@ -177,18 +181,16 @@ def test_add_keeps_the_file_describing_itself_consistently(
     """
     out = tmp_path / f"{subcommand}.parquet"
 
-    _run_cli("add", subcommand, projected_conus, out, *extra_args)
+    _run_cli("add", subcommand, projected_conus, out)
 
     assert (geo_version(out) or "").startswith("2.0")
     assert logical_geo_types(out)["geometry"] == ("Geometry", EPSG_5070)
-    assert _geo_block_crs_id(out) == EPSG_5070
+    assert geo_block_crs_id(out) == EPSG_5070
     assert spec_problems(out) == []
 
 
-@pytest.mark.parametrize(("subcommand", "extra_args"), ROW_REWRITING_ADD_COMMANDS)
-def test_add_states_the_crs_even_when_asked_for_1_1(
-    subcommand, extra_args, projected_conus, tmp_path
-):
+@pytest.mark.parametrize("subcommand", ROW_REWRITING_ADD_COMMANDS)
+def test_add_states_the_crs_even_when_asked_for_1_1(subcommand, projected_conus, tmp_path):
     """An explicit version still wins -- and still has to say which CRS it is.
 
     1.1 has nowhere but the ``geo`` block to put a CRS, so a 1.1 rewrite of a
@@ -199,11 +201,11 @@ def test_add_states_the_crs_even_when_asked_for_1_1(
     """
     out = tmp_path / f"{subcommand}.parquet"
 
-    _run_cli("add", subcommand, projected_conus, out, *extra_args, "--geoparquet-version", "1.1")
+    _run_cli("add", subcommand, projected_conus, out, "--geoparquet-version", "1.1")
 
     assert (geo_version(out) or "").startswith("1.1")
     assert logical_geo_types(out) == {}, "1.1 forbids a native Parquet geo type"
-    assert _geo_block_crs_id(out) == EPSG_5070
+    assert geo_block_crs_id(out) == EPSG_5070
     assert spec_problems(out) == []
 
 
@@ -225,7 +227,7 @@ def test_geometry_metrics_keeps_the_native_type_from_a_fresh_process(projected_c
 
     assert (geo_version(out) or "").startswith("2.0")
     assert logical_geo_types(out)["geometry"] == ("Geometry", EPSG_5070)
-    assert _geo_block_crs_id(out) == EPSG_5070
+    assert geo_block_crs_id(out) == EPSG_5070
     assert spec_problems(out) == []
 
 
@@ -301,7 +303,7 @@ def test_add_attaches_the_witness_crs_to_the_primary_column_only(
 
     _run_cli("add", "bbox", two_native_geometry_columns, out)
 
-    assert _geo_block_crs_id(out) == EPSG_5070
+    assert geo_block_crs_id(out) == EPSG_5070
     assert logical_geo_types(out)["geometry"] == ("Geometry", EPSG_5070)
     assert logical_geo_types(out)["centroid"][1] != EPSG_5070
 
