@@ -537,10 +537,11 @@ become their empty linear counterpart. The surface family (PolyhedralSurface,
 TIN, Triangle) is not linearized and still raises an error.
 
 Curved input is spotted either by a header scan of local GeoPackages or on the
-first pass that parses geometry. `--skip-hilbert` removes that pass, so a
-curved source which is not a local `.gpkg` (FileGDB, a GeoPackage on S3) still
-errors under `--skip-hilbert` — drop the flag, or linearize with `ogr2ogr`
-first.
+first pass that parses geometry. `--skip-hilbert` removes that pass, so for a
+curved source which is not a local `.gpkg` (FileGDB, a GeoPackage on S3) the
+write is where the curves first show up. gpio then linearizes the source and
+writes again. That costs one extra read of the source, and only when it holds
+curves. `--no-linearize-curves` keeps the error instead.
 
 ### Skip Hilbert Ordering
 
