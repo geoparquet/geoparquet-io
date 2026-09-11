@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import pathlib
 import struct
 
 import click
@@ -219,6 +220,116 @@ class TestTheRootGroupIsTheBoundary:
             )
 
         assert any(record.exc_info for record in caplog.records)
+
+
+class TestInnerHandlersStillRunFirst:
+    """The boundary is outermost, so it never preempts a recovery (#988).
+
+    ``convert`` identifies DuckDB's curved-geometry refusal by matching
+    "Unsupported geometry type in WKB" on the exception, linearizes the source
+    and writes again. That error is an ``InvalidInputException``, which is
+    exactly what ``INPUT_FILE_DUCKDB_ERRORS`` claims -- so if the boundary ran
+    anywhere but last, it would convert the error into a ``ClickException`` and
+    the retry would never happen. It runs last because it lives on
+    ``Group.invoke``, and these pin that rather than trusting it.
+    """
+
+    #: The real string ``_is_linearizable_curve_error`` matches on, and the real
+    #: class DuckDB raises with it -- both measured against the curved FileGDB
+    #: fixture, not invented here.
+    CURVE_REFUSAL = "Conversion Error: Unsupported geometry type in WKB"
+
+    def test_the_curve_refusal_is_a_class_the_boundary_would_otherwise_claim(self):
+        """Without this being true, the tests below would prove nothing."""
+        exc = duckdb.InvalidInputException(self.CURVE_REFUSAL)
+        assert isinstance(exc, INPUT_FILE_DUCKDB_ERRORS)
+        assert cli_error_for(exc) is not None
+
+    def test_an_inner_handler_recovers_before_the_boundary_sees_it(self):
+        """A command that catches and recovers still succeeds, untouched."""
+        attempts = []
+
+        @click.group(cls=ErrorBoundaryGroup)
+        def root():
+            pass
+
+        @root.command()
+        def convert():
+            try:
+                attempts.append("first")
+                raise duckdb.InvalidInputException(TestInnerHandlersStillRunFirst.CURVE_REFUSAL)
+            except duckdb.Error as e:
+                if "Unsupported geometry type in WKB" not in str(e):
+                    raise
+                attempts.append("linearized retry")
+
+        result = CliRunner().invoke(root, ["convert"])
+
+        assert result.exit_code == 0, result.output
+        assert attempts == ["first", "linearized retry"]
+
+    def test_the_inner_handler_sees_the_raw_exception_not_a_click_exception(self):
+        """The retry matches on the message and the DuckDB class. Both have to
+        arrive intact -- a reshaped exception would silently stop matching and
+        the fallback would turn into a hard failure."""
+        seen = {}
+
+        @click.group(cls=ErrorBoundaryGroup)
+        def root():
+            pass
+
+        @root.command()
+        def convert():
+            try:
+                raise duckdb.InvalidInputException(TestInnerHandlersStillRunFirst.CURVE_REFUSAL)
+            except Exception as e:
+                seen["type"] = type(e)
+                seen["message"] = str(e)
+
+        CliRunner().invoke(root, ["convert"])
+
+        assert seen["type"] is duckdb.InvalidInputException
+        assert "Unsupported geometry type in WKB" in seen["message"]
+
+    def test_the_real_curved_filegdb_still_converts_through_the_boundary(self, tmp_path):
+        """End to end on #988's own fixture, through the real ``cli``.
+
+        ``--skip-hilbert`` removes the bounds pass, so the curve refusal happens
+        on the write and only the retry can rescue it. Exit 0 here means the
+        boundary let the recovery run; a regression would show up as exit 1 with
+        DuckDB's message on a file that used to convert.
+        """
+        gdb = pathlib.Path(__file__).parent / "data" / "curved_geometry_test.gdb"
+        if not gdb.exists():  # pragma: no cover - fixture ships with the repo
+            pytest.skip("curved FileGDB fixture not present")
+
+        out = tmp_path / "curved.parquet"
+        result = CliRunner().invoke(cli, ["convert", str(gdb), str(out), "--skip-hilbert"])
+
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+
+    def test_a_refusal_the_inner_handler_declines_still_becomes_an_error_line(self):
+        """The other half of the contract: what the recovery re-raises (a
+        Parquet input, or ``--no-linearize-curves``) is still input-caused, so
+        it gets the error line rather than a traceback."""
+
+        @click.group(cls=ErrorBoundaryGroup)
+        def root():
+            pass
+
+        @root.command()
+        def convert():
+            try:
+                raise duckdb.InvalidInputException(TestInnerHandlersStillRunFirst.CURVE_REFUSAL)
+            except duckdb.Error:
+                raise  # --no-linearize-curves: the fallback is off
+
+        result = CliRunner().invoke(root, ["convert"])
+
+        assert result.exit_code == 1
+        assert "Unsupported geometry type in WKB" in result.output
+        assert "Traceback" not in result.output
 
 
 class TestTheLineTheTupleDraws:
