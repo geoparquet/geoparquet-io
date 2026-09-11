@@ -96,7 +96,7 @@ geoparquet_io/
 | ... | *39 more modules* | |
 <!-- END GENERATED: core-modules -->
 
-<!-- freshness: last-verified: 2026-03-20, maps-to: geoparquet_io/core/common.py, geoparquet_io/cli/decorators.py -->
+<!-- freshness: last-verified: 2026-09-11, maps-to: geoparquet_io/core/common.py, geoparquet_io/cli/decorators.py -->
 ### Key Patterns
 
 1. **CLI/Core Separation**: CLI commands are thin wrappers; business logic in `core/`

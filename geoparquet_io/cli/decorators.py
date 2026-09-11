@@ -380,16 +380,23 @@ def _validate_column_list(ctx, param, value):
 
     This layer owns blank entries only. Whether a non-blank name exists is a
     schema question, so it stays with whichever backend can see the schema
-    (``validate_columns`` for parquet, ``validate_bigquery_columns`` for
-    BigQuery), which reports it as ``InvalidParameterError`` -- also exit 2.
-    Catching blanks here matters even so: ``--dry-run`` builds the same SELECT
-    without ever opening a connection, so there is no schema to check against.
+    (``core.extract.validate_columns`` for parquet,
+    ``core.column_selection.resolve_columns_against_schema`` for BigQuery,
+    Carto and ArcGIS), which reports it as ``InvalidParameterError`` -- also
+    exit 2. Catching blanks here matters even so: ``--dry-run`` builds the same
+    SELECT without ever opening a connection, so there is no schema to check
+    against.
+
+    This callback is **not** the only blank-entry guard, and must not be treated
+    as one: the Python API never goes through Click, so every backend also runs
+    ``core.column_selection.split_column_list`` on the raw value (#980).
 
     A **wholly empty** value is not a blank entry, it is an unset option, and is
-    normalised to ``None``. Every backend reads these options as
-    ``[c.strip() for c in v.split(",")] if v else None``
-    (``core/extract.py``, ``core/extract_bigquery.py``, ``core/carto.py``,
-    ``core/pmtiles.py``), so ``""`` has always meant "not given" -- which is what
+    normalised to ``None``. Every backend reads these options through
+    ``split_column_list`` (``core/extract.py``, ``core/extract_bigquery.py``,
+    ``core/carto.py``, ``core/arcgis.py``, ``core/pmtiles.py``), which keeps the
+    ``[c.strip() for c in v.split(",")] if v else None`` semantics those call
+    sites used to spell out, so ``""`` has always meant "not given" -- which is what
     ``--include-cols "$COLS"`` expands to when ``COLS`` is unset. Rejecting it
     would break working invocations without catching anything: ``"".split(",")``
     is ``[""]`` only because there is nothing there to name. ``"   "`` and

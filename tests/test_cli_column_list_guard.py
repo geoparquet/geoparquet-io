@@ -24,9 +24,11 @@ list-shaped values that fall outside the spelling filter are recorded in
 ``LIST_VALUED_OUTSIDE_THE_SWEEP`` with the reason each is already safe.
 
 An entirely empty value is **unset**, not a blank entry. Every backend reads
-these options as ``[c.strip() for c in v.split(",")] if v else None``
+these options through ``core.column_selection.split_column_list``
 (``core/extract.py``, ``core/extract_bigquery.py``, ``core/carto.py``,
-``core/pmtiles.py``), so ``""`` has always meant "option not given" -- which is
+``core/arcgis.py``, ``core/pmtiles.py``), which keeps the
+``[c.strip() for c in v.split(",")] if v else None`` semantics those call sites
+used to spell out, so ``""`` has always meant "option not given" -- which is
 what ``--include-cols "$COLS"`` with an unset variable expands to. The guard
 preserves that and rejects only a value that carries a blank *entry*: ``"   "``
 and ``"id,,name"`` are truthy on main, split to a list containing ``""``, and
@@ -34,8 +36,13 @@ are the actual #969 defect.
 
 The Click layer owns *blank entries only*. Whether a non-blank name actually
 exists is a schema question, so it belongs to whichever backend can see the
-schema -- ``validate_columns`` for parquet, ``validate_bigquery_columns`` for
-BigQuery -- and is covered in those backends' own tests.
+schema -- ``core.extract.validate_columns`` for parquet,
+``core.column_selection.resolve_columns_against_schema`` for BigQuery, Carto and
+ArcGIS -- and is covered in those backends' own tests.
+
+This module is the Click half only. Because the Python API never goes through
+Click, the same blank entries are rejected again in ``core/``; that half lives
+in ``tests/test_core_column_list_guard.py`` (#980).
 """
 
 from __future__ import annotations

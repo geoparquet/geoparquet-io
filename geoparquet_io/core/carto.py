@@ -16,6 +16,10 @@ from urllib.parse import quote, urlparse
 
 import pyarrow as pa
 
+from geoparquet_io.core.column_selection import (
+    resolve_columns_against_schema,
+    split_column_list,
+)
 from geoparquet_io.core.common import (
     InvalidParameterError,
     get_duckdb_connection,
@@ -279,6 +283,21 @@ def _geometry_column_from_fields(fields: object) -> str | None:
     return None
 
 
+def _column_names_from_fields(fields: object) -> list[str] | None:
+    """Return every column name in a Carto ``fields`` schema block, in order.
+
+    The same block :func:`_geometry_column_from_fields` reads, so checking
+    ``--include-cols`` against the table costs no extra request (#980).
+
+    Returns:
+        The column names, or None if the block is missing or malformed -- which
+        callers must read as "no schema to check against", not "no columns".
+    """
+    if not isinstance(fields, dict):
+        return None
+    return [str(name) for name in fields]
+
+
 def _carto_sql_json(
     url: str,
     sql: str,
@@ -312,6 +331,25 @@ def _carto_sql_json(
     return payload
 
 
+def _probe_table_schema(
+    url: str,
+    table_name: str,
+    api_key: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> object:
+    """Fetch a Carto table's ``fields`` schema block with one bounded request.
+
+    Issues ``SELECT * FROM <table> LIMIT 0`` — schema only, no rows.
+
+    Raises:
+        CartoError: If the probe request fails.
+    """
+    _validate_table_name(table_name)
+    quoted_table = quote_identifier(table_name)
+    payload = _carto_sql_json(url, f"SELECT * FROM {quoted_table} LIMIT 0", api_key, timeout)
+    return payload.get("fields")
+
+
 def _detect_geometry_column(
     url: str,
     table_name: str,
@@ -319,9 +357,6 @@ def _detect_geometry_column(
     timeout: float = DEFAULT_TIMEOUT,
 ) -> str | None:
     """Probe the Carto SQL API for a geometry-typed column.
-
-    Issues ``SELECT * FROM <table> LIMIT 0`` (schema only, no rows) and inspects
-    the ``fields`` block for a column whose ``type`` is ``"geometry"``.
 
     Note:
         Carto attaches ``the_geom``/``the_geom_webmercator`` (type ``geometry``)
@@ -336,10 +371,7 @@ def _detect_geometry_column(
     Raises:
         CartoError: If the probe request fails.
     """
-    _validate_table_name(table_name)
-    quoted_table = quote_identifier(table_name)
-    payload = _carto_sql_json(url, f"SELECT * FROM {quoted_table} LIMIT 0", api_key, timeout)
-    return _geometry_column_from_fields(payload.get("fields"))
+    return _geometry_column_from_fields(_probe_table_schema(url, table_name, api_key, timeout))
 
 
 def _geometry_column_has_values(
@@ -368,12 +400,12 @@ def _geometry_column_has_values(
     return bool(payload.get("rows"))
 
 
-def _table_has_geometry(
+def _detect_table_shape(
     url: str,
     table_name: str,
     api_key: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
-) -> bool:
+) -> tuple[bool, list[str] | None]:
     """Decide whether a Carto table should be extracted as geometry.
 
     Two-step: (1) find a geometry-typed column in the schema; (2) confirm it
@@ -381,20 +413,37 @@ def _table_has_geometry(
     often-empty ``the_geom`` to managed tabular tables. If detection is
     inconclusive (network error, etc.) we fall back to the geometry path so the
     normal extraction and error handling apply.
+
+    Returns:
+        ``(has_geometry, column_names)``. The step-1 probe already carries the
+        whole schema, so its column names come back with the decision and
+        ``--include-cols`` can be checked against them for free (#980).
+        ``column_names`` is None when that probe failed, i.e. when there is no
+        schema to check against.
     """
     try:
-        geom_col = _detect_geometry_column(url, table_name, api_key, timeout)
-        if not geom_col:
-            debug("No geometry-typed column in schema; extracting as plain table")
-            return False
-        if _geometry_column_has_values(url, table_name, geom_col, api_key, timeout):
-            debug(f"Detected populated geometry column: {geom_col}")
-            return True
-        debug(f"Geometry column {geom_col!r} is entirely NULL; extracting as plain table")
-        return False
+        fields = _probe_table_schema(url, table_name, api_key, timeout)
     except CartoError as e:
         debug(f"Geometry detection inconclusive ({e}); assuming geometry present")
-        return True
+        return True, None
+
+    columns = _column_names_from_fields(fields)
+    geom_col = _geometry_column_from_fields(fields)
+    if not geom_col:
+        debug("No geometry-typed column in schema; extracting as plain table")
+        return False, columns
+
+    try:
+        populated = _geometry_column_has_values(url, table_name, geom_col, api_key, timeout)
+    except CartoError as e:
+        debug(f"Geometry detection inconclusive ({e}); assuming geometry present")
+        return True, columns
+
+    if populated:
+        debug(f"Detected populated geometry column: {geom_col}")
+        return True, columns
+    debug(f"Geometry column {geom_col!r} is entirely NULL; extracting as plain table")
+    return False, columns
 
 
 def _create_empty_geoparquet_table(geoparquet_version: str | None = None) -> pa.Table:
@@ -605,15 +654,35 @@ def carto_to_table(
     if effective_api_key:
         debug("Using API key for authentication")
 
-    # Parse column lists
-    include_list = [c.strip() for c in include_cols.split(",")] if include_cols else None
-    exclude_set = {c.strip() for c in exclude_cols.split(",")} if exclude_cols else set()
+    # Parse column lists. A blank entry is rejected here, not only by the Click
+    # callback: the Python API never goes through Click, and `` `` reached
+    # quote_identifier() through _build_carto_query as a raw ValueError (#980).
+    include_list = split_column_list(include_cols, "--include-cols")
+    exclude_set = set(split_column_list(exclude_cols, "--exclude-cols") or ())
 
     # Decide between geometry and plain/tabular extraction.
+    schema_columns: list[str] | None = None
     if geometry is None:
-        has_geometry = _table_has_geometry(url, table_name, effective_api_key, timeout)
+        has_geometry, schema_columns = _detect_table_shape(
+            url, table_name, effective_api_key, timeout
+        )
     else:
         has_geometry = geometry
+
+    # --include-cols becomes the SELECT list, so it is checked against the
+    # schema the probe above already read -- for free, and only when it ran.
+    #
+    # --exclude-cols is not checked, and that is a gap rather than a decision:
+    # it names columns of the *fetched* table, where ``the_geom`` has become
+    # ``geometry``, so the set to check against is ``["geometry",
+    # *schema_columns]`` -- which is exactly what arcgis.py does. (``geometry``
+    # itself is not the obstacle: it is warned about and dropped below, before
+    # any filtering.) Until that lands, ``--exclude-cols OWNER`` silently fails
+    # to drop a column named ``Owner``. Tracked separately.
+    if schema_columns is not None:
+        include_list = resolve_columns_against_schema(
+            include_list, schema_columns, "--include-cols"
+        )
 
     if not has_geometry:
         if bbox:

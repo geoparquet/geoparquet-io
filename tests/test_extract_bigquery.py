@@ -778,26 +778,34 @@ class TestColumnValidation:
     (``tests/test_cli_column_list_guard.py``); this is the schema half, which
     only the backend can do, and it matches the parquet precedent by raising
     ``InvalidParameterError`` -- mapped to exit 2 by ``handle_core_exception``.
+
+    The validator itself moved to ``core/column_selection.py`` when Carto and
+    ArcGIS turned out to need the same check (#980); only the ``DESCRIBE`` that
+    feeds it is BigQuery's. These cases stay here because the schema they
+    exercise is one this module produces -- notably the local-table schema
+    carrying both ``id`` and ``ID``.
     """
 
     def test_none_is_passed_through(self):
-        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+        from geoparquet_io.core.column_selection import resolve_columns_against_schema
 
-        assert validate_bigquery_columns(None, ["id", "geom"], "--include-cols") is None
+        assert resolve_columns_against_schema(None, ["id", "geom"], "--include-cols") is None
 
     def test_known_columns_are_returned(self):
-        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+        from geoparquet_io.core.column_selection import resolve_columns_against_schema
 
-        result = validate_bigquery_columns(["id", "geom"], ["id", "name", "geom"], "--include-cols")
+        result = resolve_columns_against_schema(
+            ["id", "geom"], ["id", "name", "geom"], "--include-cols"
+        )
         assert result == ["id", "geom"]
 
     def test_case_is_resolved_to_the_schema_spelling(self):
         """DuckDB matches a quoted identifier case-insensitively, but the exclude
         filter in ``_build_column_list`` compares strings, so ``--exclude-cols
         ID`` used to exclude nothing at all. Resolving here makes both agree."""
-        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+        from geoparquet_io.core.column_selection import resolve_columns_against_schema
 
-        result = validate_bigquery_columns(["ID", "GeoM"], ["id", "geom"], "--exclude-cols")
+        result = resolve_columns_against_schema(["ID", "GeoM"], ["id", "geom"], "--exclude-cols")
         assert result == ["id", "geom"]
 
     def test_an_exact_match_wins_over_a_case_fold(self):
@@ -808,20 +816,20 @@ class TestColumnValidation:
         map keeps only the last of those, so an exactly-spelled request has to be
         honoured as itself before any folding is tried.
         """
-        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
+        from geoparquet_io.core.column_selection import resolve_columns_against_schema
 
         schema = ["id", "ID", "geom"]
-        assert validate_bigquery_columns(["id"], schema, "--exclude-cols") == ["id"]
-        assert validate_bigquery_columns(["ID"], schema, "--exclude-cols") == ["ID"]
+        assert resolve_columns_against_schema(["id"], schema, "--exclude-cols") == ["id"]
+        assert resolve_columns_against_schema(["ID"], schema, "--exclude-cols") == ["ID"]
         # A spelling that matches neither exactly still folds, as before.
-        assert validate_bigquery_columns(["GeoM"], schema, "--include-cols") == ["geom"]
+        assert resolve_columns_against_schema(["GeoM"], schema, "--include-cols") == ["geom"]
 
     def test_missing_column_is_an_invalid_parameter(self):
+        from geoparquet_io.core.column_selection import resolve_columns_against_schema
         from geoparquet_io.core.exceptions import InvalidParameterError
-        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
 
         with pytest.raises(InvalidParameterError) as exc_info:
-            validate_bigquery_columns(["id", "nope"], ["id", "geom"], "--include-cols")
+            resolve_columns_against_schema(["id", "nope"], ["id", "geom"], "--include-cols")
 
         message = str(exc_info.value)
         assert "--include-cols" in message
@@ -831,18 +839,18 @@ class TestColumnValidation:
 
     def test_blank_entry_is_an_invalid_parameter(self):
         """The Python API bypasses Click, so core must reject a blank too."""
+        from geoparquet_io.core.column_selection import resolve_columns_against_schema
         from geoparquet_io.core.exceptions import InvalidParameterError
-        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
 
         with pytest.raises(InvalidParameterError, match="empty or whitespace-only"):
-            validate_bigquery_columns(["id", "   "], ["id", "geom"], "--exclude-cols")
+            resolve_columns_against_schema(["id", "   "], ["id", "geom"], "--exclude-cols")
 
     def test_blank_entry_never_reaches_quote_identifier(self):
+        from geoparquet_io.core.column_selection import resolve_columns_against_schema
         from geoparquet_io.core.exceptions import InvalidParameterError
-        from geoparquet_io.core.extract_bigquery import validate_bigquery_columns
 
         with pytest.raises(InvalidParameterError):
-            validate_bigquery_columns([""], ["id"], "--include-cols")
+            resolve_columns_against_schema([""], ["id"], "--include-cols")
 
     def test_schema_column_names_reads_the_table(self):
         from geoparquet_io.core.extract_bigquery import _schema_column_names

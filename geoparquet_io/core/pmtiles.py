@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import IO
 
+from geoparquet_io.core.column_selection import split_column_list
 from geoparquet_io.core.logging_config import debug, success
 
 
@@ -567,6 +568,7 @@ def create_pmtiles_from_geoparquet(
             Set False to pass geometry through unrepaired.
 
     Raises:
+        InvalidParameterError: If include_cols carries a blank entry
         TippecanoeNotFoundError: If tippecanoe is not in PATH
         ValueError: If paths contain shell metacharacters or the user supplied an invalid layer_by_column
         RuntimeError: If any subprocess fails
@@ -578,15 +580,20 @@ def create_pmtiles_from_geoparquet(
             "When creating pmtiles, you cannot specify both 'layer' which defines one layer name "
             "and 'layer_by_column' which defines multiple layer names based on the values of a column"
         )
+    # --include-cols is forwarded verbatim into a `gpio extract` subprocess
+    # argv, so a blank entry used to be rejected one process away from the user
+    # (#980). Checked here, with the other usage errors and before the
+    # tippecanoe probe, so a bad option is not reported as a missing binary.
+    cols = split_column_list(include_cols, "--include-cols")
+
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()
 
     # If layer_by_column is set, ensure that the group by column is always included
     include_cols_with_layer_by_column: str | None
-    if layer_by_column and include_cols:
-        cols = [c.strip() for c in include_cols.split(",")]
+    if layer_by_column and cols:
         if layer_by_column not in cols:
-            cols.append(layer_by_column)
+            cols = [*cols, layer_by_column]
         include_cols_with_layer_by_column = ",".join(cols)
     else:
         include_cols_with_layer_by_column = include_cols
