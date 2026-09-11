@@ -17,34 +17,51 @@ from geoparquet_io.core.parquet_writer import (
 )
 
 
-class SpillAwareGroup(click.Group):
-    """Root group that names ``TMPDIR`` when DuckDB runs out of room to spill.
+class ErrorBoundaryGroup(click.Group):
+    """Root group that turns a DuckDB failure into gpio's error line.
 
-    DuckDB caps its spill at ``max_temp_directory_size`` (90% of the volume by
-    default), so a small or RAM-backed temp volume fails cleanly rather than
-    filling the disk -- but it fails saying "Out of Memory Error", and its list
-    of "possible solutions" is entirely about memory. It never mentions the one
-    knob that fixes a disk shortage. This adds that line.
+    Two failures reach this point with no gpio frame willing to own them, and
+    both used to leave a raw Python traceback on the terminal:
 
-    It belongs on the *root* group rather than on a decorator because every
-    command spills: ``handle_geoparquet_errors`` is applied to four command
-    modules, and ``gpio sort hilbert`` -- the worked example in the docs -- is
-    not one of them. ``Group.invoke`` is the single funnel every subcommand
-    passes through.
+    * DuckDB runs out of room to spill. It caps its spill at
+      ``max_temp_directory_size`` (90% of the volume by default), so a small or
+      RAM-backed temp volume fails cleanly rather than filling the disk -- but
+      it fails saying "Out of Memory Error", and its list of "possible
+      solutions" is entirely about memory. It never mentions the one knob that
+      fixes a disk shortage, so the boundary adds that line (#752).
+    * DuckDB's Parquet reader refuses the input's ``geo`` block. That block is
+      arbitrary JSON from somebody else's tool, so its refusal is news about the
+      file, not a gpio bug -- and DuckDB's message already says what is wrong
+      with it. Eleven commands answered such a file with a traceback because the
+      handling lived in per-site ``except`` blocks that those paths never
+      reached (#983).
 
-    Anything that is not this specific failure is re-raised untouched.
+    Both belong on the *root* group rather than on a decorator, because every
+    command can hit them: ``handle_geoparquet_errors`` is applied to four
+    command modules, and ``gpio sort hilbert`` -- the worked example in the docs
+    -- is not one of them. ``Group.invoke`` is the single funnel every
+    subcommand passes through, so a command added tomorrow inherits this.
+
+    Anything ``cli_error_for`` does not claim is re-raised untouched: a genuine
+    gpio bug still gets its traceback.
     """
 
     def invoke(self, ctx):
-        from geoparquet_io.core.duckdb_utils import spill_space_hint
+        from geoparquet_io.cli.exception_handler import cli_error_for
+        from geoparquet_io.core.logging_config import get_logger
 
         try:
             return super().invoke(ctx)
         except Exception as exc:
-            hint = spill_space_hint(exc)
-            if hint is None:
+            error = cli_error_for(exc)
+            if error is None:
                 raise
-            raise click.ClickException(f"{exc}\n\n{hint}") from exc
+            # The traceback is hidden, not discarded: --verbose still prints it,
+            # which is what a gpio bug that surfaces as a DuckDB error needs.
+            get_logger(__name__).debug(
+                "Converted a low-level failure to an error line", exc_info=exc
+            )
+            raise error from exc
 
 
 def handle_geoparquet_errors(func):

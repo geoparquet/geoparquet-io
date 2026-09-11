@@ -540,9 +540,9 @@ class TestTheCliNamesTmpdir:
     """The hint has to reach the user, on every command, not just the ones with a decorator."""
 
     def test_the_group_replaces_an_out_of_spill_space_message(self):
-        from geoparquet_io.cli.decorators import SpillAwareGroup
+        from geoparquet_io.cli.decorators import ErrorBoundaryGroup
 
-        @click.group(cls=SpillAwareGroup)
+        @click.group(cls=ErrorBoundaryGroup)
         def root():
             pass
 
@@ -560,10 +560,13 @@ class TestTheCliNamesTmpdir:
         # The original text is kept: it names the sizes involved.
         assert "failed to offload data block" in result.output
 
-    def test_other_errors_pass_through_untouched(self):
-        from geoparquet_io.cli.decorators import SpillAwareGroup
+    def test_another_duckdb_error_keeps_its_own_message(self):
+        """The spill hint is added to the one failure it explains and to nothing
+        else. Another DuckDB error still becomes an error line (#983) -- it just
+        does not grow a ``TMPDIR`` paragraph that has nothing to do with it."""
+        from geoparquet_io.cli.decorators import ErrorBoundaryGroup
 
-        @click.group(cls=SpillAwareGroup)
+        @click.group(cls=ErrorBoundaryGroup)
         def root():
             pass
 
@@ -573,13 +576,14 @@ class TestTheCliNamesTmpdir:
 
         result = CliRunner().invoke(root, ["boom"])
 
-        assert isinstance(result.exception, duckdb.IOException)
+        assert "IO Error: No files found that match the pattern" in result.output
+        assert "TMPDIR" not in result.output
 
     def test_the_real_cli_group_uses_it(self):
-        from geoparquet_io.cli.decorators import SpillAwareGroup
+        from geoparquet_io.cli.decorators import ErrorBoundaryGroup
         from geoparquet_io.cli.main import cli
 
-        assert isinstance(cli, SpillAwareGroup)
+        assert isinstance(cli, ErrorBoundaryGroup)
 
 
 def test_the_reaper_pattern_is_not_hand_written_twice():

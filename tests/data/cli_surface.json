@@ -1,5 +1,5 @@
 {
- "class": "SpillAwareGroup",
+ "class": "ErrorBoundaryGroup",
  "commands": {
   "add": {
    "class": "Group",

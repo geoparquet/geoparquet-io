@@ -2222,13 +2222,29 @@ KNOWN_UNGUARDED: dict[str, set[str]] = {
 
 #: One column name only: the sweep's job is breadth across *commands*, and the
 #: `geometry`-versus-`geom` axis is covered per reader above.
-SWEEP_SHAPES = [(case, block) for col, case, block in MALFORMED_BLOCKS if col == "geometry"] + [
-    (f"version_is_{case}", _version_block(bad)) for case, bad in NON_STRING_VERSIONS[2:]
-]
+#:
+#: `no_columns_key` is #983's reproduction and is not one of `MALFORMED_BLOCKS`:
+#: nothing about it is malformed as far as *gpio* is concerned -- valid JSON, a
+#: string version, no key of a shape any guard here objects to. It is DuckDB's
+#: Parquet reader that refuses it, which is the whole point of the second
+#: assertion below.
+SWEEP_SHAPES = (
+    [("no_columns_key", {"version": "1.1.0"})]
+    + [(case, block) for col, case, block in MALFORMED_BLOCKS if col == "geometry"]
+    + [(f"version_is_{case}", _version_block(bad)) for case, bad in NON_STRING_VERSIONS[2:]]
+)
 
 
 @pytest.mark.parametrize(("case", "block"), SWEEP_SHAPES, ids=[c for c, _ in SWEEP_SHAPES])
-def test_no_command_dies_with_a_raw_type_error_on_a_malformed_block(case, block, tmp_path):
+def test_no_command_dies_with_a_raw_exception_on_a_malformed_block(case, block, tmp_path):
+    """Two ways the same file can end in a traceback, caught in one pass.
+
+    A raw ``TypeError``/``AttributeError`` is gpio indexing into a block it did
+    not check (#883, #979). A raw ``duckdb.Error`` is the layer underneath:
+    DuckDB's Parquet reader refuses the block outright, and eleven commands let
+    that refusal out as a traceback because the translation to an error line
+    lived in per-site ``except`` blocks instead of at the CLI boundary (#983).
+    """
     from click.testing import CliRunner
 
     from geoparquet_io.cli.main import cli
@@ -2237,6 +2253,7 @@ def test_no_command_dies_with_a_raw_type_error_on_a_malformed_block(case, block,
     src = _file_with_geo(tmp_path, f"sweep_{case}", block)
 
     crashed: dict[str, str] = {}
+    leaked_from_duckdb: dict[str, str] = {}
     for i, (name, argv) in enumerate(SWEEP_COMMANDS):
         args = [
             arg.format(
@@ -2253,5 +2270,8 @@ def test_no_command_dies_with_a_raw_type_error_on_a_malformed_block(case, block,
         exc = CliRunner().invoke(cli, args).exception
         if isinstance(exc, (TypeError, AttributeError)):
             crashed[name] = f"{type(exc).__name__}: {exc}"
+        if isinstance(exc, duckdb.Error):
+            leaked_from_duckdb[name] = f"{type(exc).__name__}: {exc}"
 
     assert set(crashed) == KNOWN_UNGUARDED.get(case, set()), crashed
+    assert leaked_from_duckdb == {}
