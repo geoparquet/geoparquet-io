@@ -168,6 +168,39 @@ def carried_column_name(
     return None
 
 
+def carried_version(value, source: str | None = None) -> str | None:
+    """A carried ``geo.version`` *string*, or ``None`` when the block does not give one.
+
+    Every reader of this key parses it -- ``version.startswith("2.")``,
+    ``version.split(".")`` -- and each of them guarded truthiness only, so a
+    ``version`` that is ``2``, ``2.0``, ``["2.0"]``, ``{"major": 2}`` or ``true``
+    walked past the guard and raised ``AttributeError`` several frames from
+    anything a user can act on (#979). In ``streaming`` the ``except`` beside
+    the call named ``json.JSONDecodeError`` and ``UnicodeDecodeError``
+    specifically, so it did not even catch it.
+
+    Version readers are shared between the write paths and ``gpio check``, so
+    this takes the same line as :func:`carried_column_name`: guard rather than
+    sanitize, hand back nothing rather than a value that cannot be a version,
+    name the ignored key once, and let each caller fall through to the default
+    it already has for a file that declares no version. Degrading to "unknown
+    version" is the whole point -- ``gpio check`` is the command a user runs to
+    be *told* their file is malformed, so crashing on the malformed input is the
+    one thing it must not do.
+
+    An *absent* version is not malformed and says nothing; an empty string is
+    not a version either, and ``validate`` already FAILs it as one.
+    """
+    if isinstance(value, str):
+        return value or None
+    if value is None:
+        return None
+    _emit_malformed_geo_warning(
+        f"'version' is {_article(_json_type_name(value))}, expected a string", source
+    )
+    return None
+
+
 def decode_carried_geo(raw):
     """Decode a raw carried ``geo`` value (bytes or str) to JSON, or None.
 
