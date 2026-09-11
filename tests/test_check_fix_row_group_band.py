@@ -9,7 +9,7 @@ therefore produced a file that ``gpio check optimization`` marked ``[fail]`` on
 its row-group factor and told the user to re-partition.
 
 Which band ``--fix`` targets is a decision, not an oversight, so state it: it
-targets the **spatial** band, via ``DEFAULT_SORT_ROW_GROUP_ROWS`` (49,152).
+targets the **spatial** band, via ``DEFAULT_ROW_GROUP_ROWS`` (49,152).
 Three reasons.
 
 * ``--fix`` is remedial. Its whole job is to leave a file that passes gpio's
@@ -24,7 +24,7 @@ Three reasons.
   it (#775); ``GENERAL_ROW_COUNT_RANGE``'s top is inherited, as its own comment
   says.
 
-The value is not typed here either. ``DEFAULT_SORT_ROW_GROUP_ROWS`` is
+The value is not typed here either. ``DEFAULT_ROW_GROUP_ROWS`` is
 ``align_to_writer_vector(SPATIAL_BAND_TOP_ROWS)`` -- the same constant and the
 same snapping helper ``gpio sort`` uses since #967 -- so ``check --fix`` and
 ``gpio sort`` cannot drift apart, and neither can drift from the band. That is
@@ -48,7 +48,7 @@ from geoparquet_io.core import check_fixes
 from geoparquet_io.core.check_optimization import _check_row_group_size
 from geoparquet_io.core.check_parquet_structure import SPATIAL_ROW_COUNT_RANGE
 from geoparquet_io.core.parquet_writer import (
-    DEFAULT_SORT_ROW_GROUP_ROWS,
+    DEFAULT_ROW_GROUP_ROWS,
     WRITER_VECTOR_ROWS,
     align_to_writer_vector,
 )
@@ -82,28 +82,28 @@ class TestEveryFixAsksForTheSortDefault:
 
         check_fixes.fix_compression(places_test_file, str(tmp_path / "out.parquet"))
 
-        assert _row_group_kwarg(recorded) == DEFAULT_SORT_ROW_GROUP_ROWS
+        assert _row_group_kwarg(recorded) == DEFAULT_ROW_GROUP_ROWS
 
     def test_fix_row_groups(self, monkeypatch, places_test_file, tmp_path):
         recorded = _spy(monkeypatch, "write_parquet_with_metadata")
 
         check_fixes.fix_row_groups(places_test_file, str(tmp_path / "out.parquet"))
 
-        assert _row_group_kwarg(recorded) == DEFAULT_SORT_ROW_GROUP_ROWS
+        assert _row_group_kwarg(recorded) == DEFAULT_ROW_GROUP_ROWS
 
     def test_fix_bbox_removal(self, monkeypatch, places_test_file, tmp_path):
         recorded = _spy(monkeypatch, "write_parquet_with_metadata")
 
         check_fixes.fix_bbox_removal(places_test_file, str(tmp_path / "out.parquet"), "bbox")
 
-        assert _row_group_kwarg(recorded) == DEFAULT_SORT_ROW_GROUP_ROWS
+        assert _row_group_kwarg(recorded) == DEFAULT_ROW_GROUP_ROWS
 
     def test_fix_bbox_column(self, monkeypatch, places_test_file, tmp_path):
         recorded = _spy(monkeypatch, "add_bbox_column")
 
         check_fixes.fix_bbox_column(places_test_file, str(tmp_path / "out.parquet"))
 
-        assert _row_group_kwarg(recorded) == DEFAULT_SORT_ROW_GROUP_ROWS
+        assert _row_group_kwarg(recorded) == DEFAULT_ROW_GROUP_ROWS
 
     def test_fix_spatial_ordering_inherits_the_sort_default(
         self, monkeypatch, places_test_file, tmp_path
@@ -114,7 +114,7 @@ class TestEveryFixAsksForTheSortDefault:
 
         check_fixes.fix_spatial_ordering(places_test_file, str(tmp_path / "out.parquet"))
 
-        assert _row_group_kwarg(recorded) == DEFAULT_SORT_ROW_GROUP_ROWS
+        assert _row_group_kwarg(recorded) == DEFAULT_ROW_GROUP_ROWS
 
 
 class TestTheFixDefaultIsDerivedRatherThanTyped:
@@ -123,11 +123,11 @@ class TestTheFixDefaultIsDerivedRatherThanTyped:
     def test_it_sits_inside_the_band_check_optimization_scores(self):
         spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
 
-        assert spatial_low <= DEFAULT_SORT_ROW_GROUP_ROWS <= spatial_high
+        assert spatial_low <= DEFAULT_ROW_GROUP_ROWS <= spatial_high
 
     def test_it_is_a_whole_writer_vector_so_the_writer_passes_it_through(self):
-        assert DEFAULT_SORT_ROW_GROUP_ROWS % WRITER_VECTOR_ROWS == 0
-        assert align_to_writer_vector(DEFAULT_SORT_ROW_GROUP_ROWS) == DEFAULT_SORT_ROW_GROUP_ROWS
+        assert DEFAULT_ROW_GROUP_ROWS % WRITER_VECTOR_ROWS == 0
+        assert align_to_writer_vector(DEFAULT_ROW_GROUP_ROWS) == DEFAULT_ROW_GROUP_ROWS
 
     def test_no_write_site_names_a_literal_row_count(self):
         """The bug was five copies of one literal. Pin that there are none.
@@ -137,9 +137,9 @@ class TestTheFixDefaultIsDerivedRatherThanTyped:
         """
         requested = set(re.findall(r"row_group_rows=([^,\n)]+)", CHECK_FIXES_SOURCE))
 
-        assert requested == {"DEFAULT_SORT_ROW_GROUP_ROWS"}, (
+        assert requested == {"DEFAULT_ROW_GROUP_ROWS"}, (
             "core/check_fixes.py asks a writer for a row-group size that is not "
-            "the derived sort default. Use DEFAULT_SORT_ROW_GROUP_ROWS so the "
+            "the derived sort default. Use DEFAULT_ROW_GROUP_ROWS so the "
             f"value stays inside SPATIAL_ROW_COUNT_RANGE (#972). Found: {sorted(requested)}"
         )
 
@@ -157,7 +157,7 @@ class TestTheFixDefaultIsDerivedRatherThanTyped:
             None,
         )
 
-        assert summary == [f"Optimized row groups ({DEFAULT_SORT_ROW_GROUP_ROWS:,} rows/group)"]
+        assert summary == [f"Optimized row groups ({DEFAULT_ROW_GROUP_ROWS:,} rows/group)"]
 
 
 @pytest.fixture
@@ -351,9 +351,7 @@ class TestTheTriggerFollowsTheSpatialBand:
 
         table = pq.read_table(spatially_oversized_file)
         inside = tmp_path / "inside.parquet"
-        pq.write_table(
-            table, inside, compression="ZSTD", row_group_size=DEFAULT_SORT_ROW_GROUP_ROWS
-        )
+        pq.write_table(table, inside, compression="ZSTD", row_group_size=DEFAULT_ROW_GROUP_ROWS)
 
         results = check_row_groups(str(inside), return_results=True, quiet=True)
 

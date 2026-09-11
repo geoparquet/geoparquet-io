@@ -71,7 +71,11 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
-from geoparquet_io.core.parquet_writer import ParquetWriteSettings
+from geoparquet_io.core.parquet_writer import (
+    ParquetWriteSettings,
+    resolve_output_geoparquet_version,
+    resolve_row_group_rows,
+)
 from geoparquet_io.core.remote import (
     _sanitize_url_for_logging,
     is_remote_url,
@@ -1661,11 +1665,11 @@ def _apply_geoparquet_metadata(
         # so auto mode (geoparquet_version=None) keeps whatever it resolves to,
         # which is issue #600's territory.
         #
-        # Scope: this fixes write_geoparquet_table's path only. Table.write()
-        # dispatches to strategy.write_from_table(), and the in-memory,
-        # streaming and disk-rewrite strategies have the same-shaped guard and
-        # still leak the key -- tracked in issue #773, deliberately left to its
-        # own PR rather than widened into this one.
+        # The three strategies behind Table.write() had the same-shaped guard
+        # and leaked the key (#773); they now route their file-level metadata
+        # through parquet_writer.apply_output_kv_metadata, which applies this
+        # same rule before any such guard can be reached. This branch stays
+        # because write_geoparquet_table does not go through a strategy.
         if geoparquet_version == "parquet-geo-only":
             if verbose:
                 debug(
@@ -2956,8 +2960,19 @@ def write_parquet_with_metadata(
         con, query, original_metadata, geometry_column, verbose
     )
 
-    if geoparquet_version is None:
-        geoparquet_version = extract_version_from_metadata(original_metadata)
+    # The facade owns both of these: how many rows a row group gets, and which
+    # version auto mode resolves to. Every caller of this function -- 21 of them
+    # -- used to inherit whatever its writer defaulted to and whatever its own
+    # `geo` key happened to say, which is how `convert` came to write 122,880-row
+    # groups (#981) and how `sort`/`extract`/`partition` came to rewrite a
+    # native-geo-only input as 1.1 WKB while `convert` kept it native (#600).
+    row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
+    geoparquet_version = resolve_output_geoparquet_version(
+        geoparquet_version,
+        input_file=input_file,
+        original_metadata=original_metadata,
+        verbose=verbose,
+    )
 
     effective_version = geoparquet_version or "1.1"
 
@@ -3248,6 +3263,12 @@ def write_geoparquet_table(
     # raise `argument of type 'NoneType' is not iterable` here, and a list-,
     # string- or non-object-entry `columns` a `TypeError` one line later (#947).
     geo_meta = sanitized_carried_geo(table.schema.metadata)
+
+    # The facade's row-group decision, so an Arrow-side write (arcgis, carto,
+    # wfs, bigquery, aggregate, overview) lands on the same number a DuckDB-side
+    # one does. Without it these fell through to ParquetWriteSettings' old
+    # 100,000 while the COPY paths took DuckDB's 122,880.
+    row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
 
     if geometry_column is None:
         geometry_column = carried_geometry_column(geo_meta, table.column_names) or "geometry"

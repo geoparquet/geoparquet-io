@@ -104,7 +104,7 @@ from geoparquet_io.core.add import kdtree as core_kdtree
 from geoparquet_io.core.add import quadkey as core_quadkey
 from geoparquet_io.core.add import s2 as core_s2
 from geoparquet_io.core.convert import convert_to_geoparquet
-from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
+from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from geoparquet_io.core.partition import by_h3 as core_part_h3
 from geoparquet_io.core.partition import by_quadkey as core_part_quadkey
 
@@ -673,22 +673,38 @@ KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
         "ops",
         "tile_size",
         "None",
-        str(DEFAULT_SORT_ROW_GROUP_ROWS),
+        str(DEFAULT_ROW_GROUP_ROWS),
     ): (
         f"The file core resolves row_group_rows=None to the sort default of "
-        f"{DEFAULT_SORT_ROW_GROUP_ROWS:,} rows (DEFAULT_SORT_ROW_GROUP_ROWS); the in-memory API "
-        f"spells that same effective default explicitly as tile_size={DEFAULT_SORT_ROW_GROUP_ROWS}."
+        f"{DEFAULT_ROW_GROUP_ROWS:,} rows (DEFAULT_ROW_GROUP_ROWS); the in-memory API "
+        f"spells that same effective default explicitly as tile_size={DEFAULT_ROW_GROUP_ROWS}."
     ),
     (
         "sort str",
         "table",
         "tile_size",
         "None",
-        str(DEFAULT_SORT_ROW_GROUP_ROWS),
+        str(DEFAULT_ROW_GROUP_ROWS),
     ): (
         f"The file core resolves row_group_rows=None to the sort default of "
-        f"{DEFAULT_SORT_ROW_GROUP_ROWS:,} rows (DEFAULT_SORT_ROW_GROUP_ROWS); the fluent API "
-        f"spells that same effective default explicitly as tile_size={DEFAULT_SORT_ROW_GROUP_ROWS}."
+        f"{DEFAULT_ROW_GROUP_ROWS:,} rows (DEFAULT_ROW_GROUP_ROWS); the fluent API "
+        f"spells that same effective default explicitly as tile_size={DEFAULT_ROW_GROUP_ROWS}."
+    ),
+    (
+        "convert geoparquet",
+        "table",
+        "row_group_rows",
+        "None",
+        str(DEFAULT_ROW_GROUP_ROWS),
+    ): (
+        f"Measurement depth, not behaviour -- the same gap this case's notes already "
+        f"concede for geoparquet_version. Both front ends resolve row_group_rows through "
+        f"parquet_writer.resolve_row_group_rows and both land on {DEFAULT_ROW_GROUP_ROWS:,}, "
+        f"but the two boundaries this case patches sit on opposite sides of that call: the "
+        f"CLI's is convert_to_geoparquet, which runs *before* write_parquet_with_metadata "
+        f"resolves, and the table's is WriteStrategyFactory.get_strategy, which runs *after* "
+        f"Table.write resolves. tests/test_write_facade_row_groups.py asserts the thing this "
+        f"case cannot see: that the two front ends write the same row-group layout."
     ),
 }
 

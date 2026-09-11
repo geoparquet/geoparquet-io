@@ -46,6 +46,15 @@ class PartitionWriteOptions:
 
     Replaces an opaque ``**write_kwargs`` passthrough so both partition drivers
     forward exactly the same, type-checked set of options to every partition.
+
+    ``geoparquet_version`` is expected to be **already resolved** by the driver,
+    through ``parquet_writer.resolve_output_geoparquet_version``, rather than
+    left as ``None`` for each partition write to resolve for itself. A partition
+    write sees only the staging file, and staging is always written
+    ``GEOPARQUET_VERSION 'NONE'`` (see :func:`run_partitioned_copy`), so a write
+    that resolved auto mode from what it reads would call every input
+    native-geo-only. Resolving once, from the real input, is both correct and
+    the only way every partition of one run agrees (#600).
     """
 
     geoparquet_version: str | None = None

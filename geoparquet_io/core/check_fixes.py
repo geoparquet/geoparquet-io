@@ -22,7 +22,7 @@ from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
 from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
 from geoparquet_io.core.hilbert_order import hilbert_order
 from geoparquet_io.core.logging_config import debug, info, progress
-from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
+from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
@@ -31,7 +31,7 @@ from geoparquet_io.core.remote import (
     setup_aws_profile_if_needed,
 )
 
-# Every fix below writes DEFAULT_SORT_ROW_GROUP_ROWS rows per row group.
+# Every fix below writes DEFAULT_ROW_GROUP_ROWS rows per row group.
 #
 # `check --fix` is remedial, so the file it leaves behind has to pass the checks
 # gpio runs next -- including the stricter of the two row-count bands, the
@@ -49,7 +49,7 @@ from geoparquet_io.core.remote import (
 # to prune well would undo what the sort just bought. Of the two bands it is
 # also the one with a measurement behind it (#775).
 #
-# The number is not typed here. DEFAULT_SORT_ROW_GROUP_ROWS is
+# The number is not typed here. DEFAULT_ROW_GROUP_ROWS is
 # align_to_writer_vector(SPATIAL_BAND_TOP_ROWS) -- derived from the band, and
 # already snapped to a whole 2,048-row writer vector, so what gpio asks for is
 # what lands. It is also exactly what `gpio sort` writes since #967, which is
@@ -119,7 +119,7 @@ def fix_compression(
             original_metadata=original_metadata,
             compression="ZSTD",
             compression_level=15,
-            row_group_rows=DEFAULT_SORT_ROW_GROUP_ROWS,
+            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
             verbose=verbose,
             profile=profile,
             geoparquet_version=geoparquet_version,
@@ -177,7 +177,7 @@ def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
         verbose=verbose,
         compression="ZSTD",
         compression_level=15,
-        row_group_rows=DEFAULT_SORT_ROW_GROUP_ROWS,
+        row_group_rows=DEFAULT_ROW_GROUP_ROWS,
         profile=profile,
         overwrite=True,  # check --fix manages file lifecycle
     )
@@ -262,7 +262,7 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
             original_metadata=None,  # Don't preserve old metadata with bbox covering
             compression="ZSTD",
             compression_level=15,
-            row_group_rows=DEFAULT_SORT_ROW_GROUP_ROWS,
+            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
             verbose=verbose,
             profile=profile,
             geoparquet_version=gp_version,
@@ -350,7 +350,7 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
             verbose=verbose,
             compression="ZSTD",
             compression_level=15,
-            row_group_rows=DEFAULT_SORT_ROW_GROUP_ROWS,
+            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
             profile=profile,
             overwrite=True,  # check --fix manages file lifecycle
         )
@@ -441,7 +441,7 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
             original_metadata=original_metadata,
             compression="ZSTD",
             compression_level=15,
-            row_group_rows=DEFAULT_SORT_ROW_GROUP_ROWS,
+            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
             verbose=verbose,
             profile=profile,
             geoparquet_version=geoparquet_version,
@@ -611,7 +611,7 @@ def _apply_compression_fix(check_results, current_file, output_file, gp_version,
     if needs_compression:
         fixes.append("Optimized compression (ZSTD)")
     if needs_row_groups:
-        fixes.append(f"Optimized row groups ({DEFAULT_SORT_ROW_GROUP_ROWS:,} rows/group)")
+        fixes.append(f"Optimized row groups ({DEFAULT_ROW_GROUP_ROWS:,} rows/group)")
     return fixes
 
 

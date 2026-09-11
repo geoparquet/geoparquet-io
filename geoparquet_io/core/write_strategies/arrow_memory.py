@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
 from geoparquet_io.core.write_strategies.base import BaseWriteStrategy
 
 if TYPE_CHECKING:
@@ -110,13 +111,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
                 geometry_info=geometry_info,
             )
 
-        if extra_kv_metadata:
-            existing_meta = dict(table.schema.metadata or {})
-            for key, value in extra_kv_metadata.items():
-                bkey = key.encode("utf-8") if isinstance(key, str) else key
-                bval = value.encode("utf-8") if isinstance(value, str) else value
-                existing_meta[bkey] = bval
-            table = table.replace_schema_metadata(existing_meta)
+        table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
         _write_table_with_settings(
             table,
@@ -177,13 +172,11 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
                 verbose=verbose,
             )
 
-        if extra_kv_metadata:
-            existing_meta = dict(table.schema.metadata or {})
-            for key, value in extra_kv_metadata.items():
-                bkey = key.encode("utf-8") if isinstance(key, str) else key
-                bval = value.encode("utf-8") if isinstance(value, str) else value
-                existing_meta[bkey] = bval
-            table = table.replace_schema_metadata(existing_meta)
+        # The facade has the last word on the output's file-level keys. It sits
+        # after the `has_geometry` branch above, so a table whose geometry was
+        # projected away cannot skip it and write the carried `geo` key through
+        # under an explicit parquet-geo-only request (#773).
+        table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
         _write_table_with_settings(
             table,

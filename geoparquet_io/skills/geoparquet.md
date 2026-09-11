@@ -204,7 +204,7 @@ Most write commands accept these options:
 |--------|--------|---------|
 | `--compression` | zstd, snappy, gzip, lz4, brotli, uncompressed | zstd |
 | `--compression-level` | 1-22 (for zstd) | 15 |
-| `--row-group-size` | Number of rows per group | varies by command |
+| `--row-group-size` | Number of rows per group | 49,152 |
 <!-- END GENERATED: compression-options -->
 
 **Recommendations:**

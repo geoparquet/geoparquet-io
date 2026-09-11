@@ -1965,7 +1965,10 @@ def convert_to_geoparquet(
 
     Applies best practices:
     - ZSTD compression
-    - 100k row groups
+    - 49,152-row row groups (``parquet_writer.DEFAULT_ROW_GROUP_ROWS``), inside
+      the 10,000-50,000 band ``gpio check optimization`` scores. Nothing used to
+      set a row count here at all, so the writer picked its own 122,880 and the
+      command's own spatial check failed the file it had just written (#981).
     - Bbox column with metadata
     - Hilbert spatial ordering (unless --skip-hilbert)
     - GeoParquet metadata (version configurable)
@@ -1977,7 +1980,8 @@ def convert_to_geoparquet(
         verbose: Print detailed progress
         compression: Compression type (default: ZSTD)
         compression_level: Compression level (default: 15)
-        row_group_rows: Rows per group (default: None)
+        row_group_rows: Rows per group (default: None, meaning the shared
+            write default of 49,152; see parquet_writer.resolve_row_group_rows)
         row_group_size_mb: Target row group size in MB (alternative to row_group_rows)
         wkt_column: CSV/TSV only - WKT column name (auto-detected if not specified)
         lat_column: CSV/TSV only - Latitude column name (requires lon_column)

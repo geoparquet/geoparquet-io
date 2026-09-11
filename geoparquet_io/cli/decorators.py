@@ -204,7 +204,7 @@ def _row_group_size_help(default_rows: int | None) -> str:
     """Help text for --row-group-size, naming a default only where one exists.
 
     Only commands that resolve their own default (the ``gpio sort`` family, via
-    ``resolve_sort_row_group_rows``) may name a number here. Everywhere else the
+    ``resolve_row_group_rows``) may name a number here. Everywhere else the
     option falls through as ``None`` and the writer picks -- DuckDB's COPY uses
     122,880 rows -- so quoting a figure would repeat the #775 bug of advertising
     a default that nothing applies.
@@ -244,7 +244,7 @@ def row_group_options(func=None, *, default_rows: int | None = None):
     text matches what the command actually does.
 
     Usable bare (``@row_group_options``) or called
-    (``@row_group_options(default_rows=DEFAULT_SORT_ROW_GROUP_ROWS)``).
+    (``@row_group_options(default_rows=DEFAULT_ROW_GROUP_ROWS)``).
     """
     if func is None:
         return lambda inner: row_group_options(inner, default_rows=default_rows)

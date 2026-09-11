@@ -750,6 +750,25 @@ table.write('output.parquet', compression='GZIP', compression_level=6)
 table.write('output.parquet', row_group_size_mb=128)
 ```
 
+**Row group size**
+
+`row_group_rows` is resolved by the same write facade the CLI uses, so a number
+means the same thing on both front ends:
+
+| `row_group_rows` | Rows per group written |
+|------------------|------------------------|
+| `None` (default) | 49,152 |
+| `50000` | 49,152 — snapped to a whole 2,048-row writer vector, as `gpio sort --row-group-size 50000` does |
+| `10240` | 10,240 — already a whole number of vectors |
+| `10` | 10 — a request of one vector or less is passed through |
+
+Until [#971](https://github.com/geoparquet/geoparquet-io/issues/971) this path
+handed the writer the raw value: `row_group_rows=50000` wrote 51,200-row groups
+while the identical CLI request wrote 49,152, and `None` inherited DuckDB's
+122,880 — both outside the 10,000–50,000 band `gpio check optimization` scores.
+Pass `row_group_size_mb` instead to size groups by bytes; the row-count default
+does not override it.
+
 **GeoParquet Version**
 
 Control the GeoParquet spec version written into the file metadata:

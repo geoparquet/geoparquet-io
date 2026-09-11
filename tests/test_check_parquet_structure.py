@@ -195,14 +195,14 @@ class TestRowCountBands:
         whole vector at or below the top, and it must sit inside the band.
         """
         from geoparquet_io.core.parquet_writer import (
-            DEFAULT_SORT_ROW_GROUP_ROWS,
+            DEFAULT_ROW_GROUP_ROWS,
             WRITER_VECTOR_ROWS,
         )
 
         spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
-        assert spatial_low <= DEFAULT_SORT_ROW_GROUP_ROWS <= spatial_high
-        assert DEFAULT_SORT_ROW_GROUP_ROWS % WRITER_VECTOR_ROWS == 0
-        assert DEFAULT_SORT_ROW_GROUP_ROWS + WRITER_VECTOR_ROWS > spatial_high
+        assert spatial_low <= DEFAULT_ROW_GROUP_ROWS <= spatial_high
+        assert DEFAULT_ROW_GROUP_ROWS % WRITER_VECTOR_ROWS == 0
+        assert DEFAULT_ROW_GROUP_ROWS + WRITER_VECTOR_ROWS > spatial_high
 
     def test_optimization_check_scores_the_same_spatial_band(self, monkeypatch):
         """``check optimization``'s row-group factor scores this exact band."""
@@ -250,7 +250,7 @@ class TestRowCountBands:
         import logging
 
         from geoparquet_io.core import check_parquet_structure as structure
-        from geoparquet_io.core.parquet_writer import DEFAULT_SORT_ROW_GROUP_ROWS
+        from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 
         monkeypatch.setattr(
             structure,
@@ -271,10 +271,12 @@ class TestRowCountBands:
         spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
         assert f"{general_low:,}-{general_high:,} rows per group (general use)" in printed
         assert f"{spatial_low:,}-{spatial_high:,} rows per group" in printed
-        # The line must name the number ``gpio sort`` actually writes. Quoting
-        # the band's top instead was true only while the two coincided, and it
-        # stopped being true the moment the default moved off it (#961).
-        assert f"gpio sort defaults to {DEFAULT_SORT_ROW_GROUP_ROWS:,}" in printed
+        # The line must name the number gpio actually writes. Quoting the band's
+        # top instead was true only while the two coincided, and it stopped
+        # being true the moment the default moved off it (#961). It no longer
+        # says "gpio sort" either: the write facade applies the same default to
+        # every command, so naming one of them would under-claim (#981).
+        assert f"gpio writes {DEFAULT_ROW_GROUP_ROWS:,} by default" in printed
 
 
 class TestGetRowGroupStats:

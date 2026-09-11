@@ -6,7 +6,7 @@ DuckDB as *nothing at all*, so DuckDB's own 122,880-row default applied while
 group for the spatial queries sorting exists to serve. Four numbers, none of
 them agreeing.
 
-The sort commands now resolve their own default -- ``DEFAULT_SORT_ROW_GROUP_ROWS``
+The sort commands now resolve their own default -- ``DEFAULT_ROW_GROUP_ROWS``
 -- and hand it down explicitly, so the advertised default *is* the effective
 default on every write path.
 
@@ -45,11 +45,11 @@ from geoparquet_io.core.check_parquet_structure import SPATIAL_ROW_COUNT_RANGE
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.hilbert_order import hilbert_order
 from geoparquet_io.core.parquet_writer import (
-    DEFAULT_SORT_ROW_GROUP_ROWS,
+    DEFAULT_ROW_GROUP_ROWS,
     SPATIAL_BAND_TOP_ROWS,
     WRITER_VECTOR_ROWS,
     align_to_writer_vector,
-    resolve_sort_row_group_rows,
+    resolve_row_group_rows,
 )
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 
@@ -159,7 +159,7 @@ def _help_default_rows(command: str) -> int:
 @pytest.mark.parametrize("command", sorted(SORT_COMMANDS))
 def test_help_advertises_the_sort_default(command):
     """Every sort subcommand's help names the default the sort commands use."""
-    assert _help_default_rows(command) == DEFAULT_SORT_ROW_GROUP_ROWS
+    assert _help_default_rows(command) == DEFAULT_ROW_GROUP_ROWS
 
 
 @pytest.mark.parametrize("command", sorted(SORT_COMMANDS))
@@ -196,7 +196,7 @@ def test_default_is_inside_the_recommended_spatial_band(points_file, tmp_path):
     disk, not merely for the number gpio asked the writer for.
     """
     spatial_low, spatial_high = SPATIAL_ROW_COUNT_RANGE
-    assert spatial_low <= DEFAULT_SORT_ROW_GROUP_ROWS <= spatial_high
+    assert spatial_low <= DEFAULT_ROW_GROUP_ROWS <= spatial_high
 
     output = tmp_path / "band.parquet"
     result = CliRunner().invoke(cli, ["sort", "hilbert", points_file, str(output)])
@@ -230,7 +230,7 @@ def test_row_group_size_mb_is_not_overridden_by_the_default(points_file, tmp_pat
     assert result.exit_code == 0, result.output
     # A 1MB target on this data is far smaller than 50,000 rows, so the MB path
     # is demonstrably the one that sized the groups.
-    assert max(_row_group_rows(output)) < DEFAULT_SORT_ROW_GROUP_ROWS
+    assert max(_row_group_rows(output)) < DEFAULT_ROW_GROUP_ROWS
 
 
 def test_streaming_path_receives_the_resolved_default(points_file, tmp_path, monkeypatch):
@@ -261,7 +261,7 @@ def test_streaming_path_receives_the_resolved_default(points_file, tmp_path, mon
 
     rows = _row_group_rows(output)
     assert sum(rows) == table.num_rows
-    assert max(rows) == DEFAULT_SORT_ROW_GROUP_ROWS
+    assert max(rows) == DEFAULT_ROW_GROUP_ROWS
 
 
 def test_str_tile_size_tracks_the_sort_default():
@@ -269,11 +269,11 @@ def test_str_tile_size_tracks_the_sort_default():
 
     ``DEFAULT_STR_TILE_SIZE`` is the public default of ``ops.sort_str()`` and
     ``Table.sort_str()``, and it also picks the strip count the CLI builds. If
-    it drifts from ``DEFAULT_SORT_ROW_GROUP_ROWS``, ``gpio sort str`` lays out
+    it drifts from ``DEFAULT_ROW_GROUP_ROWS``, ``gpio sort str`` lays out
     different strips depending on whether ``--row-group-size-mb`` was passed,
     and the documented Python default stops matching the CLI's.
     """
-    assert DEFAULT_STR_TILE_SIZE == DEFAULT_SORT_ROW_GROUP_ROWS
+    assert DEFAULT_STR_TILE_SIZE == DEFAULT_ROW_GROUP_ROWS
 
 
 class TestWriterVectorAlignment:
@@ -306,7 +306,7 @@ class TestWriterVectorAlignment:
         """
         import duckdb
 
-        requests = (3_000, 8_193, 9_000, 9_215, 50_000, DEFAULT_SORT_ROW_GROUP_ROWS)
+        requests = (3_000, 8_193, 9_000, 9_215, 50_000, DEFAULT_ROW_GROUP_ROWS)
         connection = duckdb.connect()
         try:
             connection.execute("CREATE TABLE t AS SELECT i AS id FROM range(60000) tbl(i)")
@@ -321,7 +321,7 @@ class TestWriterVectorAlignment:
         assert measured[3_000] == 4_096, measured
         assert measured[50_000] == 51_200, measured
         # The default is a whole number of vectors, so the writer leaves it be.
-        assert measured[DEFAULT_SORT_ROW_GROUP_ROWS] == DEFAULT_SORT_ROW_GROUP_ROWS, measured
+        assert measured[DEFAULT_ROW_GROUP_ROWS] == DEFAULT_ROW_GROUP_ROWS, measured
         # It is a ceiling at every measured point, never a nearest: 8,193 and
         # 9,000 both land on 10,240 rather than 8,192.
         assert measured == {request: _writer_ceiling(request) for request in requests}, measured
@@ -344,9 +344,9 @@ class TestWriterVectorAlignment:
     def test_the_default_is_a_whole_number_of_writer_vectors(self):
         """The default is the largest whole vector at or below the band's top."""
         spatial_high = SPATIAL_ROW_COUNT_RANGE[1]
-        assert DEFAULT_SORT_ROW_GROUP_ROWS % WRITER_VECTOR_ROWS == 0
-        assert DEFAULT_SORT_ROW_GROUP_ROWS <= spatial_high
-        assert DEFAULT_SORT_ROW_GROUP_ROWS + WRITER_VECTOR_ROWS > spatial_high
+        assert DEFAULT_ROW_GROUP_ROWS % WRITER_VECTOR_ROWS == 0
+        assert DEFAULT_ROW_GROUP_ROWS <= spatial_high
+        assert DEFAULT_ROW_GROUP_ROWS + WRITER_VECTOR_ROWS > spatial_high
 
     @pytest.mark.parametrize(
         ("requested", "expected"),
@@ -382,7 +382,7 @@ class TestWriterVectorAlignment:
         for requested in range(1, 210_001, 97):
             aligned = align_to_writer_vector(requested)
             if requested <= SPATIAL_BAND_TOP_ROWS < _writer_ceiling(requested):
-                assert aligned == DEFAULT_SORT_ROW_GROUP_ROWS, requested
+                assert aligned == DEFAULT_ROW_GROUP_ROWS, requested
             else:
                 assert aligned == _writer_ceiling(requested), requested
 
@@ -412,7 +412,7 @@ class TestWriterVectorAlignment:
         for requested in range(1, 210_001, 89):
             aligned = align_to_writer_vector(requested)
             if aligned < requested:
-                assert aligned == DEFAULT_SORT_ROW_GROUP_ROWS, requested
+                assert aligned == DEFAULT_ROW_GROUP_ROWS, requested
                 assert requested <= SPATIAL_BAND_TOP_ROWS, requested
 
     def test_every_request_inside_the_spatial_band_stays_inside_it(self):
@@ -435,7 +435,7 @@ class TestWriterVectorAlignment:
     def test_an_adjusted_explicit_request_is_announced(self, caplog):
         """Changing what the user typed must not be silent."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            resolved = resolve_sort_row_group_rows(50_000, None)
+            resolved = resolve_row_group_rows(50_000, None)
 
         assert resolved == 49_152
         assert "50,000" in caplog.text
@@ -444,16 +444,16 @@ class TestWriterVectorAlignment:
     def test_an_already_aligned_request_is_left_alone_and_silent(self, caplog):
         """No note when there is nothing to report."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            resolved = resolve_sort_row_group_rows(20_480, None)
+            resolved = resolve_row_group_rows(20_480, None)
 
         assert resolved == 20_480
         assert caplog.text == ""
 
     def test_the_default_needs_no_adjustment_note(self, caplog):
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            resolved = resolve_sort_row_group_rows(None, None)
+            resolved = resolve_row_group_rows(None, None)
 
-        assert resolved == DEFAULT_SORT_ROW_GROUP_ROWS
+        assert resolved == DEFAULT_ROW_GROUP_ROWS
         assert caplog.text == ""
 
     def test_sorted_output_lands_on_exactly_the_advertised_default(self, points_file, tmp_path):
@@ -461,7 +461,7 @@ class TestWriterVectorAlignment:
         output = tmp_path / "exact.parquet"
         result = CliRunner().invoke(cli, ["sort", "hilbert", points_file, str(output)])
         assert result.exit_code == 0, result.output
-        assert max(_row_group_rows(output)) == DEFAULT_SORT_ROW_GROUP_ROWS
+        assert max(_row_group_rows(output)) == DEFAULT_ROW_GROUP_ROWS
 
     def test_sorted_output_passes_the_optimization_row_group_factor(self, points_file, tmp_path):
         """The #961 repro: ``gpio check optimization`` must not fail gpio's own output."""
@@ -519,7 +519,7 @@ class TestWriterVectorAlignment:
         about the same option.
         """
         with pytest.raises(InvalidParameterError):
-            resolve_sort_row_group_rows(requested, None)
+            resolve_row_group_rows(requested, None)
 
     @pytest.mark.parametrize("command", sorted(SORT_COMMANDS))
     def test_every_sort_subcommand_rejects_a_non_positive_request(

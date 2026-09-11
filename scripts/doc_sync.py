@@ -34,6 +34,8 @@ from pathlib import Path
 
 import click
 
+from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -225,7 +227,7 @@ def generate_compression_options() -> str:
         "|--------|--------|---------|",
         f"| `--compression` | zstd, snappy, gzip, lz4, brotli, uncompressed | {compression} |",
         f"| `--compression-level` | 1-22 (for zstd) | {compression_level} |",
-        "| `--row-group-size` | Number of rows per group | varies by command |",
+        f"| `--row-group-size` | Number of rows per group | {DEFAULT_ROW_GROUP_ROWS:,} |",
         "<!-- END GENERATED: compression-options -->",
     ]
     return "\n".join(lines)

@@ -10,6 +10,7 @@ from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identif
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.logging_config import debug, error, info, progress, warn
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
     check_output_collision,
@@ -859,7 +860,9 @@ def partition_by_column(
                 debug(f"Created output directory: {actual_output}")
 
             write_options = PartitionWriteOptions(
-                geoparquet_version=geoparquet_version,
+                geoparquet_version=resolve_output_geoparquet_version(
+                    geoparquet_version, input_file=input_parquet, verbose=verbose
+                ),
                 compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,
