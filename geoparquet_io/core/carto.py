@@ -446,6 +446,78 @@ def _detect_table_shape(
     return False, columns
 
 
+def _probe_schema_columns(
+    url: str,
+    table_name: str,
+    api_key: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> list[str] | None:
+    """Read a table's column names for the ``--include-cols`` check, tolerating a failure.
+
+    :func:`_detect_table_shape` gets these for free from the probe it already
+    runs. ``--geometry``/``--no-geometry`` skips that probe, so this pays for the
+    one bounded ``SELECT * ... LIMIT 0`` itself -- and only for ``--include-cols``,
+    where the round-trip earns itself: that list becomes the SELECT list, so an
+    unresolved name comes back as an opaque ``ST_Read`` failure on an HTTP error
+    body *and* burns the retry budget first. ``--exclude-cols`` needs no probe at
+    all; :func:`_apply_column_exclusions` checks it against the fetched table.
+
+    Returns:
+        The column names, or None when there is no schema to check against --
+        never an extraction failure, matching how every other call site treats
+        a probe that could not answer.
+    """
+    try:
+        return _column_names_from_fields(_probe_table_schema(url, table_name, api_key, timeout))
+    except CartoError as e:
+        debug(f"Schema probe for the column check failed ({e}); skipping it")
+        return None
+
+
+def _apply_column_exclusions(
+    table: pa.Table,
+    exclude_list: list[str] | None,
+    *,
+    protect_geometry: bool,
+) -> pa.Table:
+    """Drop the ``--exclude-cols`` columns from the table that was actually fetched.
+
+    The names are resolved against ``table.column_names`` -- the exact post-fetch
+    set, after Carto's ``the_geom`` has become ``geometry`` -- so a case mismatch
+    or a typo is an error rather than a filter that silently matches nothing
+    (#991). Resolving here rather than against the source schema also costs
+    nothing and needs nothing: no probe is involved, so the check holds under
+    ``--geometry``/``--no-geometry`` too.
+
+    Args:
+        table: The fetched table, after any rename
+        exclude_list: Column names to drop, or None
+        protect_geometry: Refuse to drop ``geometry``, which GeoParquet output
+            requires. Only the geometry path has such a column; on the tabular
+            path ``geometry`` is not a column at all, so naming it is an error
+            like any other name the table does not carry.
+
+    Returns:
+        The table without the excluded columns.
+
+    Raises:
+        InvalidParameterError: If a name is absent from the fetched table.
+    """
+    exclude_list = resolve_columns_against_schema(
+        exclude_list, table.column_names, "--exclude-cols"
+    )
+    if exclude_list and protect_geometry and "geometry" in exclude_list:
+        exclude_list = [col for col in exclude_list if col != "geometry"]
+        warn("Cannot exclude 'geometry' column - it is required for GeoParquet output")
+    if not exclude_list:
+        return table
+
+    exclude_set = set(exclude_list)
+    table = table.select([col for col in table.column_names if col not in exclude_set])
+    debug(f"Excluded columns: {exclude_set}")
+    return table
+
+
 def _create_empty_geoparquet_table(geoparquet_version: str | None = None) -> pa.Table:
     """Create an empty table with proper GeoParquet metadata.
 
@@ -658,27 +730,25 @@ def carto_to_table(
     # callback: the Python API never goes through Click, and `` `` reached
     # quote_identifier() through _build_carto_query as a raw ValueError (#980).
     include_list = split_column_list(include_cols, "--include-cols")
-    exclude_set = set(split_column_list(exclude_cols, "--exclude-cols") or ())
+    exclude_list = split_column_list(exclude_cols, "--exclude-cols")
 
-    # Decide between geometry and plain/tabular extraction.
+    # Decide between geometry and plain/tabular extraction. The shape probe
+    # carries the schema, so on the default path the --include-cols check is free.
     schema_columns: list[str] | None = None
     if geometry is None:
         has_geometry, schema_columns = _detect_table_shape(
             url, table_name, effective_api_key, timeout
         )
     else:
+        # Forcing the mode skips that probe. --include-cols buys its own rather
+        # than losing the check to an unrelated flag (#991); --exclude-cols needs
+        # no schema here, since it is checked against the fetched table below.
         has_geometry = geometry
+        if include_list:
+            schema_columns = _probe_schema_columns(url, table_name, effective_api_key, timeout)
 
-    # --include-cols becomes the SELECT list, so it is checked against the
-    # schema the probe above already read -- for free, and only when it ran.
-    #
-    # --exclude-cols is not checked, and that is a gap rather than a decision:
-    # it names columns of the *fetched* table, where ``the_geom`` has become
-    # ``geometry``, so the set to check against is ``["geometry",
-    # *schema_columns]`` -- which is exactly what arcgis.py does. (``geometry``
-    # itself is not the obstacle: it is warned about and dropped below, before
-    # any filtering.) Until that lands, ``--exclude-cols OWNER`` silently fails
-    # to drop a column named ``Owner``. Tracked separately.
+    # --include-cols becomes the SELECT list, so it names *source* columns and is
+    # the only list a schema can answer for ahead of the fetch.
     if schema_columns is not None:
         include_list = resolve_columns_against_schema(
             include_list, schema_columns, "--include-cols"
@@ -693,7 +763,7 @@ def carto_to_table(
             where=where,
             limit=limit,
             include_list=include_list,
-            exclude_set=exclude_set,
+            exclude_list=exclude_list,
             api_key=effective_api_key,
             timeout=timeout,
             max_retries=max_retries,
@@ -706,7 +776,7 @@ def carto_to_table(
         bbox=bbox,
         limit=limit,
         include_list=include_list,
-        exclude_set=exclude_set,
+        exclude_list=exclude_list,
         api_key=effective_api_key,
         timeout=timeout,
         max_retries=max_retries,
@@ -723,7 +793,7 @@ def _carto_geo_table(
     bbox: tuple[float, float, float, float] | None,
     limit: int | None,
     include_list: list[str] | None,
-    exclude_set: set[str],
+    exclude_list: list[str] | None,
     api_key: str | None,
     timeout: float,
     max_retries: int,
@@ -785,16 +855,9 @@ def _carto_geo_table(
         cols_to_keep = [c for c in table.column_names if c != "OGC_FID"]
         table = table.select(cols_to_keep)
 
-    # Apply column exclusions (but never exclude geometry)
-    if exclude_set:
-        # Prevent excluding the geometry column - it's required for GeoParquet
-        if "geometry" in exclude_set:
-            exclude_set = exclude_set - {"geometry"}
-            warn("Cannot exclude 'geometry' column - it is required for GeoParquet output")
-        if exclude_set:
-            cols_to_keep = [c for c in table.column_names if c not in exclude_set]
-            table = table.select(cols_to_keep)
-            debug(f"Excluded columns: {exclude_set}")
+    # Apply column exclusions, resolved against the table just fetched -- the
+    # rename above is why that is the only set that answers exactly (#991).
+    table = _apply_column_exclusions(table, exclude_list, protect_geometry=True)
 
     # Add CRS metadata (Carto uses WGS84)
     version = geoparquet_version or "1.1.0"
@@ -831,7 +894,7 @@ def _carto_plain_table(
     where: str | None,
     limit: int | None,
     include_list: list[str] | None,
-    exclude_set: set[str],
+    exclude_list: list[str] | None,
     api_key: str | None,
     timeout: float,
     max_retries: int,
@@ -876,11 +939,10 @@ def _carto_plain_table(
 
     debug(f"Received {table.num_rows:,} rows")
 
-    # Apply column exclusions (no geometry to protect here)
-    if exclude_set:
-        cols_to_keep = [c for c in table.column_names if c not in exclude_set]
-        table = table.select(cols_to_keep)
-        debug(f"Excluded columns: {exclude_set}")
+    # Apply column exclusions. Nothing was renamed on this path, so the fetched
+    # columns are the source ones -- and 'geometry' is not among them, so naming
+    # it is an error here rather than something to protect.
+    table = _apply_column_exclusions(table, exclude_list, protect_geometry=False)
 
     success(f"Extracted {table.num_rows:,} rows (plain table, no geometry)")
     return table

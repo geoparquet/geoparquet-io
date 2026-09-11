@@ -824,6 +824,32 @@ class TestColumnValidation:
         # A spelling that matches neither exactly still folds, as before.
         assert resolve_columns_against_schema(["GeoM"], schema, "--include-cols") == ["geom"]
 
+    @pytest.mark.parametrize("requested", ["Id", "iD"])
+    def test_an_ambiguous_fold_raises_instead_of_picking_one(self, requested):
+        """A third spelling could mean either column, so the caller is asked which.
+
+        ``{col.lower(): col}`` silently kept the last, which is arbitrary -- and
+        on ``--exclude-cols`` an arbitrary choice deletes a column the caller did
+        not name.
+        """
+        from geoparquet_io.core.column_selection import resolve_columns_against_schema
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with pytest.raises(InvalidParameterError) as exc_info:
+            resolve_columns_against_schema([requested], ["id", "ID", "geom"], "--exclude-cols")
+
+        message = str(exc_info.value)
+        assert "Ambiguous" in message
+        assert "ID" in message and "id" in message
+
+    def test_an_unambiguous_schema_never_reports_ambiguity(self):
+        """The check must not fire on ordinary schemas, which is every real one."""
+        from geoparquet_io.core.column_selection import resolve_columns_against_schema
+
+        assert resolve_columns_against_schema(
+            ["ID", "GeoM"], ["id", "name", "geom"], "--exclude-cols"
+        ) == ["id", "geom"]
+
     def test_missing_column_is_an_invalid_parameter(self):
         from geoparquet_io.core.column_selection import resolve_columns_against_schema
         from geoparquet_io.core.exceptions import InvalidParameterError

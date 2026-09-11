@@ -1945,20 +1945,29 @@ gpio extract data.parquet output.parquet --include-cols invalid_column
 # Available columns: id, name, geometry, bbox, ...
 ```
 
-The same check runs on `gpio extract bigquery`, `carto` and `arcgis`, against
-the schema each already reads to plan the extraction — so an unknown name fails
-locally instead of becoming a backend error or, for ArcGIS, an `outFields`
-entry the server quietly ignores. Names are matched case-insensitively and
-resolved to the source's own spelling.
+The same check runs on `gpio extract bigquery`, `carto` and `arcgis`, for both
+`--include-cols` and `--exclude-cols`, against a column list each command
+already has — so an unknown name fails locally instead of becoming a backend
+error or, for ArcGIS, an `outFields` entry the server quietly ignores. Names are
+matched case-insensitively and resolved to that list's own spelling, so
+`--exclude-cols OWNER` drops a column named `Owner` rather than silently
+dropping nothing.
 
-Two limits on that, both because the check can only use a schema the command
-already had in hand:
+`--exclude-cols` names columns of the table you get back, not of the source. On
+`carto` it is therefore checked against that table once it is fetched, so the
+name to use is `geometry` — the post-fetch name of the geometry column — and not
+the source's `the_geom`. Excluding `geometry` from a spatial extraction is
+refused with a warning, since GeoParquet output requires the column; on a
+geometry-less (tabular) table there is no such column, so naming it is an
+unknown-column error like any other.
 
-- On `carto` it applies to `--include-cols` only. `--exclude-cols` names
-  columns of the *fetched* table and is still matched exactly, so
-  `--exclude-cols OWNER` does not drop a column named `Owner`.
-- On `carto`, passing `--geometry` or `--no-geometry` skips the schema probe
-  that the check reads, so neither list is checked against the table.
+Because that check reads the fetched table, it needs no extra request and holds
+whatever else you pass — including `--geometry`/`--no-geometry`, which skip the
+shape probe. It does report after the fetch rather than before it. `--include-cols`
+is checked *before* the fetch instead, since it becomes the SELECT list: under
+`--geometry`/`--no-geometry` it issues one bounded `SELECT * … LIMIT 0` of its
+own to do so, and if that cannot be reached, extraction proceeds unchecked
+rather than failing.
 
 A **blank entry** in the list — `--include-cols id,,name`, or `--include-cols '   '` —
 is a usage error and is rejected before anything is opened or contacted. That
@@ -1967,6 +1976,12 @@ holds for the Python API too (`ops.from_carto`, `ops.from_arcgis`,
 through the CLI's option parsing. A **wholly empty** value is not a blank entry:
 `--include-cols ""` means "option not given", so `--include-cols "$COLS"` keeps
 working when `COLS` is unset.
+
+That last rule is about the *string* option. The Python API's list arguments —
+`ops.read_bigquery(columns=[...])` and `gpio.Table.from_bigquery(columns=[...])`
+— have their own "unset", which is `None` or `[]`. A list holding a blank entry,
+including `[""]` on its own, is a mistake and raises rather than quietly
+selecting every column.
 
 ### Invalid WHERE Clause
 
