@@ -768,11 +768,14 @@ def _fatal_status_error(
             f"could not be read as {fmt}. Retrying would fetch the same response; the "
             f"query or the format is the problem: {reason}"
         )
-    hint = _FATAL_STATUS_HINTS.get(status.code)
+    code = status.code
+    if code is None:  # pragma: no cover - _is_retryable already answered for no status
+        return None
+    hint = _FATAL_STATUS_HINTS.get(code)
     message = (
         hint.format(table=table_name)
         if hint is not None
-        else f"Carto request for table '{table_name}' failed with HTTP {status.code}."
+        else f"Carto request for table '{table_name}' failed with HTTP {code}."
     )
     if status.detail:
         message += f" Carto said: {status.detail}"
