@@ -130,7 +130,13 @@ class TestApplyCompressionFix:
     """Tests for _apply_compression_fix function."""
 
     def test_no_compression_fix_needed(self, tmp_path):
-        """Test when no compression or row group fix is needed."""
+        """Test when no compression or row group fix is needed.
+
+        Here the file to place *is* the user's input -- every earlier step
+        declined to rewrite anything -- so it must be copied to the output and
+        left where it was. Moving it is what deleted files under
+        ``--fix-output`` (#1036).
+        """
 
         from geoparquet_io.core.check_fixes import _apply_compression_fix
 
@@ -145,11 +151,13 @@ class TestApplyCompressionFix:
         input_file.write_text("test")
 
         fixes = _apply_compression_fix(
-            check_results, str(input_file), str(output_file), None, False, None
+            check_results, str(input_file), str(input_file), str(output_file), None, False, None
         )
 
         assert fixes == []
         assert output_file.exists()
+        assert input_file.exists(), "the user's input was moved to the output path"
+        assert input_file.read_text() == "test"
 
     def test_compression_fix_only(self):
         """Test when only compression fix is needed."""
