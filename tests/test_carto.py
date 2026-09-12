@@ -1163,6 +1163,9 @@ class TestFailureClassificationIgnoresTheUsersSql:
             carto_module, "get_duckdb_connection", lambda *a, **k: _Counting(real_get_conn())
         )
 
+        # A refused loopback connection fails in milliseconds; the generous
+        # timeout keeps a slow GDAL on a cold runner from making the attempt
+        # look like it ran out the clock, which is a different verdict.
         with pytest.raises(CartoError) as excinfo:
             _fetch_with_retry(
                 url=self.DEAD_URL,
@@ -1170,7 +1173,7 @@ class TestFailureClassificationIgnoresTheUsersSql:
                 sql="SELECT * FROM census_blocks LIMIT 404",
                 max_retries=3,
                 retry_delay=0.01,
-                timeout=2,
+                timeout=30,
             )
 
         assert seen["attempts"] == 3

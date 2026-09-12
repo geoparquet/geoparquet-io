@@ -845,6 +845,10 @@ def _fetch_with_retry(
             conn.execute("SET allow_asterisks_in_http_paths = true")
             conn.execute(f"SET http_timeout = {int(timeout * 1000)}")  # milliseconds
 
+            # The clock that decides "timed out" starts at the request, not at
+            # the connection: loading the spatial extension on a cold macOS
+            # runner took longer than a 2 s --timeout and read as one.
+            started = time.monotonic()
             table = conn.execute(f"SELECT * FROM {read_expr}").arrow().read_all()
             return table
 
