@@ -10,7 +10,7 @@ import json
 import tempfile
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -19,6 +19,8 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from tests.conftest import safe_unlink
+from tests.http_transport import FakeTransport, html_reply, json_reply
+from tests.native_geo_probes import geo_block_crs_id, spec_problems
 
 # --- Mock Data Fixtures ---
 
@@ -80,6 +82,36 @@ MOCK_ESRI_FEATURES_PAGE = {
         }
     ],
 }
+
+
+def stub_arcgis_service(http, *, layer=None, count=None, page=None):
+    """Route a whole FeatureServer layer at the fake transport.
+
+    Metadata (`f=json` on the layer URL), the `returnCountOnly` probe and the
+    feature pages, so a CLI or API call runs end to end with no network and the
+    request it issued stays assertable.
+    """
+    page = page if page is not None else MOCK_FEATURES_PAGE
+    count = count if count is not None else len(page["features"])
+    http.respond(
+        lambda request: not request.path.endswith("/query"),
+        json_reply(layer if layer is not None else MOCK_LAYER_INFO),
+    )
+    http.respond(
+        lambda request: request.params.get("returnCountOnly") == "true",
+        json_reply({"count": count}),
+    )
+    http.respond(lambda request: True, json_reply(page))
+    return http
+
+
+def feature_page_requests(http):
+    """The feature-page requests, in order (no metadata, no count probe)."""
+    return [
+        request
+        for request in http.requests
+        if request.path.endswith("/query") and request.params.get("returnCountOnly") != "true"
+    ]
 
 
 class TestResolveToken:
@@ -291,158 +323,151 @@ class TestGetLayerInfo:
 
 
 class TestFetchFeaturesPage:
-    """Tests for feature fetching."""
+    """What a feature-page request actually puts on the wire.
 
-    @patch("geoparquet_io.core.arcgis._make_request")
-    def test_fetch_page(self, mock_request):
+    Driven through ``tests/http_transport.py``: the assertion is the query
+    string the server would have received, not a mock's recorded kwargs.
+    """
+
+    URL = "https://example.com/FeatureServer/0"
+
+    def test_fetch_page(self, monkeypatch):
         """Test fetching a single page of features."""
         from geoparquet_io.core.arcgis import fetch_features_page
 
-        mock_request.return_value = MOCK_FEATURES_PAGE
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
 
-        result = fetch_features_page(
-            "https://example.com/FeatureServer/0",
-            offset=0,
-            limit=1000,
-        )
+        result = fetch_features_page(self.URL, offset=0, limit=1000)
 
         assert result["type"] == "FeatureCollection"
         assert len(result["features"]) == 3
+        assert http.last.path == "/FeatureServer/0/query"
+        assert http.last.params["resultOffset"] == "0"
+        assert http.last.params["resultRecordCount"] == "1000"
 
-    @patch("geoparquet_io.core.arcgis._make_request")
-    def test_fetch_page_default_uses_geojson(self, mock_request):
+    def test_fetch_page_default_uses_geojson(self, monkeypatch):
         from geoparquet_io.core.arcgis import fetch_features_page
 
-        mock_request.return_value = MOCK_FEATURES_PAGE
-        fetch_features_page("https://example.com/FeatureServer/0", offset=0, limit=1000)
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
 
-        params = mock_request.call_args.kwargs["params"]
-        assert params["f"] == "geojson"
-        assert "outSR" not in params
+        fetch_features_page(self.URL, offset=0, limit=1000)
 
-    @patch("geoparquet_io.core.arcgis._make_request")
-    def test_fetch_page_output_wkid_uses_esrijson_and_outsr(self, mock_request):
+        assert http.last.params["f"] == "geojson"
+        assert "outSR" not in http.last.params
+
+    def test_fetch_page_output_wkid_uses_esrijson_and_outsr(self, monkeypatch):
         from geoparquet_io.core.arcgis import fetch_features_page
 
-        mock_request.return_value = MOCK_ESRI_FEATURES_PAGE
-        fetch_features_page(
-            "https://example.com/FeatureServer/0",
-            offset=0,
-            limit=1000,
-            output_wkid=25830,
-        )
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/query", json_reply(MOCK_ESRI_FEATURES_PAGE))
 
-        params = mock_request.call_args.kwargs["params"]
-        assert params["f"] == "json"
-        assert params["outSR"] == "25830"
+        fetch_features_page(self.URL, offset=0, limit=1000, output_wkid=25830)
 
-    @patch("geoparquet_io.core.arcgis._make_request")
-    def test_fetch_page_no_max_allowable_offset_by_default(self, mock_request):
+        assert http.last.params["f"] == "json"
+        assert http.last.params["outSR"] == "25830"
+
+    def test_fetch_page_no_max_allowable_offset_by_default(self, monkeypatch):
         from geoparquet_io.core.arcgis import fetch_features_page
 
-        mock_request.return_value = MOCK_FEATURES_PAGE
-        fetch_features_page("https://example.com/FeatureServer/0", offset=0, limit=1000)
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
 
-        params = mock_request.call_args.kwargs["params"]
-        assert "maxAllowableOffset" not in params
+        fetch_features_page(self.URL, offset=0, limit=1000)
 
-    @patch("geoparquet_io.core.arcgis._make_request")
-    def test_fetch_page_max_allowable_offset_on_geojson(self, mock_request):
+        assert "maxAllowableOffset" not in http.last.params
+
+    def test_fetch_page_max_allowable_offset_on_geojson(self, monkeypatch):
         """Generalization tolerance is honored on the default GeoJSON path too."""
         from geoparquet_io.core.arcgis import fetch_features_page
 
-        mock_request.return_value = MOCK_FEATURES_PAGE
-        fetch_features_page(
-            "https://example.com/FeatureServer/0",
-            offset=0,
-            limit=1000,
-            max_allowable_offset=0.005,
-        )
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
 
-        params = mock_request.call_args.kwargs["params"]
-        assert params["f"] == "geojson"
-        assert params["maxAllowableOffset"] == "0.005"
+        fetch_features_page(self.URL, offset=0, limit=1000, max_allowable_offset=0.005)
+
+        assert http.last.params["f"] == "geojson"
+        assert http.last.params["maxAllowableOffset"] == "0.005"
         # outSR is anchored to 4326 so the tolerance unit is unambiguously degrees.
-        assert params["outSR"] == "4326"
+        assert http.last.params["outSR"] == "4326"
 
-    @patch("geoparquet_io.core.arcgis._make_request")
-    def test_fetch_page_max_allowable_offset_with_outsr(self, mock_request):
+    def test_fetch_page_max_allowable_offset_with_outsr(self, monkeypatch):
         from geoparquet_io.core.arcgis import fetch_features_page
 
-        mock_request.return_value = MOCK_ESRI_FEATURES_PAGE
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/query", json_reply(MOCK_ESRI_FEATURES_PAGE))
+
         fetch_features_page(
-            "https://example.com/FeatureServer/0",
-            offset=0,
-            limit=1000,
-            output_wkid=25830,
-            max_allowable_offset=0.005,
+            self.URL, offset=0, limit=1000, output_wkid=25830, max_allowable_offset=0.005
         )
 
-        params = mock_request.call_args.kwargs["params"]
-        assert params["f"] == "json"
-        assert params["outSR"] == "25830"
-        assert params["maxAllowableOffset"] == "0.005"
+        assert http.last.params["f"] == "json"
+        assert http.last.params["outSR"] == "25830"
+        assert http.last.params["maxAllowableOffset"] == "0.005"
 
 
 class TestTimeout:
-    """Tests for the configurable HTTP timeout (issue #518)."""
+    """The configurable HTTP timeout (issue #518), read off the request itself.
 
-    @patch("geoparquet_io.core.arcgis._make_request")
-    def test_fetch_page_default_timeout(self, mock_request):
+    ``httpx`` records a per-request timeout in ``request.extensions``, so the
+    harness asserts the value that actually reached the transport rather than
+    the value handed to an intermediate mock.
+    """
+
+    URL = "https://example.com/FeatureServer/0"
+
+    def test_fetch_page_default_timeout(self, monkeypatch):
         """Default timeout matches DEFAULT_TIMEOUT when not specified."""
         from geoparquet_io.core.arcgis import DEFAULT_TIMEOUT, fetch_features_page
 
-        mock_request.return_value = MOCK_FEATURES_PAGE
-        fetch_features_page("https://example.com/FeatureServer/0", offset=0, limit=1000)
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
 
-        assert mock_request.call_args.kwargs["timeout"] == DEFAULT_TIMEOUT
+        fetch_features_page(self.URL, offset=0, limit=1000)
 
-    @patch("geoparquet_io.core.arcgis._make_request")
-    def test_fetch_page_custom_timeout_threaded_to_request(self, mock_request):
+        assert http.last.timeout == DEFAULT_TIMEOUT
+
+    def test_fetch_page_custom_timeout_threaded_to_request(self, monkeypatch):
         """A custom timeout reaches the underlying HTTP request."""
         from geoparquet_io.core.arcgis import fetch_features_page
 
-        mock_request.return_value = MOCK_FEATURES_PAGE
-        fetch_features_page(
-            "https://example.com/FeatureServer/0",
-            offset=0,
-            limit=1000,
-            timeout=300.0,
-        )
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
 
-        assert mock_request.call_args.kwargs["timeout"] == 300.0
+        fetch_features_page(self.URL, offset=0, limit=1000, timeout=300.0)
 
-    def test_make_request_passes_timeout_to_retry_helper(self):
-        """_make_request forwards the timeout to make_request_with_retry."""
+        assert http.last.timeout == 300.0
+
+    def test_make_request_passes_timeout_to_retry_helper(self, monkeypatch):
+        """_make_request forwards the timeout all the way to the wire."""
         from geoparquet_io.core.arcgis import _make_request
 
-        with patch("geoparquet_io.core.arcgis.make_request_with_retry") as mock_retry:
-            mock_retry.return_value = {"ok": True}
-            _make_request("GET", "https://example.com/test", timeout=240.0)
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/test", json_reply({"ok": True}))
 
-        assert mock_retry.call_args.kwargs["timeout"] == 240.0
+        assert _make_request("GET", "https://example.com/test", timeout=240.0) == {"ok": True}
+        assert http.last.timeout == 240.0
 
-    def test_make_request_with_retry_applies_timeout_per_request(self):
+    def test_make_request_with_retry_applies_timeout_per_request(self, monkeypatch):
         """The retry helper applies the timeout to the actual httpx call.
 
         Regression test: the shared client caches its first timeout, so the
-        timeout must also be passed per-request to actually take effect.
+        timeout must also be passed per-request to actually take effect. The
+        harness hands out one client for every call, so a timeout applied only
+        at construction would not show up on the second request.
         """
         from geoparquet_io.core.http_retry import make_request_with_retry
 
-        mock_client = MagicMock()
-        mock_response = Mock()
-        mock_response.json.return_value = {"ok": True}
-        mock_response.raise_for_status = Mock()
-        mock_client.get.return_value = mock_response
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/test", json_reply({"ok": True}))
 
-        with patch("geoparquet_io.core.http_retry.get_shared_http_client") as mock_get_client:
-            mock_get_client.return_value = mock_client
-            make_request_with_retry("GET", "https://example.com/test", timeout=300.0)
+        make_request_with_retry("GET", "https://example.com/test", timeout=30.0)
+        make_request_with_retry("GET", "https://example.com/test", timeout=300.0)
 
-        assert mock_client.get.call_args.kwargs["timeout"] == 300.0
+        assert [request.timeout for request in http.requests] == [30.0, 300.0]
 
-    def test_non_json_without_batch_size_is_remote_access_error(self):
+    def test_non_json_without_batch_size_is_remote_access_error(self, monkeypatch):
         """A non-paged request that gets HTML must not report a batch problem.
 
         Regression test for #485: the count and layer-info queries carry no
@@ -452,42 +477,30 @@ class TestTimeout:
         from geoparquet_io.core.exceptions import BatchTooLargeError, RemoteAccessError
         from geoparquet_io.core.http_retry import make_request_with_retry
 
-        mock_client = MagicMock()
-        mock_response = Mock()
-        mock_response.json.side_effect = json.JSONDecodeError("x", "<html>", 0)
-        mock_response.raise_for_status = Mock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "text/html"}
-        mock_client.get.return_value = mock_response
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/count", html_reply(b"<html>blocked by WAF</html>"))
 
-        with patch("geoparquet_io.core.http_retry.get_shared_http_client") as mock_get_client:
-            mock_get_client.return_value = mock_client
-            with pytest.raises(RemoteAccessError) as exc_info:
-                make_request_with_retry("GET", "https://example.com/count")
+        with pytest.raises(RemoteAccessError) as exc_info:
+            make_request_with_retry("GET", "https://example.com/count")
 
         assert not isinstance(exc_info.value, BatchTooLargeError)
         assert "Batch size" not in str(exc_info.value)
         assert "text/html" in str(exc_info.value)
+        assert len(http.requests) == 1  # not retried
 
-    def test_non_json_with_batch_size_keeps_batch_error(self):
+    def test_non_json_with_batch_size_keeps_batch_error(self, monkeypatch):
         """A paged request that gets HTML still raises BatchTooLargeError."""
         from geoparquet_io.core.exceptions import BatchTooLargeError
         from geoparquet_io.core.http_retry import make_request_with_retry
 
-        mock_client = MagicMock()
-        mock_response = Mock()
-        mock_response.json.side_effect = json.JSONDecodeError("x", "<html>", 0)
-        mock_response.raise_for_status = Mock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "text/html"}
-        mock_client.get.return_value = mock_response
+        http = FakeTransport.install(monkeypatch)
+        http.respond("/query", html_reply(b"<html>blocked by WAF</html>"))
 
-        with patch("geoparquet_io.core.http_retry.get_shared_http_client") as mock_get_client:
-            mock_get_client.return_value = mock_client
-            with pytest.raises(BatchTooLargeError) as exc_info:
-                make_request_with_retry("GET", "https://example.com/query", batch_size=1000)
+        with pytest.raises(BatchTooLargeError) as exc_info:
+            make_request_with_retry("GET", "https://example.com/query", batch_size=1000)
 
         assert exc_info.value.batch_size == 1000
+        assert len(http.requests) == 1
 
 
 class TestCrsParsing:
@@ -1062,9 +1075,9 @@ class TestCLI:
         yield str(tmp_path)
         safe_unlink(tmp_path)
 
-    @patch("geoparquet_io.core.arcgis.convert_arcgis_to_geoparquet")
-    def test_basic_command(self, mock_convert, output_file):
-        """Test basic CLI command."""
+    def test_basic_command(self, monkeypatch, output_file):
+        """The command runs end to end and writes a spec-clean GeoParquet."""
+        http = stub_arcgis_service(FakeTransport.install(monkeypatch))
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -1076,8 +1089,10 @@ class TestCLI:
             ],
         )
 
-        assert result.exit_code == 0
-        mock_convert.assert_called_once()
+        assert result.exit_code == 0, result.output
+        assert pq.read_metadata(output_file).num_rows == 3
+        assert spec_problems(output_file) == []
+        assert feature_page_requests(http)[0].params["f"] == "geojson"
 
     def test_missing_output(self):
         """Test error when output file missing."""
@@ -1115,12 +1130,13 @@ class TestCLI:
 class TestArcgisCliOutputCrs:
     """Tests for the --output-crs CLI option on extract arcgis."""
 
-    @patch("geoparquet_io.core.arcgis.convert_arcgis_to_geoparquet")
-    def test_cli_passes_output_crs(self, mock_convert, tmp_path):
+    def test_cli_passes_output_crs(self, monkeypatch, tmp_path):
+        """--output-crs reaches the server as outSR, and the file says so."""
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
 
+        http = stub_arcgis_service(FakeTransport.install(monkeypatch), page=MOCK_ESRI_FEATURES_PAGE)
         out = str(tmp_path / "out.parquet")
         result = CliRunner().invoke(
             cli,
@@ -1135,7 +1151,10 @@ class TestArcgisCliOutputCrs:
         )
 
         assert result.exit_code == 0, result.output
-        assert mock_convert.call_args.kwargs["output_crs"] == "EPSG:25830"
+        page = feature_page_requests(http)[0]
+        assert page.params["outSR"] == "25830"
+        assert page.params["f"] == "json"  # outSR is honored only for EsriJSON
+        assert geo_block_crs_id(out) == {"authority": "EPSG", "code": 25830}
 
     @patch("geoparquet_io.core.arcgis.get_layer_info")
     def test_cli_invalid_output_crs_fails_cleanly(self, mock_layer, tmp_path):
@@ -1162,12 +1181,12 @@ class TestArcgisCliOutputCrs:
         assert not isinstance(result.exception, ValueError)
         mock_layer.assert_not_called()
 
-    @patch("geoparquet_io.core.arcgis.convert_arcgis_to_geoparquet")
-    def test_cli_passes_max_allowable_offset(self, mock_convert, tmp_path):
+    def test_cli_passes_max_allowable_offset(self, monkeypatch, tmp_path):
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
 
+        http = stub_arcgis_service(FakeTransport.install(monkeypatch))
         out = str(tmp_path / "out.parquet")
         result = CliRunner().invoke(
             cli,
@@ -1182,14 +1201,14 @@ class TestArcgisCliOutputCrs:
         )
 
         assert result.exit_code == 0, result.output
-        assert mock_convert.call_args.kwargs["max_allowable_offset"] == 0.005
+        assert feature_page_requests(http)[0].params["maxAllowableOffset"] == "0.005"
 
-    @patch("geoparquet_io.core.arcgis.convert_arcgis_to_geoparquet")
-    def test_cli_passes_timeout(self, mock_convert, tmp_path):
+    def test_cli_passes_timeout(self, monkeypatch, tmp_path):
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
 
+        http = stub_arcgis_service(FakeTransport.install(monkeypatch))
         out = str(tmp_path / "out.parquet")
         result = CliRunner().invoke(
             cli,
@@ -1204,14 +1223,14 @@ class TestArcgisCliOutputCrs:
         )
 
         assert result.exit_code == 0, result.output
-        assert mock_convert.call_args.kwargs["timeout"] == 300.0
+        assert {request.timeout for request in http.requests} == {300.0}
 
-    @patch("geoparquet_io.core.arcgis.convert_arcgis_to_geoparquet")
-    def test_cli_timeout_defaults_to_60(self, mock_convert, tmp_path):
+    def test_cli_timeout_defaults_to_60(self, monkeypatch, tmp_path):
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
 
+        http = stub_arcgis_service(FakeTransport.install(monkeypatch))
         out = str(tmp_path / "out.parquet")
         result = CliRunner().invoke(
             cli,
@@ -1224,7 +1243,7 @@ class TestArcgisCliOutputCrs:
         )
 
         assert result.exit_code == 0, result.output
-        assert mock_convert.call_args.kwargs["timeout"] == 60.0
+        assert {request.timeout for request in http.requests} == {60.0}
 
     @patch("geoparquet_io.core.arcgis.get_layer_info")
     def test_cli_invalid_max_allowable_offset_fails_cleanly(self, mock_layer, tmp_path):
