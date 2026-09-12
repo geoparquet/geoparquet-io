@@ -151,6 +151,7 @@ class TestTheFixDefaultIsDerivedRatherThanTyped:
         summary = check_fixes._apply_compression_fix(
             {"row_groups": {"fix_available": True}},
             str(tmp_path / "in.parquet"),
+            str(tmp_path / "in.parquet"),
             str(tmp_path / "out.parquet"),
             None,
             False,
