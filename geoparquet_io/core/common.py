@@ -137,6 +137,16 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.parquet_write import (
+    _DUCKDB_GENERATED_COLUMN_FIELDS as _DUCKDB_GENERATED_COLUMN_FIELDS,
+)
+from geoparquet_io.core.parquet_write import (
+    _REQUIRED_CARRIED_GEO_FIELDS as _REQUIRED_CARRIED_GEO_FIELDS,
+)
+from geoparquet_io.core.parquet_write import _apply_nonplanar_edges as _apply_nonplanar_edges
+from geoparquet_io.core.parquet_write import (
+    _auto_fix_vecorel_if_needed as _auto_fix_vecorel_if_needed,
+)
+from geoparquet_io.core.parquet_write import (
     _carries_more_than_duckdb_generates as _carries_more_than_duckdb_generates,
 )
 from geoparquet_io.core.parquet_write import (
@@ -149,6 +159,9 @@ from geoparquet_io.core.parquet_write import (
     _geo_block_to_carry_on_fast_path as _geo_block_to_carry_on_fast_path,
 )
 from geoparquet_io.core.parquet_write import _plain_copy_to as _plain_copy_to
+from geoparquet_io.core.parquet_write import (
+    _preserve_edges_after_write as _preserve_edges_after_write,
+)
 from geoparquet_io.core.parquet_write import (
     _prune_metadata_to_output_columns as _prune_metadata_to_output_columns,
 )

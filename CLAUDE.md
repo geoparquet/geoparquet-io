@@ -42,7 +42,7 @@ geoparquet_io/
 ├── cli/commands/      # One module per command group (thin wrappers)
 ├── cli/_shared.py     # Group-neutral plumbing (S3 activation, default-group factory)
 ├── cli/decorators.py  # Reusable Click options and cls= command classes
-├── core/              # Business logic (52 modules)
+├── core/              # Business logic (63 modules)
 │   └── common.py      # Shared utilities - CHECK FIRST
 └── api/               # Python API (table.py, ops.py)
 ```
@@ -79,21 +79,21 @@ geoparquet_io/
 
 | Module | Purpose | Lines |
 |--------|---------|-------|
-| `common.py` |  | 4086 |
-| `validate.py` | GeoParquet file validation against specification r... | 2854 |
-| `inspect_utils.py` | Utilities for inspecting GeoParquet files. | 1608 |
-| `convert.py` |  | 1395 |
-| `duckdb_metadata.py` | DuckDB-based Parquet metadata extraction. | 1322 |
-| `arcgis.py` | ArcGIS Feature Service to GeoParquet conversion. | 1226 |
-| `extract.py` | Extract columns and rows from GeoParquet files. | 1225 |
-| `metadata_utils.py` | Utilities for extracting and formatting GeoParquet... | 1197 |
-| `wfs.py` | WFS (Web Feature Service) to GeoParquet conversion... | 1193 |
-| `extract_bigquery.py` |  | 1044 |
-| `partition_common.py` |  | 908 |
-| `admin_datasets.py` |  | 735 |
-| `partition_admin_hierarchical.py` |  | 698 |
-| `upload.py` | Upload GeoParquet files to cloud object storage. | 675 |
-| ... | *39 more modules* | |
+| `validate.py` | GeoParquet file validation against specification r... | 4251 |
+| `wfs.py` | WFS (Web Feature Service) to GeoParquet conversion... | 3483 |
+| `convert.py` |  | 2248 |
+| `inspect_utils.py` | Utilities for inspecting GeoParquet files. | 1756 |
+| `arcgis.py` | ArcGIS Feature Service to GeoParquet conversion. | 1642 |
+| `duckdb_metadata.py` | DuckDB-based Parquet metadata extraction. | 1547 |
+| `geo_metadata.py` | GeoParquet metadata handling functions. | 1531 |
+| `extract.py` | Extract columns and rows from GeoParquet files. | 1426 |
+| `crs_utils.py` | CRS (Coordinate Reference System) utilities for Ge... | 1360 |
+| `duckdb_utils.py` | DuckDB connection management utilities. | 1244 |
+| `admin_datasets.py` | Admin partition dataset abstraction layer. | 1219 |
+| `extract_bigquery.py` | BigQuery extraction to GeoParquet. | 1204 |
+| `parquet_write.py` | The write funnels: the two front doors every gpio ... | 1098 |
+| `common.py` | Shared helpers for reading and writing GeoParquet (being taken apart). | 979 |
+| ... | *49 more modules* | |
 <!-- END GENERATED: core-modules -->
 
 <!-- freshness: last-verified: 2026-09-11, maps-to: geoparquet_io/core/common.py, geoparquet_io/cli/decorators.py -->
