@@ -1,9 +1,12 @@
 """Tests for Carto SQL API extractor."""
 
+import http.server
 import json
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
+from urllib.parse import quote
 
 import pytest
 from click.testing import CliRunner
@@ -18,7 +21,10 @@ from geoparquet_io.core.carto import (
     _create_empty_geoparquet_table,
     _detect_geometry_column,
     _detect_table_shape,
+    _fatal_status_error,
+    _fetch_with_retry,
     _geometry_column_from_fields,
+    _status_from_duckdb_error,
     _validate_carto_url,
     _validate_table_name,
     carto_to_table,
@@ -872,16 +878,22 @@ class TestCartoReadExpressionEscaping:
             def execute(self, sql, *args, **kwargs):
                 seen.append(sql)
                 if sql.lstrip().upper().startswith("SELECT"):
-                    # Non-retryable, so the helper gives up after one attempt.
-                    raise RuntimeError("404 not found")
+                    raise RuntimeError("the read failed; only the SQL matters here")
                 return self
 
         monkeypatch.setattr(
             carto_module, "get_duckdb_connection", lambda *a, **k: _RecordingConnection()
         )
+        # max_retries=1 keeps this to one attempt. The failure classification is
+        # not what is under test here, and since #1020 it no longer takes its cue
+        # from the exception message.
         with pytest.raises(CartoError):
             carto_module._fetch_with_retry(
-                url=self.HOSTILE_URL, table_name="t", sql="SELECT * FROM t", fmt=fmt
+                url=self.HOSTILE_URL,
+                table_name="t",
+                sql="SELECT * FROM t",
+                fmt=fmt,
+                max_retries=1,
             )
         return next(s for s in seen if s.lstrip().upper().startswith("SELECT"))
 
@@ -910,3 +922,312 @@ class TestCartoReadExpressionEscaping:
         finally:
             con.close()
         assert '"error":true' not in payload.replace(" ", ""), payload
+
+
+# =============================================================================
+# #1020: failures are classified by HTTP status, never by the exception message
+# =============================================================================
+
+
+class _AttemptCountingConnection:
+    """A DuckDB connection stand-in that counts fetches and fails them all.
+
+    Only the ``SELECT * FROM ST_Read(...)`` / ``read_csv_auto(...)`` statement
+    is counted; the ``SET`` statements around it are not attempts.
+    """
+
+    def __init__(self, error: Exception):
+        self.error = error
+        self.attempts = 0
+
+    def execute(self, sql, *args, **kwargs):
+        if sql.lstrip().upper().startswith("SELECT"):
+            self.attempts += 1
+            raise self.error
+        return self
+
+
+@pytest.fixture
+def status_http_server():
+    """Serve loopback HTTP with a caller-chosen status code.
+
+    Yields ``(base_url, state)``; set ``state["code"]`` to pick the status the
+    next request gets. Loopback only, so this is not a ``network`` test.
+    """
+    state = {"code": 404}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def _respond(self, body=b""):
+            self.send_response(state["code"])
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802 - http.server API
+            self._respond(b'{"error": ["boom"]}')
+
+        def do_HEAD(self):  # noqa: N802 - http.server API
+            self._respond()
+
+        def log_message(self, *args):  # pragma: no cover - silence stderr noise
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}/api/v2/sql", state
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+class TestStatusFromDuckdbError:
+    """``duckdb.HTTPException.status_code`` is used only when it is a real status."""
+
+    def test_a_plain_exception_carries_no_status(self):
+        assert _status_from_duckdb_error(RuntimeError("IO Error: 404 not found")) is None
+
+    def test_a_real_status_is_read(self):
+        exc = RuntimeError("boom")
+        exc.status_code = 503
+        assert _status_from_duckdb_error(exc) == 503
+
+    def test_zero_is_not_a_status(self):
+        """DuckDB reports status_code 0 when the request produced no status."""
+        exc = RuntimeError("boom")
+        exc.status_code = 0
+        assert _status_from_duckdb_error(exc) is None
+
+    def test_a_non_integer_status_is_ignored(self):
+        exc = RuntimeError("boom")
+        exc.status_code = "404"
+        assert _status_from_duckdb_error(exc) is None
+
+
+class TestFatalStatusError:
+    """Which statuses are fatal, and which are the retryable class."""
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (404, "not found"),
+            (401, "Unauthorized"),
+            (403, "forbidden"),
+            (400, "HTTP 400"),
+            (418, "HTTP 418"),
+        ],
+    )
+    def test_client_errors_are_fatal(self, status, expected):
+        error = _fatal_status_error(status, "my_table")
+        assert error is not None
+        assert expected in str(error)
+        assert "my_table" in str(error)
+
+    @pytest.mark.parametrize("status", [None, 200, 429, 500, 502, 503, 504])
+    def test_transient_and_absent_statuses_are_retryable(self, status):
+        """No status at all -- connection refused, DNS -- is the retryable class."""
+        assert _fatal_status_error(status, "my_table") is None
+
+
+class TestFailureClassificationIgnoresTheUsersSql:
+    """#1020: digits in the user's own SQL must not decide the verdict.
+
+    Every row here is the same underlying failure -- connection refused against
+    a dead port, the canonical retryable class -- and differs only in the SQL,
+    which the old classifier saw because the request URL is embedded in the
+    DuckDB exception message.
+    """
+
+    DEAD_URL = "http://127.0.0.1:1/api/v2/sql"
+
+    @pytest.mark.parametrize(
+        ("sql", "note"),
+        [
+            ("SELECT * FROM census_blocks LIMIT 10", "plain SQL, no magic digits"),
+            ("SELECT * FROM census_blocks LIMIT 404", "user typed --limit 404"),
+            ("SELECT * FROM parcels WHERE zone = '404'", "'404' inside a WHERE value"),
+            ("SELECT * FROM room_401_sensors LIMIT 10", "'401' inside the table name"),
+            ("SELECT * FROM logs WHERE msg = 'not found'", "the words, inside a WHERE value"),
+            ("SELECT * FROM unauthorized_events LIMIT 10", "'unauthorized' in the table name"),
+        ],
+    )
+    def test_the_sql_in_the_message_never_decides_the_verdict(self, monkeypatch, sql, note):
+        """The classifier's old input, verbatim, over the issue's whole table.
+
+        The exception carries the real ``ST_Read`` failure text, URL and all, so
+        the digits the old classifier matched on are present exactly as they
+        were. The port is still dead, so the status probe answers "no status" --
+        the retryable class -- for every row.
+        """
+        gdal_message = (
+            f"IO Error: Could not open GDAL dataset at: "
+            f"{self.DEAD_URL}?q={quote(sql)}&format=GeoJSON"
+        )
+        conn = _AttemptCountingConnection(RuntimeError(gdal_message))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+
+        with pytest.raises(CartoError) as excinfo:
+            _fetch_with_retry(
+                url=self.DEAD_URL,
+                table_name="t",
+                sql=sql,
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=2,
+            )
+        message = str(excinfo.value)
+
+        assert conn.attempts == 3, f"{note}: retries were lost"
+        assert "Failed to fetch data from Carto after 3 attempts" in message, note
+        assert "not found" not in message, note
+        assert "Unauthorized" not in message, note
+        assert "forbidden" not in message, note
+
+    def test_a_real_dead_port_fetch_retries_end_to_end(self, monkeypatch):
+        """The issue's reproduction, with DuckDB and GDAL actually in the loop.
+
+        ``--limit 404`` used to cost every retry and report "Table 't' not
+        found" for what was only a connection failure.
+        """
+        real_get_conn = carto_module.get_duckdb_connection
+        seen = {"attempts": 0}
+
+        class _Counting:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql_text, *args, **kwargs):
+                if sql_text.lstrip().upper().startswith("SELECT"):
+                    seen["attempts"] += 1
+                return self._inner.execute(sql_text, *args, **kwargs)
+
+        monkeypatch.setattr(
+            carto_module, "get_duckdb_connection", lambda *a, **k: _Counting(real_get_conn())
+        )
+
+        with pytest.raises(CartoError) as excinfo:
+            _fetch_with_retry(
+                url=self.DEAD_URL,
+                table_name="t",
+                sql="SELECT * FROM census_blocks LIMIT 404",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=2,
+            )
+
+        assert seen["attempts"] == 3
+        assert "Failed to fetch data from Carto after 3 attempts" in str(excinfo.value)
+        assert "not found" not in str(excinfo.value)
+
+
+class TestFailureClassificationUsesTheHttpStatus:
+    """A real server's status decides the verdict, against a mocked server."""
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [(404, "not found"), (401, "Unauthorized"), (403, "forbidden")],
+    )
+    def test_a_real_client_error_fails_fast_with_the_right_message(
+        self, monkeypatch, status_http_server, status, expected
+    ):
+        base_url, state = status_http_server
+        state["code"] = status
+        conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+
+        with pytest.raises(CartoError) as excinfo:
+            _fetch_with_retry(
+                url=base_url,
+                table_name="my_table",
+                sql="SELECT * FROM my_table LIMIT 10",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert conn.attempts == 1, "a fatal status must not burn the retry budget"
+        assert expected in str(excinfo.value)
+
+    def test_a_real_503_retries_even_when_the_table_name_says_404(
+        self, monkeypatch, status_http_server
+    ):
+        """The inverse of the bug: a name full of digits must not fail fast."""
+        base_url, state = status_http_server
+        state["code"] = 503
+        conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+
+        with pytest.raises(CartoError) as excinfo:
+            _fetch_with_retry(
+                url=base_url,
+                table_name="room_404_sensors",
+                sql="SELECT * FROM room_404_sensors LIMIT 404",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert conn.attempts == 3
+        assert "Failed to fetch data from Carto after 3 attempts" in str(excinfo.value)
+
+    def test_a_duckdb_http_status_is_used_without_a_probe(self, monkeypatch):
+        """When DuckDB itself reports the status, no extra request is issued."""
+        error = RuntimeError("HTTP Error: HTTP GET error")
+        error.status_code = 404
+        conn = _AttemptCountingConnection(error)
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+
+        def _no_probe(*args, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("the status was already known; no probe should be issued")
+
+        monkeypatch.setattr(carto_module, "_probe_request_status", _no_probe)
+
+        with pytest.raises(CartoError, match="not found"):
+            _fetch_with_retry(
+                url="http://127.0.0.1:1/api/v2/sql",
+                table_name="my_table",
+                sql="SELECT * FROM my_table",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert conn.attempts == 1
+
+    def test_a_timeout_is_retried_then_reported_as_a_timeout(self, monkeypatch):
+        """Timeouts keep their actionable hint, classified by type not by text."""
+        conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+        monkeypatch.setattr(
+            carto_module,
+            "_probe_request_status",
+            lambda *a, **k: carto_module._CartoStatus(None, True),
+        )
+
+        with pytest.raises(CartoError, match="timed out after 3 attempts"):
+            _fetch_with_retry(
+                url="http://127.0.0.1:1/api/v2/sql",
+                table_name="my_table",
+                sql="SELECT * FROM my_table",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert conn.attempts == 3
+
+    def test_a_probe_that_cannot_answer_is_retryable(self, monkeypatch):
+        """An unusable URL breaks the probe itself; that means 'no status'."""
+        import httpx
+
+        def _boom(*args, **kwargs):
+            raise httpx.InvalidURL("not a URL httpx will accept")
+
+        monkeypatch.setattr(httpx, "stream", _boom)
+        assert carto_module._probe_request_status("http://x/", 1.0) == carto_module._CartoStatus(
+            None, False
+        )

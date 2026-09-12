@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import quote, urlparse
 
 import pyarrow as pa
@@ -47,14 +48,47 @@ DEFAULT_TIMEOUT = 120  # seconds
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 2.0  # seconds
 
+# A failed fetch is diagnosed with one extra request (see _probe_request_status).
+# Cap how long that may take so a long --timeout is not paid a second time just
+# to learn a status code.
+STATUS_PROBE_TIMEOUT = 30.0  # seconds
+
 # Environment variable for API key
 CARTO_API_KEY_ENV = "CARTO_API_KEY"
+
+# The fatal HTTP statuses, and what each one means for a Carto extraction.
+# Keyed on the status the transport reported -- never on text found in an
+# exception message, which embeds the request URL and so the user's own SQL
+# (#1020).
+_FATAL_STATUS_HINTS = {
+    404: ("Table '{table}' not found. Check the table name and ensure it is publicly accessible."),
+    401: (
+        "Unauthorized access to table '{table}'. "
+        "Set CARTO_API_KEY environment variable or check permissions."
+    ),
+    403: "Access forbidden to table '{table}'. Check permissions.",
+}
 
 
 class CartoError(Exception):
     """Carto-specific error."""
 
     pass
+
+
+class _CartoStatus(NamedTuple):
+    """What the transport reported about one failed fetch attempt.
+
+    Args:
+        code: The HTTP status the server answered with, or None when the
+            request never got one. That absence -- connection refused, DNS
+            failure, a timeout -- *is* the retryable class.
+        timed_out: Whether the request timed out, known from the exception
+            *type* rather than from any text in its message.
+    """
+
+    code: int | None
+    timed_out: bool
 
 
 def _validate_carto_url(url: str) -> str:
@@ -547,6 +581,98 @@ def _create_empty_geoparquet_table(geoparquet_version: str | None = None) -> pa.
     return table.replace_schema_metadata(new_metadata)
 
 
+def _status_from_duckdb_error(exc: BaseException) -> int | None:
+    """Read the HTTP status off a DuckDB exception, when it carries a usable one.
+
+    ``duckdb.HTTPException`` exposes ``status_code``, but reports 0 whenever the
+    request produced no status of its own -- including, in practice, some auth
+    failures -- so 0 is read as "no status" rather than as a code. The
+    ``ST_Read`` path raises a plain ``IOException`` that carries no status at
+    all; :func:`_probe_request_status` is how that one gets a number.
+
+    Returns:
+        The status, or None when the exception does not carry a real one.
+    """
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int) and not isinstance(code, bool) and code > 0:
+        return code
+    return None
+
+
+def _probe_request_status(full_url: str, timeout: float) -> _CartoStatus:
+    """Ask the server what status this exact request gets.
+
+    ``ST_Read`` fetches through GDAL, which reports only ``IO Error: Could not
+    open GDAL dataset at: <url>`` no matter what the server said -- so the
+    status has to be asked for separately. One streamed GET reads the response
+    headers without pulling the body down.
+
+    This costs a request, but only on a failure, and the failures it has to tell
+    apart are the cheap ones: a missing table, a rejected key, a server already
+    erroring. The expensive case is a transient blip on a large query, where
+    Carto re-runs it to produce the headers; ``STATUS_PROBE_TIMEOUT`` bounds how
+    long that may take before the probe gives up and the failure stays
+    retryable.
+
+    Returns:
+        The status, or ``_CartoStatus(None, ...)`` when the request produced no
+        status. A probe that cannot answer must say so rather than guess: no
+        status means the retryable class.
+    """
+    import httpx
+
+    try:
+        with httpx.stream(
+            "GET",
+            full_url,
+            timeout=min(timeout, STATUS_PROBE_TIMEOUT),
+            follow_redirects=True,
+        ) as response:
+            return _CartoStatus(response.status_code, False)
+    except httpx.TimeoutException:
+        return _CartoStatus(None, True)
+    except Exception as probe_error:  # noqa: BLE001 - any failure means "no status"
+        debug(f"Status probe failed ({probe_error}); treating the failure as retryable")
+        return _CartoStatus(None, False)
+
+
+def _classify_fetch_failure(exc: BaseException, full_url: str, timeout: float) -> _CartoStatus:
+    """Decide what a failed fetch attempt was, without reading the message.
+
+    Prefers a status DuckDB itself reported (the CSV path goes through httpfs,
+    which has one); falls back to a direct probe for the ``ST_Read`` path, which
+    does not.
+    """
+    code = _status_from_duckdb_error(exc)
+    if code is not None:
+        return _CartoStatus(code, False)
+    return _probe_request_status(full_url, timeout)
+
+
+def _fatal_status_error(status: int | None, table_name: str) -> CartoError | None:
+    """Build the fatal error for an HTTP status, or None when it is retryable.
+
+    Retryable: no status at all, any success/redirect, 429, and every 5xx.
+    Fatal: the rest of 4xx, which no amount of retrying will change.
+    """
+    if status is None or status < 400 or status == 429 or status >= 500:
+        return None
+    hint = _FATAL_STATUS_HINTS.get(status)
+    if hint is not None:
+        return CartoError(hint.format(table=table_name))
+    return CartoError(f"Carto request for table '{table_name}' failed with HTTP {status}.")
+
+
+def _retry_warning(status: _CartoStatus, attempt: int, max_retries: int, delay: float) -> str:
+    """Word the retry warning from the classified status, not from the message."""
+    suffix = f"(attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s..."
+    if status.timed_out:
+        return f"Request timed out {suffix}"
+    if status.code is None:
+        return f"Could not reach Carto {suffix}"
+    return f"Carto returned HTTP {status.code} {suffix}"
+
+
 def _fetch_with_retry(
     url: str,
     table_name: str,
@@ -604,50 +730,27 @@ def _fetch_with_retry(
 
         except Exception as e:
             last_exception = e
-            error_msg = str(e).lower()
 
-            # Non-retryable errors - fail immediately
-            if "404" in error_msg or "not found" in error_msg:
-                raise CartoError(
-                    f"Table '{table_name}' not found. Check the table name and ensure "
-                    f"it is publicly accessible."
-                ) from e
+            # Classify on the HTTP status the transport reported -- never on the
+            # exception message, which embeds full_url and therefore the user's
+            # own table name, WHERE clause and LIMIT (#1020).
+            status = _classify_fetch_failure(e, full_url, timeout)
 
-            if "401" in error_msg or "unauthorized" in error_msg:
-                raise CartoError(
-                    f"Unauthorized access to table '{table_name}'. "
-                    "Set CARTO_API_KEY environment variable or check permissions."
-                ) from e
+            fatal = _fatal_status_error(status.code, table_name)
+            if fatal is not None:
+                raise fatal from e
 
-            if "403" in error_msg or "forbidden" in error_msg:
-                raise CartoError(
-                    f"Access forbidden to table '{table_name}'. Check permissions."
-                ) from e
-
-            # Retryable errors
+            # Retryable: a 429/5xx, or no status at all (connection refused, DNS).
             if attempt < max_retries - 1:
                 delay = retry_delay * (2**attempt)  # Exponential backoff
-                if "timeout" in error_msg:
-                    warn(
-                        f"Request timed out (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s..."
-                    )
-                elif "connection" in error_msg or "network" in error_msg:
-                    warn(
-                        f"Connection error (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s..."
-                    )
-                else:
-                    warn(
-                        f"Request failed (attempt {attempt + 1}/{max_retries}): {e}, retrying in {delay:.1f}s..."
-                    )
+                warn(_retry_warning(status, attempt, max_retries, delay))
                 time.sleep(delay)
-            else:
-                # Final attempt failed
-                if "timeout" in error_msg:
-                    raise CartoError(
-                        f"Request timed out after {max_retries} attempts. "
-                        "The table may be too large. Try using --limit or --where to reduce the result set, "
-                        "or increase --timeout."
-                    ) from e
+            elif status.timed_out:
+                raise CartoError(
+                    f"Request timed out after {max_retries} attempts. "
+                    "The table may be too large. Try using --limit or --where to reduce the result set, "
+                    "or increase --timeout."
+                ) from e
 
     # All retries exhausted
     raise CartoError(
