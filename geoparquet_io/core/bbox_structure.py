@@ -11,6 +11,7 @@ recommendation a command gives the user.
 import json
 from typing import Literal, TypedDict
 
+from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.logging_config import debug
 
@@ -196,8 +197,6 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
             - status (str): "optimal", "suboptimal", or "poor"
             - message (str): Human readable description
     """
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
-
     # Get schema info using DuckDB
     schema_info = get_schema_info(parquet_file)
 

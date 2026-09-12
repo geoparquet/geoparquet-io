@@ -9,6 +9,8 @@ same field arrives as ``int64`` on one page and ``decimal128`` on the next.
 Pure pyarrow: nothing here knows about geometry, GeoParquet or files.
 """
 
+from geoparquet_io.core.logging_config import warn
+
 
 def _rebuild_array_with_type(
     chunked_array,
@@ -277,8 +279,6 @@ def _cast_table_to_schema(table, target_schema, *, page_info: str | None = None)
         ValueError: If a column cannot be cast to the target type
     """
     import pyarrow as pa
-
-    from geoparquet_io.core.logging_config import warn
 
     if table.schema.equals(target_schema):
         return table

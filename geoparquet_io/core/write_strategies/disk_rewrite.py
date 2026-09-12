@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
@@ -120,10 +121,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite."""
-        from geoparquet_io.core.common import (
-            compute_geometry_types_via_sql,
-            validate_compression_settings,
-        )
+        from geoparquet_io.core.common import compute_geometry_types_via_sql
         from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
         from geoparquet_io.core.geo_metadata import compute_bbox_via_sql
         from geoparquet_io.core.remote import is_remote_url, upload_if_remote
@@ -348,7 +346,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         row_group_rows: int | None = None,
     ) -> None:
         """Write plain Parquet (no geo metadata) from an Arrow table."""
-        from geoparquet_io.core.common import validate_compression_settings
         from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 
         validated_compression, validated_level, _ = validate_compression_settings(

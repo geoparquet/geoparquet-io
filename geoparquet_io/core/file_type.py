@@ -5,6 +5,7 @@ derived from the file's ``geo`` metadata and its Parquet logical types, cached
 by path and mtime because nearly every command asks it at least once.
 """
 
+from geoparquet_io.core.duckdb_metadata import detect_geometry_columns, get_geo_metadata
 from geoparquet_io.core.file_utils import _get_file_cache_key
 from geoparquet_io.core.geo_metadata import carried_version
 from geoparquet_io.core.logging_config import debug
@@ -70,11 +71,6 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
             - file_type: str - One of: "geoparquet_v1", "geoparquet_v2", "parquet_geo_only", "unknown"
             - bbox_recommended: bool - Whether bbox column is recommended for this file type
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        detect_geometry_columns,
-        get_geo_metadata,
-    )
-
     # Check cache first (skip if connection provided - caller wants fresh read)
     if con is None:
         cached_result = _check_file_type_cache(parquet_file)

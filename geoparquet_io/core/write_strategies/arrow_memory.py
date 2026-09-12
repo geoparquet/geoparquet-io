@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
 from geoparquet_io.core.write_strategies.base import BaseWriteStrategy
@@ -58,7 +59,6 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
             _apply_geoparquet_metadata,
             _normalize_arrow_large_types,
             _write_table_with_settings,
-            validate_compression_settings,
         )
         from geoparquet_io.core.duckdb_utils import (
             _get_query_columns,
@@ -145,7 +145,6 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
             _apply_geoparquet_metadata,
             _normalize_arrow_large_types,
             _write_table_with_settings,
-            validate_compression_settings,
         )
 
         configure_verbose(verbose)
