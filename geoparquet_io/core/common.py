@@ -380,43 +380,6 @@ def parse_size_string(size_str):
     return int(value * multiplier)
 
 
-def calculate_row_group_size(
-    total_rows, file_size_bytes, target_row_group_size_mb=None, target_row_group_rows=None
-):
-    """
-    Calculate optimal row group size for parquet file.
-
-    Args:
-        total_rows: Total number of rows in the file
-        file_size_bytes: Current file size in bytes
-        target_row_group_size_mb: Target size per row group in MB
-        target_row_group_rows: Exact number of rows per row group
-
-    Returns:
-        int: Number of rows per row group
-    """
-    if target_row_group_rows:
-        # Use exact row count if specified
-        return min(target_row_group_rows, total_rows)
-
-    if not target_row_group_size_mb:
-        target_row_group_size_mb = 130  # Default 130MB
-
-    # Convert target size to bytes
-    target_bytes = target_row_group_size_mb * 1024 * 1024
-
-    # Calculate average bytes per row
-    if total_rows > 0 and file_size_bytes > 0:
-        bytes_per_row = file_size_bytes / total_rows
-        # Calculate number of rows that would fit in target size
-        rows_per_group = int(target_bytes / bytes_per_row)
-        # Ensure at least 1 row per group but not more than total rows
-        return max(1, min(rows_per_group, total_rows))
-    else:
-        # Default to all rows in one group if we can't calculate
-        return max(1, total_rows)
-
-
 def validate_compression_settings(compression, compression_level, verbose=False):
     """
     Validate and normalize compression settings.
