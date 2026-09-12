@@ -563,6 +563,29 @@ class TestCrsExtraction:
         result = _extract_crs_from_spatial_reference({})
         assert result is not None  # Should default to WGS84
 
+    def test_every_carrier_of_the_spatial_reference_is_tried(self):
+        """wkid, latestWkid and wkt all describe the CRS; any one resolving is enough."""
+        from pyproj import CRS
+
+        from geoparquet_io.core.arcgis import _extract_crs_from_spatial_reference
+
+        # latestWkid unresolvable, legacy wkid fine.
+        result = _extract_crs_from_spatial_reference({"wkid": 4326, "latestWkid": 999999})
+        assert result["id"]["code"] == 4326
+
+        # Both WKIDs unresolvable, but the WKT defines the CRS in full.
+        result = _extract_crs_from_spatial_reference(
+            {"wkid": 999999, "wkt": CRS.from_epsg(26918).to_wkt()}
+        )
+        assert result["id"]["code"] == 26918
+
+    def test_a_spatial_reference_nothing_resolves_returns_none(self):
+        """No carrier resolves -> None, which the caller turns into a refusal (#1039)."""
+        from geoparquet_io.core.arcgis import _extract_crs_from_spatial_reference
+
+        assert _extract_crs_from_spatial_reference({"wkid": 999999}) is None
+        assert _extract_crs_from_spatial_reference({"wkid": 999999, "wkt": "not wkt"}) is None
+
     @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
     @patch("geoparquet_io.core.arcgis.get_layer_info")
     def test_output_crs_is_wgs84_regardless_of_native_sr(
@@ -640,16 +663,23 @@ class TestArcgisToTableOutputCrs:
             total_count=1,
         )
 
-    def _stub_stream(self, tmp_path, detected_sr):
+    def _stub_stream(self, tmp_path, detected_sr, point=(0.0, 0.0)):
+        """Stand in for the download, yielding one point and a server-returned SR.
+
+        ``point`` defaults to the origin, which is a valid lon/lat. Pass a
+        projected easting/northing to make a file that has been mislabelled
+        CRS84 detectable: that is the whole of #1039, and a point at 0,0 is
+        legal in either reading.
+        """
         import shutil
+        import struct
 
         temp_parquet = str(tmp_path / "temp.parquet")
+        wkb_point = b"\x01" + struct.pack("<I", 1) + struct.pack("<dd", *point)
         pq.write_table(
             pa.table(
                 {
-                    "geometry": [
-                        b"\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-                    ],
+                    "geometry": [wkb_point],
                     "OBJECTID": [1],
                     "name": ["Zone 1"],
                 }
@@ -738,18 +768,13 @@ class TestArcgisToTableOutputCrs:
         assert crs["id"]["authority"] == "ESRI"
         assert int(crs["id"]["code"]) == 102039
 
-    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
-    @patch("geoparquet_io.core.arcgis.get_layer_info")
-    def test_unresolvable_wkid_writes_no_crs(self, mock_layer, mock_stream, tmp_path, caplog):
-        """A WKID resolving as neither EPSG nor ESRI must not be tagged as EPSG."""
-        import logging
+    def _unresolvable_layer(self, spatial_reference):
+        from geoparquet_io.core.arcgis import ArcGISLayerInfo
 
-        from geoparquet_io.core.arcgis import ArcGISLayerInfo, arcgis_to_table
-
-        mock_layer.return_value = ArcGISLayerInfo(
+        return ArcGISLayerInfo(
             name="Test",
-            geometry_type="esriGeometryPolygon",
-            spatial_reference={"wkid": 999999},
+            geometry_type="esriGeometryPoint",
+            spatial_reference=spatial_reference,
             fields=[
                 {"name": "OBJECTID", "type": "esriFieldTypeOID", "nullable": False},
                 {"name": "name", "type": "esriFieldTypeString", "nullable": True},
@@ -757,15 +782,226 @@ class TestArcgisToTableOutputCrs:
             max_record_count=1000,
             total_count=1,
         )
-        mock_stream.side_effect = self._stub_stream(tmp_path, {"wkid": 999999})
+
+    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
+    @patch("geoparquet_io.core.arcgis.get_layer_info")
+    def test_an_unresolvable_wkid_is_refused_rather_than_written_as_lon_lat(
+        self, mock_layer, mock_stream, tmp_path
+    ):
+        """A WKID nothing resolves must refuse, not write a file that claims CRS84.
+
+        Leaving the `crs` key out is not "CRS unset": GeoParquet reads an absent
+        `crs` as OGC:CRS84, so projected easting/northing came out labelled
+        longitude/latitude and `gpio check spec` failed the file gpio had just
+        written. Replaces the behaviour this test used to pin.
+        See https://github.com/geoparquet/geoparquet-io/issues/1039
+        """
+        from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        mock_layer.return_value = self._unresolvable_layer({"wkid": 999999})
+        mock_stream.side_effect = self._stub_stream(
+            tmp_path, {"wkid": 999999}, point=(441000.0, 4474000.0)
+        )
+        out = tmp_path / "refused.parquet"
+
+        with pytest.raises(InvalidParameterError) as excinfo:
+            convert_arcgis_to_geoparquet(
+                "https://example.com/FeatureServer/0", str(out), output_crs="native"
+            )
+
+        message = str(excinfo.value)
+        assert "999999" in message
+        assert "OGC:CRS84" in message
+        assert "--output-crs" in message
+        assert not out.exists()
+
+    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
+    @patch("geoparquet_io.core.arcgis.get_layer_info")
+    def test_an_unresolvable_explicit_output_crs_is_refused(
+        self, mock_layer, mock_stream, tmp_path
+    ):
+        """The explicit `--output-crs EPSG:<code>` half refuses too, before the download."""
+        from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        out = tmp_path / "refused.parquet"
+
+        with pytest.raises(InvalidParameterError, match="99999"):
+            convert_arcgis_to_geoparquet(
+                "https://example.com/FeatureServer/0", str(out), output_crs="EPSG:99999"
+            )
+
+        assert not out.exists()
+        # Nothing was downloaded to reach the refusal, and no layer metadata
+        # was even fetched: the requested code is unresolvable on its own.
+        mock_layer.assert_not_called()
+        mock_stream.assert_not_called()
+
+    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
+    @patch("geoparquet_io.core.arcgis.get_layer_info")
+    def test_a_server_returning_an_unresolvable_sr_is_refused_after_the_download(
+        self, mock_layer, mock_stream, tmp_path
+    ):
+        """The requested code resolves; the SR the server actually returned does not.
+
+        This is the only #1039 path a download can reach -- both pre-flight
+        checks pass and the mismatch only shows up in the pages. The features
+        are in a CRS gpio cannot name, so no file is written; the temp stream is
+        cleaned up either way.
+        """
+        from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        mock_layer.return_value = self._layer(26918, 26918)
+        mock_stream.side_effect = self._stub_stream(
+            tmp_path, {"wkid": 999999}, point=(441000.0, 4474000.0)
+        )
+        out = tmp_path / "refused.parquet"
+
+        with pytest.raises(InvalidParameterError, match="999999"):
+            convert_arcgis_to_geoparquet(
+                "https://example.com/FeatureServer/0", str(out), output_crs="EPSG:26918"
+            )
+
+        mock_stream.assert_called_once()
+        assert not out.exists()
+
+    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
+    @patch("geoparquet_io.core.arcgis.get_layer_info")
+    def test_a_quoted_wkid_still_resolves(self, mock_layer, mock_stream, tmp_path, caplog):
+        """Some services quote the code; that is not an unresolvable CRS.
+
+        Nor a mismatch with the code that was requested: comparing the quoted
+        string to the requested integer would warn that the server returned
+        26918 instead of 26918.
+        """
+        import logging
+
+        from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+        from tests.native_geo_probes import geo_block_crs_id, spec_problems
+
+        mock_layer.return_value = self._layer(26918, 26918)
+        mock_stream.side_effect = self._stub_stream(
+            tmp_path, {"wkid": "26918"}, point=(441000.0, 4474000.0)
+        )
+        out = tmp_path / "quoted.parquet"
 
         with caplog.at_level(logging.WARNING):
-            result = arcgis_to_table("https://example.com/FeatureServer/0", output_crs="native")
+            convert_arcgis_to_geoparquet(
+                "https://example.com/FeatureServer/0", str(out), output_crs="EPSG:26918"
+            )
 
-        # No fabricated EPSG metadata when the code cannot be resolved.
-        metadata = result.schema.metadata or {}
-        assert b"geo" not in metadata
-        assert any("999999" in r.message for r in caplog.records)
+        assert geo_block_crs_id(out)["code"] == 26918
+        assert spec_problems(out) == []
+        assert not any("server returned" in r.message for r in caplog.records)
+
+    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
+    @patch("geoparquet_io.core.arcgis.get_layer_info")
+    def test_a_wkt_beside_an_unresolvable_wkid_is_used(self, mock_layer, mock_stream, tmp_path):
+        """An ArcGIS spatialReference carries wkid, latestWkid *and* wkt; try them all.
+
+        The server can advertise a vendor WKID no authority knows while supplying
+        the WKT that defines it. Before #1039 the WKT was never reached, because
+        the fallback to it was guarded on the WKID being absent rather than on it
+        failing to resolve.
+        """
+        from pyproj import CRS
+
+        from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+        from tests.native_geo_probes import geo_block_crs_id, spec_problems
+
+        sr = {"wkid": 999999, "wkt": CRS.from_epsg(26918).to_wkt()}
+        mock_layer.return_value = self._unresolvable_layer(sr)
+        mock_stream.side_effect = self._stub_stream(tmp_path, sr, point=(441000.0, 4474000.0))
+        out = tmp_path / "from_wkt.parquet"
+
+        convert_arcgis_to_geoparquet(
+            "https://example.com/FeatureServer/0", str(out), output_crs="native"
+        )
+
+        assert geo_block_crs_id(out)["code"] == 26918
+        assert spec_problems(out) == []
+
+    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
+    @patch("geoparquet_io.core.arcgis.get_layer_info")
+    def test_a_custom_projection_wkt_is_written_as_full_projjson(
+        self, mock_layer, mock_stream, tmp_path
+    ):
+        """An Esri projection definition is written out in full, name and all.
+
+        The WKID is unresolvable, so the CRS written comes from the WKT the
+        server supplied beside it -- a complete PROJJSON description carrying
+        the layer's own CRS name, rather than the omitted key that used to
+        assert CRS84.
+        """
+        from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+        from tests.native_geo_probes import geo_block, spec_problems
+
+        wkt = (
+            'PROJCS["Custom_Transverse_Mercator",'
+            'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
+            'SPHEROID["WGS_1984",6378137.0,298.257223563]],'
+            'PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],'
+            'PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",500000.0],'
+            'PARAMETER["False_Northing",0.0],PARAMETER["Central_Meridian",-75.0],'
+            'PARAMETER["Scale_Factor",0.9996],PARAMETER["Latitude_Of_Origin",0.0],'
+            'UNIT["Meter",1.0]]'
+        )
+        sr = {"wkid": 999999, "wkt": wkt}
+        mock_layer.return_value = self._unresolvable_layer(sr)
+        mock_stream.side_effect = self._stub_stream(tmp_path, sr, point=(441000.0, 4474000.0))
+        out = tmp_path / "custom.parquet"
+
+        convert_arcgis_to_geoparquet(
+            "https://example.com/FeatureServer/0", str(out), output_crs="native"
+        )
+
+        crs = geo_block(out)["columns"]["geometry"]["crs"]
+        assert crs["name"] == "Custom_Transverse_Mercator"
+        assert spec_problems(out) == []
+
+    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
+    @patch("geoparquet_io.core.arcgis.get_layer_info")
+    def test_native_prefers_a_resolvable_wkt_over_an_unresolvable_wkid(
+        self, mock_layer, mock_stream, tmp_path
+    ):
+        """`--output-crs native` asks the server for a CRS gpio can also write down."""
+        from pyproj import CRS
+
+        from geoparquet_io.core.arcgis import arcgis_to_table
+
+        sr = {"wkid": 999999, "wkt": CRS.from_epsg(26918).to_wkt()}
+        mock_layer.return_value = self._unresolvable_layer(sr)
+        mock_stream.side_effect = self._stub_stream(tmp_path, {"wkid": 26918})
+
+        arcgis_to_table("https://example.com/FeatureServer/0", output_crs="native")
+
+        assert mock_stream.call_args.kwargs["output_wkid"] == 26918
+
+    @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
+    @patch("geoparquet_io.core.arcgis.get_layer_info")
+    def test_the_default_path_still_writes_crs84_and_is_spec_clean(
+        self, mock_layer, mock_stream, tmp_path
+    ):
+        """No --output-crs: f=geojson is lon/lat whatever the layer advertises.
+
+        The layer here advertises the same unresolvable WKID the refusal tests
+        use, to pin that the default path never consults it: `f=geojson` is
+        WGS84 per RFC 7946, so the absent `crs` key -- GeoParquet's spelling of
+        OGC:CRS84 -- is a true statement here and must stay reachable.
+        """
+        from geoparquet_io.core.arcgis import convert_arcgis_to_geoparquet
+        from tests.native_geo_probes import geo_block_crs_id, spec_problems
+
+        mock_layer.return_value = self._unresolvable_layer({"wkid": 999999})
+        mock_stream.side_effect = self._stub_stream(tmp_path, None, point=(-75.0, 40.4))
+        out = tmp_path / "default.parquet"
+
+        convert_arcgis_to_geoparquet("https://example.com/FeatureServer/0", str(out))
+
+        assert geo_block_crs_id(out) == "<no crs key -- resolves as OGC:CRS84>"
+        assert spec_problems(out) == []
 
     @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
     @patch("geoparquet_io.core.arcgis.get_layer_info")
