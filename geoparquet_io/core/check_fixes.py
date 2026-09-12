@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
+import contextlib
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 
 import duckdb
@@ -20,7 +22,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
-from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
+from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.hilbert_order import hilbert_order
 from geoparquet_io.core.logging_config import debug, info, progress
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
@@ -28,7 +30,6 @@ from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
     needs_httpfs,
-    remote_write_context,
     setup_aws_profile_if_needed,
 )
 
@@ -86,7 +87,7 @@ from geoparquet_io.core.remote import (
 
 
 @contextmanager
-def _staged_output(output_file, profile):
+def _staged_output(output_file: str) -> Iterator[str]:
     """The path a rewrite writes to, put over *output_file* once it is closed.
 
     A ``COPY`` whose destination already exists is not a plain write: DuckDB
@@ -95,57 +96,64 @@ def _staged_output(output_file, profile):
     DuckDB moved over was the file the same statement was reading, and nothing
     but the scheduler ordered the release of the scan handle against the move.
     POSIX does not care. Windows refuses to rename over a path any handle still
-    holds open, so the command died with ``IO Error: Could not move file: Access
-    is denied.`` -- in some runs of the same commit and not others, which is
-    what an intermittent windows-latest failure with no local reproduction looks
-    like (#1032).
+    holds open: ``IO Error: Could not move file: Access is denied.``, in some
+    runs of the same commit and not others (#1032).
 
-    Staging beside the output and swapping afterwards moves the rename out of
-    DuckDB's hands and to a point where the connection is closed and every
-    PyArrow reader the write opened on the input -- the ``get_parquet_metadata``
-    read and the ``input_file=`` witness that #1009 made unconditional -- is
-    gone. ``add_bbox_metadata`` and ``fix_spatial_ordering`` already work this
-    way; this is the same pattern for the other three.
+    So the rule here is *any existing local destination* is staged -- not only
+    one that is the input. That is stronger than the ``is_same_file_path`` test
+    the rest of the module asks, on purpose: the hazard is DuckDB moving over an
+    existing file, whichever file it is, and it cannot be defeated by two
+    spellings of one path. The swap is gpio's own ``os.replace()``, after the
+    caller has closed its connection and every reader the write opened.
 
-    A destination that does not exist yet needs none of it: there is no file to
-    move over. So does a remote one, which ``write_parquet_with_metadata``
-    already routes through its own local staging and upload.
+    A destination that does not exist yet needs none of it. Neither does a
+    remote one: ``write_parquet_with_metadata`` stages a remote output locally
+    and uploads it, and there is no file on this machine to rename over.
     """
     if is_remote_url(output_file) or not os.path.exists(output_file):
         yield output_file
         return
 
     staging = _staging_path_beside(output_file)
-    moved = False
     try:
         yield staging
-        _move_temp_output_into_place(staging, output_file, profile)
-        moved = True
+        # The rewrite takes the original's mode: DuckDB created the staging
+        # file from the umask, and a 0600 file should not come out 0644.
+        with contextlib.suppress(OSError):
+            shutil.copymode(output_file, staging)
+        # os.replace() is atomic on POSIX and Windows for two paths on one
+        # filesystem, which _staging_path_beside() guarantees. The destination
+        # is never unlinked or truncated first, so a failure here leaves the
+        # original intact (#959).
+        os.replace(staging, output_file)
     finally:
-        # Only ever discard the rewrite when it did NOT reach the destination
-        # -- the original is still in place, and under `--no-backup` there is
-        # no .bak to fall back on (#959).
-        if not moved and os.path.exists(staging):
-            os.remove(staging)
+        # Gone after a successful replace. Still here after a failed write or a
+        # failed move -- and discarded either way: the untouched original is the
+        # good copy, and a dot-prefixed leftover in the user's data directory
+        # would be invisible to `ls` and accumulate. Cleanup must not mask the
+        # error that got us here.
+        if os.path.exists(staging):
+            with contextlib.suppress(OSError):
+                os.remove(staging)
 
 
 def _rewrite_through_staging(
-    parquet_file,
-    output_file,
-    query,
+    parquet_file: str,
+    output_file: str,
+    query: str,
     *,
-    verbose,
-    profile,
-    geoparquet_version=None,
-    original_metadata=None,
-):
+    verbose: bool,
+    profile: str | None,
+    geoparquet_version: str | None = None,
+    original_metadata: dict | None = None,
+) -> None:
     """Run *query* over *parquet_file* and leave the result at *output_file*.
 
     The one rewrite the three ``COPY``-based fixes share: staged output, one
     DuckDB connection closed before the swap, and the input named as the write
     facade's witness.
     """
-    with _staged_output(output_file, profile) as destination:
+    with _staged_output(output_file) as destination:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
         try:
             write_parquet_with_metadata(
@@ -380,24 +388,16 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     if verbose:
         debug("Applying Hilbert spatial ordering (this may take a while)...")
 
-    # An in-place fix has to be routed through a temp file: hilbert_order() reads
-    # the whole input while writing, so handle_output_overwrite() refuses an
-    # output that resolves to its own input, and `overwrite=True` does not lift
-    # that. This function was the only fix_* that handed the path straight
-    # through, which is why `check spatial --fix` alone could not repair a file
-    # in place; fix_compression() and fix_bbox_all() already route the same way
-    # (#941).
-    actual_output = output_file
-    temp_output_file = None
-    moved_into_place = False
-    if is_same_file_path(parquet_file, output_file):
-        temp_output_file = _staging_path_beside(output_file)
-        actual_output = temp_output_file
-
-    try:
+    # An in-place fix has to be routed through a staging file: hilbert_order()
+    # reads the whole input while writing, so handle_output_overwrite() refuses
+    # an output that resolves to its own input, and `overwrite=True` does not
+    # lift that (#941). Same staging as the three COPY-based fixes; a remote
+    # in-place fix is not staged, so hilbert_order's own refusal is what the
+    # user sees rather than a half-finished upload.
+    with _staged_output(output_file) as destination:
         hilbert_order(
             input_parquet=parquet_file,
-            output_parquet=actual_output,
+            output_parquet=destination,
             add_bbox_flag=False,  # bbox should already be added if needed
             verbose=verbose,
             compression="ZSTD",
@@ -406,17 +406,6 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
             profile=profile,
             overwrite=True,  # check --fix manages file lifecycle
         )
-
-        if temp_output_file:
-            _move_temp_output_into_place(temp_output_file, output_file, profile)
-            moved_into_place = True
-    finally:
-        # Only ever discard the rewrite when it did NOT reach the destination.
-        # Deleting it unconditionally destroyed the only good copy of the data
-        # whenever the move failed -- ENOSPC, a read-only mount, a quota -- and
-        # under `--fix --no-backup` there is no .bak to fall back on (#959).
-        if temp_output_file and not moved_into_place and os.path.exists(temp_output_file):
-            os.remove(temp_output_file)
 
     return {"fix_applied": "Applied Hilbert spatial ordering", "success": True}
 
@@ -429,29 +418,16 @@ def _staging_path_beside(output_file):
     multi-GB in-place fix exhaust a tmpfs the destination would have
     accommodated, and degrades the move back into a copy+unlink -- which is what
     makes it non-atomic. Co-locating keeps ``os.replace()`` a rename. The dot
-    prefix keeps the in-flight file out of the ``*.parquet`` globs that walk a
-    partition directory.
+    prefix keeps the in-flight file out of ``glob.glob("*.parquet")`` and out
+    of a plain ``ls`` -- not out of ``pathlib.Path.glob``, which matches
+    dotfiles, so an orphan left by a hard kill is still visible to gpio's own
+    directory walks.
     """
     directory = None if is_remote_url(output_file) else (os.path.dirname(output_file) or ".")
     fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".gpio-fix-", suffix=".parquet")
     os.close(fd)
     os.unlink(temp_path)
     return temp_path
-
-
-def _move_temp_output_into_place(temp_output_file, output_file, profile):
-    """Put a temp-file rewrite back over the path it was produced from."""
-    if is_remote_url(output_file):
-        with remote_write_context(output_file, profile=profile) as remote_path:
-            shutil.copy2(temp_output_file, remote_path)
-        os.remove(temp_output_file)
-        return
-
-    # os.replace() is atomic on POSIX and Windows for two paths on one
-    # filesystem, which _staging_path_beside() guarantees. The destination is
-    # never unlinked or truncated first, so a failure here leaves the original
-    # file intact and the rewrite still sitting in the temp file (#959).
-    os.replace(temp_output_file, output_file)
 
 
 def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geoparquet_version=None):

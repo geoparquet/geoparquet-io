@@ -33,7 +33,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import weakref
 from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
@@ -55,11 +54,16 @@ _COPY_TO = re.compile(r"\bCOPY\b.*?\bTO\b\s+'((?:[^']|'')*)'", re.IGNORECASE | r
 
 @dataclass
 class _Rename:
-    """One ``os.replace()``, and what still held its destination open."""
+    """One ``os.replace()``, and what still held either of its paths open.
+
+    Windows refuses ``MoveFileEx`` when *either* the source or the destination
+    has an open handle, so both are recorded.
+    """
 
     source: str
     destination: str
     holders: list[str] = field(default_factory=list)
+    source_holders: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -78,24 +82,27 @@ class _Probe:
 def fix_probe(monkeypatch):
     """Watch every DuckDB ``COPY``, every ``os.replace()``, and every open handle.
 
-    Handles are tracked at the Python level rather than through the OS: a
-    ``ParquetFile`` is registered on construction and drops out of the weak
-    mapping the moment it is collected, and a DuckDB connection is remembered
-    against every path its SQL names until it is closed. That is what "open on
-    Windows" means here, and unlike an ``/proc``-style descriptor scan it reads
-    the same on macOS, Linux and Windows.
+    Handles are tracked at the Python level rather than through the OS, and by
+    *discipline* rather than by liveness: a ``ParquetFile`` counts as a holder
+    from construction until its ``close()`` (which ``with`` calls), and a DuckDB
+    connection is remembered against every path its SQL names until it is
+    closed. Liveness would not do -- on CPython a reader bound to a local is
+    collected at function return whether or not anyone closed it, so a probe
+    keyed on liveness read the un-``with``ed reads in ``get_parquet_metadata``
+    and the pyarrow fast paths as already gone, and passed with them reverted.
+    That is what "open on Windows" means here, and unlike an ``/proc``-style
+    descriptor scan it reads the same on macOS, Linux and Windows.
     """
     probe = _Probe()
-    live_readers: weakref.WeakValueDictionary[int, pq.ParquetFile] = weakref.WeakValueDictionary()
-    reader_paths: dict[int, str] = {}
+    unclosed_readers: dict[int, str] = {}
     connection_paths: dict[int, set[str]] = {}
     ids = count()
 
     def holders_of(path: str) -> list[str]:
         held = [
-            f"pyarrow.ParquetFile({reader_paths[key]})"
-            for key in list(live_readers)
-            if key in reader_paths and is_same_file_path(reader_paths[key], path)
+            f"pyarrow.ParquetFile({seen}) never closed"
+            for seen in unclosed_readers.values()
+            if is_same_file_path(seen, path)
         ]
         held += [
             f"open duckdb connection that read {path}"
@@ -105,13 +112,17 @@ def fix_probe(monkeypatch):
         return held
 
     original_reader_init = pq.ParquetFile.__init__
+    original_reader_close = pq.ParquetFile.close
 
     def reader_init(self, source, *args, **kwargs):
         original_reader_init(self, source, *args, **kwargs)
         if isinstance(source, (str, os.PathLike)):
-            key = next(ids)
-            live_readers[key] = self
-            reader_paths[key] = str(source)
+            self._probe_key = next(ids)
+            unclosed_readers[self._probe_key] = str(source)
+
+    def reader_close(self, *args, **kwargs):
+        unclosed_readers.pop(getattr(self, "_probe_key", None), None)
+        return original_reader_close(self, *args, **kwargs)
 
     original_execute = duckdb.DuckDBPyConnection.execute
     original_close = duckdb.DuckDBPyConnection.close
@@ -133,10 +144,13 @@ def fix_probe(monkeypatch):
     original_replace = os.replace
 
     def replace(src, dst, **kwargs):
-        probe.renames.append(_Rename(str(src), str(dst), holders_of(str(dst))))
+        probe.renames.append(
+            _Rename(str(src), str(dst), holders_of(str(dst)), holders_of(str(src)))
+        )
         return original_replace(src, dst, **kwargs)
 
     monkeypatch.setattr(pq.ParquetFile, "__init__", reader_init)
+    monkeypatch.setattr(pq.ParquetFile, "close", reader_close)
     monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", execute)
     monkeypatch.setattr(duckdb.DuckDBPyConnection, "close", close)
     monkeypatch.setattr(os, "replace", replace)
@@ -226,6 +240,10 @@ def test_an_in_place_fix_swaps_its_rewrite_in_with_nothing_holding_the_file_open
             f"`check {subcommand} --fix` renamed over {swap.destination} while "
             f"{swap.holders} still held it open"
         )
+        assert swap.source_holders == [], (
+            f"`check {subcommand} --fix` renamed {swap.source} while "
+            f"{swap.source_holders} still held it open"
+        )
 
 
 @pytest.mark.parametrize(("subcommand", "fixture_name"), IN_PLACE_FIXES)
@@ -275,6 +293,62 @@ def test_a_failed_rewrite_keeps_the_original_and_removes_the_staging_file(tmp_pa
 
     assert target.read_bytes() == b"the original bytes"
     assert list(tmp_path.glob(".gpio-fix-*")) == [], "a staging file was left behind"
+
+
+def test_a_failed_move_keeps_the_original_and_discards_the_rewrite(tmp_path, monkeypatch):
+    """The other half of #959: the swap itself fails (ENOSPC, EXDEV, a quota).
+
+    The original was never unlinked, so it is intact and is the good copy. The
+    completed rewrite is discarded rather than left as a dot-prefixed orphan --
+    the user re-runs the fix; they do not go looking for a hidden file.
+    """
+    target = tmp_path / "precious.parquet"
+    target.write_bytes(b"the original bytes")
+
+    def write_something(**kwargs):
+        Path(kwargs["output_file"]).write_bytes(b"a complete rewrite")
+
+    def no_space(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(check_fixes, "write_parquet_with_metadata", write_something)
+    monkeypatch.setattr(check_fixes, "get_duckdb_connection", lambda **kwargs: duckdb.connect())
+    monkeypatch.setattr(os, "replace", no_space)
+
+    with pytest.raises(OSError, match="No space left on device"):
+        check_fixes._rewrite_through_staging(
+            str(target), str(target), "SELECT 1", verbose=False, profile=None
+        )
+
+    assert target.read_bytes() == b"the original bytes"
+    assert list(tmp_path.glob(".gpio-fix-*")) == [], "a staging file was left behind"
+
+
+def test_a_remote_in_place_fix_is_handed_to_the_facade_unstaged(monkeypatch):
+    """``check row-group s3://b/k.parquet --fix --overwrite``: nothing to rename over here.
+
+    The facade stages a remote output locally and uploads it. Staging it a
+    second time on this machine and then trying to ``os.replace`` onto a URL is
+    how the first version of this fix's sibling (#1029) turned a working command
+    into a ``TypeError``.
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(
+        check_fixes,
+        "write_parquet_with_metadata",
+        lambda con, query, output_file, **kwargs: seen.append(output_file),
+    )
+    monkeypatch.setattr(check_fixes, "get_duckdb_connection", lambda **kwargs: duckdb.connect())
+
+    check_fixes._rewrite_through_staging(
+        "s3://bucket/key.parquet",
+        "s3://bucket/key.parquet",
+        "SELECT 1",
+        verbose=False,
+        profile=None,
+    )
+
+    assert seen == ["s3://bucket/key.parquet"]
 
 
 def test_a_remote_rewrite_that_cannot_read_its_input_says_so(monkeypatch):
