@@ -334,6 +334,14 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
     import tempfile
     import uuid
 
+    # Registers the GeoArrow extension types process-wide, so a geometry column
+    # arriving on the stream as `geoarrow.wkb` is written to the scratch file
+    # with its Parquet GEOMETRY/GEOGRAPHY logical type -- and the CRS inside it --
+    # rather than demoted to plain `binary`. That scratch file is the witness the
+    # write facade then reads the output's version and CRS from (#993), so it has
+    # to be lossless with respect to the stream. The registration is global, which
+    # is why it happens here rather than being relied on (#1006).
+    import geoarrow.pyarrow  # noqa: F401
     import pyarrow.parquet as pq
 
     from geoparquet_io.core.geo_metadata import (

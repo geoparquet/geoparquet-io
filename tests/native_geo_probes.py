@@ -90,6 +90,26 @@ def logical_geo_types(path) -> dict[str, tuple[str, dict | None]]:
     return native
 
 
+def native_geo_edges(path, column: str = "geometry") -> tuple[str | None, str | None]:
+    """``(GEOMETRY|GEOGRAPHY, edge type)`` for one column, read from both carriers.
+
+    The Parquet logical type names the family, but the edge interpolation that
+    separates a *spherical* GEOGRAPHY from a planar one is not in
+    ``logical_type.to_json()`` -- it is the ``algorithm`` property, which pyarrow
+    surfaces on the GeoArrow extension type it materialises the column as. So the
+    family comes from :func:`logical_geo_types` and the edges from the Arrow
+    field, and a rewrite that quietly replanned spherical edges as straight lines
+    over the same bytes changes the second half of the pair.
+
+    Requires ``geoarrow.pyarrow`` to have been imported in this process; without
+    it the column is plain ``binary`` and the edge type reads ``None``.
+    """
+    described = logical_geo_types(path).get(column)
+    field = pq.read_table(str(path)).schema.field(column)
+    edges = getattr(field.type, "edge_type", None)
+    return (described[0] if described else None, None if edges is None else str(edges))
+
+
 def logical_crs_id(path, column: str = "geometry"):
     """The CRS inside one column's Parquet logical type, or a reason there is none."""
     described = logical_geo_types(path).get(column)

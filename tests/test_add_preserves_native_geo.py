@@ -51,6 +51,7 @@ from tests.native_geo_probes import (
     geo_block_crs_id,
     geo_version,
     logical_geo_types,
+    native_geo_edges,
     projjson,
     spec_problems,
     write_native_geo_only,
@@ -252,6 +253,48 @@ def test_the_geography_fixture_really_is_spherical(spherical_geography):
     """Non-vacuity for the xfail below."""
     assert logical_geo_types(spherical_geography)["geometry"][0] == "Geography"
     assert spec_problems(spherical_geography) == []
+
+
+def test_the_vecorel_rewrite_round_trips_a_geography_unchanged(spherical_geography, tmp_path):
+    """The measurement #993 deleted ~100 lines of hand-rolled mapping on.
+
+    That branch carried a ``_geography_edge_type`` mapper because a pyarrow
+    rewrite was assumed to lose a GEOGRAPHY's edge interpolation. It does not --
+    once ``geoarrow.pyarrow`` has registered the extension types,
+    ``_fix_vecorel_schema``'s read -> cast -> write carries the family *and* the
+    edges through untouched, which is why the mapper went. The claim was
+    verified and then pinned by nothing, leaving the only GEOGRAPHY coverage in
+    the tree an ``xfail(strict)`` about a different path (#999). This is the pin
+    (#1006).
+
+    The pair matters, not just the family: a GEOGRAPHY whose edges came back
+    planar would still read ``"Geography"`` while describing different shapes
+    over the same bytes.
+
+    In-process on purpose, and it is the one thing here that can be: what is
+    pinned is the round-trip *given* registered extension types, not the
+    registration itself. Deleting ``_fix_vecorel_schema``'s own import leaves
+    this green, because this module's fixtures already did it -- which is why
+    ``test_geometry_metrics_keeps_the_native_type_from_a_fresh_process`` exists
+    and runs in a subprocess.
+    """
+    from geoparquet_io.core.constants import _fix_vecorel_schema
+
+    # A copy, because the rewrite replaces the file in place and the fixture is
+    # module-scoped.
+    subject = tmp_path / "geography.parquet"
+    subject.write_bytes(Path(spherical_geography).read_bytes())
+
+    before = native_geo_edges(subject)
+    assert before == ("Geography", "EdgeType.SPHERICAL"), "fixture is not a spherical GEOGRAPHY"
+
+    # ``id`` has no nulls and is nullable, so the rewrite is actually taken --
+    # `_fix_vecorel_schema` returns early when no field needs changing, and an
+    # early return would round-trip the geometry column vacuously.
+    _fix_vecorel_schema(str(subject), ["id"])
+
+    assert native_geo_edges(subject) == before
+    assert spec_problems(subject) == []
 
 
 @pytest.mark.xfail(

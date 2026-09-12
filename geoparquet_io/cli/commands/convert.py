@@ -314,6 +314,12 @@ def _convert_streaming(
     import tempfile
     import uuid
 
+    # Registers the GeoArrow extension types process-wide, so the `pq.read_table`
+    # below materialises a Parquet GEOMETRY/GEOGRAPHY column as `geoarrow.wkb`
+    # rather than plain `binary` and the stream describes its geometry as one.
+    # The registration is global, which is why it happens here rather than being
+    # relied on -- see `constants._fix_vecorel_schema` (#1006, #993).
+    import geoarrow.pyarrow  # noqa: F401
     import pyarrow.parquet as pq
 
     from geoparquet_io.core.streaming import write_arrow_stream
