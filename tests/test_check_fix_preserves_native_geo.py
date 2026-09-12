@@ -32,6 +32,7 @@ Refs: https://github.com/geoparquet/geoparquet-io/issues/997
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -62,6 +63,32 @@ def _covering(path) -> dict | None:
     """One column's declared ``covering``, read off the ``geo`` block."""
     columns = (geo_block(path) or {}).get("columns") or {}
     return (columns.get("geometry") or {}).get("covering")
+
+
+def _rewrite_geo_block(path, block: dict) -> None:
+    table = pq.read_table(str(path))
+    metadata = dict(table.schema.metadata or {})
+    metadata[b"geo"] = json.dumps(block).encode("utf-8")
+    pq.write_table(table.replace_schema_metadata(metadata), str(path), compression="zstd")
+
+
+def _strip_covering(path) -> None:
+    """Rewrite ``path`` with its primary column's ``covering`` removed from the block."""
+    block = geo_block(path)
+    block["columns"]["geometry"].pop("covering", None)
+    _rewrite_geo_block(path, block)
+
+
+def _declare_geo_block(path, *, crs_epsg: int) -> None:
+    """Give a ``geo``-less file a 2.0 block naming ``crs_epsg`` and no covering."""
+    column = {
+        "encoding": "WKB",
+        "geometry_types": ["Polygon"],
+        "crs": json.loads(projjson(crs_epsg)),
+    }
+    _rewrite_geo_block(
+        path, {"version": "2.0.0", "primary_column": "geometry", "columns": {"geometry": column}}
+    )
 
 
 def _geometry_compression(path) -> str:
@@ -189,16 +216,21 @@ def test_check_all_fix_leaves_a_native_geo_only_file_native_geo_only(native_geo_
 def test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from(projected_conus, tmp_path):
     """The third rewrite, ``check_fixes.fix_bbox_removal``.
 
-    Measured on ``origin/main`` before the fix and it already passed: the output
-    is ``parquet-geo-only``, whose only CRS slot is the Parquet logical type, and
-    DuckDB restates that from the column it read. So this is a guard rather than
-    a reproduction -- the site is given the same witness as the other two because
-    the facade asks every rewrite for one, and nothing should be able to take the
-    CRS away here without a test noticing.
+    ``add bbox`` writes native 2.0 -- a ``geo`` block *and* a Parquet logical
+    type, both naming EPSG:5070 -- and declares the column in a ``covering``,
+    which ``check bbox`` calls optimal and leaves alone. Strip the covering and
+    the column is *undeclared*, which is the 2.0 shape ``--fix`` removes it from.
+
+    A guard rather than a reproduction: it passes with or without the witness,
+    because DuckDB reads the CRS off the logical type and restates it in both
+    places. The test below is the one the witness is load-bearing for.
     """
-    with_bbox = tmp_path / "pgo_with_bbox.parquet"
-    _run_cli("add", "bbox", projected_conus, with_bbox, "--geoparquet-version", "parquet-geo-only")
+    with_bbox = tmp_path / "v2_with_bbox.parquet"
+    _run_cli("add", "bbox", projected_conus, with_bbox)
     assert "bbox" in pq.read_schema(str(with_bbox)).names
+    assert (geo_version(with_bbox) or "").startswith("2.0")
+    _strip_covering(with_bbox)
+    assert _covering(with_bbox) is None
     fixed = tmp_path / "removed.parquet"
 
     _run_cli("check", "bbox", with_bbox, "--fix", "--fix-output", fixed)
@@ -207,7 +239,43 @@ def test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from(projected_conus
     # *leaves*, so a bbox struct shows up as xmin/ymin/xmax/ymax and the column
     # name this asserts on never appears at all.
     assert "bbox" not in pq.read_schema(str(fixed)).names, "the fix did not run"
-    assert geo_block(fixed) is None
+    assert (geo_version(fixed) or "").startswith("2.0")
+    assert logical_geo_types(fixed)["geometry"] == ("Geometry", EPSG_5070)
+    assert geo_block_crs_id(fixed) == EPSG_5070
+    assert spec_problems(fixed) == []
+
+
+def test_removing_a_bbox_column_keeps_a_crs_only_the_geo_block_states(tmp_path, _conus_5070_rows):
+    """The input the witness at ``fix_bbox_removal`` exists for.
+
+    A 2.0 file whose ``geo`` block says EPSG:5070 while its Parquet logical type
+    carries no CRS at all. ``check spec`` fails it on ``v2_crs_consistency`` --
+    but it is a file people have, and the rewrite that removes its undeclared
+    bbox column does not carry the block (``original_metadata=None``), so the
+    output's ``crs`` has exactly one source: the witness. Measured with the
+    ``input_file=`` removed, the output said **nothing** in both places -- 5070
+    metres labelled OGC:CRS84, ``coordinates outside valid range for CRS`` --
+    the #945 shape, a fix that mislabels the data it was asked to repair.
+    """
+    import geoarrow.pyarrow as ga
+
+    no_crs = write_native_geo_only(
+        tmp_path / "no_crs.parquet", _conus_5070_rows, {"geometry": (2, ga.wkb())}
+    )
+    with_bbox = tmp_path / "block_says_5070.parquet"
+    _run_cli("add", "bbox", no_crs, with_bbox)
+    assert "bbox" in pq.read_schema(str(with_bbox)).names
+    _declare_geo_block(with_bbox, crs_epsg=5070)
+    assert geo_block_crs_id(with_bbox) == EPSG_5070
+    assert logical_geo_types(with_bbox) == {"geometry": ("Geometry", None)}
+    assert _covering(with_bbox) is None, "a declared bbox is 'optimal' and never removed"
+    fixed = tmp_path / "removed.parquet"
+
+    _run_cli("check", "bbox", with_bbox, "--fix", "--fix-output", fixed)
+
+    assert "bbox" not in pq.read_schema(str(fixed)).names, "the fix did not run"
+    assert (geo_version(fixed) or "").startswith("2.0")
+    assert geo_block_crs_id(fixed) == EPSG_5070
     assert logical_geo_types(fixed)["geometry"] == ("Geometry", EPSG_5070)
     assert spec_problems(fixed) == []
 
