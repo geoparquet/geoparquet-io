@@ -4,6 +4,7 @@ import http.server
 import json
 import tempfile
 import threading
+import time
 from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
@@ -864,9 +865,13 @@ class TestCartoReadExpressionEscaping:
     URL that arrives from config or automation makes it an injection.
     """
 
-    # Passes _validate_carto_url (https scheme, /api/v2/sql suffix) and
-    # carries the one character the old spelling could not survive.
-    HOSTILE_URL = 'https://ex"ample.carto.com/api/v2/sql'
+    # Carries the one character the old spelling could not survive, on a
+    # loopback port that refuses instantly. The first version used
+    # `https://ex"ample.carto.com/...`: since #1020 a failed fetch probes the
+    # URL for its status, and that hostname resolves (wildcard DNS) -- two
+    # fast-suite tests were opening real TLS connections to Carto's load
+    # balancer, and would block for 30 s each wherever DNS is blackholed.
+    HOSTILE_URL = 'http://127.0.0.1:1/ex"ample/api/v2/sql'
 
     def _captured_read_sql(self, monkeypatch, fmt):
         """Run _fetch_with_retry against a connection that only records SQL."""
@@ -954,19 +959,22 @@ def status_http_server():
     Yields ``(base_url, state)``; set ``state["code"]`` to pick the status the
     next request gets. Loopback only, so this is not a ``network`` test.
     """
-    state = {"code": 404}
+    state = {"code": 404, "body": b'{"error": ["boom"]}', "headers": {}, "requests": []}
 
     class _Handler(http.server.BaseHTTPRequestHandler):
         def _respond(self, body=b""):
+            state["requests"].append(self.path)
             self.send_response(state["code"])
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            for name, value in state["headers"].items():
+                self.send_header(name, value)
             self.end_headers()
             if body:
                 self.wfile.write(body)
 
         def do_GET(self):  # noqa: N802 - http.server API
-            self._respond(b'{"error": ["boom"]}')
+            self._respond(state["body"])
 
         def do_HEAD(self):  # noqa: N802 - http.server API
             self._respond()
@@ -1009,7 +1017,13 @@ class TestStatusFromDuckdbError:
 
 
 class TestFatalStatusError:
-    """Which statuses are fatal, and which are the retryable class."""
+    """Which classified failures are fatal, and which are the retryable class."""
+
+    _EXC = RuntimeError("IO Error: Could not open GDAL dataset")
+
+    @staticmethod
+    def _status(code, **kwargs):
+        return carto_module._CartoStatus(code, False, **kwargs)
 
     @pytest.mark.parametrize(
         ("status", "expected"),
@@ -1022,15 +1036,55 @@ class TestFatalStatusError:
         ],
     )
     def test_client_errors_are_fatal(self, status, expected):
-        error = _fatal_status_error(status, "my_table")
+        error = _fatal_status_error(self._status(status), "my_table", "GeoJSON", self._EXC)
         assert error is not None
         assert expected in str(error)
         assert "my_table" in str(error)
 
-    @pytest.mark.parametrize("status", [None, 200, 429, 500, 502, 503, 504])
+    @pytest.mark.parametrize("status", [None, 408, 429, 500, 502, 503, 504])
     def test_transient_and_absent_statuses_are_retryable(self, status):
-        """No status at all -- connection refused, DNS -- is the retryable class."""
-        assert _fatal_status_error(status, "my_table") is None
+        """No status at all -- connection refused, DNS -- is the retryable class.
+
+        408 is the server asking the client to resend (RFC 9110); it sits with
+        429, not with the 4xx that no retry can change.
+        """
+        assert _fatal_status_error(self._status(status), "my_table", "GeoJSON", self._EXC) is None
+
+    def test_a_2xx_probe_means_the_response_not_the_server_is_the_problem(self):
+        """The server is fine and the parse failed: retrying fetches the same bytes.
+
+        The first version retried this three times, warning ``Carto returned
+        HTTP 200 ... retrying`` each time -- a sentence no user can act on.
+        """
+        error = _fatal_status_error(self._status(200), "my_table", "GeoJSON", self._EXC)
+        assert error is not None
+        assert "HTTP 200" in str(error)
+        assert "could not be read as GeoJSON" in str(error)
+        assert "GDAL dataset" in str(error), "the local error is the actionable part"
+
+    def test_a_4xx_quotes_cartos_own_explanation(self):
+        detail = 'column "foo" does not exist'
+        error = _fatal_status_error(
+            self._status(400, detail=detail), "my_table", "GeoJSON", self._EXC
+        )
+        assert error is not None
+        assert "HTTP 400" in str(error)
+        assert detail in str(error)
+
+    def test_a_local_failure_is_fatal_and_says_it_is_local(self):
+        status = carto_module._CartoStatus(None, False, local=True)
+        error = _fatal_status_error(status, "my_table", "csv", MemoryError("boom"))
+        assert error is not None
+        assert "local failure" in str(error)
+
+    def test_the_url_in_the_underlying_error_is_sanitized(self):
+        """DuckDB's text names the request URL, api_key and all."""
+        exc = RuntimeError(
+            "IO Error: Could not open GDAL dataset at: "
+            "https://x.carto.com/api/v2/sql?q=SELECT%201&api_key=SUPERSECRET"
+        )
+        error = _fatal_status_error(self._status(200), "t", "GeoJSON", exc)
+        assert "SUPERSECRET" not in str(error)
 
 
 class TestFailureClassificationIgnoresTheUsersSql:
@@ -1219,6 +1273,176 @@ class TestFailureClassificationUsesTheHttpStatus:
             )
 
         assert conn.attempts == 3
+
+    def test_the_probe_is_one_request_per_failed_attempt(self, monkeypatch, status_http_server):
+        """Cost claim, pinned: a retryable failure costs one probe per attempt, no more."""
+        base_url, state = status_http_server
+        state["code"] = 503
+        conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+
+        with pytest.raises(CartoError):
+            _fetch_with_retry(
+                url=base_url,
+                table_name="t",
+                sql="SELECT 1",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert conn.attempts == 3
+        assert len(state["requests"]) == 3, state["requests"]
+
+    def test_a_400_quotes_cartos_explanation_and_fails_fast(self, monkeypatch, status_http_server):
+        """The most common *user* error: bad SQL. Carto says why; so must gpio."""
+        base_url, state = status_http_server
+        state["code"] = 400
+        state["body"] = b'{"error": ["column \\"foo\\" does not exist"]}'
+        conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+
+        with pytest.raises(CartoError) as excinfo:
+            _fetch_with_retry(
+                url=base_url,
+                table_name="t",
+                sql="SELECT foo FROM t",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert conn.attempts == 1
+        assert "HTTP 400" in str(excinfo.value)
+        assert 'column "foo" does not exist' in str(excinfo.value)
+
+    def test_a_200_from_the_probe_is_fatal_not_retried(self, monkeypatch, status_http_server):
+        """The server is fine; the parse failed. Retrying fetches the same bytes."""
+        base_url, state = status_http_server
+        state["code"] = 200
+        state["body"] = b"this is not GeoJSON"
+        conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+        warnings: list[str] = []
+        monkeypatch.setattr(carto_module, "warn", warnings.append)
+
+        with pytest.raises(CartoError) as excinfo:
+            _fetch_with_retry(
+                url=base_url,
+                table_name="t",
+                sql="SELECT 1",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert conn.attempts == 1
+        assert "HTTP 200" in str(excinfo.value) and "could not be read" in str(excinfo.value)
+        assert warnings == [], "no 'Carto returned HTTP 200 ... retrying'"
+
+    def test_a_429_honours_retry_after(self, monkeypatch, status_http_server):
+        base_url, state = status_http_server
+        state["code"] = 429
+        state["headers"] = {"Retry-After": "3"}
+        conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+        slept: list[float] = []
+        monkeypatch.setattr(carto_module.time, "sleep", slept.append)
+
+        with pytest.raises(CartoError):
+            _fetch_with_retry(
+                url=base_url,
+                table_name="t",
+                sql="SELECT 1",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert conn.attempts == 3
+        assert slept == [3.0, 3.0], "the server's Retry-After beats the shorter backoff"
+
+    def test_a_data_request_that_ran_out_the_clock_is_a_timeout_and_is_not_probed(
+        self, monkeypatch
+    ):
+        """S2-1 of the review: the --limit hint was lost whenever the server answered headers.
+
+        Known from the clock, not the message: an attempt that ran for the whole
+        ``--timeout`` before failing timed out. And it is not probed -- the probe
+        would re-run the query that was too heavy the first time.
+        """
+
+        class _SlowConnection(_AttemptCountingConnection):
+            def execute(self, sql, *args, **kwargs):
+                if sql.lstrip().upper().startswith("SELECT"):
+                    time.sleep(0.05)
+                return super().execute(sql, *args, **kwargs)
+
+        conn = _SlowConnection(RuntimeError("IO Error: Connection timeout: HTTP GET took too long"))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+
+        def _no_probe(*args, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("a timed-out attempt must not re-run the query as a probe")
+
+        monkeypatch.setattr(carto_module, "_probe_request_status", _no_probe)
+
+        with pytest.raises(CartoError, match="timed out after 3 attempts.*--limit"):
+            _fetch_with_retry(
+                url="http://127.0.0.1:1/api/v2/sql",
+                table_name="t",
+                sql="SELECT * FROM t",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=0.01,
+            )
+
+        assert conn.attempts == 3
+
+    def test_a_local_failure_is_fatal_at_once_and_not_probed(self, monkeypatch):
+        """Out of memory on this machine is not a Carto problem and not retryable."""
+        import duckdb
+
+        conn = _AttemptCountingConnection(duckdb.OutOfMemoryException("Out of Memory Error"))
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+
+        def _no_probe(*args, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("a local failure has no status to ask for")
+
+        monkeypatch.setattr(carto_module, "_probe_request_status", _no_probe)
+
+        with pytest.raises(CartoError, match="local failure"):
+            _fetch_with_retry(
+                url="http://127.0.0.1:1/api/v2/sql",
+                table_name="t",
+                sql="SELECT * FROM t",
+                max_retries=3,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert conn.attempts == 1
+
+    def test_the_exhausted_retries_message_does_not_leak_the_api_key(self, monkeypatch):
+        conn = _AttemptCountingConnection(
+            RuntimeError(
+                "IO Error: Could not open GDAL dataset at: "
+                "http://127.0.0.1:1/api/v2/sql?q=SELECT%201&format=GeoJSON&api_key=SUPERSECRET"
+            )
+        )
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+
+        with pytest.raises(CartoError) as excinfo:
+            _fetch_with_retry(
+                url="http://127.0.0.1:1/api/v2/sql",
+                table_name="t",
+                sql="SELECT 1",
+                api_key="SUPERSECRET",
+                max_retries=2,
+                retry_delay=0.01,
+                timeout=5,
+            )
+
+        assert "SUPERSECRET" not in str(excinfo.value)
 
     def test_a_probe_that_cannot_answer_is_retryable(self, monkeypatch):
         """An unusable URL breaks the probe itself; that means 'no status'."""
