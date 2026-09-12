@@ -239,8 +239,12 @@ def get_parquet_metadata(parquet_file, verbose=False):
         # Create a simple object that mimics PyArrow schema for basic usage
         schema = _DuckDBSchemaWrapper(schema_info)
     else:
-        pf = pq.ParquetFile(file_to_check)
-        schema = pf.schema_arrow
+        # Closed before returning, not left to the collector. `check compression
+        # --fix` and `check row-group --fix` call this on the file they then
+        # rewrite in place, and Windows refuses to rename over a path this
+        # process still holds open (#1032).
+        with pq.ParquetFile(file_to_check) as pf:
+            schema = pf.schema_arrow
 
     if verbose and kv_metadata:
         debug("\nParquet metadata key-value pairs:")

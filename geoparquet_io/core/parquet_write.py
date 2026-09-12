@@ -319,8 +319,11 @@ def _plain_copy_to(
     if verbose:
         import pyarrow.parquet as pq
 
-        pf = pq.ParquetFile(output_path)
-        success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
+        # Closed before the caller moves or uploads this file: `--verbose` must
+        # not be the difference between a fix that lands and one that dies on
+        # `Could not move file: Access is denied` (#1023, #1032).
+        with pq.ParquetFile(output_path) as pf:
+            success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
 
 
 def _prune_metadata_to_output_columns(

@@ -52,10 +52,12 @@ def _resolve_local_path(parquet_file: str) -> str:
 
 def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
     """Get key-value metadata using PyArrow (fast path for local files)."""
-    pf = None
     try:
-        pf = pq.ParquetFile(parquet_file)
-        metadata = pf.metadata.metadata
+        # Closed on exit, not left to the collector: an in-place `check --fix`
+        # renames over this file next, and Windows refuses while a reader holds
+        # it (#1032).
+        with pq.ParquetFile(parquet_file) as pf:
+            metadata = pf.metadata.metadata
         return dict(metadata) if metadata else {}
     except Exception as e:
         error_msg = str(e)
@@ -66,17 +68,13 @@ def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
                 f"Hint: Use 'gpio convert geoparquet' to convert other formats."
             ) from e
         raise GeoParquetError(f"Cannot read file: {parquet_file}\n{error_msg}") from e
-    finally:
-        # Explicitly delete ParquetFile to release file handle (Windows compatibility)
-        del pf
 
 
 def _pyarrow_get_geo_metadata(parquet_file: str) -> dict | None:
     """Get and parse 'geo' metadata using PyArrow (fast path for local files)."""
-    pf = None
     try:
-        pf = pq.ParquetFile(parquet_file)
-        metadata = pf.metadata.metadata
+        with pq.ParquetFile(parquet_file) as pf:
+            metadata = pf.metadata.metadata
         if metadata and b"geo" in metadata:
             return json.loads(metadata[b"geo"].decode("utf-8"))
         return None
@@ -93,9 +91,6 @@ def _pyarrow_get_geo_metadata(parquet_file: str) -> dict | None:
                 f"Hint: Use 'gpio convert' to convert other formats to GeoParquet."
             ) from e
         raise GeoParquetError(f"Cannot read file: {parquet_file}\n{error_msg}") from e
-    finally:
-        # Explicitly delete ParquetFile to release file handle (Windows compatibility)
-        del pf
 
 
 def _pyarrow_get_file_metadata(parquet_file: str) -> dict:
@@ -118,11 +113,10 @@ def _pyarrow_get_schema_info(parquet_file: str) -> list[dict] | None:
     Returns list of dicts matching DuckDB's parquet_schema() format,
     or None if PyArrow cannot handle the file (e.g., unsupported CRS format).
     """
-    pf = None
     try:
-        pf = pq.ParquetFile(parquet_file)
-        schema = pf.schema_arrow
-        parquet_schema = pf.schema  # Physical Parquet schema
+        with pq.ParquetFile(parquet_file) as pf:
+            schema = pf.schema_arrow
+            parquet_schema = pf.schema  # Physical Parquet schema
         result = []
 
         # Build a map from column name to Parquet physical schema for logical type lookup
@@ -218,9 +212,6 @@ def _pyarrow_get_schema_info(parquet_file: str) -> list[dict] | None:
         raise GeoParquetError(f"Cannot read schema: {parquet_file}\n{str(e)}") from e
     except Exception as e:
         raise GeoParquetError(f"Cannot read schema: {parquet_file}\n{str(e)}") from e
-    finally:
-        # Explicitly delete ParquetFile to release file handle (Windows compatibility)
-        del pf
 
 
 def _format_geometry_type_crs(crs) -> str:

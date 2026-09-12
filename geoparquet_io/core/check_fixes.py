@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
+import contextlib
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import duckdb
 
@@ -19,7 +22,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
-from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
+from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.hilbert_order import hilbert_order
 from geoparquet_io.core.logging_config import debug, info, progress
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
@@ -27,7 +30,6 @@ from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
     needs_httpfs,
-    remote_write_context,
     setup_aws_profile_if_needed,
 )
 
@@ -84,6 +86,102 @@ from geoparquet_io.core.remote import (
 # `resolve_output_geoparquet_version`).
 
 
+@contextmanager
+def _staged_output(output_file: str) -> Iterator[str]:
+    """The path a rewrite writes to, put over *output_file* once it is closed.
+
+    A ``COPY`` whose destination already exists is not a plain write: DuckDB
+    writes ``tmp_<name>`` beside it and then *moves* that onto the destination.
+    Every ``--fix`` here defaults to rewriting the file in place, so the file
+    DuckDB moved over was the file the same statement was reading, and nothing
+    but the scheduler ordered the release of the scan handle against the move.
+    POSIX does not care. Windows refuses to rename over a path any handle still
+    holds open: ``IO Error: Could not move file: Access is denied.``, in some
+    runs of the same commit and not others (#1032).
+
+    So the rule here is *any existing local destination* is staged -- not only
+    one that is the input. That is stronger than the ``is_same_file_path`` test
+    the rest of the module asks, on purpose: the hazard is DuckDB moving over an
+    existing file, whichever file it is, and it cannot be defeated by two
+    spellings of one path. The swap is gpio's own ``os.replace()``, after the
+    caller has closed its connection and every reader the write opened.
+
+    A destination that does not exist yet needs none of it. Neither does a
+    remote one: ``write_parquet_with_metadata`` stages a remote output locally
+    and uploads it, and there is no file on this machine to rename over.
+    """
+    if is_remote_url(output_file) or not os.path.exists(output_file):
+        yield output_file
+        return
+
+    staging = _staging_path_beside(output_file)
+    try:
+        yield staging
+        # The rewrite takes the original's mode: DuckDB created the staging
+        # file from the umask, and a 0600 file should not come out 0644.
+        with contextlib.suppress(OSError):
+            shutil.copymode(output_file, staging)
+        # os.replace() is atomic on POSIX and Windows for two paths on one
+        # filesystem, which _staging_path_beside() guarantees. The destination
+        # is never unlinked or truncated first, so a failure here leaves the
+        # original intact (#959).
+        os.replace(staging, output_file)
+    finally:
+        # Gone after a successful replace. Still here after a failed write or a
+        # failed move -- and discarded either way: the untouched original is the
+        # good copy, and a dot-prefixed leftover in the user's data directory
+        # would be invisible to `ls` and accumulate. Cleanup must not mask the
+        # error that got us here.
+        if os.path.exists(staging):
+            with contextlib.suppress(OSError):
+                os.remove(staging)
+
+
+def _rewrite_through_staging(
+    parquet_file: str,
+    output_file: str,
+    query: str,
+    *,
+    verbose: bool,
+    profile: str | None,
+    geoparquet_version: str | None = None,
+    original_metadata: dict | None = None,
+) -> None:
+    """Run *query* over *parquet_file* and leave the result at *output_file*.
+
+    The one rewrite the three ``COPY``-based fixes share: staged output, one
+    DuckDB connection closed before the swap, and the input named as the write
+    facade's witness.
+    """
+    with _staged_output(output_file) as destination:
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
+        try:
+            write_parquet_with_metadata(
+                con=con,
+                query=query,
+                output_file=destination,
+                original_metadata=original_metadata,
+                compression="ZSTD",
+                compression_level=15,
+                row_group_rows=DEFAULT_ROW_GROUP_ROWS,
+                verbose=verbose,
+                profile=profile,
+                geoparquet_version=geoparquet_version,
+                # The rows come from `parquet_file` -- which under
+                # `check all --fix` is the previous fix's scratch file, not the
+                # user's input, and the witness has to be the file actually
+                # read (#1001).
+                input_file=parquet_file,
+            )
+        except duckdb.IOException as e:
+            if is_remote_url(parquet_file):
+                hints = get_remote_error_hint(str(e), parquet_file)
+                raise RemoteAccessError(parquet_file, f"{hints}\n\nOriginal error: {str(e)}") from e
+            raise
+        finally:
+            con.close()
+
+
 def fix_compression(
     parquet_file, output_file, verbose=False, profile=None, geoparquet_version=None
 ):
@@ -102,29 +200,8 @@ def fix_compression(
     if verbose:
         debug("Applying ZSTD compression...")
 
-    # Handle in-place operations: use temp file if input == output
-    import tempfile
-    from pathlib import Path
-
-    actual_output = output_file
-    temp_output_file = None
-    is_inplace = parquet_file == output_file
-    is_remote_output = is_remote_url(output_file)
-
-    if is_inplace:
-        # In-place operation: write to temp file first, then move/upload
-        fd, temp_output_file = tempfile.mkstemp(suffix=".parquet")
-        os.close(fd)
-        os.unlink(temp_output_file)
-        actual_output = temp_output_file
-    elif output_file and not is_remote_output and Path(output_file).exists():
-        # Different local files: safe to delete output
-        Path(output_file).unlink()
-
     # Setup AWS profile if needed
-    setup_aws_profile_if_needed(
-        profile, parquet_file, actual_output if not is_remote_output else output_file
-    )
+    setup_aws_profile_if_needed(profile, parquet_file, output_file)
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
@@ -134,57 +211,18 @@ def fix_compression(
     # from (#1001).
     original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
-    # Read and rewrite with ZSTD compression
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
+    # Preserve row order from input file (important after Hilbert sorting)
+    _rewrite_through_staging(
+        parquet_file,
+        output_file,
+        f"SELECT * FROM read_parquet({sql_path(raw_url)}, hive_partitioning=false)",
+        verbose=verbose,
+        profile=profile,
+        geoparquet_version=geoparquet_version,
+        original_metadata=original_metadata,
+    )
 
-    try:
-        # Preserve row order from input file (important after Hilbert sorting)
-        query = f"SELECT * FROM read_parquet({sql_path(raw_url)}, hive_partitioning=false)"
-
-        write_parquet_with_metadata(
-            con=con,
-            query=query,
-            output_file=actual_output,
-            original_metadata=original_metadata,
-            compression="ZSTD",
-            compression_level=15,
-            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
-            verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            # The rows come from `parquet_file` -- which under `check all --fix`
-            # is the previous fix's scratch file, not the user's input, and the
-            # witness has to be the file actually read (#1001).
-            input_file=parquet_file,
-        )
-
-        # If we used a temp file for in-place operation, move/upload it to final location
-        if temp_output_file:
-            if is_remote_output:
-                # Remote output: upload temp file
-                with remote_write_context(output_file, profile=profile) as remote_path:
-                    import shutil
-
-                    shutil.copy2(temp_output_file, remote_path)
-                # Clean up temp file
-                Path(temp_output_file).unlink()
-            else:
-                # Local output: move temp file
-                import shutil
-
-                if Path(output_file).exists():
-                    Path(output_file).unlink()
-                shutil.move(actual_output, output_file)
-
-        return {"fix_applied": "Re-compressed with ZSTD", "success": True}
-    except duckdb.IOException as e:
-        con.close()
-        if is_remote_url(parquet_file):
-            hints = get_remote_error_hint(str(e), parquet_file)
-            raise RemoteAccessError(parquet_file, f"{hints}\n\nOriginal error: {str(e)}") from e
-        raise
-    finally:
-        con.close()
+    return {"fix_applied": "Re-compressed with ZSTD", "success": True}
 
 
 def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
@@ -278,43 +316,27 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
     else:
         gp_version = "1.1"  # Fallback, shouldn't happen for removal
 
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
+    # Select all columns EXCEPT the bbox column. The column name is read from
+    # the file's own schema (see ``_detect_bbox_column_from_table``), so it is
+    # attacker-controlled and must be quoted as an identifier -- a bare
+    # interpolation lets a crafted column name inject arbitrary SQL into the
+    # projection (#918).
+    #
+    # `original_metadata=None`: don't preserve old metadata with bbox covering.
+    # The CRS still survives, from `input_file` -- `gp_version` above answers
+    # the version question from the same file, but a native-geo-only input keeps
+    # its CRS only in the Parquet logical type, so without the witness the
+    # rewrite restates whatever DuckDB read and declares nothing (#1001).
+    _rewrite_through_staging(
+        parquet_file,
+        output_file,
+        f"SELECT * EXCLUDE ({quote_identifier(bbox_column_name)}) FROM {sql_path(raw_url)}",
+        verbose=verbose,
+        profile=profile,
+        geoparquet_version=gp_version,
+    )
 
-    try:
-        # Select all columns EXCEPT the bbox column. The column name is read from
-        # the file's own schema (see ``_detect_bbox_column_from_table``), so it is
-        # attacker-controlled and must be quoted as an identifier -- a bare
-        # interpolation lets a crafted column name inject arbitrary SQL into the
-        # projection (#918).
-        query = f"SELECT * EXCLUDE ({quote_identifier(bbox_column_name)}) FROM {sql_path(raw_url)}"
-
-        write_parquet_with_metadata(
-            con=con,
-            query=query,
-            output_file=output_file,
-            original_metadata=None,  # Don't preserve old metadata with bbox covering
-            compression="ZSTD",
-            compression_level=15,
-            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
-            verbose=verbose,
-            profile=profile,
-            geoparquet_version=gp_version,
-            # The witness for the CRS. `gp_version` above answers the version
-            # question from the same file, but a native-geo-only input keeps its
-            # CRS only in the Parquet logical type, so without this the rewrite
-            # restates whatever DuckDB read and declares nothing (#1001).
-            input_file=parquet_file,
-        )
-
-        return {"fix_applied": f"Removed bbox column '{bbox_column_name}'", "success": True}
-    except duckdb.IOException as e:
-        con.close()
-        if is_remote_url(parquet_file):
-            hints = get_remote_error_hint(str(e), parquet_file)
-            raise RemoteAccessError(parquet_file, f"{hints}\n\nOriginal error: {str(e)}") from e
-        raise
-    finally:
-        con.close()
+    return {"fix_applied": f"Removed bbox column '{bbox_column_name}'", "success": True}
 
 
 def fix_bbox_all(
@@ -366,24 +388,16 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     if verbose:
         debug("Applying Hilbert spatial ordering (this may take a while)...")
 
-    # An in-place fix has to be routed through a temp file: hilbert_order() reads
-    # the whole input while writing, so handle_output_overwrite() refuses an
-    # output that resolves to its own input, and `overwrite=True` does not lift
-    # that. This function was the only fix_* that handed the path straight
-    # through, which is why `check spatial --fix` alone could not repair a file
-    # in place; fix_compression() and fix_bbox_all() already route the same way
-    # (#941).
-    actual_output = output_file
-    temp_output_file = None
-    moved_into_place = False
-    if is_same_file_path(parquet_file, output_file):
-        temp_output_file = _staging_path_beside(output_file)
-        actual_output = temp_output_file
-
-    try:
+    # An in-place fix has to be routed through a staging file: hilbert_order()
+    # reads the whole input while writing, so handle_output_overwrite() refuses
+    # an output that resolves to its own input, and `overwrite=True` does not
+    # lift that (#941). Same staging as the three COPY-based fixes; a remote
+    # in-place fix is not staged, so hilbert_order's own refusal is what the
+    # user sees rather than a half-finished upload.
+    with _staged_output(output_file) as destination:
         hilbert_order(
             input_parquet=parquet_file,
-            output_parquet=actual_output,
+            output_parquet=destination,
             add_bbox_flag=False,  # bbox should already be added if needed
             verbose=verbose,
             compression="ZSTD",
@@ -392,17 +406,6 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
             profile=profile,
             overwrite=True,  # check --fix manages file lifecycle
         )
-
-        if temp_output_file:
-            _move_temp_output_into_place(temp_output_file, output_file, profile)
-            moved_into_place = True
-    finally:
-        # Only ever discard the rewrite when it did NOT reach the destination.
-        # Deleting it unconditionally destroyed the only good copy of the data
-        # whenever the move failed -- ENOSPC, a read-only mount, a quota -- and
-        # under `--fix --no-backup` there is no .bak to fall back on (#959).
-        if temp_output_file and not moved_into_place and os.path.exists(temp_output_file):
-            os.remove(temp_output_file)
 
     return {"fix_applied": "Applied Hilbert spatial ordering", "success": True}
 
@@ -415,29 +418,16 @@ def _staging_path_beside(output_file):
     multi-GB in-place fix exhaust a tmpfs the destination would have
     accommodated, and degrades the move back into a copy+unlink -- which is what
     makes it non-atomic. Co-locating keeps ``os.replace()`` a rename. The dot
-    prefix keeps the in-flight file out of the ``*.parquet`` globs that walk a
-    partition directory.
+    prefix keeps the in-flight file out of ``glob.glob("*.parquet")`` and out
+    of a plain ``ls`` -- not out of ``pathlib.Path.glob``, which matches
+    dotfiles, so an orphan left by a hard kill is still visible to gpio's own
+    directory walks.
     """
     directory = None if is_remote_url(output_file) else (os.path.dirname(output_file) or ".")
     fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".gpio-fix-", suffix=".parquet")
     os.close(fd)
     os.unlink(temp_path)
     return temp_path
-
-
-def _move_temp_output_into_place(temp_output_file, output_file, profile):
-    """Put a temp-file rewrite back over the path it was produced from."""
-    if is_remote_url(output_file):
-        with remote_write_context(output_file, profile=profile) as remote_path:
-            shutil.copy2(temp_output_file, remote_path)
-        os.remove(temp_output_file)
-        return
-
-    # os.replace() is atomic on POSIX and Windows for two paths on one
-    # filesystem, which _staging_path_beside() guarantees. The destination is
-    # never unlinked or truncated first, so a failure here leaves the original
-    # file intact and the rewrite still sitting in the temp file (#959).
-    os.replace(temp_output_file, output_file)
 
 
 def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geoparquet_version=None):
@@ -466,34 +456,17 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
     original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
     # Read and rewrite with optimal row groups
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
+    _rewrite_through_staging(
+        parquet_file,
+        output_file,
+        f"SELECT * FROM {sql_path(raw_url)}",
+        verbose=verbose,
+        profile=profile,
+        geoparquet_version=geoparquet_version,
+        original_metadata=original_metadata,
+    )
 
-    try:
-        query = f"SELECT * FROM {sql_path(raw_url)}"
-
-        write_parquet_with_metadata(
-            con=con,
-            query=query,
-            output_file=output_file,
-            original_metadata=original_metadata,
-            compression="ZSTD",
-            compression_level=15,
-            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
-            verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            input_file=parquet_file,
-        )
-
-        return {"fix_applied": "Optimized row groups", "success": True}
-    except duckdb.IOException as e:
-        con.close()
-        if is_remote_url(parquet_file):
-            hints = get_remote_error_hint(str(e), parquet_file)
-            raise RemoteAccessError(parquet_file, f"{hints}\n\nOriginal error: {str(e)}") from e
-        raise
-    finally:
-        con.close()
+    return {"fix_applied": "Optimized row groups", "success": True}
 
 
 def get_geoparquet_version_from_check_results(check_results):

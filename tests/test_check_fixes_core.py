@@ -2,7 +2,6 @@
 
 import os
 import shutil
-from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -12,7 +11,6 @@ import pytest
 
 from geoparquet_io.core import check_fixes
 from geoparquet_io.core.check_fixes import (
-    _move_temp_output_into_place,
     fix_bbox_column,
     fix_bbox_metadata,
     fix_bbox_removal,
@@ -477,11 +475,11 @@ class TestFixSpatialOrdering:
     def test_a_failed_move_leaves_the_original_intact(self, places_test_file, temp_output_dir):
         """A move that fails must not take the only good copy of the data with it.
 
-        The whole destructive step lives in ``_move_temp_output_into_place``, so
-        if it raises, the ``finally`` must not go on to delete the rewrite *and*
-        leave the caller with nothing. Under ``--fix --no-backup`` there is no
-        ``.bak`` to fall back on, and a direct caller of this function has no
-        ``.bak`` concept at all.
+        The whole destructive step is the ``os.replace()`` inside
+        ``_staged_output``, so if it raises, the original -- never unlinked --
+        is exactly as it was. Under ``--fix --no-backup`` there is no ``.bak``
+        to fall back on, and a direct caller of this function has no ``.bak``
+        concept at all.
         """
         target = os.path.join(temp_output_dir, "precious.parquet")
         shutil.copy2(places_test_file, target)
@@ -495,77 +493,14 @@ class TestFixSpatialOrdering:
 
         with (
             mock.patch.object(check_fixes, "hilbert_order", side_effect=copy_into_place),
-            mock.patch.object(check_fixes, "_move_temp_output_into_place", side_effect=no_space),
+            mock.patch.object(os, "replace", side_effect=no_space),
             pytest.raises(OSError, match="No space left on device"),
         ):
             fix_spatial_ordering(target, target, verbose=False)
 
         assert os.path.exists(target), "the in-place fix destroyed the original file"
         assert Path(target).read_bytes() == original_bytes
-
-
-class TestMoveTempOutputIntoPlace:
-    """The temp-file rewrite lands on both local and remote destinations."""
-
-    def test_local_destination_is_replaced(self, tmp_path):
-        temp_file = tmp_path / "temp.parquet"
-        temp_file.write_bytes(b"new")
-        destination = tmp_path / "dest.parquet"
-        destination.write_bytes(b"old")
-
-        _move_temp_output_into_place(str(temp_file), str(destination), None)
-
-        assert destination.read_bytes() == b"new"
-        assert not temp_file.exists()
-
-    def test_a_failed_replace_does_not_destroy_the_destination(self, tmp_path):
-        """ENOSPC mid-move must leave the destination exactly as it was.
-
-        Unlinking the destination and *then* moving leaves a window in which an
-        ``OSError`` -- ENOSPC (likely precisely when fixing a large file in
-        place), a read-only mount, a quota, EXDEV -- destroys the original with
-        the rewrite still only in the temp file. ``os.replace()`` is atomic on
-        POSIX and Windows for two paths on one filesystem, which co-locating the
-        temp guarantees, so there is no such window.
-        """
-        temp_file = tmp_path / "temp.parquet"
-        temp_file.write_bytes(b"new")
-        destination = tmp_path / "dest.parquet"
-        destination.write_bytes(b"old")
-
-        def no_space(*_args, **_kwargs):
-            raise OSError(28, "No space left on device")
-
-        # Whichever primitive puts the rewrite back, a failure must be survivable.
-        with (
-            mock.patch("os.replace", side_effect=no_space),
-            mock.patch("shutil.move", side_effect=no_space),
-            pytest.raises(OSError, match="No space left on device"),
-        ):
-            _move_temp_output_into_place(str(temp_file), str(destination), None)
-
-        assert destination.exists(), "the destination was destroyed by a failed move"
-        assert destination.read_bytes() == b"old"
-        assert temp_file.read_bytes() == b"new"
-
-    def test_remote_destination_is_uploaded(self, tmp_path):
-        temp_file = tmp_path / "temp.parquet"
-        temp_file.write_bytes(b"new")
-        staged = tmp_path / "staged.parquet"
-
-        @contextmanager
-        def fake_remote_write_context(path, profile=None):
-            yield str(staged)
-
-        with (
-            mock.patch.object(check_fixes, "is_remote_url", return_value=True),
-            mock.patch.object(
-                check_fixes, "remote_write_context", side_effect=fake_remote_write_context
-            ),
-        ):
-            _move_temp_output_into_place(str(temp_file), "s3://bucket/dest.parquet", "myprofile")
-
-        assert staged.read_bytes() == b"new"
+        assert list(Path(temp_output_dir).glob(".gpio-fix-*")) == []
 
 
 class TestInPlaceFixOperations:
