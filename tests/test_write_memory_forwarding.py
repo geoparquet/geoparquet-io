@@ -730,7 +730,16 @@ class TestStdoutStreamingIgnoresMemoryLimit:
         self, places_test_file, capsys
     ):
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.logging_config import setup_cli_logging
         from geoparquet_io.core.stream_io import write_output
+
+        # The warning reaches stderr only through the CLI stream handler, and
+        # this test calls a core function rather than the CLI -- so it has to
+        # install that handler itself. It used to inherit one another test left
+        # on the process-global package logger, which made it pass or fail on
+        # the xdist schedule; `tests/conftest.py` now hands the logger back
+        # after every test, so the dependency has to be stated here.
+        setup_cli_logging(verbose=False, use_colors=False)
 
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
