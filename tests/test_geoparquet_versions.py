@@ -535,7 +535,22 @@ class TestCheckBboxVersionAware:
 
 
 class TestCheckBboxFix:
-    """Test bbox fix functionality for different versions."""
+    """Test bbox fix functionality for different versions.
+
+    Each test below also runs the shared ``--fix`` oracle (WP-1 of #1018) over
+    the file the fix wrote: ``check spec`` clean, the 100 rows preserved, and the
+    CRS read from the ``geo`` block and the Parquet logical type separately --
+    which for a native-geo-only input means the logical type alone, the one place
+    that shape has to keep it (#1001).
+    """
+
+    @staticmethod
+    def assert_removal_output_is_sound(path):
+        from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
+
+        assert_fix_output_is_sound(
+            path, expected_rows=100, expected_crs=CRS84, expects_covering=False
+        )
 
     def test_fix_removes_bbox_from_parquet_geo_only(
         self, fields_geom_type_only_file, temp_output_file
@@ -562,6 +577,7 @@ class TestCheckBboxFix:
         fixed_result = check_metadata_and_bbox(temp_output_file, verbose=False, return_results=True)
         assert fixed_result["has_bbox_column"] is False
         assert fixed_result["passed"] is True
+        self.assert_removal_output_is_sound(temp_output_file)
 
     def test_fix_preserves_native_geo_type(self, fields_geom_type_only_file, temp_output_file):
         """Bbox removal should preserve native Parquet Geometry type."""
@@ -575,6 +591,7 @@ class TestCheckBboxFix:
         )
 
         assert has_native_geo_types(temp_output_file)
+        self.assert_removal_output_is_sound(temp_output_file)
 
     def test_fix_preserves_data(self, fields_geom_type_only_file, temp_output_file):
         """Bbox removal should preserve all other data."""
@@ -601,6 +618,7 @@ class TestCheckBboxFix:
         con.close()
 
         assert fixed_count == original_count
+        self.assert_removal_output_is_sound(temp_output_file)
 
     def test_cli_check_bbox_fix_removes_bbox(self, fields_geom_type_only_file, temp_output_file):
         """CLI check bbox --fix should remove bbox from parquet-geo-only file."""
@@ -625,6 +643,7 @@ class TestCheckBboxFix:
 
         fixed_result = check_metadata_and_bbox(temp_output_file, verbose=False, return_results=True)
         assert fixed_result["has_bbox_column"] is False
+        self.assert_removal_output_is_sound(temp_output_file)
 
     def test_fix_preserves_parquet_geo_only_format(
         self, fields_geom_type_only_file, temp_output_file
@@ -642,6 +661,7 @@ class TestCheckBboxFix:
         # Should still be parquet-geo-only (no GeoParquet metadata)
         assert not has_geoparquet_metadata(temp_output_file)
         assert has_native_geo_types(temp_output_file)
+        self.assert_removal_output_is_sound(temp_output_file)
 
 
 class TestVersionPreservation:

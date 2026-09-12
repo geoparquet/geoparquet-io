@@ -32,6 +32,27 @@ from click.testing import CliRunner
 from geoparquet_io.cli.commands import check as cli_check
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import pmtiles as core_pmtiles
+from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
+from tests.native_geo_probes import geo_block
+
+#: ``places_test.parquet`` and everything derived from it: 766 rows, CRS84.
+PLACES_ROWS = 766
+
+
+def assert_places_output_is_sound(path, *, version, covering=True):
+    """WP-1 (#1018): whatever a guard reports, the bytes it left have to be valid.
+
+    Reporting the right filename is not the same as writing the right file, and
+    every test below that lets a real fix run now checks both.
+    """
+    assert_fix_output_is_sound(
+        path,
+        expected_rows=PLACES_ROWS,
+        expected_crs=CRS84,
+        expects_covering=covering,
+        expected_version_prefix=version,
+    )
+
 
 # (subcommand, extra args) for every command that repeats the empty-input guard.
 EMPTY_INPUT_SUBCOMMANDS = [
@@ -275,6 +296,8 @@ class TestPmtilesGeneration:
         create.assert_called_once()
         assert create.call_args.kwargs["input_path"] == str(fixed)
         assert create.call_args.kwargs["output_path"] == expected_pmtiles
+        # The file PMTiles were built from is itself a file gpio accepts.
+        assert_places_output_is_sound(fixed, version="1.0", covering=False)
 
     def test_pmtiles_failure_is_reported_without_aborting(self, places_test_file, tmp_path):
         fixed = tmp_path / "fixed.parquet"
@@ -306,6 +329,8 @@ class TestPmtilesGeneration:
         # The failure is reported per file and the run still exits cleanly.
         assert result.exit_code == 0, result.output
         assert f"PMTiles failed for {places_test_file}: tippecanoe blew up" in result.output
+        # The PMTiles step failed; the fixed parquet it was handed is still good.
+        assert_places_output_is_sound(fixed, version="1.0", covering=False)
 
 
 class TestMultiFileFixSummary:
@@ -350,6 +375,7 @@ class TestMultiFileFixSummary:
             target = poorly_ordered_partition / f"p{index}.parquet"
             assert str(target) in result.output
             assert Path(f"{target}.bak").exists()
+            assert_places_output_is_sound(target, version="1.1")
 
     def test_a_long_fix_list_is_truncated(self, capsys):
         """Past ``max_issues_shown`` the list is capped, like the issue list."""
@@ -411,6 +437,7 @@ class TestSpatialFixReporting:
         assert "Spatial ordering applied successfully!" in result.output
         assert f"Optimized file: {fixed}" in result.output
         assert fixed.exists()
+        assert_places_output_is_sound(fixed, version="1.1")
 
     def test_in_place_fix_reports_output_and_backup(self, poorly_ordered_file):
         """#941: ``--fix`` with no ``--fix-output`` rewrites the input in place.
@@ -443,6 +470,9 @@ class TestSpatialFixReporting:
         assert (
             pq.read_table(f"{poorly_ordered_file}.bak").column("fsq_place_id").to_pylist() == before
         )
+        assert_places_output_is_sound(poorly_ordered_file, version="1.1")
+        # The backup is the untouched input: still 1.0, still uncovered.
+        assert_places_output_is_sound(f"{poorly_ordered_file}.bak", version="1.0", covering=False)
 
     def test_an_aliased_fix_output_is_treated_as_an_in_place_fix(self, poorly_ordered_file):
         """``--fix-output ./same.parquet`` is in place, backup and all.
@@ -482,6 +512,7 @@ class TestSpatialFixReporting:
         after = pq.read_table(poorly_ordered_file).column("fsq_place_id").to_pylist()
         assert sorted(after) == sorted(before)
         assert after != before
+        assert_places_output_is_sound(poorly_ordered_file, version="1.1")
 
     def test_overwrite_option_exists_for_parity_with_the_other_fixes(self):
         """``check spatial`` accepts ``--overwrite``, like its fix-capable siblings."""
@@ -503,6 +534,7 @@ class TestRowGroupFixReporting:
         assert f"Backup: {poorly_ordered_file}.bak" in result.output
         # The 16 tiny row groups are consolidated into one.
         assert pq.ParquetFile(poorly_ordered_file).num_row_groups == 1
+        assert_places_output_is_sound(poorly_ordered_file, version="1.1")
 
 
 class TestBboxFixReporting:
@@ -519,6 +551,7 @@ class TestBboxFixReporting:
         assert "No fix needed - bbox is optimal!" in result.output
         # Nothing was rewritten, so no backup exists.
         assert not (tmp_path / "optimal.parquet.bak").exists()
+        assert_places_output_is_sound(target, version="1.1")
 
     def test_v1_file_gains_a_bbox_column(self, buildings_test_file, tmp_path):
         target = tmp_path / "buildings.parquet"
@@ -532,6 +565,13 @@ class TestBboxFixReporting:
         assert f"Optimized file: {target}" in result.output
         assert f"Backup: {target}.bak" in result.output
         assert "bbox" in pq.ParquetFile(target).schema_arrow.names
+        assert_fix_output_is_sound(
+            target,
+            expected_rows=42,
+            expected_crs=CRS84,
+            expects_covering=True,
+            expected_version_prefix="1.1",
+        )
 
     def test_geo_native_file_loses_its_bbox_column(self, fields_geom_type_only_file, tmp_path):
         target = tmp_path / "pgo.parquet"
@@ -546,3 +586,9 @@ class TestBboxFixReporting:
         assert f"Optimized file: {target}" in result.output
         assert f"Backup: {target}.bak" in result.output
         assert "bbox" not in pq.ParquetFile(target).schema_arrow.names
+        # A native-geo-only input stays native-geo-only: no `geo` key invented,
+        # and the CRS still read straight off the Parquet logical type.
+        assert geo_block(target) is None
+        assert_fix_output_is_sound(
+            target, expected_rows=100, expected_crs=CRS84, expects_covering=False
+        )
