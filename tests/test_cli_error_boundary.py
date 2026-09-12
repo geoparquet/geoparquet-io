@@ -46,13 +46,13 @@ def rejected_file(tmp_path):
     return str(path)
 
 
-@pytest.fixture
-def restore_log_level():
-    """``configure_verbose`` is one-way and the logger is a module global."""
-    package_logger = logging.getLogger("geoparquet_io")
-    before = package_logger.level
-    yield
-    package_logger.setLevel(before)
+# ``configure_verbose`` is one-way and the logger is a module global, so a
+# ``--verbose`` test used to hand DEBUG to whatever ran next. This file's own
+# local fixture only covered the tests below; ``tests/conftest.py`` now snapshots
+# the logger -- level, handlers and ``propagate`` -- around *every* test, because
+# the test this leak actually broke was ``test_a_duckdb_error_reaches_the_user_as
+# _an_error_line`` in this file, poisoned from another module on the same xdist
+# worker. See ``tests/test_logging_state_isolation.py``.
 
 
 def _group_raising(exc: BaseException):
@@ -336,7 +336,6 @@ class TestVerboseRestoresTheHiddenTraceback:
         ("check optimization", ["check", "optimization", "{in}"]),
     ]
 
-    @pytest.mark.usefixtures("restore_log_level")
     @pytest.mark.parametrize(("name", "argv"), COMMANDS, ids=[n for n, _ in COMMANDS])
     def test_verbose_prints_the_traceback_the_error_line_replaced(
         self, name, argv, rejected_file, tmp_path
@@ -354,7 +353,6 @@ class TestVerboseRestoresTheHiddenTraceback:
         assert "Traceback (most recent call last)" in verbose.output, verbose.output
         assert "InvalidInputException" in verbose.output
 
-    @pytest.mark.usefixtures("restore_log_level")
     def test_the_flag_raises_the_level_before_the_command_body_runs(self):
         """The mechanism, without a failure in the way: by the time any gpio
         code runs, DEBUG is already on. Nothing inside the command is asked to

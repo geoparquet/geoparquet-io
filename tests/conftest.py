@@ -39,6 +39,7 @@ duckdb.connect = _thread_limited_connect
 # ---------------------------------------------------------------------------
 import functools  # noqa: E402
 import json  # noqa: E402
+import logging  # noqa: E402
 import os  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
@@ -64,6 +65,54 @@ try:
 except ImportError:  # pragma: no cover - click < 8.2
     UNSET = object()
     CLICK_HAS_UNSET = False
+
+
+# ---------------------------------------------------------------------------
+# The package logger is process-global; a test must hand it back
+# ---------------------------------------------------------------------------
+# ``--verbose`` raises the ``geoparquet_io`` logger to DEBUG as the flag is
+# parsed (``cli.decorators.enable_verbose_logging``, #995), and
+# ``core.logging_config.configure_verbose`` is deliberately one-way -- nothing
+# lowers the level again. That is correct for a CLI, which runs one command per
+# process, and it is why the fix for this belongs here rather than in the CLI.
+#
+# Under pytest one process runs hundreds of tests, so the first ``--verbose``
+# invocation (or the first core call made with ``verbose=True``) turns DEBUG on
+# for every later test on that xdist worker. Any test that asserts on the
+# *absence* of debug output then fails depending on the schedule -- which is how
+# ``test_cli_error_boundary.py`` started failing on Windows only, with a
+# traceback that ``ErrorBoundaryGroup.invoke`` logs at DEBUG with ``exc_info``.
+#
+# The state to put back is read off ``core/logging_config.py``: ``level``,
+# ``handlers`` (``setup_cli_logging`` clears the list in place and installs its
+# own; ``_bootstrap_default_handler`` may append a ``NullHandler``) and
+# ``propagate``. There is no module-level verbosity flag -- the logger's level
+# *is* the state -- and nothing mutates a handler that was already attached, so
+# restoring the same handler objects restores their levels and formatters too.
+
+PACKAGE_LOGGER_NAME = "geoparquet_io"
+
+
+@contextmanager
+def pristine_package_logging():
+    """Hand the ``geoparquet_io`` logger back exactly as it was found."""
+    package_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
+    level = package_logger.level
+    handlers = list(package_logger.handlers)
+    propagate = package_logger.propagate
+    try:
+        yield
+    finally:
+        package_logger.setLevel(level)
+        package_logger.handlers[:] = handlers
+        package_logger.propagate = propagate
+
+
+@pytest.fixture(autouse=True)
+def _isolate_package_logging():
+    """Snapshot/restore the package logger around every test in the suite."""
+    with pristine_package_logging():
+        yield
 
 
 def walk_cli_commands(cmd, path: tuple[str, ...] = ()):
