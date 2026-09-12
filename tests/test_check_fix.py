@@ -1,4 +1,12 @@
-"""Tests for check --fix functionality."""
+"""Tests for check --fix functionality.
+
+Every test that produces a file also hands it to
+:func:`tests.fix_output_oracle.assert_fix_output_is_sound` (WP-1 of #1018). The
+per-fix assertion -- "the compression is ZSTD now", "there is a bbox column now"
+-- only proves the fix did the one thing it advertises; the oracle proves it did
+not break anything else on the way, which is the promise ``--fix`` actually
+makes.
+"""
 
 import os
 import shutil
@@ -12,6 +20,23 @@ from geoparquet_io.core.check_parquet_structure import (
     check_metadata_and_bbox,
 )
 from geoparquet_io.core.check_spatial_order import check_spatial_order
+from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
+
+#: ``places_test.parquet``: 766 rows, CRS84, GeoParquet 1.0.0, with a bbox column.
+PLACES_ROWS = 766
+#: ``buildings_test.parquet``: 42 rows, CRS84, GeoParquet 1.0.0, no bbox column.
+BUILDINGS_ROWS = 42
+
+
+def assert_places_output_is_sound(path, *, version, covering):
+    """The oracle, with the constants every places-derived fixture shares."""
+    assert_fix_output_is_sound(
+        path,
+        expected_rows=PLACES_ROWS,
+        expected_crs=CRS84,
+        expects_covering=covering,
+        expected_version_prefix=version,
+    )
 
 
 class TestCheckFixCompression:
@@ -44,6 +69,9 @@ class TestCheckFixCompression:
         final_result = check_compression(fixed_file, verbose=False, return_results=True)
         assert final_result["current_compression"] == "ZSTD"
         assert final_result["passed"] is True
+        # ...and the rewrite kept every row, the CRS in both carriers, and a
+        # `geo` block gpio's own validator accepts.
+        assert_places_output_is_sound(fixed_file, version="1.1", covering=True)
 
     def test_fix_compression_with_backup(self, places_test_file, temp_output_dir):
         """Test fixing compression with automatic backup."""
@@ -62,6 +90,9 @@ class TestCheckFixCompression:
         # Verify compression is fixed
         final_result = check_compression(test_file, verbose=False, return_results=True)
         assert final_result["current_compression"] == "ZSTD"
+        assert_places_output_is_sound(test_file, version="1.1", covering=True)
+        # The backup is the original, untouched: still 1.0, still no covering.
+        assert_places_output_is_sound(test_file + ".bak", version="1.0", covering=False)
 
     def test_fix_compression_already_optimal(self, places_test_file, temp_output_dir):
         """Test fixing when compression is already optimal."""
@@ -75,6 +106,9 @@ class TestCheckFixCompression:
 
         assert result.exit_code == 0
         assert "No fix needed" in result.output
+        # Declining to fix must also mean declining to touch: the file is
+        # exactly the 1.0 input, not a rewrite that happens to be ZSTD too.
+        assert_places_output_is_sound(zstd_file, version="1.0", covering=False)
 
 
 class TestCheckFixBbox:
@@ -109,6 +143,9 @@ class TestCheckFixBbox:
         final_result = check_metadata_and_bbox(fixed_file, verbose=False, return_results=True)
         assert final_result["has_bbox_column"] is True
         assert "bbox" in pq.read_table(fixed_file).column_names
+        # The added column is declared in a covering that resolves, and nothing
+        # else about the file moved.
+        assert_places_output_is_sound(fixed_file, version="1.1", covering=True)
 
     def test_fix_bbox_already_optimal(self, buildings_test_file, temp_output_dir):
         """Test fixing when bbox is already optimal."""
@@ -125,6 +162,7 @@ class TestCheckFixBbox:
 
         # Should report no fix needed or succeed with confirmation
         assert result.exit_code == 0 or "No fix needed" in result.output
+        assert_fix_output_is_sound(temp_file, expected_rows=BUILDINGS_ROWS, expected_crs=CRS84)
 
 
 class TestCheckFixRowGroups:
@@ -152,6 +190,8 @@ class TestCheckFixRowGroups:
         assert result.exit_code == 0
         # Small file with single row group is optimal - no fix created
         assert "No fix needed" in result.output or "optimal" in result.output.lower()
+        assert not os.path.exists(fixed_file)
+        assert_places_output_is_sound(poor_file, version="1.0", covering=False)
 
 
 class TestCheckFixSpatial:
@@ -188,6 +228,7 @@ class TestCheckFixSpatial:
         assert result.exit_code == 0
         if "No fix needed" not in result.output:
             assert os.path.exists(fixed_file)
+            assert_places_output_is_sound(fixed_file, version="1.1", covering=True)
 
 
 class TestCheckFixAll:
@@ -228,6 +269,10 @@ class TestCheckFixAll:
 
         bbox_result = check_metadata_and_bbox(fixed_file, verbose=False, return_results=True)
         assert bbox_result["has_bbox_column"] is True
+        # `check all` names the output version from its own checks, so a 1.0
+        # input is repaired as 1.0 rather than upgraded behind the user -- and
+        # 1.0 has no `covering` key to carry.
+        assert_places_output_is_sound(fixed_file, version="1.0", covering=False)
 
     def test_fix_all_with_backup(self, places_test_file, temp_output_dir):
         """Test fixing all issues with backup creation."""
@@ -247,6 +292,8 @@ class TestCheckFixAll:
         assert result.exit_code == 0
         assert os.path.exists(test_file)
         assert os.path.exists(test_file + ".bak")
+        assert_places_output_is_sound(test_file, version="1.0", covering=False)
+        assert_places_output_is_sound(test_file + ".bak", version="1.0", covering=False)
 
     def test_fix_all_no_fixes_needed(self, buildings_test_file, temp_output_dir):
         """Test check all --fix when file is already optimal."""
@@ -265,6 +312,7 @@ class TestCheckFixAll:
 
         # Should report no fixes needed or succeed
         assert result.exit_code == 0 or "No fix needed" in result.output
+        assert_fix_output_is_sound(temp_file, expected_rows=BUILDINGS_ROWS, expected_crs=CRS84)
 
 
 class TestCheckFixOptions:
@@ -285,6 +333,8 @@ class TestCheckFixOptions:
         )
 
         assert result.exit_code != 0
+        # Declined, so the file is untouched -- still the SNAPPY 1.0 input.
+        assert_places_output_is_sound(test_file, version="1.0", covering=False)
 
     def test_fix_with_custom_output(self, places_test_file, temp_output_dir):
         """Test --fix-output option."""
@@ -306,6 +356,7 @@ class TestCheckFixOptions:
         assert os.path.exists(output_file)
         assert os.path.exists(test_file)  # Original should remain
         assert not os.path.exists(test_file + ".bak")  # No backup needed
+        assert_places_output_is_sound(output_file, version="1.1", covering=True)
 
     def test_fix_preserves_original_data(self, places_test_file, temp_output_dir):
         """Test that fix preserves all original data."""
@@ -335,6 +386,7 @@ class TestCheckFixOptions:
         assert len(fixed_table) == original_row_count
         # All original columns should be present (may have added bbox)
         assert original_columns.issubset(set(fixed_table.column_names))
+        assert_places_output_is_sound(fixed_file, version="1.1", covering=True)
 
 
 class TestCheckFixMultipleFiles:
@@ -375,6 +427,7 @@ class TestCheckFixMultipleFiles:
             metadata = pq.read_metadata(file_path)
             # ZSTD compression should be applied
             assert "ZSTD" in str(metadata.row_group(0).column(0).compression)
+            assert_places_output_is_sound(file_path, version="1.1", covering=True)
 
     def test_fix_multiple_files_some_optimal(self, places_test_file, temp_output_dir):
         """Test that --fix skips optimal files and fixes only suboptimal ones."""
@@ -412,6 +465,11 @@ class TestCheckFixMultipleFiles:
         assert os.path.exists(file2 + ".bak")
         assert os.path.exists(file3 + ".bak")
 
+        # The untouched file is still the 1.0 input; the two rewrites are sound.
+        assert_places_output_is_sound(file1, version="1.0", covering=False)
+        for rewritten in (file2, file3):
+            assert_places_output_is_sound(rewritten, version="1.1", covering=True)
+
     def test_fix_multiple_files_compression(self, places_test_file, temp_output_dir):
         """Test compression --fix with multiple files."""
         partition_dir = os.path.join(temp_output_dir, "partition")
@@ -439,3 +497,4 @@ class TestCheckFixMultipleFiles:
             metadata = pq.read_metadata(file_path)
             assert "ZSTD" in str(metadata.row_group(0).column(0).compression)
             assert os.path.exists(file_path + ".bak")
+            assert_places_output_is_sound(file_path, version="1.1", covering=True)

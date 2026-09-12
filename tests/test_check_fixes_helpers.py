@@ -159,7 +159,28 @@ class TestApplyCompressionFix:
 
 
 class TestFixBboxAll:
-    """Tests for fix_bbox_all function."""
+    """Tests for fix_bbox_all function.
+
+    ``fix_bbox_all`` is the entry point ``check bbox --fix`` uses for a 1.x file,
+    so every output below is also handed the shared oracle (WP-1 of #1018):
+    ``check spec`` clean, the rows preserved, the CRS from both carriers read
+    separately, and the covering resolved against the real schema.
+    """
+
+    #: 42 rows, CRS84, GeoParquet 1.0.0, no bbox column.
+    BUILDINGS_ROWS = 42
+
+    @classmethod
+    def assert_buildings_output_is_sound(cls, path):
+        from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
+
+        assert_fix_output_is_sound(
+            path,
+            expected_rows=cls.BUILDINGS_ROWS,
+            expected_crs=CRS84,
+            expects_covering=True,
+            expected_version_prefix="1.1",
+        )
 
     def test_column_only_fix(self, buildings_test_file, temp_output_dir):
         """Test fixing only bbox column."""
@@ -179,6 +200,7 @@ class TestFixBboxAll:
 
         assert fix_result["success"] is True
         assert os.path.exists(output_file)
+        self.assert_buildings_output_is_sound(output_file)
 
     def test_metadata_only_fix(self, places_v11_file, temp_output_dir):
         """Test fixing only bbox metadata.
@@ -201,6 +223,27 @@ class TestFixBboxAll:
         )
 
         assert fix_result["success"] is True
+        # `places_v11_file` declares 1.1.0 while DuckDB gives it a native Parquet
+        # GEOMETRY logical type, so it fails `check spec` before any fix runs
+        # (gpio #1037). Carried as an explicit baseline, not waved away.
+        from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
+
+        assert_fix_output_is_sound(
+            output_file,
+            expected_rows=766,
+            expected_crs=CRS84,
+            expects_covering=True,
+            expected_version_prefix="1.1",
+            known_spec_failures={
+                "version_features_match": (
+                    "the places_v11_file fixture is built with native Parquet geo "
+                    "types under a 1.1 version string (gpio #1037)"
+                )
+            },
+        )
+        # This test copies its input before fixing, which is what hides gpio
+        # #1036: `fix_bbox_all` *moves* the caller's file to `output_file` on
+        # this exact branch, so without the copy the fixture would be destroyed.
 
     def test_both_fixes(self, buildings_test_file, temp_output_dir):
         """Test fixing both column and metadata."""
@@ -219,6 +262,7 @@ class TestFixBboxAll:
         )
 
         assert fix_result["success"] is True
+        self.assert_buildings_output_is_sound(output_file)
 
     def test_with_verbose(self, buildings_test_file, temp_output_dir):
         """Test fix_bbox_all with verbose output."""
@@ -237,3 +281,4 @@ class TestFixBboxAll:
         )
 
         assert fix_result["success"] is True
+        self.assert_buildings_output_is_sound(output_file)

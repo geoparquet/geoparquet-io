@@ -356,6 +356,20 @@ def test_cli_verbose_output_survives_nested_default_calls(buildings_test_file, t
     for expected in ("Adding column 'bbox'...", "Creating column 'bbox'...", "Schema fields:"):
         assert expected in combined, f"verbose line lost after spec validation: {expected!r}"
 
+    # This test is about the logger, but it ran a real `check all --fix` over a
+    # real file, so it is also a place the WP-1 oracle (#1018) costs nothing.
+    from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
+
+    # 1.1, not the 1.0 it came in as: adding a bbox column means declaring it in
+    # a `covering`, and `covering` is a 1.1-only key (#686).
+    assert_fix_output_is_sound(
+        target,
+        expected_rows=42,
+        expected_crs=CRS84,
+        expects_covering=True,
+        expected_version_prefix="1.1",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Bootstrap when NOTHING has configured logging (a bare script importing gpio)

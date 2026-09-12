@@ -52,6 +52,22 @@ from geoparquet_io.core.parquet_writer import (
     WRITER_VECTOR_ROWS,
     align_to_writer_vector,
 )
+from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
+
+#: The synthetic fixtures below: 110,000 places rows, CRS84, no bbox column.
+BAND_FIXTURE_ROWS = 110_000
+
+
+def assert_band_output_is_sound(path, *, version):
+    """WP-1 (#1018): a file inside the band still has to be a file gpio accepts."""
+    assert_fix_output_is_sound(
+        path,
+        expected_rows=BAND_FIXTURE_ROWS,
+        expected_crs=CRS84,
+        expects_covering=False,
+        expected_version_prefix=version,
+    )
+
 
 CHECK_FIXES_SOURCE = Path(check_fixes.__file__).read_text(encoding="utf-8")
 
@@ -194,6 +210,7 @@ class TestAFixedFilePassesTheRowGroupFactor:
 
         verdict = _check_row_group_size(fixed)
         assert verdict["passed"], verdict["detail"]
+        assert_band_output_is_sound(fixed, version="1.1")
 
     def test_the_old_constant_is_what_failed_it(self, oversized_row_group_file, tmp_path):
         """Control: the same file written the old way still fails, so the test
@@ -212,6 +229,9 @@ class TestAFixedFilePassesTheRowGroupFactor:
         assert not verdict["passed"]
         assert "100,352" not in verdict["detail"]  # it reports the average, not the group size
         assert "55,000 rows per group" in verdict["detail"]
+        # The control differs from the test above in the band and nothing else:
+        # the legacy layout is still a file gpio's own validator accepts.
+        assert_band_output_is_sound(fixed, version="1.1")
 
 
 @pytest.fixture
@@ -280,6 +300,7 @@ class TestTheIssuesOwnReproductionThroughTheCli:
 
         after = runner.invoke(cli, ["check", "optimization", spatially_oversized_file])
         assert "[pass]" in _row_group_factor(after.output), after.output
+        assert_band_output_is_sound(spatially_oversized_file, version="1.1")
 
     def test_check_all_fix_leaves_a_file_that_passes_check_optimization(
         self, spatially_oversized_file
@@ -299,6 +320,9 @@ class TestTheIssuesOwnReproductionThroughTheCli:
 
         after = runner.invoke(cli, ["check", "optimization", spatially_oversized_file])
         assert "[pass]" in _row_group_factor(after.output), after.output
+        # `check all` names the version from its own checks, so a 1.0 input is
+        # repaired as 1.0 rather than upgraded behind the user.
+        assert_band_output_is_sound(spatially_oversized_file, version="1.0")
 
     def test_a_file_already_in_the_spatial_band_is_left_alone(
         self, spatially_oversized_file, tmp_path
@@ -324,6 +348,7 @@ class TestTheIssuesOwnReproductionThroughTheCli:
 
         assert "No fix needed" in again.output, again.output
         assert Path(spatially_oversized_file).read_bytes() == before
+        assert_band_output_is_sound(spatially_oversized_file, version="1.1")
 
 
 class TestTheTriggerFollowsTheSpatialBand:
