@@ -1324,6 +1324,9 @@ class TestRowGroupsMatchTheWriteFacade:
             pytest.param({}, id="no-flag"),
             pytest.param({"row_group_rows": 20_000}, id="row-count"),
             pytest.param({"row_group_size_mb": 1.0}, id="mb-target"),
+            # A target below one writer vector's worth of rows: floors at 2,048
+            # on both branches rather than writing seven-row groups.
+            pytest.param({"row_group_size_mb": 0.001}, id="sub-vector-mb-target"),
         ],
     )
     def test_both_branches_agree(self, tmp_path, bq_result_table, flags):
@@ -1334,6 +1337,33 @@ class TestRowGroupsMatchTheWriteFacade:
         _extract_to(plain_out, table=bq_result_table, with_geometry=False, **flags)
 
         assert _row_group_rows(plain_out) == _row_group_rows(geo_out)
+
+    def test_a_sub_vector_mb_target_floors_at_one_writer_vector(self, tmp_path, bq_result_table):
+        """``--row-group-size-mb 1KB`` used to mean 8,572 seven-row groups."""
+        from geoparquet_io.core.parquet_writer import WRITER_VECTOR_ROWS
+
+        out = tmp_path / "plain-tiny-mb.parquet"
+        _extract_to(out, table=bq_result_table, with_geometry=False, row_group_size_mb=0.001)
+
+        groups = _row_group_rows(out)
+        assert groups[0] == WRITER_VECTOR_ROWS
+        assert min(groups[:-1]) == WRITER_VECTOR_ROWS
+
+    @pytest.mark.parametrize("with_geometry", [True, False], ids=["geometry", "geometry-less"])
+    def test_a_zero_mb_target_is_rejected_on_both_branches(
+        self, tmp_path, bq_result_table, with_geometry
+    ):
+        """``0MB`` parses. It meant "given" to the facade and "absent" to the writer,
+        and the geometry-less branch wrote one row group for the whole file --
+        #1021 again, through the one value nobody had typed on purpose."""
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        out = tmp_path / "never.parquet"
+        with pytest.raises(InvalidParameterError, match="row-group-size-mb"):
+            _extract_to(
+                out, table=bq_result_table, with_geometry=with_geometry, row_group_size_mb=0.0
+            )
+        assert not out.exists()
 
     def test_an_explicit_row_count_is_aligned_on_both_branches(self, tmp_path, bq_result_table):
         """20,000 is not a size a row group can have; the facade says 20,480."""
@@ -1400,6 +1430,36 @@ class TestFacadeSizesAnMbTarget:
 
         table = _bq_result_table(20_000)
         assert resolve_row_group_rows_for_table(table, 4_096, 1.0) == 4_096
+
+    def test_a_sub_vector_mb_target_floors_at_one_writer_vector(self):
+        from geoparquet_io.core.parquet_writer import (
+            WRITER_VECTOR_ROWS,
+            resolve_row_group_rows_for_table,
+        )
+
+        table = _bq_result_table(20_000)
+        assert resolve_row_group_rows_for_table(table, None, 0.001) == WRITER_VECTOR_ROWS
+
+    def test_the_floor_still_caps_at_the_table(self):
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+
+        table = _bq_result_table(100)
+        assert resolve_row_group_rows_for_table(table, None, 0.001) == 100
+
+    @pytest.mark.parametrize("mb", [0.0, -1.0])
+    def test_a_non_positive_mb_target_is_rejected(self, mb):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows
+
+        with pytest.raises(InvalidParameterError, match="--row-group-size-mb"):
+            resolve_row_group_rows(None, mb)
+
+    def test_the_mb_rejection_names_the_callers_own_parameter(self):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows
+
+        with pytest.raises(InvalidParameterError, match="row_group_size_mb"):
+            resolve_row_group_rows(None, 0.0, mb_param_name="row_group_size_mb")
 
     def test_estimate_row_size_falls_back_when_the_table_cannot_say(self):
         """A table-like object with neither buffer accessor gets 100 bytes/row."""
