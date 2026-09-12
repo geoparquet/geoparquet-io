@@ -1952,20 +1952,31 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
         }
 
     def test_no_second_literal_copy_of_the_set(self):
-        """Guard against the literal being reintroduced next to the constant."""
-        import inspect
+        """Guard against the literal being reintroduced next to the constant.
+
+        Scanned across all of ``geoparquet_io/core`` rather than one module: the
+        constant and its two consumers no longer share an address, and a guard
+        that watched only the module the constant happens to live in would miss
+        a copy pasted into the other consumer -- which is the drift.
+        """
         import re
+        from pathlib import Path
 
-        from geoparquet_io.core import common
+        import geoparquet_io.core
 
-        source = inspect.getsource(common)
+        core_dir = Path(geoparquet_io.core.__file__).parent
         # The keys spelled out as a literal tuple/set/list. Exactly one such
         # spelling is legitimate -- the constant's own definition; a second is
         # the duplicate this guards against.
-        literals = re.findall(r"""[\(\[\{]\s*["']geo["']\s*,\s*["']ARROW:schema["']""", source)
-        assert len(literals) == 1, (
-            f"the carried-metadata key set is spelled out {len(literals)} times; it must "
-            "appear only in the _CARRIED_SCHEMA_METADATA_KEYS definition, so the two "
+        pattern = re.compile(r"""[\(\[\{]\s*["']geo["']\s*,\s*["']ARROW:schema["']""")
+        sites = [
+            f"{path.relative_to(core_dir)}"
+            for path in sorted(core_dir.rglob("*.py"))
+            for _ in pattern.findall(path.read_text(encoding="utf-8"))
+        ]
+        assert len(sites) == 1, (
+            f"the carried-metadata key set is spelled out {len(sites)} times ({sites}); it "
+            "must appear only in the _CARRIED_SCHEMA_METADATA_KEYS definition, so the two "
             "write paths cannot drift"
         )
 
