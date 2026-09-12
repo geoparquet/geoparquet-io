@@ -41,7 +41,11 @@ from geoparquet_io.core.geoarrow_encoding import (
     is_wkb_extension_field,
 )
 from geoparquet_io.core.logging_config import debug, success
-from geoparquet_io.core.parquet_writer import ParquetWriteSettings
+from geoparquet_io.core.parquet_writer import (
+    ParquetWriteSettings,
+    estimate_row_size,
+    resolve_row_group_rows_for_table,
+)
 
 
 def _detect_version_from_table(table, verbose: bool = False) -> str | None:
@@ -907,42 +911,11 @@ def _build_geo_block(
     return geo_meta
 
 
-def _estimate_row_size(table) -> int:
-    """
-    Estimate bytes per row from PyArrow table memory usage.
-
-    Uses table.get_total_buffer_size() if available (PyArrow >= 0.17),
-    falls back to table.nbytes, and uses a default of 100 bytes if
-    neither is available or returns 0.
-
-    Args:
-        table: PyArrow Table
-
-    Returns:
-        int: Estimated bytes per row (minimum 1)
-    """
-    default_row_size = 100
-    num_rows = max(1, table.num_rows)
-
-    # Try get_total_buffer_size() first (more accurate, includes all buffers)
-    if hasattr(table, "get_total_buffer_size"):
-        try:
-            total_bytes = table.get_total_buffer_size()
-            if total_bytes > 0:
-                return max(1, total_bytes // num_rows)
-        except Exception:
-            pass
-
-    # Fall back to nbytes property
-    if hasattr(table, "nbytes"):
-        try:
-            total_bytes = table.nbytes
-            if total_bytes > 0:
-                return max(1, total_bytes // num_rows)
-        except Exception:
-            pass
-
-    return default_row_size
+# The bytes-per-row estimate is the facade's now (`parquet_writer.estimate_row_size`):
+# it feeds the MB -> rows decision, and a second copy here was how two write
+# paths came to answer the same flag differently (#1021). Kept under its old
+# name for `common.py`'s compatibility shim until the shims go.
+_estimate_row_size = estimate_row_size
 
 
 def _write_table_with_settings(
@@ -974,14 +947,11 @@ def _write_table_with_settings(
         geometry_column: Name of the geometry column
         verbose: Whether to print verbose output
     """
-    # Calculate row group size
-    rows_per_group = row_group_rows
-    if not rows_per_group and row_group_size_mb and table.num_rows > 0:
-        # Estimate bytes per row from actual table memory usage
-        estimated_row_size = _estimate_row_size(table)
-        target_bytes = row_group_size_mb * 1024 * 1024
-        rows_per_group = max(1, int(target_bytes // estimated_row_size))
-        rows_per_group = min(rows_per_group, table.num_rows)
+    # The facade's row-group decision, including the MB -> rows sizing. Calling
+    # it again after write_geoparquet_table already resolved is harmless and
+    # silent; the paths that reach here without resolving still land on the one
+    # number rather than pyarrow's own default (#1021).
+    rows_per_group = resolve_row_group_rows_for_table(table, row_group_rows, row_group_size_mb)
 
     # Use central configuration for write settings
     settings = ParquetWriteSettings(

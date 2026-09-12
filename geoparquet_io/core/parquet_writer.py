@@ -159,6 +159,7 @@ def resolve_row_group_rows(
     row_group_rows: int | None,
     row_group_size_mb: float | None,
     param_name: str = "--row-group-size",
+    mb_param_name: str = "--row-group-size-mb",
 ) -> int | None:
     """Decide how many rows a row group gets. The facade's first decision.
 
@@ -203,9 +204,18 @@ def resolve_row_group_rows(
     front ends, so the default names the CLI flag and ``Table.write`` passes its
     own keyword instead -- a Python caller never typed ``--row-group-size`` and
     should not be sent looking for it in their code.
+
+    A byte target of zero or less is rejected on the same footing. ``0MB``
+    parses, and used to mean two different things on two branches of one
+    command: "a target was given" here (so no default), and "no target" at the
+    writer (``0.0`` is falsy), which handed ``pq.write_table`` a ``None`` and
+    got one row group for the whole file -- the #1021 shape, surviving the fix
+    for #1021 through the one value nobody had typed.
     """
     if row_group_rows is not None and row_group_rows < 1:
         raise InvalidParameterError(param_name, "must be at least 1")
+    if row_group_size_mb is not None and row_group_size_mb <= 0:
+        raise InvalidParameterError(mb_param_name, "must be greater than 0")
     if row_group_rows is None and row_group_size_mb is None:
         return DEFAULT_ROW_GROUP_ROWS
     if row_group_rows is None:
@@ -217,6 +227,65 @@ def resolve_row_group_rows(
     if aligned != row_group_rows:
         info(_rounding_note(row_group_rows, aligned))
     return aligned
+
+
+def estimate_row_size(table) -> int:
+    """Bytes per row, as well as an in-memory Arrow table can say.
+
+    ``get_total_buffer_size()`` first (it counts every buffer), then
+    ``nbytes``, then 100 bytes for a table-like object that answers neither.
+    The floor is 1: a zero would make the division below a ``ZeroDivisionError``
+    rather than a big row group.
+    """
+    default_row_size = 100
+    num_rows = max(1, table.num_rows)
+
+    for accessor in ("get_total_buffer_size", "nbytes"):
+        try:
+            value = getattr(table, accessor)
+            total_bytes = value() if callable(value) else value
+            if total_bytes > 0:
+                return max(1, total_bytes // num_rows)
+        except Exception:
+            continue
+
+    return default_row_size
+
+
+def resolve_row_group_rows_for_table(
+    table,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    param_name: str = "--row-group-size",
+) -> int | None:
+    """:func:`resolve_row_group_rows`, with an MB target turned into rows.
+
+    ``resolve_row_group_rows`` deliberately answers ``None`` for an explicit
+    ``--row-group-size-mb``, because a *byte* target can only become a row count
+    once there is a table to measure. This is that second step, and it lives
+    here rather than at each write because a path that does it for itself
+    invents a second answer to the facade's first question -- which is exactly
+    how ``gpio extract bigquery`` came to hand ``pq.write_table`` a byte count
+    where a row count goes, asking for 134,217,728 rows per group and writing
+    one row group for the whole file (#1021).
+
+    ``None`` still comes back for an MB target against an empty table: there is
+    nothing to measure and no rows to group.
+
+    The row count floors at one writer vector. A target below what one vector
+    of this table weighs (``1KB`` against 110-byte rows) would otherwise size
+    groups of a handful of rows -- 8,572 seven-row groups from 60,000 rows --
+    which no reader wants and DuckDB's ``COPY`` would not write anyway (it
+    quantises every sub-vector request up to 2,048; see
+    :func:`resolve_row_group_rows`). The table's own row count still caps it.
+    """
+    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb, param_name)
+    if resolved is not None or not row_group_size_mb or table.num_rows <= 0:
+        return resolved
+
+    target_bytes = row_group_size_mb * 1024 * 1024
+    rows = max(WRITER_VECTOR_ROWS, int(target_bytes // estimate_row_size(table)))
+    return min(rows, table.num_rows)
 
 
 def _rounding_note(requested: int, landed: int) -> str:

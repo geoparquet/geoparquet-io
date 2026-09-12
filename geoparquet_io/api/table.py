@@ -1120,7 +1120,10 @@ class Table:
         # rejected value blames `row_group_rows`, not a CLI flag this caller
         # never typed.
         row_group_rows = resolve_row_group_rows(
-            row_group_rows, row_group_size_mb, param_name="row_group_rows"
+            row_group_rows,
+            row_group_size_mb,
+            param_name="row_group_rows",
+            mb_param_name="row_group_size_mb",
         )
 
         # Auto mode: resolve to a concrete version with the same decision the
