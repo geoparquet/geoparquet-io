@@ -278,13 +278,14 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
     else:
         gp_version = "1.1"  # Fallback, shouldn't happen for removal
 
-    # In place: stage beside the destination and move once the connection is
-    # closed, or DuckDB renames its `.tmp` over a file it is still reading --
-    # `Could not move file: Access is denied` on Windows. See fix_row_groups.
+    # Local in-place: stage beside the destination and move once the connection
+    # is closed, or DuckDB renames its `tmp_<basename>` over a file it is still
+    # reading -- `Could not move file: Access is denied` on Windows. See
+    # fix_row_groups for the remote case.
     actual_output = output_file
     temp_output_file = None
     moved_into_place = False
-    if is_same_file_path(parquet_file, output_file):
+    if is_same_file_path(parquet_file, output_file) and not is_remote_url(output_file):
         temp_output_file = _staging_path_beside(output_file)
         actual_output = temp_output_file
 
@@ -315,20 +316,17 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
             # restates whatever DuckDB read and declares nothing (#1001).
             input_file=parquet_file,
         )
-    except duckdb.IOException as e:
         con.close()
+        if temp_output_file:
+            _move_temp_output_into_place(temp_output_file, output_file, profile)
+            moved_into_place = True
+    except duckdb.IOException as e:
         if is_remote_url(parquet_file):
             hints = get_remote_error_hint(str(e), parquet_file)
             raise RemoteAccessError(parquet_file, f"{hints}\n\nOriginal error: {str(e)}") from e
         raise
     finally:
         con.close()
-
-    try:
-        if temp_output_file:
-            _move_temp_output_into_place(temp_output_file, output_file, profile)
-            moved_into_place = True
-    finally:
         if temp_output_file and not moved_into_place and os.path.exists(temp_output_file):
             os.remove(temp_output_file)
 
@@ -483,17 +481,19 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
     # see fix_compression above.
     original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
-    # An in-place fix is staged beside the destination and moved over it once
-    # the connection is closed. Handed the input path as its output, DuckDB's
-    # COPY finds the destination in place, writes `<file>.tmp` and renames it
-    # over a file it is still reading -- fine on POSIX, and on Windows
-    # `IO Error: Could not move file: Access is denied`, intermittently, as
-    # the .bak sits there with nothing to restore from. Same routing as
-    # fix_compression and fix_spatial_ordering (#941, #959).
+    # A local in-place fix is staged beside the destination and moved over it
+    # once the connection is closed. Handed the input path as its output,
+    # DuckDB's COPY finds the destination in place, writes `tmp_<basename>` next
+    # to it and renames that over a file it is still reading -- fine on POSIX,
+    # and on Windows `IO Error: Could not move file: Access is denied`,
+    # intermittently, as the .bak sits there with nothing to restore from.
+    # Same routing as fix_spatial_ordering (#941, #959). A remote in-place fix
+    # is not staged: the write facade already stages a remote output locally
+    # and uploads it, and there is no destination on this machine to rename over.
     actual_output = output_file
     temp_output_file = None
     moved_into_place = False
-    if is_same_file_path(parquet_file, output_file):
+    if is_same_file_path(parquet_file, output_file) and not is_remote_url(output_file):
         temp_output_file = _staging_path_beside(output_file)
         actual_output = temp_output_file
 
@@ -516,24 +516,23 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
             geoparquet_version=geoparquet_version,
             input_file=parquet_file,
         )
+        # Closed before the move: the connection is the last reader of the file
+        # the staging copy is about to replace.
+        con.close()
+        if temp_output_file:
+            _move_temp_output_into_place(temp_output_file, output_file, profile)
+            moved_into_place = True
     except duckdb.IOException as e:
         if is_remote_url(parquet_file):
             hints = get_remote_error_hint(str(e), parquet_file)
             raise RemoteAccessError(parquet_file, f"{hints}\n\nOriginal error: {str(e)}") from e
         raise
     finally:
-        # Closed before the move below: the connection is the last reader of
-        # the file the staging copy is about to replace.
         con.close()
-
-    try:
-        if temp_output_file:
-            _move_temp_output_into_place(temp_output_file, output_file, profile)
-            moved_into_place = True
-    finally:
-        # Only ever discard the rewrite when it did NOT reach the destination
-        # (#959): a failed move leaves the original intact and the rewrite in
-        # the staging file for the user to recover.
+        # The staging file is discarded on any failure -- of the write or of the
+        # move -- and only then: the original was never touched, so it is the
+        # good copy (#959), and a rewrite left behind under a dot-prefixed name
+        # would sit invisibly in the user's data directory.
         if temp_output_file and not moved_into_place and os.path.exists(temp_output_file):
             os.remove(temp_output_file)
 
