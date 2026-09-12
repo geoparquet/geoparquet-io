@@ -39,9 +39,13 @@ def sanitize_url_for_logging(url: str) -> str:
     # Remove query string (may contain presigned credentials)
     if "?" in url:
         url = url.split("?")[0]
-    # Truncate very long paths but keep filename for debugging
+    # Truncate very long paths but keep filename for debugging. A directory
+    # URL ends in "/" and has no filename to keep: the elision would leave
+    # `s3://bucket/datasets/.../`, which names nothing a user can act on --
+    # the destination of a partial upload came out that way (#1025 review).
+    # The credentials, if any, were in the query string, already gone.
     parts = url.split("/")
-    if len(parts) > 5:
+    if len(parts) > 5 and parts[-1]:
         return "/".join(parts[:4]) + "/..." + "/" + parts[-1]
     return url
 

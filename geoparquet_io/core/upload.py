@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -729,6 +730,13 @@ def _print_upload_summary(counts: tuple[int, int, int], total_files: int) -> Non
         print(f"✗ {failed} file(s) failed")
     if not_attempted:
         print(f"⊘ {not_attempted} file(s) not attempted (stopped on first error)")
+    # The summary is the one thing here on stdout; everything else -- the
+    # per-file errors, and the `Error:` line the raise below becomes -- goes to
+    # stderr. Redirected to a log (`> log 2>&1`, the CI case this exists for),
+    # stdout is block-buffered and the summary would land *after* the error
+    # that tells the reader to look at it. Flush so the order on disk is the
+    # order it happened.
+    sys.stdout.flush()
 
 
 def _raise_if_upload_incomplete(

@@ -859,7 +859,7 @@ class TestDirectoryUploadReportsWhatReachedTheStore:
         return source
 
     @staticmethod
-    def _run(source, fake_put, extra_args=()):
+    def _run(source, fake_put, extra_args=(), destination="s3://example-bucket/out/"):
         runner = CliRunner()
         with (
             patch.object(publish_module, "check_credentials", return_value=(True, "")),
@@ -868,7 +868,7 @@ class TestDirectoryUploadReportsWhatReachedTheStore:
         ):
             return runner.invoke(
                 cli,
-                ["publish", "upload", str(source), "s3://example-bucket/out/", *extra_args],
+                ["publish", "upload", str(source), destination, *extra_args],
             )
 
     @staticmethod
@@ -990,15 +990,87 @@ class TestDirectoryUploadReportsWhatReachedTheStore:
         assert result.exit_code == 0
 
     def test_the_error_names_the_destination_and_the_counts(self, tmp_path):
-        """A script's operator needs to know where the gap is, and how big."""
+        """A script's operator needs to know where the gap is, and how big.
+
+        A realistic prefix, several segments deep: the first version of this
+        error routed the destination through the presigned-URL sanitizer, which
+        keeps a *filename* and elides the path before it -- so a directory URL,
+        ending in ``/``, came out as ``s3://bucket/datasets/.../``. The fixture
+        it was tested with sat exactly at the threshold where nothing is elided.
+        """
         source = self._make_files(tmp_path, count=4)
+        destination = "s3://example-bucket/datasets/overture/2025-01/buildings/"
 
         def fake_put(store, key, path, **kwargs):
             if Path(path).name == "part-00.parquet":
                 raise RuntimeError("AccessDenied: bucket is read-only")
 
-        result = self._run(source, fake_put, ["--max-files", "2"])
+        result = self._run(source, fake_put, ["--max-files", "2"], destination=destination)
 
-        assert "s3://example-bucket/out/" in result.output
+        assert destination in result.output, result.output
+        assert "..." not in result.output.split("Error:")[-1]
         assert "1 of 4 file(s) failed to upload" in result.output
         assert result.exit_code == 1
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            # A directory URL keeps its whole path: there is no filename to elide to.
+            (
+                "s3://bucket/datasets/overture/2025-01/buildings/",
+                "s3://bucket/datasets/overture/2025-01/buildings/",
+            ),
+            # A file URL still elides the middle and keeps the filename.
+            ("s3://bucket/a/b/c/d/file.parquet", "s3://bucket/a/.../file.parquet"),
+            # And the query string -- where presigned credentials live -- always goes.
+            (
+                "s3://bucket/a/b/c/d/?X-Amz-Signature=secret",
+                "s3://bucket/a/b/c/d/",
+            ),
+        ],
+    )
+    def test_sanitizing_a_directory_url_keeps_its_path(self, url, expected):
+        from geoparquet_io.core.exceptions import sanitize_url_for_logging
+
+        assert sanitize_url_for_logging(url) == expected
+
+    def test_a_partition_to_a_remote_folder_exits_non_zero_when_a_file_is_missing(self, tmp_path):
+        """The raise reaches every directory writer, not only ``publish upload``.
+
+        ``gpio partition <scheme> in.parquet s3://…/`` writes locally and then
+        uploads the directory through the same ``_upload_directory_sync``. On
+        ``main`` a partial upload there printed ``Created N partition(s) in
+        s3://…`` and exited 0.
+        """
+        arrived = []
+
+        def fake_put(store, key, path, **kwargs):
+            if not arrived:
+                arrived.append(Path(path).name)
+                raise RuntimeError("AccessDenied: bucket is read-only")
+            arrived.append(Path(path).name)
+
+        runner = CliRunner()
+        with (
+            patch.object(upload_module.obs, "put", fake_put),
+            patch.object(upload_module, "_setup_store_and_kwargs", lambda *a, **k: (object(), {})),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "partition",
+                    "quadkey",
+                    "tests/data/buildings_test.parquet",
+                    "s3://example-bucket/datasets/buildings/",
+                    "--resolution",
+                    "8",
+                    "--partition-resolution",
+                    "3",
+                    "--force",
+                ],
+            )
+
+        assert arrived, "the partition never reached the upload"
+        assert result.exit_code != 0, result.output
+        assert "failed to upload" in result.output
+        assert "Created" not in result.output.split("Error:")[-1]
