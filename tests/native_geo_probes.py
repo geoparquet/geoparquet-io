@@ -183,7 +183,7 @@ def conus_wkb(*projections: str) -> list[tuple]:
         con.close()
 
 
-def write_native_geo_only(path, rows, columns) -> Path:
+def write_native_geo_only(path, rows, columns, compression="zstd", **write_options) -> Path:
     """Write a Parquet file with native geo logical types and **no** ``geo`` key.
 
     Written through pyarrow rather than DuckDB because that is the only way to
@@ -194,6 +194,12 @@ def write_native_geo_only(path, rows, columns) -> Path:
     is no ``geo`` block to answer either.
 
     ``columns`` maps a column name to ``(row index, geoarrow type)``.
+
+    ``compression`` and ``write_options`` (``row_group_size``, ...) go straight
+    to ``pq.write_table``. They are what a ``gpio check --fix`` test needs: a fix
+    only rewrites a file it finds something wrong with, so an input written
+    SNAPPY or in 5-row groups is how those tests get a rewrite to measure at all
+    (#1001).
     """
     arrays = {
         "id": pa.array([row[0] for row in rows], type=pa.int64()),
@@ -203,7 +209,7 @@ def write_native_geo_only(path, rows, columns) -> Path:
         arrays[name] = pa.ExtensionArray.from_storage(
             geo_type, pa.array([bytes(row[index]) for row in rows], type=pa.binary())
         )
-    pq.write_table(pa.table(arrays), str(path), compression="zstd")
+    pq.write_table(pa.table(arrays), str(path), compression=compression, **write_options)
     return path
 
 

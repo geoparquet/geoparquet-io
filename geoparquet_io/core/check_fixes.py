@@ -54,6 +54,34 @@ from geoparquet_io.core.remote import (
 # already snapped to a whole 2,048-row writer vector, so what gpio asks for is
 # what lands. It is also exactly what `gpio sort` writes since #967, which is
 # what #795 meant by fix_spatial_order inheriting the sort default.
+#
+# Every rewrite below also hands the write facade the file it is rewriting --
+# both `input_file=` and that file's own metadata. A remedial command is held to
+# a stricter standard than an ordinary one: whatever `--fix` writes is the file
+# gpio's own checks are run against next, so a fix that loses a fact is a fix
+# that makes the report worse. Two were lost by withholding the input:
+#
+# * `input_file=` is the witness `resolve_output_geoparquet_version` and
+#   `resolve_input_crs` both answer from. Without it a native-geo-only input --
+#   Parquet GEOMETRY logical type, no `geo` key -- was rewritten as 1.1 WKB, and
+#   since that logical type is the *only* place such a file keeps its CRS, the
+#   CRS went with it. `check spec` then scored the output `✗ coordinates outside
+#   valid range for CRS`: EPSG:5070 metres read as degrees, because an absent
+#   `crs` means OGC:CRS84 (#1001).
+# * `original_metadata` used to be read only for a 1.x output, on the reasoning
+#   that 2.0 regenerates its `geo` block anyway. DuckDB does regenerate it, and
+#   what it generates carries no `covering` -- so `check all --fix` on a 2.0
+#   file with a bbox column discarded the covering and then complained that the
+#   bbox column was not declared in one (#1003). Since #738/#772 the carried
+#   block is what `_geo_block_to_carry_on_fast_path` substitutes for DuckDB's,
+#   and these two rewrites keep every row of their input, so it still describes
+#   the output exactly.
+#
+# The witness must be the file whose *rows* the write reads. Under
+# `check all --fix` that is the previous step's scratch file rather than the
+# user's input: the fixes chain, and naming the original while reading a
+# rewrite is how a wrong CRS comes to be asserted rather than omitted (see
+# `resolve_output_geoparquet_version`).
 
 
 def fix_compression(
@@ -100,10 +128,11 @@ def fix_compression(
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
-    # Get original metadata (only needed for v1.x)
-    original_metadata = None
-    if geoparquet_version in (None, "1.0", "1.1"):
-        original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
+    # Both halves of what the input has to say about itself, at every version.
+    # See the module docstring: the `geo` block carries a 2.0 input's `covering`
+    # (#1003) and the file is the witness the facade resolves version and CRS
+    # from (#1001).
+    original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
     # Read and rewrite with ZSTD compression
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
@@ -123,6 +152,10 @@ def fix_compression(
             verbose=verbose,
             profile=profile,
             geoparquet_version=geoparquet_version,
+            # The rows come from `parquet_file` -- which under `check all --fix`
+            # is the previous fix's scratch file, not the user's input, and the
+            # witness has to be the file actually read (#1001).
+            input_file=parquet_file,
         )
 
         # If we used a temp file for in-place operation, move/upload it to final location
@@ -266,6 +299,11 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
             verbose=verbose,
             profile=profile,
             geoparquet_version=gp_version,
+            # The witness for the CRS. `gp_version` above answers the version
+            # question from the same file, but a native-geo-only input keeps its
+            # CRS only in the Parquet logical type, so without this the rewrite
+            # restates whatever DuckDB read and declares nothing (#1001).
+            input_file=parquet_file,
         )
 
         return {"fix_applied": f"Removed bbox column '{bbox_column_name}'", "success": True}
@@ -423,10 +461,9 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
-    # Get original metadata (only needed for v1.x)
-    original_metadata = None
-    if geoparquet_version in (None, "1.0", "1.1"):
-        original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
+    # Both halves of what the input has to say about itself, at every version --
+    # see fix_compression above.
+    original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
     # Read and rewrite with optimal row groups
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
@@ -445,6 +482,7 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
             verbose=verbose,
             profile=profile,
             geoparquet_version=geoparquet_version,
+            input_file=parquet_file,
         )
 
         return {"fix_applied": "Optimized row groups", "success": True}
