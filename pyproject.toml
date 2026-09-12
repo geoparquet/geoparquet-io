@@ -215,18 +215,20 @@ ignore_missing_imports = true
 # These suppress errors in complex modules until they are incrementally fixed.
 # TODO: Remove overrides as type annotations are added to each module.
 #
-# `arrow_geo_metadata` and `geo_metadata_repair` were carved out of
-# `geoparquet_io.core.common`, which is on this list: their seven errors were
-# always suppressed, by their old address. Listing them relocates that
-# suppression rather than granting a new one, so the split stays a pure move.
-# Typing them out is tracked separately -- the errors are real (a
-# `compression_level: int | None` reaching a field typed `int`, an
-# `effective_version: str | None` used as a dict key), not annotation noise.
+# `arrow_geo_metadata`, `geo_metadata_repair` and `parquet_write` were carved out
+# of `geoparquet_io.core.common`, which is on this list: their errors were always
+# suppressed, by their old address. Listing them relocates that suppression
+# rather than granting a new one, so the split stays a pure move. Typing them out
+# is tracked separately -- the errors are real (a `compression_level: int | None`
+# reaching a field typed `int`, an `effective_version: str | None` used as a dict
+# key, a `row_group_size_mb: float | None` reaching a parameter typed
+# `int | None`), not annotation noise.
 [[tool.mypy.overrides]]
 module = [
     "geoparquet_io.api.check",
     "geoparquet_io.core.arrow_geo_metadata",
     "geoparquet_io.core.geo_metadata_repair",
+    "geoparquet_io.core.parquet_write",
     "geoparquet_io.api.ops",
     "geoparquet_io.api.table",
     "geoparquet_io.benchmarks.profile_report",
