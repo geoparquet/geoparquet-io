@@ -101,7 +101,7 @@ jobs:
       # diff-cover gate); when each re-derived `os == ... && python-version ==
       # ...` for itself, moving the baseline (drop 3.11, add 3.14) would have
       # turned all four false at once — no coverage measured, nothing uploaded,
-      # and BOTH the 80% floor and the 90% diff-cover gate silently gone with
+      # and BOTH the 85% floor and the 90% diff-cover gate silently gone with
       # every check green. Change the baseline HERE and everything follows.
       # (Deliberately not a `matrix.coverage` flag added via `include:`: an
       # include-contributed key is appended to the generated job name, so the
@@ -188,11 +188,17 @@ jobs:
           # this is that instrumenting nine jobs to discard the result is waste
           # and obscures where the gate lives, not a matrix speedup.
           #
-          # The reporting job passes every flag explicitly because `addopts` no
-          # longer carries them: the 80% floor is enforced HERE.
+          # The reporting job passes the coverage flags explicitly because
+          # `addopts` no longer carries them. The floor itself is NOT a flag:
+          # pytest-cov reads [tool.coverage.report] fail_under from pyproject.toml
+          # when no --cov-fail-under is given, so the number lives in one place
+          # and this leg enforces it. tests/test_coverage_job.py asserts that no
+          # --cov-fail-under= creeps back in here to override it. Likewise branch
+          # coverage comes from [tool.coverage.run] branch = true, so the floor is
+          # the combined line+branch figure.
           COV_ARGS: >-
             ${{ env.COVERAGE_JOB == 'true'
-            && '--cov=geoparquet_io --cov-report=term-missing --cov-report=xml --cov-fail-under=80'
+            && '--cov=geoparquet_io --cov-report=term-missing --cov-report=xml'
             || '--no-cov' }}
         run: |
           # word-splitting intended: COV_ARGS is a flag list (or --no-cov)
@@ -225,8 +231,11 @@ jobs:
         # tests that run on every PR, not only in the post-merge slow suite.
         run: |
           git fetch origin "$BASE_REF"
+          # --branch-coverage: diff-cover ignores the condition-coverage data
+          # coverage.xml carries unless asked, so without it a new `if` whose
+          # else-arm never ran still reads as 100% covered on its changed lines.
           uv run diff-cover coverage.xml \
-            --compare-branch "origin/$BASE_REF" --fail-under=90
+            --compare-branch "origin/$BASE_REF" --fail-under=90 --branch-coverage
 
   notebooks:
     runs-on: ubuntu-latest
@@ -412,8 +421,8 @@ jobs:
         env:
           # Only ubuntu uploads slow-suite coverage to Codecov (step below);
           # macOS and Windows discarded theirs. --cov-fail-under=0 stays on the
-          # reporting job because the slow suite alone never reaches the 80%
-          # floor that [tool.coverage.report] would otherwise apply.
+          # reporting job because the slow suite alone never reaches the floor
+          # that [tool.coverage.report] would otherwise apply.
           COV_ARGS: >-
             ${{ matrix.os == 'ubuntu-latest'
             && '--cov=geoparquet_io --cov-report=xml --cov-report=term-missing --cov-fail-under=0'

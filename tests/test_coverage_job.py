@@ -2,7 +2,7 @@
 
 Exactly one matrix combination reports coverage: it is the only job that
 measures lines at all, the only one that uploads to Codecov, the only one that
-enforces the 80% floor, and the only one that runs the 90% diff-cover gate.
+enforces the coverage floor, and the only one that runs the 90% diff-cover gate.
 
 Four separate places key off that decision (checkout depth, the pytest flag
 list, the Codecov upload, the diff-cover gate). While each re-derived
@@ -15,11 +15,17 @@ and these tests keep it that way.
 
 import itertools
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -128,7 +134,7 @@ class TestCoverageLegIsSingleSourced:
         assert selected in combos, (
             f"{COVERAGE_FLAG} points at {selected}, which is not one of the "
             f"{len(combos)} combinations this matrix actually schedules "
-            f"({combos}). No job would measure coverage, so the 80% floor and "
+            f"({combos}). No job would measure coverage, so the coverage floor and "
             "the 90% diff-cover gate would both vanish with all checks green."
         )
 
@@ -197,19 +203,61 @@ class TestCoverageLegIsSingleSourced:
             )
 
 
+@pytest.fixture()
+def coverage_config() -> dict[str, Any]:
+    """`[tool.coverage]` from pyproject.toml -- the one place the floor lives."""
+    with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
+        return tomllib.load(f)["tool"]["coverage"]
+
+
 class TestCoverageLegStillEnforcesTheGates:
     """The one leg that measures coverage still carries every gate."""
 
-    def test_coverage_leg_passes_the_floor_and_reports(self, test_job: dict[str, Any]):
-        """`addopts` no longer carries coverage, so these flags are the gate."""
+    def test_coverage_leg_measures_and_reports(self, test_job: dict[str, Any]):
+        """`addopts` no longer carries coverage, so these flags are what measures."""
         step = _step_by_name(test_job, "Run fast tests")
         cov_args = step["env"]["COV_ARGS"]
-        for flag in ("--cov=geoparquet_io", "--cov-report=xml", "--cov-fail-under=80"):
+        for flag in ("--cov=geoparquet_io", "--cov-report=xml"):
             assert flag in cov_args, (
                 f"{flag} missing from COV_ARGS. Coverage flags are no longer in "
-                "pyproject `addopts`, so this env var is the only thing enforcing "
-                "the floor and producing coverage.xml for Codecov/diff-cover."
+                "pyproject `addopts`, so this env var is the only thing measuring "
+                "coverage and producing coverage.xml for Codecov/diff-cover."
             )
+
+    def test_the_floor_is_read_from_pyproject_and_nothing_overrides_it(
+        self, test_job: dict[str, Any], coverage_config: dict[str, Any]
+    ):
+        """One number, in `[tool.coverage.report] fail_under`.
+
+        pytest-cov falls back to that value when no `--cov-fail-under` is given,
+        so a second copy in COV_ARGS would not be a cross-check: an explicit
+        flag silently wins, and the pyproject value -- the one every local
+        `--cov` run and every prose mention cites -- becomes a lie the moment
+        the two drift. The first version of this floor lived in three places and
+        two prose sites were missed in the very PR that moved it.
+        """
+        floor = coverage_config["report"]["fail_under"]
+        assert isinstance(floor, int) and 80 <= floor < 100, (
+            f"[tool.coverage.report] fail_under = {floor!r}: expected the trailing-ratchet "
+            "floor, an integer two points under the measured combined figure"
+        )
+        fast_cov_args = _step_by_name(test_job, "Run fast tests")["env"]["COV_ARGS"]
+        assert "--cov-fail-under" not in fast_cov_args, (
+            "COV_ARGS on the fast-test leg carries --cov-fail-under, which overrides "
+            "[tool.coverage.report] fail_under. Delete it: the floor has one home."
+        )
+
+    def test_branch_coverage_stays_on(self, coverage_config: dict[str, Any]):
+        """`branch = true` is what makes the floor a combined figure.
+
+        Turning it off does not fail any check: `fail_under` quietly becomes a
+        line-only floor that the same tree clears with several points to spare.
+        """
+        assert coverage_config["run"].get("branch") is True, (
+            "[tool.coverage.run] branch must stay true: the fail_under floor was "
+            "measured as a combined line+branch figure, and a line-only comparison "
+            "against it is a looser gate wearing the same number."
+        )
 
     def test_non_coverage_legs_opt_out_explicitly(self, test_job: dict[str, Any]):
         """The other legs must pass --no-cov, not an empty string."""
@@ -221,3 +269,16 @@ class TestCoverageLegStillEnforcesTheGates:
     def test_diff_cover_threshold_unchanged(self, test_job: dict[str, Any]):
         step = _step_by_name(test_job, "Diff coverage gate")
         assert "--fail-under=90" in step["run"], "diff-cover must gate changed lines at 90%"
+
+    def test_diff_cover_counts_partial_branches(self, test_job: dict[str, Any]):
+        """diff-cover ignores coverage.xml's branch data unless asked.
+
+        Without `--branch-coverage`, a new `if` whose else-arm never ran is 100%
+        covered on its changed lines; the flag is what turns `branch = true`
+        into a changed-lines gate rather than only a floor metric.
+        """
+        step = _step_by_name(test_job, "Diff coverage gate")
+        assert "--branch-coverage" in step["run"], (
+            "diff-cover must be passed --branch-coverage, or partial branches on "
+            "changed lines pass the 90% gate as if fully covered"
+        )

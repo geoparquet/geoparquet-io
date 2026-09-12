@@ -41,10 +41,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
 from geoparquet_io.core.arrow_geo_metadata import _DIMENSION_SUFFIXES as _DIMENSION_SUFFIXES
 from geoparquet_io.core.arrow_geo_metadata import _GEOMETRY_TYPE_CODES as _GEOMETRY_TYPE_CODES
 from geoparquet_io.core.arrow_geo_metadata import (
-    _apply_geoparquet_metadata,
-    _detect_version_from_table,
-    _normalize_arrow_large_types,
-    _write_table_with_settings,
+    _apply_geoparquet_metadata as _apply_geoparquet_metadata,
 )
 from geoparquet_io.core.arrow_geo_metadata import (
     _canonicalize_wkb_columns as _canonicalize_wkb_columns,
@@ -54,9 +51,13 @@ from geoparquet_io.core.arrow_geo_metadata import _compute_geometry_types as _co
 from geoparquet_io.core.arrow_geo_metadata import (
     _detect_bbox_column_from_table as _detect_bbox_column_from_table,
 )
+from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 from geoparquet_io.core.arrow_geo_metadata import _estimate_row_size as _estimate_row_size
 from geoparquet_io.core.arrow_geo_metadata import (
     _get_geometry_type_name as _get_geometry_type_name,
+)
+from geoparquet_io.core.arrow_geo_metadata import (
+    _normalize_arrow_large_types as _normalize_arrow_large_types,
 )
 from geoparquet_io.core.arrow_geo_metadata import (
     _parse_geo_metadata_quietly as _parse_geo_metadata_quietly,
@@ -70,6 +71,9 @@ from geoparquet_io.core.arrow_geo_metadata import (
 from geoparquet_io.core.arrow_geo_metadata import (
     _strip_geoarrow_to_plain_wkb as _strip_geoarrow_to_plain_wkb,
 )
+from geoparquet_io.core.arrow_geo_metadata import (
+    _write_table_with_settings as _write_table_with_settings,
+)
 from geoparquet_io.core.arrow_types import _cast_table_to_schema as _cast_table_to_schema
 from geoparquet_io.core.arrow_types import _compute_unified_schema as _compute_unified_schema
 from geoparquet_io.core.arrow_types import _promote_numeric_type as _promote_numeric_type
@@ -79,14 +83,15 @@ from geoparquet_io.core.bbox_structure import (
 )
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.bbox_structure import get_bbox_advice as get_bbox_advice
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import (
+    validate_compression_settings as validate_compression_settings,
+)
 
 # Internal imports - used by functions in this module
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
     _get_query_column_type,
     _get_query_columns,
-    _wrap_query_with_wkb_conversion,
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
@@ -123,10 +128,7 @@ from geoparquet_io.core.geo_metadata_repair import (
 from geoparquet_io.core.geo_metadata_repair import (
     _rewrite_file_with_geo_metadata as _rewrite_file_with_geo_metadata,
 )
-from geoparquet_io.core.geometry_detection import (
-    _detect_geometry_from_query,
-    find_primary_geometry_column,
-)
+from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -180,12 +182,9 @@ from geoparquet_io.core.remote import (
     _sanitize_url_for_logging,
     is_remote_url,
     needs_httpfs,
-    remote_write_context,
-    upload_if_remote,
 )
 from geoparquet_io.core.sizing import format_size as format_size
 from geoparquet_io.core.sizing import parse_size_string as parse_size_string
-from geoparquet_io.core.streaming import extract_version_from_metadata
 
 
 def should_skip_bbox(geoparquet_version):
@@ -492,140 +491,6 @@ def resolve_geoparquet_version_from_table(table, verbose: bool = False) -> str |
     the same version the CLI would for the same input file (todo 043).
     """
     return _resolve_auto_version(_detect_version_from_table(table, verbose))
-
-
-def write_geoparquet_via_arrow(
-    con,
-    query: str,
-    output_file: str,
-    geometry_column: str | None = None,
-    original_metadata: dict | None = None,
-    compression: str = "ZSTD",
-    compression_level: int = 15,
-    row_group_size_mb: int | None = None,
-    row_group_rows: int | None = None,
-    custom_metadata: dict | None = None,
-    verbose: bool = False,
-    show_sql: bool = False,
-    profile: str | None = None,
-    geoparquet_version: str | None = None,
-    input_crs: dict | None = None,
-) -> None:
-    """
-    Write a GeoParquet file using Arrow as the internal transfer format.
-
-    This is more efficient than the COPY-then-rewrite approach because it:
-    1. Fetches query results directly as an Arrow Table
-    2. Applies GeoParquet metadata in memory
-    3. Writes once to disk
-
-    Args:
-        con: DuckDB connection with spatial extension loaded
-        query: SQL SELECT query to execute
-        output_file: Path to output file (local or remote URL)
-        geometry_column: Name of geometry column (auto-detected if None)
-        original_metadata: Original metadata from source file for preservation
-        compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
-        compression_level: Compression level (varies by format)
-        row_group_size_mb: Target row group size in MB
-        row_group_rows: Exact number of rows per row group
-        custom_metadata: Optional dict with custom metadata (e.g., H3 covering info)
-        verbose: Whether to print verbose output
-        show_sql: Whether to print SQL statements before execution
-        profile: AWS profile name (S3 only, optional)
-        geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
-        input_crs: PROJJSON dict with CRS from input file
-    """
-    # Detect geometry column if not provided
-    if geometry_column is None:
-        geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
-
-    # Auto-detect GeoParquet version from input metadata if not explicitly provided
-    if geoparquet_version is None:
-        geoparquet_version = extract_version_from_metadata(original_metadata)
-
-    # Check if geometry column actually exists in the query result
-    query_columns = _get_query_columns(con, query)
-    has_geometry = geometry_column in query_columns
-
-    # No AWS_PROFILE env mutation here: the write target inside this block is a
-    # local (temp) file, and the upload at the end is credentialed by passing
-    # profile= straight through to upload().
-    with remote_write_context(output_file, is_directory=False, verbose=verbose) as (
-        actual_output,
-        is_remote,
-    ):
-        # Validate compression settings
-        compression, compression_level, compression_desc = validate_compression_settings(
-            compression, compression_level, verbose
-        )
-
-        if verbose:
-            debug(f"Writing output with {compression_desc} compression (Arrow path)...")
-            if geoparquet_version:
-                debug(f"Using GeoParquet version: {geoparquet_version}")
-
-        # Wrap query with WKB conversion only if geometry column exists
-        if has_geometry:
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
-        else:
-            final_query = query
-            if verbose:
-                debug(
-                    f"Geometry column '{geometry_column}' not in query - writing as regular Parquet"
-                )
-
-        if show_sql:
-            info("\n-- Arrow query (with WKB conversion):" if has_geometry else "\n-- Arrow query:")
-            progress(final_query)
-
-        # Fetch as Arrow table
-        if verbose:
-            debug("Fetching query results as Arrow table...")
-
-        result = con.execute(final_query)
-        table = result.arrow().read_all()
-
-        # Normalize large_string/large_binary back to string/binary for Parquet compatibility
-        table = _normalize_arrow_large_types(table)
-
-        if verbose:
-            debug(f"Fetched {table.num_rows:,} rows, {len(table.column_names)} columns")
-
-        # Apply GeoParquet metadata only if geometry column exists
-        if has_geometry:
-            table = _apply_geoparquet_metadata(
-                table,
-                geometry_column=geometry_column,
-                geoparquet_version=geoparquet_version,
-                original_metadata=original_metadata,
-                input_crs=input_crs,
-                custom_metadata=custom_metadata,
-                verbose=verbose,
-            )
-
-        # Write to disk
-        _write_table_with_settings(
-            table,
-            actual_output,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_rows=row_group_rows,
-            row_group_size_mb=row_group_size_mb,
-            geoparquet_version=geoparquet_version,
-            geometry_column=geometry_column,
-            verbose=verbose,
-        )
-
-        # Upload to remote if needed
-        if is_remote:
-            upload_if_remote(
-                actual_output,
-                output_file,
-                profile=profile,
-                is_directory=False,
-                verbose=verbose,
-            )
 
 
 def _build_bounds_query(parquet_path, bbox_info, geometry_column, verbose):

@@ -78,8 +78,11 @@ partial run can never clear a whole-suite floor, so the default invocation used 
 exit 1 on a gate that measured nothing. Both gates below still run in CI.
 
 Add `--cov-fail-under=0` when you opt in on a subset: `[tool.coverage.report]`
-sets `fail_under = 80`, so coverage re-arms the floor on any `--cov` run even
+sets `fail_under = 85`, so coverage re-arms the floor on any `--cov` run even
 though `addopts` no longer requests one.
+
+Branch coverage is on (`[tool.coverage.run] branch = true`), so that floor is
+measured against the combined line+branch figure, not the line figure.
 
 CI runs four test tiers:
 
@@ -108,7 +111,7 @@ CI runs four test tiers:
 
 Coverage gates (both enforced in CI):
 
-- Global floor: 80% total coverage.
+- Global floor: `[tool.coverage.report] fail_under` in `pyproject.toml` (85 at the time of writing), measured as combined line+branch coverage.
 - **Changed lines: 90%** — `diff-cover` checks that the lines your PR touches
   are covered *by fast tests*. New code ships with tests that run on every PR,
   not only in the post-merge slow suite.

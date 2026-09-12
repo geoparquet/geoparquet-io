@@ -145,15 +145,15 @@ python_classes = "Test*"
 python_functions = "test_*"
 # Coverage flags deliberately absent: a plain `uv run pytest` should be fast and
 # green. Instrumenting every run (including every spawned subprocess) cost 39-49%
-# on single-file dev runs, and a partial run can never clear the 80% floor, so the
+# on single-file dev runs, and a partial run can never clear the 85% floor, so the
 # default local invocation always exited 1 on a gate that measured nothing.
 # The floor is enforced where it is meaningful — the ubuntu/3.11 job in
 # .github/workflows/tests.yml passes --cov=geoparquet_io --cov-report=term-missing
-# --cov-report=xml --cov-fail-under=80 over the whole fast suite, and feeds
+# --cov-report=xml --cov-fail-under=85 over the whole fast suite, and feeds
 # Codecov plus the 90% diff-cover gate. Locally, opt in with:
 #   uv run pytest --cov=geoparquet_io --cov-report=term-missing --cov-fail-under=0
 # (--cov-fail-under=0 is required on a subset: [tool.coverage.report].fail_under
-# re-arms the 80% floor on any --cov run, which a partial run can never clear.)
+# re-arms the 85% floor on any --cov run, which a partial run can never clear.)
 addopts = [
     "-v",
     "--tb=short",
@@ -419,19 +419,37 @@ check-filenames = true
 
 [tool.coverage.run]
 source = ["geoparquet_io"]
-branch = false
+# Branch coverage on: the line figure hid partial branches -- an `if` whose body
+# ran and whose fall-through never did. Two consumers see the difference: the
+# fail_under floor below now measures the COMBINED line+branch figure, and the
+# diff-cover gate in tests.yml counts a partial branch on a changed line as
+# uncovered -- but only because it is passed --branch-coverage; without that
+# flag diff-cover ignores the condition data coverage.xml carries.
+branch = true
 omit = [
     "geoparquet_io/__init__.py",
 ]
 
 [tool.coverage.report]
 # Trailing ratchet: the floor sits two points under the measured full-fast-suite
-# number (82.8% on 2026-09, `-m "not slow and not network and not meta"`), so it
-# catches real regressions without flaking on run-to-run noise. When the measured
-# number moves up, raise the floor to follow it (measured minus two, rounded
-# down); never lower it to admit a regression. The same value is repeated in the
-# CI COV_ARGS (.github/workflows/tests.yml) and pinned by tests/test_coverage_job.py.
-fail_under = 80
+# number (87.069% on 2026-09-12, `-m "not slow and not network and not meta"`),
+# so it catches real regressions without flaking on run-to-run noise. When the
+# measured number moves up, raise the floor to follow it (measured minus two,
+# rounded down); never lower it to admit a regression. This is the ONE place the
+# number lives: pytest-cov reads it on the CI coverage leg because COV_ARGS
+# passes no --cov-fail-under, and tests/test_coverage_job.py asserts that stays
+# so (and that branch = true stays on, since turning it off would silently
+# turn this into a looser line-only floor).
+#
+# That measured number is the COMBINED line+branch figure, because
+# [tool.coverage.run] branch = true. It is several points under the line figure
+# - re-measure, don't convert, when you next move this.
+#
+# pytest-cov rounds the total to a whole number before comparing, so the exit
+# status enforces "> 84.5", while its summary line compares unrounded; between
+# 84.5 and 85.0 the log says FAIL and the job passes. Cosmetic, but read the
+# exit status, not the line.
+fail_under = 85
 show_missing = true
 skip_covered = false
 exclude_lines = [

@@ -56,7 +56,7 @@ uv run pytest -n auto
 ### Neutral
 - The `tests/data/` directory currently contains ~30 fixture files totaling approximately 1.5MB.
 - Some test modules create temporary fixtures in pytest's `tmp_path` for tests that modify data, ensuring test isolation.
-- Coverage requirement is 80% minimum (enforced via `--cov-fail-under=80`; a trailing ratchet two points under the measured full-fast-suite number), with a higher target for new code.
+- Coverage requirement is 85% minimum (enforced via `--cov-fail-under=85`; a trailing ratchet two points under the measured full-fast-suite number, which is the combined line+branch figure since `branch = true`), with a higher target for new code.
 
 ## Alternatives Considered
 
