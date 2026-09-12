@@ -247,7 +247,7 @@ def _parse_time_strings(col, target_type):
     parsed = pc.strptime(col, format="%H:%M:%S", unit="ms", error_is_null=True)
     unmatched = pc.and_(pc.is_valid(col), pc.is_null(parsed))
     if pc.any(unmatched).as_py():
-        values = []
+        values: list[datetime.time | None] = []
         for value in col.to_pylist():
             if value is None:
                 values.append(None)

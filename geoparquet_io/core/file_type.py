@@ -5,6 +5,8 @@ derived from the file's ``geo`` metadata and its Parquet logical types, cached
 by path and mtime because nearly every command asks it at least once.
 """
 
+from typing import Any
+
 from geoparquet_io.core.duckdb_metadata import detect_geometry_columns, get_geo_metadata
 from geoparquet_io.core.file_utils import _get_file_cache_key
 from geoparquet_io.core.geo_metadata import carried_version
@@ -79,7 +81,7 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
                 debug(f"File type detection (cached): {cached_result}")
             return cached_result.copy()  # Return copy to prevent mutation
 
-    result = {
+    result: dict[str, Any] = {
         "has_geo_metadata": False,
         "geo_version": None,
         "has_native_geo_types": False,
@@ -135,4 +137,4 @@ def detect_geoparquet_file_type_cache_clear():
 
 
 # Add cache_clear method to the function for compatibility
-detect_geoparquet_file_type.cache_clear = detect_geoparquet_file_type_cache_clear
+detect_geoparquet_file_type.cache_clear = detect_geoparquet_file_type_cache_clear  # type: ignore[attr-defined]

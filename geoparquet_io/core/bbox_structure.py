@@ -9,7 +9,7 @@ recommendation a command gives the user.
 """
 
 import json
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
@@ -41,7 +41,7 @@ def _bbox_column_from_covering(geo_meta) -> str | None:
             and _BBOX_REQUIRED_FIELDS.issubset(bbox_refs)
             and all(isinstance(ref, list) and len(ref) == 2 for ref in bbox_refs.values())
         ):
-            return bbox_refs["xmin"][0]
+            return cast("str", bbox_refs["xmin"][0])
     return None
 
 
