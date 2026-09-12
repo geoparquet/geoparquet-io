@@ -1231,3 +1231,32 @@ class TestFailureClassificationUsesTheHttpStatus:
         assert carto_module._probe_request_status("http://x/", 1.0) == carto_module._CartoStatus(
             None, False
         )
+
+    def test_a_probe_that_times_out_says_so_by_type(self, monkeypatch):
+        """The timeout verdict comes from httpx's exception type, not from text."""
+        import httpx
+
+        def _slow(*args, **kwargs):
+            raise httpx.ConnectTimeout("took too long")
+
+        monkeypatch.setattr(httpx, "stream", _slow)
+        assert carto_module._probe_request_status("http://x/", 1.0) == carto_module._CartoStatus(
+            None, True
+        )
+
+    def test_the_probe_is_bounded_below_a_long_data_timeout(self, monkeypatch):
+        """A 120s --timeout must not be paid twice just to learn a status."""
+        import httpx
+
+        seen = {}
+
+        def _record(*args, **kwargs):
+            seen["timeout"] = kwargs["timeout"]
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(httpx, "stream", _record)
+        carto_module._probe_request_status("http://x/", 120.0)
+        assert seen["timeout"] == carto_module.STATUS_PROBE_TIMEOUT
+
+        carto_module._probe_request_status("http://x/", 2.0)
+        assert seen["timeout"] == 2.0
