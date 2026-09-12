@@ -1,4 +1,12 @@
-"""Tests for core/check_fixes.py module."""
+"""Tests for core/check_fixes.py module.
+
+Every test that produces a file also runs
+:func:`tests.fix_output_oracle.assert_fix_output_is_sound` over it (WP-1 of
+#1018): ``gpio check spec`` clean, the rows preserved, the CRS read from the
+``geo`` block and the Parquet logical type separately, and the covering resolved
+against the real schema. The per-fix assertion only proves the fix did its one
+advertised job; the oracle proves it did not break the file doing it.
+"""
 
 import os
 import shutil
@@ -21,6 +29,35 @@ from geoparquet_io.core.check_parquet_structure import (
     check_compression,
     check_metadata_and_bbox,
 )
+from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
+
+#: ``places_test.parquet``: 766 rows, CRS84, GeoParquet 1.0.0, with a bbox column.
+PLACES_ROWS = 766
+
+#: ``tests/conftest.py::places_v11_file`` declares 1.1.0 but DuckDB writes its
+#: geometry with a native Parquet GEOMETRY logical type, which is 2.0-only, so
+#: the fixture fails `check spec` before any fix touches it. Carried as an
+#: explicit baseline rather than weakening the oracle: a *second* failure still
+#: fails the test, and so does this one going away once the fixture is repaired.
+V11_FIXTURE_BASELINE = {
+    "version_features_match": (
+        "tests/conftest.py::places_v11_file declares 1.1.0 while DuckDB gives it "
+        "a native Parquet GEOMETRY logical type -- a fixture defect, not a fix "
+        "defect (gpio #1037)"
+    )
+}
+
+
+def assert_places_output_is_sound(path, *, version, covering, baseline=None):
+    """The oracle, with the constants every places-derived fixture shares."""
+    assert_fix_output_is_sound(
+        path,
+        expected_rows=PLACES_ROWS,
+        expected_crs=CRS84,
+        expects_covering=covering,
+        expected_version_prefix=version,
+        known_spec_failures=baseline,
+    )
 
 
 class TestFixCompression:
@@ -49,6 +86,7 @@ class TestFixCompression:
         # Verify compression is now ZSTD
         final_result = check_compression(output_file, verbose=False, return_results=True)
         assert final_result["current_compression"] == "ZSTD"
+        assert_places_output_is_sound(output_file, version="1.1", covering=True)
 
     def test_fixes_with_verbose(self, places_test_file, temp_output_dir):
         """Test fix_compression with verbose flag."""
@@ -60,6 +98,7 @@ class TestFixCompression:
 
         fix_result = fix_compression(snappy_file, output_file, verbose=True)
         assert fix_result["success"] is True
+        assert_places_output_is_sound(output_file, version="1.1", covering=True)
 
 
 class TestFixBboxColumn:
@@ -89,6 +128,9 @@ class TestFixBboxColumn:
         # Verify bbox column now exists
         final_result = check_metadata_and_bbox(output_file, verbose=False, return_results=True)
         assert final_result["has_bbox_column"] is True
+        # `fix_bbox_column` writes the column *and* declares it; only the oracle
+        # says whether the file around it is still one gpio would accept.
+        assert_places_output_is_sound(output_file, version="1.1", covering=True)
 
     def test_with_verbose(self, buildings_test_file, temp_output_dir):
         """Test fix_bbox_column with verbose flag."""
@@ -97,6 +139,13 @@ class TestFixBboxColumn:
         # Buildings file doesn't have bbox
         fix_result = fix_bbox_column(buildings_test_file, output_file, verbose=True)
         assert fix_result["success"] is True
+        assert_fix_output_is_sound(
+            output_file,
+            expected_rows=42,
+            expected_crs=CRS84,
+            expects_covering=True,
+            expected_version_prefix="1.1",
+        )
 
 
 class TestFixBboxMetadata:
@@ -115,6 +164,9 @@ class TestFixBboxMetadata:
 
         assert fix_result["success"] is True
         assert "bbox" in fix_result["fix_applied"].lower()
+        assert_places_output_is_sound(
+            test_file, version="1.1", covering=True, baseline=V11_FIXTURE_BASELINE
+        )
 
     def test_copies_file_if_output_different(self, places_v11_file, temp_output_dir):
         """Test that file is copied when output differs from input."""
@@ -124,6 +176,11 @@ class TestFixBboxMetadata:
 
         assert fix_result["success"] is True
         assert os.path.exists(output_file)
+        assert_places_output_is_sound(
+            output_file, version="1.1", covering=True, baseline=V11_FIXTURE_BASELINE
+        )
+        # Copied, not moved: the caller's input is still where it was (#1036).
+        assert os.path.exists(places_v11_file)
 
     def test_with_verbose(self, places_v11_file, temp_output_dir):
         """Test fix_bbox_metadata with verbose flag."""
@@ -132,6 +189,9 @@ class TestFixBboxMetadata:
 
         fix_result = fix_bbox_metadata(test_file, test_file, verbose=True)
         assert fix_result["success"] is True
+        assert_places_output_is_sound(
+            test_file, version="1.1", covering=True, baseline=V11_FIXTURE_BASELINE
+        )
 
 
 class TestFixRowGroups:
@@ -148,6 +208,7 @@ class TestFixRowGroups:
         assert fix_result["success"] is True
         assert "Optimized row groups" in fix_result["fix_applied"]
         assert os.path.exists(output_file)
+        assert_places_output_is_sound(output_file, version="1.1", covering=True)
 
     def test_with_geoparquet_version(self, places_test_file, temp_output_dir):
         """Test row group optimization preserving version."""
@@ -160,6 +221,7 @@ class TestFixRowGroups:
         )
 
         assert fix_result["success"] is True
+        assert_places_output_is_sound(output_file, version="1.1", covering=True)
 
     def test_with_verbose(self, places_test_file, temp_output_dir):
         """Test row group optimization with verbose output."""
@@ -170,6 +232,7 @@ class TestFixRowGroups:
         fix_result = fix_row_groups(places_test_file, output_file, verbose=True)
 
         assert fix_result["success"] is True
+        assert_places_output_is_sound(output_file, version="1.1", covering=True)
 
 
 class TestFixBboxRemoval:
@@ -197,6 +260,7 @@ class TestFixBboxRemoval:
         # Verify column removed
         result_table = pq.read_table(output_file)
         assert "bbox" not in result_table.column_names
+        assert_places_output_is_sound(output_file, version="1.1", covering=False)
 
     def test_with_verbose(self, places_test_file, temp_output_dir):
         """Test bbox removal with verbose output."""
@@ -213,6 +277,7 @@ class TestFixBboxRemoval:
         )
 
         assert fix_result["success"] is True
+        assert_places_output_is_sound(output_file, version="1.1", covering=False)
 
 
 class TestFixBboxRemovalSqlInjection:
@@ -268,6 +333,9 @@ class TestFixBboxRemovalSqlInjection:
         # the legitimate columns survive untouched.
         assert self._PAYLOAD not in result_cols
         assert result_cols == ["geometry", "filler"]
+        # Escaping the identifier is only half the requirement: the file the
+        # rewrite leaves behind still has to be a valid GeoParquet file.
+        assert_places_output_is_sound(out, version="1.1", covering=False)
 
     def test_bbox_name_with_embedded_quote_is_escaped(self, places_test_file, temp_output_dir):
         """A payload carrying a literal double quote must have it doubled, not
@@ -298,6 +366,7 @@ class TestFixBboxRemovalSqlInjection:
         assert "pwn2" not in result_cols
         assert payload not in result_cols
         assert result_cols == ["geometry"]
+        assert_places_output_is_sound(out, version="1.1", covering=False)
 
 
 class TestGetGeoparquetVersionFromCheckResults:
@@ -386,6 +455,7 @@ class TestFixSpatialOrdering:
         assert fix_result["success"] is True
         assert "Hilbert" in fix_result["fix_applied"]
         assert os.path.exists(output_file)
+        assert_places_output_is_sound(output_file, version="1.1", covering=True)
 
     def test_inplace_fix_reorders_the_input(self, places_test_file, temp_output_dir):
         """#941: input == output is routed through a temp file, not refused.
@@ -407,6 +477,7 @@ class TestFixSpatialOrdering:
         after = pq.read_table(target).column("fsq_place_id").to_pylist()
         assert sorted(after) == sorted(before)
         assert after != before
+        assert_places_output_is_sound(target, version="1.1", covering=True)
 
     def test_temp_file_is_removed_when_the_sort_fails(self, places_test_file, temp_output_dir):
         """A failed in-place sort leaves no stray temp file behind."""
@@ -425,8 +496,10 @@ class TestFixSpatialOrdering:
 
         assert seen and seen[0] != target
         assert not os.path.exists(seen[0])
-        # The original is untouched: nothing was moved over it.
+        # The original is untouched: nothing was moved over it -- and "untouched"
+        # means still a file gpio accepts, not merely the right row count.
         assert pq.read_table(target).num_rows == pq.read_table(places_test_file).num_rows
+        assert_places_output_is_sound(target, version="1.0", covering=False)
 
     def test_temp_output_is_written_beside_the_target(self, places_test_file, temp_output_dir):
         """The rewrite stages next to the target, not in ``$TMPDIR``.
@@ -450,6 +523,7 @@ class TestFixSpatialOrdering:
 
         assert seen, "hilbert_order was never called"
         assert os.path.dirname(os.path.abspath(seen[0])) == os.path.abspath(temp_output_dir)
+        assert_places_output_is_sound(target, version="1.0", covering=False)
 
     def test_an_aliased_output_path_is_still_an_in_place_fix(
         self, places_test_file, temp_output_dir
@@ -471,6 +545,7 @@ class TestFixSpatialOrdering:
         assert fix_result["success"] is True
         after = pq.read_table(target).column("fsq_place_id").to_pylist()
         assert sorted(after) == sorted(before)
+        assert_places_output_is_sound(target, version="1.1", covering=True)
 
     def test_a_failed_move_leaves_the_original_intact(self, places_test_file, temp_output_dir):
         """A move that fails must not take the only good copy of the data with it.
@@ -501,6 +576,7 @@ class TestFixSpatialOrdering:
         assert os.path.exists(target), "the in-place fix destroyed the original file"
         assert Path(target).read_bytes() == original_bytes
         assert list(Path(temp_output_dir).glob(".gpio-fix-*")) == []
+        assert_places_output_is_sound(target, version="1.0", covering=False)
 
 
 class TestInPlaceFixOperations:
@@ -528,6 +604,7 @@ class TestInPlaceFixOperations:
 
         result = check_compression(test_file, verbose=False, return_results=True)
         assert result["current_compression"] == "ZSTD"
+        assert_places_output_is_sound(test_file, version="1.1", covering=True)
 
     def test_fix_compression_inplace_preserves_data(self, places_test_file, temp_output_dir):
         """Test that in-place fix preserves all data."""
@@ -549,6 +626,7 @@ class TestInPlaceFixOperations:
         fixed_table = pq.read_table(test_file)
         assert len(fixed_table) == original_row_count
         assert fixed_table.schema.names == original_table.schema.names
+        assert_places_output_is_sound(test_file, version="1.1", covering=True)
 
 
 class TestHilbertDetectionAndWarnings:

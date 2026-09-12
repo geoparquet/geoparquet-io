@@ -46,6 +46,7 @@ from geoparquet_io.cli.main import cli
 from geoparquet_io.core import check_fixes
 from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import is_same_file_path
+from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
 
 # `COPY (...) TO '<path>' (...)`, with the SQL-literal doubling undone by the
 # caller. DuckDB is the only writer that moves a file gpio did not name.
@@ -197,6 +198,29 @@ IN_PLACE_FIXES = [
     pytest.param("compression", "snappy_file", id="compression"),
 ]
 
+#: What each of those three inputs must look like once its fix has run, for the
+#: shared WP-1 oracle (#1018). "The bytes changed" is all the repair assertion
+#: below could see on its own, and an in-place fix has no backup to fall back on
+#: under ``--no-backup``: if the staged rewrite it renames into place is not a
+#: valid GeoParquet file, the user's file is simply gone.
+IN_PLACE_FIX_OUTPUTS = {
+    # A native-geo-only input loses its bbox column and stays native-geo-only:
+    # no `geo` key invented, the CRS still only in the Parquet logical type.
+    "bbox": {"expected_rows": 100, "expects_covering": False, "expected_version_prefix": None},
+    # places is 1.0 in; the write facade repairs it as 1.1 and declares the
+    # bbox column it kept.
+    "row-group": {
+        "expected_rows": 766,
+        "expects_covering": True,
+        "expected_version_prefix": "1.1",
+    },
+    "compression": {
+        "expected_rows": 766,
+        "expects_covering": True,
+        "expected_version_prefix": "1.1",
+    },
+}
+
 
 def _run_fix(subcommand: str, target) -> None:
     result = CliRunner().invoke(cli, ["check", subcommand, str(target), "--fix"])
@@ -260,6 +284,8 @@ def test_an_in_place_fix_still_repairs_the_file_and_leaves_a_backup(
     backup = target.with_name(target.name + ".bak")
     assert backup.exists() and backup.read_bytes() == before
     assert list(target.parent.glob(".gpio-fix-*")) == [], "a staging file was left behind"
+    # ...and what was renamed into place is a file gpio itself accepts (#1018).
+    assert_fix_output_is_sound(target, expected_crs=CRS84, **IN_PLACE_FIX_OUTPUTS[subcommand])
 
 
 # ---------------------------------------------------------------------------
