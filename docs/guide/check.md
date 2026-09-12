@@ -309,6 +309,15 @@ Validates file structure and metadata against the GeoParquet specification:
   carried through verbatim, `native_crs_format` warns with the literal, and
   `v2_crs_consistency` compares it as-is, so it fails closed and names the value
   it could not read rather than reading it as the default.
+- **A `v2_crs_consistency` failure does not survive a rewrite** — a gpio
+  command that rewrites the file as GeoParquet (`add`, `sort`, `partition`,
+  `convert geoparquet`, `check --fix`) answers "which CRS?" for the primary
+  column from the `geo` block first, falling back to the Parquet logical type.
+  When the two disagree, the `geo` block wins and its answer is written into
+  *both* places, so the output passes this check over coordinates that were
+  never transformed. gpio warns when it does this, naming both CRSs and which
+  one it used, but the warning is the only trace: fix whichever half is wrong
+  on the **input**, before the rewrite.
 - **Datum-aware epoch validation** — a coordinate `epoch` on a datum ensemble
   (e.g. EPSG:4326, or the OGC:CRS84 default when `crs` is omitted) fails; on a
   specific static frame (e.g. GDA2020) it warns; on a dynamic frame (e.g. ITRF)

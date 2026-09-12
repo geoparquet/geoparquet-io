@@ -314,6 +314,12 @@ def _convert_streaming(
     import tempfile
     import uuid
 
+    # Registers the GeoArrow extension types process-wide, so the `pq.read_table`
+    # below materialises a Parquet GEOMETRY/GEOGRAPHY column as `geoarrow.wkb`
+    # rather than plain `binary` and the stream describes its geometry as one.
+    # The registration is global, which is why it happens here rather than being
+    # relied on -- see `constants._fix_vecorel_schema` (#1006, #993).
+    import geoarrow.pyarrow  # noqa: F401
     import pyarrow.parquet as pq
 
     from geoparquet_io.core.streaming import write_arrow_stream
@@ -347,8 +353,16 @@ def _convert_streaming(
             memory_limit=memory_limit,
         )
 
-        # Read and stream to stdout
-        table = pq.read_table(temp_path)
+        # Read and stream to stdout. Through `ParquetFile` so the file handle is
+        # closed here, before the `unlink` below, rather than whenever the
+        # reader `pq.read_table` creates internally is collected: with the
+        # extension types registered the table it returns is reachable through
+        # Python-side objects that outlive this frame's refcount drop, and
+        # Windows refuses to delete a file that still has a reader open
+        # (WinError 32). POSIX unlinks an open file happily, so only the Windows
+        # legs saw it.
+        with pq.ParquetFile(temp_path) as reader:
+            table = reader.read()
         write_arrow_stream(table)
     finally:
         if temp_path.exists():
