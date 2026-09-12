@@ -47,12 +47,15 @@ def rejected_file(tmp_path):
 
 
 # ``configure_verbose`` is one-way and the logger is a module global, so a
-# ``--verbose`` test used to hand DEBUG to whatever ran next. This file's own
-# local fixture only covered the tests below; ``tests/conftest.py`` now snapshots
-# the logger -- level, handlers and ``propagate`` -- around *every* test, because
-# the test this leak actually broke was ``test_a_duckdb_error_reaches_the_user_as
-# _an_error_line`` in this file, poisoned from another module on the same xdist
-# worker. See ``tests/test_logging_state_isolation.py``.
+# ``--verbose`` test hands DEBUG to whatever runs next. This file's own local
+# fixture only covered the tests below, and the tests it could not save are the
+# two that build their own ``ErrorBoundaryGroup`` -- ``cli`` resets the level on
+# every invocation through ``setup_cli_logging``, a throwaway group does not.
+# ``tests/conftest.py`` now puts every ``geoparquet_io`` logger back to a
+# known-clean state around *every* test in the suite, which is what it takes:
+# the poison arrived from ``test_add.py``'s module-scoped ``--verbose`` fixtures
+# on the same xdist worker, before any function-scoped fixture could look.
+# See ``tests/test_logging_state_isolation.py``.
 
 
 def _group_raising(exc: BaseException):

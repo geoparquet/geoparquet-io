@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover - click < 8.2
 
 
 # ---------------------------------------------------------------------------
-# The package logger is process-global; a test must hand it back
+# The package logger is process-global; a test must start from a known state
 # ---------------------------------------------------------------------------
 # ``--verbose`` raises the ``geoparquet_io`` logger to DEBUG as the flag is
 # parsed (``cli.decorators.enable_verbose_logging``, #995), and
@@ -80,38 +80,95 @@ except ImportError:  # pragma: no cover - click < 8.2
 # invocation (or the first core call made with ``verbose=True``) turns DEBUG on
 # for every later test on that xdist worker. Any test that asserts on the
 # *absence* of debug output then fails depending on the schedule -- which is how
-# ``test_cli_error_boundary.py`` started failing on Windows only, with a
-# traceback that ``ErrorBoundaryGroup.invoke`` logs at DEBUG with ``exc_info``.
+# ``test_cli_error_boundary.py`` started failing, with a traceback that
+# ``ErrorBoundaryGroup.invoke`` logs at DEBUG with ``exc_info``. Windows was
+# never special; ``-n auto`` just drew the losing order there first.
 #
-# The state to put back is read off ``core/logging_config.py``: ``level``,
-# ``handlers`` (``setup_cli_logging`` clears the list in place and installs its
-# own; ``_bootstrap_default_handler`` may append a ``NullHandler``) and
-# ``propagate``. There is no module-level verbosity flag -- the logger's level
-# *is* the state -- and nothing mutates a handler that was already attached, so
-# restoring the same handler objects restores their levels and formatters too.
+# Restoring a *snapshot* is not enough, and was itself a bug (#1016): a
+# function-scoped fixture is set up only after every higher-scoped one, so a
+# module-scoped fixture that runs ``--verbose`` -- ``test_add.py``'s
+# ``bbox_optioned_run`` and ``_h3_optioned_invocation`` both do -- has already
+# raised the level by the time the snapshot is taken. Restoring that snapshot
+# then re-applies the poison after every later test, turning an intermittent
+# leak into a permanent one for the rest of the worker.
+#
+# So this sets a *known* state instead of putting back whatever it found:
+# every ``geoparquet_io`` logger goes back to what a freshly imported process
+# has -- level ``NOTSET``, no handlers, ``propagate`` True -- before the test
+# body runs and again after it. Nothing that happened earlier in the process
+# can survive that, whether it came from a previous test, a higher-scoped
+# fixture, or import time.
+#
+# The pieces are read off ``core/logging_config.py``: ``setup_cli_logging``
+# assigns the level, clears ``handlers`` in place and installs its own, and sets
+# ``propagate``; ``configure_verbose`` raises the level and may add a handler
+# through ``_bootstrap_default_handler``. There is no module-level verbosity
+# flag -- the logger's level *is* the state -- and every handler those install
+# is created fresh, so dropping them cannot lose configuration that belongs to
+# somebody else.
+#
+# ``NOTSET`` (rather than a fixed level) is what a fresh process has, and 13
+# tests use a bare ``caplog.at_level(...)`` that sets the *root* level and
+# relies on the package logger inheriting from it. That inheritance is also the
+# one way a poisoned root could still enable DEBUG here, so the root level is
+# clamped out of DEBUG too -- unless the run explicitly asked for a log level,
+# which is a developer debugging and must be honoured.
 
 PACKAGE_LOGGER_NAME = "geoparquet_io"
 
 
+def _reset_package_loggers() -> None:
+    """Return every ``geoparquet_io`` logger to its freshly-imported state."""
+    prefix = PACKAGE_LOGGER_NAME + "."
+    names = [
+        name
+        for name in list(logging.Logger.manager.loggerDict)
+        if name == PACKAGE_LOGGER_NAME or name.startswith(prefix)
+    ]
+    # `geoparquet_io` itself may not be in loggerDict yet; getLogger creates it.
+    for name in [PACKAGE_LOGGER_NAME, *names]:
+        child = logging.getLogger(name)
+        child.setLevel(logging.NOTSET)
+        child.handlers[:] = []
+        child.propagate = True
+
+
 @contextmanager
-def pristine_package_logging():
-    """Hand the ``geoparquet_io`` logger back exactly as it was found."""
-    package_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
-    level = package_logger.level
-    handlers = list(package_logger.handlers)
-    propagate = package_logger.propagate
+def pristine_package_logging(*, guard_root: bool = True):
+    """Run the body with gpio's loggers in a known-clean state, and leave it so.
+
+    ``guard_root`` clamps the root logger out of DEBUG for the duration, so the
+    package loggers -- which sit at ``NOTSET`` and inherit -- cannot be switched
+    on by a root level somebody else left behind. The root's own level is put
+    back afterwards; it belongs to pytest, not to us.
+    """
+    root = logging.getLogger()
+    root_level = root.level
+    _reset_package_loggers()
+    if guard_root and root.getEffectiveLevel() < logging.WARNING:
+        root.setLevel(logging.WARNING)
     try:
         yield
     finally:
-        package_logger.setLevel(level)
-        package_logger.handlers[:] = handlers
-        package_logger.propagate = propagate
+        _reset_package_loggers()
+        root.setLevel(root_level)
+
+
+def _has_explicit_log_level(config) -> bool:
+    """True when the run asked for a log level (``--log-level``/``log_cli_level``)."""
+    for name in ("log_level", "log_cli_level"):
+        try:
+            if config.getoption(name, None) or config.getini(name):
+                return True
+        except (ValueError, KeyError):  # pragma: no cover - plugin not registered
+            continue
+    return False
 
 
 @pytest.fixture(autouse=True)
-def _isolate_package_logging():
-    """Snapshot/restore the package logger around every test in the suite."""
-    with pristine_package_logging():
+def _isolate_package_logging(pytestconfig):
+    """Give every test in the suite a known-clean ``geoparquet_io`` logger."""
+    with pristine_package_logging(guard_root=not _has_explicit_log_level(pytestconfig)):
         yield
 
 
