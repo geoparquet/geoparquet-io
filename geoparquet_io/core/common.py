@@ -6,8 +6,10 @@ through it are the symptom -- a module this central is one every new helper has
 to route around. Blocks that answer a single question and carry no coupling to
 the rest have moved out to modules named for that question.
 
-Every name that moved is still importable from here, so that no caller had to
-change in the commit that moved the code. Those re-exports are written
+Every moved name that a caller imports is still importable from here, so that
+no caller had to change in the commit that moved the code; module-private
+helpers nothing else reached went with their module and were not shimmed. Those
+re-exports are written
 ``import X as X`` -- the explicit re-export form -- which is both how a reader
 tells a compatibility shim from a helper this module actually uses, and how
 ruff and vulture tell the same thing. The shims are deleted, and their callers

@@ -9,8 +9,9 @@ and rewrites the file's key-value metadata in place.
 
 Reading a *written file* is the whole job, which is what separates it from
 ``core/arrow_geo_metadata.py``, whose subject is an in-memory table that has not
-been written yet. Split out of ``common.py`` unchanged; every name is still
-importable from there.
+been written yet. Split out of ``common.py`` unchanged; every name a caller
+imports is still importable from there (the module-private type-code tables and
+helpers are not re-exported, and nothing outside this module reached them).
 """
 
 import json

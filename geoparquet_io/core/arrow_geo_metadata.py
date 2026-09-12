@@ -10,7 +10,9 @@ table's schema metadata.
 It is the layer *under* the write funnels rather than part of them: nothing here
 knows about DuckDB, queries, remote outputs or the ``COPY`` path, and nothing
 here calls back out into ``core/common.py``. Split out of ``common.py``
-unchanged; every name is still importable from there.
+unchanged; every name a caller imports is still importable from there (the
+module-private helpers -- ``_build_geo_block``, ``_crs_as_projjson`` and the
+like -- are not re-exported, and nothing outside this module reached them).
 """
 
 import json
