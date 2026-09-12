@@ -111,7 +111,7 @@ CI runs four test tiers:
 
 Coverage gates (both enforced in CI):
 
-- Global floor: 80% total coverage.
+- Global floor: `[tool.coverage.report] fail_under` in `pyproject.toml` (85 at the time of writing), measured as combined line+branch coverage.
 - **Changed lines: 90%** — `diff-cover` checks that the lines your PR touches
   are covered *by fast tests*. New code ships with tests that run on every PR,
   not only in the post-merge slow suite.

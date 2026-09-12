@@ -176,19 +176,23 @@ uv run pytest --cov=geoparquet_io --cov-report=term-missing --cov-fail-under=0  
 ```
 
 `--cov-fail-under=0` is needed on partial runs: `[tool.coverage.report].fail_under`
-re-arms the 85% floor whenever you opt into `--cov`, and a subset never clears it.
+re-arms the floor whenever you opt into `--cov`, and a subset never clears it.
 
 Local runs are uninstrumented: `addopts` carries no `--cov`, so a single-file run
-is fast and a partial run can't fail a whole-suite gate. The 85% floor (a trailing ratchet: measured full-fast-suite coverage minus two points) and the 90%
-diff-cover gate on changed lines are enforced in CI (the ubuntu/3.11 job in
-`.github/workflows/tests.yml`), which passes the coverage flags explicitly.
+is fast and a partial run can't fail a whole-suite gate. The coverage floor (a
+trailing ratchet: measured full-fast-suite coverage minus two points, rounded
+down) and the 90% diff-cover gate on changed lines are enforced in CI (the
+ubuntu/3.11 job in `.github/workflows/tests.yml`). The floor's number lives in
+**one** place, `[tool.coverage.report] fail_under` in `pyproject.toml`, which
+pytest-cov reads on that leg; `tests/test_coverage_job.py` asserts nothing
+overrides it.
 
 `[tool.coverage.run] branch = true`, so the floor measures the **combined**
-line+branch figure — 87.069% on 2026-09-12, several points under the line-only
-figure (89.4%). When you raise the floor, re-measure the combined number; don't
-convert from a line percentage. Three places must move together:
-`[tool.coverage.report] fail_under`, `COV_ARGS` in `.github/workflows/tests.yml`,
-and `FLOOR` in `tests/test_coverage_job.py`.
+line+branch figure, several points under the line-only figure (the dated
+measurement is in the `fail_under` comment). When you raise the floor,
+re-measure the combined number; don't convert from a line percentage. The
+diff-cover gate is passed `--branch-coverage`, so a partial branch on a changed
+line counts as uncovered there too.
 
 The `meta` lane (codespell, commitizen, doc-sync, mutmut, mypy,
 validate-claude-md, security tool checks) is excluded from the fast suite and

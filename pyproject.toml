@@ -419,12 +419,12 @@ check-filenames = true
 
 [tool.coverage.run]
 source = ["geoparquet_io"]
-# Branch coverage on: the line figure hid an 8.7-point gap (88.6% line vs 79.9%
-# branch, 1,195 partial branches - an `if` whose body ran and whose fall-through
-# never did). With this on, the 90% diff-cover gate stops accepting a new
-# conditional with only one arm exercised. Note it also changes what
-# [tool.coverage.report] fail_under measures: coverage.py then compares the
-# *combined* line+branch figure, which is several points below the line figure.
+# Branch coverage on: the line figure hid partial branches -- an `if` whose body
+# ran and whose fall-through never did. Two consumers see the difference: the
+# fail_under floor below now measures the COMBINED line+branch figure, and the
+# diff-cover gate in tests.yml counts a partial branch on a changed line as
+# uncovered -- but only because it is passed --branch-coverage; without that
+# flag diff-cover ignores the condition data coverage.xml carries.
 branch = true
 omit = [
     "geoparquet_io/__init__.py",
@@ -435,13 +435,20 @@ omit = [
 # number (87.069% on 2026-09-12, `-m "not slow and not network and not meta"`),
 # so it catches real regressions without flaking on run-to-run noise. When the
 # measured number moves up, raise the floor to follow it (measured minus two,
-# rounded down); never lower it to admit a regression. The same value is repeated
-# in the CI COV_ARGS (.github/workflows/tests.yml) and pinned by
-# tests/test_coverage_job.py.
+# rounded down); never lower it to admit a regression. This is the ONE place the
+# number lives: pytest-cov reads it on the CI coverage leg because COV_ARGS
+# passes no --cov-fail-under, and tests/test_coverage_job.py asserts that stays
+# so (and that branch = true stays on, since turning it off would silently
+# turn this into a looser line-only floor).
 #
 # That measured number is the COMBINED line+branch figure, because
-# [tool.coverage.run] branch = true. It is not the line figure (89.4% on the same
-# run) - re-measure, don't convert, when you next move this.
+# [tool.coverage.run] branch = true. It is several points under the line figure
+# - re-measure, don't convert, when you next move this.
+#
+# pytest-cov rounds the total to a whole number before comparing, so the exit
+# status enforces "> 84.5", while its summary line compares unrounded; between
+# 84.5 and 85.0 the log says FAIL and the job passes. Cosmetic, but read the
+# exit status, not the line.
 fail_under = 85
 show_missing = true
 skip_covered = false

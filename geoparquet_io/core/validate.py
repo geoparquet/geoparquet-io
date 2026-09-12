@@ -3833,7 +3833,11 @@ def _run_parquet_geo_only_checks(
         return checks
 
     for geom_col in geo_columns.keys():
-        # Parquet native geo type checks
+        # Parquet native geo type checks. Spec validation asks for native
+        # GeospatialStatistics; whether a bbox *column*'s row-group min/max
+        # exist is a best-practice question, answered by `check optimization`'s
+        # geo_bbox_stats, not a spec check (a `_check_row_group_bbox_statistics`
+        # was written for it once, never registered, and removed in #1038).
         checks.append(_check_native_geo_type_present(schema_info, geom_col))
         checks.append(_check_geography_edges_valid(schema_info, geom_col))
         checks.append(_check_native_geo_statistics(parquet_file, geom_col))

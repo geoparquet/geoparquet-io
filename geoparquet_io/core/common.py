@@ -51,9 +51,7 @@ from geoparquet_io.core.arrow_geo_metadata import _compute_geometry_types as _co
 from geoparquet_io.core.arrow_geo_metadata import (
     _detect_bbox_column_from_table as _detect_bbox_column_from_table,
 )
-from geoparquet_io.core.arrow_geo_metadata import (
-    _detect_version_from_table,
-)
+from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 from geoparquet_io.core.arrow_geo_metadata import _estimate_row_size as _estimate_row_size
 from geoparquet_io.core.arrow_geo_metadata import (
     _get_geometry_type_name as _get_geometry_type_name,
@@ -130,9 +128,7 @@ from geoparquet_io.core.geo_metadata_repair import (
 from geoparquet_io.core.geo_metadata_repair import (
     _rewrite_file_with_geo_metadata as _rewrite_file_with_geo_metadata,
 )
-from geoparquet_io.core.geometry_detection import (
-    find_primary_geometry_column,
-)
+from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
