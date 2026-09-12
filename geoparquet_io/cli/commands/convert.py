@@ -353,8 +353,16 @@ def _convert_streaming(
             memory_limit=memory_limit,
         )
 
-        # Read and stream to stdout
-        table = pq.read_table(temp_path)
+        # Read and stream to stdout. Through `ParquetFile` so the file handle is
+        # closed here, before the `unlink` below, rather than whenever the
+        # reader `pq.read_table` creates internally is collected: with the
+        # extension types registered the table it returns is reachable through
+        # Python-side objects that outlive this frame's refcount drop, and
+        # Windows refuses to delete a file that still has a reader open
+        # (WinError 32). POSIX unlinks an open file happily, so only the Windows
+        # legs saw it.
+        with pq.ParquetFile(temp_path) as reader:
+            table = reader.read()
         write_arrow_stream(table)
     finally:
         if temp_path.exists():

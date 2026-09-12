@@ -23,10 +23,12 @@ defect (#1006). It stops being lossless for a consumer that reads the Arrow
 field type rather than the KV, and it is one import away from being the #993
 defect again if anything downstream starts trusting the schema.
 
-**Every test here runs in a subprocess, and has to.** This module's own imports
-register the extension types process-wide, so an in-process test of a
-process-global registration is green whatever the code under test does -- which
-is exactly how #993's first version shipped with the bug in it.
+**Every test of the registration here runs in a subprocess, and has to.** This
+module's own imports register the extension types process-wide, so an
+in-process test of a process-global registration is green whatever the code
+under test does -- which is exactly how #993's first version shipped with the
+bug in it. The one in-process test is about handle discipline, not the
+registration, and says so.
 
 Refs: https://github.com/geoparquet/geoparquet-io/issues/1006
 Refs: https://github.com/geoparquet/geoparquet-io/issues/993
@@ -129,6 +131,75 @@ def test_convert_to_stdout_keeps_the_geo_key(projected_conus):
     table = ipc.RecordBatchStreamReader(pa.BufferReader(payload)).read_all()
     geo = json.loads((table.schema.metadata or {})[b"geo"].decode("utf-8"))
     assert geo["columns"]["geometry"]["crs"]["id"] == EPSG_5070
+
+
+def test_convert_to_stdout_closes_the_scratch_file_before_deleting_it(projected_conus, monkeypatch):
+    """The handle-closed invariant behind a Windows-only failure, asserted on every OS.
+
+    With the extension types registered, the table ``pq.read_table`` returned
+    kept its reader reachable past the frame, and ``temp_path.unlink()`` in the
+    ``finally`` raised ``PermissionError: [WinError 32]`` on all three Windows
+    legs -- POSIX unlinks an open file, so nothing else saw it. The rule (see
+    ``windows-os-replace-open-handle``) is that a handle on a file the code
+    later deletes is closed first.
+
+    The leaked reader is not observable from POSIX -- no descriptor stays open,
+    the difference is in how Windows treats a reader the collector has not yet
+    reached -- so what can be pinned on every OS is the discipline that keeps
+    the invariant: the scratch file is read through a ``ParquetFile`` that is
+    closed before the stream is written, and never through ``pq.read_table``,
+    whose reader is closed whenever it is collected. In-process on purpose: it
+    is about handle discipline, not the registration.
+    """
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core import streaming
+
+    events: list[tuple[str, str]] = []
+    real_parquet_file = pq.ParquetFile
+    real_read_table = pq.read_table
+
+    def recording_read_table(source, *args, **kwargs):
+        events.append(("read_table", str(source)))
+        return real_read_table(source, *args, **kwargs)
+
+    monkeypatch.setattr(pq, "read_table", recording_read_table)
+
+    class RecordingParquetFile(real_parquet_file):
+        """Records which file each closed reader was on: the conversion itself
+        opens and closes readers on the *input*, which are not the point."""
+
+        def __init__(self, source, *args, **kwargs):
+            self._recorded_source = str(source)
+            super().__init__(source, *args, **kwargs)
+
+        def close(self, *args, **kwargs):
+            events.append(("closed", self._recorded_source))
+            return super().close(*args, **kwargs)
+
+    monkeypatch.setattr(pq, "ParquetFile", RecordingParquetFile)
+    monkeypatch.setattr(
+        streaming, "write_arrow_stream", lambda table: events.append(("streamed", ""))
+    )
+
+    result = CliRunner().invoke(cli, ["convert", "geoparquet", str(projected_conus), "-"])
+
+    assert result.exit_code == 0, result.output
+    scratch_read_table = [s for kind, s in events if kind == "read_table" and "gpio_convert_" in s]
+    assert not scratch_read_table, (
+        "the scratch file was read through pq.read_table, whose reader is closed "
+        f"at the collector's leisure -- after the unlink, on Windows: {scratch_read_table}"
+    )
+    streamed_at = events.index(("streamed", ""))
+    scratch_closed_at = [
+        i
+        for i, (kind, source) in enumerate(events)
+        if kind == "closed" and "gpio_convert_" in source
+    ]
+    assert scratch_closed_at, f"the scratch file was never read through a closable reader: {events}"
+    assert scratch_closed_at[0] < streamed_at, events
 
 
 def test_read_stdin_to_temp_file_keeps_the_native_logical_type(stream_of):
