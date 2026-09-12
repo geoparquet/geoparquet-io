@@ -11,6 +11,7 @@ Writers handle local file output only; remote uploads are handled by the upload 
 """
 
 import json
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,6 +24,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import (
+    FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
 )
@@ -35,6 +37,7 @@ from geoparquet_io.core.remote import (
     setup_aws_profile_if_needed,
     validate_profile_for_urls,
 )
+from geoparquet_io.core.sizing import format_size
 
 # Error message templates for consistency
 ERROR_REMOTE_OUTPUT = "{format} output path must be local. Use upload() for cloud destinations."
@@ -618,3 +621,73 @@ def write_format(
             "format",
             f"Unsupported format: {format}. Supported formats: {', '.join(supported)}",
         )
+
+
+def create_shapefile_zip(shapefile_path: str | Path, verbose: bool = False) -> Path:
+    """
+    Create a zip archive containing a shapefile and all its sidecar files.
+
+    Shapefiles consist of multiple files with different extensions (.shp, .shx, .dbf, .prj, .cpg).
+    This function creates a single .shp.zip archive containing all related files.
+
+    Args:
+        shapefile_path: Path to the main .shp file
+        verbose: Print verbose output
+
+    Returns:
+        Path to the created .shp.zip file
+
+    Raises:
+        click.ClickException: If shapefile or required sidecars are missing
+    """
+    import zipfile
+
+    configure_verbose(verbose)
+    shapefile_path = Path(shapefile_path)
+
+    if not shapefile_path.exists():
+        raise FileNotFoundGeoParquetError(str(shapefile_path))
+
+    # Shapefile extensions: .shp (main), .shx (index), .dbf (attributes) are required
+    # Optional: .prj (projection), .cpg (encoding), .sbn/.sbx (spatial index)
+    stem = shapefile_path.stem
+    parent = shapefile_path.parent
+
+    # Find all files with the same stem
+    sidecar_files = list(parent.glob(f"{stem}.*"))
+
+    # Filter to only shapefile-related extensions
+    shapefile_extensions = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx"}
+    sidecar_files = [f for f in sidecar_files if f.suffix.lower() in shapefile_extensions]
+
+    if not sidecar_files:
+        raise FileNotFoundGeoParquetError(str(shapefile_path), "no shapefile components found")
+
+    # Verify required files exist
+    required_extensions = {".shp", ".shx", ".dbf"}
+    found_extensions = {f.suffix.lower() for f in sidecar_files}
+    missing = required_extensions - found_extensions
+
+    if missing:
+        raise FileNotFoundGeoParquetError(
+            str(shapefile_path), f"missing required shapefile components: {', '.join(missing)}"
+        )
+
+    # Create zip file
+    zip_path = parent / f"{stem}.shp.zip"
+
+    if verbose:
+        debug(f"Creating shapefile archive: {zip_path}")
+        debug(f"Including {len(sidecar_files)} files: {[f.name for f in sidecar_files]}")
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for sidecar in sidecar_files:
+            zipf.write(sidecar, sidecar.name)
+            if verbose:
+                debug(f"  Added: {sidecar.name}")
+
+    if verbose:
+        zip_size = zip_path.stat().st_size
+        success(f"Created shapefile archive: {zip_path} ({format_size(zip_size)})")
+
+    return zip_path

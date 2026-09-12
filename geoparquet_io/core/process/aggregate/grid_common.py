@@ -17,6 +17,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.crs_utils import (
     crs_transform_sql_expr,
@@ -572,8 +573,6 @@ def _resolve_bbox_column_for_file(
     Detection consults the file's GeoParquet ``covering.bbox`` metadata first,
     falling back to naming conventions (see ``check_bbox_structure``).
     """
-    from geoparquet_io.core.common import check_bbox_structure
-
     if bbox_column:
         return bbox_column
     detected = check_bbox_structure(input_parquet, verbose).get("bbox_column_name")

@@ -9,6 +9,7 @@ Evaluates five factors that affect spatial query performance:
 5. Efficient compression (ZSTD)
 """
 
+from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.logging_config import error, info, progress, success, warn
 
 
@@ -34,8 +35,6 @@ def _check_native_geo_types(parquet_file, verbose=False):
     Returns:
         dict with 'passed' (bool) and 'detail' (str)
     """
-    from geoparquet_io.core.common import detect_geoparquet_file_type
-
     file_info = detect_geoparquet_file_type(parquet_file, verbose)
     has_native = file_info.get("has_native_geo_types", False)
 

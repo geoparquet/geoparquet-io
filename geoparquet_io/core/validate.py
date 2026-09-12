@@ -33,6 +33,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
     schema_direct_children,
@@ -3640,7 +3641,6 @@ def validate_geoparquet(
     Returns:
         ValidationResult with all check results
     """
-    from geoparquet_io.core.common import detect_geoparquet_file_type
     from geoparquet_io.core.duckdb_metadata import (
         detect_geometry_columns,
         get_geo_metadata,
