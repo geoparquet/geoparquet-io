@@ -1255,17 +1255,27 @@ class TestFailureClassificationUsesTheHttpStatus:
 
         assert conn.attempts == 1
 
-    def test_a_timeout_is_retried_then_reported_as_a_timeout(self, monkeypatch):
-        """Timeouts keep their actionable hint, classified by type not by text."""
+    def test_a_probe_that_times_out_is_no_status_not_a_timeout_verdict(self, monkeypatch):
+        """A probe that cannot answer in time says nothing about the data request.
+
+        The first version read it as "the request timed out" and printed the
+        ``--limit`` hint. On Windows runners a SYN to a closed loopback port is
+        dropped rather than refused, so every dead-port test there reported a
+        timeout for a connection that was never made.
+        """
+        import httpx
+
         conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
         monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
-        monkeypatch.setattr(
-            carto_module,
-            "_probe_request_status",
-            lambda *a, **k: carto_module._CartoStatus(None, True),
-        )
 
-        with pytest.raises(CartoError, match="timed out after 3 attempts"):
+        def _slow(*args, **kwargs):
+            raise httpx.ConnectTimeout("took too long")
+
+        monkeypatch.setattr(httpx, "stream", _slow)
+        warnings: list[str] = []
+        monkeypatch.setattr(carto_module, "warn", warnings.append)
+
+        with pytest.raises(CartoError, match="Failed to fetch data from Carto after 3 attempts"):
             _fetch_with_retry(
                 url="http://127.0.0.1:1/api/v2/sql",
                 table_name="my_table",
@@ -1276,6 +1286,7 @@ class TestFailureClassificationUsesTheHttpStatus:
             )
 
         assert conn.attempts == 3
+        assert all(w.startswith("Could not reach Carto") for w in warnings), warnings
 
     def test_the_probe_is_one_request_per_failed_attempt(self, monkeypatch, status_http_server):
         """Cost claim, pinned: a retryable failure costs one probe per attempt, no more."""
@@ -1459,8 +1470,8 @@ class TestFailureClassificationUsesTheHttpStatus:
             None, False
         )
 
-    def test_a_probe_that_times_out_says_so_by_type(self, monkeypatch):
-        """The timeout verdict comes from httpx's exception type, not from text."""
+    def test_a_probe_that_times_out_reports_no_status(self, monkeypatch):
+        """httpx's timeout type means the *probe* could not answer -- no status."""
         import httpx
 
         def _slow(*args, **kwargs):
@@ -1468,7 +1479,7 @@ class TestFailureClassificationUsesTheHttpStatus:
 
         monkeypatch.setattr(httpx, "stream", _slow)
         assert carto_module._probe_request_status("http://x/", 1.0) == carto_module._CartoStatus(
-            None, True
+            None, False
         )
 
     def test_the_probe_is_bounded_below_a_long_data_timeout(self, monkeypatch):

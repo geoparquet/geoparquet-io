@@ -112,12 +112,11 @@ class _CartoStatus(NamedTuple):
         code: The HTTP status the server answered with, or None when the
             request never got one. That absence -- connection refused, DNS
             failure, a timeout -- *is* the retryable class.
-        timed_out: Whether the request timed out. Known from the exception
-            *type* when the probe times out, and from the *clock* when the data
-            request does -- an attempt that ran for the whole ``--timeout``
-            before failing timed out whatever its message says, and is not
-            probed: the probe would re-run the query that was too heavy the
-            first time.
+        timed_out: Whether the data request timed out, known from the *clock*:
+            an attempt that ran for the whole ``--timeout`` before failing timed
+            out whatever its message says, and is not probed -- the probe would
+            re-run the query that was too heavy the first time. A probe that
+            itself times out is "no status", never this.
         local: The failure happened on this machine -- out of memory, an
             interrupt, a binder error -- before any response existed to
             classify. Nothing to probe, nothing a retry would change.
@@ -676,9 +675,14 @@ def _probe_request_status(full_url: str, timeout: float) -> _CartoStatus:
             # bare "HTTP 400" throws away the only thing the user can act on.
             detail = _read_probe_detail(response) if 400 <= code < 500 and code != 429 else None
             return _CartoStatus(code, False, detail=detail, retry_after=_retry_after(response))
-    except httpx.TimeoutException:
-        return _CartoStatus(None, True)
     except Exception as probe_error:  # noqa: BLE001 - any failure means "no status"
+        # A probe that times out is a probe that could not answer -- no status,
+        # the retryable class. It is *not* evidence that the data request timed
+        # out: that verdict comes from the data request's own clock in
+        # `_classify_fetch_failure`. The first version read a probe timeout as
+        # one, and Windows runners, where a SYN to a closed loopback port is
+        # dropped rather than refused, reported "Request timed out ... try
+        # --limit" for a connection that was never made.
         debug(f"Status probe failed ({probe_error}); treating the failure as retryable")
         return _CartoStatus(None, False)
 
