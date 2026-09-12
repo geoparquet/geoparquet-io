@@ -653,13 +653,15 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     return None
 
 
-def _crs_from_geo_block(parquet_file) -> dict | str | None:
-    """The CRS the file's ``geo`` block states for its primary column, or ``None``.
+def _crs_from_geo_block(parquet_file) -> tuple[dict | str | None, str | None]:
+    """``(crs, primary column)`` as the file's ``geo`` block states them.
 
-    ``None`` for a missing block, an undescribed column, the default CRS and an
-    explicit ``crs: null`` alike -- all of them mean "this source does not name a
-    CRS to write". The null case warns on its way through, because an unknown CRS
-    is not an absent one.
+    The CRS is ``None`` for a missing block, an undescribed column, the default
+    CRS and an explicit ``crs: null`` alike -- all of them mean "this source does
+    not name a CRS to write". The null case warns on its way through, because an
+    unknown CRS is not an absent one. The column comes back alongside so the
+    caller can hold the logical type of *that* column against it, not whichever
+    geometry column happens to come first in the schema.
 
     A write-path reader, so a malformed carried block goes through
     :func:`sanitize_geo_metadata` rather than being indexed as-is (#887).
@@ -671,22 +673,25 @@ def _crs_from_geo_block(parquet_file) -> dict | str | None:
 
     geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
     if not geo_meta:
-        return None
+        return None, None
     primary_col = _primary_column_of_file(geo_meta, parquet_file)
     columns = geo_meta.get("columns", {})
     if primary_col not in columns:
-        return None
+        return None, primary_col
     if crs_is_explicitly_null(columns[primary_col]):
         warn_null_crs_once(str(parquet_file))
     crs = columns[primary_col].get("crs")
-    return crs if crs and not is_default_crs(crs) else None
+    return (crs if crs and not is_default_crs(crs) else None), primary_col
 
 
-def _crs_from_native_geo_type(parquet_file) -> dict | str | None:
-    """The CRS inside the first Parquet GEOMETRY/GEOGRAPHY logical type, or ``None``.
+def _crs_from_native_geo_type(parquet_file, column: str | None = None) -> dict | str | None:
+    """The CRS inside a Parquet GEOMETRY/GEOGRAPHY logical type, or ``None``.
 
-    The only place a *native-geo-only* file records its CRS, and the second
-    opinion on every file that also has a ``geo`` block.
+    With ``column`` it reads that one column -- the second opinion on a file
+    whose ``geo`` block has already named its primary. Without it, the first
+    geometry column that names a non-default CRS: the only place a
+    *native-geo-only* file records its CRS, where no block says which column is
+    primary.
     """
     from geoparquet_io.core.duckdb_metadata import (
         get_schema_info,
@@ -695,6 +700,8 @@ def _crs_from_native_geo_type(parquet_file) -> dict | str | None:
     )
 
     for col in get_schema_info(parquet_file):
+        if column is not None and col.get("name") != column:
+            continue
         logical_type = col.get("logical_type") or ""
         if not logical_type.startswith(("GeometryType(", "GeographyType(")):
             continue
@@ -730,11 +737,14 @@ def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
 @lru_cache(maxsize=256)
 def _emit_crs_disagreement_warning(key: str, winner: str, loser: str) -> None:
     """Emit the two-sources-disagree warning exactly once per ``key`` (LRU-bounded)."""
+    # Says what was read and which half won, not what the caller will write with
+    # it: `convert reproject` transforms the coordinates and states its target
+    # CRS, the GDAL writers do not write a `geo` block at all, so a sentence
+    # about "the output" would be false for them.
     warn(
         f"{key}: the geo metadata says the CRS is {winner} but the Parquet geometry "
         f"logical type says {loser}. Using {winner}, per the documented preference "
-        "for the geo metadata -- an output written from this input will state "
-        f"{winner} in both places, with coordinates that were never transformed. "
+        "for the geo metadata; the coordinates themselves are read as-is. "
         "Run `gpio check spec` on the input and fix whichever half is wrong."
     )
 
@@ -777,8 +787,15 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
     footer either way, and ``gpio check spec`` reads both halves of every file
     regardless.
     """
-    geo_block_crs = _crs_from_geo_block(parquet_file)
-    native_crs = _crs_from_native_geo_type(parquet_file)
+    geo_block_crs, primary_col = _crs_from_geo_block(parquet_file)
+    # Compare like with like: the block's answer is about its primary column,
+    # so the logical type it is held against has to be that column's. A valid
+    # file with a second geometry column in another CRS ahead of the primary in
+    # schema order is otherwise accused of contradicting itself, and a primary
+    # that really does disagree is masked by a non-primary that happens to agree.
+    native_crs = _crs_from_native_geo_type(
+        parquet_file, column=primary_col if geo_block_crs is not None else None
+    )
 
     if geo_block_crs is not None:
         if _crs_sources_disagree(geo_block_crs, native_crs):

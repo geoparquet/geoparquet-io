@@ -105,7 +105,7 @@ def native_geo_edges(path, column: str = "geometry") -> tuple[str | None, str | 
     it the column is plain ``binary`` and the edge type reads ``None``.
     """
     described = logical_geo_types(path).get(column)
-    field = pq.read_table(str(path)).schema.field(column)
+    field = pq.read_schema(str(path)).field(column)
     edges = getattr(field.type, "edge_type", None)
     return (described[0] if described else None, None if edges is None else str(edges))
 

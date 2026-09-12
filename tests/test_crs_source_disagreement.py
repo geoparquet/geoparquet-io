@@ -207,6 +207,92 @@ def test_a_crs_less_file_does_not_warn(tmp_path, _native_rows, caplog):
 
 
 # ---------------------------------------------------------------------------
+# Two geometry columns: the comparison is about the primary one
+# ---------------------------------------------------------------------------
+
+
+def _two_column_file(tmp_path: Path, *, block_primary_epsg: int) -> Path:
+    """``aux`` (EPSG:5070) ahead of the primary ``geometry`` (EPSG:3857) in schema order.
+
+    Both logical types carry their CRS; the ``geo`` block describes ``aux``
+    truthfully and says ``block_primary_epsg`` for ``geometry``. Passing 3857
+    makes a valid file; anything else makes the *primary* column disagree while
+    the non-primary one still agrees.
+    """
+    import geoarrow.pyarrow as ga
+
+    rows = conus_wkb(
+        "ST_Transform(cell, 'EPSG:4326', 'EPSG:5070', always_xy := true)",
+        "ST_Transform(cell, 'EPSG:4326', 'EPSG:3857', always_xy := true)",
+    )
+    path = write_native_geo_only(
+        tmp_path / "two_columns.parquet",
+        rows,
+        {
+            "aux": (2, ga.wkb().with_crs(projjson(5070))),
+            "geometry": (3, ga.wkb().with_crs(projjson(3857))),
+        },
+    )
+    table = pq.read_table(str(path))
+    block = {
+        "version": "2.0.0",
+        "primary_column": "geometry",
+        "columns": {
+            "aux": {
+                "encoding": "WKB",
+                "geometry_types": ["Polygon"],
+                "crs": json.loads(projjson(5070)),
+            },
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Polygon"],
+                "crs": json.loads(projjson(block_primary_epsg)),
+            },
+        },
+    }
+    metadata = dict(table.schema.metadata or {})
+    metadata[b"geo"] = json.dumps(block).encode("utf-8")
+    pq.write_table(table.replace_schema_metadata(metadata), str(path), compression="zstd")
+    return path
+
+
+def test_a_valid_second_geometry_column_ahead_of_the_primary_does_not_warn(tmp_path, caplog):
+    """Both columns agree with themselves; only the schema order is unusual.
+
+    Comparing the block's *primary* CRS against the *first* logical type in the
+    schema accuses a valid file of contradicting itself and sends the user to
+    ``gpio check spec``, which finds nothing.
+    """
+    path = _two_column_file(tmp_path, block_primary_epsg=3857)
+    assert spec_problems(path) == [], "the fixture itself must be a valid file"
+
+    with caplog.at_level(logging.WARNING):
+        resolved = extract_crs_from_parquet(str(path))
+
+    assert (resolved or {}).get("id") == EPSG_3857
+    assert caplog.records == []
+
+
+def test_the_disagreement_is_judged_on_the_primary_column(tmp_path, caplog):
+    """The block misdescribes the primary column while the earlier ``aux`` is fine.
+
+    Matching the block's primary CRS against ``aux``'s logical type -- the first
+    one in the schema -- would find EPSG:5070 on both sides and stay silent over
+    a real disagreement.
+    """
+    path = _two_column_file(tmp_path, block_primary_epsg=5070)
+
+    with caplog.at_level(logging.WARNING):
+        resolved = extract_crs_from_parquet(str(path))
+
+    assert (resolved or {}).get("id") == EPSG_5070, "the documented preference must not change"
+    warnings = _disagreement_warnings(caplog.records)
+    assert len(warnings) == 1, caplog.records
+    assert "Using EPSG:5070" in warnings[0]
+    assert "logical type says EPSG:3857" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
 # The write path the issue was filed about
 # ---------------------------------------------------------------------------
 
