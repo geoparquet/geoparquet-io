@@ -35,6 +35,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
 from geoparquet_io.core.write_strategies.duckdb_kv import validate_memory_limit
 
 # Regex patterns for GCP resource validation
@@ -1124,20 +1125,29 @@ def _execute_bigquery_extraction(
                     edges=final_edges,
                 )
             else:
-                # No geometry - write plain Parquet with same compression settings
+                # No geometry: plain Parquet, but with the row-group count the
+                # geometry branch above gets. This used to hand pq.write_table a
+                # byte count where a row count goes -- `--row-group-size-mb 128`
+                # asked for 134,217,728 rows per group -- and None when no flag
+                # was given, so DEFAULT_ROW_GROUP_ROWS never applied and the
+                # output was one row group for the whole file (#1021).
+                #
+                # It stays a direct write rather than routing through
+                # write_geoparquet_table because that helper reads
+                # geometry_column=None as "auto-detect by name": it would call a
+                # plain VARCHAR column named `geom` or `shape` geometry and
+                # stamp a geo key on it, which is precisely what BigQuery's own
+                # schema said this table does not have.
                 import pyarrow.parquet as pq
-
-                # Map row_group_size_mb to row_group_size (bytes)
-                rg_size = int(row_group_size_mb * 1024 * 1024) if row_group_size_mb else None
-                # row_group_rows takes precedence if specified
-                final_rg_size = row_group_rows if row_group_rows else rg_size
 
                 pq.write_table(
                     result,
                     output_parquet,
                     compression=compression,
                     compression_level=compression_level,
-                    row_group_size=final_rg_size,
+                    row_group_size=resolve_row_group_rows_for_table(
+                        result, row_group_rows, row_group_size_mb
+                    ),
                 )
 
             success(f"Extracted {row_count:,} rows to {output_parquet}")

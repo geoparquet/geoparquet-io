@@ -1225,6 +1225,207 @@ class TestBigQueryConnection:
         )
 
 
+def _wkb_point(x: float, y: float) -> bytes:
+    """Little-endian WKB POINT, enough for the geometry branch to write."""
+    import struct
+
+    return struct.pack("<BIdd", 1, 1, x, y)
+
+
+def _bq_result_table(num_rows: int) -> pa.Table:
+    """One table both branches write, so a row-size estimate is identical.
+
+    The geometry column is called ``geom`` -- a name
+    ``detect_geometry_column_from_names`` matches -- on purpose: the
+    geometry-less branch must stay plain Parquet even then.
+    """
+    return pa.table(
+        {
+            "id": pa.array(range(num_rows), pa.int64()),
+            "name": pa.array([f"{i:0>100}" for i in range(num_rows)]),
+            "geom": pa.array(
+                [_wkb_point(i % 180 - 90, i % 90 - 45) for i in range(num_rows)], pa.binary()
+            ),
+        }
+    )
+
+
+def _extract_to(out: Path, *, table: pa.Table, with_geometry: bool, **kwargs) -> None:
+    """Run ``extract_bigquery`` against a stubbed connection that returns ``table``.
+
+    ``with_geometry`` only changes the type DuckDB reports for ``geom``, which
+    is the single input that picks the write branch.
+    """
+    from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+    schema_rows = [
+        ("id", "BIGINT"),
+        ("name", "VARCHAR"),
+        ("geom", "GEOMETRY" if with_geometry else "VARCHAR"),
+    ]
+    con = MagicMock()
+    con.execute.return_value.arrow.return_value.read_all.return_value = table
+    with (
+        patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+        patch("geoparquet_io.core.extract_bigquery._schema_rows", return_value=schema_rows),
+    ):
+        mock_conn.return_value.__enter__.return_value = con
+        extract_bigquery(table_id="project-name.dataset.table", output_parquet=str(out), **kwargs)
+
+
+def _row_group_rows(path: Path) -> list[int]:
+    meta = pq.ParquetFile(path).metadata
+    return [meta.row_group(i).num_rows for i in range(meta.num_row_groups)]
+
+
+#: > DEFAULT_ROW_GROUP_ROWS, so the default is visible in the footer.
+_FACADE_TEST_ROWS = 60_000
+
+
+@pytest.fixture(scope="module")
+def bq_result_table() -> pa.Table:
+    return _bq_result_table(_FACADE_TEST_ROWS)
+
+
+class TestRowGroupsMatchTheWriteFacade:
+    """#1021: the geometry-less branch wrote one row group for the whole file.
+
+    It called ``pq.write_table`` directly with a *byte* count in
+    ``row_group_size`` (a row count), and with ``None`` when no flag was given
+    -- so ``DEFAULT_ROW_GROUP_ROWS`` never applied. Same command, same flags,
+    same input: five row groups with a geometry column and one without.
+    """
+
+    ROWS = _FACADE_TEST_ROWS
+
+    def test_default_applies_without_a_flag(self, tmp_path, bq_result_table):
+        """No row-group flag: the facade's 49,152, not pyarrow's own default."""
+        from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
+
+        out = tmp_path / "plain.parquet"
+        _extract_to(out, table=bq_result_table, with_geometry=False)
+
+        groups = _row_group_rows(out)
+        assert groups == [DEFAULT_ROW_GROUP_ROWS, self.ROWS - DEFAULT_ROW_GROUP_ROWS]
+
+    def test_mb_target_yields_several_groups(self, tmp_path, bq_result_table):
+        """``--row-group-size-mb`` is a byte target, sized into rows -- not rows."""
+        out = tmp_path / "plain-mb.parquet"
+        _extract_to(out, table=bq_result_table, with_geometry=False, row_group_size_mb=1.0)
+
+        groups = _row_group_rows(out)
+        # 60,000 rows of ~110 bytes is ~6.5 MB; 1 MB groups cannot be one group.
+        assert len(groups) > 1, groups
+        assert max(groups) < self.ROWS
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            pytest.param({}, id="no-flag"),
+            pytest.param({"row_group_rows": 20_000}, id="row-count"),
+            pytest.param({"row_group_size_mb": 1.0}, id="mb-target"),
+        ],
+    )
+    def test_both_branches_agree(self, tmp_path, bq_result_table, flags):
+        """One command, one flag, one input -- one row-group layout."""
+        geo_out = tmp_path / "geo.parquet"
+        plain_out = tmp_path / "plain.parquet"
+        _extract_to(geo_out, table=bq_result_table, with_geometry=True, **flags)
+        _extract_to(plain_out, table=bq_result_table, with_geometry=False, **flags)
+
+        assert _row_group_rows(plain_out) == _row_group_rows(geo_out)
+
+    def test_an_explicit_row_count_is_aligned_on_both_branches(self, tmp_path, bq_result_table):
+        """20,000 is not a size a row group can have; the facade says 20,480."""
+        out = tmp_path / "plain-rows.parquet"
+        _extract_to(out, table=bq_result_table, with_geometry=False, row_group_rows=20_000)
+
+        assert _row_group_rows(out)[0] == 20_480
+
+    def test_a_bad_row_count_is_rejected_rather_than_written(self, tmp_path, bq_result_table):
+        """The facade's validation reaches this branch too."""
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        out = tmp_path / "never.parquet"
+        with pytest.raises(InvalidParameterError):
+            _extract_to(out, table=bq_result_table, with_geometry=False, row_group_rows=0)
+
+    def test_a_geom_named_column_stays_plain_parquet(self, tmp_path, bq_result_table):
+        """Routing must not start auto-detecting geometry by column name.
+
+        ``geom`` is in ``STANDARD_GEOMETRY_NAMES``, but DuckDB reported it as
+        ``VARCHAR``: BigQuery said it is not geography, and the output must not
+        claim otherwise.
+        """
+        out = tmp_path / "plain-geo-name.parquet"
+        _extract_to(out, table=bq_result_table, with_geometry=False)
+
+        assert b"geo" not in (pq.ParquetFile(out).schema_arrow.metadata or {})
+
+
+class TestFacadeSizesAnMbTarget:
+    """``resolve_row_group_rows_for_table`` -- one owner for MB -> rows."""
+
+    def test_no_options_is_the_default(self):
+        from geoparquet_io.core.parquet_writer import (
+            DEFAULT_ROW_GROUP_ROWS,
+            resolve_row_group_rows_for_table,
+        )
+
+        table = pa.table({"id": pa.array(range(10), pa.int64())})
+        assert resolve_row_group_rows_for_table(table, None, None) == DEFAULT_ROW_GROUP_ROWS
+
+    def test_an_mb_target_becomes_a_row_count(self):
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+
+        table = _bq_result_table(20_000)
+        rows = resolve_row_group_rows_for_table(table, None, 1.0)
+        assert rows is not None
+        assert 1 <= rows < 20_000
+
+    def test_an_mb_target_never_exceeds_the_table(self):
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+
+        table = _bq_result_table(100)
+        assert resolve_row_group_rows_for_table(table, None, 1024.0) == 100
+
+    def test_an_empty_table_keeps_the_mb_target_unsized(self):
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+
+        table = pa.table({"id": pa.array([], pa.int64())})
+        assert resolve_row_group_rows_for_table(table, None, 1.0) is None
+
+    def test_an_explicit_row_count_wins_over_an_mb_target(self):
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+
+        table = _bq_result_table(20_000)
+        assert resolve_row_group_rows_for_table(table, 4_096, 1.0) == 4_096
+
+    def test_estimate_row_size_falls_back_when_the_table_cannot_say(self):
+        """A table-like object with neither buffer accessor gets 100 bytes/row."""
+        from geoparquet_io.core.parquet_writer import estimate_row_size
+
+        class _Opaque:
+            num_rows = 10
+
+        assert estimate_row_size(_Opaque()) == 100
+
+    def test_estimate_row_size_survives_a_raising_accessor(self):
+        from geoparquet_io.core.parquet_writer import estimate_row_size
+
+        class _Broken:
+            num_rows = 10
+
+            def get_total_buffer_size(self):
+                raise RuntimeError("no")
+
+            @property
+            def nbytes(self):
+                raise RuntimeError("no")
+
+        assert estimate_row_size(_Broken()) == 100
+
+
 # Integration tests that require BigQuery access
 @pytest.mark.network
 class TestBigQueryIntegration:

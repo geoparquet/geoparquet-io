@@ -163,9 +163,9 @@ def _resolve_row_group_rows_for_table(
 
 def _rows_for_mb_target(sample: pa.Table, row_group_size_mb: float, verbose: bool) -> int:
     """Convert an MB target into a row count using a sample's bytes-per-row."""
-    from geoparquet_io.core.common import _estimate_row_size
+    from geoparquet_io.core.parquet_writer import estimate_row_size
 
-    bytes_per_row = _estimate_row_size(sample)
+    bytes_per_row = estimate_row_size(sample)
     target_bytes = row_group_size_mb * 1024 * 1024
     rows = max(1, int(target_bytes // bytes_per_row))
     if verbose:

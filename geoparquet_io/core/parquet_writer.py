@@ -219,6 +219,58 @@ def resolve_row_group_rows(
     return aligned
 
 
+def estimate_row_size(table) -> int:
+    """Bytes per row, as well as an in-memory Arrow table can say.
+
+    ``get_total_buffer_size()`` first (it counts every buffer), then
+    ``nbytes``, then 100 bytes for a table-like object that answers neither.
+    The floor is 1: a zero would make the division below a ``ZeroDivisionError``
+    rather than a big row group.
+    """
+    default_row_size = 100
+    num_rows = max(1, table.num_rows)
+
+    for accessor in ("get_total_buffer_size", "nbytes"):
+        try:
+            value = getattr(table, accessor)
+            total_bytes = value() if callable(value) else value
+            if total_bytes > 0:
+                return max(1, total_bytes // num_rows)
+        except Exception:
+            continue
+
+    return default_row_size
+
+
+def resolve_row_group_rows_for_table(
+    table,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    param_name: str = "--row-group-size",
+) -> int | None:
+    """:func:`resolve_row_group_rows`, with an MB target turned into rows.
+
+    ``resolve_row_group_rows`` deliberately answers ``None`` for an explicit
+    ``--row-group-size-mb``, because a *byte* target can only become a row count
+    once there is a table to measure. This is that second step, and it lives
+    here rather than at each write because a path that does it for itself
+    invents a second answer to the facade's first question -- which is exactly
+    how ``gpio extract bigquery`` came to hand ``pq.write_table`` a byte count
+    where a row count goes, asking for 134,217,728 rows per group and writing
+    one row group for the whole file (#1021).
+
+    ``None`` still comes back for an MB target against an empty table: there is
+    nothing to measure and no rows to group.
+    """
+    resolved = resolve_row_group_rows(row_group_rows, row_group_size_mb, param_name)
+    if resolved is not None or not row_group_size_mb or table.num_rows <= 0:
+        return resolved
+
+    target_bytes = row_group_size_mb * 1024 * 1024
+    rows = max(1, int(target_bytes // estimate_row_size(table)))
+    return min(rows, table.num_rows)
+
+
 def _rounding_note(requested: int, landed: int) -> str:
     """The one sentence gpio says when a row-group request does not land.
 
