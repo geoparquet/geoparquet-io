@@ -2291,66 +2291,6 @@ def _execute_bounds_query(con, raw_url: str, geom_col: str, limit_clause: str):
 # =============================================================================
 
 
-def _check_row_group_bbox_statistics(parquet_file: str, geom_col: str) -> ValidationCheck:
-    """Check that file has bbox column with row group statistics for spatial filtering."""
-    from geoparquet_io.core.duckdb_metadata import (
-        get_bbox_from_row_group_stats,
-        has_bbox_column,
-    )
-    from geoparquet_io.core.remote import is_remote_url
-
-    try:
-        # For remote files, skip (DuckDB can handle but may be slow)
-        if is_remote_url(parquet_file):
-            return ValidationCheck(
-                name=f"row_group_bbox_stats_{geom_col}",
-                status=CheckStatus.SKIPPED,
-                message="row group statistics check skipped for remote files",
-                category="parquet_geo_types",
-            )
-
-        # Check if file has a bbox column
-        has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-
-        if not has_bbox:
-            return ValidationCheck(
-                name=f"row_group_bbox_stats_{geom_col}",
-                status=CheckStatus.WARNING,
-                message="no bbox column found for spatial filtering",
-                details="A bbox struct column (xmin/ymin/xmax/ymax) enables efficient spatial "
-                "filtering. Use 'gpio add bbox' to add one.",
-                category="parquet_geo_types",
-            )
-
-        # Check if bbox column has valid statistics
-        bbox = get_bbox_from_row_group_stats(parquet_file, bbox_col_name)
-
-        if bbox:
-            return ValidationCheck(
-                name=f"row_group_bbox_stats_{geom_col}",
-                status=CheckStatus.PASSED,
-                message=f'bbox column "{bbox_col_name}" has row group statistics',
-                category="parquet_geo_types",
-            )
-        else:
-            return ValidationCheck(
-                name=f"row_group_bbox_stats_{geom_col}",
-                status=CheckStatus.WARNING,
-                message=f'bbox column "{bbox_col_name}" missing row group statistics',
-                details="Row group statistics enable efficient spatial filtering. "
-                "Re-write the file with a tool that generates statistics.",
-                category="parquet_geo_types",
-            )
-
-    except Exception as e:
-        return ValidationCheck(
-            name=f"row_group_bbox_stats_{geom_col}",
-            status=CheckStatus.SKIPPED,
-            message=f"could not check row group statistics: {e}",
-            category="parquet_geo_types",
-        )
-
-
 def _is_bbox_valid(geo_bbox: dict) -> bool:
     """Check if bbox values are reasonable (not garbage from parsing errors).
 

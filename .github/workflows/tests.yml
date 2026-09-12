@@ -101,7 +101,7 @@ jobs:
       # diff-cover gate); when each re-derived `os == ... && python-version ==
       # ...` for itself, moving the baseline (drop 3.11, add 3.14) would have
       # turned all four false at once — no coverage measured, nothing uploaded,
-      # and BOTH the 80% floor and the 90% diff-cover gate silently gone with
+      # and BOTH the 85% floor and the 90% diff-cover gate silently gone with
       # every check green. Change the baseline HERE and everything follows.
       # (Deliberately not a `matrix.coverage` flag added via `include:`: an
       # include-contributed key is appended to the generated job name, so the
@@ -189,10 +189,16 @@ jobs:
           # and obscures where the gate lives, not a matrix speedup.
           #
           # The reporting job passes every flag explicitly because `addopts` no
-          # longer carries them: the 80% floor is enforced HERE.
+          # longer carries them: the 85% floor is enforced HERE.
+          #
+          # Branch coverage is NOT a flag here: [tool.coverage.run] branch = true
+          # in pyproject.toml turns it on for every consumer (local runs, this
+          # job, coverage.xml for diff-cover), so the floor below measures the
+          # combined line+branch figure. Keep the number in step with
+          # [tool.coverage.report] fail_under; tests/test_coverage_job.py pins it.
           COV_ARGS: >-
             ${{ env.COVERAGE_JOB == 'true'
-            && '--cov=geoparquet_io --cov-report=term-missing --cov-report=xml --cov-fail-under=80'
+            && '--cov=geoparquet_io --cov-report=term-missing --cov-report=xml --cov-fail-under=85'
             || '--no-cov' }}
         run: |
           # word-splitting intended: COV_ARGS is a flag list (or --no-cov)

@@ -305,15 +305,6 @@ def _setup_admin_join_connection(dataset, get_duckdb_connection):
     return con
 
 
-def _setup_duckdb_extensions(con):
-    """Load required DuckDB extensions."""
-    con.execute("INSTALL spatial;")
-    con.execute("LOAD spatial;")
-    con.execute("SET geometry_always_xy = true;")
-    con.execute("INSTALL httpfs;")
-    con.execute("LOAD httpfs;")
-
-
 def _build_admin_select_for_partitioning(levels, boundary_columns, dataset=None, vecorel=False):
     """Build admin SELECT clause for partitioning.
 

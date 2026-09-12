@@ -2,7 +2,7 @@
 
 Exactly one matrix combination reports coverage: it is the only job that
 measures lines at all, the only one that uploads to Codecov, the only one that
-enforces the 80% floor, and the only one that runs the 90% diff-cover gate.
+enforces the 85% floor, and the only one that runs the 90% diff-cover gate.
 
 Four separate places key off that decision (checkout depth, the pytest flag
 list, the Codecov upload, the diff-cover gate). While each re-derived
@@ -22,6 +22,14 @@ import pytest
 import yaml
 
 PROJECT_ROOT = Path(__file__).parent.parent
+
+# The coverage floor, repeated in three places that must agree: this pin,
+# `[tool.coverage.report] fail_under` in pyproject.toml, and `--cov-fail-under`
+# inside COV_ARGS in tests.yml. It is a trailing ratchet — the measured
+# full-fast-suite number minus two, rounded down — and since
+# `[tool.coverage.run] branch = true` that measured number is the COMBINED
+# line+branch figure (87.069% on 2026-09-12), not the line figure.
+FLOOR = 85
 
 # The job-level env var that decides which matrix leg reports coverage.
 COVERAGE_FLAG = "COVERAGE_JOB"
@@ -128,7 +136,7 @@ class TestCoverageLegIsSingleSourced:
         assert selected in combos, (
             f"{COVERAGE_FLAG} points at {selected}, which is not one of the "
             f"{len(combos)} combinations this matrix actually schedules "
-            f"({combos}). No job would measure coverage, so the 80% floor and "
+            f"({combos}). No job would measure coverage, so the {FLOOR}% floor and "
             "the 90% diff-cover gate would both vanish with all checks green."
         )
 
@@ -204,7 +212,7 @@ class TestCoverageLegStillEnforcesTheGates:
         """`addopts` no longer carries coverage, so these flags are the gate."""
         step = _step_by_name(test_job, "Run fast tests")
         cov_args = step["env"]["COV_ARGS"]
-        for flag in ("--cov=geoparquet_io", "--cov-report=xml", "--cov-fail-under=80"):
+        for flag in ("--cov=geoparquet_io", "--cov-report=xml", f"--cov-fail-under={FLOOR}"):
             assert flag in cov_args, (
                 f"{flag} missing from COV_ARGS. Coverage flags are no longer in "
                 "pyproject `addopts`, so this env var is the only thing enforcing "
