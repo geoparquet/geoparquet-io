@@ -278,6 +278,16 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
     else:
         gp_version = "1.1"  # Fallback, shouldn't happen for removal
 
+    # In place: stage beside the destination and move once the connection is
+    # closed, or DuckDB renames its `.tmp` over a file it is still reading --
+    # `Could not move file: Access is denied` on Windows. See fix_row_groups.
+    actual_output = output_file
+    temp_output_file = None
+    moved_into_place = False
+    if is_same_file_path(parquet_file, output_file):
+        temp_output_file = _staging_path_beside(output_file)
+        actual_output = temp_output_file
+
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
     try:
@@ -291,7 +301,7 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
         write_parquet_with_metadata(
             con=con,
             query=query,
-            output_file=output_file,
+            output_file=actual_output,
             original_metadata=None,  # Don't preserve old metadata with bbox covering
             compression="ZSTD",
             compression_level=15,
@@ -305,8 +315,6 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
             # restates whatever DuckDB read and declares nothing (#1001).
             input_file=parquet_file,
         )
-
-        return {"fix_applied": f"Removed bbox column '{bbox_column_name}'", "success": True}
     except duckdb.IOException as e:
         con.close()
         if is_remote_url(parquet_file):
@@ -315,6 +323,16 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
         raise
     finally:
         con.close()
+
+    try:
+        if temp_output_file:
+            _move_temp_output_into_place(temp_output_file, output_file, profile)
+            moved_into_place = True
+    finally:
+        if temp_output_file and not moved_into_place and os.path.exists(temp_output_file):
+            os.remove(temp_output_file)
+
+    return {"fix_applied": f"Removed bbox column '{bbox_column_name}'", "success": True}
 
 
 def fix_bbox_all(
@@ -465,6 +483,20 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
     # see fix_compression above.
     original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
 
+    # An in-place fix is staged beside the destination and moved over it once
+    # the connection is closed. Handed the input path as its output, DuckDB's
+    # COPY finds the destination in place, writes `<file>.tmp` and renames it
+    # over a file it is still reading -- fine on POSIX, and on Windows
+    # `IO Error: Could not move file: Access is denied`, intermittently, as
+    # the .bak sits there with nothing to restore from. Same routing as
+    # fix_compression and fix_spatial_ordering (#941, #959).
+    actual_output = output_file
+    temp_output_file = None
+    moved_into_place = False
+    if is_same_file_path(parquet_file, output_file):
+        temp_output_file = _staging_path_beside(output_file)
+        actual_output = temp_output_file
+
     # Read and rewrite with optimal row groups
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
 
@@ -474,7 +506,7 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
         write_parquet_with_metadata(
             con=con,
             query=query,
-            output_file=output_file,
+            output_file=actual_output,
             original_metadata=original_metadata,
             compression="ZSTD",
             compression_level=15,
@@ -484,16 +516,28 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
             geoparquet_version=geoparquet_version,
             input_file=parquet_file,
         )
-
-        return {"fix_applied": "Optimized row groups", "success": True}
     except duckdb.IOException as e:
-        con.close()
         if is_remote_url(parquet_file):
             hints = get_remote_error_hint(str(e), parquet_file)
             raise RemoteAccessError(parquet_file, f"{hints}\n\nOriginal error: {str(e)}") from e
         raise
     finally:
+        # Closed before the move below: the connection is the last reader of
+        # the file the staging copy is about to replace.
         con.close()
+
+    try:
+        if temp_output_file:
+            _move_temp_output_into_place(temp_output_file, output_file, profile)
+            moved_into_place = True
+    finally:
+        # Only ever discard the rewrite when it did NOT reach the destination
+        # (#959): a failed move leaves the original intact and the rewrite in
+        # the staging file for the user to recover.
+        if temp_output_file and not moved_into_place and os.path.exists(temp_output_file):
+            os.remove(temp_output_file)
+
+    return {"fix_applied": "Optimized row groups", "success": True}
 
 
 def get_geoparquet_version_from_check_results(check_results):
