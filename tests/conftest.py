@@ -38,9 +38,12 @@ duckdb.connect = _thread_limited_connect
 # noqa: E402 - Intentionally importing after duckdb patch
 # ---------------------------------------------------------------------------
 import functools  # noqa: E402
+import importlib  # noqa: E402
+import inspect  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import os  # noqa: E402
+import pkgutil  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
@@ -170,6 +173,113 @@ def _isolate_package_logging(pytestconfig):
     """Give every test in the suite a known-clean ``geoparquet_io`` logger."""
     with pristine_package_logging(guard_root=not _has_explicit_log_level(pytestconfig)):
         yield
+
+
+# ---------------------------------------------------------------------------
+# The package's ``lru_cache``es are process-global too, and one of them is an
+# assertion oracle
+# ---------------------------------------------------------------------------
+# The logger guard above fixes one half of #1016's test-order leakage. This is
+# the other half, and it is the more dangerous one, because a cache does not
+# merely change *how* output is formatted -- it decides whether output happens
+# at all.
+#
+# Three of the caches exist solely to make a warning fire **once per process**:
+# ``geo_metadata._emit_malformed_geo_warning``,
+# ``crs_utils._emit_null_crs_warning`` and
+# ``crs_utils._emit_crs_disagreement_warning``. They are keyed on the file (and
+# the detail), which is exactly why they leak: two tests that hand the same
+# malformed fixture to the same code path share a cache entry, so whichever runs
+# second sees *no warning* and an assertion of the form "the user is told about
+# this file" passes or fails purely on the schedule. Every one of the three has
+# a hand-written ``reset_*`` helper whose docstring says "Intended for tests" --
+# the need was understood, the enforcement was not there, and ``grep -A4
+# 'autouse=True' tests | grep cache_clear`` returned nothing.
+#
+# The other caches are performance caches -- ``crs_utils._projjson_from_authority``
+# (a pyproj lookup), ``file_type.detect_geoparquet_file_type`` (a hand-rolled
+# dict with a ``cache_clear`` attribute bolted on) and
+# ``write_strategies.WriteStrategyFactory.get_strategy`` (strategy instances).
+# They are keyed on a path or an enum, so a test that writes a *new* file at a
+# path a previous test used gets the previous test's answer. Clearing them is
+# free: every one recomputes from its arguments.
+#
+# Discovery walks the package rather than naming them, so a cache added
+# tomorrow is isolated the day it lands. ``tests/test_cache_state_isolation.py``
+# pins the resulting set by name, so an *unexpected* new cache is noticed rather
+# than silently swept in.
+#
+# Clearing happens on entry only, not on exit. Unlike a logger -- whose level is
+# read by whatever runs next, including a higher-scoped fixture's teardown -- a
+# warm cache cannot affect a test that already started from a cold one, so
+# entry is where the whole invariant lives and a second pass would only cost.
+
+_package_caches: dict[str, object] | None = None
+
+
+def _cached_callables(module):
+    """Yield ``(qualified name, cached callable)`` defined in ``module``.
+
+    ``__module__`` filtering keeps a re-export (``core/common.py`` re-exports a
+    good deal of the split-out modules) from yielding the same cache twice
+    under two names.
+
+    Class members go through :func:`inspect.getattr_static` and are unwrapped
+    from their ``classmethod``: a plain ``getattr`` would execute any
+    ``property`` on the way past, and the factory's cache is a ``classmethod``
+    wrapping an ``lru_cache``.
+    """
+    for attr, obj in vars(module).items():
+        if getattr(obj, "__module__", None) != module.__name__:
+            continue
+        if callable(obj) and hasattr(obj, "cache_clear"):
+            yield f"{module.__name__}.{getattr(obj, '__qualname__', attr)}", obj
+        elif inspect.isclass(obj):
+            for member_name in vars(obj):
+                member = inspect.getattr_static(obj, member_name)
+                member = getattr(member, "__func__", member)
+                if callable(member) and hasattr(member, "cache_clear"):
+                    yield f"{module.__name__}.{obj.__qualname__}.{member_name}", member
+
+
+def discover_package_caches() -> dict[str, object]:
+    """Every cached callable in ``geoparquet_io``, keyed by qualified name.
+
+    Computed once per process: the module set is fixed after import, and the
+    objects themselves are stable (an ``lru_cache`` wrapper is created at
+    decoration time and never replaced).
+    """
+    global _package_caches
+    if _package_caches is not None:
+        return _package_caches
+
+    import geoparquet_io
+
+    modules = [geoparquet_io]
+    for info in pkgutil.walk_packages(geoparquet_io.__path__, prefix="geoparquet_io."):
+        try:
+            modules.append(importlib.import_module(info.name))
+        except Exception:  # pragma: no cover - a module that will not import holds no live cache
+            continue
+
+    caches: dict[str, object] = {}
+    for module in modules:
+        caches.update(_cached_callables(module))
+    _package_caches = caches
+    return caches
+
+
+def clear_package_caches() -> None:
+    """Empty every ``geoparquet_io`` cache, including the warn-once ones."""
+    for cache in discover_package_caches().values():
+        cache.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_package_caches():
+    """Give every test in the suite a cold cache, warn-once caches included."""
+    clear_package_caches()
+    yield
 
 
 def walk_cli_commands(cmd, path: tuple[str, ...] = ()):
