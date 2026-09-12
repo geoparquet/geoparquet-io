@@ -2,6 +2,7 @@
 
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -14,7 +15,7 @@ from geoparquet_io.core.aws_credentials import (
     resolve_aws_credentials,
     resolve_aws_region,
 )
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.logging_config import error, progress, success
 
 
@@ -384,10 +385,34 @@ def _upload_file_sync(store, source: Path, target_key: str, **kwargs) -> None:
     success(f"Upload complete ({speed_mbps:.2f} MB/s)")
 
 
+class _UploadNotAttempted(Exception):
+    """Marker for a file ``--fail-fast`` stopped before it was ever tried.
+
+    It rides in the error slot of a result tuple so a not-attempted file is
+    neither a success nor a failure when the summary is counted (#1019).
+    """
+
+
 def _upload_one_file(
-    store, file_path: Path, source: Path, prefix: str, **kwargs
+    store,
+    file_path: Path,
+    source: Path,
+    prefix: str,
+    stop_requested: threading.Event | None = None,
+    **kwargs,
 ) -> tuple[Path, Exception | None]:
-    """Upload a single file and return result tuple for parallel processing."""
+    """Upload a single file and return result tuple for parallel processing.
+
+    ``stop_requested`` is set only when ``--fail-fast`` is in force. Checking it
+    here is what makes the stop reliable: cancelling the queued futures from the
+    consumer loop races a worker that is already pulling the next file off the
+    queue, and loses often enough that the same failing run cancelled six files
+    on one machine and none on another. The first failure sets the flag before
+    it returns, so every file a worker picks up afterwards stops here instead.
+    """
+    if stop_requested is not None and stop_requested.is_set():
+        return file_path, _UploadNotAttempted()
+
     try:
         target_key = _build_target_key(file_path, source, prefix)
         file_size = file_path.stat().st_size
@@ -405,12 +430,15 @@ def _upload_one_file(
         return file_path, None
     except Exception as e:
         error(f"{file_path.name}: {e}")
+        if stop_requested is not None:
+            stop_requested.set()
         return file_path, e
 
 
 def _upload_directory_sync(
     store,
     source: Path,
+    destination: str,
     prefix: str,
     files: list[Path],
     max_files: int,
@@ -422,11 +450,16 @@ def _upload_directory_sync(
     Args:
         store: obstore ObjectStore instance
         source: Source directory path
+        destination: Object store URL the files are going to, named in the error
+            raised when some of them do not get there
         prefix: S3/GCS/Azure prefix for uploaded files
         files: List of files to upload
         max_files: Max number of concurrent file uploads (must be >= 1)
         fail_fast: Stop on first error if True
         **kwargs: Additional arguments passed to obs.put
+
+    Raises:
+        RemoteAccessError: If any file failed or was never attempted
     """
     # Ensure max_files is at least 1 to avoid ThreadPoolExecutor ValueError
     max_files = max(1, max_files)
@@ -435,22 +468,74 @@ def _upload_directory_sync(
     total_size_mb = total_size / (1024 * 1024)
     progress(f"Found {len(files)} file(s) to upload ({total_size_mb:.2f} MB total)")
 
-    results = []
+    stop_requested = threading.Event() if fail_fast else None
+    results: list[tuple[Path, Exception | None]] = []
+    cancelled: list[Path] = []
     with ThreadPoolExecutor(max_workers=max_files) as executor:
         futures = {
-            executor.submit(_upload_one_file, store, f, source, prefix, **kwargs): f for f in files
+            executor.submit(
+                _upload_one_file, store, f, source, prefix, stop_requested=stop_requested, **kwargs
+            ): f
+            for f in files
         }
+        pending = set(futures)
 
         for future in as_completed(futures):
+            pending.discard(future)
             result = future.result()
             results.append(result)
             if fail_fast and result[1] is not None:
-                # Cancel remaining futures on first error
-                for f in futures:
-                    f.cancel()
+                cancelled = _drain_remaining_uploads(futures, pending, results)
                 break
 
-    _print_upload_summary(results, len(files))
+    counts = _classify_upload_results(results, cancelled)
+    _print_upload_summary(counts, len(files))
+    _raise_if_upload_incomplete(destination, counts, len(files))
+
+
+def _drain_remaining_uploads(
+    futures: dict,
+    pending: set,
+    results: list[tuple[Path, Exception | None]],
+) -> list[Path]:
+    """End a ``--fail-fast`` run and return the files no worker ever saw.
+
+    ``Future.cancel()`` only takes a file still queued. An upload already in
+    flight cannot be called back -- its bytes are on their way -- so it is
+    waited on and appended to ``results``, and counted by whether it actually
+    reached the store. What comes back from here is only what was cancelled
+    outright, which the summary reports as not attempted rather than as
+    uploaded (#1019).
+    """
+    for future in pending:
+        future.cancel()
+
+    in_flight = [future for future in pending if not future.cancelled()]
+    results.extend(future.result() for future in in_flight)
+    return [futures[future] for future in pending if future.cancelled()]
+
+
+def _classify_upload_results(
+    results: list[tuple[Path, Exception | None]],
+    cancelled: list[Path],
+) -> tuple[int, int, int]:
+    """Split what happened into (uploaded, failed, not attempted).
+
+    A file is counted as uploaded only if it returned without an exception.
+    Files stopped by ``--fail-fast`` -- cancelled while queued, or turned back
+    at the start of their worker -- are their own category, because calling
+    them either uploaded or failed misreports the state of the bucket.
+    """
+    uploaded = failed = 0
+    not_attempted = len(cancelled)
+    for _path, err in results:
+        if err is None:
+            uploaded += 1
+        elif isinstance(err, _UploadNotAttempted):
+            not_attempted += 1
+        else:
+            failed += 1
+    return uploaded, failed, not_attempted
 
 
 def _upload_single_file(
@@ -497,7 +582,11 @@ def _upload_directory(
     s3_region: str | None = None,
     s3_use_ssl: bool = True,
 ) -> None:
-    """Upload a directory of files."""
+    """Upload a directory of files.
+
+    Raises:
+        RemoteAccessError: If any file failed or was never attempted
+    """
     files = list(source.rglob(pattern) if pattern else source.rglob("*"))
     files = [f for f in files if f.is_file()]
 
@@ -520,6 +609,7 @@ def _upload_directory(
     _upload_directory_sync(
         store=store,
         source=source,
+        destination=destination,
         prefix=prefix,
         files=files,
         max_files=max_files,
@@ -557,6 +647,11 @@ def upload(
         s3_endpoint: Custom S3-compatible endpoint (e.g., "minio.example.com:9000")
         s3_region: S3 region (default: us-east-1 when using custom endpoint)
         s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
+
+    Raises:
+        RemoteAccessError: If a directory upload left any file out of the
+            destination -- failed, or never attempted because ``fail_fast``
+            stopped the run. The summary printed first says how many of each.
 
     Examples:
         # Single file
@@ -619,15 +714,46 @@ def _build_target_key(file_path: Path, source: Path, prefix: str) -> str:
     return str(rel_path)
 
 
-def _print_upload_summary(results: list, total_files: int) -> None:
-    """Print summary of upload results."""
-    errors = [(path, err) for path, err in results if err is not None]
-    success_count = total_files - len(errors)
+def _print_upload_summary(counts: tuple[int, int, int], total_files: int) -> None:
+    """Print summary of upload results.
+
+    The uploaded count is counted from the files that actually returned without
+    an exception, never derived as ``total_files - errors``: deriving it
+    reported every file ``--fail-fast`` stopped as uploaded (#1019).
+    """
+    uploaded, failed, not_attempted = counts
 
     print(f"\n{'=' * 50}")
-    print(f"✓ {success_count}/{total_files} file(s) uploaded successfully")
-    if errors:
-        print(f"✗ {len(errors)} file(s) failed")
+    print(f"✓ {uploaded}/{total_files} file(s) uploaded successfully")
+    if failed:
+        print(f"✗ {failed} file(s) failed")
+    if not_attempted:
+        print(f"⊘ {not_attempted} file(s) not attempted (stopped on first error)")
+
+
+def _raise_if_upload_incomplete(
+    destination: str,
+    counts: tuple[int, int, int],
+    total_files: int,
+) -> None:
+    """Fail the run when any file did not reach the store.
+
+    Without this a directory upload printed its errors and still exited 0, so
+    ``gpio publish upload … && echo ok`` printed ``ok`` over a bucket missing
+    data (#1019). Partial and total failure raise alike: a caller branching on
+    ``$?`` needs "the dataset is not all there", and the summary above says how
+    much of it is there. Giving them separate exit codes would invent a
+    convention gpio does not have -- 1 is a failure and 2 is Click's usage
+    error, and nothing else is in use.
+    """
+    _uploaded, failed, not_attempted = counts
+    if not failed and not not_attempted:
+        return
+
+    reason = f"{failed} of {total_files} file(s) failed to upload"
+    if not_attempted:
+        reason += f"; {not_attempted} not attempted (stopped on first error)"
+    raise RemoteAccessError(destination, f"{reason}. See the errors above.")
 
 
 def _get_target_key(source: Path, prefix: str, is_dir_destination: bool) -> str:

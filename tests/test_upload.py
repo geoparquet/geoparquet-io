@@ -3,7 +3,10 @@ Tests for upload functionality.
 """
 
 import importlib
+import itertools
 import os
+import re
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +19,7 @@ cli = main_module.cli
 # `check_credentials` is patched where `gpio publish upload` resolves it, which is
 # the module that owns the command (Deep Review 3.2 moved it out of `cli.main`).
 publish_module = importlib.import_module("geoparquet_io.cli.commands.publish")
+upload_module = importlib.import_module("geoparquet_io.core.upload")
 from geoparquet_io.core.upload import (  # noqa: E402
     _check_azure_credentials,
     _check_gcs_credentials,
@@ -836,3 +840,165 @@ class TestCredentialValidationFunctions:
             assert "az login" in hint
             # "az login" alone is not enough for obstore -- the opt-in must be named.
             assert "AZURE_USE_AZURE_CLI=true" in hint
+
+
+class TestDirectoryUploadReportsWhatReachedTheStore:
+    """A directory upload must report the files that actually arrived (#1019).
+
+    Every test here drives the real ``gpio publish upload`` command with
+    ``obs.put`` replaced by a recording stub, then checks the printed summary
+    against the keys the stub actually received -- not against itself.
+    """
+
+    @staticmethod
+    def _make_files(tmp_path, count=10):
+        source = tmp_path / "dataset"
+        source.mkdir()
+        for i in range(count):
+            (source / f"part-{i:02d}.parquet").write_bytes(b"x" * 100)
+        return source
+
+    @staticmethod
+    def _run(source, fake_put, extra_args=()):
+        runner = CliRunner()
+        with (
+            patch.object(publish_module, "check_credentials", return_value=(True, "")),
+            patch.object(upload_module.obs, "put", fake_put),
+            patch.object(upload_module, "_setup_store_and_kwargs", lambda *a, **k: (object(), {})),
+        ):
+            return runner.invoke(
+                cli,
+                ["publish", "upload", str(source), "s3://example-bucket/out/", *extra_args],
+            )
+
+    @staticmethod
+    def _summary_counts(output):
+        """The three counts the summary claims: (uploaded, failed, not attempted)."""
+        uploaded = re.search(r"✓ (\d+)/(\d+) file\(s\) uploaded successfully", output)
+        failed = re.search(r"✗ (\d+) file\(s\) failed", output)
+        skipped = re.search(r"⊘ (\d+) file\(s\) not attempted", output)
+        assert uploaded, f"no summary line in output:\n{output}"
+        return (
+            int(uploaded.group(1)),
+            int(failed.group(1)) if failed else 0,
+            int(skipped.group(1)) if skipped else 0,
+        )
+
+    def test_fail_fast_does_not_count_stopped_files_as_uploaded(self, tmp_path):
+        """The success count is what arrived, not ``total - errors`` (#1019).
+
+        The very first file to reach the store fails, on a single worker, so
+        nothing else is ever tried. Before the fix this printed
+        ``9/10 file(s) uploaded successfully`` over an empty bucket.
+        """
+        source = self._make_files(tmp_path)
+        arrived = []
+        calls = itertools.count()
+        lock = threading.Lock()
+
+        def fake_put(store, key, path, **kwargs):
+            with lock:
+                nth = next(calls)
+            if nth == 0:
+                raise RuntimeError("AccessDenied: bucket is read-only")
+            arrived.append(Path(path).name)
+
+        result = self._run(source, fake_put, ["--fail-fast", "--max-files", "1"])
+
+        assert arrived == []
+        assert self._summary_counts(result.output) == (0, 1, 9)
+        assert "⊘ 9 file(s) not attempted (stopped on first error)" in result.output
+        assert result.exit_code == 1
+
+    def test_fail_fast_lets_in_flight_uploads_finish_and_counts_them(self, tmp_path):
+        """Cancellation reaches files that never started, never files in flight.
+
+        The gate makes every non-failing upload finish *after* the failure has
+        been signalled, so a file counted as uploaded here can only be one that
+        was in flight when ``--fail-fast`` tripped.
+        """
+        source = self._make_files(tmp_path)
+        started, arrived = [], []
+        calls = itertools.count()
+        lock = threading.Lock()
+        failure_landed = threading.Event()
+
+        def fake_put(store, key, path, **kwargs):
+            with lock:
+                nth = next(calls)
+                started.append(Path(path).name)
+            if nth == 1:
+                failure_landed.set()
+                raise RuntimeError("AccessDenied: bucket is read-only")
+            assert failure_landed.wait(timeout=30), "the failing upload never ran"
+            arrived.append(Path(path).name)
+
+        result = self._run(source, fake_put, ["--fail-fast", "--max-files", "2"])
+
+        # Two workers, so exactly two files were in flight when the failure
+        # landed; the survivor could only finish after it, and must be counted.
+        assert len(started) == 2
+        assert arrived == [started[0]]
+        assert self._summary_counts(result.output) == (1, 1, 8)
+        assert result.exit_code == 1
+
+    def test_continue_on_error_attempts_every_file_and_still_exits_non_zero(self, tmp_path):
+        """Without ``--fail-fast`` nothing is skipped, but errors must still fail."""
+        source = self._make_files(tmp_path)
+        arrived = []
+
+        def fake_put(store, key, path, **kwargs):
+            if Path(path).name == "part-00.parquet":
+                raise RuntimeError("AccessDenied: bucket is read-only")
+            arrived.append(Path(path).name)
+
+        result = self._run(source, fake_put, ["--max-files", "2"])
+
+        assert len(arrived) == 9
+        assert self._summary_counts(result.output) == (9, 1, 0)
+        assert "not attempted" not in result.output
+        assert result.exit_code == 1
+
+    def test_a_directory_upload_that_failed_entirely_exits_non_zero(self, tmp_path):
+        """Nothing reached the bucket, so ``cmd && echo ok`` must not print ok."""
+        source = self._make_files(tmp_path)
+        arrived = []
+
+        def fake_put(store, key, path, **kwargs):
+            raise RuntimeError("AccessDenied: bucket is read-only")
+
+        result = self._run(source, fake_put)
+
+        assert arrived == []
+        assert self._summary_counts(result.output) == (0, 10, 0)
+        assert "10 of 10 file(s) failed to upload" in result.output
+        assert result.exit_code == 1
+
+    def test_a_fully_successful_directory_upload_still_exits_zero(self, tmp_path):
+        """The happy path is unchanged: no failure lines, exit 0."""
+        source = self._make_files(tmp_path)
+        arrived = []
+
+        def fake_put(store, key, path, **kwargs):
+            arrived.append(Path(path).name)
+
+        result = self._run(source, fake_put, ["--max-files", "4"])
+
+        assert len(arrived) == 10
+        assert self._summary_counts(result.output) == (10, 0, 0)
+        assert "failed" not in result.output
+        assert result.exit_code == 0
+
+    def test_the_error_names_the_destination_and_the_counts(self, tmp_path):
+        """A script's operator needs to know where the gap is, and how big."""
+        source = self._make_files(tmp_path, count=4)
+
+        def fake_put(store, key, path, **kwargs):
+            if Path(path).name == "part-00.parquet":
+                raise RuntimeError("AccessDenied: bucket is read-only")
+
+        result = self._run(source, fake_put, ["--max-files", "2"])
+
+        assert "s3://example-bucket/out/" in result.output
+        assert "1 of 4 file(s) failed to upload" in result.output
+        assert result.exit_code == 1

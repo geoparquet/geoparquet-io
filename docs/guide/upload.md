@@ -134,6 +134,38 @@ By default, directory uploads continue on errors. Use `--fail-fast` to stop on f
 gpio publish upload output/ s3://bucket/dataset/ --fail-fast
 ```
 
+Either way, the summary counts only the files that actually reached the store,
+and a directory upload that left anything out exits **1** — so `&&` and `set -e`
+stop the script instead of carrying on over an incomplete dataset:
+
+```
+==================================================
+✓ 2/10 file(s) uploaded successfully
+✗ 1 file(s) failed
+⊘ 7 file(s) not attempted (stopped on first error)
+```
+
+`--fail-fast` stops every file that has not started yet; uploads already in
+flight are allowed to finish, and are counted by whether they arrived. The three
+counts always add up to the total, so a retry knows exactly how much is missing.
+Partial and total failure both exit 1 — read the counts, not the exit code, to
+tell them apart.
+
+In Python the same failure raises `RemoteAccessError`:
+
+<!-- doctest: skip="needs cloud credentials" -->
+```python
+from pathlib import Path
+
+from geoparquet_io.core.exceptions import RemoteAccessError
+from geoparquet_io.core.upload import upload
+
+try:
+    upload(Path("output/"), "s3://bucket/dataset/", fail_fast=True)
+except RemoteAccessError as e:
+    print(f"upload incomplete: {e}")
+```
+
 ## Dry Run
 
 Preview what would be uploaded without actually uploading:
