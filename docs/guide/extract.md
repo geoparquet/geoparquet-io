@@ -1129,9 +1129,13 @@ By default, `gpio extract arcgis` fetches GeoJSON from the server and outputs WG
     table.write("out.parquet")
     ```
 
-The output GeoParquet is tagged with the CRS the server actually returned. If the server returns a different CRS than the one requested, a warning is emitted and the file is tagged with the actual CRS. Legacy Esri codes are normalized to their EPSG equivalents (102100 becomes 3857), and layers that advertise an Esri-specific WKID with no EPSG equivalent (for example 102039) are tagged with the `ESRI` authority so the CRS stays resolvable. A WKID that resolves to neither an EPSG nor an ESRI definition is left untagged rather than labeled with a code no reader can resolve.
+The output GeoParquet is tagged with the CRS the server actually returned. If the server returns a different CRS than the one requested, a warning is emitted and the file is tagged with the actual CRS. Legacy Esri codes are normalized to their EPSG equivalents (102100 becomes 3857), and layers that advertise an Esri-specific WKID with no EPSG equivalent (for example 102039) are tagged with the `ESRI` authority so the CRS stays resolvable.
 
-With `--output-crs native`, the layer's spatial reference is taken from its advertised WKID, or recovered from its WKT when no WKID is published. If the WKT maps to no EPSG code, the extraction fails with a clear message so you can pass an explicit `--output-crs EPSG:<code>` instead.
+An ArcGIS `spatialReference` describes one CRS through up to three carriers — `latestWkid`, `wkid`, and `wkt` — and each is tried in turn, so a vendor WKID no authority knows still resolves when the service supplies the WKT beside it. A custom projection that no authority registers is written as its full PROJJSON definition; PROJJSON does not require an `id`.
+
+If none of them resolves, the extraction **fails** rather than writing the file. GeoParquet spells "the CRS is OGC:CRS84" as an *absent* `crs` key, so a file written with no CRS would not record "unknown" — it would claim that projected easting/northing values are longitude/latitude, and `gpio check spec` would then reject the file gpio had just written. Pass `--output-crs EPSG:<code>` with a code that resolves, omit `--output-crs` to fetch WGS84 lon/lat from the service, or reproject the data yourself.
+
+With `--output-crs native`, the layer's spatial reference is taken from an advertised WKID that resolves, or recovered from its WKT when no WKID is published or none of them resolves. If the WKT maps to no EPSG code, the extraction fails with a clear message so you can pass an explicit `--output-crs EPSG:<code>` instead.
 
 | Value | Behavior |
 |-------|----------|
