@@ -1043,6 +1043,30 @@ def merge_longitude_ranges(ranges: list[tuple[float, float]]) -> tuple[float, fl
     return merged[at + 1][0], merged[at][1]
 
 
+#: Real WKT definitions are a few kilobytes; a remote service can send anything.
+MAX_WKT_CHARS = 65_536
+
+
+def projjson_from_wkt(wkt: object) -> dict | None:
+    """PROJJSON for a WKT1/WKT2 definition, or None when pyproj cannot parse it.
+
+    A registered CRS keeps its ``id``; a custom projection comes back as a
+    complete definition without one, which PROJJSON allows. Anything that is
+    not a string, or longer than :data:`MAX_WKT_CHARS`, is not a CRS: the text
+    arrives from remote services and is written into the output's metadata
+    verbatim, so it is bounded before PROJ ever sees it.
+    """
+    if not isinstance(wkt, str) or not wkt.strip() or len(wkt) > MAX_WKT_CHARS:
+        return None
+    from pyproj import CRS
+    from pyproj.exceptions import CRSError
+
+    try:
+        return CRS.from_wkt(wkt).to_json_dict()
+    except CRSError:
+        return None
+
+
 def parse_crs_string_to_projjson(crs_string, con=None):
     """Convert a CRS string (like "EPSG:5070") to full PROJJSON dict."""
     identifier = _extract_crs_identifier(crs_string)

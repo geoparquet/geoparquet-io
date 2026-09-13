@@ -513,3 +513,44 @@ class TestCrsUtilsIntegration:
             identifier = _extract_crs_identifier(crs)
             if identifier:
                 assert identifier[0] == "EPSG"
+
+
+class TestProjjsonFromWkt:
+    """``projjson_from_wkt``: the parser the ArcGIS extractor reads server WKT with."""
+
+    def test_a_registered_crs_keeps_its_id(self):
+        from pyproj import CRS
+
+        from geoparquet_io.core.crs_utils import projjson_from_wkt
+
+        assert projjson_from_wkt(CRS.from_epsg(26918).to_wkt())["id"]["code"] == 26918
+
+    def test_a_custom_projection_is_a_full_definition_without_an_id(self):
+        from geoparquet_io.core.crs_utils import projjson_from_wkt
+
+        wkt = (
+            'PROJCS["Custom_Transverse_Mercator",'
+            'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
+            'SPHEROID["WGS_1984",6378137.0,298.257223563]],'
+            'PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],'
+            'PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",500000.0],'
+            'PARAMETER["False_Northing",0.0],PARAMETER["Central_Meridian",-75.5],'
+            'PARAMETER["Scale_Factor",0.9996],PARAMETER["Latitude_Of_Origin",0.0],'
+            'UNIT["Meter",1.0]]'
+        )
+        projjson = projjson_from_wkt(wkt)
+        assert projjson["type"] == "ProjectedCRS"
+        assert projjson["name"] == "Custom_Transverse_Mercator"
+        assert "id" not in projjson
+
+    @pytest.mark.parametrize(
+        "wkt",
+        ["not wkt", "", "   ", None, 12, b"PROJCS[]", "A" * 70_000, "PROJCS[" * 20_000],
+        # Explicit ids: pytest exports the test id into an environment variable,
+        # which Windows caps at 32,767 characters.
+        ids=["garbage", "empty", "blank", "none", "int", "bytes", "70k-chars", "deep-nesting"],
+    )
+    def test_anything_that_is_not_a_bounded_wkt_string_is_none(self, wkt):
+        from geoparquet_io.core.crs_utils import projjson_from_wkt
+
+        assert projjson_from_wkt(wkt) is None

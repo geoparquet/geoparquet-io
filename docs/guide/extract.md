@@ -1129,15 +1129,20 @@ By default, `gpio extract arcgis` fetches GeoJSON from the server and outputs WG
     table.write("out.parquet")
     ```
 
-The output GeoParquet is tagged with the CRS the server actually returned. If the server returns a different CRS than the one requested, a warning is emitted and the file is tagged with the actual CRS. Legacy Esri codes are normalized to their EPSG equivalents (102100 becomes 3857), and layers that advertise an Esri-specific WKID with no EPSG equivalent (for example 102039) are tagged with the `ESRI` authority so the CRS stays resolvable. A WKID that resolves to neither an EPSG nor an ESRI definition is left untagged rather than labeled with a code no reader can resolve.
+The output GeoParquet is tagged with the CRS the server actually returned. If the server returns a different CRS than the one requested, a warning is emitted and the file is tagged with the actual CRS. Legacy Esri codes are normalized to their EPSG equivalents (102100 becomes 3857), and layers that advertise an Esri-specific WKID with no EPSG equivalent (for example 102039) are tagged with the `ESRI` authority so the CRS stays resolvable.
 
-With `--output-crs native`, the layer's spatial reference is taken from its advertised WKID, or recovered from its WKT when no WKID is published. If the WKT maps to no EPSG code, the extraction fails with a clear message so you can pass an explicit `--output-crs EPSG:<code>` instead.
+An ArcGIS `spatialReference` describes one CRS through up to three carriers, `latestWkid`, `wkid` and `wkt`, and each is tried in turn, so a vendor WKID no authority knows still resolves when the service supplies the WKT beside it; a custom projection no authority registers is written as its full PROJJSON definition, which needs no `id`. If none of them resolves, the extraction **fails** rather than writing the file: GeoParquet spells "the CRS is OGC:CRS84" as an *absent* `crs` key, so a file written with no CRS would label projected easting/northing as longitude/latitude, and `gpio check spec` would reject it. Pass `--output-crs EPSG:<code>` with a code that resolves, or omit `--output-crs` to fetch WGS84 lon/lat from the service.
+
+!!! note "Changed after 1.5.0"
+    An `--output-crs` that resolves under no authority, or a service that returns one, used to write a file with no `crs` key and a warning. It now exits with an error and writes nothing. A pipeline that relied on the old output was reading projected coordinates as degrees.
+
+With `--output-crs native`, the layer's advertised spatial reference is resolved the same way and its code is requested as `outSR`; a layer that publishes only a WKT is matched to a registered code through PROJ, and one that matches nothing fails with a message that says so.
 
 | Value | Behavior |
 |-------|----------|
 | *(omitted)* | Fetches GeoJSON, outputs WGS84 (default) |
 | `native` | Fetches EsriJSON with the layer's advertised spatial reference |
-| `EPSG:<code>` | Fetches EsriJSON with `outSR` set to the requested EPSG code |
+| `EPSG:<code>` | Fetches EsriJSON with `outSR` set to the requested code, which must resolve under EPSG or ESRI |
 
 ### Geometry generalization
 
