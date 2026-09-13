@@ -101,7 +101,7 @@ jobs:
       # diff-cover gate); when each re-derived `os == ... && python-version ==
       # ...` for itself, moving the baseline (drop 3.11, add 3.14) would have
       # turned all four false at once — no coverage measured, nothing uploaded,
-      # and BOTH the 85% floor and the 90% diff-cover gate silently gone with
+      # and BOTH the coverage floor and the 90% diff-cover gate silently gone with
       # every check green. Change the baseline HERE and everything follows.
       # (Deliberately not a `matrix.coverage` flag added via `include:`: an
       # include-contributed key is appended to the generated job name, so the

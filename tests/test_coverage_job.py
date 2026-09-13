@@ -247,6 +247,22 @@ class TestCoverageLegStillEnforcesTheGates:
             "[tool.coverage.report] fail_under. Delete it: the floor has one home."
         )
 
+    def test_the_floors_echoes_agree_with_its_home(self):
+        """The prose that repeats the number, and the dated measurement, match.
+
+        `scripts/coverage_floor.py --apply` moves them all at once; this is the
+        check that a hand edit did not move one and leave the rest (the way the
+        previous ratchet left a stale dated comment for #1038 to clean up).
+        Runs in the fast lane because the meta lane is post-merge, which is too
+        late to catch a drifted echo in the PR that moves the floor.
+        """
+        from scripts import coverage_floor
+
+        assert coverage_floor.drift() == [], (
+            "fail_under and its echoes disagree; run "
+            "`uv run python scripts/coverage_floor.py --apply` (or fix the echo)"
+        )
+
     def test_branch_coverage_stays_on(self, coverage_config: dict[str, Any]):
         """`branch = true` is what makes the floor a combined figure.
 
