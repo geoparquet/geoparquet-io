@@ -40,6 +40,12 @@ Three limits keep the blast radius small:
    static destructors, which is where the evidence puts the abort.
 3. **An escape hatch.** `GPIO_INTERPRETER_EXIT=1` leaves through `sys.exit`
    instead, for anyone debugging the teardown itself.
+4. **Not on Windows.** There `os._exit` is `ExitProcess`, which terminates
+   the other threads and then runs every loaded DLL's detach routine; with
+   DuckDB's worker threads cut off mid-flight that access-violated (exit
+   `0xC0000005`) after `gpio check all` on the CI runners, on the two
+   heads that tried it. The abort this ADR exists for has only been seen
+   on Linux, so Windows keeps the interpreter's own exit.
 
 A flush that fails because the reader went away (`| head`) or the stream was
 closed keeps the command's status. Any other `OSError` on the flush, a full

@@ -207,8 +207,14 @@ def _leave_process(status: int) -> NoReturn:
     then the streams are flushed, then ``os._exit``. What is skipped is the
     unloading of DuckDB, its spatial extension, Arrow, GEOS and PROJ, which is
     where a run that had already succeeded could abort (#1053).
+
+    Not on Windows: there ``os._exit`` (ExitProcess) tears the loaded DLLs
+    down while DuckDB's worker threads are still running, and *that* access-
+    violates (exit 0xC0000005) after ``gpio check all`` on the CI runners.
+    The #1053 abort has only ever been seen on Linux, so Windows keeps the
+    interpreter's own exit.
     """
-    if os.environ.get("GPIO_INTERPRETER_EXIT"):
+    if os.environ.get("GPIO_INTERPRETER_EXIT") or sys.platform == "win32":
         sys.exit(status)
     atexit._run_exitfuncs()
     for stream in (sys.stdout, sys.stderr):
@@ -240,7 +246,7 @@ def main() -> NoReturn:
     ``terminate called without an active exception`` and status 134 while
     CPython unloaded the native extensions (#1053). Set
     ``GPIO_INTERPRETER_EXIT=1`` to leave through ``sys.exit`` instead, when
-    that teardown is the thing being debugged.
+    that teardown is the thing being debugged; Windows always does.
 
     Only this function ends the process. ``cli`` itself is a plain Click group:
     ``CliRunner``, ``cli(standalone_mode=False)`` and the Python API are

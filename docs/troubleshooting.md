@@ -329,7 +329,7 @@ If you are debugging the teardown itself, `GPIO_INTERPRETER_EXIT=1` makes `gpio`
 GPIO_INTERPRETER_EXIT=1 gpio add geometry-metrics in.parquet out.parquet
 ```
 
-`CliRunner`, `cli(standalone_mode=False)` and the Python API are unaffected; only the `gpio` console script exits this way.
+`CliRunner`, `cli(standalone_mode=False)` and the Python API are unaffected; only the `gpio` console script exits this way, and only on Linux and macOS: on Windows the early exit itself crashed after some commands, so `gpio` there leaves through the interpreter as before.
 
 ## Getting Help
 

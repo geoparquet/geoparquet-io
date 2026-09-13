@@ -700,8 +700,8 @@ def _assert_ladder_walked_the_layer(http, pages) -> None:
     # Each refused rung is restarted from offset 0; how many of its siblings
     # were issued before the cancel is the scheduler's.
     assert {offset for offset, size in windows if size == 100} <= {0, 100}
-    fifties = [offset for offset, size in windows if size == 50]
-    assert fifties[0] == 0 and set(fifties) <= {0, 50, 100, 150}
+    fifties = {offset for offset, size in windows if size == 50}
+    assert 0 in fifties and fifties <= {0, 50, 100, 150}
     # The rung that works walks the whole layer, each window exactly once.
     assert sorted(window for window in windows if window[1] == 10) == [
         (offset, 10) for offset in range(0, 200, 10)

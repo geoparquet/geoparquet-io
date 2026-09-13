@@ -35,6 +35,10 @@ _PROGRAM = (
 )
 
 
+#: Windows keeps the interpreter's exit (see ADR-0007), so finalization runs there.
+_WINDOWS = sys.platform == "win32"
+
+
 def _run_entry_point(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-c", _PROGRAM, *args],
@@ -60,7 +64,7 @@ def test_a_failing_command_keeps_the_status_click_chose(args, status, needle):
     assert completed.returncode == status
     assert needle in completed.stdout + completed.stderr
     assert "ATEXIT-RAN" in completed.stderr
-    assert "FINALIZATION-RAN" not in completed.stderr
+    assert ("FINALIZATION-RAN" in completed.stderr) is _WINDOWS
 
 
 def test_a_successful_command_delivers_its_output_and_skips_finalization():
@@ -76,7 +80,7 @@ def test_a_successful_command_delivers_its_output_and_skips_finalization():
     assert completed.returncode == 0
     assert completed.stdout.rstrip("\n") == expected.rstrip("\n")
     assert "ATEXIT-RAN" in completed.stderr
-    assert "FINALIZATION-RAN" not in completed.stderr
+    assert ("FINALIZATION-RAN" in completed.stderr) is _WINDOWS
 
 
 def test_the_escape_hatch_leaves_through_the_interpreter():
@@ -106,6 +110,7 @@ def _fake_exit(status: int):
 
 @pytest.mark.parametrize(("argv", "status"), [(["--version"], 0), (["--no-such-flag"], 2)])
 def test_main_hands_clicks_status_to_the_exit(monkeypatch, capsys, argv, status):
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "_exit", _fake_exit)
     monkeypatch.setattr("atexit._run_exitfuncs", lambda: None)
     monkeypatch.setattr(sys, "argv", ["gpio", *argv])
@@ -118,8 +123,12 @@ def test_main_hands_clicks_status_to_the_exit(monkeypatch, capsys, argv, status)
     capsys.readouterr()
 
 
-def test_the_escape_hatch_uses_sys_exit_in_process(monkeypatch):
-    monkeypatch.setenv("GPIO_INTERPRETER_EXIT", "1")
+@pytest.mark.parametrize("how", ["env", "windows"])
+def test_the_escape_hatch_uses_sys_exit_in_process(monkeypatch, how):
+    if how == "env":
+        monkeypatch.setenv("GPIO_INTERPRETER_EXIT", "1")
+    else:
+        monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(os, "_exit", _fake_exit)
 
     with pytest.raises(SystemExit) as left:
@@ -158,6 +167,7 @@ class _Stream:
     ],
 )
 def test_a_flush_failure_is_a_broken_pipe_or_a_real_error(monkeypatch, error, status):
+    monkeypatch.setattr(sys, "platform", "linux")
     statuses: list[int] = []
     monkeypatch.setattr(os, "_exit", statuses.append)
     monkeypatch.setattr(sys, "stdout", _Stream("<stdout>", error))
@@ -171,6 +181,7 @@ def test_a_flush_failure_is_a_broken_pipe_or_a_real_error(monkeypatch, error, st
 
 def test_a_missing_stream_is_not_an_error(monkeypatch):
     """``pythonw`` and a closed fd 1 leave ``sys.stdout`` as None."""
+    monkeypatch.setattr(sys, "platform", "linux")
     statuses: list[int] = []
     monkeypatch.setattr(os, "_exit", statuses.append)
     monkeypatch.setattr(sys, "stdout", None)
