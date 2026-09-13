@@ -15,7 +15,7 @@ is written at all -- that the write paths used to answer for themselves and
 disagree about. The funnels here are what *asks* those questions. Folding them
 in would put a thousand lines of mechanism behind a name that means "the
 decisions", and leave the next write path with no small module to read. The
-dependency runs one way and only one way: ``parquet_write`` imports
+dependency runs one way and only one way: ``write_funnels`` imports
 ``parquet_writer``, never the reverse.
 
 Split out of ``common.py`` unchanged; every name is still importable from there.
@@ -36,6 +36,10 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs, apply_output_crs
+from geoparquet_io.core.derive_geo_from_file import (
+    _ensure_v2_geo_metadata,
+    _rewrite_file_with_geo_metadata,
+)
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
     get_kv_metadata,
@@ -58,10 +62,6 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo,
     strip_derived_stats,
     strip_nonplanar_edges,
-)
-from geoparquet_io.core.geo_metadata_repair import (
-    _ensure_v2_geo_metadata,
-    _rewrite_file_with_geo_metadata,
 )
 from geoparquet_io.core.geometry_detection import _detect_geometry_from_query
 from geoparquet_io.core.logging_config import (

@@ -21,8 +21,8 @@ repointed at the real home, in a later pass. What went where:
 * :mod:`geoparquet_io.core.compression` -- compression option validation
 * :mod:`geoparquet_io.core.file_type` -- GeoParquet file-type detection
 * :mod:`geoparquet_io.core.format_writers` -- ``create_shapefile_zip``
-* :mod:`geoparquet_io.core.geo_metadata_repair` -- the ``geo`` block for a written file
-* :mod:`geoparquet_io.core.parquet_write` -- ``write_parquet_with_metadata`` and
+* :mod:`geoparquet_io.core.derive_geo_from_file` -- the ``geo`` block for a written file
+* :mod:`geoparquet_io.core.write_funnels` -- ``write_parquet_with_metadata`` and
   ``write_geoparquet_table``, the two write funnels
 * :mod:`geoparquet_io.core.sizing` -- byte-size parsing and formatting
 """
@@ -86,6 +86,16 @@ from geoparquet_io.core.bbox_structure import get_bbox_advice as get_bbox_advice
 from geoparquet_io.core.compression import (
     validate_compression_settings as validate_compression_settings,
 )
+from geoparquet_io.core.derive_geo_from_file import _crs_from_geo_logical as _crs_from_geo_logical
+from geoparquet_io.core.derive_geo_from_file import (
+    _ensure_v2_geo_metadata as _ensure_v2_geo_metadata,
+)
+from geoparquet_io.core.derive_geo_from_file import (
+    _geography_edges_from_logical as _geography_edges_from_logical,
+)
+from geoparquet_io.core.derive_geo_from_file import (
+    _rewrite_file_with_geo_metadata as _rewrite_file_with_geo_metadata,
+)
 
 # Internal imports - used by functions in this module
 from geoparquet_io.core.duckdb_utils import (
@@ -118,16 +128,6 @@ from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS as GEOPARQUET_VE
 from geoparquet_io.core.geo_metadata import (
     build_bbox_covering,
 )
-from geoparquet_io.core.geo_metadata_repair import _crs_from_geo_logical as _crs_from_geo_logical
-from geoparquet_io.core.geo_metadata_repair import (
-    _ensure_v2_geo_metadata as _ensure_v2_geo_metadata,
-)
-from geoparquet_io.core.geo_metadata_repair import (
-    _geography_edges_from_logical as _geography_edges_from_logical,
-)
-from geoparquet_io.core.geo_metadata_repair import (
-    _rewrite_file_with_geo_metadata as _rewrite_file_with_geo_metadata,
-)
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -138,46 +138,6 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
-from geoparquet_io.core.parquet_write import (
-    _DUCKDB_GENERATED_COLUMN_FIELDS as _DUCKDB_GENERATED_COLUMN_FIELDS,
-)
-from geoparquet_io.core.parquet_write import (
-    _REQUIRED_CARRIED_GEO_FIELDS as _REQUIRED_CARRIED_GEO_FIELDS,
-)
-from geoparquet_io.core.parquet_write import _apply_nonplanar_edges as _apply_nonplanar_edges
-from geoparquet_io.core.parquet_write import (
-    _auto_fix_vecorel_if_needed as _auto_fix_vecorel_if_needed,
-)
-from geoparquet_io.core.parquet_write import (
-    _carries_more_than_duckdb_generates as _carries_more_than_duckdb_generates,
-)
-from geoparquet_io.core.parquet_write import (
-    _collect_nonplanar_edges_from_metadata as _collect_nonplanar_edges_from_metadata,
-)
-from geoparquet_io.core.parquet_write import (
-    _edges_for_output_version as _edges_for_output_version,
-)
-from geoparquet_io.core.parquet_write import (
-    _geo_block_to_carry_on_fast_path as _geo_block_to_carry_on_fast_path,
-)
-from geoparquet_io.core.parquet_write import _plain_copy_to as _plain_copy_to
-from geoparquet_io.core.parquet_write import (
-    _preserve_edges_after_write as _preserve_edges_after_write,
-)
-from geoparquet_io.core.parquet_write import (
-    _prune_metadata_to_output_columns as _prune_metadata_to_output_columns,
-)
-from geoparquet_io.core.parquet_write import (
-    collect_nonplanar_edges as collect_nonplanar_edges,
-)
-from geoparquet_io.core.parquet_write import (
-    extract_preserved_kv_metadata as extract_preserved_kv_metadata,
-)
-from geoparquet_io.core.parquet_write import (
-    read_preserved_kv_metadata as read_preserved_kv_metadata,
-)
-from geoparquet_io.core.parquet_write import write_geoparquet_table as write_geoparquet_table
-from geoparquet_io.core.parquet_write import write_parquet_with_metadata
 from geoparquet_io.core.remote import (
     _sanitize_url_for_logging,
     is_remote_url,
@@ -185,6 +145,46 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.sizing import format_size as format_size
 from geoparquet_io.core.sizing import parse_size_string as parse_size_string
+from geoparquet_io.core.write_funnels import (
+    _DUCKDB_GENERATED_COLUMN_FIELDS as _DUCKDB_GENERATED_COLUMN_FIELDS,
+)
+from geoparquet_io.core.write_funnels import (
+    _REQUIRED_CARRIED_GEO_FIELDS as _REQUIRED_CARRIED_GEO_FIELDS,
+)
+from geoparquet_io.core.write_funnels import _apply_nonplanar_edges as _apply_nonplanar_edges
+from geoparquet_io.core.write_funnels import (
+    _auto_fix_vecorel_if_needed as _auto_fix_vecorel_if_needed,
+)
+from geoparquet_io.core.write_funnels import (
+    _carries_more_than_duckdb_generates as _carries_more_than_duckdb_generates,
+)
+from geoparquet_io.core.write_funnels import (
+    _collect_nonplanar_edges_from_metadata as _collect_nonplanar_edges_from_metadata,
+)
+from geoparquet_io.core.write_funnels import (
+    _edges_for_output_version as _edges_for_output_version,
+)
+from geoparquet_io.core.write_funnels import (
+    _geo_block_to_carry_on_fast_path as _geo_block_to_carry_on_fast_path,
+)
+from geoparquet_io.core.write_funnels import _plain_copy_to as _plain_copy_to
+from geoparquet_io.core.write_funnels import (
+    _preserve_edges_after_write as _preserve_edges_after_write,
+)
+from geoparquet_io.core.write_funnels import (
+    _prune_metadata_to_output_columns as _prune_metadata_to_output_columns,
+)
+from geoparquet_io.core.write_funnels import (
+    collect_nonplanar_edges as collect_nonplanar_edges,
+)
+from geoparquet_io.core.write_funnels import (
+    extract_preserved_kv_metadata as extract_preserved_kv_metadata,
+)
+from geoparquet_io.core.write_funnels import (
+    read_preserved_kv_metadata as read_preserved_kv_metadata,
+)
+from geoparquet_io.core.write_funnels import write_geoparquet_table as write_geoparquet_table
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 def should_skip_bbox(geoparquet_version):

@@ -28,6 +28,8 @@ from geoparquet_io.core.crs_utils import (
     parse_geo_metadata_from_schema,
 )
 from geoparquet_io.core.geo_metadata import (
+    _DIMENSION_SUFFIXES,
+    _GEOMETRY_TYPE_CODES,
     DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
     carried_version,
@@ -155,27 +157,6 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
         return covering_column
 
     return detect_bbox_column_from_schema(table.schema, verbose)
-
-
-# WKB geometry type codes to GeoParquet base names (2D types)
-_GEOMETRY_TYPE_CODES = {
-    0: "Unknown",
-    1: "Point",
-    2: "LineString",
-    3: "Polygon",
-    4: "MultiPoint",
-    5: "MultiLineString",
-    6: "MultiPolygon",
-    7: "GeometryCollection",
-}
-
-# Dimensional suffixes based on WKB type code modifier
-_DIMENSION_SUFFIXES = {
-    0: "",  # 2D (no suffix)
-    1: " Z",  # Z dimension (codes 1001-1007)
-    2: " M",  # M dimension (codes 2001-2007)
-    3: " ZM",  # ZM dimensions (codes 3001-3007)
-}
 
 
 def _get_geometry_type_name(code: int) -> str:

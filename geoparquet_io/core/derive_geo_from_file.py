@@ -23,25 +23,25 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs
 from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type, resolve_crs_reference
+from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES, _GEOMETRY_TYPE_CODES
 from geoparquet_io.core.logging_config import debug, warn
 
+# The one WKB type-code table lives in ``geo_metadata``; this module is a
+# consumer of it, not a second copy. Code 0 is dropped deliberately: the shared
+# table maps it to the placeholder ``"Unknown"``, which is not a GeoParquet
+# ``geometry_types`` value. A derived block names only the types it can actually
+# read off the file, so an unrecognised base falls through to ``None`` and
+# :func:`_geo_col_meta_from_stats` drops it.
 _GEO_TYPE_CODE_BASES = {
-    1: "Point",
-    2: "LineString",
-    3: "Polygon",
-    4: "MultiPoint",
-    5: "MultiLineString",
-    6: "MultiPolygon",
-    7: "GeometryCollection",
+    code: name for code, name in _GEOMETRY_TYPE_CODES.items() if name != "Unknown"
 }
-_GEO_TYPE_CODE_SUFFIXES = {0: "", 1: " Z", 2: " M", 3: " ZM"}
 
 
 def _geo_code_to_type_name(code: int) -> str | None:
     """Map a Parquet geospatial type code (e.g. 3002) to 'LineString ZM'."""
     dim, base = divmod(code, 1000)
     name = _GEO_TYPE_CODE_BASES.get(base)
-    suffix = _GEO_TYPE_CODE_SUFFIXES.get(dim)
+    suffix = _DIMENSION_SUFFIXES.get(dim)
     if name is None or suffix is None:
         return None
     return name + suffix

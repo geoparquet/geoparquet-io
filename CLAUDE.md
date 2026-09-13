@@ -91,7 +91,7 @@ geoparquet_io/
 | `duckdb_utils.py` | DuckDB connection management utilities. | 1244 |
 | `admin_datasets.py` | Admin partition dataset abstraction layer. | 1219 |
 | `extract_bigquery.py` | BigQuery extraction to GeoParquet. | 1204 |
-| `parquet_write.py` | The write funnels: the two front doors every gpio ... | 1098 |
+| `write_funnels.py` | The write funnels: the two front doors every gpio ... | 1098 |
 | `common.py` | Shared helpers for reading and writing GeoParquet (being taken apart). | 979 |
 | ... | *49 more modules* | |
 <!-- END GENERATED: core-modules -->

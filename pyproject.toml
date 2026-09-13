@@ -215,7 +215,7 @@ ignore_missing_imports = true
 # These suppress errors in complex modules until they are incrementally fixed.
 # TODO: Remove overrides as type annotations are added to each module.
 #
-# `arrow_geo_metadata`, `geo_metadata_repair` and `parquet_write` were carved out
+# `arrow_geo_metadata`, `derive_geo_from_file` and `write_funnels` were carved out
 # of `geoparquet_io.core.common`, which is on this list: their errors were always
 # suppressed, by their old address. Listing them relocates that suppression
 # rather than granting a new one, so the split stays a pure move. Typing them out
@@ -227,8 +227,8 @@ ignore_missing_imports = true
 module = [
     "geoparquet_io.api.check",
     "geoparquet_io.core.arrow_geo_metadata",
-    "geoparquet_io.core.geo_metadata_repair",
-    "geoparquet_io.core.parquet_write",
+    "geoparquet_io.core.derive_geo_from_file",
+    "geoparquet_io.core.write_funnels",
     "geoparquet_io.api.ops",
     "geoparquet_io.api.table",
     "geoparquet_io.benchmarks.profile_report",
