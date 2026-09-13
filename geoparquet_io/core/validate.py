@@ -6,13 +6,16 @@ geospatial types according to their respective specifications.
 """
 
 import json
+import math
 import re
+import reprlib
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
+from rich.markup import escape
 
 from geoparquet_io.core.common import split_zm_suffix, zm_suffix_sql
 from geoparquet_io.core.crs_utils import (
@@ -34,6 +37,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
+from geoparquet_io.core.geo_metadata import is_covering_path
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
     schema_direct_children,
@@ -620,12 +624,11 @@ def _check_bbox_valid(col_meta: dict, col_name: str, geo_version: str = "1.0.0")
             category="column_metadata",
         )
 
-    # Check all elements are numbers
-    if not all(isinstance(x, (int, float)) for x in bbox):
+    if not all(_is_finite_number(x) for x in bbox):
         return ValidationCheck(
             name=f"bbox_valid_{col_name}",
             status=CheckStatus.FAILED,
-            message=f'column "{col_name}" bbox elements must be numbers',
+            message=f'column "{col_name}" bbox elements must be numbers (found: {_short(bbox)})',
             category="column_metadata",
         )
 
@@ -1526,19 +1529,30 @@ def _check_orientation_matches_data(
     )
 
 
-def _bbox_xy(bbox: list) -> tuple | None:
+def _is_finite_number(value: Any) -> bool:
+    """A real, finite JSON number that fits a double: not a bool, NaN, infinity or a 400-digit int."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an int too large for float(): json.loads makes those
+        return False
+
+
+def _bbox_xy(bbox: Any) -> tuple[float, float, float, float] | None:
     """(xmin, ymin, xmax, ymax) of a 4-, 6- or 8-element GeoParquet bbox; None otherwise.
 
-    Coerces through float() so a non-numeric metadata element can never reach
-    the SQL the values are interpolated into.
+    The shape is tested, not the length: a four-key object and a four-character
+    string both have ``len()`` 4 and used to be indexed as one (#1062). Only a
+    list of finite numbers is accepted, so nothing else reaches the SQL the
+    values are interpolated into.
     """
-    if len(bbox) not in (4, 6, 8):
+    if not isinstance(bbox, list) or len(bbox) not in (4, 6, 8):
+        return None
+    if not all(_is_finite_number(value) for value in bbox):
         return None
     half = len(bbox) // 2
-    try:
-        return float(bbox[0]), float(bbox[1]), float(bbox[half]), float(bbox[half + 1])
-    except (TypeError, ValueError):
-        return None
+    return float(bbox[0]), float(bbox[1]), float(bbox[half]), float(bbox[half + 1])
 
 
 def _x_within_sql(geom_expr: str, xmin, xmax) -> str:
@@ -1696,7 +1710,7 @@ def _check_bbox_contains_data(
             name=f"bbox_contains_data_{geom_col}",
             status=CheckStatus.SKIPPED,
             message=(
-                f"bbox {bbox!r} is not valid, expected 4, 6 or 8 numbers; skipping data check"
+                f"bbox {_short(bbox)} is not valid, expected 4, 6 or 8 numbers; skipping data check"
             ),
             category="data_validation",
         )
@@ -1747,6 +1761,108 @@ def _check_bbox_contains_data(
 # =============================================================================
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_SHORT = reprlib.Repr()
+_SHORT.maxstring = 80
+_SHORT.maxlist = _SHORT.maxdict = 8
+_SHORT.maxother = 80
+
+
+def _printable(name: str) -> str:
+    """A column name from the file, bounded and stripped of control characters."""
+    return _CONTROL_CHARS.sub("", name)[:200]
+
+
+def _short(value: Any) -> str:
+    """``repr`` of a metadata value, bounded and printable.
+
+    The value came out of the file, not out of gpio: it is capped so a 10 MB
+    string cannot become a 40 MB report, and control characters are stripped
+    so it cannot carry terminal escapes into the output.
+    """
+    return _CONTROL_CHARS.sub("", _SHORT.repr(value))
+
+
+def _covering_verdict(check_name: str, status: CheckStatus, message: str) -> ValidationCheck:
+    """A ``geoparquet_1_1`` verdict for one of the four covering.bbox checks."""
+    return ValidationCheck(
+        name=check_name, status=status, message=message, category="geoparquet_1_1"
+    )
+
+
+def _declares_bbox_covering(col_meta: dict) -> bool:
+    """``covering`` is an object with a ``bbox`` key.
+
+    A string ``covering`` satisfies ``"bbox" in covering`` too (#1062);
+    ``covering_is_object`` reports it, every other covering check treats the
+    column as declaring none.
+    """
+    covering = col_meta.get("covering")
+    return isinstance(covering, dict) and "bbox" in covering
+
+
+@dataclass(frozen=True)
+class _BboxCoveringRef:
+    """What a column's ``covering.bbox`` says, parsed once for the four checks."""
+
+    declared: bool
+    paths: dict | None = None
+    #: Root column named by the ``xmin`` path, once it is known to be one.
+    column: str | None = None
+    #: Why the covering cannot be used, as the FAILED message; None when it can.
+    problem: str | None = None
+
+
+def _resolve_bbox_covering(col_meta: dict) -> _BboxCoveringRef:
+    """Parse ``covering.bbox`` without indexing anything whose shape is unproven.
+
+    A value whose *type* is wrong is recorded as a problem and never indexed:
+    a string path passes every length test and reads character-wise, which is
+    how a verdict once named a column ``"b"`` the file never mentions (#1062).
+    """
+    if not _declares_bbox_covering(col_meta):
+        return _BboxCoveringRef(declared=False)
+    paths = col_meta["covering"]["bbox"]
+    if not isinstance(paths, dict):
+        return _BboxCoveringRef(
+            declared=True,
+            problem=f"covering bbox must be an object of [column, field] paths "
+            f"(found: {_short(paths)})",
+        )
+    xmin = paths.get("xmin")
+    if not is_covering_path(xmin):
+        detail = (
+            "it has no xmin path"
+            if "xmin" not in paths
+            else f"its xmin must be a path array [column, field] (found: {_short(xmin)})"
+        )
+        return _BboxCoveringRef(
+            declared=True,
+            paths=paths,
+            problem=f"cannot determine bbox column name from covering: {detail}",
+        )
+    return _BboxCoveringRef(declared=True, paths=paths, column=xmin[0])
+
+
+def _covering_bbox_column(
+    col_meta: dict, check_name: str, schema_info: list
+) -> tuple[str, int] | ValidationCheck:
+    """``(column, root schema index)`` the covering points at, or the verdict that stops the check.
+
+    The three column-resolving checks share this prologue so a shape guard
+    cannot be dropped from one of them.
+    """
+    ref = _resolve_bbox_covering(col_meta)
+    if not ref.declared:
+        return _covering_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
+    if ref.problem is not None or ref.column is None:
+        return _covering_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
+    index = root_schema_index(schema_info, ref.column)
+    if index is None:
+        return _bbox_column_missing(check_name, ref.column, schema_info)
+    return ref.column, index
+
+
 def _check_covering_is_object(col_meta: dict, col_name: str) -> ValidationCheck:
     """Check 1.1-1: optional 'covering' must be an object if present."""
     covering = col_meta.get("covering")
@@ -1765,69 +1881,54 @@ def _check_covering_is_object(col_meta: dict, col_name: str) -> ValidationCheck:
         status=CheckStatus.PASSED if is_valid else CheckStatus.FAILED,
         message=f'column "{col_name}" has valid covering object'
         if is_valid
-        else f'column "{col_name}" covering must be an object',
+        else f'column "{col_name}" covering must be an object (found: {_short(covering)})',
         category="geoparquet_1_1",
     )
 
 
 def _check_covering_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck:
     """Check 1.1-2: covering 'bbox' encoding must have valid xmin/ymin/xmax/ymax paths."""
-    covering = col_meta.get("covering")
+    check_name = f"covering_bbox_paths_{col_name}"
+    ref = _resolve_bbox_covering(col_meta)
+    if not ref.declared:
+        return _covering_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
+    if ref.paths is None:
+        return _covering_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
 
-    if covering is None or "bbox" not in covering:
-        return ValidationCheck(
-            name=f"covering_bbox_paths_{col_name}",
-            status=CheckStatus.SKIPPED,
-            message="no bbox covering defined",
-            category="geoparquet_1_1",
-        )
-
-    bbox_covering = covering["bbox"]
     required_keys = ["xmin", "ymin", "xmax", "ymax"]
-    missing = [k for k in required_keys if k not in bbox_covering]
-
+    missing = [k for k in required_keys if k not in ref.paths]
     if missing:
-        return ValidationCheck(
-            name=f"covering_bbox_paths_{col_name}",
-            status=CheckStatus.FAILED,
-            message=f"covering bbox missing required paths: {missing}",
-            category="geoparquet_1_1",
+        return _covering_verdict(
+            check_name, CheckStatus.FAILED, f"covering bbox missing required paths: {missing}"
         )
 
-    # Validate path format: should be [column_name, field_name]
     for key in required_keys:
-        path = bbox_covering[key]
-        if not isinstance(path, list) or len(path) != 2:
-            return ValidationCheck(
-                name=f"covering_bbox_paths_{col_name}",
-                status=CheckStatus.FAILED,
-                message=f"covering bbox {key} must be a path array [column, field]",
-                category="geoparquet_1_1",
+        path = ref.paths[key]
+        if not is_covering_path(path):
+            return _covering_verdict(
+                check_name,
+                CheckStatus.FAILED,
+                f"covering bbox {key} must be a path array [column, field] (found: {_short(path)})",
             )
 
-    wrong_field = [k for k in required_keys if bbox_covering[k][1] != k]
+    wrong_field = [k for k in required_keys if ref.paths[k][1] != k]
     if wrong_field:
-        return ValidationCheck(
-            name=f"covering_bbox_paths_{col_name}",
-            status=CheckStatus.FAILED,
-            message=f"covering bbox path field must equal its key: {wrong_field}",
-            category="geoparquet_1_1",
+        return _covering_verdict(
+            check_name,
+            CheckStatus.FAILED,
+            f"covering bbox path field must equal its key: {wrong_field}",
         )
 
-    columns = sorted({str(bbox_covering[k][0]) for k in required_keys})
+    columns = sorted({ref.paths[k][0] for k in required_keys})
     if len(columns) > 1:
-        return ValidationCheck(
-            name=f"covering_bbox_paths_{col_name}",
-            status=CheckStatus.FAILED,
-            message=f"covering bbox paths must name a single column (found: {columns})",
-            category="geoparquet_1_1",
+        return _covering_verdict(
+            check_name,
+            CheckStatus.FAILED,
+            f"covering bbox paths must name a single column (found: {columns})",
         )
 
-    return ValidationCheck(
-        name=f"covering_bbox_paths_{col_name}",
-        status=CheckStatus.PASSED,
-        message="covering bbox has valid xmin/ymin/xmax/ymax paths",
-        category="geoparquet_1_1",
+    return _covering_verdict(
+        check_name, CheckStatus.PASSED, "covering bbox has valid xmin/ymin/xmax/ymax paths"
     )
 
 
@@ -1843,7 +1944,7 @@ def _bbox_column_missing(check_name: str, bbox_col_name: str, schema_info: list)
     return ValidationCheck(
         name=check_name,
         status=CheckStatus.FAILED,
-        message=f'bbox column "{bbox_col_name}" is not at the schema root ({detail})',
+        message=f'bbox column "{_printable(bbox_col_name)}" is not at the schema root ({detail})',
         category="geoparquet_1_1",
     )
 
@@ -1852,37 +1953,14 @@ def _check_covering_bbox_column_exists(
     col_meta: dict, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-3: covering bbox column must exist at root of schema."""
-    covering = col_meta.get("covering")
-
-    if covering is None or "bbox" not in covering:
-        return ValidationCheck(
-            name=f"covering_bbox_column_exists_{col_name}",
-            status=CheckStatus.SKIPPED,
-            message="no bbox covering defined",
-            category="geoparquet_1_1",
-        )
-
-    bbox_covering = covering["bbox"]
-    # Get the column name from the path (first element)
-    bbox_col_name = bbox_covering.get("xmin", [None])[0]
-
-    if bbox_col_name is None:
-        return ValidationCheck(
-            name=f"covering_bbox_column_exists_{col_name}",
-            status=CheckStatus.FAILED,
-            message="cannot determine bbox column name from covering",
-            category="geoparquet_1_1",
-        )
-
     check_name = f"covering_bbox_column_exists_{col_name}"
-    if root_schema_index(schema_info, bbox_col_name) is None:
-        return _bbox_column_missing(check_name, bbox_col_name, schema_info)
+    resolved = _covering_bbox_column(col_meta, check_name, schema_info)
+    if isinstance(resolved, ValidationCheck):
+        return resolved
+    bbox_col_name, _ = resolved
 
-    return ValidationCheck(
-        name=check_name,
-        status=CheckStatus.PASSED,
-        message=f'bbox column "{bbox_col_name}" exists at schema root',
-        category="geoparquet_1_1",
+    return _covering_verdict(
+        check_name, CheckStatus.PASSED, f'bbox column "{bbox_col_name}" exists at schema root'
     )
 
 
@@ -1897,48 +1975,26 @@ def _check_covering_bbox_structure(
 ) -> ValidationCheck:
     """Check 1.1-4/5: covering bbox column is a struct of xmin/ymin/xmax/ymax or
     xmin/ymin/zmin/xmax/ymax/zmax, in that order."""
-    covering = col_meta.get("covering")
-
-    if covering is None or "bbox" not in covering:
-        return ValidationCheck(
-            name=f"covering_bbox_structure_{col_name}",
-            status=CheckStatus.SKIPPED,
-            message="no bbox covering defined",
-            category="geoparquet_1_1",
-        )
-
-    bbox_covering = covering["bbox"]
-    bbox_col_name = bbox_covering.get("xmin", [None])[0]
-
-    if bbox_col_name is None:
-        return ValidationCheck(
-            name=f"covering_bbox_structure_{col_name}",
-            status=CheckStatus.FAILED,
-            message="cannot determine bbox column name",
-            category="geoparquet_1_1",
-        )
-
     check_name = f"covering_bbox_structure_{col_name}"
-    index = root_schema_index(schema_info, bbox_col_name)
-    if index is None:
-        return _bbox_column_missing(check_name, bbox_col_name, schema_info)
+    resolved = _covering_bbox_column(col_meta, check_name, schema_info)
+    if isinstance(resolved, ValidationCheck):
+        return resolved
+    _, index = resolved
 
     found_fields = [c.get("name") for c in schema_direct_children(schema_info, index)]
 
     if found_fields != _BBOX_FIELDS.get(len(found_fields)):
-        return ValidationCheck(
-            name=f"covering_bbox_structure_{col_name}",
-            status=CheckStatus.FAILED,
-            message=f"bbox column fields must be {_BBOX_FIELDS[4]} or {_BBOX_FIELDS[6]}, "
+        return _covering_verdict(
+            check_name,
+            CheckStatus.FAILED,
+            f"bbox column fields must be {_BBOX_FIELDS[4]} or {_BBOX_FIELDS[6]}, "
             f"in that order (found: {found_fields})",
-            category="geoparquet_1_1",
         )
 
-    return ValidationCheck(
-        name=f"covering_bbox_structure_{col_name}",
-        status=CheckStatus.PASSED,
-        message=f"bbox column has valid structure with {'/'.join(found_fields)}",
-        category="geoparquet_1_1",
+    return _covering_verdict(
+        check_name,
+        CheckStatus.PASSED,
+        f"bbox column has valid structure with {'/'.join(found_fields)}",
     )
 
 
@@ -1946,31 +2002,11 @@ def _check_covering_bbox_field_types(
     col_meta: dict, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-6/7: covering bbox fields must be FLOAT or DOUBLE and same type."""
-    covering = col_meta.get("covering")
-
-    if covering is None or "bbox" not in covering:
-        return ValidationCheck(
-            name=f"covering_bbox_field_types_{col_name}",
-            status=CheckStatus.SKIPPED,
-            message="no bbox covering defined",
-            category="geoparquet_1_1",
-        )
-
-    bbox_covering = covering["bbox"]
-    bbox_col_name = bbox_covering.get("xmin", [None])[0]
-
-    if bbox_col_name is None:
-        return ValidationCheck(
-            name=f"covering_bbox_field_types_{col_name}",
-            status=CheckStatus.FAILED,
-            message="cannot determine bbox column name",
-            category="geoparquet_1_1",
-        )
-
     check_name = f"covering_bbox_field_types_{col_name}"
-    index = root_schema_index(schema_info, bbox_col_name)
-    if index is None:
-        return _bbox_column_missing(check_name, bbox_col_name, schema_info)
+    resolved = _covering_bbox_column(col_meta, check_name, schema_info)
+    if isinstance(resolved, ValidationCheck):
+        return resolved
+    _, index = resolved
 
     valid_types = {"FLOAT", "DOUBLE", "FLOAT32", "FLOAT64"}
     # Same trap as _check_geometry_byte_array: a group child's type is an
@@ -1982,27 +2018,21 @@ def _check_covering_bbox_field_types(
     # Check if all types are valid
     invalid_types = field_types - valid_types
     if invalid_types:
-        return ValidationCheck(
-            name=f"covering_bbox_field_types_{col_name}",
-            status=CheckStatus.FAILED,
-            message=f"bbox fields must be FLOAT or DOUBLE (found: {invalid_types})",
-            category="geoparquet_1_1",
+        return _covering_verdict(
+            check_name,
+            CheckStatus.FAILED,
+            f"bbox fields must be FLOAT or DOUBLE (found: {invalid_types})",
         )
 
-    # Check if all types are the same
     if len(field_types) > 1:
-        return ValidationCheck(
-            name=f"covering_bbox_field_types_{col_name}",
-            status=CheckStatus.FAILED,
-            message=f"bbox fields must all use the same type (found: {field_types})",
-            category="geoparquet_1_1",
+        return _covering_verdict(
+            check_name,
+            CheckStatus.FAILED,
+            f"bbox fields must all use the same type (found: {field_types})",
         )
 
-    return ValidationCheck(
-        name=f"covering_bbox_field_types_{col_name}",
-        status=CheckStatus.PASSED,
-        message=f"bbox fields have valid type: {field_types}",
-        category="geoparquet_1_1",
+    return _covering_verdict(
+        check_name, CheckStatus.PASSED, f"bbox fields have valid type: {field_types}"
     )
 
 
@@ -4000,8 +4030,7 @@ def _run_geoparquet_checks(
             checks.append(_check_covering_is_object(col_meta, col_name))
 
             # Only run bbox covering checks if covering is defined
-            covering = col_meta.get("covering")
-            if covering is not None and "bbox" in covering:
+            if _declares_bbox_covering(col_meta):
                 checks.append(_check_covering_bbox_paths(col_meta, col_name))
                 checks.append(_check_covering_bbox_column_exists(col_meta, col_name, schema_info))
                 checks.append(_check_covering_bbox_structure(col_meta, col_name, schema_info))
@@ -4135,9 +4164,10 @@ def format_terminal_output(result: ValidationResult) -> None:
         for check in checks:
             symbol = _get_check_symbol(check.status)
             color = _get_check_color(check.status)
-            console.print(f"  {symbol} [{color}]{check.message}[/{color}]")
+            # Messages quote values from the file; rich markup in them is text.
+            console.print(f"  {symbol} [{color}]{escape(check.message)}[/{color}]")
             if check.details:
-                console.print(f"      [dim]{check.details}[/dim]")
+                console.print(f"      [dim]{escape(check.details)}[/dim]")
 
     # Summary
     console.print(

@@ -201,21 +201,6 @@ def test_one_defect_is_one_failed_verdict(tmp_path, case_id, override, check_nam
     assert failed == [check_name]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KeyError,
-    reason="#1062: a 4-key `bbox` object crashes `gpio check spec` with KeyError",
-)
-def test_bbox_object_with_four_keys_is_reported_not_crashed(tmp_path):
-    """``_check_bbox_valid`` already calls this bbox invalid; the data check then
-    indexes it as a list anyway because ``len()`` of a 4-key dict is 4."""
-    bbox = {"xmin": 0, "ymin": 0, "xmax": 1, "ymax": 1}
-    path = write_geoparquet(tmp_path / "f.parquet", base_geo(bbox=bbox))
-    assert_verdict(
-        verdicts(path), "bbox_valid_geometry", CheckStatus.FAILED, "bbox must be an array"
-    )
-
-
 def test_geo_block_naming_a_column_the_schema_does_not_have(tmp_path):
     """Every schema check must say the column is missing, not read some other column."""
     geo = base_geo()
@@ -250,20 +235,6 @@ def test_covering_bbox_missing_a_required_path(tmp_path):
         "covering_bbox_paths_geometry",
         CheckStatus.FAILED,
         "covering bbox missing required paths: ['xmax']",
-    )
-
-
-def test_covering_bbox_path_is_not_a_path_array(tmp_path):
-    path = write_geoparquet(
-        tmp_path / "f.parquet",
-        base_geo(covering={"bbox": dict(BBOX_PATHS, xmin="bbox.xmin")}),
-        {"bbox": bbox_struct()},
-    )
-    assert_verdict(
-        verdicts(path),
-        "covering_bbox_paths_geometry",
-        CheckStatus.FAILED,
-        "covering bbox xmin must be a path array [column, field]",
     )
 
 
@@ -330,58 +301,6 @@ def test_covering_bbox_checks_skip_a_column_with_no_covering(check, name):
     assert result.name == name
     assert result.status == CheckStatus.SKIPPED
     assert result.message == "no bbox covering defined"
-
-
-# =============================================================================
-# Bug: a malformed `geo` value is indexed without checking its shape (issue #1062)
-# =============================================================================
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=IndexError,
-    reason="#1062: covering.bbox.xmin = [] crashes `gpio check spec` with IndexError",
-)
-def test_covering_bbox_empty_path_array_is_reported_not_crashed(tmp_path):
-    path = write_geoparquet(
-        tmp_path / "f.parquet",
-        base_geo(covering={"bbox": dict(BBOX_PATHS, xmin=[])}),
-        {"bbox": bbox_struct()},
-    )
-    assert_verdict(
-        verdicts(path),
-        "covering_bbox_column_exists_geometry",
-        CheckStatus.FAILED,
-        "cannot determine bbox column name",
-    )
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="#1062: a string covering path is indexed character-wise, so the message "
-    'names a column "b" that the file never mentions',
-)
-def test_covering_bbox_string_path_does_not_invent_a_column_name(tmp_path):
-    path = write_geoparquet(
-        tmp_path / "f.parquet",
-        base_geo(covering={"bbox": dict(BBOX_PATHS, xmin="bbox.xmin")}),
-        {"bbox": bbox_struct()},
-    )
-    message = verdicts(path)["covering_bbox_column_exists_geometry"].message
-    assert '"b"' not in message, message
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason="#1062: covering = 'bbox' (a string, not an object) crashes `gpio check spec` "
-    "before `_check_covering_is_object` can report it",
-)
-def test_covering_that_is_a_string_is_reported_not_crashed(tmp_path):
-    path = write_geoparquet(tmp_path / "f.parquet", base_geo(covering="bbox"))
-    assert_verdict(
-        verdicts(path), "covering_is_object_geometry", CheckStatus.FAILED, "covering must be"
-    )
 
 
 # =============================================================================
@@ -752,7 +671,7 @@ FAILED_ARMS = {
     "_check_encoding_matches_data": HERE,
     "_check_geometry_types_match_data": HERE,
     "_check_covering_bbox_paths": HERE,
-    "_check_covering_bbox_column_exists": HERE,
+    "_covering_bbox_column": HERE,
     "_check_covering_bbox_structure": HERE,
     "_check_covering_bbox_field_types": HERE,
     "_check_native_geo_type_present": HERE,
@@ -786,10 +705,7 @@ FAILED_ARMS = {
     "_check_coordinates_valid_for_crs": ELSEWHERE,
     "validate_geoparquet": ELSEWHERE,
     "_run_parquet_geo_only_checks": ELSEWHERE,
-    "_check_covering_is_object": (
-        "#1062: a non-object covering crashes the run before this check reports; "
-        "test_covering_that_is_a_string_is_reported_not_crashed flips to HERE with #1072"
-    ),
+    "_check_covering_is_object": HERE,
     "_check_native_geo_types_match": (
         "FAILS when the data holds a type the Parquet GeospatialStatistics do not "
         "declare. pyarrow computes those statistics from the data, so no writer in "
@@ -851,3 +767,177 @@ def test_every_here_entry_is_asserted_in_this_file():
             continue
         check_name = name.removeprefix("_check_").removeprefix("_run_")
         assert check_name in source or name in source, f"{name} is claimed HERE but not asserted"
+
+
+# =============================================================================
+# A malformed `geo` value gets a verdict that names it, never a traceback (#1062)
+#
+# The defect was one shape: a value whose *type* one check had judged wrong
+# was indexed by a later check as if it had the right type. Each sweep below
+# holds one representative per branch of the guard that now sits in front of
+# that read.
+# =============================================================================
+
+COVERING_BBOX_CHECKS = (
+    "covering_bbox_paths_geometry",
+    "covering_bbox_column_exists_geometry",
+    "covering_bbox_structure_geometry",
+    "covering_bbox_field_types_geometry",
+)
+
+
+@pytest.mark.parametrize(
+    "covering",
+    [
+        pytest.param("a bbox here", id="string"),
+        pytest.param(["bbox"], id="list"),
+        pytest.param(5, id="int"),
+    ],
+)
+def test_covering_that_is_not_an_object(tmp_path, covering):
+    """One verdict names the wrong type; the four bbox checks do not run at all.
+
+    A string satisfies ``"bbox" in covering`` and ``covering["bbox"]`` both."""
+    checks = verdicts(
+        write_geoparquet(
+            tmp_path / "f.parquet", base_geo(covering=covering), {"bbox": bbox_struct()}
+        )
+    )
+    assert_verdict(
+        checks,
+        "covering_is_object_geometry",
+        CheckStatus.FAILED,
+        f"covering must be an object (found: {covering!r})",
+    )
+    assert not [name for name in checks if name.startswith("covering_bbox_")], sorted(checks)
+
+
+@pytest.mark.parametrize(
+    "bbox_covering",
+    [
+        pytest.param("bbox", id="string"),
+        pytest.param(["xmin", "ymin"], id="list"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_covering_bbox_that_is_not_an_object(tmp_path, bbox_covering):
+    """All four checks reject the value and quote it, none reads keys off it."""
+    checks = verdicts(
+        write_geoparquet(
+            tmp_path / "f.parquet",
+            base_geo(covering={"bbox": bbox_covering}),
+            {"bbox": bbox_struct()},
+        )
+    )
+    for name in COVERING_BBOX_CHECKS:
+        assert_verdict(
+            checks,
+            name,
+            CheckStatus.FAILED,
+            f"covering bbox must be an object of [column, field] paths (found: {bbox_covering!r})",
+        )
+
+
+@pytest.mark.parametrize(
+    "path_value",
+    [
+        pytest.param([], id="empty_list"),
+        pytest.param("bbox.xmin", id="string"),
+        pytest.param(5, id="int"),
+        pytest.param({"column": "bbox", "field": "xmin"}, id="object"),
+        pytest.param([None, None], id="list_of_nulls"),
+    ],
+)
+def test_covering_bbox_path_that_is_not_a_path_array(tmp_path, path_value):
+    """Every verdict quotes the offending value; none invents a column name
+    (``"bbox.xmin"[0]`` is ``"b"``)."""
+    checks = verdicts(
+        write_geoparquet(
+            tmp_path / "f.parquet",
+            base_geo(covering={"bbox": dict(BBOX_PATHS, xmin=path_value)}),
+            {"bbox": bbox_struct()},
+        )
+    )
+    assert_verdict(
+        checks,
+        "covering_bbox_paths_geometry",
+        CheckStatus.FAILED,
+        f"covering bbox xmin must be a path array [column, field] (found: {path_value!r})",
+    )
+    for name in COVERING_BBOX_CHECKS[1:]:
+        assert_verdict(
+            checks,
+            name,
+            CheckStatus.FAILED,
+            "cannot determine bbox column name from covering: its xmin must be a path array "
+            f"[column, field] (found: {path_value!r})",
+        )
+
+
+@pytest.mark.parametrize(
+    ("bbox", "fragment"),
+    [
+        pytest.param(
+            {"xmin": 0, "ymin": 0, "xmax": 1, "ymax": 1},
+            "bbox must be an array",
+            id="four_key_object",
+        ),
+        pytest.param("1234", "bbox must be an array", id="four_character_string"),
+        pytest.param(5, "bbox must be an array", id="int"),
+        pytest.param(["0", "0", "2", "3"], "bbox elements must be numbers", id="numeric_strings"),
+        pytest.param([True, False, True, True], "bbox elements must be numbers", id="bools"),
+        pytest.param([0, 0, float("inf"), 3], "bbox elements must be numbers", id="infinity"),
+        pytest.param(
+            [0, 0, 10**400, 3], "bbox elements must be numbers", id="int_too_large_for_a_double"
+        ),
+    ],
+)
+def test_bbox_that_is_not_four_finite_numbers(tmp_path, bbox, fragment):
+    """The metadata check FAILs and the data check skips; nothing is coerced into SQL.
+
+    ``"1234"`` and ``["0", "0", "2", "3"]`` are the quiet half of the bug: they
+    never crashed, they were read as numbers and the data was judged against them.
+    """
+    checks = verdicts(write_geoparquet(tmp_path / "f.parquet", base_geo(bbox=bbox)))
+    assert_verdict(checks, "bbox_valid_geometry", CheckStatus.FAILED, fragment)
+    assert_verdict(checks, "bbox_contains_data_geometry", CheckStatus.SKIPPED, "is not valid")
+
+
+def test_a_huge_value_is_quoted_briefly(tmp_path):
+    """The report quotes what it found, bounded: a 10 MB string is not a 40 MB report."""
+    checks = verdicts(
+        write_geoparquet(
+            tmp_path / "f.parquet",
+            base_geo(covering={"bbox": dict(BBOX_PATHS, xmin="A" * 10_000_000)}),
+            {"bbox": bbox_struct()},
+        )
+    )
+    assert len(checks["covering_bbox_paths_geometry"].message) < 300
+
+
+def test_a_malformed_covering_does_not_crash_inspect_meta(tmp_path):
+    """The same reads live in the ``inspect meta`` printer (#1062)."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    for covering in ("bbox", {"bbox": "bbox"}, {"bbox": dict(BBOX_PATHS, xmin="bbox.xmin")}):
+        path = write_geoparquet(
+            tmp_path / "f.parquet", base_geo(covering=covering), {"bbox": bbox_struct()}
+        )
+        result = CliRunner().invoke(cli, ["inspect", "meta", path])
+        assert result.exit_code == 0, result.output
+        assert "Column: b\n" not in result.output
+
+
+def test_a_covering_path_naming_a_missing_column_is_reported_by_name(tmp_path):
+    """The one place a covering-named column reaches a message: bounded and printable."""
+    name = "\x1b[32mgreen\x1b[0m" + "x" * 500
+    checks = verdicts(
+        write_geoparquet(
+            tmp_path / "f.parquet",
+            base_geo(covering={"bbox": {k: [name, k] for k in ("xmin", "ymin", "xmax", "ymax")}}),
+        )
+    )
+    message = checks["covering_bbox_column_exists_geometry"].message
+    assert "\x1b" not in message and len(message) < 400

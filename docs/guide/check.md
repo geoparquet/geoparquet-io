@@ -324,7 +324,12 @@ Validates file structure and metadata against the GeoParquet specification:
   it passes. With an explicit `"crs": null` the datum cannot be verified, so an
   epoch produces a warning.
 - **Malformed metadata** — a `geo` key containing invalid JSON or a non-object
-  value fails cleanly in auto mode instead of crashing.
+  value fails cleanly in auto mode instead of crashing. The same holds for a
+  value *inside* a valid `geo` object whose type is wrong: a `covering` that is
+  not an object, a `covering.bbox` that is not an object of `[column, field]`
+  paths, a `bbox` that is not an array of finite numbers. Each gets a FAILED
+  check quoting the value it found (bounded, so a huge value cannot flood the
+  report), and the rest of the report is still printed (#1062).
 - **Dimension-aware geometry types** — `geometry_types` entries carry Z/M
   suffixes (`"Point Z"`, `"LineString ZM"`), and validation matches declared
   suffixes against the actual coordinate dimensions in both directions

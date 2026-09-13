@@ -12,6 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from geoparquet_io.core.common import format_size
+from geoparquet_io.core.geo_metadata import is_covering_path
 from geoparquet_io.core.parquet_schema import root_schema_columns
 
 
@@ -621,6 +622,11 @@ def format_parquet_geo_metadata(
         )
 
 
+def _is_bbox_covering_paths(cover_info: dict) -> bool:
+    """Every bbox key present and each a ``[column, field]`` path."""
+    return all(is_covering_path(cover_info.get(k)) for k in ("xmin", "ymin", "xmax", "ymax"))
+
+
 def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
     """
     Format and output GeoParquet metadata from the 'geo' key.
@@ -744,12 +750,16 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
                 if "covering" in col_meta:
                     console.print("    Covering:")
                     covering = col_meta["covering"]
+                    if not isinstance(covering, dict):
+                        # A malformed covering is shown, not indexed (#1062).
+                        console.print(f"      [red]not an object:[/red] {covering!r}")
+                        covering = {}
                     for cover_type, cover_info in covering.items():
                         if cover_type == "bbox" and isinstance(cover_info, dict):
                             # Format bbox covering more concisely
-                            if all(k in cover_info for k in ["xmin", "ymin", "xmax", "ymax"]):
-                                # All bbox components present
-                                bbox_col = cover_info["xmin"][0]  # Get the column name
+                            if _is_bbox_covering_paths(cover_info):
+                                # All bbox components present and well-formed
+                                bbox_col = cover_info["xmin"][0]
                                 console.print("      bbox:")
                                 console.print(f"        Column: {bbox_col}")
                                 console.print(f"        xmin: {bbox_col}.xmin")
