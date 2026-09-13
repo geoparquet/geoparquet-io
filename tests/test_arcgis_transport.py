@@ -835,8 +835,14 @@ def test_a_native_crs_request_warns_when_the_server_returns_another(monkeypatch,
 
 
 def test_the_written_file_is_spec_clean_and_carries_crs84(monkeypatch, tmp_path):
+    """The default path never consults the layer's SR: f=geojson is WGS84 (RFC 7946).
+
+    The layer advertises a WKID nothing resolves -- the one the refusal tests
+    below use -- so the absent `crs` key here is a true statement and stays
+    reachable.
+    """
     http = FakeTransport.install(monkeypatch)
-    stub_service(http, total=12)
+    stub_service(http, total=12, layer=_layer_json(wkid=999999))
     out = tmp_path / "cities.parquet"
 
     convert_arcgis_to_geoparquet(SERVICE, str(out), verbose=True)
@@ -966,54 +972,171 @@ def test_native_output_crs_requires_an_advertised_spatial_reference(monkeypatch)
         arcgis_to_table(SERVICE, output_crs="native")
 
 
-def test_an_unresolvable_wkid_is_written_as_lon_lat(monkeypatch, tmp_path, caplog):
-    """An unresolvable WKID relabels projected coordinates as WGS84 lon/lat.
+# ---------------------------------------------------------------------------
+# A CRS gpio cannot write down is refused, never written as lon/lat (#1039)
+# ---------------------------------------------------------------------------
 
-    `_projjson_from_wkid` returns None for a WKID that is neither an EPSG nor
-    an ESRI code, and `arcgis_to_table` guards the *whole* geo dict on that
-    value, so no CRS is attached. In GeoParquet an absent `crs` key does not
-    mean "unknown" — it means OGC:CRS84 — so metres come out labelled as
-    degrees — and gpio's own `check spec` then fails the file it just wrote.
-    The warning says only that the CRS was "left unset".
-    See https://github.com/geoparquet/geoparquet-io/issues/1039
-    """
-    http = FakeTransport.install(monkeypatch)
-    http.respond(
-        lambda r: r.path.endswith("/0") and not r.path.endswith("query"),
-        json_reply(_layer_json()),
-    )
-    http.respond(_is_count, json_reply({"count": 1}))
-    http.respond(
-        _is_query,
-        json_reply(
+#: A projection no authority registers: UTM 18N with its meridian moved half a degree.
+CUSTOM_WKT = (
+    'PROJCS["Custom_Transverse_Mercator",'
+    'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
+    'SPHEROID["WGS_1984",6378137.0,298.257223563]],'
+    'PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],'
+    'PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",500000.0],'
+    'PARAMETER["False_Northing",0.0],PARAMETER["Central_Meridian",-75.5],'
+    'PARAMETER["Scale_Factor",0.9996],PARAMETER["Latitude_Of_Origin",0.0],'
+    'UNIT["Meter",1.0]]'
+)
+
+
+def _esri_page(spatial_reference: dict | None, count: int = 1, start: int = 0) -> dict:
+    """An EsriJSON page of projected points (metres, so a CRS84 label is detectable)."""
+    page = {
+        "geometryType": "esriGeometryPoint",
+        "fields": FIELDS,
+        "features": [
             {
-                "geometryType": "esriGeometryPoint",
-                "fields": FIELDS,
-                "features": [
-                    {
-                        "geometry": {"x": 441000.0, "y": 4474000.0},
-                        "attributes": {"OBJECTID": 1, "name": "a", "pop": 1},
-                    }
-                ],
+                "geometry": {"x": 441000.0 + 10.0 * i, "y": 4474000.0},
+                "attributes": {"OBJECTID": i, "name": f"p{i}", "pop": i},
             }
-        ),
-    )
-    out = tmp_path / "unresolvable.parquet"
+            for i in range(start, start + count)
+        ],
+    }
+    if spatial_reference is not None:
+        page["spatialReference"] = spatial_reference
+    return page
 
-    with caplog.at_level("WARNING"):
+
+def test_an_unresolvable_explicit_output_crs_is_refused_before_any_request(monkeypatch, tmp_path):
+    """Parseable is not resolvable: EPSG:99999 is no code, and no request is spent on it."""
+    http = FakeTransport.install(monkeypatch)
+    out = tmp_path / "refused.parquet"
+
+    with pytest.raises(InvalidParameterError, match="wkid=99999 resolves under neither") as excinfo:
         convert_arcgis_to_geoparquet(SERVICE, str(out), output_crs="EPSG:99999")
 
-    assert "not a known EPSG or ESRI code" in caplog.text
-    # No `crs` key at all, which GeoParquet resolves as OGC:CRS84 - so these
-    # projected easting/northing values are now labelled longitude/latitude.
-    assert geo_block_crs_id(out) == "<no crs key -- resolves as OGC:CRS84>"
-    assert geo_block(out)["columns"]["geometry"]["bbox"] == [
-        441000.0,
-        4474000.0,
-        441000.0,
-        4474000.0,
-    ]
-    # gpio wrote a file its own validator rejects.
-    assert any(
-        "coordinates outside valid range for CRS" in problem for problem in spec_problems(out)
+    assert "OGC:CRS84" in str(excinfo.value) and "--output-crs" in str(excinfo.value)
+    assert http.requests == []
+    assert not out.exists()
+
+
+def test_an_unresolvable_layer_wkid_is_refused_under_native_before_any_page(monkeypatch, tmp_path):
+    """The layer's own SR resolves to nothing: refuse after the metadata, before the features."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=3, layer=_layer_json(wkid=999999))
+    out = tmp_path / "refused.parquet"
+
+    with pytest.raises(
+        GeoParquetError, match="--output-crs native: latestWkid=999999 / wkid=999999"
+    ):
+        convert_arcgis_to_geoparquet(SERVICE, str(out), output_crs="native")
+
+    assert http.matching(_is_query) == []
+    assert not out.exists()
+
+
+def test_a_server_returning_an_unresolvable_sr_is_refused_after_the_first_page(
+    monkeypatch, tmp_path
+):
+    """The requested code resolves; the SR the server actually returned does not.
+
+    The only #1039 path a download can reach. It stops after the first page --
+    the rest would only be thrown away -- and blames the service, not the flag.
+    """
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=200,
+        layer=_layer_json(wkid=26918),
+        page_replies=(
+            json_reply(_esri_page({"wkid": 999999}, count=100)),
+            json_reply(_esri_page({"wkid": 999999}, count=100, start=100)),
+        ),
     )
+    out = tmp_path / "refused.parquet"
+
+    with pytest.raises(GeoParquetError, match="service returned a spatial reference") as excinfo:
+        convert_arcgis_to_geoparquet(SERVICE, str(out), output_crs="EPSG:26918")
+
+    assert not isinstance(excinfo.value, InvalidParameterError)
+    assert len(http.matching(_is_query)) == 1, "the download went on past the first page"
+    assert not out.exists()
+
+
+def test_a_quoted_wkid_still_resolves_and_is_not_a_mismatch(monkeypatch, tmp_path, caplog):
+    """Some services quote the code; that is neither unresolvable nor "another CRS"."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=1,
+        layer=_layer_json(wkid=26918),
+        page_replies=(json_reply(_esri_page({"wkid": "26918"})),),
+    )
+    out = tmp_path / "quoted.parquet"
+
+    with caplog.at_level("WARNING"):
+        convert_arcgis_to_geoparquet(SERVICE, str(out), output_crs="EPSG:26918")
+
+    assert "server returned" not in caplog.text
+    assert geo_block_crs_id(out)["code"] == 26918
+    assert spec_problems(out) == []
+
+
+def test_a_resolvable_wkid_beside_an_unresolvable_latestwkid_is_not_a_mismatch(
+    monkeypatch, tmp_path, caplog
+):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=1,
+        layer=_layer_json(wkid=26918),
+        page_replies=(json_reply(_esri_page({"wkid": 26918, "latestWkid": 999999})),),
+    )
+    out = tmp_path / "vendor_latest.parquet"
+
+    with caplog.at_level("WARNING"):
+        convert_arcgis_to_geoparquet(SERVICE, str(out), output_crs="EPSG:26918")
+
+    assert "server returned" not in caplog.text
+    assert geo_block_crs_id(out)["code"] == 26918
+
+
+def test_a_wkt_beside_an_unresolvable_wkid_is_used_under_native(monkeypatch, tmp_path):
+    """The server advertises a vendor WKID nothing knows, and the WKT that defines it."""
+    from pyproj import CRS
+
+    http = FakeTransport.install(monkeypatch)
+    spatial_reference = {"wkid": 999999, "wkt": CRS.from_epsg(26918).to_wkt()}
+    layer = _layer_json(wkid=999999)
+    layer["spatialReference"] = spatial_reference
+    stub_service(
+        http, total=1, layer=layer, page_replies=(json_reply(_esri_page(spatial_reference)),)
+    )
+    out = tmp_path / "from_wkt.parquet"
+
+    convert_arcgis_to_geoparquet(SERVICE, str(out), output_crs="native")
+
+    assert http.matching(_is_query)[0].params["outSR"] == "26918"
+    assert geo_block_crs_id(out)["code"] == 26918
+    assert spec_problems(out) == []
+
+
+def test_a_custom_projection_wkt_is_written_as_full_projjson(monkeypatch, tmp_path, caplog):
+    """A CRS no authority registers is written out in full, name and all, with no `id`."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=1,
+        layer=_layer_json(wkid=32618),
+        page_replies=(json_reply(_esri_page({"wkid": 999999, "wkt": CUSTOM_WKT})),),
+    )
+    out = tmp_path / "custom.parquet"
+
+    with caplog.at_level("WARNING"):
+        convert_arcgis_to_geoparquet(SERVICE, str(out), output_crs="EPSG:32618")
+
+    assert "server returned WKID 999999" in caplog.text.replace("\n", " ")
+    crs = geo_block(out)["columns"]["geometry"]["crs"]
+    assert crs["name"] == "Custom_Transverse_Mercator"
+    assert "id" not in crs
+    assert spec_problems(out) == []

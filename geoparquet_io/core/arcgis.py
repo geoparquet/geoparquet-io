@@ -24,7 +24,12 @@ from geoparquet_io.core.column_selection import (
     split_column_list,
 )
 from geoparquet_io.core.common import _cast_table_to_schema, write_geoparquet_table
-from geoparquet_io.core.crs_utils import _extract_crs_identifier, parse_crs_string_to_projjson
+from geoparquet_io.core.crs_utils import (
+    _extract_crs_identifier,
+    _projjson_from_authority,
+    parse_crs_string_to_projjson,
+    projjson_from_wkt,
+)
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 from geoparquet_io.core.exceptions import (
     BatchTooLargeError,
@@ -793,15 +798,6 @@ def fetch_all_features(
             debug(f"Fetched {fetched} features total using {max_workers} workers")
 
 
-def _wkid_from_spatial_reference(spatial_ref: dict) -> int | None:
-    """Return the WKID from an ArcGIS spatial reference dict, or None.
-
-    Prefers latestWkid (the current EPSG-aligned code) over the legacy
-    Esri-specific wkid, e.g. {"wkid": 102100, "latestWkid": 3857} -> 3857.
-    """
-    return spatial_ref.get("latestWkid") or spatial_ref.get("wkid")
-
-
 def _normalize_wkid(wkid: int) -> int:
     """Map legacy Esri WKIDs to their EPSG equivalents (e.g. 102100 -> 3857)."""
     return WKID_TO_EPSG.get(wkid, wkid)
@@ -827,183 +823,169 @@ def _parse_crs_to_wkid(value: str) -> int:
 
 
 def _projjson_from_wkid(wkid: int) -> dict | None:
-    """Resolve an ArcGIS WKID to PROJJSON, trying the EPSG then ESRI authority.
+    """PROJJSON for an ArcGIS WKID under the EPSG then the ESRI authority, or None.
 
-    Many ArcGIS layers advertise Esri-authority WKIDs (e.g. 102039) that are
-    not valid EPSG codes; tagging those as EPSG would write CRS metadata no
-    consumer can resolve.
-
-    Returns None, silently, when neither authority knows the code. The caller
-    decides what that means -- a sibling carrier of the same spatial reference
-    may still resolve it, and when none does the answer is to refuse, not to
-    warn and continue (#1039).
+    Many layers advertise Esri-authority codes (102039) that are not EPSG codes;
+    tagging those as EPSG would write a CRS no consumer can resolve.
     """
     code = _normalize_wkid(wkid)
-    try:
-        from pyproj import CRS
-        from pyproj.exceptions import CRSError
-    except ImportError:
-        return {"id": {"authority": "EPSG", "code": code}}
     for authority in ("EPSG", "ESRI"):
-        try:
-            return CRS.from_authority(authority, code).to_json_dict()
-        except CRSError:
-            continue
+        cached = _projjson_from_authority(authority, str(code))
+        if cached is not None:
+            return json.loads(cached)
     return None
 
 
-def _projjson_from_wkt(wkt: str) -> dict | None:
-    """Resolve an ArcGIS WKT (or WKT2) spatial reference to PROJJSON, or None.
+def _coerce_wkid(raw: object) -> int | None:
+    """An integer code out of what a service sent, or None.
 
-    ArcGIS supplies ``wkt`` for spatial references no authority registers --
-    custom projections above all -- and often alongside a vendor WKID. PROJJSON
-    does not require an ``id``, so an unregistered CRS still round-trips as a
-    complete description, which is strictly better than declaring the column
-    CRS-less.
-
-    Not :func:`~geoparquet_io.core.crs_utils.parse_crs_string_to_projjson`:
-    that one reads an ``AUTHORITY:CODE`` identifier out of its argument and
-    returns None for every WKT string, which is why the WKT fallback below it
-    never resolved anything before #1039.
-
-    pyproj is a hard dependency, imported unguarded here as it is in
-    :func:`_resolve_native_wkid` below. :func:`_projjson_from_wkid`'s
-    ``ImportError`` guard predates that being true.
+    Services quote codes (``"26918"``) and occasionally send floats; ``bool``
+    is an ``int`` subclass and never a code. Anything ``int()`` rejects -- a
+    superscript digit, a 5,000-digit string -- is not a code either.
     """
-    from pyproj import CRS
-    from pyproj.exceptions import CRSError
-
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, float) and not raw.is_integer():
+        return None
     try:
-        return CRS.from_wkt(wkt).to_json_dict()
-    except (CRSError, TypeError):
+        return int(raw)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
         return None
 
 
 def _wkid_candidates(spatial_ref: dict) -> list[int]:
-    """Every WKID an ArcGIS spatial reference offers, best first, deduplicated.
-
-    ``latestWkid`` is the modern EPSG-aligned code and wins when both resolve,
-    but "present" and "resolvable" are different questions: a server can send a
-    vendor ``latestWkid`` beside a perfectly good legacy ``wkid``.
-    """
+    """Every WKID a spatial reference offers: ``latestWkid`` first, normalized, deduplicated."""
     candidates: list[int] = []
     for key in ("latestWkid", "wkid"):
-        raw = spatial_ref.get(key)
-        # Some services quote the code. ``bool`` is an ``int`` subclass and is
-        # never a WKID.
-        if isinstance(raw, str) and raw.strip().isdigit():
-            raw = int(raw)
-        if not isinstance(raw, int) or isinstance(raw, bool):
+        code = _coerce_wkid(spatial_ref.get(key))
+        if code is None:
             continue
-        code = _normalize_wkid(raw)
+        code = _normalize_wkid(code)
         if code not in candidates:
             candidates.append(code)
     return candidates
 
 
-def _resolve_native_wkid(spatial_ref: dict) -> int:
-    """Resolve a layer's advertised native SR to an EPSG/ESRI WKID for outSR.
-
-    Prefers an advertised WKID that some authority actually resolves. Falls back
-    to deriving an EPSG code from an advertised WKT (common for layers that omit
-    a WKID, and the only rescue for one whose WKID no authority knows). Raises
-    when the SR is absent or its WKT maps to no EPSG code.
-    """
-    candidates = _wkid_candidates(spatial_ref)
-    for wkid in candidates:
-        if _projjson_from_wkid(wkid) is not None:
-            return wkid
-
-    wkt = spatial_ref.get("wkt")
-    if wkt:
-        from pyproj import CRS
-        from pyproj.exceptions import CRSError
-
-        try:
-            epsg = CRS.from_wkt(wkt).to_epsg()
-        except CRSError:
-            epsg = None
-        if epsg is not None:
-            return epsg
-        raise GeoParquetError(
-            "--output-crs native could not resolve the layer's WKT spatial reference "
-            "to an EPSG code. Pass an explicit --output-crs EPSG:<code> instead."
-        )
-
-    if candidates:
-        # The layer advertises a WKID; it is just one nothing resolves, and it
-        # would have been sent as outSR and then written as no CRS at all.
-        raise _unresolvable_output_crs(spatial_ref)
-
-    raise GeoParquetError(
-        "--output-crs native requested but the layer advertises no spatial reference."
-    )
-
-
 def _extract_crs_from_spatial_reference(spatial_ref: dict) -> dict | None:
-    """Resolve an ArcGIS spatial reference to PROJJSON, or None when none of it does.
+    """Resolve an ArcGIS spatial reference to PROJJSON.
 
-    An ArcGIS ``spatialReference`` object describes one CRS through up to three
-    carriers -- ``latestWkid`` (the modern EPSG-aligned code), ``wkid`` (which
-    may be an Esri-authority or legacy code), and ``wkt``/``wkt2`` (the full
-    definition, and all an unregistered CRS has). Each is tried in turn, because
-    any one of them resolving is enough and the first one present is not always
-    the one that does: before #1039 a WKID nothing knew ended the search, with
-    the WKT beside it never read.
-
-    None means the service described a CRS gpio cannot write down. It is not
-    "no CRS": callers must refuse rather than omit the key, because GeoParquet
-    reads an absent ``crs`` as OGC:CRS84.
+    Tries ``latestWkid``, ``wkid``, then ``wkt2``/``wkt``: any carrier that
+    resolves is enough. None means the service described a CRS gpio cannot
+    write down -- not "no CRS". Callers refuse rather than omit the key,
+    because GeoParquet reads an absent ``crs`` as OGC:CRS84 (#1039).
     """
+    if not spatial_ref:
+        # ArcGIS's own default when a service says nothing is WGS84.
+        return parse_crs_string_to_projjson("EPSG:4326")
     for wkid in _wkid_candidates(spatial_ref):
         projjson = _projjson_from_wkid(wkid)
         if projjson is not None:
             return projjson
-
     for key in ("wkt2", "wkt"):
-        wkt = spatial_ref.get(key)
-        if wkt:
-            projjson = _projjson_from_wkt(wkt)
-            if projjson is not None:
-                return projjson
-
-    if not spatial_ref:
-        # An empty spatial reference is not an unresolvable one: ArcGIS's own
-        # default is WGS84, and that is a CRS gpio can state.
-        return parse_crs_string_to_projjson("EPSG:4326")
-
+        projjson = projjson_from_wkt(spatial_ref.get(key))
+        if projjson is not None:
+            return projjson
     return None
 
 
-def _unresolvable_output_crs(spatial_ref: dict) -> InvalidParameterError:
-    """The refusal for an output CRS gpio has no way to write down.
+def _resolve_native_wkid(spatial_ref: dict) -> int:
+    """The code to send as ``outSR`` for ``--output-crs native``.
 
-    Refusing is the point, and it is not the same choice as warning louder.
-    GeoParquet spells "the CRS is OGC:CRS84" as an *absent* ``crs`` key, so a
-    file written with the CRS left out does not record "unknown" -- it asserts
-    longitude/latitude over projected easting/northing, and ``gpio check spec``
-    then fails the file gpio has just written (#1039). Writing ``crs: null``
-    instead would stop the lie but still discard a CRS the service knew, leaving
-    data nothing downstream can reproject; and ``_resolve_native_wkid``, the
-    other half of the same question, has always refused rather than guess.
+    The advertised spatial reference has to resolve, and to carry an authority
+    code the service can be asked for; a WKT-only definition is matched to one
+    through pyproj.
     """
+    if not spatial_ref:
+        raise GeoParquetError(
+            "--output-crs native requested but the layer advertises no spatial reference."
+        )
+    projjson = _extract_crs_from_spatial_reference(spatial_ref)
+    if projjson is None:
+        raise GeoParquetError(f"--output-crs native: {_unresolvable_crs_message(spatial_ref)}")
+    code = _coerce_wkid((projjson.get("id") or {}).get("code"))
+    if code is not None:
+        return code
+
+    from pyproj import CRS
+
+    authority = CRS.from_json_dict(projjson).to_authority()
+    if authority is None or not authority[1].isdigit():
+        raise GeoParquetError(
+            "--output-crs native could not match the layer's WKT spatial reference to an "
+            "EPSG or ESRI code to request. Pass an explicit --output-crs EPSG:<code> instead."
+        )
+    return int(authority[1])
+
+
+def _describe(value: object) -> str:
+    """A server-sent value, safe to print: an int as is, anything else repr'd and capped."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return repr(value)[:64]
+
+
+def _unresolvable_crs_message(spatial_ref: dict) -> str:
+    """Why a spatial reference cannot be written down, and what to do instead."""
     codes = " / ".join(
-        f"{key}={spatial_ref[key]}" for key in ("latestWkid", "wkid") if spatial_ref.get(key)
+        f"{key}={_describe(spatial_ref[key])}"
+        for key in ("latestWkid", "wkid")
+        if spatial_ref.get(key) is not None
     )
-    wkt_note = (
-        " and the WKT supplied beside it does not parse"
-        if (spatial_ref.get("wkt") or spatial_ref.get("wkt2"))
-        else " and no WKT was supplied for it"
+    has_wkt = bool(spatial_ref.get("wkt") or spatial_ref.get("wkt2"))
+    wkt_note = "the WKT beside it does not parse" if has_wkt else "no WKT accompanies it"
+    return (
+        f"{codes or 'the spatial reference'} resolves under neither the EPSG nor the ESRI "
+        f"authority and {wkt_note}, so the output cannot be tagged with a CRS. A GeoParquet "
+        "file with no `crs` key means OGC:CRS84, which would label projected coordinates as "
+        "longitude/latitude. Pass --output-crs EPSG:<code> with a code that resolves, or "
+        "omit --output-crs to fetch WGS84 lon/lat from the service."
     )
-    return InvalidParameterError(
-        "output_crs",
-        f"the output coordinates would be in {codes}, which resolves under neither the "
-        f"EPSG nor the ESRI authority{wkt_note}, so gpio cannot describe the CRS it "
-        "would be writing. A GeoParquet file with no `crs` key does not mean 'unknown' "
-        "-- it means OGC:CRS84 -- so writing this would label projected coordinates as "
-        "longitude/latitude. Pass --output-crs EPSG:<code> with a code that resolves, "
-        "reproject the data yourself, or omit --output-crs to fetch WGS84 lon/lat from "
-        "the service.",
+
+
+def _tag_output_crs(
+    table: pa.Table,
+    detected_sr: dict | None,
+    output_wkid: int | None,
+    geometry_type: str,
+    verbose: bool,
+) -> pa.Table:
+    """Attach the ``geo`` block: CRS84 on the GeoJSON path, the server's SR on the outSR path."""
+    if output_wkid is None:
+        # f=geojson is WGS84 per RFC 7946, whatever the layer advertises.
+        crs = parse_crs_string_to_projjson("OGC:CRS84")
+    else:
+        # A server that omitted spatialReference on every page is taken at its
+        # word for the WKID it was asked for; it cannot be checked.
+        returned_sr = detected_sr or {"wkid": output_wkid}
+        candidates = _wkid_candidates(returned_sr)
+        if candidates and output_wkid not in candidates:
+            warn(
+                f"Requested output CRS WKID {output_wkid} but server returned "
+                f"WKID {candidates[0]}. Tagging output with the returned CRS "
+                f"(coordinates were not reprojected)."
+            )
+        crs = _extract_crs_from_spatial_reference(returned_sr)
+        if crs is None:
+            # Never a geo block with no `crs` key: that spells OGC:CRS84 (#1039).
+            raise GeoParquetError(
+                "The service returned a spatial reference gpio cannot describe: "
+                + _unresolvable_crs_message(returned_sr)
+            )
+
+    geo_metadata = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "crs": crs,
+                "geometry_types": _resolve_geometry_types(table, geometry_type, verbose),
+            }
+        },
+    }
+    existing_metadata = table.schema.metadata or {}
+    return table.replace_schema_metadata(
+        {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
     )
 
 
@@ -1273,9 +1255,16 @@ def _stream_features_to_parquet(
             if not features:
                 continue
 
-            # Capture the server-returned spatial reference once (output_wkid path)
+            # Capture the server-returned spatial reference once (output_wkid path),
+            # and stop right here if it is one gpio cannot write down: the rest
+            # of the download would only be thrown away (#1039).
             if output_wkid is not None and detected_sr is None:
                 detected_sr = page.get("spatialReference")
+                if detected_sr and _extract_crs_from_spatial_reference(detected_sr) is None:
+                    raise GeoParquetError(
+                        "The service returned a spatial reference gpio cannot describe; "
+                        "stopped after the first page: " + _unresolvable_crs_message(detected_sr)
+                    )
 
             # Convert this page to Arrow table
             if output_wkid is not None:
@@ -1453,12 +1442,12 @@ def arcgis_to_table(
             output_wkid = _normalize_wkid(_parse_crs_to_wkid(output_crs))
         except ValueError as e:
             raise InvalidParameterError("output_crs", str(e)) from e
-        # Parseable is not resolvable. A code no authority knows would be sent
-        # as outSR and then have no PROJJSON to write, which used to mean the
-        # file was written with no `crs` key -- i.e. claiming CRS84 (#1039).
-        # Checked here so a multi-gigabyte download is not spent to reach it.
+        # Parseable is not resolvable; checked before any request so a large
+        # download is not spent to reach the refusal (#1039).
         if _projjson_from_wkid(output_wkid) is None:
-            raise _unresolvable_output_crs({"wkid": output_wkid})
+            raise InvalidParameterError(
+                "output_crs", _unresolvable_crs_message({"wkid": output_wkid})
+            )
 
     # A generalization tolerance must be positive; reject bad values before any
     # network work so the failure is fast and clean.
@@ -1564,52 +1553,7 @@ def arcgis_to_table(
         if table.num_rows > 0:
             table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
 
-        # Add CRS to metadata.
-        # Default (GeoJSON path): always CRS84 (WGS84 lon/lat) because we request
-        # f=geojson, which per RFC 7946 is always WGS84 regardless of the native SR.
-        # Native path (EsriJSON + outSR): tag the SR the server actually returned.
-        if output_wkid is None:
-            crs = parse_crs_string_to_projjson("OGC:CRS84")
-        else:
-            # returned_wkid is None when the server omitted spatialReference on
-            # every page; we can't observe a mismatch in that case, so we skip the
-            # warning and fall back to tagging with the requested WKID below.
-            # Read through _wkid_candidates so a quoted code ("26918") is
-            # compared as the integer it is, not reported as a mismatch with
-            # itself.
-            candidates = _wkid_candidates(detected_sr or {})
-            returned_wkid = candidates[0] if candidates else None
-            if returned_wkid is not None and returned_wkid != output_wkid:
-                warn(
-                    f"Requested output CRS WKID {output_wkid} but server returned "
-                    f"WKID {returned_wkid}. Tagging output with the returned CRS "
-                    f"(coordinates were not reprojected)."
-                )
-            returned_sr = detected_sr or {"wkid": output_wkid}
-            crs = _extract_crs_from_spatial_reference(returned_sr)
-            if crs is None:
-                # Never fall through to a geo block with no `crs` key: that is
-                # GeoParquet's spelling of OGC:CRS84, not of "unknown" (#1039).
-                raise _unresolvable_output_crs(returned_sr)
-
-        geo_metadata = {
-            "version": "1.1.0",
-            "primary_column": "geometry",
-            "columns": {
-                "geometry": {
-                    "encoding": "WKB",
-                    "crs": crs,
-                    "geometry_types": _resolve_geometry_types(
-                        table, layer_info.geometry_type, verbose
-                    ),
-                }
-            },
-        }
-
-        # Update table schema with geo metadata
-        existing_metadata = table.schema.metadata or {}
-        new_metadata = {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
-        table = table.replace_schema_metadata(new_metadata)
+        table = _tag_output_crs(table, detected_sr, output_wkid, layer_info.geometry_type, verbose)
 
         success(f"Converted {table.num_rows} features")
         return table
