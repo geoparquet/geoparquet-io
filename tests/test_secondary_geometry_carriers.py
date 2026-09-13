@@ -522,14 +522,14 @@ class TestCarrierHelperDefensivePaths:
     """The error and empty-input branches of the helpers this PR adds or fixes."""
 
     def test_parse_geo_metadata_quietly_handles_every_absent_shape(self):
-        from geoparquet_io.core.common import _parse_geo_metadata_quietly
+        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
         assert _parse_geo_metadata_quietly(None) == {}
         assert _parse_geo_metadata_quietly({}) == {}
         assert _parse_geo_metadata_quietly({b"other": b"x"}) == {}
 
     def test_parse_geo_metadata_quietly_accepts_a_str_key(self):
-        from geoparquet_io.core.common import _parse_geo_metadata_quietly
+        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
         assert _parse_geo_metadata_quietly({"geo": json.dumps(_geo_dict())})["primary_column"] == (
             "geometry"
@@ -542,7 +542,7 @@ class TestCarrierHelperDefensivePaths:
     )
     def test_parse_geo_metadata_quietly_swallows_unreadable_values(self, raw):
         """An unreadable geo key must not break a write; it just names no columns."""
-        from geoparquet_io.core.common import _parse_geo_metadata_quietly
+        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
         assert _parse_geo_metadata_quietly({b"geo": raw}) == {}
 
@@ -585,7 +585,7 @@ class TestCarrierHelperDefensivePaths:
         assert result.schema.field("geometry").type == pa.large_binary()
 
     def test_canonicalize_is_a_no_op_when_nothing_needs_changing(self):
-        from geoparquet_io.core.common import _canonicalize_wkb_columns
+        from geoparquet_io.core.arrow_geo_metadata import _canonicalize_wkb_columns
 
         table = pa.table({"geometry": pa.array([_wkb_point(1.0, 2.0)], type=pa.binary())})
 
@@ -593,7 +593,7 @@ class TestCarrierHelperDefensivePaths:
 
     def test_a_declared_column_missing_from_the_table_is_skipped(self, tmp_path):
         """geo metadata can name a column a projection has already dropped."""
-        from geoparquet_io.core.common import _apply_geoparquet_metadata
+        from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 
         table = pa.table(
             {
@@ -692,7 +692,7 @@ class TestMalformedCarriedColumns:
         ids=["null", "list", "string", "dict_of_non_dict"],
     )
     def test_a_malformed_columns_value_does_not_reach_the_carrier_logic(self, columns):
-        from geoparquet_io.core.common import _parse_geo_metadata_quietly
+        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
         raw = {"version": "1.1.0", "primary_column": "geometry", "columns": columns}
         parsed = _parse_geo_metadata_quietly({b"geo": json.dumps(raw).encode()})

@@ -23,7 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import _apply_geoparquet_metadata
+from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 from geoparquet_io.core.geo_metadata import (
     reset_malformed_geo_warnings,
     sanitize_geo_metadata,
@@ -289,7 +289,7 @@ def test_strategy_base_reader_sanitizes_every_key_shape(metadata):
 
 def test_parse_geo_metadata_quietly_delegates_to_the_shared_check():
     """``common._parse_geo_metadata_quietly`` must not keep a second copy of the check."""
-    from geoparquet_io.core.common import _parse_geo_metadata_quietly
+    from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
     reset_malformed_geo_warnings()
     raw = json.dumps({"primary_column": 1, "columns": ["geometry"]}).encode("utf-8")

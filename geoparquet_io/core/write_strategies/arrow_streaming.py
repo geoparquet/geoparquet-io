@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.arrow_geo_metadata import (
+    _compute_geometry_types,
+    _detect_version_from_table,
+)
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.geoarrow_encoding import (
@@ -658,10 +662,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using batch streaming."""
-        from geoparquet_io.core.common import (
-            _compute_geometry_types,
-            _detect_version_from_table,
-        )
         from geoparquet_io.core.crs_utils import apply_output_crs
         from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS, create_geo_metadata
 

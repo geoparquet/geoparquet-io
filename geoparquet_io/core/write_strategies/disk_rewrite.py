@@ -19,6 +19,10 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.arrow_geo_metadata import (
+    _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
+    _detect_version_from_table,
+)
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
@@ -270,7 +274,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using temporary file and rewrite."""
-        from geoparquet_io.core.common import _detect_version_from_table
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -516,7 +519,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         native_crs: dict[str, dict | None],
     ) -> None:
         """Write the already-open source file out again, one row group at a time."""
-        from geoparquet_io.core.common import _CARRIED_SCHEMA_METADATA_KEYS_BYTES
 
         schema = _native_geometry_schema(pf.schema_arrow, native_crs)
 

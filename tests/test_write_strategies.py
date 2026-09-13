@@ -1842,7 +1842,7 @@ class TestNativeGeometryCrsAcrossStrategies:
         import geoarrow.pyarrow as ga
         import pyproj
 
-        from geoparquet_io.core.common import _process_geometry_column_for_version
+        from geoparquet_io.core.arrow_geo_metadata import _process_geometry_column_for_version
 
         projected = pyproj.CRS.from_authority("EPSG", "3857").to_json_dict()
         wkb = [struct.pack("<BI2d", 1, 1, 1.0, 2.0)]

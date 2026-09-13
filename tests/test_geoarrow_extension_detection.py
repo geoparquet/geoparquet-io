@@ -234,7 +234,7 @@ class TestMetadataPathAgrees:
 
     @pytest.mark.parametrize("version", ["1.0", "1.1"])
     def test_process_geometry_column_agrees(self, version):
-        from geoparquet_io.core.common import _process_geometry_column_for_version
+        from geoparquet_io.core.arrow_geo_metadata import _process_geometry_column_for_version
 
         resolved = _process_geometry_column_for_version(
             resolved_extension_table(), "geometry", version, None, False
@@ -247,7 +247,7 @@ class TestMetadataPathAgrees:
     @pytest.mark.parametrize("version", ["1.0", "1.1"])
     def test_process_geometry_column_leaves_plain_wkb(self, version):
         """Shape (2) must lose the stale ARROW:extension:name for a 1.x output."""
-        from geoparquet_io.core.common import _process_geometry_column_for_version
+        from geoparquet_io.core.arrow_geo_metadata import _process_geometry_column_for_version
 
         out = _process_geometry_column_for_version(
             metadata_only_table(), "geometry", version, None, False
@@ -257,7 +257,7 @@ class TestMetadataPathAgrees:
         assert b"ARROW:extension:name" not in (field.metadata or {})
 
     def test_strip_to_plain_wkb_agrees(self):
-        from geoparquet_io.core.common import _strip_geoarrow_to_plain_wkb
+        from geoparquet_io.core.arrow_geo_metadata import _strip_geoarrow_to_plain_wkb
 
         resolved = _strip_geoarrow_to_plain_wkb(resolved_extension_table(), "geometry", False)
         meta_only = _strip_geoarrow_to_plain_wkb(metadata_only_table(), "geometry", False)
@@ -270,7 +270,7 @@ class TestMetadataPathAgrees:
         Not an isolation test of the backstop: _process_geometry_column_for_version
         already strips the carrier, so this fails only when both mechanisms break.
         """
-        from geoparquet_io.core.common import _apply_geoparquet_metadata
+        from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 
         resolved = _apply_geoparquet_metadata(
             resolved_extension_table(), "geometry", "1.1", None, None, None, False
@@ -287,7 +287,7 @@ class TestVersionDetectionAgrees:
 
     @BOTH_SHAPES
     def test_detect_version_from_table_agrees(self, with_geo):
-        from geoparquet_io.core.common import _detect_version_from_table
+        from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 
         assert _detect_version_from_table(resolved_extension_table(with_geo)) == (
             _detect_version_from_table(metadata_only_table(with_geo))
@@ -303,10 +303,8 @@ class TestVersionDetectionAgrees:
 
     def test_declared_geoarrow_without_geo_metadata_is_native(self):
         """No geo block + a geoarrow column is the in-memory parquet-geo-only shape."""
-        from geoparquet_io.core.common import (
-            _detect_version_from_table,
-            resolve_geoparquet_version_from_table,
-        )
+        from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
+        from geoparquet_io.core.common import resolve_geoparquet_version_from_table
 
         table = metadata_only_table(with_geo=False)
         assert _detect_version_from_table(table) == "parquet-geo-only"
@@ -314,7 +312,7 @@ class TestVersionDetectionAgrees:
 
     def test_carried_geo_version_still_wins(self):
         """A declared version in the geo block is unchanged by the wider detection."""
-        from geoparquet_io.core.common import _detect_version_from_table
+        from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 
         assert _detect_version_from_table(metadata_only_table(with_geo=True)) == "1.1"
 
@@ -407,7 +405,7 @@ class TestNonWkbCarriersSurviveTheStrip:
     """
 
     def test_native_point_is_not_cast_by_strip(self):
-        from geoparquet_io.core.common import _strip_geoarrow_to_plain_wkb
+        from geoparquet_io.core.arrow_geo_metadata import _strip_geoarrow_to_plain_wkb
 
         table = metadata_only_native_point_table()
         out = _strip_geoarrow_to_plain_wkb(table, "geometry", False)
@@ -415,7 +413,7 @@ class TestNonWkbCarriersSurviveTheStrip:
         assert out.column("geometry").to_pylist() == [{"x": 1.0, "y": 2.0}]
 
     def test_wkt_is_not_cast_by_strip(self):
-        from geoparquet_io.core.common import _strip_geoarrow_to_plain_wkb
+        from geoparquet_io.core.arrow_geo_metadata import _strip_geoarrow_to_plain_wkb
 
         out = _strip_geoarrow_to_plain_wkb(metadata_only_wkt_table(), "geometry", False)
         assert out.schema.field("geometry").type == pa.string()
@@ -423,7 +421,7 @@ class TestNonWkbCarriersSurviveTheStrip:
 
     @pytest.mark.parametrize("version", ["1.0", "1.1"])
     def test_native_point_survives_version_processing(self, version):
-        from geoparquet_io.core.common import _process_geometry_column_for_version
+        from geoparquet_io.core.arrow_geo_metadata import _process_geometry_column_for_version
 
         table = metadata_only_native_point_table()
         out = _process_geometry_column_for_version(table, "geometry", version, None, False)
@@ -431,7 +429,7 @@ class TestNonWkbCarriersSurviveTheStrip:
 
     @pytest.mark.parametrize("version", ["1.0", "1.1"])
     def test_wkt_survives_version_processing(self, version):
-        from geoparquet_io.core.common import _process_geometry_column_for_version
+        from geoparquet_io.core.arrow_geo_metadata import _process_geometry_column_for_version
 
         out = _process_geometry_column_for_version(
             metadata_only_wkt_table(), "geometry", version, None, False
@@ -475,7 +473,7 @@ class TestNonWkbCarriersSurviveTheStrip:
 
     def test_native_point_still_detects_as_native_geo(self):
         """The version-detection predicate stays broad: any geoarrow name counts."""
-        from geoparquet_io.core.common import _detect_version_from_table
+        from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 
         assert _detect_version_from_table(metadata_only_native_point_table(with_geo=False)) == (
             "parquet-geo-only"

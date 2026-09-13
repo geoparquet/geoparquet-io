@@ -581,7 +581,7 @@ def test_check_bbox_structure_covering_beats_name_convention(tmp_path):
 
 
 def test_detect_bbox_column_from_table_uses_covering_first(tmp_path):
-    from geoparquet_io.core.common import _detect_bbox_column_from_table
+    from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 
     table = _write_parquet_with_covering(tmp_path / "f.parquet", "my_box", extra_bbox_col="bbox")
     assert _detect_bbox_column_from_table(table, verbose=True) == "my_box"
@@ -817,7 +817,7 @@ def test_detect_bbox_column_from_table_bad_covering_falls_back():
 
     import pyarrow as pa
 
-    from geoparquet_io.core.common import _detect_bbox_column_from_table
+    from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 
     box = {"xmin": 9.9, "ymin": 49.9, "xmax": 10.1, "ymax": 50.1}
     struct_type = pa.struct([(k, pa.float64()) for k in ("xmin", "ymin", "xmax", "ymax")])

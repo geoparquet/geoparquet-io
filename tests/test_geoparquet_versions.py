@@ -1877,7 +1877,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         """
         import json
 
-        from geoparquet_io.core.common import _apply_geoparquet_metadata
+        from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 
         result = _apply_geoparquet_metadata(
             self._attributes_only_table_with_geo(
@@ -1919,7 +1919,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         """The verbose path names what it dropped and why."""
         import logging
 
-        from geoparquet_io.core.common import _apply_geoparquet_metadata
+        from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 
         with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
             _apply_geoparquet_metadata(
@@ -1939,7 +1939,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
 
     def test_apply_metadata_helper_strips_directly(self):
         """The helper itself honors the request, so every caller inherits the fix."""
-        from geoparquet_io.core.common import _apply_geoparquet_metadata
+        from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 
         result = _apply_geoparquet_metadata(
             self._attributes_only_table_with_geo(),
@@ -1961,7 +1961,7 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
     """
 
     def test_bytes_form_is_derived_from_the_string_form(self):
-        from geoparquet_io.core.common import (
+        from geoparquet_io.core.arrow_geo_metadata import (
             _CARRIED_SCHEMA_METADATA_KEYS,
             _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
         )
@@ -2010,7 +2010,7 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
         """
         import inspect
 
-        from geoparquet_io.core.common import _strip_geo_metadata_key
+        from geoparquet_io.core.arrow_geo_metadata import _strip_geo_metadata_key
         from geoparquet_io.core.write_funnels import (
             extract_preserved_kv_metadata,
             write_parquet_with_metadata,
