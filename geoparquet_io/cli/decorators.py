@@ -123,7 +123,7 @@ def parse_row_group_options(
     if not row_group_size_mb:
         return None
 
-    from geoparquet_io.core.common import parse_size_string
+    from geoparquet_io.core.sizing import parse_size_string
 
     try:
         size_bytes = parse_size_string(row_group_size_mb)
@@ -1098,8 +1098,8 @@ def handle_directory_sub_partition(
 
     _reject_single_file_only_options(partition_type, column_name, output_folder)
 
-    from geoparquet_io.core.common import parse_size_string
     from geoparquet_io.core.logging_config import info, progress, warn
+    from geoparquet_io.core.sizing import parse_size_string
     from geoparquet_io.core.sub_partition import plan_sub_partition, sub_partition_directory
 
     try:

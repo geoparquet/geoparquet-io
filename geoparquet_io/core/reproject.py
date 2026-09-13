@@ -14,7 +14,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.common import get_parquet_metadata, validate_compression_settings
+from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import (
     NULL_CRS_NO_FLAG_ERROR,
     apply_target_crs_to_geo_meta,

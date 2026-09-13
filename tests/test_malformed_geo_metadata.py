@@ -2042,7 +2042,7 @@ def test_carried_version_is_quiet_about_an_absent_version(absent, caplog):
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
 def test_detect_file_type_survives_a_non_string_version(case, bad, col, tmp_path):
     """`check spec`, `check bbox`, `check optimization` and `add bbox` all land here."""
-    from geoparquet_io.core.common import (
+    from geoparquet_io.core.file_type import (
         detect_geoparquet_file_type,
         detect_geoparquet_file_type_cache_clear,
     )
@@ -2065,7 +2065,7 @@ def test_detect_file_type_survives_a_non_string_version(case, bad, col, tmp_path
 )
 def test_detect_file_type_still_reads_a_real_version(version, expected, tmp_path):
     """The guard must not cost a well-formed file its version."""
-    from geoparquet_io.core.common import (
+    from geoparquet_io.core.file_type import (
         detect_geoparquet_file_type,
         detect_geoparquet_file_type_cache_clear,
     )

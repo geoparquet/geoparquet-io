@@ -15,7 +15,6 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from geoparquet_io.core.common import format_size
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
     _extract_crs_identifier,
@@ -31,6 +30,7 @@ from geoparquet_io.core.metadata_utils import (
     extract_bbox_from_row_group_stats,
 )
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
+from geoparquet_io.core.sizing import format_size
 
 
 def extract_file_info(parquet_file: str, con=None) -> dict[str, Any]:

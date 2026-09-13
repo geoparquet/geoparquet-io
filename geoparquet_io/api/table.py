@@ -1407,7 +1407,7 @@ class Table:
                 # AWS_PROFILE env mutation to leak into the host process.
                 # Special handling for shapefiles: zip all sidecars into .shp.zip
                 if format == "shapefile":
-                    from geoparquet_io.core.common import create_shapefile_zip
+                    from geoparquet_io.core.format_writers import create_shapefile_zip
 
                     # Create zip archive with all sidecar files
                     zip_path = create_shapefile_zip(output_path, verbose=False)

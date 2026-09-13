@@ -498,7 +498,7 @@ class TestCheckBboxVersionAware:
 
     def test_check_bbox_v2_file_type_detection(self, fields_v2_file):
         """V2 file should be correctly detected as geoparquet_v2."""
-        from geoparquet_io.core.common import detect_geoparquet_file_type
+        from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
         result = detect_geoparquet_file_type(fields_v2_file, verbose=False)
 
@@ -510,7 +510,7 @@ class TestCheckBboxVersionAware:
 
     def test_check_bbox_parquet_geo_only_file_type_detection(self, fields_geom_type_only_file):
         """Parquet-geo-only file should be correctly detected."""
-        from geoparquet_io.core.common import detect_geoparquet_file_type
+        from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
         result = detect_geoparquet_file_type(fields_geom_type_only_file, verbose=False)
 

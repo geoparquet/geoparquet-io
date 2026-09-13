@@ -121,7 +121,7 @@ class TestConnectionReuse:
 
     def test_detect_geoparquet_file_type_accepts_connection(self, places_test_file):
         """Test that detect_geoparquet_file_type accepts a connection parameter."""
-        from geoparquet_io.core.common import detect_geoparquet_file_type
+        from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
         # Should work without connection (uses PyArrow for local)
         result = detect_geoparquet_file_type(places_test_file)
@@ -136,7 +136,7 @@ class TestConnectionReuse:
         """Test detect_geoparquet_file_type with pre-existing connection."""
         import duckdb
 
-        from geoparquet_io.core.common import detect_geoparquet_file_type
+        from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
         # Create connection once
         con = duckdb.connect()
@@ -183,7 +183,7 @@ class TestDetectGeoparquetFileTypeCache:
 
     def test_detect_geoparquet_file_type_caches_results(self, places_test_file):
         """Test that repeated calls are cached."""
-        from geoparquet_io.core.common import detect_geoparquet_file_type
+        from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
         # Clear any existing cache
         if hasattr(detect_geoparquet_file_type, "cache_clear"):
@@ -201,7 +201,7 @@ class TestDetectGeoparquetFileTypeCache:
         """Test that cache invalidates when file is modified."""
         import json
 
-        from geoparquet_io.core.common import detect_geoparquet_file_type
+        from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
         # Create a test parquet file
         output_file = Path(temp_output_dir) / "test.parquet"
@@ -334,7 +334,7 @@ class TestPerformanceRegression:
 
     def test_detect_geoparquet_file_type_performance(self, places_test_file):
         """Test that detect_geoparquet_file_type is fast."""
-        from geoparquet_io.core.common import detect_geoparquet_file_type
+        from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
         # Clear cache to test uncached performance
         if hasattr(detect_geoparquet_file_type, "cache_clear"):

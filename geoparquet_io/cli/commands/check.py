@@ -469,7 +469,7 @@ def check_all(
             # Early skip for non-GeoParquet files when --pmtiles is passed
             # This avoids crashes in check_structure_impl which assumes geo metadata
             if pmtiles:
-                from geoparquet_io.core.common import detect_geoparquet_file_type
+                from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
                 file_info = detect_geoparquet_file_type(file_path)
                 if file_info["file_type"] == "unknown":

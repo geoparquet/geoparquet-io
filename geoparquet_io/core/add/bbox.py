@@ -5,8 +5,9 @@ from __future__ import annotations
 import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.common import add_computed_column, detect_geoparquet_file_type
+from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
+from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import covering_supported
 from geoparquet_io.core.geometry_detection import (

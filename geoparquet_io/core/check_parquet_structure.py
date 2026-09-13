@@ -4,12 +4,13 @@
 from enum import Enum
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.common import detect_geoparquet_file_type, format_size
+from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT, carried_version, covering_supported
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
+from geoparquet_io.core.sizing import format_size
 
 #: What a file with no row groups can be told about its compression: nothing.
 #: Shared with ``check_optimization`` so both checks word it the same way (#823).
