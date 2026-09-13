@@ -11,13 +11,13 @@ import json
 import pyarrow as pa
 import pytest
 
-from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.crs_utils import (
     _crs_from_geoarrow_field,
     _detect_crs_from_filegdb,
     crs_string_from_table,
     detect_crs_from_spatial_file,
 )
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
 
 @pytest.fixture(scope="module")

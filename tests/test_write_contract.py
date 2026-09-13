@@ -62,7 +62,8 @@ from click.testing import CliRunner
 
 from geoparquet_io.api import read as api_read
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.common import get_duckdb_connection, get_parquet_metadata
+from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 from geoparquet_io.core.write_funnels import write_geoparquet_table, write_parquet_with_metadata
 

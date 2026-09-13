@@ -22,15 +22,15 @@ from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
 )
-from geoparquet_io.core.common import InvalidParameterError, get_duckdb_connection
 from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
 from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
     quote_identifier,
     sql_path,
     validate_where_clause,
     where_condition_fragment,
 )
-from geoparquet_io.core.exceptions import sanitize_error_message
+from geoparquet_io.core.exceptions import InvalidParameterError, sanitize_error_message
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.logging_config import (
     configure_verbose,

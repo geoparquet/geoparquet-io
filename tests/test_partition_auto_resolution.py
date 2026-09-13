@@ -398,7 +398,7 @@ def _count_distinct_cells(parquet_file, index_type, resolution):
     """
     import mercantile
 
-    from geoparquet_io.core.common import get_duckdb_connection
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
     con = get_duckdb_connection(load_spatial=True)
     try:

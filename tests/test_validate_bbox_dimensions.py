@@ -10,9 +10,9 @@ import json
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.crs_utils import merge_longitude_ranges
 from geoparquet_io.core.duckdb_metadata import aggregate_native_geo_stats
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.inspect_utils import (
     extract_partition_summary,
     format_partition_markdown_output,

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import math
 
-from geoparquet_io.core.common import get_duckdb_connection, needs_httpfs
 from geoparquet_io.core.crs_utils import source_crs_string, transform_geom_sql
 from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
     load_community_extension,
     quote_identifier,
     sql_path,
@@ -23,6 +23,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, warn
+from geoparquet_io.core.remote import needs_httpfs
 
 # Tuning for the extent-aware probe (issue #524). Sampling a multiple of the
 # target partition count keeps cells near the target resolution well-populated,

@@ -23,8 +23,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata, add_bbox_metadata_table
-from geoparquet_io.core.common import get_duckdb_connection
-from geoparquet_io.core.duckdb_utils import _wrap_query_with_blob_conversion
+from geoparquet_io.core.duckdb_utils import _wrap_query_with_blob_conversion, get_duckdb_connection
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.validate import validate_geoparquet
 

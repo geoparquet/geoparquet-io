@@ -8,8 +8,8 @@ schema-level CRS.
 
 import pytest
 
-from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from tests.conftest import get_geoparquet_version, has_native_geo_types
 
 

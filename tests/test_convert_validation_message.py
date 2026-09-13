@@ -11,8 +11,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core import convert as convert_mod
-from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.convert import _report_conversion_results, convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
 
 @pytest.fixture

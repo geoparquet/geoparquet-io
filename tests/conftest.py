@@ -310,7 +310,7 @@ def places_v11_file(tmp_path):
     geometry column is copied as BLOB instead of being auto-converted to a native
     GEOMETRY type.
     """
-    from geoparquet_io.core.common import get_duckdb_connection
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
     from geoparquet_io.core.geo_metadata import parse_geo_metadata
 
     path = tmp_path / "places_v11.parquet"

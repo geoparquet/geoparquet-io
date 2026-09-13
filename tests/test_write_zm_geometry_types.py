@@ -16,8 +16,9 @@ import json
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import get_duckdb_connection, split_zm_suffix
+from geoparquet_io.core.common import split_zm_suffix
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from tests.conftest import get_geo_metadata

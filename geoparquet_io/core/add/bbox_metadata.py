@@ -20,11 +20,12 @@ import duckdb
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.check_parquet_structure import get_compression_info, get_row_group_stats
-from geoparquet_io.core.common import get_duckdb_connection, get_parquet_metadata
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
+    get_duckdb_connection,
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError

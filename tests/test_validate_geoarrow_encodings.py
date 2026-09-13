@@ -15,7 +15,8 @@ import pytest
 import shapely
 from shapely import wkt
 
-from geoparquet_io.core.common import get_duckdb_connection, get_parquet_metadata
+from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_covering_bbox_field_types,

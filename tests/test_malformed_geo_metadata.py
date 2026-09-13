@@ -775,8 +775,8 @@ def _corrupt_geo_file(tmp_path, cause: str):
 @pytest.mark.parametrize("cause", ["JSON", "UTF-8"])
 def test_get_geo_metadata_tolerates_undecodable_bytes_on_both_paths(cause, tmp_path):
     """Both readers give the answer invalid JSON already got: no usable metadata."""
-    from geoparquet_io.core.common import get_duckdb_connection
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
     src = _corrupt_geo_file(tmp_path, cause)
     assert get_geo_metadata(str(src)) is None  # PyArrow fast path
@@ -950,8 +950,7 @@ def test_table_write_drops_a_wrong_typed_crs(strategy, tmp_path, caplog):
     "Geoparquet column 'geometry' has invalid CRS").
     """
     from geoparquet_io.api import Table
-    from geoparquet_io.core.common import get_duckdb_connection
-    from geoparquet_io.core.duckdb_utils import sql_path
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
     from geoparquet_io.core.validate import validate_geoparquet
 
     reset_malformed_geo_warnings()

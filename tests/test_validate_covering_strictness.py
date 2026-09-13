@@ -6,8 +6,8 @@ import json
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.duckdb_metadata import get_schema_info
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_covering_bbox_column_exists,
