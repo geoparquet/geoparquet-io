@@ -262,6 +262,7 @@ def get_files_to_check(
     check_all: bool = False,
     check_sample: int | None = None,
     verbose: bool = False,
+    fix: bool = False,
 ) -> tuple[list[str], str]:
     """
     Get list of files to check from a partitioned dataset.
@@ -271,6 +272,9 @@ def get_files_to_check(
         check_all: If True, return all files
         check_sample: If set, return first N files
         verbose: Print debug messages
+        fix: If True the caller is about to repair these files, so never
+            sample: a repair acts on every matched file. An explicit
+            ``check_sample`` still wins -- that is the user naming the subset.
 
     Returns:
         tuple: (files_to_check, notice_message)
@@ -303,6 +307,9 @@ def get_files_to_check(
 
     # Default: check first file only
     first_file = partition_info["first_file"]
+    if fix and first_file:
+        notice = f"Fixing all {file_count} files in the input (--fix never samples)"
+        return all_files, notice
     if first_file:
         notice = f"Checking first file (of {file_count} total). Use --all-files or --sample-files N for more."
         return [first_file], notice

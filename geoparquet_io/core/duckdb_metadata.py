@@ -1023,7 +1023,8 @@ def get_per_row_group_bbox_stats(
     Returns list of dicts with row_group_id, xmin, ymin, xmax, ymax.
     """
     metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con)
+    # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
+    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
     try:
         # DuckDB uses 'bbox, xmin' format for path_in_schema (comma-space)
@@ -1068,7 +1069,8 @@ def get_compression_info(parquet_file: str, column_name: str | None = None, con=
     Returns dict mapping column path to compression algorithm.
     """
     metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con)
+    # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
+    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
     try:
         query = f"""
@@ -1092,7 +1094,8 @@ def get_row_group_stats_summary(parquet_file: str, con=None) -> dict:
     Returns dict with num_groups, total_rows, avg_rows_per_group, total_size, avg_group_size.
     """
     metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con)
+    # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
+    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
     try:
         # Get file-level info

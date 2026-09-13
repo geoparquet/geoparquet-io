@@ -433,26 +433,47 @@ gpio check all partitions/ --all-files
 gpio check all partitions/ --sample-files 3
 ```
 
-!!! warning "--fix rewrites every file it checks"
-    `--fix` applies to whichever files the check ran on. With `--all-files` or
-    `--sample-files N` on a directory that means **every file it checked is
-    rewritten in place**, not just the first one:
+!!! warning "--fix rewrites every file the input matched"
+    Sampling is a *checking* default. `--fix` never samples: it applies to
+    **every file the input resolved to**, not the first one, so a glob or a
+    directory rewrites all of them in place:
 
     <!-- doctest: skip="needs partitions/, which the harness does not seed" -->
     ```bash
-    # Rewrites all 4 files in the partition, in place
-    gpio check spatial partitions/ --fix --all-files
+    # Checks the first file only
+    gpio check spatial partitions/
+
+    # Fixes all 4 files in the partition, in place
+    gpio check spatial partitions/ --fix
+    gpio check spatial "partitions/*.parquet" --fix
+    ```
+
+    `--sample-files N` still wins, because that is you naming the subset.
+    Before 1.6, `--fix` on a directory or glob rewrote only the first file;
+    pass `--sample-files 1` to keep that:
+
+    <!-- doctest: skip="needs partitions/, which the harness does not seed" -->
+    ```bash
+    # Fixes the first file and no other
+    gpio check spatial partitions/ --fix --sample-files 1
     ```
 
     Each rewritten file gets a `.bak` alongside it (unless you pass
-    `--no-backup`), and the run ends with a `Fixed N files:` list naming what it
-    wrote. There is no confirmation prompt, so check the file count in the
-    `📁 Checking ...` notice before adding `--fix`.
+    `--no-backup`, which asks for confirmation once for the whole run), and the
+    run ends with a `Fixed N files:` list naming every one of them. There is no
+    confirmation prompt otherwise: run the command without `--fix` first and
+    read the file count in the `📁 Checking first file (of N total)` notice.
 
-    To write the fixed files somewhere else instead, `gpio check all` takes a
-    directory as `--fix-output` (it refuses a single file path when more than
-    one file is being fixed). Alternatively, consolidate the partition with
-    `gpio extract` first, fix that, then re-partition.
+    A file that cannot be checked or fixed does not stop the others: the run
+    reports it, fixes the rest, and exits non-zero. Ctrl-C stops the run and
+    still lists what was rewritten before it.
+
+    To write the fixed files somewhere else instead, pass an existing
+    **directory** as `--fix-output` and each input is written to its own name
+    inside it. A single file path for more than one input is refused (exit 2)
+    rather than overwritten once per file, and so is a directory in which two
+    inputs would share a name (`k=1/part-0.parquet` and `k=2/part-0.parquet`):
+    fix each subdirectory separately, or fix in place.
 
 `--fix-output` leaves the input untouched and writes no `.bak`; a file already at
 the output path is replaced without a prompt. A second spelling of the input's own

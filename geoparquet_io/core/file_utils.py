@@ -87,7 +87,7 @@ def get_first_parquet_file(partition_path: str) -> str | None:
     if os.path.isdir(partition_path):
         for root, _dirs, files in os.walk(partition_path):
             for f in sorted(files):
-                if f.endswith(".parquet"):
+                if f.endswith(".parquet") and not f.startswith("."):
                     return os.path.join(root, f)
         return None
 
@@ -106,10 +106,13 @@ def get_all_parquet_files(partition_path: str) -> list[str]:
         return [partition_path]
 
     if os.path.isdir(partition_path):
+        # Dotfiles are skipped, as the glob branch below already does: macOS
+        # AppleDouble `._x.parquet` sidecars and an orphaned `.gpio-fix-*`
+        # staging file are not data.
         parquet_files = []
         for root, _dirs, files in os.walk(partition_path):
             for f in files:
-                if f.endswith(".parquet"):
+                if f.endswith(".parquet") and not f.startswith("."):
                     parquet_files.append(os.path.join(root, f))
         return sorted(parquet_files)
 

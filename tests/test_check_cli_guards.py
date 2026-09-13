@@ -154,8 +154,13 @@ class TestMultiFileFixOutputValidation:
                 ],
             )
 
-        assert result.exit_code == 1, result.output
-        assert "--fix-output must be a directory, not a file path" in result.output
+        # A usage error (exit 2), like ``--pmtiles`` without ``--fix`` above:
+        # the invocation cannot be carried out as written. It used to be a
+        # ClickException (exit 1), which is the code for a run that started and
+        # failed -- and the four single-check commands did not refuse it at all,
+        # they wrote all N files to the one path in turn (#1041).
+        assert result.exit_code == 2, result.output
+        assert "--fix-output must be an existing directory, not a file path" in result.output
         assert "When fixing multiple files (4 files)" in result.output
         # Nothing was checked, and nothing was written to the bogus output path.
         fake_runner.assert_not_called()
@@ -362,8 +367,13 @@ class TestMultiFileFixSummary:
             assert Path(f"{target}.bak").exists()
             assert_places_output_is_sound(target, version="1.1", covering=True)
 
-    def test_a_long_fix_list_is_truncated(self, capsys):
-        """Past ``max_issues_shown`` the list is capped, like the issue list."""
+    def test_a_long_fix_list_is_not_truncated(self, capsys):
+        """Unlike the issue list, the fix list names every file (#1041).
+
+        The issue list is a sample of a diagnosis the user can re-run at any
+        time; this list is the only record of which of their files were
+        overwritten, so capping it at ``max_issues_shown`` hid the rest.
+        """
         runner = cli_check.MultiFileCheckRunner([f"f{i}.parquet" for i in range(5)])
         for index in range(5):
             runner.record_fix(f"f{index}.parquet", f"f{index}.parquet.bak" if index else None)
@@ -372,9 +382,9 @@ class TestMultiFileFixSummary:
         output = capsys.readouterr().out
         assert "Fixed 5 files:" in output
         assert "  - f0.parquet\n" in output  # no backup: no suffix
-        assert "  - f1.parquet (backup: f1.parquet.bak)" in output
-        assert "f3.parquet" not in output
-        assert "... and 2 more" in output
+        for index in range(1, 5):
+            assert f"  - f{index}.parquet (backup: f{index}.parquet.bak)" in output
+        assert "more" not in output
 
     def test_a_single_fix_is_not_pluralised(self, capsys):
         runner = cli_check.MultiFileCheckRunner(["a.parquet", "b.parquet"])
