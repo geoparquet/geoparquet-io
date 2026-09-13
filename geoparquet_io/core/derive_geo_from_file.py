@@ -10,8 +10,8 @@ and rewrites the file's key-value metadata in place.
 Reading a *written file* is the whole job, which is what separates it from
 ``core/arrow_geo_metadata.py``, whose subject is an in-memory table that has not
 been written yet. Split out of ``common.py`` unchanged; every name a caller
-imports is still importable from there (the module-private type-code tables and
-helpers are not re-exported, and nothing outside this module reached them).
+imports is still importable from there. The type-code tables it reads are the
+single copies in ``geo_metadata``.
 """
 
 import json
@@ -26,23 +26,21 @@ from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type, reso
 from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES, _GEOMETRY_TYPE_CODES
 from geoparquet_io.core.logging_config import debug, warn
 
-# The one WKB type-code table lives in ``geo_metadata``; this module is a
-# consumer of it, not a second copy. Code 0 is dropped deliberately: the shared
-# table maps it to the placeholder ``"Unknown"``, which is not a GeoParquet
-# ``geometry_types`` value. A derived block names only the types it can actually
-# read off the file, so an unrecognised base falls through to ``None`` and
-# :func:`_geo_col_meta_from_stats` drops it.
-_GEO_TYPE_CODE_BASES = {
-    code: name for code, name in _GEOMETRY_TYPE_CODES.items() if name != "Unknown"
-}
-
 
 def _geo_code_to_type_name(code: int) -> str | None:
-    """Map a Parquet geospatial type code (e.g. 3002) to 'LineString ZM'."""
+    """Map a Parquet geospatial type code (e.g. 3002) to 'LineString ZM'.
+
+    Reads the one WKB type-code table in ``geo_metadata``. Base 0 is refused
+    on purpose: the table maps it to the placeholder ``"Unknown"``, which is
+    not a GeoParquet ``geometry_types`` value, and a derived block names only
+    the types it can actually read off the file. An unrecognised base or
+    dimension falls through to ``None`` and :func:`_geo_col_meta_from_stats`
+    drops it.
+    """
     dim, base = divmod(code, 1000)
-    name = _GEO_TYPE_CODE_BASES.get(base)
+    name = _GEOMETRY_TYPE_CODES.get(base)
     suffix = _DIMENSION_SUFFIXES.get(dim)
-    if name is None or suffix is None:
+    if base == 0 or name is None or suffix is None:
         return None
     return name + suffix
 

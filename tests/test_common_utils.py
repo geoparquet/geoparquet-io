@@ -486,6 +486,16 @@ class TestIsGeographicCrs:
 class TestGetGeometryTypeName:
     """Tests for _get_geometry_type_name function."""
 
+    def test_there_is_one_copy_and_it_lives_in_geo_metadata(self):
+        """arrow_geo_metadata carried a byte-identical duplicate until #1066."""
+        from geoparquet_io.core import arrow_geo_metadata, derive_geo_from_file, geo_metadata
+
+        assert _get_geometry_type_name is geo_metadata._get_geometry_type_name
+        assert arrow_geo_metadata._get_geometry_type_name is geo_metadata._get_geometry_type_name
+        assert not hasattr(arrow_geo_metadata, "_GEOMETRY_TYPE_CODES")
+        assert derive_geo_from_file._GEOMETRY_TYPE_CODES is geo_metadata._GEOMETRY_TYPE_CODES
+        assert derive_geo_from_file._DIMENSION_SUFFIXES is geo_metadata._DIMENSION_SUFFIXES
+
     def test_2d_types(self):
         """Test 2D geometry types (codes 0-7)."""
         assert _get_geometry_type_name(0) == "Unknown"

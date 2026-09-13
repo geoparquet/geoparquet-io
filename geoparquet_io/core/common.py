@@ -38,8 +38,6 @@ from geoparquet_io.core.arrow_geo_metadata import (
 from geoparquet_io.core.arrow_geo_metadata import (
     _CARRIED_SCHEMA_METADATA_KEYS_BYTES as _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
 )
-from geoparquet_io.core.arrow_geo_metadata import _DIMENSION_SUFFIXES as _DIMENSION_SUFFIXES
-from geoparquet_io.core.arrow_geo_metadata import _GEOMETRY_TYPE_CODES as _GEOMETRY_TYPE_CODES
 from geoparquet_io.core.arrow_geo_metadata import (
     _apply_geoparquet_metadata as _apply_geoparquet_metadata,
 )
@@ -53,9 +51,6 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 from geoparquet_io.core.arrow_geo_metadata import _estimate_row_size as _estimate_row_size
-from geoparquet_io.core.arrow_geo_metadata import (
-    _get_geometry_type_name as _get_geometry_type_name,
-)
 from geoparquet_io.core.arrow_geo_metadata import (
     _normalize_arrow_large_types as _normalize_arrow_large_types,
 )
@@ -121,10 +116,18 @@ from geoparquet_io.core.file_utils import (
     resolve_file_url,
 )
 from geoparquet_io.core.format_writers import create_shapefile_zip as create_shapefile_zip
+
+# The WKB type-code tables and their name helper live in ``geo_metadata``;
+# every other module (arrow_geo_metadata, derive_geo_from_file) consumes them.
+from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES as _DIMENSION_SUFFIXES
+from geoparquet_io.core.geo_metadata import _GEOMETRY_TYPE_CODES as _GEOMETRY_TYPE_CODES
 from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION as DEFAULT_GEOPARQUET_VERSION,
 )
 from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS as GEOPARQUET_VERSIONS
+from geoparquet_io.core.geo_metadata import (
+    _get_geometry_type_name as _get_geometry_type_name,
+)
 from geoparquet_io.core.geo_metadata import (
     build_bbox_covering,
 )

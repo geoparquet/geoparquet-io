@@ -28,10 +28,9 @@ from geoparquet_io.core.crs_utils import (
     parse_geo_metadata_from_schema,
 )
 from geoparquet_io.core.geo_metadata import (
-    _DIMENSION_SUFFIXES,
-    _GEOMETRY_TYPE_CODES,
     DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
+    _get_geometry_type_name,
     carried_version,
     create_geo_metadata,
     detect_bbox_column_from_schema,
@@ -157,30 +156,6 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
         return covering_column
 
     return detect_bbox_column_from_schema(table.schema, verbose)
-
-
-def _get_geometry_type_name(code: int) -> str:
-    """
-    Convert WKB geometry type code to GeoParquet geometry type name.
-
-    Handles 2D types (0-7) and Z/M/ZM variants (1001-1007, 2001-2007, 3001-3007).
-
-    Args:
-        code: WKB geometry type code
-
-    Returns:
-        GeoParquet geometry type name (e.g., "Point", "Point Z", "Polygon ZM")
-    """
-    # Extract base type (0-7) and dimensional modifier (0, 1, 2, or 3)
-    base_type = code % 1000
-    dimension = code // 1000
-
-    base_name = _GEOMETRY_TYPE_CODES.get(base_type, "Unknown")
-    if base_name == "Unknown":
-        return "Unknown"
-
-    suffix = _DIMENSION_SUFFIXES.get(dimension, "")
-    return base_name + suffix
 
 
 def _strip_geoarrow_to_plain_wkb(table, geometry_column: str, verbose: bool):
