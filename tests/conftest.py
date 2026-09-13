@@ -190,20 +190,27 @@ def _isolate_package_logging(pytestconfig):
 # package and fails when it finds a ``cache_clear`` this tuple does not name, so
 # a new cache is noticed the day it lands, and adding it here is the fix.
 #
-# Not covered, because they have no ``cache_clear`` and no reset of their own:
-# ``http_retry._shared_http_client``, ``overture._cached_release``,
-# ``convert._csv_max_line_size_override``, ``duckdb_utils._s3_buckets_needing_auth``
-# and the ``AWS_PROFILE`` that ``remote.setup_aws_profile_if_needed`` writes
-# into ``os.environ``. A test that touches one of those still resets it itself.
+# Four more pieces of module-level state have a reset of their own but no
+# ``cache_clear``, so the walk cannot see them; ``_reset_module_state`` names
+# them. Not reset: the ``AWS_PROFILE`` that ``remote.setup_aws_profile_if_needed``
+# writes into ``os.environ`` -- a developer's real environment may carry one.
 #
 # Scope: autouse fixtures in this file apply to ``tests/`` only. The
-# ``docs/guide`` example lane collects from another directory and runs with a
-# warm process; it has no warn-once assertions today.
+# ``docs/guide`` example lane runs each fenced example in a subprocess, so an
+# in-process cache cannot leak between examples.
 #
 # Clearing happens on entry only. A warm cache cannot affect a test that already
 # started cold, so entry is where the whole invariant lives.
 
-from geoparquet_io.core import crs_utils, file_type, geo_metadata  # noqa: E402
+from geoparquet_io.core import (  # noqa: E402
+    convert,
+    crs_utils,
+    duckdb_utils,
+    file_type,
+    geo_metadata,
+    http_retry,
+    overture,
+)
 from geoparquet_io.core.write_strategies import WriteStrategyFactory  # noqa: E402
 
 PACKAGE_CACHES = (
@@ -216,10 +223,19 @@ PACKAGE_CACHES = (
 )
 
 
+def _reset_module_state() -> None:
+    """The process-global state with a reset but no ``cache_clear``."""
+    http_retry.reset_http_client()
+    convert.set_csv_max_line_size(None)
+    duckdb_utils._clear_s3_cache()
+    overture._cached_release = None
+
+
 def clear_package_caches() -> None:
-    """Empty every cache in :data:`PACKAGE_CACHES`, the warn-once ones included."""
+    """Cold-start the package: every cache in :data:`PACKAGE_CACHES`, then the rest."""
     for cache in PACKAGE_CACHES:
         cache.cache_clear()
+    _reset_module_state()
 
 
 @pytest.fixture(autouse=True)

@@ -6,8 +6,9 @@ which is worse: a logger decides how a message is rendered, a warn-once cache
 decides whether the message exists.
 
 ``tests/conftest.py`` clears the caches named in its ``PACKAGE_CACHES`` before
-each test. Two things are proven here: that the tuple is complete (a walk of
-the package finds nothing it does not name), and that the clear beats a
+each test, plus the four pieces of module-level state that have a reset but no
+``cache_clear``. Two things are proven here: that the tuple is complete (a walk
+of the package finds nothing it does not name), and that the clear beats a
 higher-scoped fixture's poisoning, which is the ordering that broke #1016's
 first attempt.
 """
@@ -22,7 +23,7 @@ from collections.abc import Iterator
 import pytest
 
 import geoparquet_io
-from geoparquet_io.core import crs_utils, geo_metadata
+from geoparquet_io.core import convert, crs_utils, duckdb_utils, geo_metadata, http_retry, overture
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
 from tests.conftest import PACKAGE_CACHES, TEST_DATA_DIR, clear_package_caches
@@ -55,7 +56,13 @@ def _cache_qualnames(module) -> Iterator[str]:
 
 
 def _walk_package_caches() -> set[str]:
-    """Every cached callable in ``geoparquet_io``, found by importing the package."""
+    """Every cached callable in ``geoparquet_io``, found by importing the package.
+
+    A module that fails to import for any reason other than ``ImportError``
+    propagates: that is a broken module, and this is the one test that should
+    say so. Caches on a class nested inside another class are not walked; none
+    exist today.
+    """
     modules = [geoparquet_io]
     for info in pkgutil.walk_packages(
         geoparquet_io.__path__, prefix="geoparquet_io.", onerror=lambda name: None
@@ -119,6 +126,11 @@ def _warm_every_cache() -> None:
     crs_utils._projjson_from_authority("EPSG", "4326")
     detect_geoparquet_file_type(str(TEST_DATA_DIR / "buildings_test.parquet"))
     WriteStrategyFactory.get_strategy(WriteStrategy.ARROW_MEMORY)
+    # ...and the module-level state that has a reset but no cache_clear.
+    http_retry.get_shared_http_client()
+    convert.set_csv_max_line_size(12_345)
+    duckdb_utils._s3_buckets_needing_auth.add("poisoned-bucket")
+    overture._cached_release = "2099-01-01.0"
 
 
 def _entries(cache) -> int:
@@ -128,6 +140,15 @@ def _entries(cache) -> int:
     from geoparquet_io.core import file_type  # the hand-rolled dict cache
 
     return len(file_type._file_type_cache)
+
+
+def _module_state_is_cold() -> bool:
+    return (
+        http_retry._shared_http_client is None
+        and convert._csv_max_line_size_override is None
+        and not duckdb_utils._s3_buckets_needing_auth
+        and overture._cached_release is None
+    )
 
 
 @pytest.fixture(scope="class")
@@ -160,6 +181,7 @@ class TestAPoisonedWorkerStillWarns:
         """
         for cache in PACKAGE_CACHES:
             assert _entries(cache) == 0, f"{cache.__qualname__} was warm at test start"
+        assert _module_state_is_cold()
 
         with caplog.at_level("WARNING", logger="geoparquet_io"):
             assert geo_metadata.carried_column_name(123, source=POISON_SOURCE) is None
