@@ -160,4 +160,4 @@ def validate_stac(stac_path: str | Path, verbose: bool = False) -> CheckResult:
     # Keep original "errors" and "warnings" intact for direct access
     results["issues"] = results.get("issues", []) + results.get("errors", [])
 
-    return CheckResult(results, check_type="stac")
+    return CheckResult(results, check_type="stac", source_path=str(stac_path))
