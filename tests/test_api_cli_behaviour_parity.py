@@ -3,8 +3,8 @@
 The default-parity and call-parity modules compare declared options and the
 values handed to core. This one compares *answers*: two front ends that agree
 on every option can still read different bytes (#1060) or resolve a fact two
-ways (#1061). Known divergences are pinned with `xfail(strict=True)` and an
-issue number; the CLI side of each is asserted unconditionally.
+ways (#1061). A known divergence is pinned with `xfail(strict=True)` and an
+issue number, with the CLI side asserted unconditionally.
 
 Where a written file's CRS is asserted, the `geo` JSON and the Parquet logical
 type are read separately (#997).
@@ -102,10 +102,6 @@ class TestInspectGroupAgreesWithTable:
         summary = _cli_json("inspect", "summary", places_test_file, "--json")
         assert summary["geoparquet_version"] == geo_block(places_test_file)["version"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="gpio #1061: Table.geoparquet_version reports the write target, not the declared version",
-    )
     def test_table_geoparquet_version_is_the_declared_version(self, places_test_file):
         assert (
             gpio.read(places_test_file).geoparquet_version == geo_block(places_test_file)["version"]
@@ -131,10 +127,6 @@ class TestCheckGroupAgreesWithTable:
         assert "needs GeoParquet 1.1+" in output
         assert "proper metadata covering" not in output
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="gpio #1060: Table.check_bbox judges a 1.1 re-write that declares a covering",
-    )
     def test_table_check_bbox_sees_that_a_1_0_file_has_no_covering(self, places_test_file):
         api = gpio.read(places_test_file).check_bbox().to_dict()
         assert api["has_bbox_column"] is True
@@ -156,7 +148,7 @@ class TestCheckGroupAgreesWithTable:
 
 
 class TestCheckGroupReadsTheFileItWasGiven:
-    """Pinned CLI-side first; the API side is the xfail (#1060, #1061)."""
+    """Both front ends judge the bytes they were handed (#1060, #1061)."""
 
     def test_cli_check_row_group_sees_the_files_layout(self, unsorted_test_file):
         layout = _row_group_layout(unsorted_test_file)
@@ -166,9 +158,6 @@ class TestCheckGroupReadsTheFileItWasGiven:
             "check", "row-group", unsorted_test_file
         )
 
-    @pytest.mark.xfail(
-        strict=True, reason="gpio #1060: Table.check_row_groups counts a temp re-write"
-    )
     def test_table_check_row_groups_sees_the_files_layout(self, unsorted_test_file):
         api = gpio.read(unsorted_test_file).check_row_groups().to_dict()
         assert api["stats"]["num_groups"] == len(_row_group_layout(unsorted_test_file))
@@ -177,9 +166,6 @@ class TestCheckGroupReadsTheFileItWasGiven:
         assert _geometry_codec(unsorted_test_file) == "SNAPPY", "fixture must not be gpio's default"
         assert "SNAPPY compression" in _cli("check", "compression", unsorted_test_file)
 
-    @pytest.mark.xfail(
-        strict=True, reason="gpio #1060: Table.check_compression measures a ZSTD re-write"
-    )
     def test_table_check_compression_sees_the_files_codec(self, unsorted_test_file):
         api = gpio.read(unsorted_test_file).check_compression().to_dict()
         assert api["current_compression"] == _geometry_codec(unsorted_test_file)
@@ -187,9 +173,6 @@ class TestCheckGroupReadsTheFileItWasGiven:
     def test_cli_check_spatial_sees_the_files_order(self, unsorted_test_file):
         assert "Poor spatial ordering" in _cli("check", "spatial", unsorted_test_file)
 
-    @pytest.mark.xfail(
-        strict=True, reason="gpio #1060: Table.check_spatial measures a one-group re-write"
-    )
     def test_table_check_spatial_sees_the_files_order(self, unsorted_test_file):
         assert gpio.read(unsorted_test_file).check_spatial().passed() is False
 
@@ -203,7 +186,6 @@ class TestCheckGroupReadsTheFileItWasGiven:
         output = _cli("check", "optimization", unsorted_test_file)
         assert f"Score: {expected['score']}/{expected['total_checks']}" in output
 
-    @pytest.mark.xfail(strict=True, reason="gpio #1060: Table.check_optimization scores a re-write")
     def test_table_check_optimization_scores_the_file(self, unsorted_test_file):
         from geoparquet_io.core.check_optimization import check_optimization
 
@@ -220,9 +202,6 @@ class TestCheckGroupReadsTheFileItWasGiven:
         spec = _cli_json("check", "spec", places_test_file, "--json")
         assert spec["detected_version"] == geo_block(places_test_file)["version"]
 
-    @pytest.mark.xfail(
-        strict=True, reason="gpio #1060/#1061: Table.validate validates a re-write at 1.1"
-    )
     def test_table_validate_detects_the_declared_version(self, places_test_file):
         api = gpio.read(places_test_file).validate().to_dict()
         assert api["detected_version"] == geo_block(places_test_file)["version"]

@@ -925,10 +925,7 @@ class Table:
             self._source_path = path
             return
         self._source_path = os.path.abspath(path)
-        try:
-            stat = os.stat(self._source_path)
-        except OSError:
-            return
+        stat = os.stat(self._source_path)  # the file was just read, so it is there
         self._source_stat = (stat.st_size, stat.st_mtime_ns)
 
     def _measurable_source(self) -> str | None:

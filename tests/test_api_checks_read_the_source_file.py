@@ -121,12 +121,16 @@ def test_a_removed_source_falls_back_to_the_rows_in_memory(tmp_path, unsorted_te
     assert table.check_row_groups().prospective is True
 
 
-def test_a_relative_path_survives_a_chdir(tmp_path, unsorted_test_file, monkeypatch):
-    monkeypatch.chdir(os.path.dirname(unsorted_test_file))
-    table = gpio.read(os.path.basename(unsorted_test_file))
-    monkeypatch.chdir(tmp_path)
+def test_a_relative_path_is_remembered_absolute(unsorted_test_file):
+    """A check after a ``chdir`` must still find the file, so the path is resolved at read time."""
+    try:
+        relative = os.path.relpath(unsorted_test_file)
+    except ValueError:  # Windows CI: tmp and repo on different drives
+        pytest.skip("no relative spelling of the fixture path from this cwd")
+    table = gpio.read(relative)
 
-    assert table.check_row_groups().prospective is False
+    assert table.source_path == os.path.abspath(unsorted_test_file)
+    assert table.check_row_groups().source_path == table.source_path
 
 
 def test_a_remote_source_is_answered_prospectively_not_refetched(monkeypatch, unsorted_test_file):
