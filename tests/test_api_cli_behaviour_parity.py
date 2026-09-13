@@ -277,9 +277,22 @@ class TestCheckGroupDivergesFromTable:
         assert api["current_compression"] == codec
 
     def test_cli_check_optimization_scores_the_file_it_was_given(self, runner, unsorted_test_file):
+        """The CLI's score is the one `check_optimization` computes for *this file*.
+
+        Not pinned to a literal: the five factors include geo bbox statistics,
+        which the readers disagree about on Windows (#770), so the number is
+        platform-dependent. What must hold everywhere is that the CLI reports
+        whatever core says about the file it was handed.
+        """
+        from geoparquet_io.core.check_optimization import check_optimization
+
+        expected = check_optimization(
+            unsorted_test_file, verbose=False, return_results=True, quiet=True
+        )
+
         result = runner.invoke(cli, ["check", "optimization", unsorted_test_file])
         assert result.exit_code == 0, result.output
-        assert "Score: 0/5" in result.output
+        assert f"Score: {expected['score']}/{expected['total_checks']}" in result.output
 
     @pytest.mark.xfail(
         strict=True,
@@ -291,14 +304,24 @@ class TestCheckGroupDivergesFromTable:
             "all."
         ),
     )
-    def test_table_check_optimization_scores_the_file_it_was_given(
-        self, runner, unsorted_test_file
-    ):
-        result = runner.invoke(cli, ["check", "optimization", unsorted_test_file])
-        cli_score = int(result.output.split("Score: ")[1].split("/")[0])
+    def test_table_check_optimization_scores_the_file_it_was_given(self, unsorted_test_file):
+        from geoparquet_io.core.check_optimization import check_optimization
 
+        expected = check_optimization(
+            unsorted_test_file, verbose=False, return_results=True, quiet=True
+        )
         api = gpio.read(unsorted_test_file).check_optimization().to_dict()
-        assert api["score"] == cli_score
+
+        # Asserted per factor rather than on the aggregate score: three of the
+        # five are about how the file is *written*, and those are exactly the
+        # ones the temp re-write replaces with gpio's defaults. The aggregate
+        # could coincide on a platform that reads geo statistics differently
+        # (#770); these three cannot.
+        for factor in ("compression", "row_group_size", "spatial_sorting"):
+            assert api["checks"][factor]["passed"] == expected["checks"][factor]["passed"], (
+                f"{factor}: CLI {expected['checks'][factor]['detail']!r} vs "
+                f"API {api['checks'][factor]['detail']!r}"
+            )
 
     def test_cli_check_spec_detects_the_version_the_file_declares(self, runner, places_test_file):
         declared = _geo_block(places_test_file)["version"]

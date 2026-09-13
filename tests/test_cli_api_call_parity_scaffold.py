@@ -248,12 +248,44 @@ def _cli(
     reference: Callable,
     args: Callable[[Ctx], list[str]],
     module: Any = cli_main,
+    wrap: Callable[[], Any] | None = None,
 ) -> Frontend:
-    return Frontend(
-        patch_site=(module, alias),
-        reference=reference,
-        invoke=lambda ctx: ctx.run_cli(args(ctx)),
-    )
+    """A CLI front end.
+
+    `wrap` supplies an extra context manager to hold open around the
+    invocation, for commands that gate the core call behind an environment
+    check the test machine cannot be relied on to satisfy.
+    """
+    if wrap is None:
+        return Frontend(
+            patch_site=(module, alias),
+            reference=reference,
+            invoke=lambda ctx: ctx.run_cli(args(ctx)),
+        )
+
+    def _invoke(ctx: Ctx):
+        with wrap():
+            return ctx.run_cli(args(ctx))
+
+    return Frontend(patch_site=(module, alias), reference=reference, invoke=_invoke)
+
+
+def _with_credentials():
+    """Make `gpio publish upload`'s credential pre-check succeed.
+
+    `cli/commands/publish.py` calls `check_credentials(destination, profile)`
+    and raises before it ever reaches `upload_impl` when it fails -- which it
+    does on any machine without AWS credentials, CI included. Without this the
+    case passes on a developer's laptop and fails on a runner, for a reason
+    that has nothing to do with parity.
+
+    Worth noting on its own: the check runs even under `--dry-run`, and
+    `Table.upload` performs no equivalent check at all, so the two front ends
+    fail differently on an unauthenticated machine. That asymmetry is about
+    error handling rather than option values, so it is recorded here rather
+    than in `normalize`.
+    """
+    return patch.object(cli_publish, "check_credentials", lambda *_a, **_k: (True, ""))
 
 
 def _ops(attr: str, reference: Callable, call: Callable[[Ctx], Any]) -> Frontend:
@@ -1139,6 +1171,7 @@ CASES: list[ParityCase] = [
             core_upload.upload,
             lambda c: ["publish", "upload", c.input_file, "s3://bucket/prefix/", "--dry-run"],
             module=cli_publish,
+            wrap=_with_credentials,
         ),
         table=Frontend(
             patch_site=(core_upload, "upload"),
