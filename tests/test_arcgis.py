@@ -447,6 +447,19 @@ class TestCrsParsing:
             ({"wkid": None, "latestWkid": [4326]}, []),
             ({}, []),
         ],
+        ids=[
+            "legacy-alias-dedup",
+            "latestwkid-first",
+            "quoted",
+            "float-integral",
+            "float",
+            "bool",
+            "zero",
+            "superscript-digit",
+            "5000-digits",
+            "wrong-types",
+            "empty",
+        ],
     )
     def test_wkid_candidates_from_whatever_the_service_sent(self, spatial_ref, expected):
         from geoparquet_io.core.arcgis import _wkid_candidates

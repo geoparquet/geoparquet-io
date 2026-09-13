@@ -544,7 +544,11 @@ class TestProjjsonFromWkt:
         assert "id" not in projjson
 
     @pytest.mark.parametrize(
-        "wkt", ["not wkt", "", "   ", None, 12, b"PROJCS[]", "A" * 70_000, "PROJCS[" * 20_000]
+        "wkt",
+        ["not wkt", "", "   ", None, 12, b"PROJCS[]", "A" * 70_000, "PROJCS[" * 20_000],
+        # Explicit ids: pytest exports the test id into an environment variable,
+        # which Windows caps at 32,767 characters.
+        ids=["garbage", "empty", "blank", "none", "int", "bytes", "70k-chars", "deep-nesting"],
     )
     def test_anything_that_is_not_a_bounded_wkt_string_is_none(self, wkt):
         from geoparquet_io.core.crs_utils import projjson_from_wkt
