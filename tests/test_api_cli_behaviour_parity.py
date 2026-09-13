@@ -554,8 +554,11 @@ class TestGenerateStacParity:
         with pytest.raises(ValueError, match="already exists"):
             gpio.generate_stac(places_test_file, out, bucket=STAC_BUCKET)
 
-        # ...and is allowed through with overwrite=True.
-        assert Path(gpio.generate_stac(places_test_file, out, bucket=STAC_BUCKET, overwrite=True))
+        # ...and is allowed through with overwrite=True, which must actually
+        # rewrite the file rather than just declining to raise.
+        out.write_text(json.dumps({"type": "stale"}), encoding="utf-8")
+        rewritten = gpio.generate_stac(places_test_file, out, bucket=STAC_BUCKET, overwrite=True)
+        assert json.loads(Path(rewritten).read_text(encoding="utf-8"))["type"] == "Feature"
 
     def test_a_directory_input_writes_a_collection_and_one_file_per_item(
         self, country_partition_dir, tmp_path
