@@ -657,35 +657,45 @@ def test_the_ladder_gives_up_at_batch_size_one(monkeypatch):
 
 
 def test_the_parallel_path_retries_the_whole_window_smaller(monkeypatch):
+    """A window that fails at one size is resubmitted whole at the next size down.
+
+    The failure is keyed on the request, not on its position in a reply
+    sequence: every request at 100 rows is rejected, whatever order the pool's
+    threads reach the transport in. A sequence would make the outcome depend on
+    whether the main thread cancels the second worker's request before it is
+    sent -- it does on macOS and often does not on Windows -- and the ladder
+    would end at 50 on one scheduler and at 10 on another.
+    """
     http = FakeTransport.install(monkeypatch)
-    stub_service(
-        http,
-        total=200,
-        page_replies=(
-            html_reply(b"<html>too large</html>"),
-            html_reply(b"<html>too large</html>"),
-            _offset_aware(200),
-        ),
-    )
+    too_large = html_reply(b"<html>too large</html>")
+    serve = _offset_aware(200)
+
+    def reject_the_full_size(request):
+        if request.params["resultRecordCount"] == "100":
+            return too_large(request)
+        return serve(request)
+
+    stub_service(http, total=200, page_replies=(reject_the_full_size,))
 
     pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
 
-    # The first page is fetched alone as a probe and rejected; the ladder drops
-    # to 50 and fans out; the first request at 50 is rejected too, so the ladder
-    # drops to 10 and the whole layer is walked again at that size. Whether the
-    # *other* 50-window was already in flight when that happened is up to the
-    # pool's scheduling, so it is the one thing not pinned here.
     windows = [
         (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
         for request in http.matching(_is_query)
     ]
     sizes = [size for _, size in windows]
     assert windows[0] == (0, 100)
-    assert (0, 50) in windows
-    assert sizes == sorted(sizes, reverse=True)  # the ladder only ever descends
-    assert {window for window in windows if window[1] == 10} == {
-        (offset, 10) for offset in range(0, 200, 10)
-    }
+    assert sizes == sorted(sizes, reverse=True), "the ladder only ever descends"
+    # One or both 100-row requests reach the transport before the retry,
+    # depending on the cancel race; either way the whole window is re-walked
+    # at 50 from the start and nothing is fetched twice at that size.
+    assert {offset for offset, size in windows if size == 100} <= {0, 100}
+    assert [window for window in windows if window[1] == 50] == [
+        (0, 50),
+        (50, 50),
+        (100, 50),
+        (150, 50),
+    ]
     assert sum(len(page["features"]) for page in pages) == 200
 
 
