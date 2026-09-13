@@ -219,6 +219,7 @@ PACKAGE_CACHES = (
     crs_utils._projjson_from_authority,
     file_type.detect_geoparquet_file_type,
     geo_metadata._emit_malformed_geo_warning,
+    geo_metadata._note_undeclarable_bbox_column,
     WriteStrategyFactory.get_strategy,
 )
 

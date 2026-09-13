@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import copy
 import json
-from functools import lru_cache
+from collections.abc import Sequence
+from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
 import duckdb
@@ -560,15 +561,9 @@ def _add_bbox_covering(
     if not bbox_info or not bbox_info.get("has_bbox_column"):
         return
 
-    if "covering" not in geo_meta["columns"][geom_col]:
-        geo_meta["columns"][geom_col]["covering"] = {}
-
-    geo_meta["columns"][geom_col]["covering"]["bbox"] = {
-        "xmin": [bbox_info["bbox_column_name"], "xmin"],
-        "ymin": [bbox_info["bbox_column_name"], "ymin"],
-        "xmax": [bbox_info["bbox_column_name"], "xmax"],
-        "ymax": [bbox_info["bbox_column_name"], "ymax"],
-    }
+    geo_meta["columns"][geom_col].setdefault("covering", {})["bbox"] = build_bbox_covering(
+        bbox_info["bbox_column_name"]
+    )
     if verbose:
         debug(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
 
@@ -1249,6 +1244,107 @@ _BBOX_COLUMN_NAMES = frozenset({"bbox", "bounds", "extent"})
 _BBOX_COLUMN_SUFFIXES = ("_bbox",)
 _BBOX_STRUCT_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
 
+#: The struct shapes a GeoParquet 1.1 ``covering.bbox`` may point at, as ordered
+#: tuples: the spec fixes the field order, so a membership test is the wrong
+#: predicate here. ``core/validate.py`` derives its table from this one (#1035).
+BBOX_COVERING_FIELD_ORDERS = (
+    ("xmin", "ymin", "xmax", "ymax"),
+    ("xmin", "ymin", "zmin", "xmax", "ymax", "zmax"),
+)
+
+#: What every "cannot declare a covering" message ends with.
+BBOX_REWRITE_HINT = "Rewrite it in the spec's order: gpio add bbox --force IN.parquet OUT.parquet"
+
+
+def bbox_field_order_is_covering_legal(field_names: Sequence[str]) -> bool:
+    """Whether a bbox struct's field names, in this order, may carry a covering."""
+    return tuple(field_names) in BBOX_COVERING_FIELD_ORDERS
+
+
+def bbox_covering_problem(
+    column: str, field_names: Sequence[str] | None, field_types: Sequence[str] | None = None
+) -> str | None:
+    """Why a ``covering`` may not name ``column``, or None when it may.
+
+    ``field_names`` are the struct's children in schema order (None for a
+    non-struct); ``field_types``, when given, are their type names, and a
+    corner that is not FLOAT/DOUBLE is refused too -- ``check spec`` rejects
+    both shapes, and a writer that declares what the validator rejects is the
+    defect (#1035).
+    """
+    if field_names is None:
+        return f"bbox column '{column}' is not a struct"
+    if not bbox_field_order_is_covering_legal(field_names):
+        legal = " or ".join(", ".join(order) for order in BBOX_COVERING_FIELD_ORDERS)
+        return (
+            f"bbox column '{column}' has struct fields {list(field_names)}; a GeoParquet 1.1 "
+            f"'covering' may only point at {legal}, in that order"
+        )
+    if field_types is not None:
+        floats = {"float", "double", "float32", "float64", "halffloat", "float16"}
+        wrong = [
+            f"{n}: {t}"
+            for n, t in zip(field_names, field_types, strict=True)
+            if str(t).lower() not in floats
+        ]
+        if wrong:
+            return f"bbox column '{column}' has non-float fields ({', '.join(wrong)}); a 'covering' requires FLOAT or DOUBLE"
+    return None
+
+
+def arrow_bbox_covering_problem(column: str, field: pa.Field) -> str | None:
+    """:func:`bbox_covering_problem` read off an Arrow field."""
+    import pyarrow as pa
+
+    if not pa.types.is_struct(field.type):
+        return bbox_covering_problem(column, None)
+    children = list(field.type)
+    return bbox_covering_problem(
+        column, [c.name for c in children], [str(c.type) for c in children]
+    )
+
+
+@cache
+def _note_undeclarable_bbox_column(column: str, problem: str, declared: bool) -> None:
+    """Warn once per process per (column, reason): a partition write says it once, not N times."""
+    if declared:
+        warn(
+            f"Dropping the 'covering' declared over '{column}': {problem}. "
+            f"gpio check spec rejects it, so it is not written. {BBOX_REWRITE_HINT}"
+        )
+    else:
+        warn(f"Not declaring a 'covering' over '{column}': {problem}. {BBOX_REWRITE_HINT}")
+
+
+def _declared_bbox_column(geo_meta: object) -> str | None:
+    """The column the primary column's ``covering.bbox`` names, if the block is well-formed."""
+    if not isinstance(geo_meta, dict):
+        return None
+    columns = geo_meta.get("columns")
+    col_meta = columns.get(geo_meta.get("primary_column")) if isinstance(columns, dict) else None
+    covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
+    return _covering_column(covering.get("bbox")) if isinstance(covering, dict) else None
+
+
+def bbox_column_to_declare(
+    schema: pa.Schema, geo_meta: dict | None = None, *, verbose: bool = False
+) -> str | None:
+    """The bbox column this write may put in a ``covering``, or None.
+
+    The one gate every writer that invents a covering goes through. A column
+    the input's own covering names is judged the same way: an illegal one is
+    dropped, and said so, because ``check spec`` rejects the file otherwise.
+    """
+    declared = _declared_bbox_column(geo_meta)
+    name = declared if declared in schema.names else detect_bbox_column_from_schema(schema, verbose)
+    if name is None:
+        return None
+    problem = arrow_bbox_covering_problem(name, schema.field(name))
+    if problem is None:
+        return name
+    _note_undeclarable_bbox_column(name, problem, name == declared)
+    return None
+
 
 def build_bbox_covering(column: str) -> dict:
     """The ``covering.bbox`` entry describing ``column``'s four struct fields.
@@ -1296,27 +1392,37 @@ def declare_carried_bbox_column(
     ``output_columns``, when the caller already knows the output's column names,
     settles the common "no bbox column at all" case without paying for the
     schema probe below.
+
+    The struct's field *order* decides, not just its field names: see
+    :data:`BBOX_COVERING_FIELD_ORDERS`.
     """
-    import pyarrow as pa
 
     if not covering_supported(geoparquet_version):
         if verbose:
             debug(f"Skipping 1.1-only covering metadata for version {geoparquet_version}")
         return False
-    # Never override a covering that arrived with provenance.
-    if isinstance(col_meta.get("covering"), dict) and "bbox" in col_meta["covering"]:
-        return False
 
-    name = SELF_EVIDENT_BBOX_COLUMN
+    covering = col_meta.get("covering") if isinstance(col_meta.get("covering"), dict) else None
+    declared = _covering_column(covering.get("bbox")) if covering else None
+    name = declared or SELF_EVIDENT_BBOX_COLUMN
     if output_columns is not None and name not in output_columns:
         return False
     schema = con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
     if name not in schema.names:
         return False
-    field = schema.field(name)
-    if not pa.types.is_struct(field.type):
+
+    problem = arrow_bbox_covering_problem(name, schema.field(name))
+    if problem is not None:
+        _note_undeclarable_bbox_column(name, problem, declared is not None)
+        if covering is not None:
+            # An illegal covering the input declared is not carried: gpio must
+            # not write a file its own validator rejects (#1035).
+            covering.pop("bbox", None)
+            if not covering:
+                del col_meta["covering"]
         return False
-    if not _BBOX_STRUCT_FIELDS.issubset({f.name for f in field.type}):
+    if declared is not None:
+        # A legal covering that arrived with provenance is kept as it is (#738).
         return False
 
     col_meta.setdefault("covering", {})["bbox"] = build_bbox_covering(name)

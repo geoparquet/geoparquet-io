@@ -88,6 +88,17 @@ PLACES_V11_FIXTURE_BASELINE = {
 }
 
 
+def run_cli(*args: object) -> str:
+    """Invoke ``gpio`` and insist it succeeded."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    result = CliRunner().invoke(cli, [str(a) for a in args])
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
 def covering_of(path: StrPath, geometry_column: str = "geometry") -> dict | None:
     """One column's declared ``covering``, read off the ``geo`` block and nothing else."""
     columns = (geo_block(path) or {}).get("columns") or {}

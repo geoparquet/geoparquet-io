@@ -31,6 +31,7 @@ from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
     _get_geometry_type_name,
+    bbox_column_to_declare,
     carried_version,
     create_geo_metadata,
     detect_bbox_column_from_schema,
@@ -156,6 +157,18 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
         return covering_column
 
     return detect_bbox_column_from_schema(table.schema, verbose)
+
+
+def _bbox_column_to_declare(table, verbose: bool = False) -> str | None:
+    """The bbox column this write may put in a ``covering``: the shared gate, on a table.
+
+    Stricter than :func:`_detect_bbox_column_from_table`, which is also a
+    read-side probe (``process aggregate --bucket-point bbox`` reads ``xmin`` by
+    name, which works in any field order).
+    """
+    return bbox_column_to_declare(
+        table.schema, parse_geo_metadata_from_schema(table.schema.metadata), verbose=verbose
+    )
 
 
 def _strip_geoarrow_to_plain_wkb(table, geometry_column: str, verbose: bool):
@@ -841,7 +854,7 @@ def _build_geo_block(
     The per-column stats that need the data (``geometry_types``, ``bbox``) are
     filled in by the caller afterwards.
     """
-    bbox_column = _detect_bbox_column_from_table(table, verbose)
+    bbox_column = _bbox_column_to_declare(table, verbose)
     geo_meta = create_geo_metadata(
         original_metadata,
         geometry_column,

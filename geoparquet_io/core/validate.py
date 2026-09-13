@@ -37,7 +37,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
-from geoparquet_io.core.geo_metadata import is_covering_path
+from geoparquet_io.core.geo_metadata import BBOX_COVERING_FIELD_ORDERS, is_covering_path
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
     schema_direct_children,
@@ -1964,10 +1964,14 @@ def _check_covering_bbox_column_exists(
     )
 
 
-_BBOX_FIELDS = {
-    4: ["xmin", "ymin", "xmax", "ymax"],
-    6: ["xmin", "ymin", "zmin", "xmax", "ymax", "zmax"],
-}
+#: The field orders a ``covering.bbox`` column may have, keyed by field count.
+#:
+#: Read off the writers' own table rather than retyped, so the shapes gpio
+#: declares and the shapes gpio accepts cannot drift. They did: the write side
+#: tested membership with ``issubset`` while this one compares an ordered list,
+#: so gpio declared coverings over Overture-order structs and then failed its
+#: own output here (#1035).
+_BBOX_FIELDS = {len(order): list(order) for order in BBOX_COVERING_FIELD_ORDERS}
 
 
 def _check_covering_bbox_structure(

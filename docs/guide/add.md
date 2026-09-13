@@ -133,6 +133,19 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
         file declaring 1.0 rather than writing metadata that version cannot carry.
         Convert it first: `gpio convert geoparquet in.parquet out.parquet --geoparquet-version 1.1`.
 
+    !!! note "Requires the spec's struct field order"
+
+        GeoParquet 1.1 fixes the *order* of a bbox column's struct fields —
+        `xmin, ymin, xmax, ymax`, or `xmin, ymin, zmin, xmax, ymax, zmax`. Overture
+        writes `xmin, xmax, ymin, ymax`, which holds exactly the right four numbers
+        and still cannot be pointed at by a `covering`; declaring one anyway produces
+        a file `gpio check spec` rejects. The same goes for a struct whose fields
+        are not FLOAT or DOUBLE. This command fails on such a column rather than
+        writing it, and every other gpio write leaves the column undeclared.
+        Rewrite the column in the spec's order first:
+        `gpio add bbox --force in.parquet out.parquet`. Note that `--force` on a
+        1.0 input writes the output at 1.1, since that is what carries the key.
+
     !!! note "Requires existing GeoParquet metadata"
 
         The command adds a `covering` key to metadata that already describes the

@@ -134,6 +134,41 @@ present, struct shape, field types — at GeoParquet 1.1 **and** 2.0. They were
 previously gated to 1.1 only, so an identical broken covering failed at 1.1 and
 passed at 2.0.
 
+#### Bbox struct field order
+
+GeoParquet 1.1 fixes the *order* of a bbox column's struct fields — `xmin`,
+`ymin`, `xmax`, `ymax` (or `xmin`, `ymin`, `zmin`, `xmax`, `ymax`, `zmax`) — not
+merely which names appear. Overture writes `xmin, xmax, ymin, ymax`, which is a
+perfectly good Parquet column and, at GeoParquet 1.0, a perfectly valid file:
+1.0 has no `covering` key, so nothing points at the column.
+
+No gpio write declares a `covering` over such a column, and every field must be
+FLOAT or DOUBLE. A rewrite (`check compression/row-group/spatial --fix`,
+`convert geoparquet`, `sort hilbert`, `extract geoparquet`, `Table.write()`)
+carries the column through untouched and leaves it undeclared, with one warning
+per run saying why; `gpio add bbox-metadata`, whose only job is to write that
+key, refuses outright. Rewriting the column in the spec's order is a data change
+and stays explicit:
+
+```bash
+gpio add bbox --force input.parquet output.parquet
+```
+
+An input that already *declares* a covering over such a column is written
+without it, with a warning that says so: gpio does not write a file its own
+`check spec` rejects, even when the input asked it to. A covering the spec
+allows is carried through unchanged.
+
+`check bbox` reports the field order (or the field types) as the issue for such
+a file, rather than reporting a missing covering it cannot legally add, and
+`--fix` says there is nothing it can repair.
+
+!!! note "Changed after 1.5.0"
+    A rewrite of a file with an `xmin, xmax, ymin, ymax` bbox column at 1.1 used
+    to declare a covering over it, which `gpio check spec` then failed. It now
+    leaves the column undeclared, and drops a covering the input declared over
+    such a column. `gpio add bbox --force` gets the covering back.
+
 ### Row Groups
 
 === "CLI"

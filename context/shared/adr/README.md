@@ -27,6 +27,7 @@ An ADR captures an architecturally significant decision along with its context a
 | [0003](0003-logging-over-click-echo.md) | Logging Over click.echo in Core | Accepted |
 | [0004](0004-python-api-mirrors-cli.md) | Python API Mirrors CLI | Accepted |
 | [0005](0005-test-fixture-strategy.md) | Test Fixture Strategy | Accepted |
+| [0006](0006-covering-gated-on-struct-shape-not-version.md) | A `covering` Is Gated on the Bbox Struct's Shape, Not on the Output Version | Accepted |
 
 ## References
 

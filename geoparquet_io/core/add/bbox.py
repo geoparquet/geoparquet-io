@@ -37,6 +37,10 @@ def _bbox_metadata_advice(parquet_file: str) -> str:
     geo_meta = get_geo_metadata(parquet_file) or {}
     version = geo_meta.get("version", "")
     if covering_supported(version):
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
+
+        if check_bbox_structure(parquet_file).get("covering_problem"):
+            return "The existing column cannot carry a 'covering'; use --force to rewrite it."
         return "Run 'gpio add bbox-metadata' to add metadata, or use --force to replace."
     return (
         f"'covering' requires GeoParquet 1.1+ (this file is {version}). Use --force to "
