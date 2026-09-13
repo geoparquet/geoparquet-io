@@ -1,18 +1,13 @@
-"""SCAFFOLDING -- delete or rewrite when the write facade lands (#664, suite 5).
+"""Call parity: every front end hands core the same values for the same knob.
 
 This module deliberately knows *call structure*: it patches the core function
 each front end imports and compares the keyword arguments the front ends hand
-down. That is normally the wrong thing to test -- but right now there is no
-single seam where `gpio add h3 in.parquet out.parquet`, `ops.add_h3(table)` and
-`Table.add_h3()` meet, so there is nothing behavioural to compare. The CLI calls
-the file-centric `add_h3_column()`; both API front ends call the table-centric
-`add_h3_table()`. Two implementations, two option sets, one advertised
-operation.
-
-Until the write-path unification gives those three doors a shared facade, this
-harness is the only thing that notices when one door starts passing a different
-resolution, column name or compression codec than the others. **When the facade
-lands, throw this file away** and assert on the facade's inputs instead.
+down. It began as scaffolding for the write facade (#664); the facade landed in
+`core/parquet_writer.py` and did not make it redundant, because the three doors
+of most commands (`gpio add h3`, `ops.add_h3`, `Table.add_h3`) still meet only
+inside core. This harness is what notices when one door starts passing a
+different resolution, column name or codec than the others; the *answers* the
+doors give are compared in `tests/test_api_cli_behaviour_parity.py`.
 
 How it works
 ------------
@@ -62,23 +57,11 @@ module diffs *values actually delivered to core* -- which catches the cases
 introspection cannot see, such as the CLI deriving `iterations` from
 `--partitions` or upper-casing `--compression` on the way down.
 
-Coverage, and the census
-------------------------
-The case table started as the ~13 commands the write-path refactors touch. WP-7
-of #1018 extended it to the five further groups where a shared call seam exists
-(`check`, `benchmark`, `process`, `pmtiles`, `publish`), taking it from 14 of
-the CLI's 59 leaves to 30.
-
-The other 29 leaves are listed in `NO_CALL_PARITY_CASE`, each with a written
-reason -- `inspect`, for instance, cannot have a case at all, because the CLI
-goes through `core.inspect` while `Table.head`/`stats`/`metadata` are
-implemented inline and call no core function. Those are compared
-*behaviourally* in `tests/test_api_cli_behaviour_parity.py`, which runs both
-front ends for real and diffs the answers.
-
-`test_every_cli_leaf_has_a_parity_case_or_a_recorded_reason` closes the loop: a
-new `gpio` command that arrives with neither a case nor a recorded reason fails
-the suite, rather than quietly enlarging the uncovered set the way it used to.
+The census
+----------
+Every CLI leaf is either a `ParityCase` or an entry in `NO_CALL_PARITY_CASE`
+with a written reason; `test_every_cli_leaf_has_a_parity_case_or_a_recorded_reason`
+fails on a new command that is neither.
 
 Patching note (project memory): dotted-string `mock.patch("...cli.main.X")`
 targets fail on Python 3.10. Every patch here is `patch.object(module, name)`,
@@ -91,9 +74,12 @@ it in isolation; in the full suite it is a non-issue.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -203,10 +189,14 @@ class Frontend:
 class ParityCase:
     id: str
     cli: Frontend
-    table: Frontend
     normalize: dict[str, tuple[str, str]]
+    table: Frontend | None = None
     ops: Frontend | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if self.table is None and self.ops is None:
+            raise ValueError(f"{self.id}: a parity case needs at least one API front end")
 
 
 @dataclass
@@ -220,7 +210,7 @@ class Ctx:
     table: Any
     gpio_table: Any
     runner: CliRunner
-    tmp_path: Any = None
+    tmp_path: Path | None = None
     cli_result: Any = None
 
     def run_cli(self, args: list[str]):
@@ -248,20 +238,9 @@ def _cli(
     reference: Callable,
     args: Callable[[Ctx], list[str]],
     module: Any = cli_main,
-    wrap: Callable[[], Any] | None = None,
+    wrap: Callable[[], AbstractContextManager[Any]] = contextlib.nullcontext,
 ) -> Frontend:
-    """A CLI front end.
-
-    `wrap` supplies an extra context manager to hold open around the
-    invocation, for commands that gate the core call behind an environment
-    check the test machine cannot be relied on to satisfy.
-    """
-    if wrap is None:
-        return Frontend(
-            patch_site=(module, alias),
-            reference=reference,
-            invoke=lambda ctx: ctx.run_cli(args(ctx)),
-        )
+    """A CLI front end; `wrap` holds a context manager open around the invocation."""
 
     def _invoke(ctx: Ctx):
         with wrap():
@@ -271,21 +250,18 @@ def _cli(
 
 
 def _with_credentials():
-    """Make `gpio publish upload`'s credential pre-check succeed.
-
-    `cli/commands/publish.py` calls `check_credentials(destination, profile)`
-    and raises before it ever reaches `upload_impl` when it fails -- which it
-    does on any machine without AWS credentials, CI included. Without this the
-    case passes on a developer's laptop and fails on a runner, for a reason
-    that has nothing to do with parity.
-
-    Worth noting on its own: the check runs even under `--dry-run`, and
-    `Table.upload` performs no equivalent check at all, so the two front ends
-    fail differently on an unauthenticated machine. That asymmetry is about
-    error handling rather than option values, so it is recorded here rather
-    than in `normalize`.
-    """
+    """`gpio publish upload` runs `check_credentials` before `upload_impl` (even under
+    `--dry-run`); it fails on any machine without AWS credentials, CI included."""
     return patch.object(cli_publish, "check_credentials", lambda *_a, **_k: (True, ""))
+
+
+def _no_network():
+    """Fail closed: if the `upload` patch ever misses, the store is never built."""
+    return patch.object(
+        core_upload,
+        "_setup_store_and_kwargs",
+        side_effect=AssertionError("Table.upload reached the network"),
+    )
 
 
 def _ops(attr: str, reference: Callable, call: Callable[[Ctx], Any]) -> Frontend:
@@ -344,39 +320,24 @@ SORT_COLUMN = "name"  # a real column of tests/data/places_test.parquet
 STAC_BUCKET = "s3://example-bucket/data/"
 
 
-class _StubValidationResult:
-    """Just enough `ValidationResult` for `Table.validate` to finish its unpacking.
-
-    The recorder replaces `validate_geoparquet`, so nothing real comes back, and
-    `Table.validate` immediately reads seven attributes off the result. Returning
-    this keeps the *call* -- which is what the case compares -- reachable.
-    """
-
-    is_valid = True
-    file_path = ""
-    detected_version = None
-    target_version = None
-    passed_count = 0
-    failed_count = 0
-    warning_count = 0
-    checks: tuple = ()
+# An empty but real `ValidationResult`, so `Table.validate` can unpack what the
+# recorder hands back; the call is what the case compares.
+_STUB_VALIDATION_RESULT = core_validate.ValidationResult(
+    file_path="", detected_version=None, target_version=None
+)
 
 
-_STUB_VALIDATION_RESULT = _StubValidationResult()
+def _fail_closed(guard: Callable[[], AbstractContextManager[Any]], call: Callable[[], Any]) -> Any:
+    with guard():
+        return call()
 
 
-def _swallow(call):
-    """Run an API front end that cannot survive its core call being recorded.
-
-    A few `ops` functions write a temp file, call core, then *read the result
-    back*. With core replaced by a recorder nothing is written, so the read-back
-    raises. The recorded call is what the case compares, and `_capture` asserts
-    it happened exactly once -- so a later failure is noise, not signal, and a
-    silently-missing call still fails loudly there.
-    """
+def _swallow(call: Callable[[], Any]) -> Any:
+    """Run an API front end whose read-back of the (recorded, never written) core
+    output raises; `_capture` still asserts the call happened exactly once."""
     try:
         return call()
-    except Exception:  # noqa: BLE001 - see docstring
+    except FileNotFoundError:
         return None
 
 
@@ -937,19 +898,13 @@ CASES: list[ParityCase] = [
         cli=_cli(
             "create_overviews_impl",
             core_overview.create_overviews,
-            lambda c: ["process", "overview", c.input_file],
+            lambda c: ["process", "overview", c.input_file, "--output-dir", c.scratch("ov")],
             module=cli_process,
         ),
         ops=Frontend(
             patch_site=(core_overview, "create_overviews"),
             reference=core_overview.create_overviews,
-            invoke=lambda c: ops.create_overviews(c.input_file),
-            result={},
-        ),
-        table=Frontend(
-            patch_site=(core_overview, "create_overviews"),
-            reference=core_overview.create_overviews,
-            invoke=lambda c: ops.create_overviews(c.input_file),
+            invoke=lambda c: ops.create_overviews(c.input_file, output_dir=c.scratch("ov")),
             result={},
         ),
         normalize={
@@ -963,12 +918,8 @@ CASES: list[ParityCase] = [
             "compression_level": ("compression_level", "compression_level"),
         },
         notes=(
-            "`Table.overview()` is a different operation from `gpio process overview`: it "
-            "rolls a table up to *one* level through `overview.rollup_table` and returns "
-            "a Table, where the command writes a whole pyramid of levels to disk. The "
-            "file-centric twin of the command is `ops.create_overviews`, so the `table` "
-            "front end here is that same function -- the case pins the command against "
-            "the API door that actually mirrors it.",
+            "`Table.overview()` rolls a table up to *one* level and is a different "
+            "operation; `ops.create_overviews` is the command's twin.",
         ),
     ),
     ParityCase(
@@ -1113,11 +1064,6 @@ CASES: list[ParityCase] = [
             reference=core_pmtiles.create_pmtiles_from_geoparquet,
             invoke=lambda c: ops.create_pmtiles(c.input_file, c.scratch("api.pmtiles")),
         ),
-        table=Frontend(
-            patch_site=(core_pmtiles, "create_pmtiles_from_geoparquet"),
-            reference=core_pmtiles.create_pmtiles_from_geoparquet,
-            invoke=lambda c: ops.create_pmtiles(c.input_file, c.scratch("api.pmtiles")),
-        ),
         normalize={
             "layer": ("layer", "layer"),
             "min_zoom": ("min_zoom", "min_zoom"),
@@ -1131,12 +1077,16 @@ CASES: list[ParityCase] = [
             "layer_by_column": ("layer_by_column", "layer_by_column"),
             "repair_geometry": ("repair_geometry", "repair_geometry"),
             "maximum_tile_bytes": ("maximum_tile_bytes", "maximum_tile_bytes"),
+            "simplify_only_low_zooms": ("simplify_only_low_zooms", "simplify_only_low_zooms"),
+            "no_simplification_of_shared_nodes": (
+                "no_simplification_of_shared_nodes",
+                "no_simplification_of_shared_nodes",
+            ),
+            "no_tile_size_limit": ("no_tile_size_limit", "no_tile_size_limit"),
+            "drop_densest_as_needed": ("drop_densest_as_needed", "drop_densest_as_needed"),
+            "force": ("force", "force"),
         },
-        notes=(
-            "`pmtiles` has no Table method -- a PMTiles archive is not a GeoParquet table "
-            "-- so `ops.create_pmtiles` stands in for both API front ends. Tippecanoe is "
-            "never invoked: the core function that would shell out to it is recorded.",
-        ),
+        notes=("A PMTiles archive is not a table, so there is no `Table` door.",),
     ),
     ParityCase(
         id="pmtiles pyramid",
@@ -1151,17 +1101,17 @@ CASES: list[ParityCase] = [
             reference=core_pmtiles_pyramid.create_pmtiles_pyramid,
             invoke=lambda c: ops.create_pmtiles_pyramid(c.input_file, c.scratch("api_pyr.pmtiles")),
         ),
-        table=Frontend(
-            patch_site=(core_pmtiles_pyramid, "create_pmtiles_pyramid"),
-            reference=core_pmtiles_pyramid.create_pmtiles_pyramid,
-            invoke=lambda c: ops.create_pmtiles_pyramid(c.input_file, c.scratch("api_pyr.pmtiles")),
-        ),
         normalize={
             "levels": ("levels", "levels"),
             "max_tile_kb": ("max_tile_kb", "max_tile_kb"),
             "bytes_per_cell": ("bytes_per_cell", "bytes_per_cell"),
             "layer_mode": ("layer_mode", "layer_mode"),
             "include_features": ("include_features", "include_features"),
+            "features_source": ("features_source", "features_source"),
+            "features_min_zoom": ("features_min_zoom", "features_min_zoom"),
+            "max_zoom": ("max_zoom", "max_zoom"),
+            "attribution": ("attribution", "attribution"),
+            "force": ("force", "force"),
         },
     ),
     ParityCase(
@@ -1169,14 +1119,16 @@ CASES: list[ParityCase] = [
         cli=_cli(
             "upload_impl",
             core_upload.upload,
-            lambda c: ["publish", "upload", c.input_file, "s3://bucket/prefix/", "--dry-run"],
+            lambda c: ["publish", "upload", c.input_file, "s3://bucket/prefix/"],
             module=cli_publish,
             wrap=_with_credentials,
         ),
         table=Frontend(
             patch_site=(core_upload, "upload"),
             reference=core_upload.upload,
-            invoke=lambda c: c.gpio_table.upload("s3://bucket/prefix/"),
+            invoke=lambda c: _fail_closed(
+                _no_network, lambda: c.gpio_table.upload("s3://bucket/prefix/")
+            ),
         ),
         normalize={
             "destination": ("destination", "destination"),
@@ -1185,15 +1137,12 @@ CASES: list[ParityCase] = [
             "s3_endpoint": ("s3_endpoint", "s3_endpoint"),
             "s3_region": ("s3_region", "s3_region"),
             "s3_use_ssl": ("s3_use_ssl", "s3_use_ssl"),
-            "dry_run": ("dry_run", "dry_run"),
         },
         notes=(
-            "`--dry-run` is passed on the CLI side so no credential check or network call "
-            "is attempted; `Table.upload` has no dry-run knob at all, which is the gap "
-            "KNOWN_PARITY_GAPS records. "
-            "`pattern`, `max_files`, `chunk_size` and `fail_fast` are CLI-only "
-            "-- they describe walking a *directory* of files, and `Table.upload` always "
-            "uploads exactly the one temp file it wrote, so it has no analogue to pin.",
+            "`dry_run` is not pinned: `Table.upload` has no such keyword (#1063, "
+            "`test_table_upload_cannot_be_rehearsed`). `pattern`, `max_files`, "
+            "`chunk_size` and `fail_fast` describe walking a directory and have no "
+            "analogue on a Table.",
         ),
     ),
     ParityCase(
@@ -1219,25 +1168,12 @@ CASES: list[ParityCase] = [
             ),
             result={},
         ),
-        table=Frontend(
-            patch_site=(core_stac, "generate_stac_item"),
-            reference=core_stac.generate_stac_item,
-            invoke=lambda c: api_stac.generate_stac(
-                c.input_file, c.scratch("api_stac2.json"), bucket=STAC_BUCKET
-            ),
-            result={},
-        ),
         normalize={
             "bucket": ("bucket_prefix", "bucket_prefix"),
             "public_url": ("public_url", "public_url"),
             "item_id": ("item_id", "item_id"),
         },
-        notes=(
-            "`publish stac`'s twin is `geoparquet_io.generate_stac` in `api/stac.py`, not "
-            "an `ops` function or a `Table` method -- which is why "
-            "`test_cli_api_default_parity.NO_API_TWIN` still lists this command as "
-            "twin-less (#1065). Both API front ends are that one function.",
-        ),
+        notes=("The twin is `geoparquet_io.generate_stac` in `api/stac.py` (#1065).",),
     ),
 ]
 
@@ -1314,19 +1250,6 @@ KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
         f"Table.write resolves. tests/test_write_facade_row_groups.py asserts the thing this "
         f"case cannot see: that the two front ends write the same row-group layout."
     ),
-    (
-        "publish upload",
-        "table",
-        "dry_run",
-        "True",
-        "False",
-    ): (
-        "A missing feature, not a spelling difference: `gpio publish upload --dry-run` "
-        "reports what would be uploaded without touching the network, and `Table.upload` "
-        "has no equivalent -- it always uploads. A library user cannot rehearse an upload "
-        "the way a CLI user can. Recorded rather than fixed: adding the keyword is an "
-        "`api/` change, out of scope for a tests-only package (gpio #1063)."
-    ),
 }
 
 
@@ -1336,10 +1259,17 @@ KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
 
 
 @pytest.fixture
-def parity_ctx(places_test_file, geojson_input, tmp_path):
-    """A real input file, a real table, and somewhere to write."""
+def parity_ctx(places_test_file, geojson_input, tmp_path, monkeypatch):
+    """A real input file, a real table, and somewhere to write.
+
+    The CLI's S3 activation reads the ambient AWS environment (#1055) and
+    `Table.upload` does not, so a developer's exported profile would read as a
+    parity failure; the variables are cleared for the case.
+    """
     import pyarrow.parquet as pq
 
+    for name in ("AWS_PROFILE", "AWS_ENDPOINT_URL", "AWS_REGION", "AWS_DEFAULT_REGION"):
+        monkeypatch.delenv(name, raising=False)
     return Ctx(
         input_file=places_test_file,
         convert_input=geojson_input,
@@ -1455,7 +1385,7 @@ def _assert_parity(case: ParityCase, side: str, ctx: Ctx) -> None:
 
 
 OPS_CASES = [case.id for case in CASES if case.ops is not None]
-TABLE_CASES = [case.id for case in CASES]
+TABLE_CASES = [case.id for case in CASES if case.table is not None]
 
 
 @pytest.mark.parametrize("case_id", OPS_CASES)
@@ -1516,113 +1446,61 @@ def test_every_known_gap_names_a_real_case_and_parameter():
         )
 
 
-def test_case_table_covers_the_commands_the_refactors_touch():
-    """Guard against a case being dropped while the harness still looks healthy."""
-    assert {
-        "add bbox",
-        "add h3",
-        "add s2",
-        "add a5",
-        "add quadkey",
-        "add kdtree",
-        "sort hilbert",
-        "sort str",
-        "sort column",
-        "sort quadkey",
-        "extract geoparquet",
-        "convert geoparquet",
-        "partition h3",
-        "partition quadkey",
-    } <= set(CASES_BY_ID)
-
-
 # --------------------------------------------------------------------------
 # Census -- a new CLI leaf must arrive with a parity case or an excuse
 # --------------------------------------------------------------------------
-#
-# Before WP-7 (#1018) the case table held 14 of the CLI's 59 leaves and seven
-# whole groups had nothing, and there was no way to notice: the assertion above
-# pinned the cases that existed, so a *new* command changed nothing. The census
-# below inverts that. Every leaf of the live command tree must be either a
-# `ParityCase` or an entry here with a written reason, so adding a command to
-# `cli/main.py` and stopping fails the suite -- the shape `tests/test_check_fix_
-# entry_points.py` uses for `--fix` entry points (#1043).
+
+_NO_SEAM_INSPECT = (
+    "No shared seam: the CLI goes through `core.inspect`, the Table method is inline "
+    "pyarrow/DuckDB and calls no core function. Compared behaviourally in "
+    "tests/test_api_cli_behaviour_parity.py::TestInspectGroupAgreesWithTable."
+)
+_ONE_DOOR = (
+    "The CLI and the API call the same core function with just the path (#1065): one "
+    "door, nothing to diff."
+)
+_NETWORK = "Reaches a live service; the network lane covers it."
+_DEFERRED = "Worth a case; not written yet (#1085)."
 
 NO_CALL_PARITY_CASE: dict[str, str] = {
-    # --- no API twin at all (these are the `NO_API_TWIN` set) -------------
-    "benchmark compare": (
-        "No API twin: diffs two benchmark JSON runs and renders a table. Nothing "
-        "is called on the other side to compare against."
-    ),
-    "benchmark report": (
-        "No API twin: renders collected benchmark results for a human. "
-        "`tests/test_benchmark_report_cli.py` is its oracle instead."
-    ),
-    "benchmark suite": (
-        "No API twin: orchestrates a multi-command benchmark run. An API caller "
-        "composes the individual operations directly."
-    ),
+    # --- no API twin at all (`NO_API_TWIN` minus the three #1065 mislabels) --
+    "benchmark compare": "No API twin: diffs two benchmark JSON runs for a human.",
+    "benchmark report": "No API twin: renders collected benchmark results for a human.",
+    "benchmark suite": "No API twin: orchestrates a multi-command benchmark run.",
     "skills": "No API twin: prints the bundled LLM skill documents.",
-    # --- an API twin exists, but the two front ends share no call seam ----
-    "inspect summary": (
-        "No shared seam. `gpio inspect summary` goes through `core.inspect."
-        "inspect_summary`; `Table.info` builds its dict inline from the in-memory "
-        "pyarrow table and calls no core function. There is no single call whose "
-        "arguments could be compared. `tests/test_api_cli_behaviour_parity.py::"
-        "TestInspectGroupAgreesWithTable` compares the *answers* instead, which is "
-        "the stronger test here."
+    # --- a twin exists, but the two front ends share no call seam ----------
+    **dict.fromkeys(
+        ["inspect summary", "inspect head", "inspect tail", "inspect stats", "inspect meta"],
+        _NO_SEAM_INSPECT,
     ),
-    "inspect head": "Same as `inspect summary`: `Table.head` is a pyarrow slice, not a core call.",
-    "inspect tail": "Same as `inspect summary`: `Table.tail` is a pyarrow slice, not a core call.",
-    "inspect stats": (
-        "Same as `inspect summary`: `Table.stats` opens its own DuckDB connection "
-        "rather than calling `core.inspect.inspect_stats`."
-    ),
-    "inspect meta": (
-        "Same as `inspect summary`: `Table.metadata` reads the schema metadata "
-        "inline. Compared behaviourally in `tests/test_api_cli_behaviour_parity.py`."
-    ),
-    "inspect layers": (
-        "`gpio.list_layers` *is* the twin (re-exported from `core.layers`; #1065), and the "
-        "CLI calls the same function -- one door, not two, so there is nothing to "
-        "diff. Exercised in `tests/test_api_cli_behaviour_parity.py::"
-        "TestListLayersIsTheInspectLayersTwin`."
-    ),
-    "check stac": (
-        "`gpio.validate_stac` is the twin (#1065) and both front ends call "
-        "`core.stac_check.validate_stac_file` with just the path; there are no "
-        "option values to diverge on."
-    ),
-    # --- a twin and a seam, but the call cannot be made offline/cheaply ---
-    "extract arcgis": "Reaches a live Feature Service; covered by the network lane.",
-    "extract wfs": "Reaches a live WFS; covered by the network lane.",
-    "extract carto": "Reaches a live Carto account; covered by the network lane.",
-    "extract bigquery": "Reaches live BigQuery; covered by the network lane.",
-    "add admin-divisions": (
-        "Needs an admin-boundary cache the core call downloads. Worth a case once "
-        "the boundary fixtures land; the defaults are covered by "
-        "`test_cli_api_default_parity.py` meanwhile."
-    ),
-    "partition admin": "Same as `add admin-divisions`: needs the admin boundary cache.",
-    "convert reproject": (
-        "Worth a case. Not added with WP-7 because the CLI resolves --target-crs "
-        "through `crs_utils` before the core call, so the case needs a normalize "
-        "map built from that resolution rather than from the flag."
-    ),
-    "convert geojson": "Worth a case; the format converters share one core entry point (#996).",
-    "convert geopackage": "Worth a case; see `convert geojson`.",
-    "convert flatgeobuf": "Worth a case; see `convert geojson`.",
-    "convert csv": "Worth a case; see `convert geojson`.",
-    "convert shapefile": "Worth a case; see `convert geojson`.",
-    "partition string": "Worth a case; no blocker, simply not reached in WP-7.",
-    "partition kdtree": "Worth a case; no blocker, simply not reached in WP-7.",
-    "partition s2": "Worth a case; no blocker, simply not reached in WP-7.",
-    "partition a5": "Worth a case; no blocker, simply not reached in WP-7.",
-    "add bbox-metadata": "Worth a case; no blocker, simply not reached in WP-7.",
+    "inspect layers": _ONE_DOOR,
+    "check stac": _ONE_DOOR,
     "add geometry-metrics": (
-        "Behavioural parity is asserted directly in "
-        "`tests/test_api_cli_behaviour_parity.py::TestAddGeometryMetricsParity`, "
-        "which compares the computed metric values rather than the call."
+        "Compared behaviourally in tests/test_api_cli_behaviour_parity.py::"
+        "TestAddGeometryMetricsParity, on the computed values rather than the call."
+    ),
+    # --- a twin and a seam, but not reachable offline --------------------
+    **dict.fromkeys(["extract arcgis", "extract wfs"], _NETWORK),
+    # --- deferred ---------------------------------------------------------
+    **dict.fromkeys(
+        [
+            "extract carto",
+            "extract bigquery",
+            "add admin-divisions",
+            "partition admin",
+            "convert reproject",
+            "convert geojson",
+            "convert geopackage",
+            "convert flatgeobuf",
+            "convert csv",
+            "convert shapefile",
+            "partition string",
+            "partition kdtree",
+            "partition s2",
+            "partition a5",
+            "add bbox-metadata",
+        ],
+        _DEFERRED,
     ),
 }
 
@@ -1634,61 +1512,20 @@ def _cli_leaves() -> set[str]:
 
 
 def test_every_cli_leaf_has_a_parity_case_or_a_recorded_reason():
-    """A new `gpio` command must arrive with a call-parity case, or say why not."""
-    uncovered = _cli_leaves() - set(CASES_BY_ID) - set(NO_CALL_PARITY_CASE)
-    assert not uncovered, (
-        "These CLI commands have no call-parity case and no entry in "
-        "NO_CALL_PARITY_CASE:\n"
-        + "\n".join(f"  {name}" for name in sorted(uncovered))
-        + "\n\nAdd a ParityCase, or add an entry to NO_CALL_PARITY_CASE with a "
-        "written reason. A command whose API twin is missing entirely is a "
-        "separate failure, raised by "
-        "tests/test_cli_api_default_parity.py::TestEveryCommandHasAnApiTwin."
-    )
-
-
-def test_no_call_parity_case_entries_are_real_commands():
-    """A stale excuse would silently exempt nothing, or hide a renamed command."""
-    stale = set(NO_CALL_PARITY_CASE) - _cli_leaves()
-    assert not stale, (
-        f"NO_CALL_PARITY_CASE names commands that no longer exist: {sorted(stale)}. "
-        f"Delete the entries."
-    )
-
-
-def test_no_command_is_both_covered_and_excused():
-    both = set(NO_CALL_PARITY_CASE) & set(CASES_BY_ID)
-    assert not both, (
-        f"{sorted(both)} have a ParityCase, so the NO_CALL_PARITY_CASE entry is "
-        f"dead text. Delete it."
-    )
-
-
-def test_every_excuse_has_a_reason():
-    for command, reason in NO_CALL_PARITY_CASE.items():
-        assert reason and reason.strip(), f"No reason recorded for {command!r}"
+    """Left: leaves with neither a case nor an excuse. Right: excuses that are stale
+    (no such command) or dead (the command has a case)."""
+    assert _cli_leaves() - set(CASES_BY_ID) == set(NO_CALL_PARITY_CASE)
 
 
 def test_every_command_group_is_represented():
-    """WP-7's actual deliverable: no group may be wholly uncovered.
+    """A group with no case at all is the state WP-7 set out to fix."""
+    groups_without_a_case = {"inspect", "skills"}  # no shared seam / no twin
 
-    A group with no case at all is the state this package set out to fix --
-    `check`, `inspect`, `benchmark`, `process`, `pmtiles`, `publish` and
-    `skills` each had zero. Groups that *cannot* have one are named here with
-    the reason, so a future group silently arriving with none still fails.
-    """
-    groups_without_a_case = {
-        "inspect": "no shared call seam anywhere in the group -- see NO_CALL_PARITY_CASE",
-        "skills": "a single leaf with no API twin",
-    }
+    covered = {case_id.split()[0] for case_id in CASES_BY_ID}
+    all_groups = {name.split()[0] for name in _cli_leaves()}
+    assert all_groups - covered - groups_without_a_case == set()
 
-    covered_groups = {case_id.split()[0] for case_id in CASES_BY_ID}
-    all_groups = {name.split()[0] for name in _cli_leaves() if " " in name}
-    all_groups |= {name for name in _cli_leaves() if " " not in name}
 
-    missing = all_groups - covered_groups - set(groups_without_a_case)
-    assert not missing, (
-        f"Command groups with no call-parity case at all: {sorted(missing)}. "
-        f"Add one case for the group, or record it in this test's "
-        f"`groups_without_a_case` with a reason."
-    )
+@pytest.mark.xfail(strict=True, reason="gpio #1063: Table.upload has no dry_run")
+def test_table_upload_cannot_be_rehearsed():
+    assert "dry_run" in inspect.signature(table_module.Table.upload).parameters
