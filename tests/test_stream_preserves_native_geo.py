@@ -64,7 +64,7 @@ def _run_cli_in_a_fresh_process(*args) -> bytes:
         [
             sys.executable,
             "-c",
-            "from geoparquet_io.cli.main import cli; cli()",
+            "from geoparquet_io.cli.main import main; main()",
             *(str(a) for a in args),
         ],
         capture_output=True,

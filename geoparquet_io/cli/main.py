@@ -1,5 +1,8 @@
+import atexit
+import os
 import sys
 from importlib.metadata import entry_points
+from typing import NoReturn
 
 import click
 from click_plugins import with_plugins
@@ -186,5 +189,77 @@ def skills(show: bool, copy_to: str | None, name: str):
         raise click.ClickException(str(e)) from e
 
 
+def _process_status(code: object) -> int:
+    """The exit status CPython gives a ``SystemExit`` carrying ``code``."""
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code
+    # CPython prints a non-integer SystemExit argument and exits 1.
+    print(code, file=sys.stderr)
+    return 1
+
+
+def _leave_process(status: int) -> NoReturn:
+    """End the process on gpio's status, skipping interpreter finalization.
+
+    The atexit handlers run first (logging's shutdown, coverage's data write),
+    then the streams are flushed, then ``os._exit``. What is skipped is the
+    unloading of DuckDB, its spatial extension, Arrow, GEOS and PROJ, which is
+    where a run that had already succeeded could abort (#1053).
+
+    Not on Windows: there ``os._exit`` (ExitProcess) tears the loaded DLLs
+    down while DuckDB's worker threads are still running, and *that* access-
+    violates (exit 0xC0000005) after ``gpio check all`` on the CI runners.
+    The #1053 abort has only ever been seen on Linux, so Windows keeps the
+    interpreter's own exit.
+    """
+    if os.environ.get("GPIO_INTERPRETER_EXIT") or sys.platform == "win32":
+        sys.exit(status)
+    atexit._run_exitfuncs()
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.flush()
+        except (BrokenPipeError, ValueError):
+            # A downstream that stopped reading (``| head``), or a stream that
+            # was closed: nothing left to say, and gpio's status stands.
+            pass
+        except OSError as exc:
+            # A full disk is not a success. CPython exits 120 on the same failure.
+            if sys.__stderr__ is not None:
+                sys.__stderr__.write(
+                    f"gpio: failed to flush {getattr(stream, 'name', '?')}: {exc}\n"
+                )
+            status = 120
+    os._exit(status)
+
+
+def main() -> NoReturn:
+    """The ``gpio`` console script.
+
+    Runs the root group as Click would, then ends the process on the status
+    Click chose rather than on what interpreter finalization makes of it:
+    measured on Linux under CPU contention, roughly one run in twenty of
+    ``gpio add geometry-metrics`` printed its success line and then died with
+    ``terminate called without an active exception`` and status 134 while
+    CPython unloaded the native extensions (#1053). Set
+    ``GPIO_INTERPRETER_EXIT=1`` to leave through ``sys.exit`` instead, when
+    that teardown is the thing being debugged; Windows always does.
+
+    Only this function ends the process. ``cli`` itself is a plain Click group:
+    ``CliRunner``, ``cli(standalone_mode=False)`` and the Python API are
+    untouched.
+    """
+    try:
+        cli.main()
+    except SystemExit as exc:
+        status = _process_status(exc.code)
+    else:  # pragma: no cover - Click's standalone main always raises SystemExit
+        status = 0
+    _leave_process(status)
+
+
 if __name__ == "__main__":
-    cli()
+    main()

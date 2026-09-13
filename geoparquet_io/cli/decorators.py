@@ -47,6 +47,7 @@ class ErrorBoundaryGroup(click.Group):
 
     Anything ``cli_error_for`` does not claim is re-raised untouched: a genuine
     gpio bug still gets its traceback.
+
     """
 
     def invoke(self, ctx):

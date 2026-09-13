@@ -10,6 +10,7 @@ wrote (``gpio check spec`` clean, both CRS carriers read separately) — never
 from __future__ import annotations
 
 import json
+import threading
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -103,6 +104,25 @@ def _offset_aware(total: int):
         offset = int(request.params.get("resultOffset", 0))
         limit = int(request.params.get("resultRecordCount", total))
         return json_reply(_page(offset, min(limit, max(0, total - offset))))(request)
+
+    return _serve
+
+
+def _refuses_pages_larger_than(limit: int, total: int):
+    """A server that blocks any page wider than ``limit`` and serves the rest.
+
+    Keyed on the *request*, not on its position in a reply sequence: the
+    parallel path submits ``max_workers`` windows and cancels the survivors as
+    soon as one is refused, so how many reach the transport, and in what order,
+    is the scheduler's choice (#1053). A server that answers by request shape
+    is the same server whoever won that race.
+    """
+    serve = _offset_aware(total)
+
+    def _serve(request):
+        if int(request.params["resultRecordCount"]) > limit:
+            return html_reply(b"<html>request too large</html>")(request)
+        return serve(request)
 
     return _serve
 
@@ -657,48 +677,71 @@ def test_the_ladder_gives_up_at_batch_size_one(monkeypatch):
 
 
 def test_the_parallel_path_retries_the_whole_window_smaller(monkeypatch):
-    """A window that fails at one size is resubmitted whole at the next size down.
-
-    The failure is keyed on the request, not on its position in a reply
-    sequence: every request at 100 rows is rejected, whatever order the pool's
-    threads reach the transport in. A sequence would make the outcome depend on
-    whether the main thread cancels the second worker's request before it is
-    sent -- it does on macOS and often does not on Windows -- and the ladder
-    would end at 50 on one scheduler and at 10 on another.
-    """
     http = FakeTransport.install(monkeypatch)
-    too_large = html_reply(b"<html>too large</html>")
-    serve = _offset_aware(200)
-
-    def reject_the_full_size(request):
-        if request.params["resultRecordCount"] == "100":
-            return too_large(request)
-        return serve(request)
-
-    stub_service(http, total=200, page_replies=(reject_the_full_size,))
+    stub_service(http, total=200, page_replies=(_refuses_pages_larger_than(10, 200),))
 
     pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
 
+    _assert_ladder_walked_the_layer(http, pages)
+
+
+def _assert_ladder_walked_the_layer(http, pages) -> None:
+    """The ladder descends 100 -> 50 -> 10 and re-walks the whole window at each rung.
+
+    Which refused requests reached the transport, and in what order the two
+    workers' requests arrived, is the scheduler's; every window at each rung
+    being fetched exactly once is not.
+    """
     windows = [
         (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
         for request in http.matching(_is_query)
     ]
-    sizes = [size for _, size in windows]
-    assert windows[0] == (0, 100)
-    assert sizes == sorted(sizes, reverse=True), "the ladder only ever descends"
-    # One or both 100-row requests reach the transport before the retry,
-    # depending on the cancel race; either way the whole window is re-walked
-    # at 50 from the start and nothing is fetched twice at that size. Two
-    # workers issue the 50-row requests, so their arrival order at the
-    # transport is the scheduler's too: compare the multiset, not the order.
+    assert windows[0] == (0, 100)  # the ladder starts at the size that was asked for
+    # Each refused rung is restarted from offset 0; how many of its siblings
+    # were issued before the cancel is the scheduler's.
     assert {offset for offset, size in windows if size == 100} <= {0, 100}
-    assert sorted(window for window in windows if window[1] == 50) == [
-        (0, 50),
-        (50, 50),
-        (100, 50),
-        (150, 50),
+    fifties = {offset for offset, size in windows if size == 50}
+    assert 0 in fifties and fifties <= {0, 50, 100, 150}
+    # The rung that works walks the whole layer, each window exactly once.
+    assert sorted(window for window in windows if window[1] == 10) == [
+        (offset, 10) for offset in range(0, 200, 10)
     ]
     assert sum(len(page["features"]) for page in pages) == 200
+
+
+def test_the_parallel_ladder_is_indifferent_to_which_sibling_won_the_race(monkeypatch):
+    """The other scheduling of the same download: both siblings reach the server.
+
+    The scheduling that broke Windows/3.12 (#1053), forced on every platform:
+    the offset-0 refusal is held until the sibling window has been issued.
+    """
+    http = FakeTransport.install(monkeypatch)
+    server = _refuses_pages_larger_than(10, 200)
+    probe_arrived = threading.Event()
+    sibling_arrived = threading.Event()
+
+    def _serve(request):
+        offset = int(request.params["resultOffset"])
+        if int(request.params["resultRecordCount"]) == 100:
+            if offset == 0:
+                probe_arrived.set()
+                # Hold the refusal until the sibling has been issued, so the
+                # collect loop's cancel() cannot get there first.
+                assert sibling_arrived.wait(timeout=30), "the sibling window was never issued"
+            else:
+                assert probe_arrived.wait(timeout=30), "the probe window was never issued"
+                sibling_arrived.set()
+        return server(request)
+
+    stub_service(http, total=200, page_replies=(_serve,))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    assert (100, 100) in [
+        (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
+        for request in http.matching(_is_query)
+    ], "the sibling never reached the server"
+    _assert_ladder_walked_the_layer(http, pages)
 
 
 def test_the_parallel_ladder_gives_up_at_batch_size_one(monkeypatch):
