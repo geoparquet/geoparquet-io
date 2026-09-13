@@ -46,7 +46,7 @@ from geoparquet_io.cli.main import cli
 from geoparquet_io.core import check_fixes
 from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import is_same_file_path
-from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
+from tests.fix_output_oracle import CRS84, NO_GEO_BLOCK, assert_fix_output_is_sound
 
 # `COPY (...) TO '<path>' (...)`, with the SQL-literal doubling undone by the
 # caller. DuckDB is the only writer that moves a file gpio did not name.
@@ -209,7 +209,8 @@ IN_PLACE_FIXES = [
     pytest.param("compression", "snappy_file", id="compression"),
 ]
 
-#: What each of those three inputs must look like once its fix has run, for the
+#: What each of those inputs must look like once its fix has run (keyed by the
+#: fixture, since one subcommand can have several), for the
 #: shared WP-1 oracle (#1018). "The bytes changed" is all the repair assertion
 #: below could see on its own, and an in-place fix has no backup to fall back on
 #: under ``--no-backup``: if the staged rewrite it renames into place is not a
@@ -217,15 +218,25 @@ IN_PLACE_FIXES = [
 IN_PLACE_FIX_OUTPUTS = {
     # A native-geo-only input loses its bbox column and stays native-geo-only:
     # no `geo` key invented, the CRS still only in the Parquet logical type.
-    "bbox": {"expected_rows": 100, "expects_covering": False, "expected_version_prefix": None},
-    # places is 1.0 in; the write facade repairs it as 1.1 and declares the
-    # bbox column it kept.
-    "row-group": {
+    "undeclared_bbox_file": {
+        "expected_rows": 100,
+        "expects_covering": False,
+        "expected_version_prefix": NO_GEO_BLOCK,
+    },
+    # places without its bbox column gets one back, declared, as 1.1.
+    "no_bbox_file": {
         "expected_rows": 766,
         "expects_covering": True,
         "expected_version_prefix": "1.1",
     },
-    "compression": {
+    # places is 1.0 in; the write facade repairs it as 1.1 and declares the
+    # bbox column it kept.
+    "tiny_row_group_file": {
+        "expected_rows": 766,
+        "expects_covering": True,
+        "expected_version_prefix": "1.1",
+    },
+    "snappy_file": {
         "expected_rows": 766,
         "expects_covering": True,
         "expected_version_prefix": "1.1",
@@ -296,7 +307,7 @@ def test_an_in_place_fix_still_repairs_the_file_and_leaves_a_backup(
     assert backup.exists() and backup.read_bytes() == before
     assert list(target.parent.glob(".gpio-fix-*")) == [], "a staging file was left behind"
     # ...and what was renamed into place is a file gpio itself accepts (#1018).
-    assert_fix_output_is_sound(target, expected_crs=CRS84, **IN_PLACE_FIX_OUTPUTS[subcommand])
+    assert_fix_output_is_sound(target, expected_crs=CRS84, **IN_PLACE_FIX_OUTPUTS[fixture_name])
 
 
 # ---------------------------------------------------------------------------

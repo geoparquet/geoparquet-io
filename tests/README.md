@@ -20,6 +20,16 @@ The test suite covers all major commands and functionality:
 - `test_partition.py` - Tests for partition commands (string, admin)
 - `conftest.py` - Shared fixtures and configuration
 
+### Shared helpers
+
+- `conftest.py` - fixtures, the DuckDB thread cap, and the per-test logger and cache isolation
+- `native_geo_probes.py` - paired CRS readers (`geo_block_crs_id` reads only the `geo`
+  block, `logical_crs_id` only the Parquet logical type), `spec_failures`/`spec_problems`
+  for gpio's own verdict, and native-geo-only fixture builders
+- `fix_output_oracle.py` - `assert_fix_output_is_sound`: what every `gpio check --fix`
+  output has to satisfy. A test that runs `--fix` hands its output to the oracle.
+- `http_transport.py` - the offline transport the WFS/ArcGIS extractor tests run on
+
 ## Test Data
 
 The `data/` directory contains test GeoParquet files:

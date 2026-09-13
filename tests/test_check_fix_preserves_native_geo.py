@@ -40,7 +40,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from tests.fix_output_oracle import assert_fix_output_is_sound
+from tests.fix_output_oracle import assert_fix_output_is_sound, covering_of
 from tests.native_geo_probes import (
     EPSG_5070,
     conus_wkb,
@@ -82,12 +82,6 @@ def _run_cli(*args) -> str:
     return result.output
 
 
-def _covering(path) -> dict | None:
-    """One column's declared ``covering``, read off the ``geo`` block."""
-    columns = (geo_block(path) or {}).get("columns") or {}
-    return (columns.get("geometry") or {}).get("covering")
-
-
 def _rewrite_geo_block(path, block: dict) -> None:
     table = pq.read_table(str(path))
     metadata = dict(table.schema.metadata or {})
@@ -95,7 +89,7 @@ def _rewrite_geo_block(path, block: dict) -> None:
     pq.write_table(table.replace_schema_metadata(metadata), str(path), compression="zstd")
 
 
-def _strip_covering(path) -> None:
+def _stripcovering_of(path) -> None:
     """Rewrite ``path`` with its primary column's ``covering`` removed from the block."""
     block = geo_block(path)
     block["columns"]["geometry"].pop("covering", None)
@@ -252,8 +246,8 @@ def test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from(projected_conus
     _run_cli("add", "bbox", projected_conus, with_bbox)
     assert "bbox" in pq.read_schema(str(with_bbox)).names
     assert (geo_version(with_bbox) or "").startswith("2.0")
-    _strip_covering(with_bbox)
-    assert _covering(with_bbox) is None
+    _stripcovering_of(with_bbox)
+    assert covering_of(with_bbox) is None
     fixed = tmp_path / "removed.parquet"
 
     _run_cli("check", "bbox", with_bbox, "--fix", "--fix-output", fixed)
@@ -291,7 +285,7 @@ def test_removing_a_bbox_column_keeps_a_crs_only_the_geo_block_states(tmp_path, 
     _declare_geo_block(with_bbox, crs_epsg=5070)
     assert geo_block_crs_id(with_bbox) == EPSG_5070
     assert logical_geo_types(with_bbox) == {"geometry": ("Geometry", None)}
-    assert _covering(with_bbox) is None, "a declared bbox is 'optimal' and never removed"
+    assert covering_of(with_bbox) is None, "a declared bbox is 'optimal' and never removed"
     fixed = tmp_path / "removed.parquet"
 
     _run_cli("check", "bbox", with_bbox, "--fix", "--fix-output", fixed)
@@ -308,7 +302,7 @@ def test_removing_a_bbox_column_keeps_a_crs_only_the_geo_block_states(tmp_path, 
 # ---------------------------------------------------------------------------
 
 
-def test_add_bbox_then_check_all_fix_keeps_the_covering(projected_conus, tmp_path):
+def test_add_bbox_then_check_all_fix_keeps_thecovering_of(projected_conus, tmp_path):
     """The composition #1003 asks for, end to end.
 
     ``add bbox`` writes native 2.0 with a ``covering``; ``check all --fix`` then
@@ -319,14 +313,14 @@ def test_add_bbox_then_check_all_fix_keeps_the_covering(projected_conus, tmp_pat
     with_bbox = tmp_path / "with_bbox.parquet"
     _run_cli("add", "bbox", projected_conus, with_bbox, "--compression", "snappy")
 
-    declared = _covering(with_bbox)
+    declared = covering_of(with_bbox)
     assert declared, "`add bbox` did not declare a covering -- nothing to lose"
     assert (geo_version(with_bbox) or "").startswith("2.0")
 
     output = _run_cli("check", "all", with_bbox, "--fix")
 
     assert _geometry_compression(with_bbox) == "ZSTD", "the fix did not run"
-    assert _covering(with_bbox) == declared
+    assert covering_of(with_bbox) == declared
     assert "Some issues remain after fixes" not in output
     assert (geo_version(with_bbox) or "").startswith("2.0")
     assert logical_geo_types(with_bbox)["geometry"] == ("Geometry", EPSG_5070)
@@ -351,7 +345,7 @@ def test_the_bbox_column_the_fix_leaves_behind_is_still_declared(projected_conus
     assert_conus_output_is_sound(with_bbox, version="2.0", covering=True)
 
 
-def test_a_1_1_input_keeps_its_version_and_its_covering(projected_conus, tmp_path):
+def test_a_1_1_input_keeps_its_version_and_itscovering_of(projected_conus, tmp_path):
     """The control: a 1.x file is repaired as 1.1, not upgraded behind the user.
 
     A fix that quietly upgrades the file a user asked gpio to *repair* is a
@@ -368,7 +362,7 @@ def test_a_1_1_input_keeps_its_version_and_its_covering(projected_conus, tmp_pat
         "--compression",
         "snappy",
     )
-    declared = _covering(one_one)
+    declared = covering_of(one_one)
     assert declared, "fixture has no covering to preserve"
 
     _run_cli("check", "all", one_one, "--fix")
@@ -376,6 +370,6 @@ def test_a_1_1_input_keeps_its_version_and_its_covering(projected_conus, tmp_pat
     assert _geometry_compression(one_one) == "ZSTD", "the fix did not run"
     assert (geo_version(one_one) or "").startswith("1.1")
     assert logical_geo_types(one_one) == {}, "a 1.1 output must not carry a native geo type"
-    assert _covering(one_one) == declared
+    assert covering_of(one_one) == declared
     assert geo_block_crs_id(one_one) == EPSG_5070
     assert_conus_output_is_sound(one_one, version="1.1", covering=True)

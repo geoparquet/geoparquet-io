@@ -1,32 +1,19 @@
 """Every ``gpio check --fix`` path, run on a broken file, judged on its output.
 
-WP-1 of #1018. The suite had 40-odd ``--fix`` invocations and none of them
-looked at the file the fix wrote beyond the single metric it had just repaired:
-``current_compression == "ZSTD"``, ``num_row_groups == 1``,
-``"bbox" in schema``. A repair that fixes its metric while corrupting the
-``geo`` block was invisible, which is the "gpio writes a file gpio rejects"
-pattern of #890, #954, #972 and #1003 arriving at the test level.
-
-Every test here runs a fix on an input that **actually has the defect** -- a fix
-that declines to run proves nothing -- and then hands the output to
-:func:`tests.fix_output_oracle.assert_fix_output_is_sound`: zero FAILED checks
-from ``check spec``, the row count preserved, the CRS read from the ``geo``
-block and the Parquet logical type **separately**, and the covering resolved
-against the real schema.
+WP-1 of #1018. Every test here runs a fix on an input that **actually has the
+defect** -- a fix that declines to run proves nothing -- then asks the fix's own
+check whether the defect is gone, and hands the output to
+:func:`tests.fix_output_oracle.assert_fix_output_is_sound`.
 
 The four shapes in :data:`SHAPES` are the four a fix has to answer the version
 and CRS questions about differently, and two of them are deliberately not in
 the default CRS: a file already in CRS84 cannot tell a path that keeps the CRS
 from one that loses it, because an absent ``crs`` already means CRS84 (#993).
-
-Two defects this file found are pinned as ``xfail(strict=True)`` in
-:class:`TestKnownDefectsInTheFixes` rather than repaired here -- ``--fix`` lives
-in ``core/check_fixes.py``, which #1033 is rewriting, and this repo fixes
-cross-cutting defects in their own PR.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import shutil
 from dataclasses import dataclass
@@ -39,14 +26,18 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound, covering_of, spec_failures
-from tests.native_geo_probes import geo_block
+from tests.fix_output_oracle import (
+    CRS84,
+    NO_GEO_BLOCK,
+    PLACES_ROWS,
+    assert_bbox_column_matches_geometry,
+    assert_fix_output_is_sound,
+    covering_of,
+    spec_failures,
+)
 
-#: ``expected_version_prefix`` sentinel: the output must carry no ``geo`` key.
-NO_GEO_BLOCK = "<no geo block>"
 
-
-def run_cli(*args):
+def run_cli(*args: object) -> str:
     """Invoke ``gpio`` and insist it succeeded."""
     result = CliRunner().invoke(cli, [str(a) for a in args])
     assert result.exit_code == 0, result.output
@@ -69,7 +60,7 @@ class Shape:
     fixture: str
     rows: int
     crs: object
-    geometry_column: str
+    id_column: str
     bbox_column: str | None
     rewrite_version: str
     rewrite_covering: bool
@@ -84,9 +75,9 @@ SHAPES = [
     Shape(
         name="v1_0_crs84",
         fixture="places_test_file",
-        rows=766,
+        rows=PLACES_ROWS,
         crs=CRS84,
-        geometry_column="geometry",
+        id_column="fsq_place_id",
         bbox_column="bbox",
         rewrite_version="1.1",
         rewrite_covering=True,
@@ -103,7 +94,7 @@ SHAPES = [
         fixture="austria_bbox_covering_file",
         rows=30,
         crs={"authority": "EPSG", "code": 31287},
-        geometry_column="geometry",
+        id_column="id",
         bbox_column="geometry_bbox",
         rewrite_version="1.1",
         rewrite_covering=True,
@@ -116,7 +107,7 @@ SHAPES = [
         fixture="fields_v2_file",
         rows=100,
         crs=CRS84,
-        geometry_column="geometry",
+        id_column="id",
         bbox_column=None,
         rewrite_version="2.0",
         rewrite_covering=False,
@@ -130,7 +121,7 @@ SHAPES = [
         fixture="projected_conus",
         rows=200,
         crs={"authority": "EPSG", "code": 5070},
-        geometry_column="geometry",
+        id_column="id",
         bbox_column=None,
         rewrite_version="2.0",
         rewrite_covering=False,
@@ -138,10 +129,11 @@ SHAPES = [
         check_all_covering=False,
     ),
 ]
+SHAPE_BY_NAME = {spec.name: spec for spec in SHAPES}
 
 
 @pytest.fixture(params=SHAPES, ids=lambda shape: shape.name)
-def shape(request):
+def shape(request) -> tuple[Shape, Path]:
     """One :class:`Shape`, with ``source`` pointing at a clean file of that shape."""
     spec = request.param
     source = request.getfixturevalue(spec.fixture)
@@ -173,7 +165,7 @@ def make_tiny_row_groups(source: Path, target: Path, rows_per_group: int = 5) ->
     return target
 
 
-def make_unsorted(source: Path, target: Path) -> Path:
+def make_unsorted(source: Path, target: Path, compression: str = "ZSTD") -> Path:
     """Shuffled into tiny row groups: ``check spatial --fix`` has work.
 
     Both halves matter. A single-row-group file has no pairs of group bounding
@@ -182,7 +174,9 @@ def make_unsorted(source: Path, target: Path) -> Path:
     """
     table = _read(source)
     order = np.random.RandomState(0).permutation(table.num_rows)
-    pq.write_table(table.take(pa.array(order)), str(target), compression="ZSTD", row_group_size=10)
+    pq.write_table(
+        table.take(pa.array(order)), str(target), compression=compression, row_group_size=10
+    )
     return target
 
 
@@ -200,7 +194,7 @@ def make_without_bbox(source: Path, target: Path, bbox_column: str) -> Path:
     return target
 
 
-def make_without_covering(source: Path, target: Path, geometry_column: str) -> Path:
+def make_without_covering(source: Path, target: Path, geometry_column: str = "geometry") -> Path:
     """Bbox column kept, its covering dropped: the ``fix_bbox_metadata`` path."""
     table = _read(source)
     metadata = dict(table.schema.metadata or {})
@@ -211,7 +205,20 @@ def make_without_covering(source: Path, target: Path, geometry_column: str) -> P
     return target
 
 
-def assert_clean_input(path) -> None:
+def make_with_geometry_column_named(source: Path, target: Path, name: str) -> Path:
+    """``buildings`` with its geometry column renamed, ``geo`` block to match."""
+    table = _read(source)
+    metadata = dict(table.schema.metadata or {})  # rename_columns drops it
+    table = table.rename_columns([name if c == "geometry" else c for c in table.column_names])
+    block = json.loads(metadata[b"geo"])
+    block["primary_column"] = name
+    block["columns"] = {name: block["columns"]["geometry"]}
+    metadata[b"geo"] = json.dumps(block).encode("utf-8")
+    pq.write_table(table.replace_schema_metadata(metadata), str(target), compression="ZSTD")
+    return target
+
+
+def assert_clean_input(path: Path) -> None:
     """Non-vacuity: "the output has no failures" says nothing if the input had some."""
     failures = spec_failures(path)
     assert failures == {}, (
@@ -220,30 +227,22 @@ def assert_clean_input(path) -> None:
 
 
 def assert_no_unexpected_residue(shape: Shape, output: str) -> None:
-    """``check all --fix`` says what it could not repair. Pin exactly that much."""
+    """``check all --fix`` says what it could not repair; pin exactly that much."""
     if shape.check_all_residual:
         assert shape.check_all_residual in output, output
+        assert output.count("   - ") == 1, f"more than the one expected residual issue:\n{output}"
     else:
         assert "Some issues remain after fixes" not in output, output
 
 
-def assert_shape_output(shape: Shape, path, *, rewrite: bool) -> None:
+def assert_shape_output(shape: Shape, path: Path, *, rewrite: bool) -> None:
     """The oracle, with the expectations this shape carries for this kind of fix."""
-    version = shape.rewrite_version if rewrite else shape.check_all_version
-    covering = shape.rewrite_covering if rewrite else shape.check_all_covering
-    if version == NO_GEO_BLOCK:
-        assert geo_block(path) is None, (
-            f"{path}: a native-geo-only input must stay native-geo-only, "
-            f"found a geo block: {geo_block(path)!r}"
-        )
-        version = None
     assert_fix_output_is_sound(
         path,
         expected_rows=shape.rows,
         expected_crs=shape.crs,
-        geometry_column=shape.geometry_column,
-        expects_covering=covering,
-        expected_version_prefix=version,
+        expects_covering=shape.rewrite_covering if rewrite else shape.check_all_covering,
+        expected_version_prefix=shape.rewrite_version if rewrite else shape.check_all_version,
     )
 
 
@@ -255,26 +254,22 @@ def assert_shape_output(shape: Shape, path, *, rewrite: bool) -> None:
 class TestCompressionFixOutput:
     """``check compression --fix`` -> ``check_fixes.fix_compression``."""
 
-    def test_output_is_sound(self, shape, tmp_path):
+    @pytest.mark.parametrize("in_place", [False, True], ids=["fix-output", "in-place"])
+    def test_output_is_sound(self, shape, in_place, tmp_path):
         spec, source = shape
         broken = make_snappy(source, tmp_path / "snappy.parquet")
         assert_clean_input(broken)
-        fixed = tmp_path / "fixed.parquet"
+        fixed = broken if in_place else tmp_path / "fixed.parquet"
+        args = [] if in_place else ["--fix-output", fixed]
 
-        output = run_cli("check", "compression", broken, "--fix", "--fix-output", fixed)
+        output = run_cli("check", "compression", broken, "--fix", *args)
 
         assert "No fix needed" not in output, "the fix declined, so nothing was measured"
+        if in_place:
+            assert Path(f"{broken}.bak").exists(), "an in-place fix must leave a backup"
+        # The fix's own check no longer finds the defect: valid is not the same as fixed.
+        assert "ZSTD recommended" not in run_cli("check", "compression", fixed)
         assert_shape_output(spec, fixed, rewrite=True)
-
-    def test_in_place_output_is_sound(self, shape, tmp_path):
-        """The default: no ``--fix-output``, so the user's own file is rewritten."""
-        spec, source = shape
-        target = make_snappy(source, tmp_path / "inplace.parquet")
-
-        run_cli("check", "compression", target, "--fix")
-
-        assert Path(f"{target}.bak").exists(), "an in-place fix must leave a backup"
-        assert_shape_output(spec, target, rewrite=True)
 
 
 # ---------------------------------------------------------------------------
@@ -285,17 +280,21 @@ class TestCompressionFixOutput:
 class TestRowGroupFixOutput:
     """``check row-group --fix`` -> ``check_fixes.fix_row_groups``."""
 
-    def test_output_is_sound(self, shape, tmp_path):
+    @pytest.mark.parametrize("in_place", [False, True], ids=["fix-output", "in-place"])
+    def test_output_is_sound(self, shape, in_place, tmp_path):
         spec, source = shape
         broken = make_tiny_row_groups(source, tmp_path / "tiny.parquet")
         assert_clean_input(broken)
-        assert pq.ParquetFile(str(broken)).metadata.num_row_groups > 1
-        fixed = tmp_path / "fixed.parquet"
+        assert pq.read_metadata(str(broken)).num_row_groups > 1
+        fixed = broken if in_place else tmp_path / "fixed.parquet"
+        args = [] if in_place else ["--fix-output", fixed]
 
-        output = run_cli("check", "row-group", broken, "--fix", "--fix-output", fixed)
+        output = run_cli("check", "row-group", broken, "--fix", *args)
 
         assert "No fix needed" not in output, "the fix declined, so nothing was measured"
-        assert pq.ParquetFile(str(fixed)).metadata.num_row_groups == 1
+        if in_place:
+            assert Path(f"{broken}.bak").exists(), "an in-place fix must leave a backup"
+        assert pq.read_metadata(str(fixed)).num_row_groups == 1
         assert_shape_output(spec, fixed, rewrite=True)
 
 
@@ -307,51 +306,34 @@ class TestRowGroupFixOutput:
 class TestSpatialFixOutput:
     """``check spatial --fix`` -> ``check_fixes.fix_spatial_ordering``."""
 
-    def test_output_is_sound(self, shape, tmp_path):
+    @pytest.mark.parametrize("in_place", [False, True], ids=["fix-output", "in-place"])
+    def test_output_is_sound(self, shape, in_place, tmp_path):
+        """Sorted, and a permutation: the same rows, in another order."""
         spec, source = shape
         broken = make_unsorted(source, tmp_path / "unsorted.parquet")
         assert_clean_input(broken)
-        fixed = tmp_path / "fixed.parquet"
+        before = _read(broken).column(spec.id_column).to_pylist()
+        fixed = broken if in_place else tmp_path / "fixed.parquet"
+        args = [] if in_place else ["--fix-output", fixed]
 
-        output = run_cli(
-            "check",
-            "spatial",
-            broken,
-            "--fix",
-            "--fix-output",
-            fixed,
-            "--random-sample-size",
-            "20",
-        )
+        output = run_cli("check", "spatial", broken, "--fix", *args, "--random-sample-size", 20)
 
         assert "No fix needed" not in output, "the fix declined, so nothing was measured"
-        assert_shape_output(spec, fixed, rewrite=True)
-
-    def test_the_rows_are_reordered_not_replaced(self, shape, tmp_path):
-        """A Hilbert sort is a permutation: the same rows, in another order."""
-        spec, source = shape
-        broken = make_unsorted(source, tmp_path / "unsorted.parquet")
-        before = _read(broken).column("id" if spec.name != "v1_0_crs84" else "fsq_place_id")
-        fixed = tmp_path / "fixed.parquet"
-
-        run_cli(
-            "check",
-            "spatial",
-            broken,
-            "--fix",
-            "--fix-output",
-            fixed,
-            "--random-sample-size",
-            "20",
+        if in_place:
+            assert Path(f"{broken}.bak").exists(), "an in-place fix must leave a backup"
+        after = _read(fixed).column(spec.id_column).to_pylist()
+        assert sorted(after) == sorted(before), "the rows are not the input's rows"
+        assert after != before, "the fix wrote the rows back in the order it found them"
+        # The fix's own check no longer finds the defect: valid is not the same as fixed.
+        assert "Poor spatial ordering" not in run_cli(
+            "check", "spatial", fixed, "--random-sample-size", 20
         )
-
-        after = _read(fixed).column("id" if spec.name != "v1_0_crs84" else "fsq_place_id")
-        assert sorted(after.to_pylist()) == sorted(before.to_pylist())
         assert_shape_output(spec, fixed, rewrite=True)
 
 
 # ---------------------------------------------------------------------------
-# fix_bbox_column / fix_bbox_metadata / fix_bbox_all / fix_bbox_removal
+# fix_bbox_column / fix_bbox_metadata / fix_bbox_all
+# (fix_bbox_removal is judged in test_check_fix_preserves_native_geo.py)
 # ---------------------------------------------------------------------------
 
 
@@ -359,17 +341,23 @@ class TestBboxFixOutput:
     """``check bbox --fix`` -- version-aware: it adds for 1.x, removes for native."""
 
     @pytest.mark.parametrize("shape_name", ["v1_0_crs84", "v1_1_epsg31287"], ids=["v1_0", "v1_1"])
-    def test_a_missing_bbox_column_is_added_and_declared(self, shape_name, tmp_path, request):
-        spec = next(s for s in SHAPES if s.name == shape_name)
+    @pytest.mark.parametrize("in_place", [False, True], ids=["fix-output", "in-place"])
+    def test_a_missing_bbox_column_is_added_and_declared(
+        self, shape_name, in_place, tmp_path, request
+    ):
+        spec = SHAPE_BY_NAME[shape_name]
         source = Path(str(request.getfixturevalue(spec.fixture)))
         broken = make_without_bbox(source, tmp_path / "no_bbox.parquet", spec.bbox_column)
         assert_clean_input(broken)
         assert spec.bbox_column not in pq.read_schema(str(broken)).names
-        fixed = tmp_path / "fixed.parquet"
+        fixed = broken if in_place else tmp_path / "fixed.parquet"
+        args = [] if in_place else ["--fix-output", fixed]
 
-        run_cli("check", "bbox", broken, "--fix", "--fix-output", fixed)
+        run_cli("check", "bbox", broken, "--fix", *args)
 
         assert "bbox" in pq.read_schema(str(fixed)).names, "the fix did not run"
+        if in_place:
+            assert Path(f"{broken}.bak").exists(), "an in-place fix must leave a backup"
         assert_fix_output_is_sound(
             fixed,
             expected_rows=spec.rows,
@@ -377,12 +365,13 @@ class TestBboxFixOutput:
             expects_covering=True,
             expected_version_prefix="1.1",
         )
+        assert_bbox_column_matches_geometry(fixed)
 
     def test_a_missing_covering_is_added(self, austria_bbox_covering_file, tmp_path):
         """The ``fix_bbox_metadata`` path: the column is there, the covering is not."""
-        spec = next(s for s in SHAPES if s.name == "v1_1_epsg31287")
+        spec = SHAPE_BY_NAME["v1_1_epsg31287"]
         broken = make_without_covering(
-            Path(austria_bbox_covering_file), tmp_path / "no_covering.parquet", "geometry"
+            Path(austria_bbox_covering_file), tmp_path / "no_cov.parquet"
         )
         assert_clean_input(broken)
         assert covering_of(broken) is None
@@ -397,35 +386,39 @@ class TestBboxFixOutput:
             expects_covering=True,
             expected_version_prefix="1.1",
         )
+        assert_bbox_column_matches_geometry(fixed)
 
-    def test_a_native_file_loses_the_bbox_column_and_keeps_its_crs(self, projected_conus, tmp_path):
-        """``fix_bbox_removal``: native stats replace the column, the CRS stays.
+    @pytest.mark.parametrize(
+        "name",
+        ['geom"x', "geom'x", "géométrie", "geom; drop table t; --"],
+        ids=["double-quote", "single-quote", "unicode", "sql"],
+    )
+    def test_an_adversarial_primary_column_name_survives_the_fix(
+        self, name, buildings_test_file, tmp_path
+    ):
+        """``geo.primary_column`` is interpolated into SQL by the bbox fix.
 
-        The input is built the way a user gets one -- ``gpio add bbox`` over a
-        native-geo-only file -- and then has its covering stripped, because a
-        *declared* bbox column is "optimal" and never removed.
+        CLAUDE.md calls it an injection surface; a quoting bug would show here
+        as a column that disappears, is duplicated, or holds the wrong bounds.
         """
-        with_bbox = tmp_path / "with_bbox.parquet"
-        run_cli("add", "bbox", projected_conus, with_bbox)
-        table = _read(with_bbox)
-        block = json.loads(table.schema.metadata[b"geo"])
-        block["columns"]["geometry"].pop("covering", None)
-        metadata = dict(table.schema.metadata)
-        metadata[b"geo"] = json.dumps(block).encode("utf-8")
-        pq.write_table(table.replace_schema_metadata(metadata), str(with_bbox), compression="zstd")
-        assert_clean_input(with_bbox)
+        broken = make_with_geometry_column_named(
+            Path(str(buildings_test_file)), tmp_path / "named.parquet", name
+        )
+        assert_clean_input(broken)
         fixed = tmp_path / "fixed.parquet"
 
-        run_cli("check", "bbox", with_bbox, "--fix", "--fix-output", fixed)
+        run_cli("check", "bbox", broken, "--fix", "--fix-output", fixed)
 
-        assert "bbox" not in pq.read_schema(str(fixed)).names, "the fix did not run"
+        assert pq.read_schema(str(fixed)).names == ["id", name, "bbox"]
         assert_fix_output_is_sound(
             fixed,
-            expected_rows=200,
-            expected_crs={"authority": "EPSG", "code": 5070},
-            expects_covering=False,
-            expected_version_prefix="2.0",
+            expected_rows=42,
+            expected_crs=CRS84,
+            geometry_column=name,
+            expects_covering=True,
+            expected_version_prefix="1.1",
         )
+        assert_bbox_column_matches_geometry(fixed, geometry_column=name)
 
 
 # ---------------------------------------------------------------------------
@@ -439,24 +432,12 @@ class TestCheckAllFixOutput:
     def test_output_is_sound(self, shape, tmp_path):
         """Every defect at once: SNAPPY, tiny row groups, shuffled rows."""
         spec, source = shape
-        broken = tmp_path / "broken.parquet"
-        table = _read(source)
-        order = np.random.RandomState(1).permutation(table.num_rows)
-        pq.write_table(
-            table.take(pa.array(order)), str(broken), compression="SNAPPY", row_group_size=10
-        )
+        broken = make_unsorted(source, tmp_path / "broken.parquet", compression="SNAPPY")
         assert_clean_input(broken)
         fixed = tmp_path / "fixed.parquet"
 
         output = run_cli(
-            "check",
-            "all",
-            broken,
-            "--fix",
-            "--fix-output",
-            fixed,
-            "--random-sample-size",
-            "20",
+            "check", "all", broken, "--fix", "--fix-output", fixed, "--random-sample-size", 20
         )
 
         assert_no_unexpected_residue(spec, output)
@@ -466,7 +447,7 @@ class TestCheckAllFixOutput:
         spec, source = shape
         target = make_snappy(source, tmp_path / "inplace.parquet")
 
-        output = run_cli("check", "all", target, "--fix", "--random-sample-size", "20")
+        output = run_cli("check", "all", target, "--fix", "--random-sample-size", 20)
 
         assert_no_unexpected_residue(spec, output)
         assert Path(f"{target}.bak").exists()
@@ -489,7 +470,7 @@ class TestMultiFileFixOutput:
 
         run_cli("check", "compression", partition, "--all-files", "--fix")
 
-        spec = next(s for s in SHAPES if s.name == "v1_1_epsg31287")
+        spec = SHAPE_BY_NAME["v1_1_epsg31287"]
         for index in range(3):
             written = partition / f"p{index}.parquet"
             assert Path(f"{written}.bak").exists()
@@ -517,14 +498,12 @@ class TestAnExpectedFailureStaysExactlyOneFailure:
         )
     }
 
-    def test_the_baseline_is_the_input_s_own(self, fields_geom_type_only_5070_file):
-        assert set(spec_failures(fields_geom_type_only_5070_file)) == set(self.OUT_OF_AREA)
-
     def test_compression_fix_adds_no_second_failure(
         self, fields_geom_type_only_5070_file, tmp_path
     ):
         target = tmp_path / "pgo_5070.parquet"
         shutil.copy2(fields_geom_type_only_5070_file, target)
+        assert set(spec_failures(target)) == set(self.OUT_OF_AREA), "the baseline is the input's"
         fixed = tmp_path / "fixed.parquet"
 
         run_cli("check", "compression", target, "--fix", "--fix-output", fixed)
@@ -543,18 +522,35 @@ class TestAnExpectedFailureStaysExactlyOneFailure:
 # ---------------------------------------------------------------------------
 
 
-#: Every public entry point in ``core/check_fixes.py``, and what drives it here.
-#: A new one with no oracle test fails ``test_every_fix_entry_point_is_covered``.
+#: Every public entry point in ``core/check_fixes.py`` and the test that judges
+#: its output, as ``module:qualname`` so a renamed or deleted test is noticed.
 COVERED_ENTRY_POINTS = {
-    "fix_compression": "TestCompressionFixOutput",
-    "fix_row_groups": "TestRowGroupFixOutput",
-    "fix_spatial_ordering": "TestSpatialFixOutput",
-    "fix_bbox_column": "TestBboxFixOutput.test_a_missing_bbox_column_is_added_and_declared",
-    "fix_bbox_metadata": "TestBboxFixOutput.test_a_missing_covering_is_added",
-    "fix_bbox_all": "TestBboxFixOutput (both bbox paths route through it)",
-    "fix_bbox_removal": "TestBboxFixOutput.test_a_native_file_loses_the_bbox_column_and_keeps_its_crs",
-    "apply_all_fixes": "TestCheckAllFixOutput",
+    "fix_compression": "tests.test_check_fix_output_is_valid:TestCompressionFixOutput",
+    "fix_row_groups": "tests.test_check_fix_output_is_valid:TestRowGroupFixOutput",
+    "fix_spatial_ordering": "tests.test_check_fix_output_is_valid:TestSpatialFixOutput",
+    "fix_bbox_column": (
+        "tests.test_check_fix_output_is_valid:"
+        "TestBboxFixOutput.test_a_missing_bbox_column_is_added_and_declared"
+    ),
+    "fix_bbox_metadata": (
+        "tests.test_check_fix_output_is_valid:TestBboxFixOutput.test_a_missing_covering_is_added"
+    ),
+    # Both bbox paths route through it.
+    "fix_bbox_all": "tests.test_check_fix_output_is_valid:TestBboxFixOutput",
+    "fix_bbox_removal": (
+        "tests.test_check_fix_preserves_native_geo:"
+        "test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from"
+    ),
+    "apply_all_fixes": "tests.test_check_fix_output_is_valid:TestCheckAllFixOutput",
 }
+
+
+def _resolve(reference: str) -> object:
+    module_name, qualname = reference.split(":")
+    target = importlib.import_module(module_name)
+    for part in qualname.split("."):
+        target = getattr(target, part)
+    return target
 
 
 def test_every_fix_entry_point_is_covered():
@@ -563,7 +559,7 @@ def test_every_fix_entry_point_is_covered():
     WP-1 exists because five commands grew seven write paths and no test ever
     looked at what any of them wrote. Reading the entry points off the module
     rather than listing them by hand is what keeps the eighth from arriving
-    unnoticed.
+    unnoticed; resolving each reference is what keeps the list honest.
     """
     from geoparquet_io.core import check_fixes
 
@@ -581,6 +577,8 @@ def test_every_fix_entry_point_is_covered():
         f"COVERED_ENTRY_POINTS. Uncovered: {sorted(public - set(COVERED_ENTRY_POINTS))}; "
         f"stale: {sorted(set(COVERED_ENTRY_POINTS) - public)}"
     )
+    for entry_point, reference in COVERED_ENTRY_POINTS.items():
+        assert callable(_resolve(reference)), f"{entry_point}: {reference} is not a test"
 
 
 # ---------------------------------------------------------------------------
@@ -589,41 +587,8 @@ def test_every_fix_entry_point_is_covered():
 
 
 class TestKnownDefectsInTheFixes:
-    """Defects WP-1 turned up. Pinned, not repaired: ``core/check_fixes.py`` is
-    being rewritten by #1033, and this repo fixes cross-cutting defects in their
-    own PR."""
-
-    @staticmethod
-    def _overture_order_bbox(source: Path, target: Path) -> Path:
-        """A 1.0 file whose bbox struct is ``xmin, xmax, ymin, ymax``.
-
-        Not a contrivance: that is the order Overture writes, and it is the order
-        this repo's own ``tests/data/country_partition/*.parquet`` and
-        ``tests/data/unsorted.parquet`` carry. At 1.0 the file is *valid* --
-        there is no covering to point at the column, and 1.0 cannot carry one --
-        so ``check spec`` passes it.
-        """
-        table = _read(source)
-        rows = table.num_rows
-        bbox = pa.StructArray.from_arrays(
-            [
-                pa.array([0.0] * rows, type=pa.float32()),
-                pa.array([1.0] * rows, type=pa.float32()),
-                pa.array([0.0] * rows, type=pa.float32()),
-                pa.array([1.0] * rows, type=pa.float32()),
-            ],
-            names=["xmin", "xmax", "ymin", "ymax"],
-        )
-        if "bbox" in table.column_names:
-            table = table.drop(["bbox"])
-        metadata = dict(table.schema.metadata or {})
-        block = json.loads(metadata[b"geo"])
-        block["version"] = "1.0.0"
-        block["columns"]["geometry"].pop("covering", None)
-        metadata[b"geo"] = json.dumps(block).encode("utf-8")
-        table = table.append_column("bbox", bbox).replace_schema_metadata(metadata)
-        pq.write_table(table, str(target), compression="SNAPPY")
-        return target
+    """Defects WP-1 turned up, pinned rather than repaired here: this repo fixes
+    cross-cutting defects in their own PR."""
 
     @pytest.mark.xfail(
         strict=True,
@@ -637,37 +602,17 @@ class TestKnownDefectsInTheFixes:
         ),
     )
     def test_a_rewrite_fix_does_not_declare_a_covering_the_spec_rejects(
-        self, places_test_file, tmp_path
+        self, unsorted_test_file, tmp_path
     ):
-        broken = self._overture_order_bbox(Path(places_test_file), tmp_path / "overture.parquet")
+        """``tests/data/unsorted.parquet`` is the shape as shipped: 1.0, bbox in
+        Overture's ``xmin, xmax, ymin, ymax`` order, valid because 1.0 cannot
+        carry a covering to point at the column."""
+        broken = tmp_path / "overture.parquet"
+        shutil.copy2(unsorted_test_file, broken)
         assert_clean_input(broken)
         fixed = tmp_path / "fixed.parquet"
 
-        run_cli("check", "compression", broken, "--fix", "--fix-output", fixed)
+        output = run_cli("check", "row-group", broken, "--fix", "--fix-output", fixed)
 
-        assert_fix_output_is_sound(
-            fixed, expected_rows=766, expected_crs=CRS84, expects_covering=True
-        )
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "gpio #1036: `check bbox --fix --fix-output OTHER` on a file that "
-            "needs only covering metadata *moves* the input to the output path "
-            "(fix_bbox_all's shutil.move), so the user's original file is gone "
-            "and no backup was taken."
-        ),
-    )
-    def test_a_fix_to_another_path_leaves_the_input_where_it_was(
-        self, austria_bbox_covering_file, tmp_path
-    ):
-        broken = make_without_covering(
-            Path(austria_bbox_covering_file), tmp_path / "input.parquet", "geometry"
-        )
-        before = broken.read_bytes()
-        fixed = tmp_path / "output.parquet"
-
-        run_cli("check", "bbox", broken, "--fix", "--fix-output", fixed)
-
-        assert broken.exists(), "--fix-output wrote elsewhere but destroyed the input"
-        assert broken.read_bytes() == before
+        assert "No fix needed" not in output, "the fix declined, so nothing was measured"
+        assert_fix_output_is_sound(fixed, expected_rows=1445, expected_crs=CRS84)

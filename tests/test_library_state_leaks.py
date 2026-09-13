@@ -30,6 +30,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.logging_config import _bootstrap_default_handler
 from geoparquet_io.core.logging_config import logger as gpio_logger
+from tests.fix_output_oracle import assert_buildings_output_is_sound
 
 S3_DEST = "s3://fake-bucket/out.parquet"
 
@@ -358,17 +359,7 @@ def test_cli_verbose_output_survives_nested_default_calls(buildings_test_file, t
 
     # This test is about the logger, but it ran a real `check all --fix` over a
     # real file, so it is also a place the WP-1 oracle (#1018) costs nothing.
-    from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
-
-    # 1.1, not the 1.0 it came in as: adding a bbox column means declaring it in
-    # a `covering`, and `covering` is a 1.1-only key (#686).
-    assert_fix_output_is_sound(
-        target,
-        expected_rows=42,
-        expected_crs=CRS84,
-        expects_covering=True,
-        expected_version_prefix="1.1",
-    )
+    assert_buildings_output_is_sound(target)
 
 
 # ---------------------------------------------------------------------------

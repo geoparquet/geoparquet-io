@@ -26,6 +26,7 @@ from tests.conftest import (
     has_geoparquet_metadata,
     has_native_geo_types,
 )
+from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
 
 
 def _is_wkb_type(arrow_type) -> bool:
@@ -546,8 +547,6 @@ class TestCheckBboxFix:
 
     @staticmethod
     def assert_removal_output_is_sound(path):
-        from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
-
         assert_fix_output_is_sound(
             path, expected_rows=100, expected_crs=CRS84, expects_covering=False
         )

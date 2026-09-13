@@ -1,125 +1,117 @@
 """The oracle every ``gpio check --fix`` output has to satisfy.
 
 ``--fix`` is the one command whose whole promise is that the file it leaves
-behind is *better* than the file it found. Until this module there were 40-odd
-``--fix`` invocations in the suite and every one of them asserted only the
-metric it had just repaired -- ``current_compression == "ZSTD"``,
-``num_row_groups == 1``, ``"bbox" in schema``. A repair that fixes its own
-metric while corrupting the ``geo`` block, dropping a CRS, losing rows or
-declaring a covering over a column that cannot legally be one was invisible,
-and that is exactly the "gpio writes a file gpio rejects" shape of #890, #954,
-#972 and #1003.
+behind is *better* than the file it found. Before this module the suite's 103
+``--fix`` invocations each asserted only the metric they had just repaired --
+``current_compression == "ZSTD"``, ``num_row_groups == 1``, ``"bbox" in
+schema`` -- so a repair that fixed its metric while corrupting the ``geo``
+block, dropping a CRS, losing rows or declaring a covering over a column that
+cannot legally be one was invisible. That is the "gpio writes a file gpio
+rejects" shape of #890, #954, #972 and #1003.
 
-:func:`assert_fix_output_is_sound` is the shared oracle. Four independent
-questions, because each of the four has shipped a green test past a real defect:
+:func:`assert_fix_output_is_sound` asks four independent questions, because
+each has shipped a green test past a real defect:
 
-1. **Does gpio's own validator pass the output?** ``check spec`` with **zero**
-   FAILED checks. Not "no new failures" -- a set, compared exactly, so a repair
-   that silently *starts* failing a check is visible and so is one that stops.
+1. **Does gpio's own validator pass the output?** ``check spec`` with zero
+   FAILED checks -- compared as an exact set against ``known_spec_failures``,
+   so a repair that silently *starts* failing a check is visible and so is one
+   that stops.
 2. **Are the rows still there?** A rewrite that drops or duplicates rows is a
    data-loss bug no metric assertion can see.
-3. **What CRS does the output claim -- in each carrier separately?** A file
-   states its CRS in the ``geo`` block *and* in the Parquet ``GEOMETRY`` logical
-   type, and the interesting failure is the two disagreeing.
-   ``crs_utils.source_crs_string`` reads one, falls back to the other and
-   returns whichever answered, so it reports *an* answer for a file that holds
-   two: structurally unable to see the defect. #997 shipped green under exactly
-   that oracle. So both carriers are read through
-   :mod:`tests.native_geo_probes`, independently, and each one that speaks at
-   all has to say the same thing.
-4. **Does the covering name a column that exists?** #1003 was ``add bbox`` then
-   ``check all --fix`` dropping the covering off a 2.0 file; the mirror-image
-   defect is declaring one that points at nothing. Both the column and every
-   ``xmin``/``ymin``/``xmax``/``ymax`` path are resolved against the real schema.
+3. **What CRS does the output claim, in each carrier separately?** The ``geo``
+   block and the Parquet ``GEOMETRY`` logical type are read independently
+   through :mod:`tests.native_geo_probes`, never through
+   ``crs_utils.source_crs_string`` (which falls back from one to the other and
+   so cannot see them disagree; #997 shipped green under it). Every carrier
+   that speaks has to say the same thing.
+4. **Does the covering name a column that exists**, with all four corners as
+   floats? #1003 was ``check all --fix`` dropping a covering; the mirror image
+   is declaring one that points at nothing.
 
-Where a fix *legitimately* leaves a failure behind -- a fixture whose
-coordinates are outside its CRS's area of use, say -- pass it in
-``known_spec_failures`` as ``{check_name: why}``. That keeps the oracle exact
-rather than weakening it to "at most N failures": a new failure still fails the
-test, and so does a listed one that has since been repaired.
+What it does *not* see, by design: row content (the count is preserved, not
+the values), an all-null geometry column, and whether the fix did anything --
+a ``check spatial --fix`` that leaves the rows unsorted writes a perfectly
+valid file. The matrix in ``test_check_fix_output_is_valid.py`` asks each
+fix's own check about the output for that, and
+:func:`assert_bbox_column_matches_geometry` covers the one metric the
+validator never reads: the bbox *values*.
 
 Refs: https://github.com/geoparquet/geoparquet-io/issues/1018 (WP-1)
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
-from tests.native_geo_probes import geo_block, geo_block_crs_id, geo_version, logical_crs_id
+from tests.native_geo_probes import (
+    DEFAULTED_CRS,
+    SILENT_CRS,
+    geo_block,
+    geo_block_crs_id,
+    geo_version,
+    logical_crs_id,
+    spec_failures,
+)
+
+StrPath = str | os.PathLike[str]
+#: A PROJJSON ``id`` mapping (``{"authority": "EPSG", "code": 5070}``) or :data:`CRS84`.
+CrsId = Mapping[str, object] | str
+NormalisedCrs = str | tuple[object, object] | None
 
 #: What both carriers say when they mean "the GeoParquet default".
 CRS84 = "OGC:CRS84"
 
-#: Marker strings from ``native_geo_probes`` meaning *this carrier says nothing*.
-_SILENT = frozenset(
-    {
-        "<no geo key>",
-        "<column not described>",
-        "<no native geo type>",
-    }
-)
+#: ``expected_version_prefix`` sentinel: the output must carry no ``geo`` key at
+#: all -- a native-geo-only input has to stay native-geo-only (#1001).
+NO_GEO_BLOCK = "<no geo block>"
 
-#: Marker strings meaning *this carrier is silent, and silence means CRS84*.
-_DEFAULTED = frozenset(
-    {
-        "<no crs key -- resolves as OGC:CRS84>",
-        "<no crs -- resolves as OGC:CRS84>",
-    }
-)
+#: The two fixtures most ``--fix`` tests are built from.
+PLACES_ROWS = 766  # tests/data/places_test.parquet: 1.0, CRS84, has a bbox column
+BUILDINGS_ROWS = 42  # tests/data/buildings_test.parquet: 1.0, CRS84, no bbox column
 
-
-def spec_failures(path) -> dict[str, str]:
-    """``{check name: message}`` for every FAILED check ``gpio check spec`` reports.
-
-    Calls ``validate_geoparquet`` with the arguments ``gpio check spec`` itself
-    passes, so the verdict here is the verdict a user gets from the CLI.
-    """
-    result = validate_geoparquet(str(path))
-    return {
-        check.name: check.message for check in result.checks if check.status == CheckStatus.FAILED
-    }
+#: ``tests/conftest.py::places_v11_file`` declares 1.1.0 but DuckDB writes its
+#: geometry with a native Parquet GEOMETRY logical type, which is 2.0-only, so
+#: the fixture fails ``check spec`` before any fix touches it (gpio #1037).
+#: Carried as an explicit baseline rather than a weakened oracle: a second
+#: failure still fails the test, and so does this one going away once the
+#: fixture is repaired.
+PLACES_V11_FIXTURE_BASELINE = {
+    "version_features_match": (
+        "tests/conftest.py::places_v11_file declares 1.1.0 while DuckDB gives it "
+        "a native Parquet GEOMETRY logical type -- a fixture defect, not a fix "
+        "defect (gpio #1037)"
+    )
+}
 
 
-def covering_of(path, geometry_column: str = "geometry") -> dict | None:
+def covering_of(path: StrPath, geometry_column: str = "geometry") -> dict | None:
     """One column's declared ``covering``, read off the ``geo`` block and nothing else."""
     columns = (geo_block(path) or {}).get("columns") or {}
     return (columns.get(geometry_column) or {}).get("covering")
 
 
-def covering_column_name(covering: Mapping | None) -> str | None:
-    """The column a ``covering`` points at, or None when it points nowhere."""
-    if not covering:
-        return None
-    xmin = (covering.get("bbox") or {}).get("xmin")
-    if not xmin:
-        return None
-    return xmin[0]
-
-
-def _normalise_crs(raw):
+def _normalise_crs(raw: object) -> NormalisedCrs:
     """One carrier's answer as a comparable value, or None when it does not speak."""
     if isinstance(raw, Mapping):
         authority, code = raw.get("authority"), raw.get("code")
         if (authority, code) == ("OGC", "CRS84"):
             return CRS84
         return (authority, code)
-    if raw in _SILENT:
+    if raw in SILENT_CRS:
         return None
-    if raw in _DEFAULTED:
+    if raw in DEFAULTED_CRS:
         return CRS84
     # "<crs: null -- unknown>" and anything unexpected compare literally.
     return raw
 
 
-def _resolve_field(schema: pa.Schema, parts) -> pa.DataType | None:
+def _resolve_field(schema: pa.Schema, parts: list[str]) -> pa.DataType | None:
     """Walk a ``covering`` path (``["bbox", "xmin"]``) down the real Arrow schema."""
-    if not parts:
-        return None
-    if parts[0] not in schema.names:
+    if not parts or parts[0] not in schema.names:
         return None
     current = schema.field(parts[0]).type
     for part in parts[1:]:
@@ -132,10 +124,12 @@ def _resolve_field(schema: pa.Schema, parts) -> pa.DataType | None:
     return current
 
 
-def _assert_covering_resolves(path, covering: Mapping, schema: pa.Schema) -> None:
+def _assert_covering_resolves(path: StrPath, covering: Mapping, schema: pa.Schema) -> None:
     """Every corner the covering names must exist and be a float."""
     bbox = covering.get("bbox") or {}
-    assert bbox, f"{path}: covering has no 'bbox' member: {covering!r}"
+    assert set(bbox) == {"xmin", "ymin", "xmax", "ymax"}, (
+        f"{path}: a covering names all four corners, found {sorted(bbox)!r}"
+    )
     for corner, parts in bbox.items():
         resolved = _resolve_field(schema, list(parts))
         assert resolved is not None, (
@@ -149,10 +143,10 @@ def _assert_covering_resolves(path, covering: Mapping, schema: pa.Schema) -> Non
 
 
 def assert_fix_output_is_sound(
-    path,
+    path: StrPath,
     *,
     expected_rows: int,
-    expected_crs,
+    expected_crs: CrsId,
     geometry_column: str = "geometry",
     expects_covering: bool | None = None,
     expected_version_prefix: str | None = None,
@@ -164,14 +158,14 @@ def assert_fix_output_is_sound(
         path: the file the fix wrote.
         expected_rows: the input's row count. A repair never changes it.
         expected_crs: what the output must claim, as a PROJJSON ``id`` mapping
-            (``{"authority": "EPSG", "code": 5070}``) or :data:`CRS84`. Every
-            carrier that states a CRS at all has to state this one, and at
-            least one carrier has to state it.
+            or :data:`CRS84`. Every carrier that states a CRS at all has to
+            state this one, and at least one carrier has to state it.
         geometry_column: the primary column's name.
         expects_covering: ``True`` requires a ``covering`` naming a real column,
             ``False`` requires none, ``None`` does not care. Pass a bool for any
             fix that touches the bbox.
-        expected_version_prefix: e.g. ``"1.1"``. A fix that silently upgrades
+        expected_version_prefix: e.g. ``"1.1"``; :data:`NO_GEO_BLOCK` for an
+            output that must carry no ``geo`` key. A fix that silently upgrades
             the file a user asked it to *repair* is a defect of the same family
             as one that loses its CRS, so say which version you expect.
         known_spec_failures: ``{check name: why it is legitimate}`` for failures
@@ -185,14 +179,6 @@ def assert_fix_output_is_sound(
         "baseline is how an oracle gets quietly weakened"
     )
 
-    parquet_file = pq.ParquetFile(str(path))
-    try:
-        actual_rows = parquet_file.metadata.num_rows
-    finally:
-        # Closed deterministically: on Windows an open handle blocks the
-        # os.replace() an in-place fix does next (see MEMORY: #770).
-        parquet_file.close()
-
     # 1. gpio's own validator, compared as a set.
     failures = spec_failures(path)
     unexpected = {name: text for name, text in failures.items() if name not in expected_failures}
@@ -204,6 +190,7 @@ def assert_fix_output_is_sound(
     )
 
     # 2. The rows.
+    actual_rows = pq.read_metadata(str(path)).num_rows
     assert actual_rows == expected_rows, (
         f"{path}: the fix changed the row count -- {expected_rows} in, {actual_rows} out"
     )
@@ -233,26 +220,103 @@ def assert_fix_output_is_sound(
                 f"{path}: no covering on column {geometry_column!r} -- "
                 "a bbox column a client cannot find is a bbox column that does nothing"
             )
-            schema = pq.read_schema(str(path))
-            named = covering_column_name(covering)
-            assert named in schema.names, (
-                f"{path}: covering names column {named!r}, which is not in {schema.names!r}"
-            )
-            _assert_covering_resolves(path, covering, schema)
+            _assert_covering_resolves(path, covering, pq.read_schema(str(path)))
         else:
             assert not covering, f"{path}: expected no covering, found {covering!r}"
 
     # 5. The version the user's file came in as.
-    if expected_version_prefix is not None:
+    if expected_version_prefix == NO_GEO_BLOCK:
+        assert geo_block(path) is None, (
+            f"{path}: a native-geo-only input must stay native-geo-only, "
+            f"found a geo block: {geo_block(path)!r}"
+        )
+    elif expected_version_prefix is not None:
         found = geo_version(path)
         assert (found or "").startswith(expected_version_prefix), (
             f"{path}: expected GeoParquet {expected_version_prefix}.x, found {found!r}"
         )
 
 
-def assert_every_fix_output_is_sound(paths, **kwargs) -> None:
-    """:func:`assert_fix_output_is_sound` over a directory's worth of outputs."""
-    paths = list(paths)
-    assert paths, "no output files to check"
-    for path in paths:
-        assert_fix_output_is_sound(path, **kwargs)
+def assert_bbox_column_matches_geometry(
+    path: StrPath, *, geometry_column: str = "geometry"
+) -> None:
+    """Every row's declared bbox is its geometry's envelope.
+
+    The one thing neither ``check spec`` nor question 4 reads: the validator
+    checks the file-level ``bbox`` against the data, and the covering check
+    only that the corners exist and are floats. A ``fix_bbox_column`` that
+    wrote ``ymin`` into ``xmin`` passes both. Compared with a tolerance that
+    admits float32 storage of float64 bounds.
+    """
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+
+    covering = covering_of(path, geometry_column)
+    assert covering, f"{path}: no covering on {geometry_column!r} to check the values of"
+    corners = {corner: list(parts) for corner, parts in (covering.get("bbox") or {}).items()}
+
+    def field(parts: list[str]) -> str:
+        return ".".join(quote_identifier(part) for part in parts)
+
+    geom = quote_identifier(geometry_column)
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        kind = con.execute(f"SELECT typeof({geom}) FROM {sql_path(str(path))} LIMIT 1").fetchone()
+        if kind and kind[0] == "BLOB":
+            geom = f"ST_GeomFromWKB({geom})"
+        checks = " AND ".join(
+            f"abs({field(corners[corner])} - {fn}({geom})) <= 1e-6 * greatest(1, abs({fn}({geom})))"
+            for corner, fn in (
+                ("xmin", "ST_XMin"),
+                ("ymin", "ST_YMin"),
+                ("xmax", "ST_XMax"),
+                ("ymax", "ST_YMax"),
+            )
+        )
+        wrong = con.execute(
+            f"SELECT count(*) FROM {sql_path(str(path))} "
+            f"WHERE {geom} IS NOT NULL AND NOT ({checks})"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert wrong == 0, f"{path}: {wrong} rows whose bbox is not their geometry's envelope"
+
+
+# ---------------------------------------------------------------------------
+# The two fixtures most --fix tests share, with their facts written once
+# ---------------------------------------------------------------------------
+
+
+def assert_places_output_is_sound(
+    path: StrPath,
+    *,
+    version: str,
+    covering: bool,
+    known_spec_failures: Mapping[str, str] | None = None,
+) -> None:
+    """The oracle for anything derived from ``places_test.parquet``."""
+    assert_fix_output_is_sound(
+        path,
+        expected_rows=PLACES_ROWS,
+        expected_crs=CRS84,
+        expects_covering=covering,
+        expected_version_prefix=version,
+        known_spec_failures=known_spec_failures,
+    )
+
+
+def assert_buildings_output_is_sound(
+    path: StrPath, *, version: str = "1.1", covering: bool = True
+) -> None:
+    """The oracle for anything derived from ``buildings_test.parquet``.
+
+    Defaults to what a bbox fix leaves behind: adding a bbox column means
+    declaring it in a ``covering``, a 1.1-only key, so the 1.0 input comes out
+    as 1.1 (#686).
+    """
+    assert_fix_output_is_sound(
+        path,
+        expected_rows=BUILDINGS_ROWS,
+        expected_crs=CRS84,
+        expects_covering=covering,
+        expected_version_prefix=version,
+    )

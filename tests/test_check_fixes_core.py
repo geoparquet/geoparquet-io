@@ -29,35 +29,12 @@ from geoparquet_io.core.check_parquet_structure import (
     check_compression,
     check_metadata_and_bbox,
 )
-from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
-
-#: ``places_test.parquet``: 766 rows, CRS84, GeoParquet 1.0.0, with a bbox column.
-PLACES_ROWS = 766
-
-#: ``tests/conftest.py::places_v11_file`` declares 1.1.0 but DuckDB writes its
-#: geometry with a native Parquet GEOMETRY logical type, which is 2.0-only, so
-#: the fixture fails `check spec` before any fix touches it. Carried as an
-#: explicit baseline rather than weakening the oracle: a *second* failure still
-#: fails the test, and so does this one going away once the fixture is repaired.
-V11_FIXTURE_BASELINE = {
-    "version_features_match": (
-        "tests/conftest.py::places_v11_file declares 1.1.0 while DuckDB gives it "
-        "a native Parquet GEOMETRY logical type -- a fixture defect, not a fix "
-        "defect (gpio #1037)"
-    )
-}
-
-
-def assert_places_output_is_sound(path, *, version, covering, baseline=None):
-    """The oracle, with the constants every places-derived fixture shares."""
-    assert_fix_output_is_sound(
-        path,
-        expected_rows=PLACES_ROWS,
-        expected_crs=CRS84,
-        expects_covering=covering,
-        expected_version_prefix=version,
-        known_spec_failures=baseline,
-    )
+from tests.fix_output_oracle import (
+    CRS84,
+    PLACES_V11_FIXTURE_BASELINE,
+    assert_fix_output_is_sound,
+    assert_places_output_is_sound,
+)
 
 
 class TestFixCompression:
@@ -165,7 +142,7 @@ class TestFixBboxMetadata:
         assert fix_result["success"] is True
         assert "bbox" in fix_result["fix_applied"].lower()
         assert_places_output_is_sound(
-            test_file, version="1.1", covering=True, baseline=V11_FIXTURE_BASELINE
+            test_file, version="1.1", covering=True, known_spec_failures=PLACES_V11_FIXTURE_BASELINE
         )
 
     def test_copies_file_if_output_different(self, places_v11_file, temp_output_dir):
@@ -177,7 +154,10 @@ class TestFixBboxMetadata:
         assert fix_result["success"] is True
         assert os.path.exists(output_file)
         assert_places_output_is_sound(
-            output_file, version="1.1", covering=True, baseline=V11_FIXTURE_BASELINE
+            output_file,
+            version="1.1",
+            covering=True,
+            known_spec_failures=PLACES_V11_FIXTURE_BASELINE,
         )
         # Copied, not moved: the caller's input is still where it was (#1036).
         assert os.path.exists(places_v11_file)
@@ -190,7 +170,7 @@ class TestFixBboxMetadata:
         fix_result = fix_bbox_metadata(test_file, test_file, verbose=True)
         assert fix_result["success"] is True
         assert_places_output_is_sound(
-            test_file, version="1.1", covering=True, baseline=V11_FIXTURE_BASELINE
+            test_file, version="1.1", covering=True, known_spec_failures=PLACES_V11_FIXTURE_BASELINE
         )
 
 

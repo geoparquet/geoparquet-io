@@ -20,23 +20,12 @@ from geoparquet_io.core.check_parquet_structure import (
     check_metadata_and_bbox,
 )
 from geoparquet_io.core.check_spatial_order import check_spatial_order
-from tests.fix_output_oracle import CRS84, assert_fix_output_is_sound
-
-#: ``places_test.parquet``: 766 rows, CRS84, GeoParquet 1.0.0, with a bbox column.
-PLACES_ROWS = 766
-#: ``buildings_test.parquet``: 42 rows, CRS84, GeoParquet 1.0.0, no bbox column.
-BUILDINGS_ROWS = 42
-
-
-def assert_places_output_is_sound(path, *, version, covering):
-    """The oracle, with the constants every places-derived fixture shares."""
-    assert_fix_output_is_sound(
-        path,
-        expected_rows=PLACES_ROWS,
-        expected_crs=CRS84,
-        expects_covering=covering,
-        expected_version_prefix=version,
-    )
+from tests.fix_output_oracle import (
+    BUILDINGS_ROWS,
+    CRS84,
+    assert_fix_output_is_sound,
+    assert_places_output_is_sound,
+)
 
 
 class TestCheckFixCompression:
