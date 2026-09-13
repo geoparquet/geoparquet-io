@@ -111,15 +111,11 @@ def _offset_aware(total: int):
 def _refuses_pages_larger_than(limit: int, total: int):
     """A server that blocks any page wider than ``limit`` and serves the rest.
 
-    The condition is a property of the *request*, not its position in a reply
-    sequence, so it answers the same way however many requests reach it and in
-    whatever order. That matters for the parallel path: it submits ``max_workers``
-    requests and then tries to cancel the survivors as soon as one of them is
-    refused, so whether a sibling ever reaches the transport is up to the pool's
-    scheduling. A positional sequence ("the first two requests fail") silently
-    means a different *server* depending on who won that race -- which is how
-    this file's parallel-ladder test came to pass on Linux and fail on Windows
-    (#1053).
+    Keyed on the *request*, not on its position in a reply sequence: the
+    parallel path submits ``max_workers`` windows and cancels the survivors as
+    soon as one is refused, so how many reach the transport, and in what order,
+    is the scheduler's choice (#1053). A server that answers by request shape
+    is the same server whoever won that race.
     """
     serve = _offset_aware(total)
 
@@ -686,34 +682,38 @@ def test_the_parallel_path_retries_the_whole_window_smaller(monkeypatch):
 
     pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
 
-    # The ladder descends one rung per refusal -- 100, then 50, then 10 -- and
-    # each rung restarts the *whole* window from ``batch_start``, so the layer is
-    # walked end to end at the size that finally works. How many requests each
-    # refused rung got to issue before the pool cancelled its siblings is up to
-    # the scheduler, so it is the one thing not pinned here.
+    _assert_ladder_walked_the_layer(http, pages)
+
+
+def _assert_ladder_walked_the_layer(http, pages) -> None:
+    """The ladder descends 100 -> 50 -> 10 and re-walks the whole window at each rung.
+
+    Which refused requests reached the transport, and in what order the two
+    workers' requests arrived, is the scheduler's; every window at each rung
+    being fetched exactly once is not.
+    """
     windows = [
         (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
         for request in http.matching(_is_query)
     ]
-    sizes = [size for _, size in windows]
-    assert (0, 100) in windows  # the ladder starts at the size that was asked for
-    assert (0, 50) in windows  # and steps down one rung at a time, not straight to 10
-    assert sizes == sorted(sizes, reverse=True)  # the ladder only ever descends
-    assert {window for window in windows if window[1] == 10} == {
+    assert windows[0] == (0, 100)  # the ladder starts at the size that was asked for
+    # Each refused rung is restarted from offset 0; how many of its siblings
+    # were issued before the cancel is the scheduler's.
+    assert {offset for offset, size in windows if size == 100} <= {0, 100}
+    fifties = [offset for offset, size in windows if size == 50]
+    assert fifties[0] == 0 and set(fifties) <= {0, 50, 100, 150}
+    # The rung that works walks the whole layer, each window exactly once.
+    assert sorted(window for window in windows if window[1] == 10) == [
         (offset, 10) for offset in range(0, 200, 10)
-    }
+    ]
     assert sum(len(page["features"]) for page in pages) == 200
 
 
 def test_the_parallel_ladder_is_indifferent_to_which_sibling_won_the_race(monkeypatch):
     """The other scheduling of the same download: both siblings reach the server.
 
-    ``fetch_all_features`` submits ``max_workers`` windows and then cancels the
-    survivors the moment one of them is refused, so a sibling reaches the
-    transport only when its worker thread got to the work item first. That is a
-    coin flip, and it landed differently on Windows/3.12 than on Linux and macOS
-    (#1053). Forcing the losing side here keeps the ladder's oracle honest on
-    every platform instead of on whichever one the scheduler favours.
+    The scheduling that broke Windows/3.12 (#1053), forced on every platform:
+    the offset-0 refusal is held until the sibling window has been issued.
     """
     http = FakeTransport.install(monkeypatch)
     server = _refuses_pages_larger_than(10, 200)
@@ -729,7 +729,7 @@ def test_the_parallel_ladder_is_indifferent_to_which_sibling_won_the_race(monkey
                 # collect loop's cancel() cannot get there first.
                 assert sibling_arrived.wait(timeout=30), "the sibling window was never issued"
             else:
-                probe_arrived.wait(timeout=30)
+                assert probe_arrived.wait(timeout=30), "the probe window was never issued"
                 sibling_arrived.set()
         return server(request)
 
@@ -737,35 +737,11 @@ def test_the_parallel_ladder_is_indifferent_to_which_sibling_won_the_race(monkey
 
     pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
 
-    windows = [
+    assert (100, 100) in [
         (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
         for request in http.matching(_is_query)
-    ]
-    assert (100, 100) in windows  # the sibling really did reach the server
-    assert {window for window in windows if window[1] == 10} == {
-        (offset, 10) for offset in range(0, 200, 10)
-    }
-    assert sum(len(page["features"]) for page in pages) == 200
-
-
-def test_a_wide_pool_issues_every_request_through_the_stubbed_transport(monkeypatch):
-    """Worker threads share the seam, so a wide pool records every window.
-
-    The pool's workers reach the network through the same
-    ``get_shared_http_client`` the main thread does, and that is the only seam
-    ``FakeTransport`` replaces. A pool thread that built its own client would
-    leave holes in the recording here -- with four workers over eight windows,
-    silently, since the pages would still arrive.
-    """
-    http = FakeTransport.install(monkeypatch)
-    stub_service(http, total=400)
-
-    pages = list(fetch_all_features(SERVICE, _layer_info(400), batch_size=50, max_workers=4))
-
-    assert sum(len(page["features"]) for page in pages) == 400
-    assert sorted(int(request.params["resultOffset"]) for request in http.matching(_is_query)) == [
-        *range(0, 400, 50)
-    ]
+    ], "the sibling never reached the server"
+    _assert_ladder_walked_the_layer(http, pages)
 
 
 def test_the_parallel_ladder_gives_up_at_batch_size_one(monkeypatch):

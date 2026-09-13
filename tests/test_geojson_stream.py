@@ -364,7 +364,7 @@ class TestPipelineIntegration:
             [
                 sys.executable,
                 "-c",
-                "from geoparquet_io.cli.main import cli; cli()",
+                "from geoparquet_io.cli.main import main; main()",
                 "convert",
                 "geojson",
                 str(PLACES_PARQUET),

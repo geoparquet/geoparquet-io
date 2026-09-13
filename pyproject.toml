@@ -76,7 +76,7 @@ dependencies = [
 ]
 
 [project.scripts]
-gpio = "geoparquet_io:cli"
+gpio = "geoparquet_io.cli.main:main"
 
 [project.urls]
 "Homepage" = "https://github.com/geoparquet/geoparquet-io"

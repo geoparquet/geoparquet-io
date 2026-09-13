@@ -315,6 +315,22 @@ Default is 50MB. Increase if your WKT geometries are larger.
 
 **Note**: Large values increase memory usage during CSV parsing. On memory-constrained systems, avoid setting excessively high limits.
 
+### A Command Succeeded but the Process Exited 134
+
+**Symptom**: the command prints its success line, the output file is correct, and the shell still reports a failure: `terminate called without an active exception`, exit status 134 (or `-6` from a subprocess).
+
+**Cause**: not gpio's work. After the command returned, the Python interpreter unloaded DuckDB, its spatial extension, Arrow, GEOS and PROJ, and that teardown aborted. It was seen on Linux under CPU contention, about one run in twenty.
+
+Since 1.6, `gpio` ends its process itself, on the status the command chose, after running the atexit handlers and flushing its output, and skips that teardown. A run whose output has been written is a success.
+
+If you are debugging the teardown itself, `GPIO_INTERPRETER_EXIT=1` makes `gpio` leave through the interpreter as before:
+
+```bash
+GPIO_INTERPRETER_EXIT=1 gpio add geometry-metrics in.parquet out.parquet
+```
+
+`CliRunner`, `cli(standalone_mode=False)` and the Python API are unaffected; only the `gpio` console script exits this way.
+
 ## Getting Help
 
 ### Debug Information

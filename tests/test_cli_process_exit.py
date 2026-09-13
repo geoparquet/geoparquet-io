@@ -1,24 +1,12 @@
 """The ``gpio`` process's exit status is gpio's answer, not its teardown's.
 
-A gpio run loads DuckDB, its spatial extension, Arrow, GEOS and PROJ. When the
-command is over, CPython's interpreter finalization unloads all of them and
-destroys their process-global state while their worker threads are being torn
-down -- and *that* code can fail after gpio's work is done and its last line is
-printed. Measured on Linux under CPU contention (8 concurrent loops, 4 CPUs),
-roughly one run in twenty of ``gpio add geometry-metrics`` printed
-
-    Added metrics:area and metrics:perimeter to: .../geometry-metrics.parquet
-    terminate called without an active exception
-
-and exited 134. The file was correct; a shell's ``set -e`` still saw a failure,
-and so did CI (#1053). The same loop with the process leaving via ``os._exit``
-after flushing was clean in 48 of 48 runs.
-
-So the root group's ``__call__`` -- Click's console-script entry point, which
-``CliRunner`` and the Python API never reach -- decides the status and leaves.
-What that costs is interpreter finalization, and these tests pin both halves:
-the status a command chose survives, everything it printed still arrives, and
-finalization is genuinely skipped.
+``geoparquet_io.cli.main.main`` (the console script) ends the process with
+``os._exit`` after running the atexit handlers and flushing the streams, so
+CPython never unloads DuckDB, Arrow, GEOS and PROJ: that teardown aborted about
+one run in twenty on Linux under CPU contention, after the command had already
+succeeded (#1053). These tests pin what that must and must not change: the
+status Click chose, everything the command printed, the atexit handlers, and
+that ``cli`` itself stays a plain Click group for embedders.
 
 Refs: https://github.com/geoparquet/geoparquet-io/issues/1053
 """
@@ -29,49 +17,39 @@ import os
 import subprocess
 import sys
 
-import click
 import pytest
 
-from geoparquet_io.cli.decorators import (
-    ErrorBoundaryGroup,
-    _leave_process,
-    _process_status,
-)
+from geoparquet_io.cli.main import _leave_process, _process_status
 
-#: The console script's own program, plus a marker that only interpreter
-#: finalization can print. ``gpio = "geoparquet_io:cli"`` calls the group, so
-#: this is the entry point under test and not an approximation of it.
+#: The console script's own program, plus two probes: an atexit handler, which
+#: must still run, and a module-level ``__del__``, which only interpreter
+#: finalization (the part being skipped) would trigger.
 _PROGRAM = (
     "import atexit, sys\n"
-    "atexit.register(lambda: sys.stderr.write('FINALIZATION-RAN\\n'))\n"
-    "from geoparquet_io.cli.main import cli\n"
-    "cli()\n"
+    "atexit.register(lambda: sys.stderr.write('ATEXIT-RAN\\n'))\n"
+    "class _Probe:\n"
+    "    def __del__(self): sys.stderr.write('FINALIZATION-RAN\\n')\n"
+    "_keep = _Probe()\n"
+    "from geoparquet_io.cli.main import main\n"
+    "main()\n"
 )
 
 
-def _run_entry_point(*args: str) -> subprocess.CompletedProcess[str]:
+def _run_entry_point(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-c", _PROGRAM, *args],
         capture_output=True,
         text=True,
         timeout=300,
+        env={**os.environ, **(env or {})},
     )
-
-
-def test_a_successful_command_exits_zero_and_skips_finalization():
-    completed = _run_entry_point("--version")
-
-    assert completed.returncode == 0
-    assert "geoparquet-io" in completed.stdout
-    assert "FINALIZATION-RAN" not in completed.stderr
 
 
 @pytest.mark.parametrize(
     ("args", "status", "needle"),
     [
         # A usage error is 2 and a reported failure is 1: two different
-        # statuses, so a wrapper that flattened everything to "nonzero" -- or
-        # to 1 -- would be caught here.
+        # statuses, so a wrapper that flattened everything to 1 is caught.
         (("--no-such-flag",), 2, "No such option"),
         (("inspect", "meta", "no-such-file.parquet"), 1, "no-such-file.parquet"),
     ],
@@ -81,153 +59,123 @@ def test_a_failing_command_keeps_the_status_click_chose(args, status, needle):
 
     assert completed.returncode == status
     assert needle in completed.stdout + completed.stderr
+    assert "ATEXIT-RAN" in completed.stderr
     assert "FINALIZATION-RAN" not in completed.stderr
 
 
-def test_everything_a_command_printed_arrives_before_the_process_leaves():
-    """``os._exit`` discards whatever is still buffered, so the flush is load-bearing.
-
-    ``gpio skills --show`` writes tens of kilobytes in one go -- comfortably more
-    than a pipe's buffer, and more than one write -- so a missing flush truncates
-    it rather than merely reordering it.
-    """
+def test_a_successful_command_delivers_its_output_and_skips_finalization():
+    """``os._exit`` discards whatever is still buffered, so the flush is load-bearing:
+    ``gpio skills --show`` writes tens of kilobytes, more than one pipe buffer."""
     from geoparquet_io.skills import get_skill_content
 
     expected = get_skill_content("geoparquet")
+    assert len(expected) > 8192, "the fixture stopped being big enough to test buffering"
+
     completed = _run_entry_point("skills", "--show")
 
     assert completed.returncode == 0
-    assert len(expected) > 8192, "the fixture stopped being big enough to test buffering"
     assert completed.stdout.rstrip("\n") == expected.rstrip("\n")
+    assert "ATEXIT-RAN" in completed.stderr
+    assert "FINALIZATION-RAN" not in completed.stderr
 
 
-# ---------------------------------------------------------------------------
-# The pieces, in process. The subprocess tests above are the end-to-end oracle;
-# these pin the branches a subprocess cannot be steered into -- a non-integer
-# ``SystemExit`` argument, a stream whose flush raises.
-# ---------------------------------------------------------------------------
+def test_the_escape_hatch_leaves_through_the_interpreter():
+    completed = _run_entry_point("--version", env={"GPIO_INTERPRETER_EXIT": "1"})
+
+    assert completed.returncode == 0
+    assert "FINALIZATION-RAN" in completed.stderr
 
 
-@pytest.mark.parametrize(
-    ("code", "status"),
-    [
-        (None, 0),  # `sys.exit()` and a command that just returned
-        (0, 0),
-        (1, 1),
-        (2, 2),
-        (-1, 255),  # what exit(3) does with it, so `gpio || echo $?` is unchanged
-        (300, 44),
-    ],
-)
+def test_the_group_itself_stays_a_plain_click_group():
+    """Embedders call ``cli(..., standalone_mode=False)`` and expect it to return."""
+    from geoparquet_io.cli.main import cli
+
+    assert cli(["--version"], standalone_mode=False) == 0
+
+
+class _Left(BaseException):
+    """Stands in for ``os._exit``, which does not return."""
+
+    def __init__(self, status: int):
+        self.status = status
+
+
+def _fake_exit(status: int):
+    raise _Left(status)
+
+
+@pytest.mark.parametrize(("argv", "status"), [(["--version"], 0), (["--no-such-flag"], 2)])
+def test_main_hands_clicks_status_to_the_exit(monkeypatch, capsys, argv, status):
+    monkeypatch.setattr(os, "_exit", _fake_exit)
+    monkeypatch.setattr("atexit._run_exitfuncs", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["gpio", *argv])
+    from geoparquet_io.cli.main import main
+
+    with pytest.raises(_Left) as left:
+        main()
+
+    assert left.value.status == status
+    capsys.readouterr()
+
+
+def test_the_escape_hatch_uses_sys_exit_in_process(monkeypatch):
+    monkeypatch.setenv("GPIO_INTERPRETER_EXIT", "1")
+    monkeypatch.setattr(os, "_exit", _fake_exit)
+
+    with pytest.raises(SystemExit) as left:
+        _leave_process(3)
+
+    assert left.value.code == 3
+
+
+@pytest.mark.parametrize(("code", "status"), [(None, 0), (0, 0), (2, 2)])
 def test_a_status_survives_the_trip_through_os_exit(code, status):
     assert _process_status(code) == status
 
 
 def test_a_non_integer_exit_code_is_printed_and_becomes_one(capsys):
-    """``sys.exit("message")`` prints the message and exits 1 -- CPython's rule."""
+    """``sys.exit("message")`` prints the message and exits 1, CPython's rule."""
     assert _process_status("something went wrong") == 1
     assert capsys.readouterr().err.strip() == "something went wrong"
 
 
-def test_a_broken_downstream_does_not_change_the_status(monkeypatch):
-    """``gpio ... | head`` closes the pipe; the flush raises and gpio still exits 0."""
+class _Stream:
+    def __init__(self, name: str, error: Exception | None = None):
+        self.name = name
+        self.error = error
 
-    class _Broken:
-        def flush(self):
-            raise BrokenPipeError(32, "Broken pipe")
+    def flush(self):
+        if self.error is not None:
+            raise self.error
 
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (BrokenPipeError(32, "Broken pipe"), 3),  # `| head` went away: status stands
+        (ValueError("I/O operation on closed file"), 3),
+        (OSError(28, "No space left on device"), 120),  # CPython's own status for this
+    ],
+)
+def test_a_flush_failure_is_a_broken_pipe_or_a_real_error(monkeypatch, error, status):
     statuses: list[int] = []
     monkeypatch.setattr(os, "_exit", statuses.append)
-    monkeypatch.setattr(sys, "stdout", _Broken())
-    monkeypatch.setattr(sys, "stderr", _Broken())
+    monkeypatch.setattr(sys, "stdout", _Stream("<stdout>", error))
+    monkeypatch.setattr(sys, "stderr", _Stream("<stderr>"))
+    monkeypatch.setattr("atexit._run_exitfuncs", lambda: None)
+
+    _leave_process(3)
+
+    assert statuses == [status]
+
+
+def test_a_missing_stream_is_not_an_error(monkeypatch):
+    """``pythonw`` and a closed fd 1 leave ``sys.stdout`` as None."""
+    statuses: list[int] = []
+    monkeypatch.setattr(os, "_exit", statuses.append)
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr("atexit._run_exitfuncs", lambda: None)
 
     _leave_process(0)
 
     assert statuses == [0]
-
-
-def test_both_streams_are_flushed_before_the_process_leaves(monkeypatch):
-    flushed: list[str] = []
-
-    class _Recorder:
-        def __init__(self, name):
-            self._name = name
-
-        def flush(self):
-            flushed.append(self._name)
-
-    monkeypatch.setattr(os, "_exit", lambda status: None)
-    monkeypatch.setattr(sys, "stdout", _Recorder("stdout"))
-    monkeypatch.setattr(sys, "stderr", _Recorder("stderr"))
-
-    _leave_process(3)
-
-    assert flushed == ["stdout", "stderr"]
-
-
-@pytest.mark.parametrize(("args", "status"), [(["noop"], 0), (["--no-such-flag"], 2)])
-def test_calling_a_group_hands_the_status_to_the_exit(monkeypatch, capsys, args, status):
-    """``__call__`` is the seam, and it is the *only* one that exits.
-
-    ``CliRunner`` and the Python API reach a group through
-    ``main(standalone_mode=False)``, which is why the assertion below is that
-    ``main`` leaves the process alone while ``__call__`` ends it.
-    """
-    left: list[int] = []
-
-    class _Left(BaseException):
-        """Stands in for ``os._exit``, which does not return."""
-
-    def _fake_exit(code: int):
-        left.append(code)
-        raise _Left
-
-    monkeypatch.setattr(os, "_exit", _fake_exit)
-
-    @click.group(cls=ErrorBoundaryGroup)
-    def throwaway():
-        pass
-
-    @throwaway.command()
-    def noop():
-        pass
-
-    with pytest.raises(_Left):
-        throwaway(args=args, prog_name="throwaway")
-    assert left == [status]
-
-    capsys.readouterr()
-    throwaway.main(args=["noop"], prog_name="throwaway", standalone_mode=False)
-    assert left == [status], "main(standalone_mode=False) must not end the process"
-
-
-def test_a_click_that_returns_instead_of_exiting_still_leaves_with_zero(monkeypatch):
-    """Nothing here leans on Click raising ``SystemExit`` to end the process.
-
-    It does, in standalone mode -- but a ``__call__`` that only handled the
-    exception would fall off its own end and hand the process back to the
-    finalization this exists to skip.
-    """
-    left: list[int] = []
-
-    class _Left(BaseException):
-        pass
-
-    def _fake_exit(code: int):
-        left.append(code)
-        raise _Left
-
-    monkeypatch.setattr(os, "_exit", _fake_exit)
-
-    @click.group(cls=ErrorBoundaryGroup)
-    def throwaway():
-        pass
-
-    @throwaway.command()
-    def noop():
-        pass
-
-    with pytest.raises(_Left):
-        throwaway(args=["noop"], prog_name="throwaway", standalone_mode=False)
-
-    assert left == [0]
