@@ -66,8 +66,8 @@ def restore_logging_state():
 
 def test_write_does_not_mutate_caller_extra_kv_dict(buildings_test_file, tmp_path):
     """Reusing one extra_kv_metadata dict across writes must not accumulate keys."""
-    from geoparquet_io.core.common import write_parquet_with_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     con = get_duckdb_connection(load_spatial=True)
     query = f"SELECT * FROM read_parquet('{buildings_test_file}')"
@@ -113,8 +113,8 @@ def test_caller_extra_kv_wins_over_preserved_key(buildings_test_file, tmp_path):
     This pins the merge *precedence*, not just the absence of mutation: with the
     merge order flipped, the preserved input value would overwrite the caller's.
     """
-    from geoparquet_io.core.common import write_parquet_with_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     con = get_duckdb_connection(load_spatial=True)
     query = f"SELECT * FROM read_parquet('{buildings_test_file}')"

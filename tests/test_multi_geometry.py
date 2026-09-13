@@ -509,7 +509,7 @@ class TestWriteStrategiesWithMultiGeometry:
 
     def test_disk_rewrite_strategy_preserves_multi_geometry(self, tmp_path):
         """disk-rewrite strategy should preserve secondary geometry columns."""
-        from geoparquet_io.core.common import write_parquet_with_metadata
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
         con, query, geom_info, _ = self._setup_test_query(tmp_path)
         output_file = tmp_path / "output.parquet"
@@ -536,7 +536,7 @@ class TestWriteStrategiesWithMultiGeometry:
 
     def test_arrow_memory_strategy_preserves_multi_geometry(self, tmp_path):
         """in-memory strategy should preserve secondary geometry columns."""
-        from geoparquet_io.core.common import write_parquet_with_metadata
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
         con, query, geom_info, _ = self._setup_test_query(tmp_path)
         output_file = tmp_path / "output.parquet"
@@ -563,7 +563,7 @@ class TestWriteStrategiesWithMultiGeometry:
 
     def test_arrow_streaming_strategy_preserves_multi_geometry(self, tmp_path):
         """streaming strategy should preserve secondary geometry columns."""
-        from geoparquet_io.core.common import write_parquet_with_metadata
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
         con, query, geom_info, _ = self._setup_test_query(tmp_path)
         output_file = tmp_path / "output.parquet"
@@ -590,9 +590,9 @@ class TestWriteStrategiesWithMultiGeometry:
 
     def test_all_strategies_preserve_crs_for_secondary_columns(self, tmp_path):
         """All write strategies should preserve CRS for secondary columns."""
-        from geoparquet_io.core.common import write_parquet_with_metadata
         from geoparquet_io.core.convert import detect_all_geometry_columns
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
         strategies = ["duckdb-kv", "disk-rewrite", "in-memory", "streaming"]
 

@@ -1636,7 +1636,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
     @pytest.mark.parametrize("input_version", ["1.0.0", "1.1.0", "2.0.0"])
     def test_pgo_strips_carried_geo_key(self, input_version, tmp_path):
         """An explicit parquet-geo-only request must drop the input's geo key."""
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / f"pgo_{input_version}.parquet")
         write_geoparquet_table(
@@ -1656,7 +1656,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
         import shapely.wkb
         from shapely.geometry import Point
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         tbl = pa.table(
             {
@@ -1676,7 +1676,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
 
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         tbl = self._table_with_geo("1.1.0")
         metadata = dict(tbl.schema.metadata or {})
@@ -1694,8 +1694,8 @@ class TestWriteGeoParquetTableParquetGeoOnly:
 
     def test_pgo_validates_against_target_version_oracle(self, tmp_path):
         """The real validator, told to expect pgo, must find no failures."""
-        from geoparquet_io.core.common import write_geoparquet_table
         from geoparquet_io.core.validate import validate_geoparquet
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / "pgo_oracle.parquet")
         write_geoparquet_table(
@@ -1723,7 +1723,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
         import shapely.wkb
         from shapely.geometry import Point
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         # Build a stale descriptor from a table with an extra "ghost" column.
         stale_src = tmp_path / "stale_src.parquet"
@@ -1764,7 +1764,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
     @pytest.mark.parametrize("version", ["1.0", "1.1", "2.0"])
     def test_other_versions_still_write_geo_key(self, version, tmp_path):
         """Non-pgo versions are unaffected: the geo key is written as before."""
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / f"v{version}.parquet")
         write_geoparquet_table(
@@ -1804,7 +1804,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         """The reproducer from #701."""
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / "pgo_no_geom.parquet")
         write_geoparquet_table(
@@ -1837,7 +1837,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         # A real serialized schema for a shape the output does not have. It has
         # to be well-formed: pyarrow reconstructs `schema_arrow` from whatever
@@ -1903,7 +1903,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         """
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / f"nogeom_{version}.parquet")
         write_geoparquet_table(
@@ -2010,8 +2010,8 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
         """
         import inspect
 
-        from geoparquet_io.core.common import (
-            _strip_geo_metadata_key,
+        from geoparquet_io.core.common import _strip_geo_metadata_key
+        from geoparquet_io.core.write_funnels import (
             extract_preserved_kv_metadata,
             write_parquet_with_metadata,
         )

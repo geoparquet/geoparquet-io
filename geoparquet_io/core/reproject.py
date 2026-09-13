@@ -15,10 +15,8 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.common import (
     check_bbox_structure,
-    collect_nonplanar_edges,
     get_parquet_metadata,
     validate_compression_settings,
-    write_parquet_with_metadata,
 )
 from geoparquet_io.core.crs_utils import (
     NULL_CRS_NO_FLAG_ERROR,
@@ -49,6 +47,7 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import write_output
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file, should_stream_output
+from geoparquet_io.core.write_funnels import collect_nonplanar_edges, write_parquet_with_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable

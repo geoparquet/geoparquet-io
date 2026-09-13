@@ -12,7 +12,6 @@ from geoparquet_io.core.common import (
     get_bbox_advice,
     get_dataset_bounds,
     get_parquet_metadata,
-    write_parquet_with_metadata,
 )
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import RemoteAccessError
@@ -43,6 +42,7 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 def _resolve_output_version(

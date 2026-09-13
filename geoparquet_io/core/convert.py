@@ -7,11 +7,7 @@ from pathlib import Path
 
 import duckdb
 
-from geoparquet_io.core.common import (
-    format_size,
-    read_preserved_kv_metadata,
-    write_parquet_with_metadata,
-)
+from geoparquet_io.core.common import format_size
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
     detect_crs_from_spatial_file,
@@ -54,6 +50,7 @@ from geoparquet_io.core.remote import (
     show_remote_read_message,
     validate_profile_for_urls,
 )
+from geoparquet_io.core.write_funnels import read_preserved_kv_metadata, write_parquet_with_metadata
 
 
 def _validate_layer_name(layer: str) -> str:

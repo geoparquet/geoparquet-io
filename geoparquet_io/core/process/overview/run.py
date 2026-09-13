@@ -16,7 +16,6 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
@@ -46,6 +45,7 @@ from geoparquet_io.core.process.overview.rollup import (
     build_level_sql,
     validate_level,
 )
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 
 def overview_output_path(

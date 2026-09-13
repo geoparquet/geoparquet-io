@@ -80,7 +80,7 @@ class TestVecorelPartitionCLI:
 
 
 def _write_geoparquet(con, query, output_file):
-    from geoparquet_io.core.common import write_parquet_with_metadata
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     write_parquet_with_metadata(con, query, output_file)
 

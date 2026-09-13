@@ -22,11 +22,7 @@ from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
 )
-from geoparquet_io.core.common import (
-    InvalidParameterError,
-    get_duckdb_connection,
-    write_geoparquet_table,
-)
+from geoparquet_io.core.common import InvalidParameterError, get_duckdb_connection
 from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
 from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
@@ -44,6 +40,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # Default timeout and retry settings
 DEFAULT_TIMEOUT = 120  # seconds

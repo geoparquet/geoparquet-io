@@ -443,8 +443,8 @@ class TestNonWkbCarriersSurviveTheStrip:
         """Writing a 1.1 file used to die with ArrowNotImplementedError here."""
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
         from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         out = str(tmp_path / "native_point.parquet")
         write_geoparquet_table(
@@ -459,8 +459,8 @@ class TestNonWkbCarriersSurviveTheStrip:
         """A binary column full of WKT text under ``encoding: WKT`` is silent corruption."""
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
         from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         out = str(tmp_path / "wkt.parquet")
         write_geoparquet_table(metadata_only_wkt_table(), out, "geometry", geoparquet_version="1.1")

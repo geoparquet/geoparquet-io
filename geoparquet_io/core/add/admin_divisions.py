@@ -8,12 +8,7 @@ multiple admin datasets with hierarchical level support.
 """
 
 from geoparquet_io.core.admin_datasets import AdminDatasetFactory
-from geoparquet_io.core.common import (
-    check_bbox_structure,
-    get_bbox_advice,
-    get_parquet_metadata,
-    write_parquet_with_metadata,
-)
+from geoparquet_io.core.common import check_bbox_structure, get_bbox_advice, get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
     reproject_to_source_sql,
     source_crs_string,
@@ -32,6 +27,7 @@ from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import _sanitize_url_for_logging, is_remote_url
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 def _admin_reprojected(source_crs, admin_bbox_col) -> bool:

@@ -23,6 +23,7 @@ from geoparquet_io.core.logging_config import success
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
 from geoparquet_io.core.streaming import is_stdin, should_stream_output
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 AREA_COLUMN = "metrics:area"
 PERIMETER_COLUMN = "metrics:perimeter"
@@ -260,7 +261,6 @@ def _add_vecorel_metadata_to_file(
     parquet_file: str, verbose: bool, memory_limit: str | None
 ) -> None:
     """Add Vecorel schema metadata to an existing file via rewrite."""
-    from geoparquet_io.core.common import write_parquet_with_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
     from geoparquet_io.core.file_utils import resolve_file_url
     from geoparquet_io.core.remote import needs_httpfs

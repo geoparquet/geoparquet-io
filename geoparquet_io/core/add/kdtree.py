@@ -37,6 +37,7 @@ from geoparquet_io.core.streaming import (
     read_stdin_to_temp_file,
     should_stream_output,
 )
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 #: Rows per partition that `gpio add kdtree` / `gpio partition kdtree` aim for
 #: when neither `--partitions` nor `--auto` is given, and the default the Python
@@ -639,7 +640,7 @@ def add_kdtree_column(
         return
 
     # Get metadata before processing
-    from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+    from geoparquet_io.core.common import get_parquet_metadata
 
     metadata, _ = get_parquet_metadata(input_parquet, verbose)
 

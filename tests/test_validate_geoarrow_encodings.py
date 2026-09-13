@@ -15,11 +15,7 @@ import pytest
 import shapely
 from shapely import wkt
 
-from geoparquet_io.core.common import (
-    get_duckdb_connection,
-    get_parquet_metadata,
-    write_parquet_with_metadata,
-)
+from geoparquet_io.core.common import get_duckdb_connection, get_parquet_metadata
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_covering_bbox_field_types,
@@ -29,6 +25,7 @@ from geoparquet_io.core.validate import (
     _geoarrow_zm_suffix,
     validate_geoparquet,
 )
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 # encoding -> (WKTs, declared geometry_types)
 GEOARROW_CASES = {

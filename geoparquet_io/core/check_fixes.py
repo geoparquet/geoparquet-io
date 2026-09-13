@@ -11,11 +11,7 @@ import duckdb
 
 from geoparquet_io.core.add.bbox import add_bbox_column
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
-from geoparquet_io.core.common import (
-    detect_geoparquet_file_type,
-    get_parquet_metadata,
-    write_parquet_with_metadata,
-)
+from geoparquet_io.core.common import detect_geoparquet_file_type, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
@@ -32,6 +28,7 @@ from geoparquet_io.core.remote import (
     needs_httpfs,
     setup_aws_profile_if_needed,
 )
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 # Every fix below writes DEFAULT_ROW_GROUP_ROWS rows per row group.
 #

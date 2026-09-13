@@ -23,7 +23,7 @@ from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
 )
-from geoparquet_io.core.common import _cast_table_to_schema, write_geoparquet_table
+from geoparquet_io.core.common import _cast_table_to_schema
 from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
     _projjson_from_authority,
@@ -45,6 +45,7 @@ from geoparquet_io.core.http_retry import (
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.remote import setup_aws_profile_if_needed
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # ArcGIS Online token endpoint
 ARCGIS_ONLINE_TOKEN_URL = "https://www.arcgis.com/sharing/rest/generateToken"

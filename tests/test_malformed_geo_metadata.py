@@ -1345,7 +1345,7 @@ def test_fast_path_carry_survives_a_malformed_block(col, case, block):
     ``'list' object has no attribute 'get'`` -- and this block would then have
     been written to the output verbatim.
     """
-    from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
     reset_malformed_geo_warnings()
     metadata = {"geo": json.dumps(block)}
@@ -1355,7 +1355,7 @@ def test_fast_path_carry_survives_a_malformed_block(col, case, block):
 
 def test_fast_path_carry_drops_a_wrong_typed_value_before_writing_it():
     """A carried ``crs: 42`` must not reach the output through the fast path."""
-    from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
     reset_malformed_geo_warnings()
     block = {
@@ -1383,7 +1383,7 @@ def test_write_geoparquet_table_survives_a_malformed_block(col, case, block, tmp
     a list-, string- or non-object-entry ``columns`` raised a ``TypeError`` or
     ``AttributeError`` one line later (#947).
     """
-    from geoparquet_io.core.common import write_geoparquet_table
+    from geoparquet_io.core.write_funnels import write_geoparquet_table
 
     reset_malformed_geo_warnings()
     out = tmp_path / f"wgt_{col}_{case}.parquet"

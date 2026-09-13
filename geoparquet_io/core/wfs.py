@@ -45,11 +45,7 @@ __all__ = [
     "wfs_to_table",
 ]
 
-from geoparquet_io.core.common import (
-    _cast_table_to_schema,
-    _compute_unified_schema,
-    write_geoparquet_table,
-)
+from geoparquet_io.core.common import _cast_table_to_schema, _compute_unified_schema
 from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
@@ -72,6 +68,7 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.reproject import reproject_table
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # Maximum JSON object size for DuckDB parsing (1GB)
 _MAX_JSON_OBJECT_SIZE = 1073741824

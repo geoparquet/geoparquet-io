@@ -10,7 +10,7 @@ import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.add.quadkey import add_quadkey_column, add_quadkey_table
-from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME, DEFAULT_QUADKEY_RESOLUTION
 from geoparquet_io.core.duckdb_metadata import get_column_names, get_usable_columns
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
@@ -35,6 +35,7 @@ from geoparquet_io.core.remote import (
 from geoparquet_io.core.sort_by_column import _sortable_columns
 from geoparquet_io.core.stream_io import write_output
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file, should_stream_output
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 def sort_by_quadkey_table(

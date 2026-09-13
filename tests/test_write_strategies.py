@@ -20,9 +20,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 from geoparquet_io.core.validate import validate_geoparquet
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from geoparquet_io.core.write_strategies import (
     WriteStrategy,
     WriteStrategyFactory,
@@ -1125,8 +1126,8 @@ class TestDuckDBKVWriteConfiguration:
         while gpio's own default is 15 — materially larger files, with no
         indication the option had been ignored.
         """
-        from geoparquet_io.core.common import write_parquet_with_metadata
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
         con = get_duckdb_connection()
         query = self._points_query(con, str(tmp_path / "src.parquet"))
@@ -1158,8 +1159,8 @@ class TestDuckDBKVWriteConfiguration:
         finalize N files on one connection, and the Python API holds a
         connection across operations.
         """
-        from geoparquet_io.core.common import write_parquet_with_metadata
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
         con = get_duckdb_connection()
         query = self._points_query(con, str(tmp_path / "src.parquet"), rows=500)
@@ -1198,8 +1199,8 @@ class TestCompressionLevelValidation:
 
     def test_library_callers_are_checked_not_just_the_cli(self, tmp_path):
         """The CLI has IntRange(1, 22); a Python caller reaches the writer directly."""
-        from geoparquet_io.core.common import write_parquet_with_metadata
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
         con = get_duckdb_connection()
         con.execute("INSTALL spatial; LOAD spatial;")

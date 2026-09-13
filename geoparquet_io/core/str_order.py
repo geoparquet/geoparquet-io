@@ -10,7 +10,7 @@ import uuid
 import duckdb
 import pyarrow as pa
 
-from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
@@ -51,6 +51,7 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 # STR's strip count is derived from the same number the writer sizes row groups
 # with, so its fallback tracks the sort default rather than the general write

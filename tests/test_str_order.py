@@ -14,10 +14,10 @@ import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows
 from geoparquet_io.core.str_order import _str_layout, str_order, str_order_table
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 
 def _point_wkb(x: float, y: float) -> bytes:

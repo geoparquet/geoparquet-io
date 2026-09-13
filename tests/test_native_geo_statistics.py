@@ -35,12 +35,13 @@ import pytest
 import shapely
 
 from geoparquet_io.core import duckdb_metadata
-from geoparquet_io.core.common import get_duckdb_connection, write_geoparquet_table
+from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.duckdb_metadata import (
     get_aggregated_native_geo_stats,
     get_native_geo_statistics,
     get_per_row_group_native_geo_stats,
 )
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # Far from the origin in every direction, so all-zero statistics cannot contain
 # the data by accident, and a zeroed *single* bound is still caught. The
