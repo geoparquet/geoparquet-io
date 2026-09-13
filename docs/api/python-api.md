@@ -1578,7 +1578,7 @@ table = ops.sort_hilbert(table)
 pq.write_table(table, 'output.parquet')
 ```
 
-> **Note:** `pq.write_table()` may not preserve all GeoParquet metadata (such as the `geo` key with CRS and geometry column info). For proper metadata preservation, wrap the result in `Table(table).write('output.parquet')` or use `write_parquet_with_metadata()` from `geoparquet_io.core.common`. The fluent API's `.write()` method is recommended.
+> **Note:** `pq.write_table()` may not preserve all GeoParquet metadata (such as the `geo` key with CRS and geometry column info). For proper metadata preservation, wrap the result in `Table(table).write('output.parquet')` or use `write_parquet_with_metadata()` from `geoparquet_io.core.write_funnels`. The fluent API's `.write()` method is recommended.
 
 Partitioning is the exception to the `table in -> table out` shape: like the CLI it
 writes a *directory*, so `ops.partition_by_*` takes the table plus an output

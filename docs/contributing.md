@@ -231,7 +231,7 @@ See `CLAUDE.md` for full architecture details.
 ### External extractors
 
 Extractors that page through a remote service (`wfs`, `arcgis`, `carto`, `bigquery`) keep
-re-discovering the same edge cases. Reuse the shared schema helpers in `core/common.py`
+re-discovering the same edge cases. Reuse the shared schema helpers in `core/arrow_types.py`
 (`_compute_unified_schema`, `_cast_table_to_schema`, `_promote_numeric_type`) rather than
 hand-rolling schema reconciliation — the `forbid-bespoke-schema-reconciliation` pre-commit hook
 enforces this. Known edge cases to handle:
