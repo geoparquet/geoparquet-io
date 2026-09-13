@@ -17,10 +17,14 @@ from geoparquet_io.core.common import (
 )
 from geoparquet_io.core.constants import VECOREL_METRICS_SCHEMA, build_collection_metadata
 from geoparquet_io.core.duckdb_utils import quote_identifier
-from geoparquet_io.core.file_utils import handle_output_overwrite
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.geometry_detection import (
+    STANDARD_GEOMETRY_NAMES,
+    find_primary_geometry_column,
+)
 from geoparquet_io.core.logging_config import success
 from geoparquet_io.core.partition.reader import require_single_file
+from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.stream_io import execute_transform
 from geoparquet_io.core.streaming import is_stdin, should_stream_output
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
@@ -126,7 +130,6 @@ def _add_metrics_streaming(
     memory_limit,
 ) -> None:
     """Handle streaming input/output for geometry metrics."""
-    from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
 
     if should_stream_output(output_path):
         verbose = False
@@ -262,8 +265,6 @@ def _add_vecorel_metadata_to_file(
 ) -> None:
     """Add Vecorel schema metadata to an existing file via rewrite."""
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
-    from geoparquet_io.core.file_utils import resolve_file_url
-    from geoparquet_io.core.remote import needs_httpfs
 
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
     extra_kv = _build_vecorel_metadata(metadata)

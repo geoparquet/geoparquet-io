@@ -24,6 +24,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
+from geoparquet_io.core.crs_utils import _crs_from_geoarrow_field, geoarrow_crs_to_projjson
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
     carried_column_name,
@@ -33,6 +34,9 @@ from geoparquet_io.core.geo_metadata import (
     prune_geo_metadata_to_columns,
     sanitize_geo_metadata,
 )
+from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
+from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
+from geoparquet_io.core.logging_config import debug
 
 # Marker for stdin/stdout in CLI arguments
 STREAM_MARKER = "-"
@@ -263,7 +267,6 @@ def find_geometry_column_from_table(table: pa.Table) -> str | None:
         return geom_col
 
     # Fall back to common names
-    from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
 
     for name in STANDARD_GEOMETRY_NAMES:
         if name in table.column_names:
@@ -352,8 +355,6 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
     # is why it happens here rather than being relied on (#1006).
     import geoarrow.pyarrow  # noqa: F401
     import pyarrow.parquet as pq
-
-    from geoparquet_io.core.logging_config import debug
 
     if verbose:
         debug("Reading Arrow IPC stream from stdin...")
@@ -576,7 +577,6 @@ def extract_crs_from_table(
     Returns:
         CRS as PROJJSON dict, string, or None if not found
     """
-    from geoparquet_io.core.crs_utils import _crs_from_geoarrow_field, geoarrow_crs_to_projjson
 
     # Find geometry column if not specified
     if geometry_column is None:
@@ -683,7 +683,6 @@ def has_geoarrow_extension_in_table(table: pa.Table) -> bool:
     Returns:
         True if table has geoarrow extension type columns
     """
-    from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
 
     # Field, not type: the extension name may be carried in the field metadata
     # instead of a resolved extension type, and both shapes are the same

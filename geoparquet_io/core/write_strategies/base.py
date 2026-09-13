@@ -17,6 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from geoparquet_io.core.crs_utils import apply_output_crs
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     decode_carried_geo,
@@ -156,7 +157,6 @@ def build_geo_metadata(
     Returns:
         dict: Complete geo metadata structure ready for embedding in Parquet
     """
-    from geoparquet_io.core.crs_utils import apply_output_crs
 
     version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
     metadata_version = version_config.get("metadata_version", "1.1.0")

@@ -4,6 +4,8 @@
 from enum import Enum
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.duckdb_metadata import get_compression_info as duckdb_get_compression_info
+from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_row_group_stats_summary
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT, carried_version, covering_supported
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
@@ -90,7 +92,6 @@ def get_row_group_stats(parquet_file):
             - total_size: Total file size in bytes
             - avg_group_size: Average group size in bytes
     """
-    from geoparquet_io.core.duckdb_metadata import get_row_group_stats_summary
 
     return get_row_group_stats_summary(parquet_file)
 
@@ -275,9 +276,6 @@ def get_compression_info(parquet_file, column_name=None):
     Returns:
         dict: Mapping of column names to their compression algorithms
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        get_compression_info as duckdb_get_compression_info,
-    )
 
     return duckdb_get_compression_info(parquet_file, column_name)
 
@@ -543,7 +541,6 @@ def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results, 
 
 def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, quiet=False):
     """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 
     geo_meta = get_geo_metadata(parquet_file)
     # `get_geo_metadata` is a read-only reader: it hands the block back exactly

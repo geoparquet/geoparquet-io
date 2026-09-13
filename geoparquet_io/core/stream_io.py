@@ -22,6 +22,11 @@ import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.crs_utils import (
+    crs_string_from_geo_meta,
+    parse_geo_metadata_from_schema,
+    source_crs_string,
+)
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
@@ -29,7 +34,7 @@ from geoparquet_io.core.geo_metadata import (
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
 )
-from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.logging_config import progress, warn
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
     apply_geoarrow_extension_type,
@@ -402,11 +407,6 @@ def _detect_transform_source_crs(
     ones whose query fn ignores CRS), so a failure must never break the transform.
     ``None`` means CRS84/CRS-less input (no reprojection needed).
     """
-    from geoparquet_io.core.crs_utils import (
-        crs_string_from_geo_meta,
-        parse_geo_metadata_from_schema,
-        source_crs_string,
-    )
 
     try:
         if is_stream:
@@ -480,7 +480,6 @@ def execute_transform(
 
         execute_transform("input.parquet", None, make_query, verbose=True)
     """
-    from geoparquet_io.core.logging_config import progress
 
     # Suppress verbose when streaming to stdout (would corrupt the stream)
     if should_stream_output(output_path):

@@ -8,6 +8,7 @@ glob patterns, hive-style) across all gpio commands.
 import os
 
 from geoparquet_io.core.duckdb_utils import sql_path
+from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import (
     get_all_parquet_files,
     get_first_parquet_file,
@@ -31,7 +32,6 @@ def require_parquet_files(path: str) -> None:
     Remote paths are left alone: :func:`get_all_parquet_files` cannot enumerate
     them, and reports the URL itself as the single match.
     """
-    from geoparquet_io.core.exceptions import GeoParquetError
 
     if is_remote_url(path):
         return
@@ -209,7 +209,6 @@ def require_single_file(path: str, command_name: str) -> None:
     Raises:
         GeoParquetError: If path is a partition
     """
-    from geoparquet_io.core.exceptions import GeoParquetError
 
     if is_partition_path(path):
         raise GeoParquetError(
@@ -241,7 +240,6 @@ def raise_for_schema_mismatch(exc: BaseException, path: str) -> None:
         GeoParquetError: When ``path`` is multi-file and ``exc`` is DuckDB's
             schema-mismatch complaint.
     """
-    from geoparquet_io.core.exceptions import GeoParquetError
 
     if not is_partition_path(path):
         return

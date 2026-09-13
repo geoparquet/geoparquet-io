@@ -9,8 +9,11 @@ Evaluates five factors that affect spatial query performance:
 5. Efficient compression (ZSTD)
 """
 
+from geoparquet_io.core.check_parquet_structure import _NO_COMPRESSION_INFO, check_compression
+from geoparquet_io.core.check_spatial_order import check_spatial_order
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.logging_config import error, info, progress, success, warn
+from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 
 
 def _score_to_level(score):
@@ -56,7 +59,6 @@ def _check_geo_bbox_stats(parquet_file, verbose=False):
     Returns:
         dict with 'passed' (bool) and 'detail' (str)
     """
-    from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 
     stats_info = has_parquet_geo_row_group_stats(parquet_file)
     if stats_info["has_stats"]:
@@ -75,7 +77,6 @@ def _check_spatial_sorting(parquet_file, verbose=False):
     Returns:
         dict with 'passed' (bool) and 'detail' (str)
     """
-    from geoparquet_io.core.check_spatial_order import check_spatial_order
 
     try:
         result = check_spatial_order(
@@ -138,10 +139,6 @@ def _check_compression(parquet_file, verbose=False):
     Returns:
         dict with 'passed' (bool) and 'detail' (str)
     """
-    from geoparquet_io.core.check_parquet_structure import (
-        _NO_COMPRESSION_INFO,
-        check_compression,
-    )
 
     result = check_compression(parquet_file, verbose=False, return_results=True, quiet=True)
     if result is None:

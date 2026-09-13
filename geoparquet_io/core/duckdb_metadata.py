@@ -19,10 +19,20 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.crs_utils import geoarrow_crs_to_projjson, merge_longitude_ranges
+from geoparquet_io.core.crs_utils import (
+    _projjson_from_authority,
+    geoarrow_crs_to_projjson,
+    merge_longitude_ranges,
+)
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, sql_path
 from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.file_utils import (
+    get_first_parquet_file,
+    is_partition_path,
+    resolve_file_url,
+)
 from geoparquet_io.core.parquet_schema import root_schema_columns
+from geoparquet_io.core.remote import is_remote_url, is_s3_url, needs_httpfs
 
 # =============================================================================
 # PyArrow Fast Path for Local Files (Issue #232 Performance Fix)
@@ -31,7 +41,6 @@ from geoparquet_io.core.parquet_schema import root_schema_columns
 
 def _is_local_file(path: str) -> bool:
     """Check if path is a local file (not remote URL)."""
-    from geoparquet_io.core.remote import is_remote_url
 
     return not is_remote_url(path)
 
@@ -41,7 +50,6 @@ def _resolve_local_path(parquet_file: str) -> str:
 
     For partitioned datasets, returns the first parquet file.
     """
-    from geoparquet_io.core.file_utils import get_first_parquet_file, is_partition_path
 
     if is_partition_path(parquet_file):
         first_file = get_first_parquet_file(parquet_file)
@@ -338,7 +346,6 @@ def _get_connection_for_file(parquet_file: str, existing_con=None, load_spatial=
         get_duckdb_connection,
         get_duckdb_connection_for_s3,
     )
-    from geoparquet_io.core.remote import is_s3_url, needs_httpfs
 
     if existing_con:
         return existing_con, False  # False = don't close
@@ -362,11 +369,6 @@ def _metadata_path(parquet_file: str) -> str:
     it in one step at the SQL boundary. Escaping here as well would double the
     doubling (#802).
     """
-    from geoparquet_io.core.file_utils import (
-        get_first_parquet_file,
-        is_partition_path,
-        resolve_file_url,
-    )
 
     # For partitions, use first file for metadata operations
     if is_partition_path(parquet_file):
@@ -701,8 +703,6 @@ def resolve_authority_code_crs(crs_value: Any) -> Any:
     pair = _authority_code_crs(crs_value)
     if pair is None:
         return crs_value
-
-    from geoparquet_io.core.crs_utils import _projjson_from_authority
 
     projjson = _projjson_from_authority(*pair)
     return crs_value if projjson is None else json.loads(projjson)

@@ -79,6 +79,11 @@ from geoparquet_io.core.parquet_writer import (
     resolve_row_group_rows,
 )
 from geoparquet_io.core.remote import remote_write_context, upload_if_remote
+from geoparquet_io.core.write_strategies import (
+    WriteStrategy,
+    WriteStrategyFactory,
+    needs_metadata_rewrite,
+)
 
 
 def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
@@ -646,11 +651,6 @@ def write_parquet_with_metadata(
     Returns:
         None
     """
-    from geoparquet_io.core.write_strategies import (
-        WriteStrategy,
-        WriteStrategyFactory,
-        needs_metadata_rewrite,
-    )
 
     configure_verbose(verbose)
 

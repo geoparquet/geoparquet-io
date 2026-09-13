@@ -23,8 +23,10 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
     _detect_version_from_table,
 )
+from geoparquet_io.core.common import compute_geometry_types_via_sql
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.duckdb_utils import (
+    _wrap_query_with_wkb_conversion,
     get_duckdb_connection,
     quote_identifier,
     sql_path,
@@ -33,6 +35,7 @@ from geoparquet_io.core.geo_metadata import compute_bbox_via_sql
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
+from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -126,9 +129,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite."""
-        from geoparquet_io.core.common import compute_geometry_types_via_sql
-        from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
-        from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -349,7 +349,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         row_group_rows: int | None = None,
     ) -> None:
         """Write plain Parquet (no geo metadata) from an Arrow table."""
-        from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 
         validated_compression, validated_level, _ = validate_compression_settings(
             compression, compression_level, verbose
@@ -401,7 +400,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         compression types. For compression_level support, use write_from_table
         which uses PyArrow directly.
         """
-        from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 
         compression_map = {
             "zstd": "ZSTD",

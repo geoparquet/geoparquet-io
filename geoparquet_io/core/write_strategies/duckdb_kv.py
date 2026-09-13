@@ -27,8 +27,10 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _detect_version_from_table,
     _parse_geo_metadata_quietly,
 )
+from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
+    _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     quote_identifier,
     sql_path,
@@ -37,6 +39,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql, declare_carried_bbox_column
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
     build_geo_metadata,
@@ -167,7 +170,6 @@ def _wrap_query_with_crs(
     input_crs: dict | None,
 ) -> str:
     """Wrap query with ST_SetCRS() — delegates to shared helper in common.py."""
-    from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 
     return _common_wrap_query_with_crs(query, geometry_column, input_crs)
 
@@ -272,7 +274,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write query results to GeoParquet using DuckDB COPY TO with KV_METADATA."""
-        from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -480,7 +481,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write with geo metadata (v1.0, v1.1, v2.0)."""
-        from geoparquet_io.core.duckdb_utils import _wrap_query_with_blob_conversion
 
         geo_meta = build_geo_metadata(
             geometry_column=geometry_column,
@@ -656,7 +656,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         extension provides, and the connection below deliberately omits spatial.
         """
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-        from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 
         compression_upper = compression.upper()
         if compression_upper not in VALID_COMPRESSIONS:
@@ -713,7 +712,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         Same contract as the table entry point above: a query with no geometry
         column still carries the input's sidecar keys (#708).
         """
-        from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 
         is_remote = is_remote_url(output_path)
         local_path = self._get_local_path(output_path, is_remote)

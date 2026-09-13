@@ -5,6 +5,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from geoparquet_io.core.duckdb_metadata import get_row_count
+from geoparquet_io.core.logging_config import (
+    configure_verbose,
+    debug,
+    info,
+    progress,
+    success,
+    warn,
+)
+from geoparquet_io.core.partition.by_a5 import partition_by_a5
+
 # Community extensions a partition type cannot run without, checked once before
 # the file loop so an unavailable one is reported once instead of per file.
 _REQUIRED_EXTENSIONS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -115,7 +126,6 @@ def _assert_no_rows_lost(source_file: str, output_dir: str) -> None:
     Raises:
         RuntimeError: If the output holds no files, or fewer rows than the source.
     """
-    from geoparquet_io.core.duckdb_metadata import get_row_count
 
     output_files = sorted(Path(output_dir).glob("**/*.parquet"))
     if not output_files:
@@ -256,15 +266,6 @@ def sub_partition_directory(
         dict with keys: processed, skipped, errors
     """
     from geoparquet_io.core.duckdb_utils import require_community_extension
-    from geoparquet_io.core.logging_config import (
-        configure_verbose,
-        debug,
-        info,
-        progress,
-        success,
-        warn,
-    )
-    from geoparquet_io.core.partition.by_a5 import partition_by_a5
     from geoparquet_io.core.partition.by_h3 import partition_by_h3
     from geoparquet_io.core.partition.by_quadkey import partition_by_quadkey
     from geoparquet_io.core.partition.by_s2 import partition_by_s2

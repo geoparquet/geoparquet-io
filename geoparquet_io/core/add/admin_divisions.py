@@ -7,7 +7,7 @@ This module extends the add_country_codes functionality to support
 multiple admin datasets with hierarchical level support.
 """
 
-from geoparquet_io.core.admin_datasets import AdminDatasetFactory
+from geoparquet_io.core.admin_datasets import AdminDatasetFactory, get_or_cache_dataset
 from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
@@ -20,6 +20,7 @@ from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_NATIVE,
     build_spatial_join_condition,
     quote_identifier,
+    s3_config_scope,
     spatial_join_strategy,
     sql_path,
 )
@@ -383,7 +384,6 @@ def _setup_dataset_and_columns(
     input_parquet, dataset_name, dataset_source, levels, verbose, no_cache=False
 ):
     """Setup dataset and get column information."""
-    from geoparquet_io.core.admin_datasets import get_or_cache_dataset
 
     dataset = AdminDatasetFactory.create(dataset_name, dataset_source, verbose)
 
@@ -882,7 +882,6 @@ def add_admin_divisions_multi(
     has_native_geometry = input_bbox_info.get("status") == "native"
 
     # Create DuckDB connection with ambient S3 config from dataset
-    from geoparquet_io.core.duckdb_utils import s3_config_scope
 
     with s3_config_scope(dataset.get_s3_config()):
         con = _setup_duckdb_connection()

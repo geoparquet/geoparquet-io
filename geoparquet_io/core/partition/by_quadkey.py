@@ -10,6 +10,7 @@ from geoparquet_io.core.add.quadkey import add_quadkey_column
 from geoparquet_io.core.constants import (
     DEFAULT_QUADKEY_COLUMN_NAME,
 )
+from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -53,7 +54,6 @@ def _ensure_quadkey_column(
     Returns:
         tuple: (input_file_to_use, temp_file_or_none)
     """
-    from geoparquet_io.core.duckdb_metadata import get_column_names
 
     column_names = get_column_names(input_parquet)
 

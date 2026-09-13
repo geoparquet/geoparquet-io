@@ -7,8 +7,10 @@ by examining GeoParquet metadata and column names.
 
 import duckdb
 
+from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import carried_column_name
 from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.remote import needs_httpfs
 
 # Standard geometry column names for fallback detection
 STANDARD_GEOMETRY_NAMES = ["geometry", "geom", "wkb_geometry", "shape", "the_geom"]
@@ -47,8 +49,6 @@ def detect_parquet_geometry_column(parquet_file: str, verbose: bool = False) -> 
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
-    from geoparquet_io.core.file_utils import resolve_file_url
-    from geoparquet_io.core.remote import needs_httpfs
 
     # Normalize path for consistent handling of URLs and local files
     raw_url = resolve_file_url(parquet_file, verbose=False)

@@ -12,7 +12,12 @@ from functools import lru_cache
 from typing import Any
 
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
+from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
+from geoparquet_io.core.geometry_detection import (
+    detect_geometry_column_from_names,
+    detect_parquet_geometry_column,
+)
 from geoparquet_io.core.logging_config import debug, warn
 
 
@@ -341,7 +346,6 @@ def _primary_column_of_file(geo_meta: dict, parquet_file) -> str | None:
     projected coordinates as if they were lon/lat -- where the raw block used to
     raise (#887 review). Ask the file instead.
     """
-    from geoparquet_io.core.geometry_detection import detect_parquet_geometry_column
 
     primary_col = geo_meta.get("primary_column")
     if isinstance(primary_col, str):
@@ -459,7 +463,6 @@ def normalize_projjson_crs(crs, source_description: str):
 
     ``source_description`` is the input path, quoted back to the user in errors.
     """
-    from geoparquet_io.core.exceptions import GeoParquetError
 
     if not isinstance(crs, dict):
         return crs
@@ -629,7 +632,6 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     a malformed carried block goes through :func:`sanitize_geo_metadata` and is
     treated the way an absent one is (#887).
     """
-    from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
 
     metadata = table.schema.metadata
     if not metadata or b"geo" not in metadata:

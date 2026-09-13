@@ -30,6 +30,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
     _get_query_column_type,
@@ -680,7 +681,6 @@ def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):
     Raises:
         click.ClickException: If column already exists or operation fails
     """
-    from geoparquet_io.core.duckdb_metadata import get_column_names
 
     # Check if column already exists using DuckDB
     column_names = get_column_names(parquet_file)

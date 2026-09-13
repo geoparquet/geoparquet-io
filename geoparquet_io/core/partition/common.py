@@ -6,6 +6,7 @@ import shutil
 from contextlib import contextmanager
 
 from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.duckdb_metadata import get_row_count
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -148,7 +149,6 @@ def raise_if_no_rows(input_parquet: str) -> None:
     it would have reported. The ``None`` guard in
     :func:`_calculate_size_estimates` is the backstop.
     """
-    from geoparquet_io.core.duckdb_metadata import get_row_count
 
     try:
         row_count = get_row_count(input_parquet)
