@@ -245,8 +245,8 @@ _READ_ONLY_CWD_SCRIPT = f"""
 import os, pathlib, sys
 import duckdb
 import pyarrow.parquet as pq
-from geoparquet_io.core.common import write_parquet_with_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 source, output = sys.argv[1], sys.argv[2]
 assert not os.access(os.getcwd(), os.W_OK), "working directory is still writable"

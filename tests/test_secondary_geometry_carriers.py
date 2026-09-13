@@ -423,8 +423,9 @@ _DETERMINISM_SCRIPT = textwrap.dedent(
     source, out, do_import = sys.argv[1], sys.argv[2], sys.argv[3] == "import"
     if do_import:
         import geoarrow.pyarrow  # noqa: F401
-    from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+    from geoparquet_io.core.common import get_parquet_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     con = get_duckdb_connection(load_spatial=True)
     metadata, _ = get_parquet_metadata(source)
@@ -550,7 +551,7 @@ class TestCarrierHelperDefensivePaths:
         """A conversion failure must leave the table alone, not raise mid-write."""
         import geoarrow.pyarrow as ga
 
-        from geoparquet_io.core import common
+        from geoparquet_io.core import arrow_geo_metadata
 
         table = pa.table(
             {"geometry": ga.as_wkb(pa.array([_wkb_point(1.0, 2.0)], type=pa.binary()))}
@@ -560,13 +561,13 @@ class TestCarrierHelperDefensivePaths:
             lambda array: (_ for _ in ()).throw(ValueError("boom")),
         )
 
-        result = common._strip_geoarrow_to_plain_wkb(table, "geometry", verbose=True)
+        result = arrow_geo_metadata._strip_geoarrow_to_plain_wkb(table, "geometry", verbose=True)
 
         assert result is table
 
     def test_canonicalize_skips_a_column_it_cannot_convert(self, monkeypatch):
         """Same contract for the field-metadata canonicalization pass."""
-        from geoparquet_io.core import common
+        from geoparquet_io.core import arrow_geo_metadata
 
         field = pa.field(
             "geometry", pa.large_binary(), metadata={b"ARROW:extension:name": b"geoarrow.wkb"}
@@ -580,7 +581,7 @@ class TestCarrierHelperDefensivePaths:
             lambda array: (_ for _ in ()).throw(ValueError("boom")),
         )
 
-        result = common._canonicalize_wkb_columns(table, {"geometry"}, verbose=True)
+        result = arrow_geo_metadata._canonicalize_wkb_columns(table, {"geometry"}, verbose=True)
 
         assert result.schema.field("geometry").type == pa.large_binary()
 

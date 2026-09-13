@@ -134,7 +134,7 @@ def test_compute_geometry_types_from_arrow_is_dimension_aware():
     import shapely
     from shapely import wkt as shapely_wkt
 
-    from geoparquet_io.core import common, geo_metadata
+    from geoparquet_io.core import arrow_geo_metadata, geo_metadata
 
     for _dim, (wkt, expected) in POLYGON_BY_DIM.items():
         table = pa.table(
@@ -145,5 +145,5 @@ def test_compute_geometry_types_from_arrow_is_dimension_aware():
                 )
             }
         )
-        assert common._compute_geometry_types(table, "geometry", False) == [expected]
+        assert arrow_geo_metadata._compute_geometry_types(table, "geometry", False) == [expected]
         assert geo_metadata._compute_geometry_types(table, "geometry", False) == [expected]
