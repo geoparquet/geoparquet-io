@@ -17,11 +17,12 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
     split_column_list,
 )
-from geoparquet_io.core.common import check_bbox_structure, get_parquet_metadata
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import get_crs_display_name
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,

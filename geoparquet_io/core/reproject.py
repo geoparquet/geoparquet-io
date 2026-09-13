@@ -13,11 +13,8 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.common import (
-    check_bbox_structure,
-    get_parquet_metadata,
-    validate_compression_settings,
-)
+from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.common import get_parquet_metadata, validate_compression_settings
 from geoparquet_io.core.crs_utils import (
     NULL_CRS_NO_FLAG_ERROR,
     apply_target_crs_to_geo_meta,
@@ -35,7 +32,11 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import strip_derived_stats
+from geoparquet_io.core.geo_metadata import (
+    carried_geometry_column,
+    sanitized_carried_geo,
+    strip_derived_stats,
+)
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.remote import (
@@ -73,7 +74,6 @@ def _carried_geo(metadata) -> dict:
     ``TypeError`` and a string-, list- or null-shaped block crashed the CRS
     lookups with a bare ``AttributeError``.
     """
-    from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
     return sanitized_carried_geo(metadata)
 
@@ -88,7 +88,6 @@ def _detect_geometry_column_from_table(table: pa.Table) -> str:
         Geometry column name — the block's primary column, else the standard
         name the table's own schema carries, else 'geometry'.
     """
-    from geoparquet_io.core.geo_metadata import carried_geometry_column
 
     # Sanitizing may have dropped a malformed `primary_column` without being
     # able to repair it from a single column; `carried_geometry_column` then

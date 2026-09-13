@@ -17,8 +17,8 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.common import DEFAULT_GEOPARQUET_VERSION, GEOPARQUET_VERSIONS
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION, GEOPARQUET_VERSIONS
 from geoparquet_io.core.validate import CheckStatus
 from tests.conftest import (
     get_geo_metadata,
@@ -412,7 +412,7 @@ class TestExistingTestFiles:
 
     def test_austria_bbox_covering_has_nonstandard_bbox_name(self, austria_bbox_covering_file):
         """Test austria_bbox_covering.parquet has 'geometry_bbox' column (not 'bbox')."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         bbox_info = check_bbox_structure(austria_bbox_covering_file)
         assert bbox_info["has_bbox_column"] is True
@@ -704,7 +704,7 @@ class TestConvertSkipsBbox:
 
     def test_convert_2_0_no_bbox_column(self, geojson_input, temp_output_file):
         """Converting to 2.0 should not add bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input,
@@ -718,7 +718,7 @@ class TestConvertSkipsBbox:
 
     def test_convert_parquet_geo_only_no_bbox_column(self, geojson_input, temp_output_file):
         """Converting to parquet-geo-only should not add bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input,
@@ -732,7 +732,7 @@ class TestConvertSkipsBbox:
 
     def test_convert_1_1_has_bbox_column(self, geojson_input, temp_output_file):
         """Converting to 1.1 should add bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input,
@@ -746,7 +746,7 @@ class TestConvertSkipsBbox:
 
     def test_convert_1_0_has_bbox_column(self, geojson_input, temp_output_file):
         """Converting to 1.0 should add bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input,
@@ -762,7 +762,7 @@ class TestConvertSkipsBbox:
         self, fields_geom_type_only_file, temp_output_file
     ):
         """Converting parquet with bbox to 2.0 should remove bbox."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         # Verify source has bbox
         source_bbox = check_bbox_structure(fields_geom_type_only_file)
@@ -783,7 +783,7 @@ class TestConvertSkipsBbox:
         self, fields_geom_type_only_file, temp_output_file
     ):
         """Converting parquet with bbox to parquet-geo-only should remove bbox."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         # Verify source has bbox
         source_bbox = check_bbox_structure(fields_geom_type_only_file)
@@ -804,7 +804,7 @@ class TestConvertSkipsBbox:
         self, fields_geom_type_only_file, temp_output_file
     ):
         """Converting parquet with bbox to 1.1 should preserve bbox."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             fields_geom_type_only_file,
@@ -1292,7 +1292,7 @@ class TestGeoParquet11GeoArrow:
 
     def test_output_has_no_bbox_column(self, geojson_input, temp_output_file):
         """Output must not have a bbox column (the key benefit over plain 1.1)."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input, temp_output_file, geoparquet_version="1.1-geoarrow", verbose=False
@@ -1302,7 +1302,7 @@ class TestGeoParquet11GeoArrow:
 
     def test_plain_1_1_has_bbox_column(self, geojson_input, temp_output_file):
         """Sanity check: plain 1.1 DOES add a bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input, temp_output_file, geoparquet_version="1.1", verbose=False
@@ -1440,7 +1440,7 @@ class TestGeoParquet11GeoArrow:
         """Every input format must yield native GeoArrow encoding + valid GeoParquet under 1.1-geoarrow."""
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
         from geoparquet_io.core.convert import convert_to_geoparquet
 
         input_file = str(test_data_dir / fixture_name)

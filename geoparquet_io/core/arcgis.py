@@ -19,11 +19,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.arrow_types import _cast_table_to_schema
 from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
 )
-from geoparquet_io.core.common import _cast_table_to_schema
 from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
     _projjson_from_authority,

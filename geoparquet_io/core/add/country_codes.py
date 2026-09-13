@@ -2,12 +2,8 @@
 
 from typing import TYPE_CHECKING
 
-from geoparquet_io.core.common import (
-    check_bbox_structure,
-    get_bbox_advice,
-    get_dataset_bounds,
-    get_parquet_metadata,
-)
+from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
+from geoparquet_io.core.common import get_dataset_bounds, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_BBOX_PREFILTER,
     SPATIAL_JOIN_NATIVE,

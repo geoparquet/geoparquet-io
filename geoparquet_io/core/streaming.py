@@ -24,6 +24,16 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
+from geoparquet_io.core.geo_metadata import (
+    backfill_derived_stats,
+    carried_column_name,
+    carried_geometry_column,
+    carried_version,
+    decode_carried_geo,
+    prune_geo_metadata_to_columns,
+    sanitize_geo_metadata,
+)
+
 # Marker for stdin/stdout in CLI arguments
 STREAM_MARKER = "-"
 
@@ -226,7 +236,6 @@ def find_geometry_column_from_metadata(metadata: dict | None) -> str | None:
     Returns:
         Geometry column name or None if the block does not name a usable one
     """
-    from geoparquet_io.core.geo_metadata import carried_column_name, decode_carried_geo
 
     if not metadata or b"geo" not in metadata:
         return None
@@ -344,10 +353,6 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
     import geoarrow.pyarrow  # noqa: F401
     import pyarrow.parquet as pq
 
-    from geoparquet_io.core.geo_metadata import (
-        backfill_derived_stats,
-        prune_geo_metadata_to_columns,
-    )
     from geoparquet_io.core.logging_config import debug
 
     if verbose:
@@ -592,10 +597,6 @@ def extract_crs_from_table(
     if table.schema.metadata and b"geo" in table.schema.metadata:
         try:
             from geoparquet_io.core.crs_utils import crs_is_explicitly_null, warn_null_crs_once
-            from geoparquet_io.core.geo_metadata import (
-                carried_geometry_column,
-                sanitize_geo_metadata,
-            )
 
             geo_bytes = table.schema.metadata[b"geo"]
             # `Table.write()` resolves the CRS through here before it builds any
@@ -645,7 +646,6 @@ def extract_version_from_metadata(metadata: dict | None) -> str | None:
     """
     if not metadata or b"geo" not in metadata:
         return None
-    from geoparquet_io.core.geo_metadata import carried_version
 
     try:
         geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))

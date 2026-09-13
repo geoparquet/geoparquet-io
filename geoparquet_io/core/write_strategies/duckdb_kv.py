@@ -34,7 +34,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     validate_compression_level,
 )
-from geoparquet_io.core.geo_metadata import declare_carried_bbox_column
+from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql, declare_carried_bbox_column
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.write_strategies.base import (
@@ -538,7 +538,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         Both come out of one scan, so a caller that invalidated both (a row
         filter, a reprojection, a multi-file merge) pays for a single pass.
         """
-        from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql
 
         need_bbox = "bbox" not in col_meta
         need_types = "geometry_types" not in col_meta

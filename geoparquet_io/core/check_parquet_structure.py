@@ -3,7 +3,9 @@
 
 from enum import Enum
 
-from geoparquet_io.core.common import check_bbox_structure, detect_geoparquet_file_type, format_size
+from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.common import detect_geoparquet_file_type, format_size
+from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT, carried_version, covering_supported
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
@@ -541,11 +543,6 @@ def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results, 
 def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, quiet=False):
     """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-    from geoparquet_io.core.geo_metadata import (
-        BBOX_REWRITE_HINT,
-        carried_version,
-        covering_supported,
-    )
 
     geo_meta = get_geo_metadata(parquet_file)
     # `get_geo_metadata` is a read-only reader: it hands the block back exactly

@@ -45,7 +45,7 @@ __all__ = [
     "wfs_to_table",
 ]
 
-from geoparquet_io.core.common import _cast_table_to_schema, _compute_unified_schema
+from geoparquet_io.core.arrow_types import _cast_table_to_schema, _compute_unified_schema
 from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,

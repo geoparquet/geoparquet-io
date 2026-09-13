@@ -1401,7 +1401,7 @@ def test_check_bbox_structure_survives_a_malformed_block(col, case, block, tmp_p
     holds it and the reader guards instead. A ``columns`` that is not an object
     declares no covering, which is the truthful answer, not a crash.
     """
-    from geoparquet_io.core.common import check_bbox_structure
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
 
     reset_malformed_geo_warnings()
     path = tmp_path / f"checkbbox_{col}_{case}.parquet"
@@ -1414,7 +1414,7 @@ def test_check_bbox_structure_survives_a_malformed_block(col, case, block, tmp_p
 
 def test_check_bbox_structure_survives_a_non_object_covering(tmp_path):
     """``covering`` itself can be the wrong type; ``.get('bbox')`` crashed on it."""
-    from geoparquet_io.core.common import check_bbox_structure
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
 
     reset_malformed_geo_warnings()
     block = {
@@ -1430,7 +1430,7 @@ def test_check_bbox_structure_survives_a_non_object_covering(tmp_path):
 
 def test_check_bbox_structure_still_finds_a_real_covering(tmp_path):
     """The guard must not cost a well-formed file its covering."""
-    from geoparquet_io.core.common import check_bbox_structure
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
 
     covering = {
         "bbox": {

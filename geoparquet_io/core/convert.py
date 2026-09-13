@@ -7,6 +7,7 @@ from pathlib import Path
 
 import duckdb
 
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.common import format_size
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
@@ -35,7 +36,7 @@ from geoparquet_io.core.file_utils import (
     resolve_file_url,
     validate_output_path,
 )
-from geoparquet_io.core.geo_metadata import build_bbox_covering
+from geoparquet_io.core.geo_metadata import build_bbox_covering, sanitize_geo_metadata
 from geoparquet_io.core.geometry_repair import (
     repair_arrow_table_geometry,
     repair_query_geometry,
@@ -205,7 +206,6 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
             - "metadata": dict - per-column metadata from input (crs, encoding, etc.)
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-    from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 
     result = {"primary": None, "secondary": [], "metadata": {}}
 
@@ -1233,7 +1233,7 @@ def _convert_spatial_path(
         tuple: (query, geometry_info) where geometry_info contains primary/secondary columns
                and their metadata. Returns (None, None) if no geometry found.
     """
-    from geoparquet_io.core.common import check_bbox_structure, should_skip_bbox
+    from geoparquet_io.core.common import should_skip_bbox
 
     # Use multi-geometry detection for parquet files
     if is_parquet:

@@ -16,10 +16,8 @@ import shutil
 import duckdb
 
 from geoparquet_io.core.admin_datasets import AdminDatasetFactory
-from geoparquet_io.core.common import (
-    check_bbox_structure,
-    get_parquet_metadata,
-)
+from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
     reproject_to_source_sql,
     source_crs_string,

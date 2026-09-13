@@ -2,12 +2,10 @@
 
 import pytest
 
+from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
 from geoparquet_io.core.common import (
-    _get_geometry_type_name,
-    check_bbox_structure,
     detect_geoparquet_file_type,
     format_size,
-    get_bbox_advice,
     get_parquet_metadata,
     parse_size_string,
     should_skip_bbox,
@@ -29,6 +27,7 @@ from geoparquet_io.core.file_utils import (
     safe_file_url,
     validate_parquet_extension,
 )
+from geoparquet_io.core.geo_metadata import _get_geometry_type_name
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.remote import (
     get_remote_error_hint,

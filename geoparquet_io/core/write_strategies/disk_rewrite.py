@@ -29,6 +29,7 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.geo_metadata import compute_bbox_via_sql
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
@@ -127,7 +128,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite."""
         from geoparquet_io.core.common import compute_geometry_types_via_sql
         from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
-        from geoparquet_io.core.geo_metadata import compute_bbox_via_sql
         from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 
         configure_verbose(verbose)

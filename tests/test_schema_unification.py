@@ -7,7 +7,7 @@ specifically the int64 vs decimal128 issue (GitHub #475).
 
 import pyarrow as pa
 
-from geoparquet_io.core.common import (
+from geoparquet_io.core.arrow_types import (
     _cast_table_to_schema,
     _compute_unified_schema,
     _promote_numeric_type,
