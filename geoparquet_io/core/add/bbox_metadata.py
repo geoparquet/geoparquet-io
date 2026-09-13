@@ -33,6 +33,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
+    arrow_bbox_covering_problem,
     covering_supported,
     parse_geo_metadata,
     sanitize_geo_metadata,
@@ -173,6 +174,16 @@ def require_geo_metadata_for_covering(geo_meta: object, source: str | None = Non
     )
 
 
+def _cannot_declare_message(problem: str, source: str | None) -> str:
+    """The refusal: declaring the covering is this command's whole job, so it fails loudly."""
+    rewrite = (
+        f"Rewrite it in the spec's order: gpio add bbox --force {source} out.parquet"
+        if source
+        else "Rewrite it in the spec's order: gpio.read(...).add_bbox()"
+    )
+    return f"Cannot add bbox covering metadata: {problem}. {rewrite}"
+
+
 def _covering_for(bbox_column: str) -> dict:
     """The `covering` value pointing at a bbox struct column."""
     return {
@@ -209,6 +220,7 @@ def add_bbox_metadata_table(
         ValueError: If the geometry or bbox column is missing, or the declared
             version predates GeoParquet 1.1
     """
+
     from geoparquet_io.core.streaming import find_geometry_column_from_table
 
     geom_col = geometry_column or find_geometry_column_from_table(table)
@@ -220,6 +232,10 @@ def add_bbox_metadata_table(
 
     if bbox_column not in table.column_names:
         raise ValueError(f"Bbox column '{bbox_column}' not found. Use add_bbox() first.")
+
+    problem = arrow_bbox_covering_problem(bbox_column, table.schema.field(bbox_column))
+    if problem is not None:
+        raise ValueError(_cannot_declare_message(problem, None))
 
     schema_metadata = dict(table.schema.metadata) if table.schema.metadata else {}
 
@@ -322,6 +338,9 @@ def add_bbox_metadata(
             "No valid bbox column found in the file. Please add a bbox column first.\n"
             f"Add one: gpio add bbox {parquet_file}"
         )
+
+    if bbox_info.get("covering_problem"):
+        raise GeoParquetError(_cannot_declare_message(bbox_info["covering_problem"], parquet_file))
 
     # Get existing metadata
     metadata, _ = get_parquet_metadata(parquet_file)

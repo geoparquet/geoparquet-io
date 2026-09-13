@@ -13,8 +13,9 @@ from typing import Literal, TypedDict, cast
 
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
-from geoparquet_io.core.geo_metadata import is_covering_path
+from geoparquet_io.core.geo_metadata import bbox_covering_problem, is_covering_path
 from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.parquet_schema import schema_direct_children
 
 #: Struct fields a bbox covering column must expose.
 _BBOX_REQUIRED_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
@@ -46,21 +47,29 @@ def _bbox_column_from_covering(geo_meta) -> str | None:
     return None
 
 
-def _schema_struct_child_names(schema_info, column_name) -> set | None:
-    """Child field names of struct column ``column_name`` from a flat
-    ``parquet_schema()`` listing; ``None`` if the column is absent or not a struct."""
-    for i, col in enumerate(schema_info):
+def _schema_struct_children(
+    schema_info: list[dict], column_name: str
+) -> tuple[list[str], list[str]] | None:
+    """``(field names, field types)`` of struct column ``column_name``, in schema order.
+
+    None if the column is absent or not a struct. Direct children only: the
+    flat ``parquet_schema()`` listing is depth-first, so a nested child's own
+    children must not be read as siblings.
+    """
+    for index, col in enumerate(schema_info):
         if col.get("name") != column_name:
             continue
-        num_children = col.get("num_children") or 0
-        if num_children < 1:
+        if (col.get("num_children") or 0) < 1:
             return None
-        return {
-            schema_info[i + j].get("name", "")
-            for j in range(1, num_children + 1)
-            if i + j < len(schema_info)
-        }
+        children = schema_direct_children(schema_info, index)
+        return [c.get("name", "") for c in children], [str(c.get("type", "")) for c in children]
     return None
+
+
+def _schema_struct_child_field_names(schema_info, column_name) -> list[str] | None:
+    """Child field names of struct column ``column_name``, in schema order, or None."""
+    children = _schema_struct_children(schema_info, column_name)
+    return children[0] if children else None
 
 
 def _find_bbox_column_in_schema(schema_info, verbose):
@@ -163,9 +172,22 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
     return False
 
 
-def _determine_bbox_status(has_bbox_column, bbox_column_name, has_bbox_metadata):
+def _determine_bbox_status(
+    has_bbox_column: bool,
+    bbox_column_name: str | None,
+    has_bbox_metadata: bool,
+    covering_problem: str | None = None,
+) -> tuple[Literal["optimal", "suboptimal", "poor"], str]:
     """Determine bbox status and message."""
-    if has_bbox_column and has_bbox_metadata:
+    if has_bbox_column and covering_problem:
+        # Before "optimal": a covering over this struct is one `check spec`
+        # rejects, whether the file declares it already or would get it (#1035).
+        verb = "declares a" if has_bbox_metadata else "cannot get a"
+        return (
+            "suboptimal",
+            f"⚠️  Found bbox column '{bbox_column_name}' that {verb} 'covering': {covering_problem}",
+        )
+    elif has_bbox_column and has_bbox_metadata:
         return "optimal", f"✓ Found bbox column '{bbox_column_name}' with proper metadata covering"
     elif has_bbox_column:
         return (
@@ -182,6 +204,8 @@ class BboxInfo(TypedDict, total=False):
     has_bbox_column: bool
     bbox_column_name: str | None
     has_bbox_metadata: bool
+    #: Why no 1.1 ``covering`` may point at that column, or None when one may (#1035).
+    covering_problem: str | None
     status: Literal["optimal", "suboptimal", "poor", "native"]
     message: str
 
@@ -215,7 +239,7 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
     bbox_column_name = None
     covering_column = _bbox_column_from_covering(geo_meta)
     if covering_column:
-        children = _schema_struct_child_names(schema_info, covering_column)
+        children = _schema_struct_child_field_names(schema_info, covering_column)
         if children and _BBOX_REQUIRED_FIELDS.issubset(children):
             bbox_column_name = covering_column
             if verbose:
@@ -229,14 +253,24 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
         geo_meta, has_bbox_column, verbose, bbox_column_name
     )
 
+    covering_problem = None
+    if has_bbox_column:
+        struct = _schema_struct_children(schema_info, bbox_column_name)
+        covering_problem = bbox_covering_problem(
+            bbox_column_name, struct[0] if struct else None, struct[1] if struct else None
+        )
+
     # Determine status and message
-    status, message = _determine_bbox_status(has_bbox_column, bbox_column_name, has_bbox_metadata)
+    status, message = _determine_bbox_status(
+        has_bbox_column, bbox_column_name, has_bbox_metadata, covering_problem
+    )
 
     if verbose:
         debug("\nFinal results:")
         debug(f"  has_bbox_column: {has_bbox_column}")
         debug(f"  bbox_column_name: {bbox_column_name}")
         debug(f"  has_bbox_metadata: {has_bbox_metadata}")
+        debug(f"  covering_problem: {covering_problem}")
         debug(f"  status: {status}")
         debug(f"  message: {message}")
 
@@ -244,6 +278,7 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
         "has_bbox_column": has_bbox_column,
         "bbox_column_name": bbox_column_name if has_bbox_column else None,
         "has_bbox_metadata": has_bbox_metadata,
+        "covering_problem": covering_problem,
         "status": status,
         "message": message,
     }

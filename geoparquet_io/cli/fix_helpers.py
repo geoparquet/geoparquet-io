@@ -6,6 +6,7 @@ import shutil
 import click
 
 from geoparquet_io.core.file_utils import is_same_file_path
+from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.remote import is_remote_url
 
 
@@ -368,7 +369,15 @@ def apply_check_all_fixes(
     )
 
     if not needs_fixes:
-        if not quiet:
+        problem = (all_results.get("bbox") or {}).get("covering_problem")
+        if problem:
+            click.echo(
+                click.style(
+                    f"\n⚠ Nothing --fix can repair here - {problem}. {BBOX_REWRITE_HINT}",
+                    fg="yellow",
+                )
+            )
+        elif not quiet:
             click.echo(click.style("\n✓ No fixes needed - file is already optimal!", fg="green"))
         return None
 

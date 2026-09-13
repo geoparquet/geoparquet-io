@@ -23,9 +23,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from click.testing import CliRunner
 
-from geoparquet_io.cli.main import cli
 from tests.fix_output_oracle import (
     CRS84,
     NO_GEO_BLOCK,
@@ -33,15 +31,9 @@ from tests.fix_output_oracle import (
     assert_bbox_column_matches_geometry,
     assert_fix_output_is_sound,
     covering_of,
+    run_cli,
     spec_failures,
 )
-
-
-def run_cli(*args: object) -> str:
-    """Invoke ``gpio`` and insist it succeeded."""
-    result = CliRunner().invoke(cli, [str(a) for a in args])
-    assert result.exit_code == 0, result.output
-    return result.output
 
 
 @dataclass(frozen=True)
@@ -579,40 +571,3 @@ def test_every_fix_entry_point_is_covered():
     )
     for entry_point, reference in COVERED_ENTRY_POINTS.items():
         assert callable(_resolve(reference)), f"{entry_point}: {reference} is not a test"
-
-
-# ---------------------------------------------------------------------------
-# What the oracle found
-# ---------------------------------------------------------------------------
-
-
-class TestKnownDefectsInTheFixes:
-    """Defects WP-1 turned up, pinned rather than repaired here: this repo fixes
-    cross-cutting defects in their own PR."""
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "gpio #1035: check compression/row-group/spatial --fix upgrade a 1.0 "
-            "file to 1.1 and declare a covering over its bbox column without "
-            "checking that the column can legally be one. With Overture's "
-            "xmin/xmax/ymin/ymax field order the output fails gpio's own "
-            "`check spec` on covering_bbox_structure -- a valid input turned "
-            "into an invalid output."
-        ),
-    )
-    def test_a_rewrite_fix_does_not_declare_a_covering_the_spec_rejects(
-        self, unsorted_test_file, tmp_path
-    ):
-        """``tests/data/unsorted.parquet`` is the shape as shipped: 1.0, bbox in
-        Overture's ``xmin, xmax, ymin, ymax`` order, valid because 1.0 cannot
-        carry a covering to point at the column."""
-        broken = tmp_path / "overture.parquet"
-        shutil.copy2(unsorted_test_file, broken)
-        assert_clean_input(broken)
-        fixed = tmp_path / "fixed.parquet"
-
-        output = run_cli("check", "row-group", broken, "--fix", "--fix-output", fixed)
-
-        assert "No fix needed" not in output, "the fix declined, so nothing was measured"
-        assert_fix_output_is_sound(fixed, expected_rows=1445, expected_crs=CRS84)

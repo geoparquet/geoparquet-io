@@ -30,6 +30,7 @@ from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_commo
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
+from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.logging_config import configure_verbose
 
 # CheckDefaultGroup: defaults to 'all' when no subcommand is provided
@@ -977,7 +978,20 @@ def check_bbox_cmd(
             if fix:
                 if not result.get("fix_available", False):
                     if show_output:
-                        click.echo(click.style("\n✓ No fix needed - bbox is optimal!", fg="green"))
+                        # Not "optimal": `--fix` declines because the repair
+                        # rewrites the column, not the metadata (#1035).
+                        if result.get("cannot_declare_covering"):
+                            click.echo(
+                                click.style(
+                                    f"\n⚠ No fix available - {result['covering_problem']}. "
+                                    f"{BBOX_REWRITE_HINT}",
+                                    fg="yellow",
+                                )
+                            )
+                        else:
+                            click.echo(
+                                click.style("\n✓ No fix needed - bbox is optimal!", fg="green")
+                            )
                     continue
 
                 # Check if this is a removal (v2/parquet-geo-only) or addition (v1.x)

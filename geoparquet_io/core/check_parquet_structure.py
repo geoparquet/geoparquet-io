@@ -541,7 +541,11 @@ def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results, 
 def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, quiet=False):
     """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-    from geoparquet_io.core.geo_metadata import carried_version, covering_supported
+    from geoparquet_io.core.geo_metadata import (
+        BBOX_REWRITE_HINT,
+        carried_version,
+        covering_supported,
+    )
 
     geo_meta = get_geo_metadata(parquet_file)
     # `get_geo_metadata` is a read-only reader: it hands the block back exactly
@@ -574,10 +578,16 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, 
     needs_bbox_column = not bbox_info["has_bbox_column"]
     # 'covering' is 1.1-only, so a 1.0 file with a bbox column is not missing anything
     # it is allowed to have — the "outdated version" issue above is the actionable one.
+    # A covering this struct cannot legally carry is reported as the problem
+    # (declared already, or the one `--fix` would otherwise add); the repair is
+    # a schema rewrite, which `gpio add bbox --force` does (#1035).
+    covering_problem = bbox_info.get("covering_problem") if bbox_info["has_bbox_column"] else None
+    cannot_declare_covering = bool(covering_problem)
     needs_bbox_metadata = (
         covering_supported(version)
         and bbox_info["has_bbox_column"]
         and not bbox_info["has_bbox_metadata"]
+        and not cannot_declare_covering
     )
 
     if needs_bbox_column:
@@ -588,6 +598,15 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, 
         issues.append("Bbox column exists but missing metadata covering")
         recommendations.append("Add bbox covering to metadata")
 
+    if cannot_declare_covering:
+        declared = bbox_info["has_bbox_metadata"] and covering_supported(version)
+        issues.append(
+            ("Covering declared over a " if declared else "Cannot declare a covering: ")
+            + str(covering_problem)
+            + (" -- gpio check spec rejects it" if declared else "")
+        )
+        recommendations.append(BBOX_REWRITE_HINT)
+
     # The inverse mismatch: a pre-1.1 file that carries the 1.1-only key anyway.
     # 'gpio check spec' rejects such a file, so don't affirm it here.
     has_illegal_covering = bbox_info["has_bbox_metadata"] and not covering_supported(version)
@@ -595,7 +614,12 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, 
         issues.append(f"Metadata covering present but version {version} predates 'covering' (1.1)")
         recommendations.append("Upgrade to version 1.1.0+ to keep the bbox covering")
 
-    passed = version >= "1.1.0" and not needs_bbox_column and not needs_bbox_metadata
+    passed = (
+        version >= "1.1.0"
+        and not needs_bbox_column
+        and not needs_bbox_metadata
+        and not cannot_declare_covering
+    )
 
     # Always suggest v2.0 upgrade for v1.x files
     recommendations.append(
@@ -618,6 +642,10 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, 
                     f"❌ Found bbox column '{bbox_info['bbox_column_name']}' with covering "
                     f"metadata, but 'covering' requires GeoParquet 1.1+ (this file is {version}) "
                     "— run 'gpio check spec' for details"
+                )
+            elif cannot_declare_covering:
+                warn(
+                    f"⚠️  {issues[-2] if has_illegal_covering else issues[-1]}. {BBOX_REWRITE_HINT}"
                 )
             elif bbox_info["has_bbox_metadata"]:
                 success(
@@ -653,6 +681,10 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, 
             "bbox_column_name": bbox_info.get("bbox_column_name"),
             "needs_bbox_column": needs_bbox_column,
             "needs_bbox_metadata": needs_bbox_metadata,
+            # There is something wrong and `--fix` declines to touch it: the
+            # repair is a schema rewrite (#1035).
+            "cannot_declare_covering": cannot_declare_covering,
+            "covering_problem": covering_problem,
             "issues": issues,
             "recommendations": recommendations,
             "fix_available": needs_bbox_column or needs_bbox_metadata,

@@ -197,19 +197,13 @@ def _has_carried_bbox(original_metadata: dict | None, geometry_column: str) -> b
     return isinstance(col_meta, dict) and col_meta.get("bbox") is not None
 
 
-def _detect_bbox_column(schema: pa.Schema) -> dict:
-    """Detect bbox column from schema using common naming conventions."""
-    for name in schema.names:
-        if name in ["bbox", "bounds", "extent"] or name.endswith("_bbox"):
-            field = schema.field(name)
-            if hasattr(field.type, "names") and set(field.type.names) >= {
-                "xmin",
-                "ymin",
-                "xmax",
-                "ymax",
-            }:
-                return {"has_bbox_column": True, "bbox_column_name": name}
-    return {"has_bbox_column": False, "bbox_column_name": None}
+def _detect_bbox_column(schema: pa.Schema, original_metadata: dict | None) -> dict:
+    """The bbox column this write may declare, through the shared gate (#1035)."""
+    from geoparquet_io.core.geo_metadata import bbox_column_to_declare
+    from geoparquet_io.core.write_strategies.base import _parse_existing_geo_metadata
+
+    name = bbox_column_to_declare(schema, _parse_existing_geo_metadata(original_metadata))
+    return {"has_bbox_column": name is not None, "bbox_column_name": name}
 
 
 def _check_geometry_type(
@@ -441,7 +435,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         from geoparquet_io.core.crs_utils import apply_output_crs
         from geoparquet_io.core.geo_metadata import create_geo_metadata
 
-        bbox_info = _detect_bbox_column(schema)
+        bbox_info = _detect_bbox_column(schema, original_metadata)
         geo_meta = create_geo_metadata(
             original_metadata=original_metadata,
             geom_col=geometry_column,
