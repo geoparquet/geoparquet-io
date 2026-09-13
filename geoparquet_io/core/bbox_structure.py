@@ -13,6 +13,7 @@ from typing import Literal, TypedDict, cast
 
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
+from geoparquet_io.core.geo_metadata import is_covering_path
 from geoparquet_io.core.logging_config import debug
 
 #: Struct fields a bbox covering column must expose.
@@ -39,7 +40,7 @@ def _bbox_column_from_covering(geo_meta) -> str | None:
         if (
             isinstance(bbox_refs, dict)
             and _BBOX_REQUIRED_FIELDS.issubset(bbox_refs)
-            and all(isinstance(ref, list) and len(ref) == 2 for ref in bbox_refs.values())
+            and all(is_covering_path(ref) for ref in bbox_refs.values())
         ):
             return cast("str", bbox_refs["xmin"][0])
     return None
@@ -141,8 +142,8 @@ def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_colum
                 # Check if the bbox covering has the required structure
                 if (
                     isinstance(bbox_refs, dict)
-                    and all(key in bbox_refs for key in ["xmin", "ymin", "xmax", "ymax"])
-                    and all(isinstance(ref, list) and len(ref) == 2 for ref in bbox_refs.values())
+                    and _BBOX_REQUIRED_FIELDS.issubset(bbox_refs)
+                    and all(is_covering_path(ref) for ref in bbox_refs.values())
                 ):
                     referenced_bbox_column = bbox_refs["xmin"][0]
                     if bbox_column_name is not None and referenced_bbox_column != bbox_column_name:

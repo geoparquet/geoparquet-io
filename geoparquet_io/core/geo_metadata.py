@@ -860,6 +860,17 @@ def backfill_derived_stats(
     return _rewrite_geo_metadata(metadata, _fill)
 
 
+def is_covering_path(path: object) -> bool:
+    """A ``[column, field]`` covering path: two strings, in a list.
+
+    The one shape test for a covering path. Length alone is not shape: a
+    string of two characters and a two-key object both have ``len()`` 2, and
+    a string indexes character-wise, so ``"bbox.xmin"[0]`` once named a column
+    ``"b"`` the file never mentions (#1062).
+    """
+    return isinstance(path, list) and len(path) == 2 and all(isinstance(p, str) for p in path)
+
+
 def _covering_column(covering_entry) -> str | None:
     """Return the data column a single ``covering`` entry points at, if any."""
     if not isinstance(covering_entry, dict):
