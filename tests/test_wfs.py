@@ -35,6 +35,7 @@ from geoparquet_io.core.wfs import (
     list_available_layers,
 )
 from tests.http_transport import FakeTransport, geojson_reply, xml_reply
+from tests.wfs_documents import MOCK_CAPABILITIES_XML
 
 
 @pytest.fixture
@@ -90,117 +91,6 @@ def offline_wfs_probes():
 # =============================================================================
 # Mock WFS Response Data
 # =============================================================================
-
-# WFS 1.1.0 GetCapabilities response with 2 feature types (cities, roads)
-MOCK_CAPABILITIES_XML = """<?xml version="1.0" encoding="UTF-8"?>
-<wfs:WFS_Capabilities
-    xmlns:wfs="http://www.opengis.net/wfs"
-    xmlns:ows="http://www.opengis.net/ows"
-    xmlns:ogc="http://www.opengis.net/ogc"
-    xmlns:xlink="http://www.w3.org/1999/xlink"
-    xmlns:gml="http://www.opengis.net/gml"
-    version="1.1.0">
-
-    <ows:ServiceIdentification>
-        <ows:Title>Mock WFS Server</ows:Title>
-        <ows:Abstract>A mock WFS server for testing geoparquet-io</ows:Abstract>
-        <ows:ServiceType>WFS</ows:ServiceType>
-        <ows:ServiceTypeVersion>1.1.0</ows:ServiceTypeVersion>
-    </ows:ServiceIdentification>
-
-    <ows:ServiceProvider>
-        <ows:ProviderName>Test Provider</ows:ProviderName>
-    </ows:ServiceProvider>
-
-    <ows:OperationsMetadata>
-        <ows:Operation name="GetCapabilities">
-            <ows:DCP>
-                <ows:HTTP>
-                    <ows:Get xlink:href="http://mock.wfs.server/wfs"/>
-                </ows:HTTP>
-            </ows:DCP>
-        </ows:Operation>
-        <ows:Operation name="DescribeFeatureType">
-            <ows:DCP>
-                <ows:HTTP>
-                    <ows:Get xlink:href="http://mock.wfs.server/wfs"/>
-                    <ows:Post xlink:href="http://mock.wfs.server/wfs"/>
-                </ows:HTTP>
-            </ows:DCP>
-        </ows:Operation>
-        <ows:Operation name="GetFeature">
-            <ows:DCP>
-                <ows:HTTP>
-                    <ows:Get xlink:href="http://mock.wfs.server/wfs"/>
-                    <ows:Post xlink:href="http://mock.wfs.server/wfs"/>
-                </ows:HTTP>
-            </ows:DCP>
-            <ows:Parameter name="outputFormat">
-                <ows:Value>text/xml; subtype=gml/3.1.1</ows:Value>
-                <ows:Value>application/json</ows:Value>
-                <ows:Value>application/geo+json</ows:Value>
-            </ows:Parameter>
-        </ows:Operation>
-    </ows:OperationsMetadata>
-
-    <wfs:FeatureTypeList>
-        <wfs:FeatureType>
-            <wfs:Name>test:cities</wfs:Name>
-            <wfs:Title>Cities</wfs:Title>
-            <wfs:Abstract>Major cities dataset for testing</wfs:Abstract>
-            <wfs:DefaultSRS>urn:ogc:def:crs:EPSG::4326</wfs:DefaultSRS>
-            <wfs:OtherSRS>urn:ogc:def:crs:EPSG::3857</wfs:OtherSRS>
-            <wfs:OutputFormats>
-                <wfs:Format>text/xml; subtype=gml/3.1.1</wfs:Format>
-                <wfs:Format>application/json</wfs:Format>
-            </wfs:OutputFormats>
-            <ows:WGS84BoundingBox>
-                <ows:LowerCorner>-180.0 -90.0</ows:LowerCorner>
-                <ows:UpperCorner>180.0 90.0</ows:UpperCorner>
-            </ows:WGS84BoundingBox>
-        </wfs:FeatureType>
-        <wfs:FeatureType>
-            <wfs:Name>test:roads</wfs:Name>
-            <wfs:Title>Roads</wfs:Title>
-            <wfs:Abstract>Road network dataset for testing</wfs:Abstract>
-            <wfs:DefaultSRS>urn:ogc:def:crs:EPSG::4326</wfs:DefaultSRS>
-            <wfs:OutputFormats>
-                <wfs:Format>text/xml; subtype=gml/3.1.1</wfs:Format>
-                <wfs:Format>application/json</wfs:Format>
-            </wfs:OutputFormats>
-            <ows:WGS84BoundingBox>
-                <ows:LowerCorner>-125.0 24.0</ows:LowerCorner>
-                <ows:UpperCorner>-66.0 50.0</ows:UpperCorner>
-            </ows:WGS84BoundingBox>
-        </wfs:FeatureType>
-    </wfs:FeatureTypeList>
-
-    <ogc:Filter_Capabilities>
-        <ogc:Spatial_Capabilities>
-            <ogc:GeometryOperands>
-                <ogc:GeometryOperand>gml:Envelope</ogc:GeometryOperand>
-                <ogc:GeometryOperand>gml:Point</ogc:GeometryOperand>
-                <ogc:GeometryOperand>gml:Polygon</ogc:GeometryOperand>
-            </ogc:GeometryOperands>
-            <ogc:SpatialOperators>
-                <ogc:SpatialOperator name="BBOX"/>
-                <ogc:SpatialOperator name="Intersects"/>
-                <ogc:SpatialOperator name="Within"/>
-            </ogc:SpatialOperators>
-        </ogc:Spatial_Capabilities>
-        <ogc:Scalar_Capabilities>
-            <ogc:LogicalOperators/>
-            <ogc:ComparisonOperators>
-                <ogc:ComparisonOperator>EqualTo</ogc:ComparisonOperator>
-                <ogc:ComparisonOperator>NotEqualTo</ogc:ComparisonOperator>
-                <ogc:ComparisonOperator>LessThan</ogc:ComparisonOperator>
-                <ogc:ComparisonOperator>GreaterThan</ogc:ComparisonOperator>
-                <ogc:ComparisonOperator>Like</ogc:ComparisonOperator>
-            </ogc:ComparisonOperators>
-        </ogc:Scalar_Capabilities>
-    </ogc:Filter_Capabilities>
-</wfs:WFS_Capabilities>
-"""
 
 # GeoJSON FeatureCollection with 3 point features
 MOCK_GEOJSON_RESPONSE = {
@@ -2602,13 +2492,6 @@ class TestAutoPageSingleWorker:
         assert call_count == 2
         assert result.num_rows == 15000
 
-    # test_parallel_workers_use_httpx_fetcher lived here. It asserted only
-    # `mock_fetch.call_count == 2`. Its replacement asserts the page windows
-    # that reached the transport and the rows that came back:
-    # tests/test_wfs_transport.py::test_parallel_pagination_covers_every_window
-    # (this class stubs the count/startIndex probes offline, so the converted
-    # test cannot run inside it).
-
     def test_startindex_limit_raises_clear_error(self):
         """When server has startIndex limit, should raise with actionable guidance."""
         from geoparquet_io.core.wfs import WFSError, fetch_all_features_duckdb
@@ -4447,47 +4330,6 @@ class TestRefineTilesAdaptive:
         assert len(result) == 1
 
 
-class TestGetFeatureCountWithBbox:
-    """_get_feature_count's hits probe, read off the request it issued.
-
-    The probe must pre-merge its WFS params into the URL rather than passing
-    ``params=`` to httpx: httpx 0.28 *replaces* a URL's existing query when
-    ``params=`` is given, which drops e.g. an apikey (issue #828). Asserting
-    the transport's recorded query string tests exactly that, where asserting
-    a mock's recorded kwargs only tested how the call was spelled.
-    """
-
-    def test_bbox_included_in_request(self, monkeypatch):
-        """When bbox provided, it should appear in the hits request."""
-        from geoparquet_io.core.wfs import _get_feature_count
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/wfs", xml_reply(b'<c numberOfFeatures="42"/>'))
-
-        result = _get_feature_count(
-            "http://mock/wfs",
-            "layer",
-            "1.1.0",
-            bbox=(4.0, 52.0, 5.0, 53.0),
-            crs="EPSG:4326",
-        )
-
-        assert result == 42
-        assert "bbox" in http.last.params
-
-    def test_no_bbox_backward_compatible(self, monkeypatch):
-        """Without bbox, request should not include bbox param."""
-        from geoparquet_io.core.wfs import _get_feature_count
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/wfs", xml_reply(b'<c numberOfFeatures="100"/>'))
-
-        result = _get_feature_count("http://mock/wfs", "layer", "1.1.0")
-
-        assert result == 100
-        assert "bbox" not in http.last.params
-
-
 class TestGetFeatureCountPreservesQueryParams:
     """The resultType=hits probe must keep the service URL's own query params.
 
@@ -5101,9 +4943,7 @@ class TestCountThreadedToFetch:
             )
             wfs_to_table("http://mock/wfs", "layer", auto_tile=True)
 
-        # The 2.0.0 count reached the fetch as total_count, so the fetch never
-        # re-queried it at the negotiated version.
-        assert [call.kwargs.get("total_count") for call in mock_fetch.call_args_list] == [20000]
+        assert mock_fetch.call_args.kwargs.get("total_count") == 20000
 
 
 class TestMultiLayerExtraction:

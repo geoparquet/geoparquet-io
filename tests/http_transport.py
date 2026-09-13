@@ -33,7 +33,8 @@ forgets a route fails loudly instead of reaching the internet.
 
 from __future__ import annotations
 
-import re
+import json
+import threading
 import time as _real_time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -41,22 +42,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
-
-__all__ = [
-    "FakeTransport",
-    "RecordedRequest",
-    "bytes_reply",
-    "connect_error",
-    "error_reply",
-    "geojson_reply",
-    "html_reply",
-    "json_reply",
-    "protocol_error",
-    "reply",
-    "timeout_error",
-    "wfs_capabilities",
-    "xml_reply",
-]
+import pytest
 
 # Modules whose ``time`` name is replaced so their sleeps are recorded and
 # instant. Both call ``time.sleep`` for backoff and ``time.time`` for timing.
@@ -104,9 +90,10 @@ class RecordedRequest:
 # Replies
 # --------------------------------------------------------------------------
 
-#: A reply is a callable ``(httpx.Request) -> httpx.Response``, or an exception
-#: to raise, or a bare ``httpx.Response`` that is cloned for every call.
-Reply = Callable[[httpx.Request], httpx.Response] | BaseException | httpx.Response
+#: A reply is a callable ``(RecordedRequest) -> httpx.Response`` -- so a reply
+#: can read the query the extractor sent -- or an exception instance to raise.
+ReplyBuilder = Callable[["RecordedRequest"], httpx.Response]
+Reply = ReplyBuilder | BaseException
 
 
 def reply(
@@ -115,53 +102,53 @@ def reply(
     content: bytes = b"",
     content_type: str | None = None,
     headers: dict[str, str] | None = None,
-) -> Callable[[httpx.Request], httpx.Response]:
+) -> ReplyBuilder:
     """A reply factory. Every helper below is a thin wrapper over this one."""
     merged = dict(headers or {})
     if content_type is not None:
         merged.setdefault("content-type", content_type)
 
-    def _build(_request: httpx.Request) -> httpx.Response:
+    def _build(_request: RecordedRequest) -> httpx.Response:
         return httpx.Response(status, content=content, headers=merged)
 
     return _build
 
 
-def json_reply(payload: Any, status: int = 200, **kwargs: Any):
+def json_reply(payload: Any, status: int = 200, **kwargs: Any) -> ReplyBuilder:
     """An ``application/json`` reply carrying ``payload``."""
-    import json as _json
-
     return reply(
         status,
-        content=_json.dumps(payload).encode("utf-8"),
+        content=json.dumps(payload).encode("utf-8"),
         content_type="application/json",
         **kwargs,
     )
 
 
-def geojson_reply(payload: Any, status: int = 200, **kwargs: Any):
+def geojson_reply(payload: Any, status: int = 200, **kwargs: Any) -> ReplyBuilder:
     """A reply with the ``application/geo+json`` content type WFS dispatches on."""
-    import json as _json
-
     return reply(
         status,
-        content=_json.dumps(payload).encode("utf-8"),
+        content=json.dumps(payload).encode("utf-8"),
         content_type="application/geo+json",
         **kwargs,
     )
 
 
-def xml_reply(body: bytes, status: int = 200, **kwargs: Any):
-    """A ``text/xml`` reply — WFS ``resultType=hits`` and GML both arrive this way."""
+def xml_reply(body: bytes, status: int = 200, **kwargs: Any) -> ReplyBuilder:
+    """A ``text/xml`` reply -- WFS ``resultType=hits`` and GML both arrive this way."""
     return reply(status, content=body, content_type="text/xml", **kwargs)
 
 
-def html_reply(body: bytes = b"<html>blocked</html>", status: int = 200, **kwargs: Any):
+def html_reply(
+    body: bytes = b"<html>blocked</html>", status: int = 200, **kwargs: Any
+) -> ReplyBuilder:
     """An HTML error/block page returned with a 200, as WAFs and proxies do."""
     return reply(status, content=body, content_type="text/html", **kwargs)
 
 
-def bytes_reply(body: bytes, status: int = 200, content_type: str = "application/octet-stream"):
+def bytes_reply(
+    body: bytes, status: int = 200, content_type: str = "application/octet-stream"
+) -> ReplyBuilder:
     """An opaque body with an explicit content type."""
     return reply(status, content=body, content_type=content_type)
 
@@ -172,7 +159,7 @@ def error_reply(
     retry_after: str | int | None = None,
     body: bytes = b"upstream error",
     content_type: str = "text/plain",
-):
+) -> ReplyBuilder:
     """An error status, optionally carrying ``Retry-After``.
 
     ``retry_after`` is passed through verbatim, so a test can send the integer
@@ -202,7 +189,8 @@ def protocol_error(message: str = "server disconnected") -> httpx.RemoteProtocol
 # The transport
 # --------------------------------------------------------------------------
 
-Matcher = str | re.Pattern[str] | Callable[[RecordedRequest], bool]
+#: A route matcher: a substring of the URL, or a predicate over the request.
+Matcher = str | Callable[[RecordedRequest], bool]
 
 
 @dataclass
@@ -212,13 +200,12 @@ class _Route:
     calls: int = 0
 
     def matches(self, recorded: RecordedRequest) -> bool:
-        if callable(self.matcher) and not isinstance(self.matcher, re.Pattern):
+        if callable(self.matcher):
             return bool(self.matcher(recorded))
-        if isinstance(self.matcher, re.Pattern):
-            return bool(self.matcher.search(recorded.url))
         return self.matcher in recorded.url
 
     def next_reply(self) -> Reply:
+        """The next reply in sequence; the last one repeats. Call under the lock."""
         chosen = self.replies[min(self.calls, len(self.replies) - 1)]
         self.calls += 1
         return chosen
@@ -246,11 +233,13 @@ class FakeTransport:
     sleeps: list[float] = field(default_factory=list)
     client_timeouts: list[float] = field(default_factory=list)
     resets: int = 0
-    _client: httpx.Client | None = None
+    # The parallel ArcGIS path issues requests from a thread pool; the lock
+    # makes "the first two requests get the failure" mean exactly that.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     # -- setup ------------------------------------------------------------
     @classmethod
-    def install(cls, monkeypatch) -> FakeTransport:
+    def install(cls, monkeypatch: pytest.MonkeyPatch) -> FakeTransport:
         """Redirect the shared HTTP client and the retry sleeps at this test."""
         fake = cls()
         client = httpx.Client(transport=httpx.MockTransport(fake._handle), follow_redirects=True)
@@ -270,9 +259,6 @@ class FakeTransport:
         for module_name in _TIME_PATCHED_MODULES:
             monkeypatch.setattr(f"{module_name}.time", shim)
 
-        # Keep the client alive for the length of the test: only the closures
-        # above hold it, and a closed client would refuse the next request.
-        fake._client = client
         return fake
 
     def respond(self, matcher: Matcher, *replies: Reply) -> FakeTransport:
@@ -281,7 +267,9 @@ class FakeTransport:
         The last reply repeats once the sequence is exhausted, so a single
         reply serves every request and ``error_reply(503), json_reply(...)``
         expresses "fail once, then succeed". Routes are tried in the order
-        they were registered.
+        they were registered. A reply callable receives the
+        :class:`RecordedRequest`, so a page server can read ``resultOffset``
+        off it and answer with the window that was asked for.
         """
         if not replies:
             raise ValueError("respond() needs at least one reply")
@@ -311,12 +299,17 @@ class FakeTransport:
     # -- the transport itself ---------------------------------------------
     def _handle(self, request: httpx.Request) -> httpx.Response:
         recorded = _record(request)
-        self.requests.append(recorded)
+        with self._lock:
+            self.requests.append(recorded)
+            chosen = self._choose(recorded)
+        if isinstance(chosen, BaseException):
+            raise chosen
+        return chosen(recorded)
 
+    def _choose(self, recorded: RecordedRequest) -> Reply:
         for route in self.routes:
             if route.matches(recorded):
-                return _resolve(route.next_reply(), request)
-
+                return route.next_reply()
         raise AssertionError(
             f"unrouted request: {recorded}\n"
             f"registered routes: {[route.matcher for route in self.routes]}"
@@ -337,23 +330,13 @@ def _record(request: httpx.Request) -> RecordedRequest:
     )
 
 
-def _resolve(chosen: Reply, request: httpx.Request) -> httpx.Response:
-    if isinstance(chosen, BaseException):
-        raise chosen
-    if isinstance(chosen, type) and issubclass(chosen, BaseException):
-        raise chosen("injected failure")
-    if isinstance(chosen, httpx.Response):
-        return httpx.Response(chosen.status_code, content=chosen.content, headers=chosen.headers)
-    return chosen(request)
-
-
 # --------------------------------------------------------------------------
 # WFS capabilities
 # --------------------------------------------------------------------------
 
 
 def wfs_capabilities(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     xml: bytes | dict[str, bytes],
     schema: dict[str, Any] | Iterable[tuple[str, dict[str, Any]]] | None = None,
 ) -> list[str]:
@@ -393,7 +376,9 @@ def wfs_capabilities(
     return asked
 
 
-def _schema_reader(schema):
+def _schema_reader(
+    schema: dict[str, Any] | Iterable[tuple[str, dict[str, Any]]] | None,
+) -> Callable[[str], dict[str, Any] | None]:
     if schema is None:
 
         def _raise(_typename):

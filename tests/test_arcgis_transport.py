@@ -96,25 +96,18 @@ def _is_query(request) -> bool:
     return request.path.endswith("/query") and not _is_count(request)
 
 
-def _offset_aware(total):
+def _offset_aware(total: int):
     """Serve whatever window the request asks for, out of ``total`` features."""
 
     def _serve(request):
-        import httpx
-
-        offset = int(request.url.params.get("resultOffset", 0))
-        limit = int(request.url.params.get("resultRecordCount", total))
-        remaining = max(0, total - offset)
-        return httpx.Response(
-            200,
-            json=_page(offset, min(limit, remaining)),
-            headers={"content-type": "application/json"},
-        )
+        offset = int(request.params.get("resultOffset", 0))
+        limit = int(request.params.get("resultRecordCount", total))
+        return json_reply(_page(offset, min(limit, max(0, total - offset))))(request)
 
     return _serve
 
 
-def stub_service(http, *, total, page_replies=None, layer=None, page_size=None):
+def stub_service(http, *, total, page_replies=None, layer=None):
     """Route a whole FeatureServer layer: metadata, count, then feature pages.
 
     ``page_replies`` overrides the feature-page answers (a sequence, so a test
@@ -518,7 +511,7 @@ def _layer_info(total, max_record_count=1000):
 
 def test_sequential_paging_walks_the_offsets_the_server_expects(monkeypatch):
     http = FakeTransport.install(monkeypatch)
-    stub_service(http, total=250, page_size=100)
+    stub_service(http, total=250)
 
     pages = list(fetch_all_features(SERVICE, _layer_info(250), batch_size=100, verbose=True))
 
@@ -563,7 +556,7 @@ def test_max_features_clamps_the_parallel_path_identically(monkeypatch):
 
 def test_parallel_paging_covers_every_offset_exactly_once(monkeypatch):
     http = FakeTransport.install(monkeypatch)
-    stub_service(http, total=250, page_size=100)
+    stub_service(http, total=250)
 
     pages = list(fetch_all_features(SERVICE, _layer_info(250), batch_size=100, max_workers=2))
 
@@ -573,7 +566,7 @@ def test_parallel_paging_covers_every_offset_exactly_once(monkeypatch):
 
 def test_parallel_pages_are_yielded_in_offset_order(monkeypatch):
     http = FakeTransport.install(monkeypatch)
-    stub_service(http, total=30, page_size=10)
+    stub_service(http, total=30)
 
     pages = list(fetch_all_features(SERVICE, _layer_info(30), batch_size=10, max_workers=3))
 
@@ -586,7 +579,6 @@ def test_an_empty_page_stops_sequential_paging(monkeypatch):
     stub_service(
         http,
         total=300,
-        page_size=100,
         page_replies=(json_reply(_page(0, 100)), json_reply({"features": []})),
     )
 
@@ -601,7 +593,6 @@ def test_a_short_page_realigns_the_next_offset(monkeypatch):
     stub_service(
         http,
         total=300,
-        page_size=100,
         page_replies=(
             json_reply(_page(0, 60)),
             json_reply(_page(60, 100)),
@@ -679,9 +670,23 @@ def test_the_parallel_path_retries_the_whole_window_smaller(monkeypatch):
 
     pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
 
-    sizes = {request.params["resultRecordCount"] for request in http.matching(_is_query)}
-    assert "50" in sizes  # the window came back at the reduced size
-    assert sum(len(page["features"]) for page in pages) > 0
+    # The first page is fetched alone as a probe and rejected; the ladder drops
+    # to 50 and fans out; the first request at 50 is rejected too, so the ladder
+    # drops to 10 and the whole layer is walked again at that size. Whether the
+    # *other* 50-window was already in flight when that happened is up to the
+    # pool's scheduling, so it is the one thing not pinned here.
+    windows = [
+        (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
+        for request in http.matching(_is_query)
+    ]
+    sizes = [size for _, size in windows]
+    assert windows[0] == (0, 100)
+    assert (0, 50) in windows
+    assert sizes == sorted(sizes, reverse=True)  # the ladder only ever descends
+    assert {window for window in windows if window[1] == 10} == {
+        (offset, 10) for offset in range(0, 200, 10)
+    }
+    assert sum(len(page["features"]) for page in pages) == 200
 
 
 def test_the_parallel_ladder_gives_up_at_batch_size_one(monkeypatch):

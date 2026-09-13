@@ -40,7 +40,7 @@ from tests.http_transport import (
     xml_reply,
 )
 from tests.native_geo_probes import geo_block, geo_block_crs_id, logical_crs_id, spec_problems
-from tests.test_wfs import MOCK_CAPABILITIES_XML
+from tests.wfs_documents import MOCK_CAPABILITIES_XML
 
 SERVICE = "https://geo.example.org/geoserver/wfs"
 TYPENAME = "test:cities"
@@ -89,16 +89,9 @@ def _pages(total: int, page_size: int):
     """Serve the window the ``startIndex``/``count`` pair asks for."""
 
     def _serve(request):
-        import httpx
-
-        start = int(request.url.params.get("startIndex", 0))
-        asked = int(request.url.params.get("count", request.url.params.get("maxFeatures", total)))
-        remaining = max(0, total - start)
-        return httpx.Response(
-            200,
-            json=_geojson(min(asked, page_size, remaining), start=start),
-            headers={"content-type": "application/geo+json"},
-        )
+        start = int(request.params.get("startIndex", 0))
+        asked = int(request.params.get("count", request.params.get("maxFeatures", total)))
+        return geojson_reply(_geojson(min(asked, page_size, total - start), start=start))(request)
 
     return _serve
 

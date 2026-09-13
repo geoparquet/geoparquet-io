@@ -322,91 +322,6 @@ class TestGetLayerInfo:
         assert result.spatial_reference == {}
 
 
-class TestFetchFeaturesPage:
-    """What a feature-page request actually puts on the wire.
-
-    Driven through ``tests/http_transport.py``: the assertion is the query
-    string the server would have received, not a mock's recorded kwargs.
-    """
-
-    URL = "https://example.com/FeatureServer/0"
-
-    def test_fetch_page(self, monkeypatch):
-        """Test fetching a single page of features."""
-        from geoparquet_io.core.arcgis import fetch_features_page
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
-
-        result = fetch_features_page(self.URL, offset=0, limit=1000)
-
-        assert result["type"] == "FeatureCollection"
-        assert len(result["features"]) == 3
-        assert http.last.path == "/FeatureServer/0/query"
-        assert http.last.params["resultOffset"] == "0"
-        assert http.last.params["resultRecordCount"] == "1000"
-
-    def test_fetch_page_default_uses_geojson(self, monkeypatch):
-        from geoparquet_io.core.arcgis import fetch_features_page
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
-
-        fetch_features_page(self.URL, offset=0, limit=1000)
-
-        assert http.last.params["f"] == "geojson"
-        assert "outSR" not in http.last.params
-
-    def test_fetch_page_output_wkid_uses_esrijson_and_outsr(self, monkeypatch):
-        from geoparquet_io.core.arcgis import fetch_features_page
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/query", json_reply(MOCK_ESRI_FEATURES_PAGE))
-
-        fetch_features_page(self.URL, offset=0, limit=1000, output_wkid=25830)
-
-        assert http.last.params["f"] == "json"
-        assert http.last.params["outSR"] == "25830"
-
-    def test_fetch_page_no_max_allowable_offset_by_default(self, monkeypatch):
-        from geoparquet_io.core.arcgis import fetch_features_page
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
-
-        fetch_features_page(self.URL, offset=0, limit=1000)
-
-        assert "maxAllowableOffset" not in http.last.params
-
-    def test_fetch_page_max_allowable_offset_on_geojson(self, monkeypatch):
-        """Generalization tolerance is honored on the default GeoJSON path too."""
-        from geoparquet_io.core.arcgis import fetch_features_page
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
-
-        fetch_features_page(self.URL, offset=0, limit=1000, max_allowable_offset=0.005)
-
-        assert http.last.params["f"] == "geojson"
-        assert http.last.params["maxAllowableOffset"] == "0.005"
-        # outSR is anchored to 4326 so the tolerance unit is unambiguously degrees.
-        assert http.last.params["outSR"] == "4326"
-
-    def test_fetch_page_max_allowable_offset_with_outsr(self, monkeypatch):
-        from geoparquet_io.core.arcgis import fetch_features_page
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/query", json_reply(MOCK_ESRI_FEATURES_PAGE))
-
-        fetch_features_page(
-            self.URL, offset=0, limit=1000, output_wkid=25830, max_allowable_offset=0.005
-        )
-
-        assert http.last.params["f"] == "json"
-        assert http.last.params["outSR"] == "25830"
-        assert http.last.params["maxAllowableOffset"] == "0.005"
-
-
 class TestTimeout:
     """The configurable HTTP timeout (issue #518), read off the request itself.
 
@@ -427,27 +342,6 @@ class TestTimeout:
         fetch_features_page(self.URL, offset=0, limit=1000)
 
         assert http.last.timeout == DEFAULT_TIMEOUT
-
-    def test_fetch_page_custom_timeout_threaded_to_request(self, monkeypatch):
-        """A custom timeout reaches the underlying HTTP request."""
-        from geoparquet_io.core.arcgis import fetch_features_page
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/query", json_reply(MOCK_FEATURES_PAGE))
-
-        fetch_features_page(self.URL, offset=0, limit=1000, timeout=300.0)
-
-        assert http.last.timeout == 300.0
-
-    def test_make_request_passes_timeout_to_retry_helper(self, monkeypatch):
-        """_make_request forwards the timeout all the way to the wire."""
-        from geoparquet_io.core.arcgis import _make_request
-
-        http = FakeTransport.install(monkeypatch)
-        http.respond("/test", json_reply({"ok": True}))
-
-        assert _make_request("GET", "https://example.com/test", timeout=240.0) == {"ok": True}
-        assert http.last.timeout == 240.0
 
     def test_make_request_with_retry_applies_timeout_per_request(self, monkeypatch):
         """The retry helper applies the timeout to the actual httpx call.

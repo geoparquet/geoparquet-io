@@ -247,6 +247,16 @@ enforces this. Known edge cases to handle:
   `--output-crs` by reprojecting when the server returns a different CRS.
 - **Network**: retry transient errors; surface upstream stderr.
 
+**Testing an extractor.** Drive it through `tests/http_transport.py` rather than a
+`mock.patch` on the request function. `FakeTransport.install(monkeypatch)` swaps the
+shared `httpx` client for one built on `httpx.MockTransport`, records every request
+(merged query string, form body, per-request timeout) and captures `time.sleep`, so a
+test asserts what was *sent* and how long the retry would have waited — not that a
+mock was called. Unrouted requests fail loudly, so an offline test cannot reach the
+internet by accident. `tests/test_arcgis_transport.py` and `tests/test_wfs_transport.py`
+are the pattern; tests that need a live service carry `@pytest.mark.network` and run in
+the network lane only.
+
 ## Releasing
 
 (Maintainers only)
