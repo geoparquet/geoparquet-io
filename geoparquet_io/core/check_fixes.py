@@ -271,13 +271,10 @@ def fix_bbox_metadata(parquet_file, output_file, verbose=False, profile=None):
     if verbose:
         debug("Adding bbox covering metadata...")
 
-    # Copied, never moved: the input is read here and nothing else, so the
-    # caller still has it afterwards.
-    if parquet_file != output_file:
-        shutil.copy2(parquet_file, output_file)
-
-    # add_bbox_metadata modifies in-place
-    add_bbox_metadata(output_file, verbose=verbose)
+    # The input is only read: the rewrite goes straight to output_file in one
+    # pass (staged beside it when it already exists), so the caller still has
+    # its file afterwards and nothing is copied only to be rewritten.
+    add_bbox_metadata(parquet_file, verbose=verbose, output_file=output_file)
 
     return {"fix_applied": "Added bbox covering metadata", "success": True}
 
@@ -345,15 +342,10 @@ def fix_bbox_all(
 ):
     """Fix both bbox column and metadata issues.
 
-    The input is only ever *read*. It used to be the thing that landed at
-    ``output_file``: when a 1.1 file had a bbox column and only the ``covering``
-    key was missing, no step rewrote anything, so ``current_file`` was still the
-    user's own path when the function reached ``shutil.move(current_file,
-    output_file)``. ``gpio check bbox in.parquet --fix --fix-output out.parquet``
-    therefore *deleted* ``in.parquet`` -- and ``handle_fix_common`` had taken no
-    ``.bak``, correctly, because the path it was asked to write was not the
-    input. In place the two paths were equal and the move was skipped, which is
-    why only ``--fix-output`` users ever saw it (#1036).
+    The input is only ever read. The result is staged beside ``output_file``
+    and swapped in by ``os.replace``, like every other fix here (#1032); the
+    covering-only branch used to ``shutil.move`` the user's own file to
+    ``output_file``, which is how ``--fix --fix-output`` deleted inputs (#1036).
 
     Args:
         parquet_file: Path to input file
@@ -364,27 +356,17 @@ def fix_bbox_all(
         profile: AWS profile name for S3 operations
 
     Returns:
-        dict with fix summary
+        dict with fix summary; ``fix_applied`` is None when there was nothing to do
     """
     if not needs_column and not needs_metadata:
-        return {"fix_applied": "Fixed bbox issues", "success": True}
+        return {"fix_applied": None, "success": True}
 
-    # The same staging every other fix in this module uses (#1032): a scratch
-    # path beside any destination that already exists, swapped in by gpio's own
-    # os.replace() once the work is done. It covers the in-place case -- where
-    # add_bbox_column would otherwise be reading the file it is writing -- and
-    # the overwrite-an-existing-output case with one rule, and it cannot be
-    # defeated by two spellings of one path.
     with _staged_output(output_file) as destination:
         if needs_column:
+            # add_bbox_column writes the covering with the column, so a
+            # separate metadata pass here would only re-read what it just wrote.
             fix_bbox_column(parquet_file, destination, verbose, profile)
-            # A bbox column no `covering` points at is a bbox column clients
-            # cannot find, so the covering follows the column whether or not the
-            # checks asked for the two separately.
-            fix_bbox_metadata(destination, destination, verbose, profile)
         else:
-            # Metadata only, and fix_bbox_metadata COPIES its input before
-            # editing the copy's key-value block.
             fix_bbox_metadata(parquet_file, destination, verbose, profile)
 
     return {"fix_applied": "Fixed bbox issues", "success": True}
@@ -563,15 +545,16 @@ def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, temp_files
     if not needs_metadata and not added_column_needs_metadata:
         return current_file, []
 
-    # For metadata, we modify in-place; copy first if unchanged
-    if current_file == parquet_file:
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
-        temp_files.append(temp_file)
-        shutil.copy2(current_file, temp_file)
-        current_file = temp_file
-
     if verbose:
         progress("\n[2/4] Adding bbox covering metadata...")
+
+    if is_same_file_path(current_file, parquet_file):
+        # The user's file is only read: the covering goes onto a scratch
+        # written in one pass, and current_file leaves the user's path here.
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+        temp_files.append(temp_file)
+        fix_bbox_metadata(current_file, temp_file, verbose, profile)
+        return temp_file, ["Added bbox covering metadata"]
 
     fix_bbox_metadata(current_file, current_file, verbose, profile)
     return current_file, ["Added bbox covering metadata"]
@@ -602,38 +585,35 @@ def _apply_spatial_ordering_fix(check_results, current_file, temp_files, verbose
     return temp_file, ["Applied Hilbert spatial ordering"]
 
 
-def _place_result(result_file: str, output_file: str, parquet_file: str) -> None:
+def _place_result(result_file: str, output_file: str, *, owned: bool) -> None:
     """Leave the finished file at *output_file* without consuming the user's input.
 
-    Two kinds of path arrive here and they are not interchangeable:
-
-    * A scratch file this module produced. Nothing else refers to it, so it is
-      **moved**. It comes from :mod:`tempfile` with no ``dir=`` -- the system
-      temp directory, routinely a different filesystem from the user's data --
-      so ``os.replace`` would raise ``EXDEV`` here and ``shutil.move``'s
-      degradation to copy+unlink is the right behaviour rather than the hazard
-      it is over a path someone owns. It lands through ``_staged_output`` all
-      the same, so an existing destination is replaced atomically.
-    * ``parquet_file`` itself, when every earlier step declined to rewrite
-      anything. That has to be a **copy**. ``--fix-output`` names a path
-      ``handle_fix_common`` does not back up -- correctly, since that path is
-      not the file being written -- so moving the input away leaves the user
-      with neither their file nor a ``.bak`` (#1036).
+    ``owned`` says whether *result_file* is a scratch file this module made
+    (moved: nothing else refers to it, and it lives in the system temp
+    directory, so ``shutil.move``'s cross-device fallback is wanted) or the
+    user's own input, when every earlier step declined to rewrite anything
+    (copied: ``--fix-output`` names a path nobody backed up, so moving the
+    input away left the user with neither file nor ``.bak``, #1036). Either
+    way it lands through ``_staged_output``, so an existing destination is
+    replaced atomically.
     """
     if is_same_file_path(result_file, output_file):
         return
 
     with _staged_output(output_file) as destination:
-        if is_same_file_path(result_file, parquet_file):
-            shutil.copy2(result_file, destination)
-        else:
+        if owned:
             shutil.move(result_file, destination)
+        else:
+            shutil.copy2(result_file, destination)
 
 
 def _apply_compression_fix(
-    check_results, parquet_file, current_file, output_file, gp_version, verbose, profile
+    check_results, current_file, output_file, gp_version, verbose, profile, *, owned=False
 ):
     """Handle compression and row group optimization.
+
+    ``owned`` is whether *current_file* is a scratch file an earlier step
+    produced, as opposed to the user's input; see :func:`_place_result`.
 
     Returns:
         list: fixes_applied
@@ -647,9 +627,7 @@ def _apply_compression_fix(
     if not needs_compression and not needs_row_groups:
         # No compression/row group fixes needed; whatever the earlier steps
         # produced is the answer, so put it at the output path.
-        if verbose and not is_same_file_path(current_file, output_file):
-            debug("\nMoving to final output location...")
-        _place_result(current_file, output_file, parquet_file)
+        _place_result(current_file, output_file, owned=owned)
         return []
 
     if verbose:
@@ -668,7 +646,7 @@ def _apply_compression_fix(
 def _cleanup_temp_files(temp_files, output_file):
     """Clean up temporary files, excluding the output file."""
     for temp_file in temp_files:
-        if os.path.exists(temp_file) and temp_file != output_file:
+        if os.path.exists(temp_file) and not is_same_file_path(temp_file, output_file):
             try:
                 os.remove(temp_file)
             except OSError:
@@ -725,12 +703,12 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
         # Step 4: Fix compression + row groups
         fixes = _apply_compression_fix(
             check_results,
-            parquet_file,
             current_file,
             output_file,
             geoparquet_version,
             verbose,
             profile,
+            owned=current_file in temp_files,
         )
         fixes_applied.extend(fixes)
 

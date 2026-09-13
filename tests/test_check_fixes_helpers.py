@@ -151,7 +151,7 @@ class TestApplyCompressionFix:
         input_file.write_text("test")
 
         fixes = _apply_compression_fix(
-            check_results, str(input_file), str(input_file), str(output_file), None, False, None
+            check_results, str(input_file), str(output_file), None, False, None
         )
 
         assert fixes == []

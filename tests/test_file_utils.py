@@ -366,6 +366,28 @@ class TestIsSameFilePath:
         link.symlink_to(target)
         assert is_same_file_path(str(link), str(target)) is True
 
+    def test_hard_link_alias(self, tmp_path):
+        """Two names for one inode: ``resolve()`` cannot see it, ``samefile`` can."""
+        target = tmp_path / "a.parquet"
+        target.write_bytes(b"")
+        link = tmp_path / "hard.parquet"
+        os.link(target, link)
+        assert is_same_file_path(str(link), str(target)) is True
+
+    def test_case_alias_on_a_case_insensitive_filesystem(self, tmp_path):
+        """``--fix-output IN.parquet`` for ``in.parquet`` on macOS or Windows.
+
+        ``Path.resolve()`` does not fold case on macOS, so the string-and-resolve
+        comparison saw two files, took the not-in-place branch, made no
+        backup, and then wrote over the input's inode anyway.
+        """
+        target = tmp_path / "in.parquet"
+        target.write_bytes(b"")
+        alias = tmp_path / "IN.parquet"
+        if not alias.exists():
+            pytest.skip("case-sensitive filesystem")
+        assert is_same_file_path(str(alias), str(target)) is True
+
     def test_different_files(self, tmp_path):
         assert is_same_file_path(str(tmp_path / "a.parquet"), str(tmp_path / "b.parquet")) is False
 

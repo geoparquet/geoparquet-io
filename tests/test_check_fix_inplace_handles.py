@@ -191,8 +191,19 @@ def snappy_file(places_test_file, tmp_path):
     return target
 
 
+@pytest.fixture
+def no_bbox_file(places_test_file, tmp_path):
+    """No bbox column: ``check bbox --fix`` adds one through ``add_computed_column``."""
+    target = tmp_path / "no_bbox.parquet"
+    with pq.ParquetFile(places_test_file) as reader:
+        table = reader.read().drop(["bbox"])
+    pq.write_table(table, target)
+    return target
+
+
 IN_PLACE_FIXES = [
     pytest.param("bbox", "undeclared_bbox_file", id="bbox"),
+    pytest.param("bbox", "no_bbox_file", id="bbox-add-column"),
     pytest.param("row-group", "tiny_row_group_file", id="row-group"),
     pytest.param("compression", "snappy_file", id="compression"),
 ]

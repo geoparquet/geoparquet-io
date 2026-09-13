@@ -262,6 +262,8 @@ def add_bbox_metadata_table(
 def add_bbox_metadata(
     parquet_file: str,
     verbose: bool = False,
+    *,
+    output_file: str | None = None,
 ) -> None:
     """Add bbox covering metadata to a GeoParquet file.
 
@@ -278,18 +280,25 @@ def add_bbox_metadata(
     Note: Only local files are supported. Remote URLs will raise an error.
 
     Args:
-        parquet_file: Path to the parquet file (will be modified in place)
+        parquet_file: Path to the parquet file. Modified in place unless
+            ``output_file`` is given.
         verbose: Print verbose output
+        output_file: Where to write the result instead of over the input. The
+            input is then only read, and the rewrite is one pass straight from
+            it -- ``check bbox --fix --fix-output`` used to copy the input onto
+            the destination first and then rewrite the copy (#1036).
 
     Raises:
         GeoParquetError: If the file is remote or the operation fails
     """
-    # Reject remote URLs - in-place modification requires local filesystem
-    if _is_remote_url(parquet_file):
-        raise GeoParquetError(
-            f"Remote URLs are not supported for in-place metadata modification: {parquet_file}\n"
-            "Download the file locally, modify it, then upload."
-        )
+    output_file = output_file or parquet_file
+    # Reject remote URLs - the rewrite below needs a local filesystem
+    for path in {parquet_file, output_file}:
+        if _is_remote_url(path):
+            raise GeoParquetError(
+                f"Remote URLs are not supported for in-place metadata modification: {path}\n"
+                "Download the file locally, modify it, then upload."
+            )
 
     # RAW path throughout: the metadata helpers each escape their own argument
     # (pre-escaping here sent ``bm''s.parquet`` on to pyarrow, issue #718), and
@@ -363,8 +372,10 @@ def add_bbox_metadata(
     row_group_size = int(row_group_stats["avg_rows_per_group"])
     compression = compression_info[primary_col]
 
-    # Create a temporary file for the rewrite
-    temp_file = parquet_file + ".tmp"
+    # A destination that already exists (the input itself, in place) is
+    # replaced through a sibling scratch file; a fresh destination is written
+    # directly, so a caller that has already staged gets a single pass.
+    temp_file = output_file + ".tmp" if os.path.exists(output_file) else output_file
     try:
         # Use DuckDB COPY TO with KV_METADATA to preserve file properties
         # This preserves bloom filters and native GEOMETRY logical type (fixes #433)
@@ -434,8 +445,9 @@ def add_bbox_metadata(
         conn.execute(copy_sql)
         conn.close()
 
-        # Replace original file atomically
-        os.replace(temp_file, parquet_file)
+        if temp_file != output_file:
+            # Replace the existing destination atomically
+            os.replace(temp_file, output_file)
 
         success(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
 
