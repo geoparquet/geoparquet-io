@@ -460,11 +460,11 @@ Validates STAC Item or Collection JSON:
 
 When checking a directory containing partitioned data, you can control how many files are checked:
 
-<!-- doctest: skip="needs partitions/, which the harness does not seed" -->
+<!-- doctest: setup="gpio partition quadkey input.parquet partitions/ --resolution 6 --partition-resolution 2" -->
 ```bash
 # By default, checks only the first file
 gpio check all partitions/
-# Output: Checking first file (of 4 total). Use --all-files or --sample-files N for more.
+# Output: Checking first file (of N total). Use --all-files or --sample-files N for more.
 
 # Check all files in the partition
 gpio check all partitions/ --all-files
@@ -478,12 +478,12 @@ gpio check all partitions/ --sample-files 3
     **every file the input resolved to**, not the first one, so a glob or a
     directory rewrites all of them in place:
 
-    <!-- doctest: skip="needs partitions/, which the harness does not seed" -->
+    <!-- doctest: setup="gpio partition quadkey input.parquet partitions/ --resolution 6 --partition-resolution 2" -->
     ```bash
     # Checks the first file only
     gpio check spatial partitions/
 
-    # Fixes all 4 files in the partition, in place
+    # Fixes every file in the partition, in place
     gpio check spatial partitions/ --fix
     gpio check spatial "partitions/*.parquet" --fix
     ```
@@ -492,7 +492,7 @@ gpio check all partitions/ --sample-files 3
     Before 1.6, `--fix` on a directory or glob rewrote only the first file;
     pass `--sample-files 1` to keep that:
 
-    <!-- doctest: skip="needs partitions/, which the harness does not seed" -->
+    <!-- doctest: setup="gpio partition quadkey input.parquet partitions/ --resolution 6 --partition-resolution 2" -->
     ```bash
     # Fixes the first file and no other
     gpio check spatial partitions/ --fix --sample-files 1
