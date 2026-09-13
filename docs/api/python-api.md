@@ -386,19 +386,16 @@ The `Table` class wraps a PyArrow Table and provides chainable transformation me
 | `bounds` | Bounding box tuple (xmin, ymin, xmax, ymax) |
 | `schema` | PyArrow Schema object |
 | `geoparquet_version` | The version the file declares, verbatim (e.g., `"1.0.0"`), or `None` |
-| `output_geoparquet_version` | The version `write()` would stamp on output (e.g., `"1.1"`), or `None` |
-| `source_path` | The file `gpio.read()` opened, or `None` for an in-memory or transformed table |
+| `source_path` | The file `gpio.read()` opened (absolute), or `None` for an in-memory, projected or transformed table |
 
-`geoparquet_version` and `output_geoparquet_version` answer two different
-questions and usually give two different answers: gpio writes any 1.x input out
-as 1.1, so a file that declares `1.0.0` reports `'1.0.0'` for what it *is* and
-`'1.1'` for what it *would become*.
-
-```python
-table = gpio.read('places_1_0_0.parquet')
-table.geoparquet_version         # '1.0.0' - what the file declares
-table.output_geoparquet_version  # '1.1'   - what write() would stamp
-```
+!!! warning "Breaking change after 1.5.0: checks measure the file you read"
+    `geoparquet_version` used to return the version `write()` would stamp
+    (`'1.1'` for any 1.x file); it now returns what the file declares
+    (`'1.0.0'`), the same fact `gpio inspect summary` reports. If you passed it
+    back into `write(geoparquet_version=...)`, pass nothing: `write()` resolves
+    the auto version itself. `check_*()` and `validate()` now measure the file
+    `gpio.read()` opened instead of a re-write of it, so a verdict that passed
+    on a poorly laid-out file now fails, as it did on the command line.
 
 ```python
 table = gpio.read('data.parquet')
@@ -1304,20 +1301,19 @@ details = result.to_dict()
 
 **Which bytes a check describes.** A table from `gpio.read(path)` is checked
 against that file, so `table.check_compression()` and `gpio check compression
-<path>` give the same verdict. Row groups, compression, bloom filters and the
-declared spec version are properties of *written* bytes, and a table built in
-memory — or derived from a file by an operation that changed the rows — has
-none of them yet. Those checks still answer, but they answer the only question
-there is, "how would this be laid out if gpio wrote it now?", and say so:
+<path>` give the same verdict. A table built in memory, read with `columns=` or
+`filters=`, or derived by an operation such as `sort_hilbert()` has no file
+behind it; its checks measure the bytes `write()` would produce with its
+defaults and say so with `prospective`. A source file that was replaced or
+removed after `read()`, or a remote URL, is treated the same way.
 
 ```python
-gpio.read('data.parquet').check_row_groups().prospective   # False - the file was read
+gpio.read('data.parquet').check_row_groups().prospective                # False
 gpio.read('data.parquet').sort_hilbert().check_row_groups().prospective  # True
 
 result = gpio.Table(arrow_table).check_compression()
-result.source       # None
+result.source_path  # None
 result.prospective  # True
-result.to_dict()['prospective']  # the same label, for dict consumers
 ```
 
 #### `check_optimization()`

@@ -18,9 +18,9 @@ class CheckResult:
     Attributes:
         results: Raw results dictionary from the check operation
         check_type: Type of check that was performed
-        source: The file whose bytes were measured, or None
-        prospective: True when no such file existed and the verdict describes
-            bytes gpio wrote from an in-memory table instead
+        source_path: The file whose bytes were measured, or None
+        prospective: True when no file was measured: the verdict describes the
+            bytes ``write()`` would produce from an in-memory table
 
     Example:
         >>> table = gpio.read('data.parquet')
@@ -36,27 +36,22 @@ class CheckResult:
         results: dict,
         check_type: str = "check",
         *,
-        source: str | None = None,
-        prospective: bool = False,
-    ):
+        source_path: str | None = None,
+    ) -> None:
         """
         Initialize a CheckResult.
 
         Args:
             results: Raw results dictionary from check operation
             check_type: Type of check (e.g., "spatial", "compression", "all")
-            source: Path of the file the verdict describes, when there is one.
-            prospective: True when the verdict describes a file gpio wrote from
-                an in-memory table rather than one the caller has. Row groups,
-                compression and bloom filters are properties of *written*
-                bytes, so a Table with no file behind it can only answer the
-                "how would this be laid out if I wrote it now?" question --
-                and must not let the answer pass for the other one (#1060).
+            source_path: The file the verdict measured, when there is one.
+                Row groups, compression and bloom filters are facts about
+                written bytes; a result with no file behind it describes what
+                ``write()`` would produce and is ``prospective``.
         """
         self._results = results
         self._check_type = check_type
-        self._source = source
-        self._prospective = prospective
+        self._source_path = source_path
 
     def passed(self) -> bool:
         """
@@ -149,17 +144,10 @@ class CheckResult:
         """
         Get the raw results dictionary.
 
-        A labelled result (one that knows which bytes it measured) carries two
-        extra keys, ``source`` and ``prospective``, so that a caller reading the
-        dict rather than the object still learns what the numbers are about.
-        An unlabelled result is handed back exactly as the check produced it.
-
         Returns:
             Raw results dictionary
         """
-        if self._source is None and not self._prospective:
-            return self._results
-        return {**self._results, "source": self._source, "prospective": self._prospective}
+        return self._results
 
     @property
     def check_type(self) -> str:
@@ -167,21 +155,21 @@ class CheckResult:
         return self._check_type
 
     @property
-    def source(self) -> str | None:
-        """The file whose bytes this verdict describes, or None."""
-        return self._source
+    def source_path(self) -> str | None:
+        """The file this verdict measured, or None when it is prospective."""
+        return self._source_path
 
     @property
     def prospective(self) -> bool:
-        """True when the verdict describes what gpio *would* write, not a file you have."""
-        return self._prospective
+        """True when no file was measured: the verdict describes what ``write()`` would produce."""
+        return self._source_path is None
 
     def __repr__(self) -> str:
         """String representation of the CheckResult."""
         status = "passed" if self.passed() else "failed"
         num_failures = len(self.failures())
         num_warnings = len(self.warnings())
-        scope = ", prospective" if self._prospective else ""
+        scope = ", prospective" if self.prospective else ""
         return (
             f"CheckResult({self._check_type}: {status}, failures={num_failures}, "
             f"warnings={num_warnings}{scope})"

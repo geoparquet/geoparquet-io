@@ -1,268 +1,177 @@
-"""`Table.check_*` / `Table.validate()` must answer about the file they were given.
+"""``Table.check_*`` and ``validate()`` measure the file ``gpio.read()`` opened.
 
-gpio #1060 and #1061. Every check routed through ``Table._with_temp_file``,
-which writes the in-memory table out with gpio's *default* settings and checks
-that. So ``check_compression()`` re-encoded to ZSTD before measuring and could
-never report a compression problem, ``check_row_groups()`` counted the one group
-the writer had just produced rather than the file's fifteen, and
-``Table.validate()`` validated a re-write stamped at the version gpio would
-*write* (#1061) instead of the one the file declares.
+A Table with no file behind it (built in memory, read with ``columns=`` or
+``filters=``, derived by an operation, or whose file changed since it was
+read) answers prospectively: the verdict describes what ``write()`` would
+produce, and says so. What the two answers *are* on the same bytes is pinned
+against the CLI in ``tests/test_api_cli_behaviour_parity.py``.
 
-The rule this module pins: a ``Table`` that came from a file answers about that
-file's bytes, and its answer is the CLI's answer. A ``Table`` with no file
-behind it has no layout to describe, so it answers the only question that has an
-answer -- "how would this be laid out if gpio wrote it now?" -- and says so, in
-``CheckResult.prospective`` and in ``to_dict()``.
-
-Every case here compares the two front ends over the *same* bytes rather than
-asserting the API merely changed: a check that agrees with itself is not the
-contract, agreeing with `gpio check` is.
+Refs: https://github.com/geoparquet/geoparquet-io/issues/1060,
+https://github.com/geoparquet/geoparquet-io/issues/1061
 """
 
 from __future__ import annotations
 
-import json
+import os
+import shutil
 
 import pyarrow.parquet as pq
 import pytest
-from click.testing import CliRunner
 
 import geoparquet_io as gpio
-from geoparquet_io.cli.main import cli
+from geoparquet_io.api.check import CheckResult
+
+CHECKS = [
+    "check",
+    "check_spatial",
+    "check_spatial_pushdown",
+    "check_compression",
+    "check_bbox",
+    "check_row_groups",
+    "check_bloom_filters",
+    "check_optimization",
+    "validate",
+]
 
 
-@pytest.fixture
-def runner():
-    return CliRunner()
+def _no_temp_write(monkeypatch, why: str) -> None:
+    monkeypatch.setattr(gpio.Table, "_with_temp_file", lambda *a, **k: pytest.fail(why))
 
 
-def _row_group_count(path) -> int:
-    return pq.ParquetFile(str(path)).metadata.num_row_groups
+@pytest.mark.parametrize("method", CHECKS)
+def test_a_read_table_is_checked_on_its_file_without_a_temp_write(
+    monkeypatch, unsorted_test_file, method
+):
+    _no_temp_write(monkeypatch, f"{method} re-wrote the rows instead of reading the file")
+
+    result = getattr(gpio.read(unsorted_test_file), method)()
+
+    assert result.source_path == os.path.abspath(unsorted_test_file)
+    assert result.prospective is False
+    assert "prospective" not in repr(result)
 
 
-def _geometry_codec(path) -> str:
-    """The codec the file's first row group actually uses."""
-    return pq.ParquetFile(str(path)).metadata.row_group(0).column(0).compression
+def test_a_file_check_reports_the_files_own_layout(unsorted_test_file):
+    """The fact behind #1060: 15 SNAPPY row groups, not one ZSTD re-write."""
+    table = gpio.read(unsorted_test_file)
+    parquet = pq.ParquetFile(unsorted_test_file)
+    geometry_index = parquet.schema_arrow.get_field_index("geometry")
+
+    assert table.check_row_groups().to_dict()["stats"]["num_groups"] == parquet.num_row_groups
+    assert (
+        table.check_compression().to_dict()["current_compression"]
+        == parquet.metadata.row_group(0).column(geometry_index).compression
+    )
+    assert table.validate().to_dict()["file_path"] == os.path.abspath(unsorted_test_file)
 
 
-def _declared_version(path) -> str:
-    metadata = pq.read_metadata(str(path)).metadata
-    return json.loads(metadata[b"geo"].decode("utf-8"))["version"]
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda path: gpio.Table(pq.read_table(path)),
+        lambda path: gpio.read(path, columns=["geometry"]),
+        lambda path: gpio.read(path, filters=[("fsq_place_id", "!=", "")]),
+        lambda path: gpio.read(path).head(10),
+        lambda path: gpio.read(path).sort_hilbert(),
+    ],
+    ids=["in_memory", "columns_kwarg", "filters_kwarg", "head", "sort_hilbert"],
+)
+def test_a_table_with_no_file_behind_it_answers_prospectively(places_test_file, make):
+    table = make(places_test_file)
+
+    assert table.source_path is None
+    result = table.check_row_groups()
+    assert result.source_path is None
+    assert result.prospective is True
+    assert "prospective" in repr(result)
+    assert result.to_dict()["stats"]["num_groups"] >= 1  # it still answers
 
 
-def _cli_json(runner, args) -> dict:
-    result = runner.invoke(cli, args)
-    assert result.exit_code == 0, f"`gpio {' '.join(args)}` failed:\n{result.output}"
-    return json.loads(result.output)
+def test_a_prospective_check_describes_what_write_would_produce(tmp_path, places_test_file):
+    """The temp write uses ``write()``'s own defaults, so the answer is the file the caller would get."""
+    derived = gpio.read(places_test_file).head(200)
+    written = gpio.read(str(derived.write(tmp_path / "out.parquet")))
+
+    prospective = derived.check_compression().to_dict()
+    measured = written.check_compression().to_dict()
+    assert prospective == measured
+    assert derived.validate().to_dict()["detected_version"] == written.geoparquet_version
 
 
-class TestChecksReadTheSourceFile:
-    """#1060: the verdict describes the user's bytes, and matches the CLI's."""
+def test_a_source_that_changed_since_read_is_not_trusted(
+    tmp_path, unsorted_test_file, places_test_file
+):
+    path = tmp_path / "a.parquet"
+    shutil.copy(unsorted_test_file, path)
+    table = gpio.read(path)
+    shutil.copy(places_test_file, path)  # different bytes at the same path
 
-    def test_row_groups_counts_the_files_groups_not_the_re_writes(self, unsorted_test_file):
-        on_disk = _row_group_count(unsorted_test_file)
-        assert on_disk > 1, "fixture must have several row groups for this to mean anything"
+    result = table.check_row_groups()
 
-        api = gpio.read(unsorted_test_file).check_row_groups().to_dict()
-        assert api["stats"]["num_groups"] == on_disk
-
-    def test_row_groups_verdict_matches_the_cli(self, runner, unsorted_test_file):
-        cli_result = runner.invoke(cli, ["check", "row-group", unsorted_test_file])
-        assert cli_result.exit_code == 0, cli_result.output
-        assert f"Number of row groups: {_row_group_count(unsorted_test_file)}" in cli_result.output
-
-        api = gpio.read(unsorted_test_file).check_row_groups()
-        assert api.passed() is False
-
-    def test_compression_reports_the_files_codec(self, unsorted_test_file):
-        codec = _geometry_codec(unsorted_test_file)
-        assert codec == "SNAPPY", "fixture must not already be gpio's default codec"
-
-        api = gpio.read(unsorted_test_file).check_compression().to_dict()
-        assert api["current_compression"] == codec
-
-    def test_compression_can_fail_and_the_cli_agrees(self, runner, unsorted_test_file):
-        cli_result = runner.invoke(cli, ["check", "compression", unsorted_test_file])
-        assert cli_result.exit_code == 0, cli_result.output
-        assert "SNAPPY" in cli_result.output
-
-        api = gpio.read(unsorted_test_file).check_compression()
-        assert api.passed() is False
-        assert any("SNAPPY" in failure for failure in api.failures())
-
-    def test_optimization_scores_the_file_the_cli_scored(self, runner, unsorted_test_file):
-        from geoparquet_io.core.check_optimization import check_optimization
-
-        expected = check_optimization(
-            unsorted_test_file, verbose=False, return_results=True, quiet=True
-        )
-        cli_result = runner.invoke(cli, ["check", "optimization", unsorted_test_file])
-        assert cli_result.exit_code == 0, cli_result.output
-        assert f"Score: {expected['score']}/{expected['total_checks']}" in cli_result.output
-
-        api = gpio.read(unsorted_test_file).check_optimization().to_dict()
-        assert api["score"] == expected["score"]
-        # Asserted per factor too: three of the five are about how the file is
-        # written, and those are exactly the ones the temp re-write replaced.
-        for factor in ("compression", "row_group_size", "spatial_sorting"):
-            assert api["checks"][factor]["passed"] == expected["checks"][factor]["passed"], (
-                f"{factor}: CLI {expected['checks'][factor]['detail']!r} vs "
-                f"API {api['checks'][factor]['detail']!r}"
-            )
-
-    def test_validate_detects_the_version_the_file_declares(self, runner, places_test_file):
-        declared = _declared_version(places_test_file)
-        assert declared == "1.0.0", "fixture must declare a version gpio would not write"
-
-        cli_spec = _cli_json(runner, ["check", "spec", places_test_file, "--json"])
-        assert cli_spec["detected_version"] == declared
-
-        api = gpio.read(places_test_file).validate().to_dict()
-        assert api["detected_version"] == declared
-
-    def test_validate_reports_the_source_path_not_a_temp_path(self, places_test_file):
-        api = gpio.read(places_test_file).validate().to_dict()
-        assert api["file_path"] == places_test_file
-
-    def test_bbox_check_reads_the_file_the_cli_read(self, places_test_file):
-        """The bbox verdict is about the file's own `geo` block and columns."""
-        from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
-
-        expected = check_metadata_and_bbox(
-            places_test_file, verbose=False, return_results=True, quiet=True
-        )
-        api = gpio.read(places_test_file).check_bbox().to_dict()
-        assert api["passed"] == expected["passed"]
-        assert api["has_bbox_column"] == expected["has_bbox_column"]
-        assert api.get("issues") == expected.get("issues")
-
-    def test_bloom_filters_read_the_file(self, unsorted_test_file):
-        from geoparquet_io.core.check_parquet_structure import check_bloom_filters
-
-        expected = check_bloom_filters(
-            unsorted_test_file, verbose=False, return_results=True, quiet=True
-        )
-        api = gpio.read(unsorted_test_file).check_bloom_filters().to_dict()
-        assert api["has_bloom_filters"] == expected["has_bloom_filters"]
-        assert api["columns_without_bloom_filters"] == expected["columns_without_bloom_filters"]
-
-    def test_spatial_pushdown_reads_the_files_row_groups(self, unsorted_test_file):
-        api = gpio.read(unsorted_test_file).check_spatial_pushdown().to_dict()
-        assert api["num_row_groups"] == _row_group_count(unsorted_test_file)
-
-    def test_check_all_reads_the_file(self, unsorted_test_file):
-        api = gpio.read(unsorted_test_file).check().to_dict()
-        assert api["compression"]["current_compression"] == _geometry_codec(unsorted_test_file)
-        assert api["row_groups"]["stats"]["num_groups"] == _row_group_count(unsorted_test_file)
-
-    def test_a_file_backed_result_names_the_file_it_measured(self, unsorted_test_file):
-        result = gpio.read(unsorted_test_file).check_compression()
-        assert result.prospective is False
-        assert result.source == unsorted_test_file
-        assert result.to_dict()["source"] == unsorted_test_file
-        assert result.to_dict()["prospective"] is False
+    assert result.prospective is True
+    assert result.to_dict()["stats"]["total_rows"] == table.num_rows
 
 
-class TestDerivedTablesAreNotTheSourceFile:
-    """A transformed table is different bytes, so it must not borrow the path."""
+def test_a_removed_source_falls_back_to_the_rows_in_memory(tmp_path, unsorted_test_file):
+    path = tmp_path / "a.parquet"
+    shutil.copy(unsorted_test_file, path)
+    table = gpio.read(path)
+    path.unlink()
 
-    def test_a_transformed_table_forgets_the_source(self, unsorted_test_file):
-        derived = gpio.read(unsorted_test_file).head(10)
-        assert derived.source_path is None
-
-    def test_a_transformed_tables_check_is_prospective(self, unsorted_test_file):
-        result = gpio.read(unsorted_test_file).head(10).check_row_groups()
-        assert result.prospective is True
-        assert result.source is None
-        # Ten rows cannot be the source file's fifteen groups.
-        assert result.to_dict()["stats"]["num_groups"] == 1
-
-    def test_sorting_forgets_the_source(self, unsorted_test_file):
-        """The clearest case: sort_hilbert exists to change the bytes."""
-        assert gpio.read(unsorted_test_file).sort_hilbert().source_path is None
+    assert table.check_row_groups().prospective is True
 
 
-class TestInMemoryTablesAnswerProspectively:
-    """No file behind the table means no layout to describe -- say so."""
+def test_a_relative_path_survives_a_chdir(tmp_path, unsorted_test_file, monkeypatch):
+    monkeypatch.chdir(os.path.dirname(unsorted_test_file))
+    table = gpio.read(os.path.basename(unsorted_test_file))
+    monkeypatch.chdir(tmp_path)
 
-    def _in_memory(self, places_test_file):
-        return gpio.Table(pq.read_table(places_test_file))
+    assert table.check_row_groups().prospective is False
 
-    def test_source_path_is_none(self, places_test_file):
-        assert self._in_memory(places_test_file).source_path is None
 
-    def test_layout_checks_are_labelled_prospective(self, places_test_file):
-        result = self._in_memory(places_test_file).check_compression()
-        assert result.prospective is True
-        assert result.source is None
+def test_a_remote_source_is_answered_prospectively_not_refetched(monkeypatch, unsorted_test_file):
+    real_read_table = pq.read_table
+    monkeypatch.setattr(
+        pq, "read_table", lambda path, **kwargs: real_read_table(unsorted_test_file)
+    )
+    table = gpio.read("s3://bucket/x.parquet")
 
-    def test_the_label_reaches_the_dict_a_notebook_user_prints(self, places_test_file):
-        details = self._in_memory(places_test_file).check_row_groups().to_dict()
-        assert details["prospective"] is True
-        assert details["source"] is None
-
-    def test_the_label_reaches_the_repr(self, places_test_file):
-        assert "prospective" in repr(self._in_memory(places_test_file).check_optimization())
-
-    def test_a_file_backed_repr_is_not_labelled_prospective(self, places_test_file):
-        assert "prospective" not in repr(gpio.read(places_test_file).check_optimization())
-
-    def test_it_still_answers(self, places_test_file):
-        """Prospective is not "refuse": the number describes bytes gpio wrote."""
-        details = self._in_memory(places_test_file).check_compression().to_dict()
-        assert details["current_compression"] == "ZSTD"
+    assert table.source_path == "s3://bucket/x.parquet"
+    assert table.check_row_groups().prospective is True
 
 
 class TestGeoparquetVersionReportsWhatTheFileDeclares:
-    """#1061: the read property answers about the file, not the write target."""
+    def test_the_declared_string_verbatim(self, places_test_file, places_v11_file):
+        assert gpio.read(places_test_file).geoparquet_version == "1.0.0"
+        assert gpio.read(places_v11_file).geoparquet_version == "1.1.0"
 
-    def test_property_matches_the_declared_version(self, places_test_file):
-        assert gpio.read(places_test_file).geoparquet_version == _declared_version(places_test_file)
-
-    def test_property_matches_the_cli_summary(self, runner, places_test_file):
-        cli_summary = _cli_json(runner, ["inspect", "summary", places_test_file, "--json"])
-        assert gpio.read(places_test_file).geoparquet_version == cli_summary["geoparquet_version"]
-
-    def test_metadata_and_info_report_the_declared_version_too(self, places_test_file):
+    def test_metadata_and_info_agree(self, places_test_file):
         table = gpio.read(places_test_file)
-        declared = _declared_version(places_test_file)
-        assert table.metadata()["geoparquet_version"] == declared
-        assert table.info(verbose=False)["geoparquet_version"] == declared
+        assert table.metadata()["geoparquet_version"] == "1.0.0"
+        assert table.info(verbose=False)["geoparquet_version"] == "1.0.0"
 
-    def test_a_11_file_reports_its_own_patch_component(self, places_v11_file):
-        assert gpio.read(places_v11_file).geoparquet_version == _declared_version(places_v11_file)
-
-    def test_a_plain_parquet_table_reports_none(self):
+    def test_a_plain_parquet_table_has_none(self):
         import pyarrow as pa
 
-        assert gpio.Table(pa.table({"a": [1, 2]})).geoparquet_version is None
+        assert gpio.Table(pa.table({"id": [1]})).geoparquet_version is None
 
-    def test_the_write_target_is_a_separate_property(self, places_test_file):
-        """The "what would I write" question keeps its own name (#1061)."""
-        table = gpio.read(places_test_file)
-        assert table.geoparquet_version == "1.0.0"
-        assert table.output_geoparquet_version == "1.1"
-
-    def test_the_write_target_is_the_version_write_actually_stamps(
-        self, places_test_file, tmp_path
-    ):
-        table = gpio.read(places_test_file)
-        out = tmp_path / "out.parquet"
-        table.write(str(out))
-        written = _declared_version(out)
-        assert written.startswith(table.output_geoparquet_version)
+    def test_write_still_upgrades_a_1_0_input_to_1_1(self, tmp_path, places_test_file):
+        out = gpio.read(places_test_file).write(tmp_path / "out.parquet")
+        assert gpio.read(str(out)).geoparquet_version.split(".")[:2] == ["1", "1"]
 
 
-class TestCheckResultLabelling:
-    def test_an_unlabelled_result_dict_is_untouched(self):
-        from geoparquet_io.api.check import CheckResult
+def test_a_result_built_without_a_source_is_prospective_and_its_dict_is_raw():
+    results = {"passed": True, "issues": []}
+    result = CheckResult(results, check_type="stac")
 
-        raw = {"passed": True, "some_data": 123}
-        assert CheckResult(raw, check_type="test").to_dict() == raw
+    assert result.prospective is True
+    assert result.to_dict() is results
 
-    def test_an_unlabelled_result_defaults_to_not_prospective(self):
-        from geoparquet_io.api.check import CheckResult
 
-        result = CheckResult({"passed": True}, check_type="test")
-        assert result.prospective is False
-        assert result.source is None
+def test_validate_stac_names_the_file_it_read(tmp_path):
+    item = tmp_path / "item.json"
+    item.write_text("{}")
+    result = gpio.validate_stac(item)
+
+    assert result.source_path == str(item)
+    assert result.prospective is False
