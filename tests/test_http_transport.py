@@ -58,6 +58,22 @@ def test_replies_are_served_in_sequence_and_the_last_one_sticks(monkeypatch):
     assert len(http.requests) == 4
 
 
+def test_a_looping_extractor_fails_instead_of_hanging(monkeypatch):
+    """Dropping ``offset += batch`` in a pager re-requests one page forever.
+
+    That used to surface only as a hung job (the repo sets no pytest timeout);
+    the request cap turns it into a failure that names the repeating request.
+    """
+    http = FakeTransport.install(monkeypatch)
+    http.max_requests = 5
+    http.respond("/page", json_reply({"features": [1]}))
+
+    with pytest.raises(AssertionError, match=r"6 requests and counting.*looping.*offset=0"):
+        for _ in range(10):
+            _client().get(f"{HOST}/page?offset=0")
+    assert len(http.requests) == 6
+
+
 def test_an_unrouted_request_fails_loudly_naming_the_url(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     http.respond("/known", json_reply({}))

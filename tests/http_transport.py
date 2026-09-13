@@ -233,6 +233,10 @@ class FakeTransport:
     sleeps: list[float] = field(default_factory=list)
     client_timeouts: list[float] = field(default_factory=list)
     resets: int = 0
+    #: An extractor that stops advancing its offset re-requests the same page
+    #: forever; without a cap that is a hung test, not a failed one. No test
+    #: here needs more than a few dozen requests.
+    max_requests: int = 500
     # The parallel ArcGIS path issues requests from a thread pool; the lock
     # makes "the first two requests get the failure" mean exactly that.
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -301,6 +305,11 @@ class FakeTransport:
         recorded = _record(request)
         with self._lock:
             self.requests.append(recorded)
+            if len(self.requests) > self.max_requests:
+                raise AssertionError(
+                    f"{len(self.requests)} requests and counting -- the extractor is looping; "
+                    f"last: {recorded}"
+                )
             chosen = self._choose(recorded)
         if isinstance(chosen, BaseException):
             raise chosen

@@ -1425,12 +1425,21 @@ class TestStreamingConversion:
     @patch("geoparquet_io.core.arcgis._stream_features_to_parquet")
     @patch("geoparquet_io.core.arcgis.get_layer_info")
     @patch("geoparquet_io.core.arcgis.validate_arcgis_url")
-    def test_arcgis_to_table_cleans_temp_file(self, mock_validate, mock_layer_info, mock_stream):
-        """Test that temp file is cleaned up after conversion."""
+    def test_arcgis_to_table_cleans_temp_file(
+        self, mock_validate, mock_layer_info, mock_stream, monkeypatch, tmp_path
+    ):
+        """Test that temp file is cleaned up after conversion.
+
+        ``arcgis_to_table`` stages under ``tempfile.gettempdir()``; pointed at
+        ``tmp_path`` here, or the before/after glob sees the staging files of
+        every other xdist worker running the extractor at the same moment.
+        """
         import glob
         import os
 
         from geoparquet_io.core.arcgis import ArcGISLayerInfo, arcgis_to_table
+
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
         mock_validate.return_value = ("https://example.com/FeatureServer/0", 0)
         mock_layer_info.return_value = ArcGISLayerInfo(
