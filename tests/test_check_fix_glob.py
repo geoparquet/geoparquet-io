@@ -250,6 +250,27 @@ class TestNoBackupOverAGlob:
             assert not Path(f"{path}.bak").exists(), "--no-backup still wrote a .bak"
             assert_austria_output_is_sound(path)
 
+    def test_writing_elsewhere_is_never_confirmed(self, austria_bbox_covering_file, tmp_path):
+        """``--no-backup`` with ``--fix-output`` has nothing to overwrite, so it asks nothing."""
+        files = broken_files(FIX_CASES[1], austria_bbox_covering_file, tmp_path / "data")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        result = invoke(
+            "check",
+            "compression",
+            tmp_path / "data" / "*.parquet",
+            "--fix",
+            "--no-backup",
+            "--fix-output",
+            out_dir,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "without backup. Continue?" not in result.output, result.output
+        for path in files:
+            assert_austria_output_is_sound(out_dir / path.name)
+
     def test_declining_the_confirmation_rewrites_nothing(
         self, austria_bbox_covering_file, tmp_path
     ):
@@ -270,27 +291,104 @@ class TestNoBackupOverAGlob:
             assert digest(path) == before[path], f"{path.name} was rewritten after an abort"
 
 
+#: Every ``--fix`` branch, with the core function it calls and a fixture that
+#: makes it run. ``check bbox`` has two: 1.x adds a bbox column, a native-geo
+#: file has its undeclared one removed, and they are separate call sites.
+FAILURE_CASES = [
+    ("row-group", "fix_row_groups", "austria_bbox_covering_file", make_tiny_row_groups, []),
+    ("compression", "fix_compression", "austria_bbox_covering_file", make_snappy, []),
+    (
+        "spatial",
+        "fix_spatial_ordering",
+        "austria_bbox_covering_file",
+        make_unsorted,
+        ["--random-sample-size", "20"],
+    ),
+    ("bbox", "fix_bbox_all", "austria_bbox_covering_file", _make_without_bbox, []),
+    ("bbox", "fix_bbox_removal", "fields_geom_type_only_file", make_snappy, []),
+    (
+        "all",
+        "apply_all_fixes",
+        "austria_bbox_covering_file",
+        _make_snappy_unsorted,
+        ["--random-sample-size", "20"],
+    ),
+]
+
+
 class TestOneFailureAmongMany:
     """A fix that raises on one file must not silence the rest, or exit 0."""
 
+    @pytest.mark.parametrize(
+        "command,fix_function,fixture,make_broken,extra",
+        FAILURE_CASES,
+        ids=[f"{command}-{fn}" for command, fn, *_ in FAILURE_CASES],
+    )
     def test_the_run_continues_and_the_exit_code_reflects_the_failure(
+        self, command, fix_function, fixture, make_broken, extra, tmp_path, request
+    ):
+        source = Path(str(request.getfixturevalue(fixture)))
+        data = tmp_path / "data"
+        data.mkdir()
+        files = [make_broken(source, data / f"{name}.parquet") for name in NAMES]
+        before = {path: digest(path) for path in files}
+        real = getattr(core_check_fixes, fix_function)
+
+        def flaky(parquet_file, *args, **kwargs):
+            if Path(parquet_file).name == "b.parquet":
+                raise RuntimeError("synthetic fix failure")
+            return real(parquet_file, *args, **kwargs)
+
+        with mock.patch.object(core_check_fixes, fix_function, flaky):
+            result = invoke("check", command, data / "*.parquet", "--fix", *extra)
+
+        assert result.exit_code == 1, result.output
+        assert "synthetic fix failure" in result.output
+        assert "Failed to fix 1 file:" in result.output
+        rewritten = {path.name for path in files if digest(path) != before[path]}
+        assert rewritten == {"a.parquet", "d.parquet"}, result.output
+
+    def test_the_files_that_did_get_fixed_are_still_sound(
         self, austria_bbox_covering_file, tmp_path
     ):
+        """A partial run is not an excuse for a half-written file."""
         files = broken_files(FIX_CASES[0], austria_bbox_covering_file, tmp_path / "data")
-        before = {path: digest(path) for path in files}
         real = core_check_fixes.fix_row_groups
 
-        def flaky(parquet_file, output_file, *args, **kwargs):
+        def flaky(parquet_file, *args, **kwargs):
             if Path(parquet_file).name == "b.parquet":
-                raise RuntimeError("synthetic row-group failure")
-            return real(parquet_file, output_file, *args, **kwargs)
+                raise RuntimeError("synthetic fix failure")
+            return real(parquet_file, *args, **kwargs)
 
         with mock.patch.object(core_check_fixes, "fix_row_groups", flaky):
             result = invoke("check", "row-group", tmp_path / "data" / "*.parquet", "--fix")
 
-        assert result.exit_code != 0, result.output
-        assert "synthetic row-group failure" in result.output
-        rewritten = {path.name for path in files if digest(path) != before[path]}
-        assert rewritten == {"a.parquet", "d.parquet"}, result.output
-        for name in ("a.parquet", "d.parquet"):
-            assert_austria_output_is_sound(tmp_path / "data" / name)
+        assert result.exit_code == 1, result.output
+        for path in files:
+            if path.name != "b.parquet":
+                assert_austria_output_is_sound(path)
+
+
+class TestFilesThatNeedNothing:
+    """A glob that matches sound files as well as broken ones."""
+
+    def test_only_the_files_that_needed_a_fix_are_reported(
+        self, austria_bbox_covering_file, tmp_path
+    ):
+        data = tmp_path / "data"
+        data.mkdir()
+        source = Path(austria_bbox_covering_file)
+        broken = _make_snappy_unsorted(source, data / "a.parquet")
+        # `b` is a copy of the pristine fixture: nothing for `check all` to do.
+        healthy = data / "b.parquet"
+        healthy.write_bytes(source.read_bytes())
+        untouched = digest(healthy)
+
+        result = invoke("check", "all", data / "*.parquet", "--fix", "--random-sample-size", "20")
+
+        assert result.exit_code == 0, result.output
+        assert "No fixes needed" in result.output
+        assert "Fixed 1 file:" in result.output
+        assert digest(healthy) == untouched, "a sound file must not be rewritten"
+        assert not Path(f"{healthy}.bak").exists()
+        assert_austria_output_is_sound(broken)
