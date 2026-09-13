@@ -272,13 +272,9 @@ def get_files_to_check(
         check_all: If True, return all files
         check_sample: If set, return first N files
         verbose: Print debug messages
-        fix: If True, the caller is about to *repair* these files, so the
-            first-file default below does not apply. Sampling is the right
-            default for a read-only look at a partition that may hold ten
-            thousand files; it is the wrong one for a repair, which silently
-            fixed ``a.parquet`` of ``a``, ``b``, ``d`` and reported success
-            (#1041). An explicit ``--sample-files N`` still wins -- that is the
-            user naming the subset, not gpio guessing at one.
+        fix: If True the caller is about to repair these files, so never
+            sample: a repair acts on every matched file. An explicit
+            ``check_sample`` still wins -- that is the user naming the subset.
 
     Returns:
         tuple: (files_to_check, notice_message)
@@ -309,12 +305,11 @@ def get_files_to_check(
         notice = f"Checking sample of {sample_count} files (out of {file_count} total)"
         return files, notice
 
-    if fix:
-        notice = f"Fixing all {file_count} files in the input (--fix never samples)"
-        return all_files, notice
-
     # Default: check first file only
     first_file = partition_info["first_file"]
+    if fix and first_file:
+        notice = f"Fixing all {file_count} files in the input (--fix never samples)"
+        return all_files, notice
     if first_file:
         notice = f"Checking first file (of {file_count} total). Use --all-files or --sample-files N for more."
         return [first_file], notice

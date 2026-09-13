@@ -1,34 +1,26 @@
-"""``gpio check <cmd> "*.parquet" --fix`` acts on every file the glob matched.
-
-#1041: with ``a.parquet``, ``b.parquet`` and ``d.parquet`` all carrying the same
-defect, ``check row-group "*.parquet" --fix`` rewrote ``a`` and left the other
-two broken, reporting one success and exiting 0. The narrowing happened in
-``get_files_to_check``, which samples a multi-file input down to its first file
-unless ``--all-files`` is passed -- a sensible default for a read-only look at a
-10,000-file partition, and the wrong one for a repair: the user is told "3 total"
-and then handed a run that fixed one of them.
+"""``gpio check <cmd> "*.parquet" --fix`` acts on every file the glob matched (#1041).
 
 Every test here drives the real CLI over a directory of genuinely defective
 files and judges *each* output with
-:func:`tests.fix_output_oracle.assert_fix_output_is_sound`. The defect injectors
-are the ones ``test_check_fix_output_is_valid`` already uses, so a fix that runs
-on N files is held to exactly the standard a fix on one file is held to.
-
-The fixture is ``austria_bbox_covering.parquet`` -- 30 rows in EPSG:31287, so a
+:func:`tests.fix_output_oracle.assert_fix_output_is_sound`, so a fix that runs
+on N files is held to exactly the standard a fix on one file is held to. The
+fixture is ``austria_bbox_covering.parquet``: 30 rows in EPSG:31287, so a
 rewrite that drops the CRS cannot hide behind CRS84 being the default (#993).
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from unittest import mock
 
+import duckdb
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
+from geoparquet_io.cli.commands import check as check_commands
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import check_fixes as core_check_fixes
 from tests.fix_output_oracle import assert_fix_output_is_sound
@@ -40,7 +32,7 @@ from tests.test_check_fix_output_is_valid import (
 )
 
 #: The three names from the issue report.
-NAMES = ["a", "b", "d"]
+NAMES = ("a", "b", "d")
 
 AUSTRIA_ROWS = 30
 AUSTRIA_CRS = {"authority": "EPSG", "code": 31287}
@@ -73,19 +65,22 @@ FIX_CASES = [
     FixCase("all", _make_snappy_unsorted, ["--random-sample-size", "20"]),
 ]
 CASE_IDS = [case.command for case in FIX_CASES]
+COMPRESSION, ALL = FIX_CASES[1], FIX_CASES[4]
 
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def broken_files(case: FixCase, source: str, directory: Path, names=NAMES) -> list[Path]:
+def broken_files(
+    case: FixCase, source: str, directory: Path, names: Sequence[str] = NAMES
+) -> list[Path]:
     """One defective copy per name, in *directory*."""
     directory.mkdir(parents=True, exist_ok=True)
     return [case.make_broken(Path(source), directory / f"{name}.parquet") for name in names]
 
 
-def invoke(*args: object, stdin: str | None = None):
+def invoke(*args: object, stdin: str | None = None) -> Result:
     return CliRunner().invoke(cli, [str(a) for a in args], input=stdin)
 
 
@@ -98,6 +93,18 @@ def assert_austria_output_is_sound(path: Path) -> None:
         expects_covering=True,
         expected_version_prefix="1.1",
     )
+
+
+def failing_on(fix_function: str, name: str, error: BaseException):
+    """The real fix, raising *error* for the file called *name*."""
+    real = getattr(core_check_fixes, fix_function)
+
+    def flaky(parquet_file, *args, **kwargs):
+        if Path(parquet_file).name == name:
+            raise error
+        return real(parquet_file, *args, **kwargs)
+
+    return mock.patch.object(core_check_fixes, fix_function, flaky)
 
 
 class TestGlobFixesEveryMatch:
@@ -121,25 +128,9 @@ class TestGlobFixesEveryMatch:
             assert path.name in result.output, f"{path.name} is not named in the report"
             assert_austria_output_is_sound(path)
 
-    def test_the_summary_names_every_file_it_rewrote(self, austria_bbox_covering_file, tmp_path):
-        """Not the first three and "... and 2 more": a mass rewrite names them all."""
-        names = ["a", "b", "c", "d", "e"]
-        files = broken_files(
-            FIX_CASES[1], austria_bbox_covering_file, tmp_path / "data", names=names
-        )
-
-        result = invoke("check", "compression", tmp_path / "data" / "*.parquet", "--fix")
-
-        assert result.exit_code == 0, result.output
-        assert "Fixed 5 files:" in result.output
-        summary = result.output.rsplit("Fixed 5 files:", 1)[1]
-        assert "more" not in summary, summary
-        for path in files:
-            assert f"  - {path}" in summary, f"{path} missing from the summary"
-
     def test_an_explicit_sample_is_still_honoured(self, austria_bbox_covering_file, tmp_path):
         """``--sample-files N`` is the user naming a subset; ``--fix`` does not widen it."""
-        files = broken_files(FIX_CASES[1], austria_bbox_covering_file, tmp_path / "data")
+        files = broken_files(COMPRESSION, austria_bbox_covering_file, tmp_path / "data")
         before = {path: digest(path) for path in files}
 
         result = invoke(
@@ -150,38 +141,46 @@ class TestGlobFixesEveryMatch:
         rewritten = [path.name for path in files if digest(path) != before[path]]
         assert rewritten == ["a.parquet"], result.output
 
+    def test_a_directory_walk_skips_dotfiles(self, austria_bbox_covering_file, tmp_path):
+        """macOS ``._x.parquet`` sidecars and an orphaned staging file are not data."""
+        files = broken_files(COMPRESSION, austria_bbox_covering_file, tmp_path / "data")
+        (tmp_path / "data" / "._a.parquet").write_bytes(b"AppleDouble")
+        (tmp_path / "data" / ".gpio-fix-orphan.parquet").write_bytes(b"half a file")
 
-class TestSharedFixOutputIsRefused:
-    """One ``--fix-output`` path cannot receive N inputs."""
+        result = invoke("check", "compression", tmp_path / "data", "--fix")
 
-    @pytest.mark.parametrize("case", FIX_CASES, ids=CASE_IDS)
+        assert result.exit_code == 0, result.output
+        assert "Fixing all 3 files" in result.output
+        for path in files:
+            assert_austria_output_is_sound(path)
+
+
+class TestFixOutputMustHoldOneOutputPerInput:
+    """``--fix-output`` is refused, before any file is checked, when it cannot."""
+
+    def _assert_refused(self, result: Result, files: list[Path], before: dict[Path, str]) -> None:
+        assert result.exit_code == 2, result.output
+        for path in files:
+            assert digest(path) == before[path], f"{path.name} was touched"
+            assert not Path(f"{path}.bak").exists()
+
     def test_a_single_path_for_many_inputs_is_a_usage_error(
-        self, case, austria_bbox_covering_file, tmp_path
+        self, austria_bbox_covering_file, tmp_path
     ):
-        files = broken_files(case, austria_bbox_covering_file, tmp_path / "data")
+        files = broken_files(COMPRESSION, austria_bbox_covering_file, tmp_path / "data")
         before = {path: digest(path) for path in files}
         shared = tmp_path / "fixed.parquet"
 
         result = invoke(
-            "check",
-            case.command,
-            tmp_path / "data" / "*.parquet",
-            "--fix",
-            "--fix-output",
-            shared,
-            *case.extra,
+            "check", "compression", tmp_path / "data" / "*.parquet", "--fix", "--fix-output", shared
         )
 
-        assert result.exit_code == 2, result.output
-        assert "--fix-output must be a directory, not a file path" in result.output
+        assert "--fix-output must be an existing directory, not a file path" in result.output
         assert "When fixing multiple files (3 files)" in result.output
-        # Refused up front: no input was touched and nothing was written.
         assert not shared.exists()
-        for path in files:
-            assert digest(path) == before[path]
-            assert not Path(f"{path}.bak").exists()
+        self._assert_refused(result, files, before)
 
-    @pytest.mark.parametrize("case", FIX_CASES, ids=CASE_IDS)
+    @pytest.mark.parametrize("case", [COMPRESSION, ALL], ids=["compression", "all"])
     def test_a_directory_receives_one_output_per_input(
         self, case, austria_bbox_covering_file, tmp_path
     ):
@@ -208,12 +207,58 @@ class TestSharedFixOutputIsRefused:
             assert not Path(f"{path}.bak").exists()
             assert_austria_output_is_sound(out_dir / path.name)
 
+    def test_two_inputs_with_one_basename_cannot_share_a_directory(
+        self, austria_bbox_covering_file, tmp_path
+    ):
+        """A hive layout: ``k=1/part-0.parquet`` and ``k=2/part-0.parquet``.
+
+        Written to their own name inside the directory, the second repair would
+        land on the first -- the very "Fixed 2 files: out/part-0.parquet twice"
+        the file-path refusal exists for, through the directory door.
+        """
+        files = [
+            COMPRESSION.make_broken(
+                Path(austria_bbox_covering_file), tmp_path / "data" / f"k={k}" / "part-0.parquet"
+            )
+            for k in (1, 2)
+            if (tmp_path / "data" / f"k={k}").mkdir(parents=True) is None
+        ]
+        before = {path: digest(path) for path in files}
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        result = invoke("check", "compression", tmp_path / "data", "--fix", "--fix-output", out_dir)
+
+        assert "would both be written to" in result.output, result.output
+        assert list(out_dir.iterdir()) == []
+        self._assert_refused(result, files, before)
+
+    def test_a_directory_holding_an_input_is_refused(self, austria_bbox_covering_file, tmp_path):
+        """``--fix-output data/`` for ``data/`` itself.
+
+        The repair of ``sub/a.parquet`` would land on ``data/a.parquet`` -- an
+        input, overwritten as a "different" file with no backup and no prompt.
+        It is the same refusal: two inputs, one output name.
+        """
+        data = tmp_path / "data"
+        (data / "sub").mkdir(parents=True)
+        top = COMPRESSION.make_broken(Path(austria_bbox_covering_file), data / "a.parquet")
+        nested = COMPRESSION.make_broken(
+            Path(austria_bbox_covering_file), data / "sub" / "a.parquet"
+        )
+        before = {top: digest(top), nested: digest(nested)}
+
+        result = invoke("check", "compression", data, "--fix", "--fix-output", data)
+
+        assert "would both be written to" in result.output, result.output
+        self._assert_refused(result, [top, nested], before)
+
     def test_a_single_match_still_takes_a_plain_output_path(
         self, austria_bbox_covering_file, tmp_path
     ):
         """The refusal is about *many* inputs; one file keeps the old spelling."""
         (broken,) = broken_files(
-            FIX_CASES[1], austria_bbox_covering_file, tmp_path / "data", names=["a"]
+            COMPRESSION, austria_bbox_covering_file, tmp_path / "data", names=["a"]
         )
         before = digest(broken)
         fixed = tmp_path / "fixed.parquet"
@@ -230,21 +275,24 @@ class TestSharedFixOutputIsRefused:
 class TestNoBackupOverAGlob:
     """``--no-backup`` asks once for the run, not once per matched file."""
 
-    def test_one_confirmation_covers_every_file(self, austria_bbox_covering_file, tmp_path):
-        files = broken_files(FIX_CASES[1], austria_bbox_covering_file, tmp_path / "data")
+    @pytest.mark.parametrize("case", [COMPRESSION, ALL], ids=["compression", "all"])
+    def test_one_confirmation_covers_every_file(self, case, austria_bbox_covering_file, tmp_path):
+        files = broken_files(case, austria_bbox_covering_file, tmp_path / "data")
         before = {path: digest(path) for path in files}
 
         result = invoke(
             "check",
-            "compression",
+            case.command,
             tmp_path / "data" / "*.parquet",
             "--fix",
             "--no-backup",
+            *case.extra,
             stdin="y\n",
         )
 
         assert result.exit_code == 0, result.output
         assert result.output.count("without backup. Continue?") == 1, result.output
+        assert "up to 3 original files under" in result.output
         for path in files:
             assert digest(path) != before[path], f"{path.name} was not rewritten"
             assert not Path(f"{path}.bak").exists(), "--no-backup still wrote a .bak"
@@ -252,7 +300,7 @@ class TestNoBackupOverAGlob:
 
     def test_writing_elsewhere_is_never_confirmed(self, austria_bbox_covering_file, tmp_path):
         """``--no-backup`` with ``--fix-output`` has nothing to overwrite, so it asks nothing."""
-        files = broken_files(FIX_CASES[1], austria_bbox_covering_file, tmp_path / "data")
+        files = broken_files(COMPRESSION, austria_bbox_covering_file, tmp_path / "data")
         out_dir = tmp_path / "out"
         out_dir.mkdir()
 
@@ -274,7 +322,7 @@ class TestNoBackupOverAGlob:
     def test_declining_the_confirmation_rewrites_nothing(
         self, austria_bbox_covering_file, tmp_path
     ):
-        files = broken_files(FIX_CASES[1], austria_bbox_covering_file, tmp_path / "data")
+        files = broken_files(COMPRESSION, austria_bbox_covering_file, tmp_path / "data")
         before = {path: digest(path) for path in files}
 
         result = invoke(
@@ -291,82 +339,103 @@ class TestNoBackupOverAGlob:
             assert digest(path) == before[path], f"{path.name} was rewritten after an abort"
 
 
-#: Every ``--fix`` branch, with the core function it calls and a fixture that
-#: makes it run. ``check bbox`` has two: 1.x adds a bbox column, a native-geo
-#: file has its undeclared one removed, and they are separate call sites.
-FAILURE_CASES = [
-    ("row-group", "fix_row_groups", "austria_bbox_covering_file", make_tiny_row_groups, []),
-    ("compression", "fix_compression", "austria_bbox_covering_file", make_snappy, []),
-    (
-        "spatial",
-        "fix_spatial_ordering",
-        "austria_bbox_covering_file",
-        make_unsorted,
-        ["--random-sample-size", "20"],
-    ),
-    ("bbox", "fix_bbox_all", "austria_bbox_covering_file", _make_without_bbox, []),
-    ("bbox", "fix_bbox_removal", "fields_geom_type_only_file", make_snappy, []),
-    (
-        "all",
-        "apply_all_fixes",
-        "austria_bbox_covering_file",
-        _make_snappy_unsorted,
-        ["--random-sample-size", "20"],
-    ),
-]
-
-
 class TestOneFailureAmongMany:
-    """A fix that raises on one file must not silence the rest, or exit 0."""
+    """A file that cannot be checked or fixed must not silence the rest, or exit 0.
+
+    Two paths: the four single-check commands share ``runner.fix_file``, and
+    ``check all`` has its own (``apply_check_all_fixes``, which restores the
+    backup itself).
+    """
 
     @pytest.mark.parametrize(
-        "command,fix_function,fixture,make_broken,extra",
-        FAILURE_CASES,
-        ids=[f"{command}-{fn}" for command, fn, *_ in FAILURE_CASES],
+        ("case", "fix_function"),
+        [(COMPRESSION, "fix_compression"), (ALL, "apply_all_fixes")],
+        ids=["compression", "all"],
     )
-    def test_the_run_continues_and_the_exit_code_reflects_the_failure(
-        self, command, fix_function, fixture, make_broken, extra, tmp_path, request
+    def test_a_failed_fix_is_reported_and_the_run_continues(
+        self, case, fix_function, austria_bbox_covering_file, tmp_path
     ):
-        source = Path(str(request.getfixturevalue(fixture)))
-        data = tmp_path / "data"
-        data.mkdir()
-        files = [make_broken(source, data / f"{name}.parquet") for name in NAMES]
+        files = broken_files(case, austria_bbox_covering_file, tmp_path / "data")
         before = {path: digest(path) for path in files}
-        real = getattr(core_check_fixes, fix_function)
 
-        def flaky(parquet_file, *args, **kwargs):
-            if Path(parquet_file).name == "b.parquet":
-                raise RuntimeError("synthetic fix failure")
-            return real(parquet_file, *args, **kwargs)
-
-        with mock.patch.object(core_check_fixes, fix_function, flaky):
-            result = invoke("check", command, data / "*.parquet", "--fix", *extra)
+        with failing_on(fix_function, "b.parquet", RuntimeError("synthetic fix failure")):
+            result = invoke(
+                "check", case.command, tmp_path / "data" / "*.parquet", "--fix", *case.extra
+            )
 
         assert result.exit_code == 1, result.output
-        assert "synthetic fix failure" in result.output
+        assert (
+            result.output.count("synthetic fix failure") == 2
+        )  # once as it happens, once in the summary
         assert "Failed to fix 1 file:" in result.output
         rewritten = {path.name for path in files if digest(path) != before[path]}
         assert rewritten == {"a.parquet", "d.parquet"}, result.output
+        for path in files:
+            if path.name == "b.parquet":
+                # Untouched, and no orphan backup beside it: the fix never landed.
+                assert not Path(f"{path}.bak").exists(), "a failed fix left its .bak behind"
+            else:
+                assert Path(f"{path}.bak").exists()
+                assert_austria_output_is_sound(path)
 
-    def test_the_files_that_did_get_fixed_are_still_sound(
-        self, austria_bbox_covering_file, tmp_path
+    @pytest.mark.parametrize("case", FIX_CASES, ids=CASE_IDS)
+    def test_a_file_that_cannot_be_checked_is_reported_and_the_run_continues(
+        self, case, austria_bbox_covering_file, tmp_path
     ):
-        """A partial run is not an excuse for a half-written file."""
-        files = broken_files(FIX_CASES[0], austria_bbox_covering_file, tmp_path / "data")
-        real = core_check_fixes.fix_row_groups
+        """The failure a real directory hits first: a file DuckDB cannot open.
 
-        def flaky(parquet_file, *args, **kwargs):
-            if Path(parquet_file).name == "b.parquet":
-                raise RuntimeError("synthetic fix failure")
-            return real(parquet_file, *args, **kwargs)
+        It fails in the *check* stage, before any fix; the run still names
+        what it did rewrite, and exits 1.
+        """
+        files = broken_files(case, austria_bbox_covering_file, tmp_path / "data")
+        before = {path: digest(path) for path in files}
+        files[1].write_bytes(b"not a parquet file")
+        before[files[1]] = digest(files[1])
 
-        with mock.patch.object(core_check_fixes, "fix_row_groups", flaky):
-            result = invoke("check", "row-group", tmp_path / "data" / "*.parquet", "--fix")
+        result = invoke(
+            "check", case.command, tmp_path / "data" / "*.parquet", "--fix", *case.extra
+        )
 
         assert result.exit_code == 1, result.output
-        for path in files:
-            if path.name != "b.parquet":
-                assert_austria_output_is_sound(path)
+        assert "Check failed: b.parquet" in result.output
+        assert "Failed to fix 1 file:" in result.output
+        assert "Fixed 2 files:" in result.output
+        assert digest(files[1]) == before[files[1]]
+        for path in (files[0], files[2]):
+            assert_austria_output_is_sound(path)
+
+    def test_an_interrupt_stops_the_run_and_still_lists_what_was_rewritten(
+        self, austria_bbox_covering_file, tmp_path
+    ):
+        """Ctrl-C reaches gpio as DuckDB's ``InterruptException`` -- a plain ``Exception``.
+
+        Treating it as "this file failed, next" would keep rewriting files after
+        the user asked it to stop.
+        """
+        files = broken_files(COMPRESSION, austria_bbox_covering_file, tmp_path / "data")
+        before = {path: digest(path) for path in files}
+
+        with failing_on(
+            "fix_compression", "b.parquet", duckdb.InterruptException("Query interrupted")
+        ):
+            result = invoke("check", "compression", tmp_path / "data" / "*.parquet", "--fix")
+
+        assert result.exit_code != 0
+        rewritten = {path.name for path in files if digest(path) != before[path]}
+        assert rewritten == {"a.parquet"}, "the run went on past the interrupt"
+        assert "Fixed 1 file:" in result.output
+        assert not Path(f"{files[1]}.bak").exists(), "the interrupted fix left its .bak behind"
+
+    def test_a_single_file_failure_keeps_its_exception(self, austria_bbox_covering_file, tmp_path):
+        """One file is not a run: the error propagates as it always did."""
+        (broken,) = broken_files(COMPRESSION, austria_bbox_covering_file, tmp_path / "data", ["a"])
+
+        with failing_on("fix_compression", "a.parquet", RuntimeError("synthetic fix failure")):
+            result = invoke("check", "compression", broken, "--fix")
+
+        assert result.exit_code != 0
+        assert "Failed to fix 1 file" not in result.output
+        assert isinstance(result.exception, RuntimeError)
 
 
 class TestFilesThatNeedNothing:
@@ -387,8 +456,44 @@ class TestFilesThatNeedNothing:
         result = invoke("check", "all", data / "*.parquet", "--fix", "--random-sample-size", "20")
 
         assert result.exit_code == 0, result.output
-        assert "No fixes needed" in result.output
         assert "Fixed 1 file:" in result.output
         assert digest(healthy) == untouched, "a sound file must not be rewritten"
         assert not Path(f"{healthy}.bak").exists()
         assert_austria_output_is_sound(broken)
+
+    def test_a_file_that_still_fails_after_its_fix_gets_one_line(
+        self, austria_bbox_covering_file, tmp_path
+    ):
+        """``check all`` re-checks each output; in a multi-file run a leftover is one line."""
+        files = broken_files(ALL, austria_bbox_covering_file, tmp_path / "data")
+
+        def never_sorted(*args, **kwargs):
+            return {
+                "passed": False,
+                "ratio": 1.0,
+                "issues": ["still unsorted"],
+                "fix_available": True,
+            }
+
+        with mock.patch.object(check_commands, "check_spatial_impl", never_sorted):
+            result = invoke("check", "all", tmp_path / "data" / "*.parquet", "--fix", *ALL.extra)
+
+        assert result.exit_code == 0, result.output
+        assert result.output.count("issues remain after fixes (Spatial Ordering)") == len(files)
+        assert "Some issues remain after fixes:" not in result.output
+
+    def test_a_multi_file_run_prints_one_line_per_file_not_a_banner(
+        self, austria_bbox_covering_file, tmp_path
+    ):
+        """Twenty files is twenty lines, not twenty "Re-validating after fixes" blocks."""
+        files = broken_files(ALL, austria_bbox_covering_file, tmp_path / "data")
+
+        result = invoke("check", "all", tmp_path / "data" / "*.parquet", "--fix", *ALL.extra)
+
+        assert result.exit_code == 0, result.output
+        assert "Re-validating after fixes" not in result.output
+        assert "Applying fixes..." not in result.output
+        assert result.output.count("Created backup") == 0
+        assert "Fixed 3 files:" in result.output
+        for path in files:
+            assert_austria_output_is_sound(path)

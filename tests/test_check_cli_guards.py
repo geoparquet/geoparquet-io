@@ -160,7 +160,7 @@ class TestMultiFileFixOutputValidation:
         # failed -- and the four single-check commands did not refuse it at all,
         # they wrote all N files to the one path in turn (#1041).
         assert result.exit_code == 2, result.output
-        assert "--fix-output must be a directory, not a file path" in result.output
+        assert "--fix-output must be an existing directory, not a file path" in result.output
         assert "When fixing multiple files (4 files)" in result.output
         # Nothing was checked, and nothing was written to the bogus output path.
         fake_runner.assert_not_called()

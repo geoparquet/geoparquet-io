@@ -43,7 +43,7 @@ class NoBackupConfirmation:
         target = (
             "the original file"
             if self.file_count == 1
-            else f"up to {self.file_count} original files"
+            else f"up to {self.file_count} original files under {os.path.dirname(parquet_file) or '.'}"
         )
         click.confirm(f"This will overwrite {target} without backup. Continue?", abort=True)
 
@@ -74,7 +74,9 @@ def validate_remote_file_modification(parquet_file, fix_output, overwrite):
     return is_remote
 
 
-def create_backup_if_needed(parquet_file, output_path, no_backup, is_remote, verbose):
+def create_backup_if_needed(
+    parquet_file, output_path, no_backup, is_remote, verbose, quiet: bool = False
+):
     """Create backup file if needed for local files."""
     backup_path = f"{parquet_file}.bak"
 
@@ -87,17 +89,27 @@ def create_backup_if_needed(parquet_file, output_path, no_backup, is_remote, ver
         if verbose:
             click.echo(f"\nCreating backup: {backup_path}")
         shutil.copy2(parquet_file, backup_path)
-        click.echo(click.style(f"✓ Created backup: {backup_path}", fg="green"))
+        if not quiet:
+            click.echo(click.style(f"✓ Created backup: {backup_path}", fg="green"))
         return backup_path
     return None
 
 
 def verify_fixes(
-    output_path, check_structure_impl, check_spatial_impl, random_sample_size, limit_rows
+    output_path,
+    check_structure_impl,
+    check_spatial_impl,
+    random_sample_size,
+    limit_rows,
+    quiet: bool = False,
 ):
-    """Re-run checks to verify fixes were successful."""
-    click.echo("\nRe-validating after fixes...")
-    click.echo("=" * 60)
+    """Re-run checks to verify fixes were successful; returns whether they all pass.
+
+    ``quiet`` (a multi-file run) prints one line only when issues remain.
+    """
+    if not quiet:
+        click.echo("\nRe-validating after fixes...")
+        click.echo("=" * 60)
 
     final_structure_results = check_structure_impl(output_path, verbose=False, return_results=True)
     final_spatial_result = check_spatial_impl(
@@ -124,6 +136,17 @@ def verify_fixes(
 
     all_passed = len(failing_checks) == 0
 
+    if quiet:
+        if not all_passed:
+            remaining = "; ".join(name for name, _ in failing_checks)
+            click.echo(
+                click.style(
+                    f"  ⚠ {os.path.basename(output_path)}: issues remain after fixes ({remaining})",
+                    fg="yellow",
+                )
+            )
+        return all_passed
+
     if all_passed:
         click.echo(click.style("\n✓ All checks passed after fixes!", fg="green", bold=True))
     else:
@@ -139,9 +162,11 @@ def verify_fixes(
 
 
 def handle_fix_error(e, no_backup, output_path, parquet_file, backup_path):
-    """Handle errors during fix application."""
-    click.echo(click.style(f"\n❌ Fix failed: {str(e)}", fg="red"))
-    # Restore from backup if it exists
+    """Put a failed in-place fix back the way it was, and remove the ``.bak``.
+
+    The failure itself is reported by the caller (the runner names the file
+    and the error once); this only undoes the backup step.
+    """
     if (
         not no_backup
         and is_same_file_path(output_path, parquet_file)
@@ -156,30 +181,32 @@ def handle_fix_error(e, no_backup, output_path, parquet_file, backup_path):
 def handle_fix_common(
     parquet_file,
     fix_output,
-    no_backup,
     fix_func,
     verbose=False,
     overwrite=False,
     profile=None,
-    confirmation=None,
+    *,
+    confirmation: NoBackupConfirmation,
+    quiet: bool = False,
 ):
     """Handle common fix logic: backup, output path, and fix application.
 
     Args:
         parquet_file: Input file path
         fix_output: Custom output path or None
-        no_backup: Whether to skip backup
         fix_func: Function to call for fixing (takes input_path, output_path, verbose, profile)
         verbose: Print verbose output
         overwrite: Whether to allow overwriting remote files
         profile: AWS profile name for S3 operations
         confirmation: the run's :class:`NoBackupConfirmation`, shared across
-            every file a multi-file ``--fix`` touches. Defaults to a
-            single-file one, which is what a lone call gets.
+            every file a multi-file ``--fix`` touches; it also carries the
+            ``--no-backup`` flag.
+        quiet: a multi-file run -- no per-file "Created backup" line.
 
     Returns:
         tuple: (output_path, backup_path or None)
     """
+    no_backup = confirmation.no_backup
     # Handle remote files
     if is_remote_url(parquet_file):
         if not fix_output:
@@ -210,7 +237,7 @@ def handle_fix_common(
     fixing_in_place = is_same_file_path(output_path, parquet_file)
 
     # Confirm overwrite without backup for local files -- once per run (#1041).
-    (confirmation or NoBackupConfirmation(no_backup)).ensure(parquet_file, output_path)
+    confirmation.ensure(parquet_file, output_path)
 
     # Create backup if needed (only for local files)
     if (
@@ -220,13 +247,19 @@ def handle_fix_common(
         and not is_remote_url(parquet_file)
     ):
         shutil.copy2(parquet_file, backup_path)
-        click.echo(click.style(f"✓ Created backup: {backup_path}", fg="green"))
+        if not quiet:
+            click.echo(click.style(f"✓ Created backup: {backup_path}", fg="green"))
         created_backup = backup_path
     else:
         created_backup = None
 
-    # Apply fix
-    fix_func(parquet_file, output_path, verbose, profile)
+    # A fix that fails leaves no orphan .bak beside an unrewritten file: the
+    # staged rewrite never landed, so the backup is put back and removed.
+    try:
+        fix_func(parquet_file, output_path, verbose, profile)
+    except Exception as e:
+        handle_fix_error(e, no_backup, output_path, parquet_file, created_backup)
+        raise
 
     return output_path, created_backup
 
@@ -286,7 +319,6 @@ def apply_check_all_fixes(
     file_path,
     all_results,
     fix_output,
-    no_backup,
     overwrite,
     verbose,
     profile,
@@ -294,7 +326,9 @@ def apply_check_all_fixes(
     check_spatial_impl,
     random_sample_size,
     limit_rows,
-    confirmation=None,
+    *,
+    confirmation: NoBackupConfirmation,
+    quiet: bool = False,
 ):
     """Apply all fixes for check_all command.
 
@@ -304,7 +338,6 @@ def apply_check_all_fixes(
         file_path: Path to the file to fix
         all_results: Combined results from all checks
         fix_output: Custom output path or None
-        no_backup: Skip backup creation
         overwrite: Allow overwriting remote files
         verbose: Print verbose output
         profile: AWS profile for S3
@@ -312,8 +345,10 @@ def apply_check_all_fixes(
         check_spatial_impl: Function to run spatial checks
         random_sample_size: Sample size for spatial check
         limit_rows: Row limit for spatial check
-        confirmation: the run's :class:`NoBackupConfirmation`; see
-            :func:`handle_fix_common`.
+        confirmation: the run's :class:`NoBackupConfirmation`, which also
+            carries the ``--no-backup`` flag; see :func:`handle_fix_common`.
+        quiet: a multi-file run -- the per-file banners are replaced by the
+            runner's progress line and end-of-run summary.
 
     Returns:
         ``(output_path, backup_path or None)`` for a file this call rewrote, or
@@ -323,6 +358,8 @@ def apply_check_all_fixes(
     """
     from geoparquet_io.core.check_fixes import apply_all_fixes
 
+    no_backup = confirmation.no_backup
+
     # Check if any fixes are needed
     needs_fixes = any(
         result.get("fix_available", False)
@@ -331,7 +368,8 @@ def apply_check_all_fixes(
     )
 
     if not needs_fixes:
-        click.echo(click.style("\n✓ No fixes needed - file is already optimal!", fg="green"))
+        if not quiet:
+            click.echo(click.style("\n✓ No fixes needed - file is already optimal!", fg="green"))
         return None
 
     # Handle remote files
@@ -345,24 +383,28 @@ def apply_check_all_fixes(
     fixing_in_place = is_same_file_path(output_path, file_path)
 
     # Confirm overwrite without backup for local files -- once per run (#1041).
-    (confirmation or NoBackupConfirmation(no_backup)).ensure(file_path, output_path)
+    confirmation.ensure(file_path, output_path)
 
     # Create backup if needed (only for local files)
-    backup_path = create_backup_if_needed(file_path, output_path, no_backup, is_remote, verbose)
+    backup_path = create_backup_if_needed(
+        file_path, output_path, no_backup, is_remote, verbose, quiet=quiet
+    )
 
     # Apply fixes
-    click.echo("\n" + "=" * 60)
-    click.echo("Applying fixes...")
-    click.echo("=" * 60)
+    if not quiet:
+        click.echo("\n" + "=" * 60)
+        click.echo("Applying fixes...")
+        click.echo("=" * 60)
 
     try:
         fixes_summary = apply_all_fixes(file_path, output_path, all_results, verbose, profile)
 
-        click.echo("\n" + "=" * 60)
-        click.echo("Fixes applied:")
-        for applied_fix in fixes_summary["fixes_applied"]:
-            click.echo(click.style(f"  ✓ {applied_fix}", fg="green"))
-        click.echo("=" * 60)
+        if not quiet:
+            click.echo("\n" + "=" * 60)
+            click.echo("Fixes applied:")
+            for applied_fix in fixes_summary["fixes_applied"]:
+                click.echo(click.style(f"  ✓ {applied_fix}", fg="green"))
+            click.echo("=" * 60)
 
         # Re-run checks to verify
         verify_fixes(
@@ -371,11 +413,13 @@ def apply_check_all_fixes(
             check_spatial_impl,
             random_sample_size,
             limit_rows,
+            quiet=quiet,
         )
 
-        click.echo(f"\nOptimized file: {output_path}")
-        if not no_backup and fixing_in_place and backup_path and os.path.exists(backup_path):
-            click.echo(f"Backup: {backup_path}")
+        if not quiet:
+            click.echo(f"\nOptimized file: {output_path}")
+            if not no_backup and fixing_in_place and backup_path and os.path.exists(backup_path):
+                click.echo(f"Backup: {backup_path}")
 
     except Exception as e:
         handle_fix_error(e, no_backup, output_path, file_path, backup_path)
