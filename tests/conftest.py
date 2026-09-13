@@ -172,6 +172,79 @@ def _isolate_package_logging(pytestconfig):
         yield
 
 
+# ---------------------------------------------------------------------------
+# The package's caches are process-global too, and three of them decide
+# whether a warning exists
+# ---------------------------------------------------------------------------
+# The logger guard above is one half of #1016's test-order leakage. This is the
+# other half. Three caches exist solely to make a warning fire once per process
+# (``_emit_malformed_geo_warning``, ``_emit_null_crs_warning``,
+# ``_emit_crs_disagreement_warning``); they are keyed on the file, so two tests
+# that hand the same fixture to the same code path share an entry and whichever
+# runs second sees no warning at all. The other three are performance caches
+# keyed on a path or an enum; a test that writes a *different* file to a path an
+# earlier test used would read the earlier answer back. Every one recomputes
+# from its arguments, so clearing is free.
+#
+# The list is explicit. ``tests/test_cache_state_isolation.py`` walks the
+# package and fails when it finds a ``cache_clear`` this tuple does not name, so
+# a new cache is noticed the day it lands, and adding it here is the fix.
+#
+# Four more pieces of module-level state have a reset of their own but no
+# ``cache_clear``, so the walk cannot see them; ``_reset_module_state`` names
+# them. Not reset: the ``AWS_PROFILE`` that ``remote.setup_aws_profile_if_needed``
+# writes into ``os.environ`` -- a developer's real environment may carry one.
+#
+# Scope: autouse fixtures in this file apply to ``tests/`` only. The
+# ``docs/guide`` example lane runs each fenced example in a subprocess, so an
+# in-process cache cannot leak between examples.
+#
+# Clearing happens on entry only. A warm cache cannot affect a test that already
+# started cold, so entry is where the whole invariant lives.
+
+from geoparquet_io.core import (  # noqa: E402
+    convert,
+    crs_utils,
+    duckdb_utils,
+    file_type,
+    geo_metadata,
+    http_retry,
+    overture,
+)
+from geoparquet_io.core.write_strategies import WriteStrategyFactory  # noqa: E402
+
+PACKAGE_CACHES = (
+    crs_utils._emit_crs_disagreement_warning,
+    crs_utils._emit_null_crs_warning,
+    crs_utils._projjson_from_authority,
+    file_type.detect_geoparquet_file_type,
+    geo_metadata._emit_malformed_geo_warning,
+    WriteStrategyFactory.get_strategy,
+)
+
+
+def _reset_module_state() -> None:
+    """The process-global state with a reset but no ``cache_clear``."""
+    http_retry.reset_http_client()
+    convert.set_csv_max_line_size(None)
+    duckdb_utils._clear_s3_cache()
+    overture._cached_release = None
+
+
+def clear_package_caches() -> None:
+    """Cold-start the package: every cache in :data:`PACKAGE_CACHES`, then the rest."""
+    for cache in PACKAGE_CACHES:
+        cache.cache_clear()
+    _reset_module_state()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_package_caches():
+    """Give every test in the suite a cold cache, warn-once caches included."""
+    clear_package_caches()
+    yield
+
+
 def walk_cli_commands(cmd, path: tuple[str, ...] = ()):
     """Yield ``(path, command)`` for every leaf command in a Click tree.
 
