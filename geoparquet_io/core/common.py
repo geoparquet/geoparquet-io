@@ -745,30 +745,37 @@ TO {sql_path(output_parquet)}
         info(f"\n-- Note: Using {compression_desc} compression")
         info("-- This query creates a new parquet file with the computed column added")
         info("-- Metadata would also be updated with proper GeoParquet covering information")
+        con.close()
         return
 
     # Execute the query using existing write helper
     if verbose:
         debug(f"Creating column '{column_name}'...")
 
-    write_parquet_with_metadata(
-        con,
-        query,
-        output_parquet,
-        original_metadata=metadata,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        custom_metadata=custom_metadata,
-        verbose=verbose,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        # The precondition: the query above is `SELECT *` plus one computed
-        # column, so the rows this write reads are `input_parquet`'s own.
-        input_file=input_parquet,
-        memory_limit=memory_limit,
-    )
+    # Closed deterministically, success or not: the caller may os.replace() the
+    # input right after this returns, which Windows refuses while a reader
+    # holds it (#1032), and a failed write removes its staging file the same way.
+    try:
+        write_parquet_with_metadata(
+            con,
+            query,
+            output_parquet,
+            original_metadata=metadata,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            custom_metadata=custom_metadata,
+            verbose=verbose,
+            profile=profile,
+            geoparquet_version=geoparquet_version,
+            # The precondition: the query above is `SELECT *` plus one computed
+            # column, so the rows this write reads are `input_parquet`'s own.
+            input_file=input_parquet,
+            memory_limit=memory_limit,
+        )
+    finally:
+        con.close()
 
 
 def add_bbox(parquet_file, bbox_column_name="bbox", verbose=False):

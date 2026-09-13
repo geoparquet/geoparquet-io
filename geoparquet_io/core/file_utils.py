@@ -263,6 +263,11 @@ def is_same_file_path(first: str | None, second: str | None) -> bool:
     if is_remote_url(first) or is_remote_url(second):
         return False
     try:
+        if os.path.exists(first) and os.path.exists(second):
+            # The inode is the truth once both exist: it also catches a
+            # case-only alias on macOS/Windows and a hard link, which
+            # ``resolve()`` reads as two files.
+            return os.path.samefile(first, second)
         return Path(first).resolve() == Path(second).resolve()
     except (OSError, ValueError):
         # ValueError is a Windows path shape -- a malformed drive spec or an

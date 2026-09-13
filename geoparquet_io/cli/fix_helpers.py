@@ -41,7 +41,7 @@ def create_backup_if_needed(parquet_file, output_path, no_backup, is_remote, ver
 
     if (
         not no_backup
-        and output_path == parquet_file
+        and is_same_file_path(output_path, parquet_file)
         and os.path.exists(parquet_file)
         and not is_remote
     ):
@@ -283,11 +283,15 @@ def apply_check_all_fixes(
     # Handle remote files
     is_remote = validate_remote_file_modification(file_path, fix_output, overwrite)
 
-    # Determine output path
+    # Determine output path. An aliased --fix-output (`./in.parquet` for
+    # `in.parquet`) is an in-place fix and gets the backup and the prompt;
+    # comparing the raw strings here is what let `check all` overwrite an
+    # input with neither (#1036, the #959 shape).
     output_path = fix_output or file_path
+    fixing_in_place = is_same_file_path(output_path, file_path)
 
     # Confirm overwrite without backup for local files
-    if no_backup and not fix_output and output_path == file_path and not is_remote:
+    if no_backup and fixing_in_place and not is_remote:
         click.confirm(
             "This will overwrite the original file without backup. Continue?",
             abort=True,
@@ -320,12 +324,7 @@ def apply_check_all_fixes(
         )
 
         click.echo(f"\nOptimized file: {output_path}")
-        if (
-            not no_backup
-            and output_path == file_path
-            and backup_path
-            and os.path.exists(backup_path)
-        ):
+        if not no_backup and fixing_in_place and backup_path and os.path.exists(backup_path):
             click.echo(f"Backup: {backup_path}")
 
     except Exception as e:

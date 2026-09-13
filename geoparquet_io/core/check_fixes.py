@@ -22,7 +22,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
 from geoparquet_io.core.hilbert_order import hilbert_order
 from geoparquet_io.core.logging_config import debug, info, progress
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
@@ -271,12 +271,10 @@ def fix_bbox_metadata(parquet_file, output_file, verbose=False, profile=None):
     if verbose:
         debug("Adding bbox covering metadata...")
 
-    # If output is different from input, copy first
-    if parquet_file != output_file:
-        shutil.copy2(parquet_file, output_file)
-
-    # add_bbox_metadata modifies in-place
-    add_bbox_metadata(output_file, verbose=verbose)
+    # The input is only read: the rewrite goes straight to output_file in one
+    # pass (staged beside it when it already exists), so the caller still has
+    # its file afterwards and nothing is copied only to be rewritten.
+    add_bbox_metadata(parquet_file, verbose=verbose, output_file=output_file)
 
     return {"fix_applied": "Added bbox covering metadata", "success": True}
 
@@ -344,6 +342,11 @@ def fix_bbox_all(
 ):
     """Fix both bbox column and metadata issues.
 
+    The input is only ever read. The result is staged beside ``output_file``
+    and swapped in by ``os.replace``, like every other fix here (#1032); the
+    covering-only branch used to ``shutil.move`` the user's own file to
+    ``output_file``, which is how ``--fix --fix-output`` deleted inputs (#1036).
+
     Args:
         parquet_file: Path to input file
         output_file: Path to output file
@@ -353,22 +356,18 @@ def fix_bbox_all(
         profile: AWS profile name for S3 operations
 
     Returns:
-        dict with fix summary
+        dict with fix summary; ``fix_applied`` is None when there was nothing to do
     """
-    current_file = parquet_file
-    temp_file = None
+    if not needs_column and not needs_metadata:
+        return {"fix_applied": None, "success": True}
 
-    if needs_column:
-        temp_file = output_file + ".tmp" if output_file == parquet_file else output_file
-        fix_bbox_column(current_file, temp_file, verbose, profile)
-        current_file = temp_file
-
-    if needs_metadata or needs_column:
-        if current_file != output_file:
-            shutil.move(current_file, output_file)
-        fix_bbox_metadata(output_file, output_file, verbose, profile)
-    elif temp_file and temp_file != output_file:
-        shutil.move(temp_file, output_file)
+    with _staged_output(output_file) as destination:
+        if needs_column:
+            # add_bbox_column writes the covering with the column, so a
+            # separate metadata pass here would only re-read what it just wrote.
+            fix_bbox_column(parquet_file, destination, verbose, profile)
+        else:
+            fix_bbox_metadata(parquet_file, destination, verbose, profile)
 
     return {"fix_applied": "Fixed bbox issues", "success": True}
 
@@ -546,15 +545,16 @@ def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, temp_files
     if not needs_metadata and not added_column_needs_metadata:
         return current_file, []
 
-    # For metadata, we modify in-place; copy first if unchanged
-    if current_file == parquet_file:
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
-        temp_files.append(temp_file)
-        shutil.copy2(current_file, temp_file)
-        current_file = temp_file
-
     if verbose:
         progress("\n[2/4] Adding bbox covering metadata...")
+
+    if is_same_file_path(current_file, parquet_file):
+        # The user's file is only read: the covering goes onto a scratch
+        # written in one pass, and current_file leaves the user's path here.
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet").name
+        temp_files.append(temp_file)
+        fix_bbox_metadata(current_file, temp_file, verbose, profile)
+        return temp_file, ["Added bbox covering metadata"]
 
     fix_bbox_metadata(current_file, current_file, verbose, profile)
     return current_file, ["Added bbox covering metadata"]
@@ -585,8 +585,35 @@ def _apply_spatial_ordering_fix(check_results, current_file, temp_files, verbose
     return temp_file, ["Applied Hilbert spatial ordering"]
 
 
-def _apply_compression_fix(check_results, current_file, output_file, gp_version, verbose, profile):
+def _place_result(result_file: str, output_file: str, *, owned: bool) -> None:
+    """Leave the finished file at *output_file* without consuming the user's input.
+
+    ``owned`` says whether *result_file* is a scratch file this module made
+    (moved: nothing else refers to it, and it lives in the system temp
+    directory, so ``shutil.move``'s cross-device fallback is wanted) or the
+    user's own input, when every earlier step declined to rewrite anything
+    (copied: ``--fix-output`` names a path nobody backed up, so moving the
+    input away left the user with neither file nor ``.bak``, #1036). Either
+    way it lands through ``_staged_output``, so an existing destination is
+    replaced atomically.
+    """
+    if is_same_file_path(result_file, output_file):
+        return
+
+    with _staged_output(output_file) as destination:
+        if owned:
+            shutil.move(result_file, destination)
+        else:
+            shutil.copy2(result_file, destination)
+
+
+def _apply_compression_fix(
+    check_results, current_file, output_file, gp_version, verbose, profile, *, owned=False
+):
     """Handle compression and row group optimization.
+
+    ``owned`` is whether *current_file* is a scratch file an earlier step
+    produced, as opposed to the user's input; see :func:`_place_result`.
 
     Returns:
         list: fixes_applied
@@ -598,19 +625,9 @@ def _apply_compression_fix(check_results, current_file, output_file, gp_version,
     needs_row_groups = row_groups_result.get("fix_available", False)
 
     if not needs_compression and not needs_row_groups:
-        # No compression/row group fixes needed, move to output
-        if current_file != output_file:
-            if verbose:
-                debug("\nMoving to final output location...")
-            # Delete output file if it exists (for in-place operations with backup)
-            from pathlib import Path
-
-            if (
-                Path(output_file).exists()
-                and Path(current_file).resolve() != Path(output_file).resolve()
-            ):
-                Path(output_file).unlink()
-            shutil.move(current_file, output_file)
+        # No compression/row group fixes needed; whatever the earlier steps
+        # produced is the answer, so put it at the output path.
+        _place_result(current_file, output_file, owned=owned)
         return []
 
     if verbose:
@@ -629,7 +646,7 @@ def _apply_compression_fix(check_results, current_file, output_file, gp_version,
 def _cleanup_temp_files(temp_files, output_file):
     """Clean up temporary files, excluding the output file."""
     for temp_file in temp_files:
-        if os.path.exists(temp_file) and temp_file != output_file:
+        if os.path.exists(temp_file) and not is_same_file_path(temp_file, output_file):
             try:
                 os.remove(temp_file)
             except OSError:
@@ -685,7 +702,13 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
 
         # Step 4: Fix compression + row groups
         fixes = _apply_compression_fix(
-            check_results, current_file, output_file, geoparquet_version, verbose, profile
+            check_results,
+            current_file,
+            output_file,
+            geoparquet_version,
+            verbose,
+            profile,
+            owned=current_file in temp_files,
         )
         fixes_applied.extend(fixes)
 

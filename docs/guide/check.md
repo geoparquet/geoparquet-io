@@ -454,6 +454,11 @@ gpio check all partitions/ --sample-files 3
     one file is being fixed). Alternatively, consolidate the partition with
     `gpio extract` first, fix that, then re-partition.
 
+`--fix-output` leaves the input untouched and writes no `.bak`; a file already at
+the output path is replaced without a prompt. A second spelling of the input's own
+path (`./in.parquet`, a symlink, a different letter case on macOS or Windows) counts
+as in place: the file is backed up and rewritten like a plain `--fix`.
+
 ## See Also
 
 - [CLI Reference: check](../cli/check.md)
