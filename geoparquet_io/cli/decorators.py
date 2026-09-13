@@ -7,6 +7,9 @@ and reduce code duplication.
 
 import functools
 import math
+import os
+import sys
+from typing import NoReturn
 
 import click
 
@@ -15,6 +18,32 @@ from geoparquet_io.core.parquet_writer import (
     SPATIAL_BAND_TOP_ROWS,
     WRITER_VECTOR_ROWS,
 )
+
+
+def _process_status(code: object) -> int:
+    """The exit status CPython would give a ``SystemExit`` carrying ``code``."""
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        # What ``exit(3)`` does with the value, so a status stays what it was.
+        return code & 0xFF
+    # CPython prints a non-integer SystemExit argument and exits 1.
+    print(code, file=sys.stderr)
+    return 1
+
+
+def _leave_process(status: int) -> NoReturn:
+    """Flush what gpio printed, then end the process without finalizing it."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            # A downstream that stopped reading (``| head``, which
+            # core.geojson_stream already redirects to devnull), or a stream
+            # somebody closed. Nothing left to say, and nothing that changes
+            # the status gpio decided.
+            pass
+    os._exit(status)
 
 
 class ErrorBoundaryGroup(click.Group):
@@ -47,7 +76,44 @@ class ErrorBoundaryGroup(click.Group):
 
     Anything ``cli_error_for`` does not claim is re-raised untouched: a genuine
     gpio bug still gets its traceback.
+
+    The root group also owns how the *process* leaves, which is ``__call__``
+    below.
     """
+
+    def __call__(self, *args, **kwargs) -> NoReturn:
+        """Run the CLI as a console script, then end the process deliberately.
+
+        Click's ``__call__`` is the console-script entry point and nothing else:
+        ``CliRunner``, the Python API and every in-process caller reach a group
+        through ``main(standalone_mode=False)``. So this is the one place that
+        can say "gpio is finished" about a whole process -- and it says it with
+        ``os._exit``, because CPython's interpreter finalization is not free of
+        consequence for a program built on native extensions.
+
+        By the time Click returns, the command has finished its work and printed
+        its last byte. What is left is CPython unloading DuckDB and its spatial
+        extension, Arrow, GEOS and PROJ, destroying their process-global state
+        while their worker threads are being torn down. That teardown is not
+        gpio's code and not gpio's result, but its failures land on gpio's exit
+        status: measured on Linux under CPU contention, roughly one run in
+        twenty of ``gpio add geometry-metrics`` printed its success line and
+        then died with ``terminate called without an active exception`` and
+        status 134 -- which a shell's ``set -e`` reads as a failed command, and
+        which CI read as a failed test (#1053). The same loop leaving this way
+        was clean in 128 of 128.
+
+        Skipping finalization is safe *here* because gpio has nothing left in
+        it: the package registers no ``atexit`` handler and no ``__del__``
+        cleanup, and every temporary file it creates is removed in a ``finally``
+        before the command returns. The streams are flushed below, which is the
+        one thing finalization did that gpio depended on.
+        """
+        try:
+            super().__call__(*args, **kwargs)
+        except SystemExit as exc:
+            _leave_process(_process_status(exc.code))
+        _leave_process(0)
 
     def invoke(self, ctx):
         from geoparquet_io.cli.exception_handler import cli_error_for
