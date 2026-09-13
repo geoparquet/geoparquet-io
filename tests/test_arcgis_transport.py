@@ -688,9 +688,11 @@ def test_the_parallel_path_retries_the_whole_window_smaller(monkeypatch):
     assert sizes == sorted(sizes, reverse=True), "the ladder only ever descends"
     # One or both 100-row requests reach the transport before the retry,
     # depending on the cancel race; either way the whole window is re-walked
-    # at 50 from the start and nothing is fetched twice at that size.
+    # at 50 from the start and nothing is fetched twice at that size. Two
+    # workers issue the 50-row requests, so their arrival order at the
+    # transport is the scheduler's too: compare the multiset, not the order.
     assert {offset for offset, size in windows if size == 100} <= {0, 100}
-    assert [window for window in windows if window[1] == 50] == [
+    assert sorted(window for window in windows if window[1] == 50) == [
         (0, 50),
         (50, 50),
         (100, 50),
