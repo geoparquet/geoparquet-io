@@ -159,7 +159,7 @@ def test_remote_output_preserves_spherical_edges(spherical_input, tmp_path, monk
     """Remote outputs are patched on the local temp file before upload."""
     import shutil
 
-    import geoparquet_io.core.parquet_write as parquet_write
+    import geoparquet_io.core.write_funnels as write_funnels
 
     uploaded = {}
 
@@ -170,7 +170,7 @@ def test_remote_output_preserves_spherical_edges(spherical_input, tmp_path, monk
 
     # Patched where ``write_parquet_with_metadata`` resolves the name, which is
     # the module that defines it.
-    monkeypatch.setattr(parquet_write, "upload_if_remote", fake_upload)
+    monkeypatch.setattr(write_funnels, "upload_if_remote", fake_upload)
 
     convert_to_geoparquet(
         str(spherical_input),

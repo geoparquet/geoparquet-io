@@ -1,6 +1,6 @@
 """Rebuilding a column's ``geo`` entry from native geo statistics.
 
-``core/geo_metadata_repair._geo_col_meta_from_stats`` folds every row group's
+``core/derive_geo_from_file._geo_col_meta_from_stats`` folds every row group's
 geospatial statistics into one column entry. The single-row-group case runs
 whenever DuckDB writes an M/ZM file; the folding itself -- a row group with no
 statistics, a bbox that has to widen, a Z range that has to widen, an unknown
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from geoparquet_io.core.geo_metadata_repair import (
+from geoparquet_io.core.derive_geo_from_file import (
     _geo_code_to_type_name,
     _geo_col_meta_from_stats,
     _geography_edges_from_logical,
