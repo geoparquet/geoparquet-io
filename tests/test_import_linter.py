@@ -32,11 +32,11 @@ class TestImportLinterConfiguration:
         session_options = config["session_options"]
         assert session_options.get("include_external_packages") == "True"
 
-    def test_has_four_contracts(self, config):
-        """Exactly four architecture contracts should be defined."""
+    def test_has_five_contracts(self, config):
+        """Exactly five architecture contracts should be defined."""
         contracts_options = config["contracts_options"]
-        assert len(contracts_options) == 4, (
-            f"Expected 4 contracts, found {len(contracts_options)}: "
+        assert len(contracts_options) == 5, (
+            f"Expected 5 contracts, found {len(contracts_options)}: "
             f"{[c.get('name', c.get('id', '?')) for c in contracts_options]}"
         )
 
@@ -101,6 +101,51 @@ class TestImportLinterConfiguration:
         assert not any("-> click" in imp for imp in ignore_imports), (
             f"Direct click ignores should no longer be needed, found: {ignore_imports}"
         )
+
+    def test_common_split_layers_contract_configured(self, config):
+        """The split's layering (#1083): common on top, the owners in order below.
+
+        The type-code tables' owner, ``geo_metadata``, must sit below both of
+        its consumers, and the two geo-block builders must be independent.
+        """
+        contracts = {c["id"]: c for c in config["contracts_options"]}
+        assert "core-common-split-layers" in contracts, "Missing core-common-split-layers"
+
+        contract = contracts["core-common-split-layers"]
+        assert contract["type"] == "layers"
+        layers = contract["layers"]
+        assert layers[0] == "geoparquet_io.core.common"
+        assert layers[1] == "geoparquet_io.core.write_funnels"
+
+        def index_of(module: str) -> int:
+            for i, layer in enumerate(layers):
+                if module in {m.strip() for m in layer.replace(":", "|").split("|")}:
+                    return i
+            raise AssertionError(f"{module} is not in the layers contract")
+
+        builders = index_of("geoparquet_io.core.arrow_geo_metadata")
+        assert builders == index_of("geoparquet_io.core.derive_geo_from_file")
+        assert "|" in layers[builders], "the two geo-block builders must be independent"
+        assert index_of("geoparquet_io.core.geo_metadata") > builders
+        assert index_of("geoparquet_io.core.duckdb_utils") > index_of(
+            "geoparquet_io.core.geo_metadata"
+        )
+
+    def test_common_split_layers_ignores_only_residue_back_edges(self, config):
+        """Every ignored edge is a deferred import *into* common.py, and a stale
+        one fails the build: the list is meant to shrink as stage C empties
+        common.py, never to grow.
+        """
+        contracts = {c["id"]: c for c in config["contracts_options"]}
+        contract = contracts["core-common-split-layers"]
+        assert contract["unmatched_ignore_imports_alerting"] == "error"
+        for edge in contract["ignore_imports"]:
+            importer, imported = (side.strip() for side in edge.split("->"))
+            assert imported == "geoparquet_io.core.common", (
+                f"{edge}: only back-edges into common.py may be ignored; a back-edge "
+                "between two owner modules is a layering bug, not a residue"
+            )
+            assert importer != "geoparquet_io.core.common"
 
     def test_api_no_cli_has_no_ignore_imports(self, config):
         """api-no-cli should have no ignored violations (clean contract)."""
