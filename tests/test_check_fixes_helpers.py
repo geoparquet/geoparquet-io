@@ -5,6 +5,11 @@ from geoparquet_io.core.check_fixes import (
     _apply_bbox_metadata_fix,
     _cleanup_temp_files,
 )
+from tests.fix_output_oracle import (
+    PLACES_V11_FIXTURE_BASELINE,
+    assert_buildings_output_is_sound,
+    assert_places_output_is_sound,
+)
 
 
 class TestCleanupTempFiles:
@@ -167,7 +172,13 @@ class TestApplyCompressionFix:
 
 
 class TestFixBboxAll:
-    """Tests for fix_bbox_all function."""
+    """Tests for fix_bbox_all function.
+
+    ``fix_bbox_all`` is the entry point ``check bbox --fix`` uses for a 1.x file,
+    so every output below is also handed the shared oracle (WP-1 of #1018):
+    ``check spec`` clean, the rows preserved, the CRS from both carriers read
+    separately, and the covering resolved against the real schema.
+    """
 
     def test_column_only_fix(self, buildings_test_file, temp_output_dir):
         """Test fixing only bbox column."""
@@ -187,6 +198,7 @@ class TestFixBboxAll:
 
         assert fix_result["success"] is True
         assert os.path.exists(output_file)
+        assert_buildings_output_is_sound(output_file)
 
     def test_metadata_only_fix(self, places_v11_file, temp_output_dir):
         """Test fixing only bbox metadata.
@@ -209,6 +221,12 @@ class TestFixBboxAll:
         )
 
         assert fix_result["success"] is True
+        assert_places_output_is_sound(
+            output_file,
+            version="1.1",
+            covering=True,
+            known_spec_failures=PLACES_V11_FIXTURE_BASELINE,
+        )
 
     def test_both_fixes(self, buildings_test_file, temp_output_dir):
         """Test fixing both column and metadata."""
@@ -227,6 +245,7 @@ class TestFixBboxAll:
         )
 
         assert fix_result["success"] is True
+        assert_buildings_output_is_sound(output_file)
 
     def test_with_verbose(self, buildings_test_file, temp_output_dir):
         """Test fix_bbox_all with verbose output."""
@@ -245,3 +264,4 @@ class TestFixBboxAll:
         )
 
         assert fix_result["success"] is True
+        assert_buildings_output_is_sound(output_file)

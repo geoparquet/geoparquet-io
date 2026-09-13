@@ -27,6 +27,20 @@ import pyarrow.parquet as pq
 EPSG_5070 = {"authority": "EPSG", "code": 5070}
 EPSG_3857 = {"authority": "EPSG", "code": 3857}
 
+#: What a CRS reader returns instead of ``None`` when its carrier says nothing.
+#: Markers rather than ``None``, so a missing ``crs`` key cannot be mistaken for
+#: a deliberate ``crs: null`` and neither can slip past an ``is not None``.
+NO_GEO_KEY = "<no geo key>"
+COLUMN_NOT_DESCRIBED = "<column not described>"
+NO_NATIVE_GEO_TYPE = "<no native geo type>"
+NO_CRS_KEY = "<no crs key -- resolves as OGC:CRS84>"
+NO_NATIVE_CRS = "<no crs -- resolves as OGC:CRS84>"
+CRS_NULL = "<crs: null -- unknown>"
+
+#: The markers meaning *this carrier is silent*, and *silent means CRS84*.
+SILENT_CRS = frozenset({NO_GEO_KEY, COLUMN_NOT_DESCRIBED, NO_NATIVE_GEO_TYPE})
+DEFAULTED_CRS = frozenset({NO_CRS_KEY, NO_NATIVE_CRS})
+
 
 # ---------------------------------------------------------------------------
 # Reader 1: the `geo` block, and only the `geo` block
@@ -35,7 +49,8 @@ EPSG_3857 = {"authority": "EPSG", "code": 3857}
 
 def geo_block(path) -> dict | None:
     """The file-level ``geo`` key, or None when there is none."""
-    metadata = pq.ParquetFile(str(path)).metadata.metadata or {}
+    with pq.ParquetFile(str(path)) as reader:
+        metadata = reader.metadata.metadata or {}
     if b"geo" not in metadata:
         return None
     return json.loads(metadata[b"geo"].decode("utf-8"))
@@ -54,15 +69,15 @@ def geo_block_crs_id(path, column: str = "geometry"):
     """
     block = geo_block(path)
     if block is None:
-        return "<no geo key>"
+        return NO_GEO_KEY
     col_meta = (block.get("columns") or {}).get(column)
     if col_meta is None:
-        return "<column not described>"
+        return COLUMN_NOT_DESCRIBED
     if "crs" not in col_meta:
         # GeoParquet's default: an absent `crs` means OGC:CRS84.
-        return "<no crs key -- resolves as OGC:CRS84>"
+        return NO_CRS_KEY
     if col_meta["crs"] is None:
-        return "<crs: null -- unknown>"
+        return CRS_NULL
     return (col_meta["crs"] or {}).get("id")
 
 
@@ -77,7 +92,8 @@ def logical_geo_types(path) -> dict[str, tuple[str, dict | None]]:
     Never through the ``geo`` block: the input class this exists for has no
     ``geo`` block, and its CRS lives only here.
     """
-    schema = pq.ParquetFile(str(path)).schema
+    with pq.ParquetFile(str(path)) as reader:
+        schema = reader.schema
     native: dict[str, tuple[str, dict | None]] = {}
     for index in range(len(schema)):
         column = schema.column(index)
@@ -114,13 +130,30 @@ def logical_crs_id(path, column: str = "geometry"):
     """The CRS inside one column's Parquet logical type, or a reason there is none."""
     described = logical_geo_types(path).get(column)
     if described is None:
-        return "<no native geo type>"
-    return described[1] if described[1] is not None else "<no crs -- resolves as OGC:CRS84>"
+        return NO_NATIVE_GEO_TYPE
+    return described[1] if described[1] is not None else NO_NATIVE_CRS
 
 
 # ---------------------------------------------------------------------------
 # The arbiter: gpio's own validator
 # ---------------------------------------------------------------------------
+
+
+def spec_failures(path) -> dict[str, str]:
+    """``{check name: message}`` for every FAILED check, straight from the validator.
+
+    ``validate_geoparquet``'s defaults are the ones ``gpio check spec`` passes
+    when given no options (``validate_data=True``, ``sample_size=1000``), so the
+    verdict here is the verdict a user gets from the CLI, without the CLI.
+    :func:`spec_problems` below goes through the CLI and its ``--json`` report
+    instead; use this one when the *set* of failing checks is the assertion.
+    """
+    from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
+
+    result = validate_geoparquet(str(path))
+    return {
+        check.name: check.message for check in result.checks if check.status == CheckStatus.FAILED
+    }
 
 
 def spec_report(path) -> dict:

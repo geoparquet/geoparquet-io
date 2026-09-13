@@ -30,6 +30,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.logging_config import _bootstrap_default_handler
 from geoparquet_io.core.logging_config import logger as gpio_logger
+from tests.fix_output_oracle import assert_buildings_output_is_sound
 
 S3_DEST = "s3://fake-bucket/out.parquet"
 
@@ -355,6 +356,10 @@ def test_cli_verbose_output_survives_nested_default_calls(buildings_test_file, t
     combined = result.stdout + result.stderr
     for expected in ("Adding column 'bbox'...", "Creating column 'bbox'...", "Schema fields:"):
         assert expected in combined, f"verbose line lost after spec validation: {expected!r}"
+
+    # This test is about the logger, but it ran a real `check all --fix` over a
+    # real file, so it is also a place the WP-1 oracle (#1018) costs nothing.
+    assert_buildings_output_is_sound(target)
 
 
 # ---------------------------------------------------------------------------

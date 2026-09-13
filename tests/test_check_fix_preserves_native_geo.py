@@ -40,6 +40,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from tests.fix_output_oracle import assert_fix_output_is_sound, covering_of
 from tests.native_geo_probes import (
     EPSG_5070,
     conus_wkb,
@@ -52,17 +53,33 @@ from tests.native_geo_probes import (
     write_native_geo_only,
 )
 
+#: The 200 CONUS polygons every fixture here is built from. A fix never changes
+#: the row count, and until WP-1 (#1018) nothing in this file checked that.
+CONUS_ROWS = 200
+
+
+def assert_conus_output_is_sound(path, *, version, covering=False):
+    """The shared ``--fix`` oracle, with this file's constants.
+
+    Adds to what each test already asserts: the rows survived, and every
+    ``covering`` path resolves against the real schema. The CRS halves and the
+    ``check spec`` verdict it re-checks are the point of this file, so they are
+    deliberately asserted twice -- once here as the shared contract, once above
+    in the terms of the issue the test is about.
+    """
+    assert_fix_output_is_sound(
+        path,
+        expected_rows=CONUS_ROWS,
+        expected_crs=EPSG_5070,
+        expects_covering=covering,
+        expected_version_prefix=version,
+    )
+
 
 def _run_cli(*args) -> str:
     result = CliRunner().invoke(cli, [str(a) for a in args])
     assert result.exit_code == 0, result.output
     return result.output
-
-
-def _covering(path) -> dict | None:
-    """One column's declared ``covering``, read off the ``geo`` block."""
-    columns = (geo_block(path) or {}).get("columns") or {}
-    return (columns.get("geometry") or {}).get("covering")
 
 
 def _rewrite_geo_block(path, block: dict) -> None:
@@ -72,7 +89,7 @@ def _rewrite_geo_block(path, block: dict) -> None:
     pq.write_table(table.replace_schema_metadata(metadata), str(path), compression="zstd")
 
 
-def _strip_covering(path) -> None:
+def _stripcovering_of(path) -> None:
     """Rewrite ``path`` with its primary column's ``covering`` removed from the block."""
     block = geo_block(path)
     block["columns"]["geometry"].pop("covering", None)
@@ -160,7 +177,7 @@ def test_check_compression_fix_keeps_the_native_type_and_the_crs(native_geo_snap
     assert (geo_version(native_geo_snappy) or "").startswith("2.0")
     assert logical_geo_types(native_geo_snappy)["geometry"] == ("Geometry", EPSG_5070)
     assert geo_block_crs_id(native_geo_snappy) == EPSG_5070
-    assert spec_problems(native_geo_snappy) == []
+    assert_conus_output_is_sound(native_geo_snappy, version="2.0")
 
 
 def test_check_row_group_fix_keeps_the_native_type_and_the_crs(native_geo_tiny_row_groups):
@@ -175,7 +192,7 @@ def test_check_row_group_fix_keeps_the_native_type_and_the_crs(native_geo_tiny_r
     assert (geo_version(native_geo_tiny_row_groups) or "").startswith("2.0")
     assert logical_geo_types(native_geo_tiny_row_groups)["geometry"] == ("Geometry", EPSG_5070)
     assert geo_block_crs_id(native_geo_tiny_row_groups) == EPSG_5070
-    assert spec_problems(native_geo_tiny_row_groups) == []
+    assert_conus_output_is_sound(native_geo_tiny_row_groups, version="2.0")
 
 
 def test_an_explicit_version_still_wins_and_still_states_the_crs(native_geo_snappy, tmp_path):
@@ -194,7 +211,7 @@ def test_an_explicit_version_still_wins_and_still_states_the_crs(native_geo_snap
     assert (geo_version(out) or "").startswith("1.1")
     assert logical_geo_types(out) == {}, "1.1 forbids a native Parquet geo type"
     assert geo_block_crs_id(out) == EPSG_5070
-    assert spec_problems(out) == []
+    assert_conus_output_is_sound(out, version="1.1")
 
 
 def test_check_all_fix_leaves_a_native_geo_only_file_native_geo_only(native_geo_snappy):
@@ -210,7 +227,7 @@ def test_check_all_fix_leaves_a_native_geo_only_file_native_geo_only(native_geo_
     assert _geometry_compression(native_geo_snappy) == "ZSTD", "the fix did not run"
     assert geo_block(native_geo_snappy) is None
     assert logical_geo_types(native_geo_snappy)["geometry"] == ("Geometry", EPSG_5070)
-    assert spec_problems(native_geo_snappy) == []
+    assert_conus_output_is_sound(native_geo_snappy, version=None)
 
 
 def test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from(projected_conus, tmp_path):
@@ -229,8 +246,8 @@ def test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from(projected_conus
     _run_cli("add", "bbox", projected_conus, with_bbox)
     assert "bbox" in pq.read_schema(str(with_bbox)).names
     assert (geo_version(with_bbox) or "").startswith("2.0")
-    _strip_covering(with_bbox)
-    assert _covering(with_bbox) is None
+    _stripcovering_of(with_bbox)
+    assert covering_of(with_bbox) is None
     fixed = tmp_path / "removed.parquet"
 
     _run_cli("check", "bbox", with_bbox, "--fix", "--fix-output", fixed)
@@ -242,7 +259,7 @@ def test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from(projected_conus
     assert (geo_version(fixed) or "").startswith("2.0")
     assert logical_geo_types(fixed)["geometry"] == ("Geometry", EPSG_5070)
     assert geo_block_crs_id(fixed) == EPSG_5070
-    assert spec_problems(fixed) == []
+    assert_conus_output_is_sound(fixed, version="2.0")
 
 
 def test_removing_a_bbox_column_keeps_a_crs_only_the_geo_block_states(tmp_path, _conus_5070_rows):
@@ -268,7 +285,7 @@ def test_removing_a_bbox_column_keeps_a_crs_only_the_geo_block_states(tmp_path, 
     _declare_geo_block(with_bbox, crs_epsg=5070)
     assert geo_block_crs_id(with_bbox) == EPSG_5070
     assert logical_geo_types(with_bbox) == {"geometry": ("Geometry", None)}
-    assert _covering(with_bbox) is None, "a declared bbox is 'optimal' and never removed"
+    assert covering_of(with_bbox) is None, "a declared bbox is 'optimal' and never removed"
     fixed = tmp_path / "removed.parquet"
 
     _run_cli("check", "bbox", with_bbox, "--fix", "--fix-output", fixed)
@@ -277,7 +294,7 @@ def test_removing_a_bbox_column_keeps_a_crs_only_the_geo_block_states(tmp_path, 
     assert (geo_version(fixed) or "").startswith("2.0")
     assert geo_block_crs_id(fixed) == EPSG_5070
     assert logical_geo_types(fixed)["geometry"] == ("Geometry", EPSG_5070)
-    assert spec_problems(fixed) == []
+    assert_conus_output_is_sound(fixed, version="2.0")
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +302,7 @@ def test_removing_a_bbox_column_keeps_a_crs_only_the_geo_block_states(tmp_path, 
 # ---------------------------------------------------------------------------
 
 
-def test_add_bbox_then_check_all_fix_keeps_the_covering(projected_conus, tmp_path):
+def test_add_bbox_then_check_all_fix_keeps_thecovering_of(projected_conus, tmp_path):
     """The composition #1003 asks for, end to end.
 
     ``add bbox`` writes native 2.0 with a ``covering``; ``check all --fix`` then
@@ -296,19 +313,19 @@ def test_add_bbox_then_check_all_fix_keeps_the_covering(projected_conus, tmp_pat
     with_bbox = tmp_path / "with_bbox.parquet"
     _run_cli("add", "bbox", projected_conus, with_bbox, "--compression", "snappy")
 
-    declared = _covering(with_bbox)
+    declared = covering_of(with_bbox)
     assert declared, "`add bbox` did not declare a covering -- nothing to lose"
     assert (geo_version(with_bbox) or "").startswith("2.0")
 
     output = _run_cli("check", "all", with_bbox, "--fix")
 
     assert _geometry_compression(with_bbox) == "ZSTD", "the fix did not run"
-    assert _covering(with_bbox) == declared
+    assert covering_of(with_bbox) == declared
     assert "Some issues remain after fixes" not in output
     assert (geo_version(with_bbox) or "").startswith("2.0")
     assert logical_geo_types(with_bbox)["geometry"] == ("Geometry", EPSG_5070)
     assert geo_block_crs_id(with_bbox) == EPSG_5070
-    assert spec_problems(with_bbox) == []
+    assert_conus_output_is_sound(with_bbox, version="2.0", covering=True)
 
 
 def test_the_bbox_column_the_fix_leaves_behind_is_still_declared(projected_conus, tmp_path):
@@ -325,9 +342,10 @@ def test_the_bbox_column_the_fix_leaves_behind_is_still_declared(projected_conus
 
     assert "not declared in 'covering'" not in output
     assert "Bbox covering column 'bbox' declared" in output
+    assert_conus_output_is_sound(with_bbox, version="2.0", covering=True)
 
 
-def test_a_1_1_input_keeps_its_version_and_its_covering(projected_conus, tmp_path):
+def test_a_1_1_input_keeps_its_version_and_itscovering_of(projected_conus, tmp_path):
     """The control: a 1.x file is repaired as 1.1, not upgraded behind the user.
 
     A fix that quietly upgrades the file a user asked gpio to *repair* is a
@@ -344,7 +362,7 @@ def test_a_1_1_input_keeps_its_version_and_its_covering(projected_conus, tmp_pat
         "--compression",
         "snappy",
     )
-    declared = _covering(one_one)
+    declared = covering_of(one_one)
     assert declared, "fixture has no covering to preserve"
 
     _run_cli("check", "all", one_one, "--fix")
@@ -352,6 +370,6 @@ def test_a_1_1_input_keeps_its_version_and_its_covering(projected_conus, tmp_pat
     assert _geometry_compression(one_one) == "ZSTD", "the fix did not run"
     assert (geo_version(one_one) or "").startswith("1.1")
     assert logical_geo_types(one_one) == {}, "a 1.1 output must not carry a native geo type"
-    assert _covering(one_one) == declared
+    assert covering_of(one_one) == declared
     assert geo_block_crs_id(one_one) == EPSG_5070
-    assert spec_problems(one_one) == []
+    assert_conus_output_is_sound(one_one, version="1.1", covering=True)
