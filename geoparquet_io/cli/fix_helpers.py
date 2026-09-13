@@ -9,6 +9,45 @@ from geoparquet_io.core.file_utils import is_same_file_path
 from geoparquet_io.core.remote import is_remote_url
 
 
+class NoBackupConfirmation:
+    """The one ``--no-backup`` prompt a whole ``--fix`` run gets.
+
+    The confirmation used to live inside each per-file fix, so a glob matching
+    N files asked N times: a non-interactive run aborted on the first and left
+    the rest unexamined, and an interactive one could be answered "y" for
+    ``a.parquet`` and "n" for ``b.parquet``, ending half-done with no backups
+    of what it had already overwritten (#1041).
+
+    It is asked *lazily* -- on the first file that is actually about to be
+    rewritten in place -- so a run that finds nothing to fix, or one writing to
+    ``--fix-output``, is never prompted at all. That is the behaviour the
+    single-file case already had, and it is why the count below is the number
+    of files matched rather than the number that will turn out to need work:
+    the prompt has to come before the first rewrite, which is before gpio knows
+    how many of the rest will need one.
+    """
+
+    def __init__(self, no_backup: bool, file_count: int = 1):
+        self.no_backup = no_backup
+        self.file_count = file_count
+        self._asked = False
+
+    def ensure(self, parquet_file: str, output_path: str) -> None:
+        """Confirm, once, before the first in-place rewrite of a local file."""
+        if not self.no_backup or self._asked:
+            return
+        if not is_same_file_path(output_path, parquet_file) or is_remote_url(parquet_file):
+            return
+
+        self._asked = True
+        target = (
+            "the original file"
+            if self.file_count == 1
+            else f"up to {self.file_count} original files"
+        )
+        click.confirm(f"This will overwrite {target} without backup. Continue?", abort=True)
+
+
 def validate_remote_file_modification(parquet_file, fix_output, overwrite):
     """Validate remote file modification parameters."""
     is_remote = is_remote_url(parquet_file)
@@ -115,7 +154,14 @@ def handle_fix_error(e, no_backup, output_path, parquet_file, backup_path):
 
 
 def handle_fix_common(
-    parquet_file, fix_output, no_backup, fix_func, verbose=False, overwrite=False, profile=None
+    parquet_file,
+    fix_output,
+    no_backup,
+    fix_func,
+    verbose=False,
+    overwrite=False,
+    profile=None,
+    confirmation=None,
 ):
     """Handle common fix logic: backup, output path, and fix application.
 
@@ -127,6 +173,9 @@ def handle_fix_common(
         verbose: Print verbose output
         overwrite: Whether to allow overwriting remote files
         profile: AWS profile name for S3 operations
+        confirmation: the run's :class:`NoBackupConfirmation`, shared across
+            every file a multi-file ``--fix`` touches. Defaults to a
+            single-file one, which is what a lone call gets.
 
     Returns:
         tuple: (output_path, backup_path or None)
@@ -160,9 +209,8 @@ def handle_fix_common(
     # refused the write anyway (#959).
     fixing_in_place = is_same_file_path(output_path, parquet_file)
 
-    # Confirm overwrite without backup for local files
-    if no_backup and fixing_in_place and not is_remote_url(parquet_file):
-        click.confirm("This will overwrite the original file without backup. Continue?", abort=True)
+    # Confirm overwrite without backup for local files -- once per run (#1041).
+    (confirmation or NoBackupConfirmation(no_backup)).ensure(parquet_file, output_path)
 
     # Create backup if needed (only for local files)
     if (
@@ -246,6 +294,7 @@ def apply_check_all_fixes(
     check_spatial_impl,
     random_sample_size,
     limit_rows,
+    confirmation=None,
 ):
     """Apply all fixes for check_all command.
 
@@ -263,9 +312,14 @@ def apply_check_all_fixes(
         check_spatial_impl: Function to run spatial checks
         random_sample_size: Sample size for spatial check
         limit_rows: Row limit for spatial check
+        confirmation: the run's :class:`NoBackupConfirmation`; see
+            :func:`handle_fix_common`.
 
     Returns:
-        True if fixes were applied, False if no fixes needed
+        ``(output_path, backup_path or None)`` for a file this call rewrote, or
+        ``None`` when the file needed no fixes. The caller records the pair in
+        the run's summary, so a multi-file ``check all --fix`` names every file
+        it touched (#1041).
     """
     from geoparquet_io.core.check_fixes import apply_all_fixes
 
@@ -278,7 +332,7 @@ def apply_check_all_fixes(
 
     if not needs_fixes:
         click.echo(click.style("\n✓ No fixes needed - file is already optimal!", fg="green"))
-        return False
+        return None
 
     # Handle remote files
     is_remote = validate_remote_file_modification(file_path, fix_output, overwrite)
@@ -290,12 +344,8 @@ def apply_check_all_fixes(
     output_path = fix_output or file_path
     fixing_in_place = is_same_file_path(output_path, file_path)
 
-    # Confirm overwrite without backup for local files
-    if no_backup and fixing_in_place and not is_remote:
-        click.confirm(
-            "This will overwrite the original file without backup. Continue?",
-            abort=True,
-        )
+    # Confirm overwrite without backup for local files -- once per run (#1041).
+    (confirmation or NoBackupConfirmation(no_backup)).ensure(file_path, output_path)
 
     # Create backup if needed (only for local files)
     backup_path = create_backup_if_needed(file_path, output_path, no_backup, is_remote, verbose)
@@ -331,4 +381,4 @@ def apply_check_all_fixes(
         handle_fix_error(e, no_backup, output_path, file_path, backup_path)
         raise
 
-    return True
+    return output_path, backup_path

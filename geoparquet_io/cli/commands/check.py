@@ -8,6 +8,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 used by exactly this group, so it lives here rather than in ``cli/_shared.py``.
 """
 
+from functools import partial
 from pathlib import Path
 
 import click
@@ -21,7 +22,7 @@ from geoparquet_io.cli.decorators import (
     overwrite_option,
     verbose_option,
 )
-from geoparquet_io.cli.fix_helpers import handle_fix_common
+from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_common
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
@@ -60,6 +61,7 @@ class MultiFileCheckRunner:
         self.failed = 0
         self.issues: list[tuple[str, str, str]] = []  # (file, level, message)
         self.fixed: list[tuple[str, str | None]] = []  # (output path, backup path)
+        self.fix_failures: list[tuple[str, str]] = []  # (file, error)
         self.current_index = 0
         self.is_multi_file = len(files) > 1
 
@@ -124,6 +126,45 @@ class MultiFileCheckRunner:
         """Record a file this run rewrote, for the end-of-run summary."""
         self.fixed.append((output_path, backup_path))
 
+    def apply_fix(self, file_path: str, fix_call):
+        """Run one file's fix, recording it -- or its failure -- and carrying on.
+
+        A fix that raised used to abort the whole run, so one unreadable file in
+        a glob of twenty left the other nineteen unexamined and the user with no
+        idea which had been repaired. A per-file failure is reported, recorded,
+        and answered at the end by :meth:`raise_if_any_fix_failed`, so the exit
+        code speaks for every matched file rather than for the first one (#1041).
+
+        Click's own exceptions are *not* caught: a ``--no-backup`` prompt the
+        user declined, or a bad parameter, is a verdict on the invocation rather
+        than on this file, and must stop the run.
+        """
+        try:
+            outcome = fix_call()
+        except (click.Abort, click.ClickException, click.exceptions.Exit):
+            raise
+        except Exception as e:
+            self.fix_failures.append((file_path, str(e)))
+            click.echo(click.style(f"  ✗ Fix failed: {Path(file_path).name} - {e}", fg="red"))
+            return None
+
+        if outcome is None:  # nothing needed fixing
+            return None
+        self.record_fix(*outcome)
+        return outcome
+
+    def raise_if_any_fix_failed(self):
+        """Exit non-zero when any matched file went unrepaired."""
+        if not self.fix_failures:
+            return
+        plural = "" if len(self.fix_failures) == 1 else "s"
+        click.echo(
+            click.style(f"Failed to fix {len(self.fix_failures)} file{plural}:", fg="red"),
+        )
+        for file_path, message in self.fix_failures:
+            click.echo(f"  - {file_path}: {message}")
+        raise click.exceptions.Exit(1)
+
     def _print_fix_summary(self):
         """List what ``--fix`` rewrote.
 
@@ -131,18 +172,19 @@ class MultiFileCheckRunner:
         so a run that rewrote every file in a partition in place used to end on
         a summary that mentioned only the checks. Naming the files is the
         minimum a mass in-place rewrite owes the user.
+
+        Every one of them, not the first ``max_issues_shown``: an issue list is
+        a sample of a diagnosis the user can re-run for, while this list is the
+        only record of which of their files were overwritten (#1041).
         """
         if not self.fixed:
             return
 
         plural = "" if len(self.fixed) == 1 else "s"
         click.echo(click.style(f"Fixed {len(self.fixed)} file{plural}:", fg="green"))
-        for output_path, backup_path in self.fixed[: self.max_issues_shown]:
+        for output_path, backup_path in self.fixed:
             suffix = f" (backup: {backup_path})" if backup_path else ""
             click.echo(f"  - {output_path}{suffix}")
-        extra_fixes = len(self.fixed) - self.max_issues_shown
-        if extra_fixes > 0:
-            click.echo(click.style(f"  ... and {extra_fixes} more", fg="cyan"))
 
     def print_summary(self):
         """Print final summary after all files are checked."""
@@ -174,6 +216,81 @@ class MultiFileCheckRunner:
         summary = ", ".join(summary_parts) if summary_parts else "0 checked"
         click.echo(f"Summary: {summary} ({total} files checked)")
         self._print_fix_summary()
+
+
+def refuse_shared_fix_output(files_to_check: list[str], fix: bool, fix_output: str | None) -> None:
+    """Refuse one ``--fix-output`` file path for several inputs.
+
+    Every matched file would be written to the same path in turn, so the user
+    ends up with the *last* file's repair and no word about the others -- the
+    run even reported ``Fixed 3 files:`` listing that one path three times
+    (#1041). A directory is fine: each input gets its own name inside it.
+
+    Raised as a :class:`click.UsageError` (exit 2), like ``--pmtiles`` without
+    ``--fix``: the invocation cannot be carried out as written, and saying so
+    before the first file is checked means nothing has been rewritten when it
+    is refused.
+    """
+    if not (fix and fix_output) or len(files_to_check) <= 1:
+        return
+    if Path(fix_output).is_dir():
+        return
+
+    raise click.UsageError(
+        f"When fixing multiple files ({len(files_to_check)} files), "
+        f"--fix-output must be a directory, not a file path.\n"
+        f"Either:\n"
+        f"  1. Specify a directory: --fix-output /path/to/output_dir/\n"
+        f"  2. Omit --fix-output to fix files in-place (with .bak backups)"
+    )
+
+
+def fix_output_for(fix_output: str | None, file_path: str) -> str | None:
+    """This file's share of ``--fix-output``: its own name inside a directory."""
+    if fix_output and Path(fix_output).is_dir():
+        return str(Path(fix_output) / Path(file_path).name)
+    return fix_output
+
+
+def start_fix_session(
+    parquet_file: str,
+    *,
+    check_all_files: bool,
+    check_sample: int | None,
+    verbose: bool,
+    fix: bool,
+    fix_output: str | None,
+    no_backup: bool,
+):
+    """Resolve the input to files and set up the run the four single-check commands share.
+
+    Returns ``(runner, confirmation)``, or ``None`` when the input matched no
+    parquet files -- the caller's cue to return, which is how that guard has
+    always read.
+    """
+    from geoparquet_io.core.partition.reader import get_files_to_check
+
+    files_to_check, notice = get_files_to_check(
+        parquet_file,
+        check_all=check_all_files,
+        check_sample=check_sample,
+        verbose=verbose,
+        fix=fix,
+    )
+
+    if notice:
+        click.echo(click.style(f"📁 {notice}", fg="cyan"))
+
+    if not files_to_check:
+        click.echo(click.style("No parquet files found", fg="red"))
+        return None
+
+    refuse_shared_fix_output(files_to_check, fix, fix_output)
+
+    return (
+        MultiFileCheckRunner(files_to_check, verbose=verbose),
+        NoBackupConfirmation(no_backup, len(files_to_check)),
+    )
 
 
 @check.command(name="all", cls=GlobAwareCommand)
@@ -252,7 +369,11 @@ def check_all(
     with _activate_s3(ctx):
         # Get files to check based on partition options
         files_to_check, notice = get_files_to_check(
-            parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
+            parquet_file,
+            check_all=check_all_files,
+            check_sample=check_sample,
+            verbose=verbose,
+            fix=fix,
         )
 
         if notice:
@@ -262,19 +383,8 @@ def check_all(
             click.echo(click.style("No parquet files found", fg="red"))
             return
 
-        # Validate fix_output for multi-file operations
-        if fix and fix_output and len(files_to_check) > 1:
-            from pathlib import Path
-
-            fix_path = Path(fix_output)
-            if not fix_path.is_dir():
-                raise click.ClickException(
-                    f"When fixing multiple files ({len(files_to_check)} files), "
-                    f"--fix-output must be a directory, not a file path.\n"
-                    f"Either:\n"
-                    f"  1. Specify a directory: --fix-output /path/to/output_dir/\n"
-                    f"  2. Omit --fix-output to fix files in-place (with .bak backups)"
-                )
+        refuse_shared_fix_output(files_to_check, fix, fix_output)
+        confirmation = NoBackupConfirmation(no_backup, len(files_to_check))
 
         # Check pmtiles requires --fix
         if pmtiles and not fix:
@@ -296,7 +406,7 @@ def check_all(
         runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
 
         # Process each file
-        for file_path in files_to_check:
+        for file_path in runner.files:
             runner.start_file(file_path)
 
             # Early skip for non-GeoParquet files when --pmtiles is passed
@@ -400,32 +510,30 @@ def check_all(
 
             # If --fix flag is set, apply fixes
             if fix:
-                from pathlib import Path
-
                 from geoparquet_io.cli.fix_helpers import apply_check_all_fixes
 
-                # If fix_output is a directory, generate per-file output path
-                per_file_output = fix_output
-                if fix_output and Path(fix_output).is_dir():
-                    # Extract filename from file_path and place in output directory
-                    filename = Path(file_path).name
-                    per_file_output = str(Path(fix_output) / filename)
+                per_file_output = fix_output_for(fix_output, file_path)
 
                 all_results = {**structure_results, "spatial": spatial_result}
-                applied = apply_check_all_fixes(
-                    file_path=file_path,
-                    all_results=all_results,
-                    fix_output=per_file_output,
-                    no_backup=no_backup,
-                    overwrite=overwrite,
-                    verbose=verbose,
-                    profile=None,
-                    check_structure_impl=check_structure_impl,
-                    check_spatial_impl=check_spatial_impl,
-                    random_sample_size=random_sample_size,
-                    limit_rows=limit_rows,
+                applied = runner.apply_fix(
+                    file_path,
+                    partial(
+                        apply_check_all_fixes,
+                        file_path=file_path,
+                        all_results=all_results,
+                        fix_output=per_file_output,
+                        no_backup=no_backup,
+                        overwrite=overwrite,
+                        verbose=verbose,
+                        profile=None,
+                        check_structure_impl=check_structure_impl,
+                        check_spatial_impl=check_spatial_impl,
+                        random_sample_size=random_sample_size,
+                        limit_rows=limit_rows,
+                        confirmation=confirmation,
+                    ),
                 )
-                if not applied:
+                if applied is None:
                     continue
 
             # Generate PMTiles if requested (non-geo files already skipped at loop start)
@@ -453,6 +561,7 @@ def check_all(
 
         # Print summary for multi-file checks
         runner.print_summary()
+        runner.raise_if_any_fix_failed()
 
 
 @check.command(name="spatial", cls=GlobAwareCommand)
@@ -505,27 +614,24 @@ def check_spatial(
 ):
     """Check spatial ordering."""
     from geoparquet_io.core.check_fixes import fix_spatial_ordering
-    from geoparquet_io.core.partition.reader import get_files_to_check
 
     configure_verbose(verbose)
 
     with _activate_s3(ctx):
-        # Get files to check based on partition options
-        files_to_check, notice = get_files_to_check(
-            parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
+        session = start_fix_session(
+            parquet_file,
+            check_all_files=check_all_files,
+            check_sample=check_sample,
+            verbose=verbose,
+            fix=fix,
+            fix_output=fix_output,
+            no_backup=no_backup,
         )
-
-        if notice:
-            click.echo(click.style(f"📁 {notice}", fg="cyan"))
-
-        if not files_to_check:
-            click.echo(click.style("No parquet files found", fg="red"))
+        if session is None:
             return
+        runner, confirmation = session
 
-        # Create runner for multi-file progress tracking
-        runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
-
-        for file_path in files_to_check:
+        for file_path in runner.files:
             runner.start_file(file_path)
 
             show_output = runner.verbose or not runner.is_multi_file
@@ -600,10 +706,23 @@ def check_spatial(
 
                 if show_output:
                     click.echo("\nApplying Hilbert spatial ordering...")
-                output_path, backup_path = handle_fix_common(
-                    file_path, fix_output, no_backup, fix_spatial_ordering, verbose, overwrite, None
+                applied = runner.apply_fix(
+                    file_path,
+                    partial(
+                        handle_fix_common,
+                        file_path,
+                        fix_output_for(fix_output, file_path),
+                        no_backup,
+                        fix_spatial_ordering,
+                        verbose,
+                        overwrite,
+                        None,
+                        confirmation=confirmation,
+                    ),
                 )
-                runner.record_fix(output_path, backup_path)
+                if applied is None:
+                    continue
+                output_path, backup_path = applied
 
                 if show_output:
                     click.echo(
@@ -615,6 +734,7 @@ def check_spatial(
 
         # Print summary for multi-file checks
         runner.print_summary()
+        runner.raise_if_any_fix_failed()
 
 
 @check.command(name="compression", cls=GlobAwareCommand)
@@ -654,27 +774,24 @@ def check_compression_cmd(
     """Check geometry column compression."""
     from geoparquet_io.core.check_fixes import fix_compression
     from geoparquet_io.core.check_parquet_structure import check_compression
-    from geoparquet_io.core.partition.reader import get_files_to_check
 
     configure_verbose(verbose)
 
     with _activate_s3(ctx):
-        # Get files to check based on partition options
-        files_to_check, notice = get_files_to_check(
-            parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
+        session = start_fix_session(
+            parquet_file,
+            check_all_files=check_all_files,
+            check_sample=check_sample,
+            verbose=verbose,
+            fix=fix,
+            fix_output=fix_output,
+            no_backup=no_backup,
         )
-
-        if notice:
-            click.echo(click.style(f"📁 {notice}", fg="cyan"))
-
-        if not files_to_check:
-            click.echo(click.style("No parquet files found", fg="red"))
+        if session is None:
             return
+        runner, confirmation = session
 
-        # Create runner for multi-file progress tracking
-        runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
-
-        for file_path in files_to_check:
+        for file_path in runner.files:
             runner.start_file(file_path)
 
             show_output = runner.verbose or not runner.is_multi_file
@@ -696,10 +813,23 @@ def check_compression_cmd(
 
                 if show_output:
                     click.echo("\nRe-compressing with ZSTD...")
-                output_path, backup_path = handle_fix_common(
-                    file_path, fix_output, no_backup, fix_compression, verbose, overwrite, None
+                applied = runner.apply_fix(
+                    file_path,
+                    partial(
+                        handle_fix_common,
+                        file_path,
+                        fix_output_for(fix_output, file_path),
+                        no_backup,
+                        fix_compression,
+                        verbose,
+                        overwrite,
+                        None,
+                        confirmation=confirmation,
+                    ),
                 )
-                runner.record_fix(output_path, backup_path)
+                if applied is None:
+                    continue
+                output_path, backup_path = applied
 
                 if show_output:
                     click.echo(click.style("\n✓ Compression optimized successfully!", fg="green"))
@@ -709,6 +839,7 @@ def check_compression_cmd(
 
         # Print summary for multi-file checks
         runner.print_summary()
+        runner.raise_if_any_fix_failed()
 
 
 @check.command(name="bbox", cls=GlobAwareCommand)
@@ -753,27 +884,24 @@ def check_bbox_cmd(
     """
     from geoparquet_io.core.check_fixes import fix_bbox_all, fix_bbox_removal
     from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
-    from geoparquet_io.core.partition.reader import get_files_to_check
 
     configure_verbose(verbose)
 
     with _activate_s3(ctx):
-        # Get files to check based on partition options
-        files_to_check, notice = get_files_to_check(
-            parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
+        session = start_fix_session(
+            parquet_file,
+            check_all_files=check_all_files,
+            check_sample=check_sample,
+            verbose=verbose,
+            fix=fix,
+            fix_output=fix_output,
+            no_backup=no_backup,
         )
-
-        if notice:
-            click.echo(click.style(f"📁 {notice}", fg="cyan"))
-
-        if not files_to_check:
-            click.echo(click.style("No parquet files found", fg="red"))
+        if session is None:
             return
+        runner, confirmation = session
 
-        # Create runner for multi-file progress tracking
-        runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
-
-        for file_path in files_to_check:
+        for file_path in runner.files:
             runner.start_file(file_path)
 
             show_output = runner.verbose or not runner.is_multi_file
@@ -803,10 +931,23 @@ def check_bbox_cmd(
                             input_path, output_path, _col, verbose_flag, profile_name
                         )
 
-                    output_path, backup_path = handle_fix_common(
-                        file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, None
+                    applied = runner.apply_fix(
+                        file_path,
+                        partial(
+                            handle_fix_common,
+                            file_path,
+                            fix_output_for(fix_output, file_path),
+                            no_backup,
+                            bbox_fix_func,
+                            verbose,
+                            overwrite,
+                            None,
+                            confirmation=confirmation,
+                        ),
                     )
-                    runner.record_fix(output_path, backup_path)
+                    if applied is None:
+                        continue
+                    output_path, backup_path = applied
 
                     if show_output:
                         click.echo(click.style("\n✓ Bbox column removed successfully!", fg="green"))
@@ -835,10 +976,23 @@ def check_bbox_cmd(
                             profile_name,
                         )
 
-                    output_path, backup_path = handle_fix_common(
-                        file_path, fix_output, no_backup, bbox_fix_func, verbose, overwrite, None
+                    applied = runner.apply_fix(
+                        file_path,
+                        partial(
+                            handle_fix_common,
+                            file_path,
+                            fix_output_for(fix_output, file_path),
+                            no_backup,
+                            bbox_fix_func,
+                            verbose,
+                            overwrite,
+                            None,
+                            confirmation=confirmation,
+                        ),
                     )
-                    runner.record_fix(output_path, backup_path)
+                    if applied is None:
+                        continue
+                    output_path, backup_path = applied
 
                     if show_output:
                         click.echo(click.style("\n✓ Bbox optimized successfully!", fg="green"))
@@ -848,6 +1002,7 @@ def check_bbox_cmd(
 
         # Print summary for multi-file checks
         runner.print_summary()
+        runner.raise_if_any_fix_failed()
 
 
 @check.command(name="row-group", cls=GlobAwareCommand)
@@ -895,27 +1050,24 @@ def check_row_group_cmd(
     """Check row group size."""
     from geoparquet_io.core.check_fixes import fix_row_groups
     from geoparquet_io.core.check_parquet_structure import check_row_groups
-    from geoparquet_io.core.partition.reader import get_files_to_check
 
     configure_verbose(verbose)
 
     with _activate_s3(ctx):
-        # Get files to check based on partition options
-        files_to_check, notice = get_files_to_check(
-            parquet_file, check_all=check_all_files, check_sample=check_sample, verbose=verbose
+        session = start_fix_session(
+            parquet_file,
+            check_all_files=check_all_files,
+            check_sample=check_sample,
+            verbose=verbose,
+            fix=fix,
+            fix_output=fix_output,
+            no_backup=no_backup,
         )
-
-        if notice:
-            click.echo(click.style(f"📁 {notice}", fg="cyan"))
-
-        if not files_to_check:
-            click.echo(click.style("No parquet files found", fg="red"))
+        if session is None:
             return
+        runner, confirmation = session
 
-        # Create runner for multi-file progress tracking
-        runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
-
-        for file_path in files_to_check:
+        for file_path in runner.files:
             runner.start_file(file_path)
 
             show_output = runner.verbose or not runner.is_multi_file
@@ -941,10 +1093,23 @@ def check_row_group_cmd(
 
                 if show_output:
                     click.echo("\nOptimizing row groups...")
-                output_path, backup_path = handle_fix_common(
-                    file_path, fix_output, no_backup, fix_row_groups, verbose, overwrite, None
+                applied = runner.apply_fix(
+                    file_path,
+                    partial(
+                        handle_fix_common,
+                        file_path,
+                        fix_output_for(fix_output, file_path),
+                        no_backup,
+                        fix_row_groups,
+                        verbose,
+                        overwrite,
+                        None,
+                        confirmation=confirmation,
+                    ),
                 )
-                runner.record_fix(output_path, backup_path)
+                if applied is None:
+                    continue
+                output_path, backup_path = applied
 
                 if show_output:
                     click.echo(click.style("\n✓ Row groups optimized successfully!", fg="green"))
@@ -954,6 +1119,7 @@ def check_row_group_cmd(
 
         # Print summary for multi-file checks
         runner.print_summary()
+        runner.raise_if_any_fix_failed()
 
 
 @check.command(name="stac")
@@ -1163,7 +1329,7 @@ def check_optimization_cmd(
 
         runner = MultiFileCheckRunner(files_to_check, verbose=verbose)
 
-        for file_path in files_to_check:
+        for file_path in runner.files:
             runner.start_file(file_path)
 
             show_output = runner.verbose or not runner.is_multi_file

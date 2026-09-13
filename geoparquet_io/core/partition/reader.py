@@ -262,6 +262,7 @@ def get_files_to_check(
     check_all: bool = False,
     check_sample: int | None = None,
     verbose: bool = False,
+    fix: bool = False,
 ) -> tuple[list[str], str]:
     """
     Get list of files to check from a partitioned dataset.
@@ -271,6 +272,13 @@ def get_files_to_check(
         check_all: If True, return all files
         check_sample: If set, return first N files
         verbose: Print debug messages
+        fix: If True, the caller is about to *repair* these files, so the
+            first-file default below does not apply. Sampling is the right
+            default for a read-only look at a partition that may hold ten
+            thousand files; it is the wrong one for a repair, which silently
+            fixed ``a.parquet`` of ``a``, ``b``, ``d`` and reported success
+            (#1041). An explicit ``--sample-files N`` still wins -- that is the
+            user naming the subset, not gpio guessing at one.
 
     Returns:
         tuple: (files_to_check, notice_message)
@@ -300,6 +308,10 @@ def get_files_to_check(
         files = all_files[:sample_count]
         notice = f"Checking sample of {sample_count} files (out of {file_count} total)"
         return files, notice
+
+    if fix:
+        notice = f"Fixing all {file_count} files in the input (--fix never samples)"
+        return all_files, notice
 
     # Default: check first file only
     first_file = partition_info["first_file"]
