@@ -29,6 +29,9 @@ The test suite covers all major commands and functionality:
 - `fix_output_oracle.py` - `assert_fix_output_is_sound`: what every `gpio check --fix`
   output has to satisfy. A test that runs `--fix` hands its output to the oracle.
 - `http_transport.py` - the offline transport the WFS/ArcGIS extractor tests run on
+- `test_validate_verdict_arms.py` - every FAILED verdict `gpio check spec` can reach,
+  reached from a one-defect file, and `FAILED_ARMS`, the ratchet that makes a new
+  FAILED-reporting function in `validate.py` fail until a test claims it
 
 ## Test Data
 
