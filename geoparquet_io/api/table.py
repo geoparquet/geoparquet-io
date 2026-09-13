@@ -270,6 +270,9 @@ def read(path: str | Path, **kwargs) -> Table:
     # so write() picks the same version the CLI would for this input, even when
     # native geometry columns were demoted to plain binary by pq.read_table.
     table._auto_version_hint = resolve_geoparquet_version_from_file(str(path))
+    # Remember the bytes this Table stands for, so `check_*` and `validate()`
+    # inspect the user's file rather than a re-write of its rows (#1060).
+    table._source_path = str(path)
     return table
 
 
@@ -575,6 +578,12 @@ class Table:
         # registered, so the table alone can't always tell a native-geo-only
         # source from generic WKB. None when the table wasn't read from a file.
         self._auto_version_hint: str | None = None
+        # The file this Table is a view of, set by read() only. Row groups,
+        # compression and bloom filters are properties of written bytes, so
+        # `check_*` must measure *this* file rather than a re-write of the
+        # rows (#1060). Deliberately NOT carried through _wrap: a transformed
+        # table is different bytes and must not borrow the source's layout.
+        self._source_path: str | None = None
         self._crs_hint: dict | str | None = crs
 
     _KEEP_CRS_HINT = object()
@@ -876,23 +885,82 @@ class Table:
         return self._table.schema
 
     @property
+    def source_path(self) -> str | None:
+        """
+        The file this Table was read from, or None.
+
+        ``gpio.read(path)`` sets it; every other way of getting a Table leaves
+        it None, and so does any transformation — ``sort_hilbert()`` exists to
+        change the bytes, so the result is no longer a view of the source file.
+        ``check_*`` and ``validate()`` use it to decide whether they have a real
+        file to measure (#1060).
+
+        Returns:
+            Path string or None
+
+        Example:
+            >>> gpio.read('data.parquet').source_path
+            'data.parquet'
+            >>> gpio.read('data.parquet').sort_hilbert().source_path is None
+            True
+        """
+        return self._source_path
+
+    @property
     def geoparquet_version(self) -> str | None:
         """
-        Get the GeoParquet version from metadata.
+        Get the GeoParquet version the file declares.
 
-        Returns the version string (e.g., '1.1.0', '2.0.0') or None
-        if no GeoParquet metadata is present.
+        Returns the ``geo.version`` string exactly as the metadata carries it
+        (e.g., '1.0.0', '1.1.0', '2.0.0'), or None when there is no GeoParquet
+        metadata. This is the same fact ``gpio inspect summary`` reports.
+
+        For the version ``write()`` would stamp on output — which is not the
+        same question, since gpio writes 1.0 files out as 1.1 — see
+        :attr:`output_geoparquet_version` (#1061).
 
         Returns:
             Version string or None
 
         Example:
             >>> table = gpio.read('data.parquet')
-            >>> print(table.geoparquet_version)  # e.g., '1.1.0'
+            >>> print(table.geoparquet_version)  # e.g., '1.0.0'
         """
-        from geoparquet_io.core.streaming import extract_version_from_metadata
+        from geoparquet_io.core.geo_metadata import carried_version, parse_geo_metadata
 
-        return extract_version_from_metadata(self._table.schema.metadata)
+        geo_meta = parse_geo_metadata(self._table.schema.metadata)
+        if not isinstance(geo_meta, dict):
+            return None
+        return carried_version(geo_meta.get("version"))
+
+    @property
+    def output_geoparquet_version(self) -> str | None:
+        """
+        Get the GeoParquet version ``write()`` would stamp on output.
+
+        Distinct from :attr:`geoparquet_version`, which reports what the file
+        declares. gpio upgrades any 1.x input to '1.1' on write and flattens
+        any 2.x to '2.0', so the two answers differ for most 1.0 files — which
+        is exactly why they no longer share a name (#1061).
+
+        Returns:
+            Version string suitable for ``write(geoparquet_version=...)``,
+            or None when nothing in the table implies a version.
+
+        Example:
+            >>> table = gpio.read('places_1_0_0.parquet')
+            >>> table.geoparquet_version, table.output_geoparquet_version
+            ('1.0.0', '1.1')
+        """
+        return self._resolve_output_version()
+
+    def _resolve_output_version(self, verbose: bool = False) -> str | None:
+        """The auto-mode write version, shared by write() and the property above."""
+        from geoparquet_io.core.common import resolve_geoparquet_version_from_table
+
+        return (
+            resolve_geoparquet_version_from_table(self._table, verbose) or self._auto_version_hint
+        )
 
     def info(self, verbose: bool = True) -> dict | None:
         """
@@ -1132,14 +1200,9 @@ class Table:
         # output self-consistent (a None version made duckdb-kv keep the native
         # GEOMETRY logical type while stamping 1.1.0/WKB geo metadata).
         if geoparquet_version is None:
-            from geoparquet_io.core.common import resolve_geoparquet_version_from_table
             from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION
 
-            geoparquet_version = (
-                resolve_geoparquet_version_from_table(self._table, verbose)
-                or self._auto_version_hint
-                or DEFAULT_GEOPARQUET_VERSION
-            )
+            geoparquet_version = self._resolve_output_version(verbose) or DEFAULT_GEOPARQUET_VERSION
 
         path_str = str(path)
         is_remote = is_remote_url(path_str)
@@ -2708,6 +2771,39 @@ class Table:
         finally:
             _safe_unlink(temp_path)
 
+    def _check_file(self, func, *args, **kwargs):
+        """Run a file-based check over the bytes this Table stands for.
+
+        A Table read from a file *is* that file, so the check reads it
+        directly: row groups, compression, bloom filters and the declared spec
+        version are properties of written bytes, and a re-write with gpio's
+        defaults replaces every one of them with gpio's own answer. That is how
+        ``check_compression()`` came to re-encode to ZSTD before measuring and
+        could never report a problem (#1060).
+
+        A Table with no file behind it -- built in memory, or derived from one
+        by an operation that changed the bytes -- has no layout to describe. It
+        still gets an answer, because "how would this be laid out if I wrote it
+        now?" is a real and useful question and the temp file really does
+        answer it; what it must not do is let that answer pass for the other
+        one. So the caller marks it ``prospective`` and the label travels with
+        the result, into ``to_dict()`` and into the repr.
+        """
+        if self._source_path is not None:
+            return func(self._source_path, *args, **kwargs)
+        return self._with_temp_file(func, *args, **kwargs)
+
+    def _check_result(self, results: dict, check_type: str) -> CheckResult:
+        """Wrap check output, recording which bytes it describes."""
+        from geoparquet_io.api.check import CheckResult
+
+        return CheckResult(
+            results,
+            check_type=check_type,
+            source=self._source_path,
+            prospective=self._source_path is None,
+        )
+
     def _with_temp_io_files(self, func, **kwargs) -> pa.Table:
         """
         Execute an input->output file transformation using temp files.
@@ -2759,6 +2855,10 @@ class Table:
         - Bbox structure and metadata
         - Compression settings
 
+        Measured on the file this Table was read from. A Table with no file
+        behind it is measured on bytes gpio writes with default settings, and
+        ``CheckResult.prospective`` is then True (#1060).
+
         Returns:
             CheckResult with pass/fail status and details
 
@@ -2771,11 +2871,10 @@ class Table:
             ...     for failure in result.failures():
             ...         print(failure)
         """
-        from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.check_parquet_structure import check_all
 
-        results = self._with_temp_file(check_all, verbose=False, return_results=True, quiet=True)
-        return CheckResult(results, check_type="all")
+        results = self._check_file(check_all, verbose=False, return_results=True, quiet=True)
+        return self._check_result(results, "all")
 
     def check_spatial(self, sample_size: int = 100, limit_rows: int = 500000) -> CheckResult:
         """
@@ -2800,10 +2899,9 @@ class Table:
             >>> else:
             ...     print("Consider using sort_hilbert()")
         """
-        from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.check_spatial_order import check_spatial_order
 
-        results = self._with_temp_file(
+        results = self._check_file(
             check_spatial_order,
             random_sample_size=sample_size,
             limit_rows=limit_rows,
@@ -2811,23 +2909,21 @@ class Table:
             return_results=True,
             quiet=True,
         )
-        return CheckResult(results, check_type="spatial")
+        return self._check_result(results, "spatial")
 
     def check_spatial_pushdown(self) -> CheckResult:
         """
-        Check spatial filter pushdown readiness (prospective).
+        Check spatial filter pushdown readiness.
 
-        Evaluates whether the table would support efficient spatial filter
-        pushdown by writing to a temp file and analyzing per-row-group bbox
-        statistics. Returns an estimated skip rate representing how many row
-        groups a typical regional query can skip.
+        Analyzes per-row-group bbox statistics and returns an estimated skip
+        rate representing how many row groups a typical regional query can
+        skip.
 
-        Note:
-            This method writes the table to a temporary file with default
-            settings to compute metrics. For metrics on an existing file's
-            actual row group structure, use the CLI command
-            ``gpio check spatial --file`` or the standalone function
-            ``geoparquet_io.check_spatial_pushdown(file_path)``.
+        Read from a file, this reports that file's actual row group structure,
+        the same numbers ``gpio check spatial`` prints. A table with no file
+        behind it has no row groups yet, so the metrics describe what gpio
+        would write with default settings and ``CheckResult.prospective`` is
+        True (#1060).
 
         Returns:
             CheckResult with pushdown readiness metrics
@@ -2839,20 +2935,23 @@ class Table:
             ...     print("Good pushdown readiness")
             >>> print(result.details())
         """
-        from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness
 
-        results = self._with_temp_file(
+        results = self._check_file(
             check_spatial_pushdown_readiness,
             verbose=False,
         )
-        return CheckResult(results, check_type="spatial_pushdown")
+        return self._check_result(results, "spatial_pushdown")
 
     def check_compression(self) -> CheckResult:
         """
         Check compression settings on geometry column.
 
         Recommends ZSTD compression for best performance.
+
+        Measured on the file this Table was read from. A Table with no file
+        behind it is measured on bytes gpio writes with default settings, and
+        ``CheckResult.prospective`` is then True (#1060).
 
         Returns:
             CheckResult with compression analysis
@@ -2862,13 +2961,12 @@ class Table:
             >>> result = table.check_compression()
             >>> print(result.to_dict())
         """
-        from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.check_parquet_structure import check_compression
 
-        results = self._with_temp_file(
+        results = self._check_file(
             check_compression, verbose=False, return_results=True, quiet=True
         )
-        return CheckResult(results, check_type="compression")
+        return self._check_result(results, "compression")
 
     def check_bbox(self) -> CheckResult:
         """
@@ -2877,6 +2975,10 @@ class Table:
         Verifies:
         - Bbox column exists and has correct structure
         - GeoParquet covering metadata is present
+
+        Measured on the file this Table was read from. A Table with no file
+        behind it is measured on bytes gpio writes with default settings, and
+        ``CheckResult.prospective`` is then True (#1060).
 
         Returns:
             CheckResult with bbox analysis
@@ -2887,13 +2989,12 @@ class Table:
             >>> if not result.passed():
             ...     table = table.add_bbox()
         """
-        from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
 
-        results = self._with_temp_file(
+        results = self._check_file(
             check_metadata_and_bbox, verbose=False, return_results=True, quiet=True
         )
-        return CheckResult(results, check_type="bbox")
+        return self._check_result(results, "bbox")
 
     def check_row_groups(self, profile: CheckProfile | None = None) -> CheckResult:
         """
@@ -2901,6 +3002,10 @@ class Table:
 
         Checks if row group sizes are optimal for cloud-native access
         (recommended: 64-256 MB per group, 10k-200k rows per group).
+
+        Measured on the file this Table was read from. A Table with no file
+        behind it is measured on bytes gpio writes with default settings, and
+        ``CheckResult.prospective`` is then True (#1060).
 
         Returns:
             CheckResult with row group analysis
@@ -2910,13 +3015,12 @@ class Table:
             >>> result = table.check_row_groups()
             >>> print(result.recommendations())
         """
-        from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.check_parquet_structure import check_row_groups
 
-        results = self._with_temp_file(
+        results = self._check_file(
             check_row_groups, verbose=False, return_results=True, quiet=True, profile=profile
         )
-        return CheckResult(results, check_type="row_groups")
+        return self._check_result(results, "row_groups")
 
     def check_bloom_filters(self) -> CheckResult:
         """
@@ -2924,6 +3028,10 @@ class Table:
 
         Bloom filters enable efficient point lookups on low-cardinality columns
         (city names, land use types, integer ranges).
+
+        Measured on the file this Table was read from. A Table with no file
+        behind it is measured on bytes gpio writes with default settings, and
+        ``CheckResult.prospective`` is then True (#1060).
 
         Returns:
             CheckResult with bloom filter analysis
@@ -2933,13 +3041,12 @@ class Table:
             >>> result = table.check_bloom_filters()
             >>> print(result.to_dict())
         """
-        from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.check_parquet_structure import check_bloom_filters
 
-        results = self._with_temp_file(
+        results = self._check_file(
             check_bloom_filters, verbose=False, return_results=True, quiet=True
         )
-        return CheckResult(results, check_type="bloom_filters")
+        return self._check_result(results, "bloom_filters")
 
     def check_optimization(self) -> CheckResult:
         """
@@ -2949,6 +3056,10 @@ class Table:
         native geo types, geo bbox stats, spatial sorting, row group size,
         and compression.
 
+        Measured on the file this Table was read from. A Table with no file
+        behind it is measured on bytes gpio writes with default settings, and
+        ``CheckResult.prospective`` is then True (#1060).
+
         Returns:
             CheckResult with optimization analysis including score and level
 
@@ -2957,19 +3068,23 @@ class Table:
             >>> result = table.check_optimization()
             >>> print(result.to_dict()['score'], '/', result.to_dict()['total_checks'])
         """
-        from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.check_optimization import check_optimization
 
-        results = self._with_temp_file(
+        results = self._check_file(
             check_optimization, verbose=False, return_results=True, quiet=True
         )
-        return CheckResult(results, check_type="optimization")
+        return self._check_result(results, "optimization")
 
     def validate(self, version: str | None = None) -> CheckResult:
         """
         Validate against GeoParquet specification.
 
         Checks compliance with GeoParquet 1.0, 1.1, 2.0, or auto-detects version.
+
+        Validates the file this Table was read from, so the detected version is
+        the one the file declares. A Table with no file behind it is validated
+        on bytes gpio writes with default settings, and
+        ``CheckResult.prospective`` is then True (#1060).
 
         Args:
             version: Target GeoParquet version (None for auto-detect)
@@ -2983,10 +3098,9 @@ class Table:
             >>> if result.passed():
             ...     print(f"Valid GeoParquet {table.geoparquet_version}")
         """
-        from geoparquet_io.api.check import CheckResult
         from geoparquet_io.core.validate import validate_geoparquet
 
-        validation_result = self._with_temp_file(
+        validation_result = self._check_file(
             validate_geoparquet,
             target_version=version,
             validate_data=True,
@@ -3009,7 +3123,7 @@ class Table:
                 if c.status.value == "failed"
             ],
         }
-        return CheckResult(results, check_type="validate")
+        return self._check_result(results, "validate")
 
     def add_admin_divisions(
         self,

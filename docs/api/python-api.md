@@ -385,7 +385,20 @@ The `Table` class wraps a PyArrow Table and provides chainable transformation me
 | `crs` | CRS as PROJJSON dict or string (None = OGC:CRS84 default) |
 | `bounds` | Bounding box tuple (xmin, ymin, xmax, ymax) |
 | `schema` | PyArrow Schema object |
-| `geoparquet_version` | GeoParquet version string (e.g., "1.1") |
+| `geoparquet_version` | The version the file declares, verbatim (e.g., `"1.0.0"`), or `None` |
+| `output_geoparquet_version` | The version `write()` would stamp on output (e.g., `"1.1"`), or `None` |
+| `source_path` | The file `gpio.read()` opened, or `None` for an in-memory or transformed table |
+
+`geoparquet_version` and `output_geoparquet_version` answer two different
+questions and usually give two different answers: gpio writes any 1.x input out
+as 1.1, so a file that declares `1.0.0` reports `'1.0.0'` for what it *is* and
+`'1.1'` for what it *would become*.
+
+```python
+table = gpio.read('places_1_0_0.parquet')
+table.geoparquet_version         # '1.0.0' - what the file declares
+table.output_geoparquet_version  # '1.1'   - what write() would stamp
+```
 
 ```python
 table = gpio.read('data.parquet')
@@ -1287,6 +1300,24 @@ row_group_result = table.check_row_groups()
 
 # Access results as dictionary
 details = result.to_dict()
+```
+
+**Which bytes a check describes.** A table from `gpio.read(path)` is checked
+against that file, so `table.check_compression()` and `gpio check compression
+<path>` give the same verdict. Row groups, compression, bloom filters and the
+declared spec version are properties of *written* bytes, and a table built in
+memory — or derived from a file by an operation that changed the rows — has
+none of them yet. Those checks still answer, but they answer the only question
+there is, "how would this be laid out if gpio wrote it now?", and say so:
+
+```python
+gpio.read('data.parquet').check_row_groups().prospective   # False - the file was read
+gpio.read('data.parquet').sort_hilbert().check_row_groups().prospective  # True
+
+result = gpio.Table(arrow_table).check_compression()
+result.source       # None
+result.prospective  # True
+result.to_dict()['prospective']  # the same label, for dict consumers
 ```
 
 #### `check_optimization()`
