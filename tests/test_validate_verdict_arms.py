@@ -45,6 +45,7 @@ from geoparquet_io.core.validate import (
     _run_geoparquet_checks,
     validate_geoparquet,
 )
+from tests.native_geo_probes import write_native_geo_only
 
 # POINT (1 2), little-endian WKB.
 WKB_POINT = bytes.fromhex("0101000000000000000000f03f0000000000000040")
@@ -130,7 +131,7 @@ COLUMN_METADATA_CASES = [
     ),
     (
         "bbox_holds_a_string",
-        {"bbox": [0, 0, "1", 1]},
+        {"bbox": [0, 0, "2", 3]},  # covers POINT (1 2): the string is the only defect
         "bbox_valid_geometry",
         CheckStatus.FAILED,
         "bbox elements must be numbers",
@@ -142,7 +143,19 @@ COLUMN_METADATA_CASES = [
         CheckStatus.FAILED,
         "epoch must be a number",
     ),
+    (
+        "orientation_is_not_a_known_value",
+        {"orientation": "sideways"},
+        "orientation_valid_geometry",
+        CheckStatus.FAILED,
+        "orientation must be one of ['counterclockwise']",
+    ),
 ]
+
+#: Table ids whose one defect makes DuckDB refuse to *read* the file, so the
+#: three data checks also FAIL, each quoting DuckDB's "Invalid Input Error"
+#: rather than a verdict of their own (#1080).
+CASCADING_CASES = {"geometry_types_not_a_list", "crs_is_a_bare_string"}
 
 
 @pytest.mark.parametrize(
@@ -153,6 +166,39 @@ COLUMN_METADATA_CASES = [
 def test_column_metadata_verdict(tmp_path, override, check_name, status, fragment):
     path = write_geoparquet(tmp_path / "f.parquet", base_geo(**override))
     assert_verdict(verdicts(path), check_name, status, fragment)
+
+
+def test_the_base_fixture_is_clean(tmp_path):
+    """Every case above adds exactly one defect to this; a FAILED here would make
+    the table vacuous."""
+    checks = verdicts(write_geoparquet(tmp_path / "f.parquet", base_geo()))
+    failed = [check.name for check in checks.values() if check.status == CheckStatus.FAILED]
+    assert failed == []
+
+
+@pytest.mark.parametrize(
+    ("case_id", "override", "check_name"),
+    [
+        pytest.param(
+            case[0],
+            case[1],
+            case[2],
+            id=case[0],
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="#1080: DuckDB refuses to read the file, so encoding_matches_data, "
+                "geometry_types_match_data and coordinates_valid_for_crs FAIL too",
+            )
+            if case[0] in CASCADING_CASES
+            else (),
+        )
+        for case in COLUMN_METADATA_CASES
+    ],
+)
+def test_one_defect_is_one_failed_verdict(tmp_path, case_id, override, check_name):
+    checks = verdicts(write_geoparquet(tmp_path / "f.parquet", base_geo(**override)))
+    failed = sorted(check.name for check in checks.values() if check.status == CheckStatus.FAILED)
+    assert failed == [check_name]
 
 
 @pytest.mark.xfail(
@@ -325,6 +371,19 @@ def test_covering_bbox_string_path_does_not_invent_a_column_name(tmp_path):
     assert '"b"' not in message, message
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=TypeError,
+    reason="#1062: covering = 'bbox' (a string, not an object) crashes `gpio check spec` "
+    "before `_check_covering_is_object` can report it",
+)
+def test_covering_that_is_a_string_is_reported_not_crashed(tmp_path):
+    path = write_geoparquet(tmp_path / "f.parquet", base_geo(covering="bbox"))
+    assert_verdict(
+        verdicts(path), "covering_is_object_geometry", CheckStatus.FAILED, "covering must be"
+    )
+
+
 # =============================================================================
 # File extension (check 1.1-8)
 # =============================================================================
@@ -411,6 +470,26 @@ def test_parquet_geo_only_target_is_matched_by_file_type(file_type, status):
     assert check.status == status
 
 
+def test_a_2_0_block_over_a_plain_wkb_column(tmp_path):
+    """The substantive arm of both native-type checks: the column exists, and is
+    plain binary. The missing-column test below reaches only their lookup arm."""
+    geo = base_geo()
+    geo["version"] = "2.0.0"
+    checks = verdicts(write_geoparquet(tmp_path / "f.parquet", geo))
+    assert_verdict(
+        checks,
+        "native_geo_type_present_geometry",
+        CheckStatus.FAILED,
+        'column "geometry" does not have GEOMETRY/GEOGRAPHY logical type',
+    )
+    assert_verdict(
+        checks,
+        "v2_native_types_geometry",
+        CheckStatus.FAILED,
+        "GeoParquet 2.0 requires native Parquet GEOMETRY/GEOGRAPHY type",
+    )
+
+
 def test_geoparquet_file_has_no_native_geo_types(tmp_path):
     """``--geoparquet-version parquet-geo-only`` on a plain WKB file: the whole
     check run is one FAILED verdict naming what is missing."""
@@ -431,11 +510,7 @@ def test_geoparquet_file_has_no_native_geo_types(tmp_path):
 
 
 def native_geo_file(path, wkb: list[bytes], *, crs=None, spherical=False, statistics=True) -> str:
-    """A Parquet file with a native GEOMETRY/GEOGRAPHY logical type and no ``geo`` key.
-
-    pyarrow is the only writer that produces this on purpose; DuckDB always adds
-    the ``geo`` block.
-    """
+    """A native GEOMETRY/GEOGRAPHY file with no ``geo`` key (see ``write_native_geo_only``)."""
     import geoarrow.pyarrow as ga
 
     geo_type = ga.wkb()
@@ -443,13 +518,16 @@ def native_geo_file(path, wkb: list[bytes], *, crs=None, spherical=False, statis
         geo_type = geo_type.with_edge_type("spherical")
     if crs is not None:
         geo_type = geo_type.with_crs(crs)
-    column = pa.ExtensionArray.from_storage(geo_type, pa.array(wkb, pa.binary()))
-    pq.write_table(
-        pa.table({"id": pa.array(range(len(wkb))), "geometry": column}),
-        str(path),
-        write_statistics=statistics,
+    rows = [(i, "g", value) for i, value in enumerate(wkb)]
+    return str(
+        write_native_geo_only(
+            path,
+            rows,
+            {"geometry": (2, geo_type)},
+            compression="snappy",
+            write_statistics=statistics,
+        )
     )
-    return str(path)
 
 
 def test_geography_coordinates_outside_valid_bounds(tmp_path):
@@ -467,14 +545,15 @@ def test_native_geo_statistics_absent(tmp_path):
     """A native-geo file written with statistics off: the check must say the
     *statistics* are missing, not that the column is."""
     path = native_geo_file(tmp_path / "pgo.parquet", [wkb_point(1, 2)] * 2, statistics=False)
+    checks = verdicts(path)
     assert_verdict(
-        verdicts(path),
+        checks,
         "native_geo_stats_geometry",
         CheckStatus.WARNING,
         'geometry column "geometry" missing geospatial statistics',
     )
     assert_verdict(
-        verdicts(path),
+        checks,
         "native_geo_stats_contains_data_geometry",
         CheckStatus.SKIPPED,
         "no geospatial statistics to validate against",
@@ -636,7 +715,14 @@ def test_geo_metadata_that_is_not_an_object_fails_the_run():
     """``validate_geoparquet`` rejects this earlier, but the check runner is public
     enough to be called directly and must not iterate a list as a dict."""
     checks = _run_geoparquet_checks(
-        "unused.parquet", {b"geo": b"[]"}, [], [], {"file_type": "geoparquet_v1"}, None, 0, False
+        "unused.parquet",
+        kv_metadata={b"geo": b"[]"},
+        geo_meta=[],
+        schema_info=[],
+        file_type_info={"file_type": "geoparquet_v1"},
+        con=None,
+        sample_size=0,
+        validate_data=False,
     )
     assert [check.name for check in checks] == ["geo_key_exists", "geo_metadata_parse"]
     assert checks[-1].status == CheckStatus.FAILED
@@ -647,118 +733,121 @@ def test_geo_metadata_that_is_not_an_object_fails_the_run():
 # The ratchet: a new FAILED arm must not arrive untested and unnoticed
 # =============================================================================
 
-#: Functions in ``validate.py`` that can emit a FAILED verdict which this file
-#: does not exercise, each with why. Shrinking this set is the point; growing it
-#: needs a reason. A *new* FAILED-emitting function appears in neither set and
-#: fails ``test_every_failed_arm_is_accounted_for`` until it is placed.
-FAILED_ARMS_EXERCISED_ELSEWHERE = {
-    # Exercised by the wider suite (tests/test_validate_*.py, tests/e2e).
-    "_check_geo_key_exists",
-    "_check_metadata_is_json",
-    "_check_version_present",
-    "_check_version_known",
-    "_check_version_features",
-    "_check_primary_column_present",
-    "_check_columns_present",
-    "_check_primary_column_in_columns",
-    "_check_encoding_valid",
-    "_check_orientation_valid",
-    "_check_edges_valid",
-    "_check_geometry_not_grouped",
-    "_check_geoarrow_layout",
-    "_check_geometry_byte_array",
-    "_geoarrow_layout_error",
-    "_compare_geometry_types",
-    "_check_orientation_matches_data",
-    "_interpret_bbox_result",
-    "_check_bbox_contains_data",
-    "_check_covering_is_object",
-    "_bbox_column_missing",
-    "_check_native_columns_in_metadata",
-    "_check_native_geo_stats_contains_data",
-    "_check_geometry_types_match_stats",
-    "_check_v2_crs_consistency",
-    "_check_v2_edges_consistency",
-    "_check_coordinates_valid_for_crs",
-    "validate_geoparquet",
-    "_run_parquet_geo_only_checks",
-    # Reachable only through a defect this suite cannot manufacture:
-    # `_check_native_geo_types_match` FAILS on geo_types declared in the
-    # Parquet GeospatialStatistics that the data contradicts, and pyarrow --
-    # the only writer that can produce a hand-built native-geo file -- does
-    # not write those statistics at all.
-    "_check_native_geo_types_match",
-    # FAILS only on a GEOGRAPHY logical type whose `algorithm` property is
-    # absent or unparsable; geoarrow.pyarrow cannot write one.
-    "_check_geography_edges_valid",
+#: Every ``validate.py`` function that can report FAILED, and where that arm is
+#: exercised: ``HERE`` (this file), or a reason it is not. Shrinking the reasons
+#: is the point; a *new* FAILED-reporting function is in neither and fails
+#: ``test_every_failed_arm_is_accounted_for`` until it is placed. Every key must
+#: resolve to a function in the module.
+HERE = "this file"
+ELSEWHERE = "tests/test_validate_*.py, tests/e2e"
+FAILED_ARMS = {
+    "_check_geometry_types_list": HERE,
+    "_check_crs_valid": HERE,
+    "_check_bbox_valid": HERE,
+    "_check_epoch_valid": HERE,
+    "_check_orientation_valid": HERE,
+    "_check_geometry_not_grouped": HERE,
+    "_check_geometry_byte_array": HERE,
+    "_check_geometry_not_repeated": HERE,
+    "_check_encoding_matches_data": HERE,
+    "_check_geometry_types_match_data": HERE,
+    "_check_covering_bbox_paths": HERE,
+    "_check_covering_bbox_column_exists": HERE,
+    "_check_covering_bbox_structure": HERE,
+    "_check_covering_bbox_field_types": HERE,
+    "_check_native_geo_type_present": HERE,
+    "_check_geography_coordinate_bounds": HERE,
+    "_check_v2_uses_native_types": HERE,
+    "_check_v2_crs_in_parquet_type": HERE,
+    "_check_version_matches": HERE,
+    "_run_geoparquet_checks": HERE,
+    "_check_geo_key_exists": ELSEWHERE,
+    "_check_metadata_is_json": ELSEWHERE,
+    "_check_version_present": ELSEWHERE,
+    "_check_version_known": ELSEWHERE,
+    "_check_version_features": ELSEWHERE,
+    "_check_primary_column_present": ELSEWHERE,
+    "_check_columns_present": ELSEWHERE,
+    "_check_primary_column_in_columns": ELSEWHERE,
+    "_check_encoding_valid": ELSEWHERE,
+    "_check_edges_valid": ELSEWHERE,
+    "_check_geoarrow_layout": ELSEWHERE,
+    "_geoarrow_layout_error": ELSEWHERE,
+    "_compare_geometry_types": ELSEWHERE,
+    "_check_orientation_matches_data": ELSEWHERE,
+    "_interpret_bbox_result": ELSEWHERE,
+    "_check_bbox_contains_data": "tests/test_validate_bbox_dimensions.py",
+    "_bbox_column_missing": ELSEWHERE,
+    "_check_native_columns_in_metadata": ELSEWHERE,
+    "_check_native_geo_stats_contains_data": ELSEWHERE,
+    "_check_geometry_types_match_stats": ELSEWHERE,
+    "_check_v2_crs_consistency": ELSEWHERE,
+    "_check_v2_edges_consistency": ELSEWHERE,
+    "_check_coordinates_valid_for_crs": ELSEWHERE,
+    "validate_geoparquet": ELSEWHERE,
+    "_run_parquet_geo_only_checks": ELSEWHERE,
+    "_check_covering_is_object": (
+        "#1062: a non-object covering crashes the run before this check reports; "
+        "test_covering_that_is_a_string_is_reported_not_crashed flips to HERE with #1072"
+    ),
+    "_check_native_geo_types_match": (
+        "FAILS when the data holds a type the Parquet GeospatialStatistics do not "
+        "declare. pyarrow computes those statistics from the data, so no writer in "
+        "the suite can produce the contradiction"
+    ),
+    "_check_geography_edges_valid": (
+        "FAILS only on a GEOGRAPHY logical type whose `algorithm` is absent or "
+        "unparsable; geoarrow.pyarrow cannot write one"
+    ),
 }
 
-FAILED_ARMS_EXERCISED_HERE = {
-    "_check_geometry_types_list",
-    "_check_crs_valid",
-    "_check_bbox_valid",
-    "_check_epoch_valid",
-    "_check_geometry_not_repeated",
-    "_check_encoding_matches_data",
-    "_check_geometry_types_match_data",
-    "_check_covering_bbox_paths",
-    "_check_covering_bbox_column_exists",
-    "_check_covering_bbox_structure",
-    "_check_covering_bbox_field_types",
-    "_check_native_geo_type_present",
-    "_check_geography_coordinate_bounds",
-    "_check_v2_uses_native_types",
-    "_check_v2_crs_in_parquet_type",
-    "_check_version_matches",
-    "_run_geoparquet_checks",
-}
+#: Functions that name ``CheckStatus.FAILED`` without reporting a verdict: the
+#: symbol and colour lookup tables in the formatting section.
+FORMATTING_ONLY = {"_get_check_color", "_get_check_symbol"}
 
 
-def _mentions_failed(node: ast.AST) -> bool:
-    return any(
-        isinstance(child, ast.Attribute)
-        and child.attr == "FAILED"
-        and isinstance(child.value, ast.Name)
-        and child.value.id == "CheckStatus"
-        for child in ast.walk(node)
-    )
-
-
-def _functions_emitting_failed(source: str) -> set[str]:
-    """Every top-level function that builds a FAILED ``ValidationCheck``.
-
-    Matches the ``ValidationCheck(...)`` constructor and the ``_result(...)``
-    closures that wrap it, so the status-symbol lookup tables in the formatting
-    section -- which name ``CheckStatus.FAILED`` but report nothing -- stay out.
-    """
-    emitting = set()
-    for node in ast.parse(source).body:
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        for child in ast.walk(node):
-            if (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Name)
-                and child.func.id in ("ValidationCheck", "_result")
-                and _mentions_failed(child)
-            ):
-                emitting.add(node.name)
-                break
-    return emitting
+def _functions_mentioning_failed(source: str) -> set[str]:
+    """Every top-level function whose body names ``CheckStatus.FAILED``, however it
+    builds the verdict (constructor, ``_result`` closure, ``status = ...``, a helper)."""
+    return {
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(child, ast.Attribute)
+            and child.attr == "FAILED"
+            and isinstance(child.value, ast.Name)
+            and child.value.id == "CheckStatus"
+            for child in ast.walk(node)
+        )
+    }
 
 
 def test_every_failed_arm_is_accounted_for():
     import geoparquet_io.core.validate as validate_module
 
     source = Path(validate_module.__file__).read_text(encoding="utf-8")
-    emitting = _functions_emitting_failed(source)
-    accounted = FAILED_ARMS_EXERCISED_HERE | FAILED_ARMS_EXERCISED_ELSEWHERE
+    emitting = _functions_mentioning_failed(source) - FORMATTING_ONLY
 
-    unaccounted = emitting - accounted
+    unaccounted = emitting - set(FAILED_ARMS)
     assert not unaccounted, (
         "these validate.py functions can report FAILED but no entry claims them; "
-        "add a case to this file or list them in FAILED_ARMS_EXERCISED_ELSEWHERE "
-        f"with a reason: {sorted(unaccounted)}"
+        "add a case to this file or list them in FAILED_ARMS with a reason: "
+        f"{sorted(unaccounted)}"
     )
-    stale = accounted - emitting
+    stale = set(FAILED_ARMS) - emitting
     assert not stale, f"these entries name functions that no longer report FAILED: {sorted(stale)}"
+    for name in FAILED_ARMS:
+        assert callable(getattr(validate_module, name)), name
+
+
+def test_every_here_entry_is_asserted_in_this_file():
+    """A ``HERE`` claim is checked against this file's own source: the function's
+    check name must appear in an assertion, so a deleted case cannot leave a
+    stale claim behind."""
+    source = Path(__file__).read_text(encoding="utf-8")
+    for name, where in FAILED_ARMS.items():
+        if where is not HERE:
+            continue
+        check_name = name.removeprefix("_check_").removeprefix("_run_")
+        assert check_name in source or name in source, f"{name} is claimed HERE but not asserted"
