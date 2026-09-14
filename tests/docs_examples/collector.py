@@ -102,6 +102,9 @@ class DocExampleItem(pytest.Item):
         if directives.skip:
             reason = directives.skip_reason or "marked skip by a doctest directive"
             self.add_marker(pytest.mark.skip(reason=reason))
+        platform_reason = directives.skipped_here(sys.platform)
+        if platform_reason:
+            self.add_marker(pytest.mark.skip(reason=f"{sys.platform}: {platform_reason}"))
         if directives.needs_tippecanoe and shutil.which("tippecanoe") is None:
             self.add_marker(pytest.mark.skip(reason="tippecanoe not installed"))
         if directives.needs_ogr and shutil.which("ogr2ogr") is None:
