@@ -54,6 +54,12 @@ DIRECTIVE_KEYWORDS = {
     "demonstrates-error": "no",  # the fence deliberately shows a command failing,
     # so the commands around it passing is the point, not wasted coverage. Lets a
     # block out of the no-passing-commands-in-a-skipped-fence check below.
+    "skip-on": "required",  # skip-on="win32: reason"; sys.platform prefix, then
+    # why. For a command the shell on that platform cannot deliver intact --
+    # Git Bash's MSYS runtime expands a quoted glob before the program sees it,
+    # so `gpio check spatial "part/*.parquet"` arrives as N positional paths.
+    # Unlike `skip`, the block still runs everywhere else, so it is not hiding
+    # a working command and the no-passing-commands check leaves it alone.
     "menu": "no",  # the lines are alternatives, not a script: run each from a
     # freshly seeded directory. Without it, a fence listing four ways to call
     # one command fails on the second, because the first already wrote the
@@ -75,6 +81,9 @@ class Directives:
 
     skip: bool = False
     skip_reason: str = ""
+    #: ``(sys.platform, reason)`` pairs; the block is skipped on those platforms
+    #: only, and runs normally on every other one.
+    skip_on: tuple[tuple[str, str], ...] = ()
     network: bool = False
     slow: bool = False
     fast: bool = False
@@ -91,6 +100,7 @@ class Directives:
     def present(self) -> bool:
         return bool(
             self.skip
+            or self.skip_on
             or self.network
             or self.slow
             or self.fast
@@ -104,8 +114,20 @@ class Directives:
 
     @property
     def runs(self) -> bool:
-        """True when the block is actually executed in some lane."""
+        """True when the block is actually executed in some lane.
+
+        ``skip_on`` does not make a block stop running: it runs on every
+        platform but the named one, which is the whole difference between it
+        and ``skip``.
+        """
         return not self.skip
+
+    def skipped_here(self, platform: str) -> str:
+        """The reason this block is skipped on ``platform``, or ``""``."""
+        for name, reason in self.skip_on:
+            if name == platform:
+                return reason
+        return ""
 
 
 @dataclass(frozen=True)
@@ -136,7 +158,7 @@ class Block:
 
 def parse_directives(text: str) -> Directives:
     """Parse the body of a ``doctest`` comment into a :class:`Directives`."""
-    values: dict[str, object] = {"setup": []}
+    values: dict[str, object] = {"setup": [], "skip_on": []}
     position = 0
     while position < len(text):
         match = _DIRECTIVE_ITEM.match(text, position)
@@ -151,7 +173,16 @@ def parse_directives(text: str) -> Directives:
             raise DirectiveSyntaxError(f'directive {keyword!r} requires a "value"')
         if arity == "no" and value is not None:
             raise DirectiveSyntaxError(f"directive {keyword!r} takes no value")
-        if keyword == "prelude":
+        if keyword == "skip-on":
+            platform, separator, reason = (value or "").partition(":")
+            platform, reason = platform.strip(), reason.strip()
+            if not platform or not separator or not reason:
+                raise DirectiveSyntaxError(
+                    f'skip-on takes "<sys.platform>: <why>", e.g. '
+                    f'skip-on="win32: the shell expands the quoted glob"; got {value!r}'
+                )
+            values["skip_on"].append((platform, reason))  # type: ignore[union-attr]
+        elif keyword == "prelude":
             values["prelude"] = value
         elif keyword == "setup":
             values["setup"].append(value)  # type: ignore[union-attr]
@@ -164,6 +195,7 @@ def parse_directives(text: str) -> Directives:
     return Directives(
         skip=bool(values.get("skip")),
         skip_reason=str(values.get("skip_reason", "")),
+        skip_on=tuple(values["skip_on"]),  # type: ignore[arg-type]
         network=bool(values.get("network")),
         slow=bool(values.get("slow")),
         fast=bool(values.get("fast")),
