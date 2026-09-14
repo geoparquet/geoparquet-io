@@ -202,6 +202,17 @@ def pmtiles_create(
     help="Override the estimated compressed bytes per cell used in band selection.",
 )
 @click.option(
+    "--bands",
+    default=None,
+    help=(
+        "Explicit zoom bands as level:minzoom pairs, e.g. '5:0,8:6,10:9'. "
+        "Skips the worst-tile probe, so --max-tile-kb no longer applies and "
+        "--levels/--bytes-per-cell are rejected alongside it. Use when two "
+        "pyramids must hand over at the same zooms so cells keep their size "
+        "as the user switches between them."
+    ),
+)
+@click.option(
     "--layer-mode",
     type=click.Choice(["single", "grouped", "per-level"]),
     default="grouped",
@@ -248,6 +259,7 @@ def pmtiles_pyramid(
     levels,
     max_tile_kb,
     bytes_per_cell,
+    bands,
     layer_mode,
     include_features,
     features_source,
@@ -278,6 +290,8 @@ def pmtiles_pyramid(
             --include-features --features-source buildings.parquet --max-zoom 8
 
         gpio pmtiles pyramid by_region.parquet out.pmtiles --layer-mode per-level
+
+        gpio pmtiles pyramid cells.parquet out.pmtiles --bands 5:0,8:6,10:9
     """
     from geoparquet_io.core.pmtiles_pyramid import create_pmtiles_pyramid
 
@@ -286,6 +300,7 @@ def pmtiles_pyramid(
             input_parquet,
             output_pmtiles,
             levels=levels,
+            bands=bands,
             max_tile_kb=max_tile_kb,
             bytes_per_cell=bytes_per_cell,
             layer_mode=layer_mode,

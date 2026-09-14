@@ -29,7 +29,7 @@ from geoparquet_io.core.process.overview.detect import (
     aggregate_connection,
     detect_aggregate_info,
 )
-from geoparquet_io.core.process.overview.levels import Band
+from geoparquet_io.core.process.overview.levels import Band, parse_bands
 from geoparquet_io.core.process.overview.run import (
     create_overviews,
     overview_output_path,
@@ -295,6 +295,7 @@ def _detect_and_plan(
     bytes_per_cell: float | None,
     base_max_zoom: int | None,
     verbose: bool,
+    bands_spec: str | None = None,
 ) -> tuple[AggregateInfo, list[Band]]:
     """Detect the aggregate's shape and select zoom bands for the pyramid."""
     with aggregate_connection(input_path, verbose) as (con, relation):
@@ -305,6 +306,12 @@ def _detect_and_plan(
                 "aggregate has no geometry column; re-run gpio process aggregate "
                 "with --out-geometry polygon or centroid before tiling",
             )
+        if bands_spec is not None:
+            # An explicit plan replaces the probe entirely: the caller has
+            # stated the handovers, so there is nothing to estimate and no
+            # budget to respect. Probing anyway would only cost a full scan to
+            # produce an answer that is then discarded.
+            return info, parse_bands(bands_spec)
         parsed_levels = parse_levels(levels, info) if levels is not None else None
         # Cap band transitions one below the base band's max zoom so the base
         # band starts by that zoom (and never inverts into minzoom > maxzoom).
@@ -327,6 +334,7 @@ def create_pmtiles_pyramid(
     output_path: str,
     *,
     levels: str | list[int | str] | None = None,
+    bands: str | None = None,
     max_tile_kb: int = 500,
     bytes_per_cell: float | None = None,
     layer_mode: str = "grouped",
@@ -385,6 +393,17 @@ def create_pmtiles_pyramid(
         raise InvalidParameterError(
             "features_source", "--include-features requires --features-source"
         )
+    # Both state the plan, so one of them would have to be silently dropped.
+    if bands is not None and levels is not None:
+        raise InvalidParameterError(
+            "bands",
+            "--bands already names every level and the zoom it starts at; "
+            "it cannot be combined with --levels. Drop one.",
+        )
+    if bands is not None and bytes_per_cell is not None:
+        # Not an error the way --levels is: this one tunes the probe rather
+        # than restating the plan, and the probe simply does not run.
+        warn("Ignoring --bytes-per-cell: --bands skips the tile-size probe it feeds.")
     if features_source:
         _validate_path(features_source)
     # Fail fast before any tiling work: tile-join would only reject an
@@ -400,15 +419,15 @@ def create_pmtiles_pyramid(
     if not _check_tile_join():
         raise TileJoinNotFoundError()
 
-    info, bands = _detect_and_plan(
-        input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose
+    info, plan = _detect_and_plan(
+        input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose, bands_spec=bands
     )
     stem = Path(output_path).stem
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        sources = _resolve_band_sources(input_path, info, bands, tmpdir, verbose)
+        sources = _resolve_band_sources(input_path, info, plan, tmpdir, verbose)
         band_files: list[str] = []
-        for i, band in enumerate(bands):
+        for i, band in enumerate(plan):
             min_zoom, band_max = _band_zoom_args(band, base_max)
             band_file = os.path.join(tmpdir, f"band_{i}.pmtiles")
             debug(
@@ -460,6 +479,6 @@ def create_pmtiles_pyramid(
 
     _merge_pyramid_metadata(
         output_path,
-        _pyramid_metadata(info, bands, base_max, layer_mode, stem, feat_min),
+        _pyramid_metadata(info, plan, base_max, layer_mode, stem, feat_min),
     )
-    success(f"Created {output_path} with {len(bands)} aggregate band(s)")
+    success(f"Created {output_path} with {len(plan)} aggregate band(s)")
