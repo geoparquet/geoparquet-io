@@ -393,6 +393,17 @@ def create_pmtiles_pyramid(
         raise InvalidParameterError(
             "features_source", "--include-features requires --features-source"
         )
+    # Both state the plan, so one of them would have to be silently dropped.
+    if bands is not None and levels is not None:
+        raise InvalidParameterError(
+            "bands",
+            "--bands already names every level and the zoom it starts at; "
+            "it cannot be combined with --levels. Drop one.",
+        )
+    if bands is not None and bytes_per_cell is not None:
+        # Not an error the way --levels is: this one tunes the probe rather
+        # than restating the plan, and the probe simply does not run.
+        warn("Ignoring --bytes-per-cell: --bands skips the tile-size probe it feeds.")
     if features_source:
         _validate_path(features_source)
     # Fail fast before any tiling work: tile-join would only reject an
@@ -408,15 +419,15 @@ def create_pmtiles_pyramid(
     if not _check_tile_join():
         raise TileJoinNotFoundError()
 
-    info, bands = _detect_and_plan(
+    info, plan = _detect_and_plan(
         input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose, bands_spec=bands
     )
     stem = Path(output_path).stem
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        sources = _resolve_band_sources(input_path, info, bands, tmpdir, verbose)
+        sources = _resolve_band_sources(input_path, info, plan, tmpdir, verbose)
         band_files: list[str] = []
-        for i, band in enumerate(bands):
+        for i, band in enumerate(plan):
             min_zoom, band_max = _band_zoom_args(band, base_max)
             band_file = os.path.join(tmpdir, f"band_{i}.pmtiles")
             debug(
@@ -468,6 +479,6 @@ def create_pmtiles_pyramid(
 
     _merge_pyramid_metadata(
         output_path,
-        _pyramid_metadata(info, bands, base_max, layer_mode, stem, feat_min),
+        _pyramid_metadata(info, plan, base_max, layer_mode, stem, feat_min),
     )
-    success(f"Created {output_path} with {len(bands)} aggregate band(s)")
+    success(f"Created {output_path} with {len(plan)} aggregate band(s)")

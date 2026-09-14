@@ -1,5 +1,6 @@
 """Tests for `gpio pmtiles pyramid` (banded multi-level PMTiles archives)."""
 
+import logging
 import shutil
 import sys
 
@@ -338,6 +339,40 @@ class TestOrchestration:
                 bands="country:1,region:3",
                 **_BAND_FORCING,
             )
+
+    def test_explicit_bands_reject_levels_rather_than_drop_it(self, tmp_path, fake_tools):
+        # Both name the plan, so honouring --bands means dropping --levels.
+        # Saying so beats obeying the option the caller did not mean.
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.pmtiles_pyramid import create_pmtiles_pyramid
+
+        src = tmp_path / "by_region.parquet"
+        _write_admin_region_aggregate(src)
+        with pytest.raises(InvalidParameterError, match="cannot be combined with --levels"):
+            create_pmtiles_pyramid(
+                str(src),
+                str(tmp_path / "out.pmtiles"),
+                bands="country:0,region:3",
+                levels="country",
+                max_zoom=6,
+            )
+
+    def test_explicit_bands_say_bytes_per_cell_went_unused(self, tmp_path, fake_tools, caplog):
+        # The probe it tunes never runs. Ignoring it is right; ignoring it
+        # silently would leave the caller believing it did something.
+        from geoparquet_io.core.pmtiles_pyramid import create_pmtiles_pyramid
+
+        src = tmp_path / "by_region.parquet"
+        _write_admin_region_aggregate(src)
+        with caplog.at_level(logging.WARNING):
+            create_pmtiles_pyramid(
+                str(src),
+                str(tmp_path / "out.pmtiles"),
+                layer_mode="per-level",
+                bands="country:0,region:3",
+                **_BAND_FORCING,
+            )
+        assert "Ignoring --bytes-per-cell" in caplog.text
 
     def test_existing_overview_sibling_is_reused(self, tmp_path, fake_tools):
         from geoparquet_io.core.pmtiles_pyramid import create_pmtiles_pyramid

@@ -83,12 +83,30 @@ The selected bands drive which levels are materialized; the same selection power
 `gpio pmtiles pyramid` also takes `--bands`, which replaces the budget and the
 probe with an explicit plan of `level:minzoom` pairs:
 
+=== "CLI"
+
+    <!-- doctest: skip="needs cells.parquet, which the harness does not seed" -->
+    ```bash
     gpio pmtiles pyramid cells.parquet out.pmtiles --bands 5:0,8:6,10:9
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs cells.parquet, which the harness does not seed" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.create_pmtiles_pyramid('cells.parquet', 'out.pmtiles', bands='5:0,8:6,10:9')
+    ```
 
 Each entry says which zoom a level starts at; ends follow from the next entry
 and the last band is open-ended, so the bands always cover every zoom. The
-first must start at z0, zooms must strictly increase, and a level may appear
-only once.
+first must start at z0, zooms must strictly increase, a level may appear only
+once, and grid levels must get finer as the zoom rises.
+
+Because there is no probe left to feed, `--max-tile-kb` no longer applies, and
+`--levels` or `--bytes-per-cell` alongside `--bands` is an error rather than a
+silently dropped option.
 
 Reach for this when several archives are browsed as one surface. Auto
 selection judges each file alone, so two archives with different data land
@@ -104,7 +122,7 @@ if that is what you asked for.
 |--------|---------|-------------|
 | `--levels` | auto | Comma-separated levels to build (grid resolutions, or `country`) |
 | `--max-tile-kb` | 500 | Tile-size budget driving auto selection |
-| `--bands` (pyramid only) | auto | Explicit `level:minzoom` bands, e.g. `5:0,8:6,10:9`; skips the probe |
+| `--bands` (pyramid only) | auto | Explicit `level:minzoom` bands, e.g. `5:0,8:6,10:9`; skips the probe, so `--max-tile-kb` no longer applies and `--levels`/`--bytes-per-cell` are rejected |
 | `--bytes-per-cell` | estimated | Override the compressed bytes-per-cell estimate |
 | `--cell-column` | auto | Cell id column when detection fails |
 | `--scheme` | auto | Bucketing scheme (`a5`/`h3`/`admin`) when inference is ambiguous, e.g. H3 ids stored as integers |

@@ -74,10 +74,12 @@ def parse_bands(spec: str) -> list[Band]:
             raise InvalidParameterError("bands", f"zoom must be an integer in {part!r}") from None
         if minzoom < 0:
             raise InvalidParameterError("bands", f"zoom cannot be negative in {part!r}")
-        # Levels are ints for grid schemes and names for admin ones.
-        level: int | str = int(level_text) if level_text.lstrip("-").isdigit() else level_text
         if level_text == "":
             raise InvalidParameterError("bands", f"missing level in {part!r}")
+        # Levels are ints for grid schemes and names for admin ones.
+        level: int | str = int(level_text) if level_text.lstrip("-").isdigit() else level_text
+        if isinstance(level, int) and level < 0:
+            raise InvalidParameterError("bands", f"level cannot be negative in {part!r}")
         entries.append((level, minzoom))
 
     if not entries:
@@ -94,6 +96,17 @@ def parse_bands(spec: str) -> list[Band]:
     levels = [lvl for lvl, _ in entries]
     if len(set(levels)) != len(levels):
         raise InvalidParameterError("bands", f"a level may appear only once, got {levels}")
+    # A grid pyramid gets finer as it zooms in, which is what the probe always
+    # produces. A plan that goes the other way serves coarse cells at the zooms
+    # that need detail and is never what the caller meant -- it is a typo.
+    grid_levels = [lvl for lvl in levels if isinstance(lvl, int)]
+    if len(grid_levels) == len(levels):
+        for prev, cur in zip(grid_levels, grid_levels[1:], strict=False):
+            if cur < prev:
+                raise InvalidParameterError(
+                    "bands",
+                    f"levels must get finer as zoom increases, got {prev} then {cur}",
+                )
 
     return [
         Band(level, minzoom, entries[i + 1][1] - 1 if i + 1 < len(entries) else None)

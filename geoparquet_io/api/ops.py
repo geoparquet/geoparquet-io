@@ -2701,9 +2701,10 @@ def create_pmtiles_pyramid(
         levels: Explicit overview levels (comma string or list; admin:
             "country"). Default: auto-select against max_tile_kb
         bands: Explicit zoom bands as level:minzoom pairs, e.g. "5:0,8:6,10:9".
-            Overrides levels/max_tile_kb/bytes_per_cell and skips the
-            worst-tile probe. Use when two pyramids must hand over at the same
-            zooms, so cells keep their size as a viewer switches between them
+            Skips the worst-tile probe, so max_tile_kb no longer applies and
+            levels/bytes_per_cell are rejected alongside it. Use when two
+            pyramids must hand over at the same zooms, so cells keep their
+            size as a viewer switches between them
         max_tile_kb: Tile-size budget in KB for band selection (default: 500)
         bytes_per_cell: Override the estimated compressed bytes per cell
         layer_mode: "single", "grouped" (default), or "per-level"

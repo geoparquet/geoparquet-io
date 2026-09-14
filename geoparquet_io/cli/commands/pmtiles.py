@@ -206,9 +206,10 @@ def pmtiles_create(
     default=None,
     help=(
         "Explicit zoom bands as level:minzoom pairs, e.g. '5:0,8:6,10:9'. "
-        "Overrides --levels, --max-tile-kb and --bytes-per-cell, and skips the "
-        "worst-tile probe. Use when two pyramids must hand over at the same "
-        "zooms so cells keep their size as the user switches between them."
+        "Skips the worst-tile probe, so --max-tile-kb no longer applies and "
+        "--levels/--bytes-per-cell are rejected alongside it. Use when two "
+        "pyramids must hand over at the same zooms so cells keep their size "
+        "as the user switches between them."
     ),
 )
 @click.option(
