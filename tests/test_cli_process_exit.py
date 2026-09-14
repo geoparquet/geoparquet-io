@@ -50,11 +50,14 @@ _WINDOWS = sys.platform == "win32"
 _IPC_END_OF_STREAM = b"\xff\xff\xff\xff\x00\x00\x00\x00"
 
 
-def _run_entry_point(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def _run_entry_point(
+    *args: str, env: dict[str, str] | None = None, text: bool = True
+) -> subprocess.CompletedProcess:
+    """Run the console script's own program. ``text=False`` for a binary payload."""
     return subprocess.run(
         [sys.executable, "-c", _PROGRAM, *args],
         capture_output=True,
-        text=True,
+        text=text,
         timeout=300,
         env={**os.environ, **(env or {})},
     )
@@ -114,11 +117,7 @@ def test_a_binary_stream_written_past_click_is_terminated(projected_conus):
 
     Refs: https://github.com/geoparquet/geoparquet-io/issues/1028
     """
-    completed = subprocess.run(
-        [sys.executable, "-c", _PROGRAM, "convert", "geoparquet", str(projected_conus), "-"],
-        capture_output=True,
-        timeout=300,
-    )
+    completed = _run_entry_point("convert", "geoparquet", str(projected_conus), "-", text=False)
     stderr = completed.stderr.decode("utf-8", "replace")
 
     assert completed.returncode == 0, stderr
