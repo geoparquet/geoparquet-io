@@ -612,8 +612,14 @@ class TestInPlaceFixOperations:
 class TestHilbertDetectionAndWarnings:
     """Tests for Hilbert-ordered file detection and spatial warnings."""
 
-    def test_spatial_check_passes_for_hilbert_files(self, temp_output_dir):
-        """Test that files with ~100k rows/group are detected as Hilbert-ordered."""
+    def test_spatial_check_does_not_fail_hilbert_files(self, temp_output_dir):
+        """A Hilbert-sorted file in one row group is not failed: the verdict is withheld.
+
+        This used to assert a pass. One row group is below the eight-row-group
+        floor of the footer check (#755), so the check reports the numbers,
+        withholds the verdict (``judged`` False, ``passed`` True: no failure
+        found) and offers no fix.
+        """
         from geoparquet_io.core.check_spatial_order import check_spatial_order_bbox_stats
         from geoparquet_io.core.hilbert_order import hilbert_order
 
@@ -634,9 +640,9 @@ class TestHilbertDetectionAndWarnings:
             output_file, verbose=False, return_results=True, quiet=True
         )
 
-        # Should be marked as passed (Hilbert-ordered with large groups)
-        assert result["passed"] is True
+        assert result["judged"] is False and result["passed"] is True
         assert result["fix_available"] is False
+        assert result["issues"] == []
 
     def test_spatial_check_fails_for_non_hilbert_files(self, places_test_file, temp_output_dir):
         """Test that randomly shuffled data gets spatial warnings."""

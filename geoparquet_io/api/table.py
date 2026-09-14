@@ -2885,13 +2885,21 @@ class Table:
         """
         Check if data is spatially ordered.
 
-        Compares distance between consecutive features vs random pairs.
-        A ratio < 0.5 indicates good spatial clustering.
+        For a file with per-row-group bbox statistics the verdict is the
+        expected fraction of row groups a query can skip, relative to what a
+        full tiling of the extent into as many row groups would allow, as the
+        Portolan spec defines it. Below eight row groups the verdict is
+        withheld: ``to_dict()["judged"]`` is False, ``passed()`` stays True (no
+        failure was found), the numbers are still in ``to_dict()`` and
+        ``warnings()`` says why. Files without such statistics fall back to
+        comparing the distance between consecutive features against random
+        pairs, which does not measure pruning.
 
         Args:
-            sample_size: Number of random pairs to sample (default: 100)
+            sample_size: Number of random pairs to sample (default: 100).
+                Sampling fallback only.
             limit_rows: Maximum rows to analyze (default: 500000, matching
-                `gpio check spatial --limit-rows`)
+                `gpio check spatial --limit-rows`). Sampling fallback only.
 
         Returns:
             CheckResult with spatial ordering analysis

@@ -1299,6 +1299,24 @@ row_group_result = table.check_row_groups()
 details = result.to_dict()
 ```
 
+`check_spatial()` judges a file with row-group bounding boxes by the [Portolan
+spec's pruning-efficiency rule](https://github.com/portolan-sdi/portolan-spec/blob/main/specs/portolan/formats.md); `sample_size` (default `100`) and
+`limit_rows` (default `500000`) apply only to the sampling fallback used when a
+file has none. Below eight row groups the verdict is withheld: `passed()` stays
+`True` (no failure was found), `judged()` is `False`, the numbers
+(`estimated_skip_rate`, `ideal_skip_rate`, `skip_rate_efficiency`,
+`bbox_area_sum`, `num_row_groups`) are still in `to_dict()`, and `warnings()`
+says why. `judged()` is available on every `CheckResult`; only the spatial
+check withholds.
+
+```python
+result = gpio.read('two_row_groups.parquet').check_spatial()
+result.passed()                           # True: nothing failed
+result.judged()                           # False: nothing was judged either
+result.warnings()[0]                      # 'Spatial ordering not judged below 8 row groups (2 in this file); ...'
+result.to_dict()["skip_rate_efficiency"]  # the number, all the same
+```
+
 **Which bytes a check describes.** A table from `gpio.read(path)` is checked
 against that file, so `table.check_compression()` and `gpio check compression
 <path>` give the same verdict. A table built in memory, read with `columns=` or
@@ -1328,7 +1346,8 @@ print(f"Score: {details['score']}/5 - {details['level']}")
 
 #### `check_spatial_pushdown()`
 
-Check spatial filter pushdown readiness by analyzing row group bounding box overlap.
+Check spatial filter pushdown readiness: the expected fraction of row groups a
+query window can skip, at least 50% to pass.
 
 ```python
 result = table.check_spatial_pushdown()
