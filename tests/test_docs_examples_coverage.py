@@ -17,16 +17,14 @@ guards stay in ``test_docs_examples_meta.py`` where they gate every PR.
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from tests.docs_examples.collector import BASH, split_statements
+from tests.docs_examples.collector import BASH, example_env, split_statements
 from tests.docs_examples.parser import iter_fences
 from tests.docs_examples.seeder import seed_workdir
 
@@ -63,14 +61,6 @@ def statement_groups(source: str) -> list[list[str]]:
     return [statement.split("\n") for statement in split_statements(source)]
 
 
-def _env() -> dict[str, str]:
-    env = dict(os.environ)
-    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-    env["NO_COLOR"] = "1"
-    env["COLUMNS"] = "100"
-    return env
-
-
 def _passes(statement: str, setups: tuple[str, ...]) -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -80,7 +70,7 @@ def _passes(statement: str, setups: tuple[str, ...]) -> bool:
                 subprocess.run(
                     [BASH, "-c", f"set -euo pipefail\n{command}"],
                     cwd=work,
-                    env=_env(),
+                    env=example_env(),
                     capture_output=True,
                     encoding="utf-8",
                     errors="replace",
@@ -92,7 +82,7 @@ def _passes(statement: str, setups: tuple[str, ...]) -> bool:
             done = subprocess.run(
                 [BASH, str(script)],
                 cwd=work,
-                env=_env(),
+                env=example_env(),
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",

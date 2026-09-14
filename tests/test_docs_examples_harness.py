@@ -10,6 +10,8 @@ the guides use.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from tests.docs_examples.collector import (
@@ -18,6 +20,7 @@ from tests.docs_examples.collector import (
     DocExampleFailure,
     block_timeout,
     check_menu_is_splittable,
+    example_env,
     menu_refusal_reason,
     split_statements,
 )
@@ -318,3 +321,33 @@ def test_seeded_files_are_independent_copies(tmp_path):
 
 def test_every_seed_source_exists():
     assert missing_canonical_files() == []
+
+
+class TestExampleEnvGlobbing:
+    """Git Bash must not expand a quoted wildcard before gpio sees it.
+
+    MSYS rebuilds the command line for a native ``.exe`` and globs it on the
+    way, so ``gpio check spatial "partitions/*.parquet"`` arrives as two
+    positional paths and is rejected on Windows alone. Without ``noglob`` the
+    docs lane judges quoted globs by MSYS's rules, not bash's.
+    """
+
+    def test_noglob_is_set_on_windows(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("MSYS", raising=False)
+        assert "noglob" in example_env()["MSYS"].split()
+
+    def test_an_existing_msys_setting_is_kept(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setenv("MSYS", "enable_pcon")
+        assert example_env()["MSYS"].split() == ["enable_pcon", "noglob"]
+
+    def test_noglob_is_not_added_twice(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setenv("MSYS", "noglob")
+        assert example_env()["MSYS"].split() == ["noglob"]
+
+    def test_posix_is_left_alone(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.delenv("MSYS", raising=False)
+        assert "MSYS" not in example_env()
