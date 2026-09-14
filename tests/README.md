@@ -82,7 +82,7 @@ pytest tests/test_check.py::TestCheckCommands::test_check_all_places
 
 ## Coverage
 
-Current fast-suite coverage is about 87% combined line+branch (the CI floor is `[tool.coverage.report] fail_under` in `pyproject.toml`), covering:
+The CI floor is `[tool.coverage.report] fail_under` in `pyproject.toml`, two points under the measured combined line+branch figure recorded in the comment above it (`uv run python scripts/coverage_floor.py` re-measures). The fast suite covers:
 - CLI command interfaces
 - Core functionality for all major operations
 - Error handling for invalid inputs

@@ -190,9 +190,12 @@ overrides it.
 `[tool.coverage.run] branch = true`, so the floor measures the **combined**
 line+branch figure, several points under the line-only figure (the dated
 measurement is in the `fail_under` comment). When you raise the floor,
-re-measure the combined number; don't convert from a line percentage. The
-diff-cover gate is passed `--branch-coverage`, so a partial branch on a changed
-line counts as uncovered there too.
+re-measure the combined number; don't convert from a line percentage.
+`uv run python scripts/coverage_floor.py` runs that measurement and proposes
+the floor; `--apply` moves `fail_under`, its dated comment and the prose
+echoes together (policy: ADR-0008). The diff-cover gate is passed
+`--branch-coverage`, so a partial branch on a changed line counts as
+uncovered there too.
 
 The `meta` lane (codespell, commitizen, doc-sync, mutmut, mypy,
 validate-claude-md, security tool checks) is excluded from the fast suite and
