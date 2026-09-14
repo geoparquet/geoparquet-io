@@ -915,7 +915,16 @@ class TestDirectoryUploadReportsWhatReachedTheStore:
 
         The gate makes every non-failing upload finish *after* the failure has
         been signalled, so a file counted as uploaded here can only be one that
-        was in flight when ``--fail-fast`` tripped.
+        was in flight when ``--fail-fast`` tripped -- and #1019 is that those
+        survivors have to appear in the summary, not be written off as stopped.
+
+        How many survivors there are is a scheduling outcome, not a promise: a
+        worker that finishes its own file is free to claim the next one in the
+        instant before the failing worker publishes the stop, so between one
+        and nine files can get past the guard. Asserting a count of two pinned
+        that race, and it came apart on a loaded runner (Linux and Windows
+        both). What the summary claims must match what the stub actually
+        received, whichever way the scheduler goes -- which is #1019 itself.
         """
         source = self._make_files(tmp_path)
         started, arrived = [], []
@@ -931,16 +940,49 @@ class TestDirectoryUploadReportsWhatReachedTheStore:
                 failure_landed.set()
                 raise RuntimeError("AccessDenied: bucket is read-only")
             assert failure_landed.wait(timeout=30), "the failing upload never ran"
-            arrived.append(Path(path).name)
+            with lock:
+                arrived.append(Path(path).name)
 
         result = self._run(source, fake_put, ["--fail-fast", "--max-files", "2"])
 
-        # Two workers, so exactly two files were in flight when the failure
-        # landed; the survivor could only finish after it, and must be counted.
-        assert len(started) == 2
-        assert arrived == [started[0]]
-        assert self._summary_counts(result.output) == (1, 1, 8)
+        uploaded, failed, not_attempted = self._summary_counts(result.output)
+        assert failed == 1
+        # The survivor(s): in flight when the stop landed, so they finished.
+        assert uploaded == len(arrived), (
+            f"summary claims {uploaded} uploaded, the store received {len(arrived)}"
+        )
+        assert uploaded >= 1, "no in-flight upload was counted (#1019)"
+        assert uploaded + failed + not_attempted == 10
+        assert set(arrived) <= set(started)
         assert result.exit_code == 1
+
+    def test_fail_fast_publishes_the_stop_before_it_logs_the_error(self, tmp_path):
+        """The stop is set first, so a freed worker cannot slip past the guard.
+
+        With ``error()`` first, the window between the failure and the stop is
+        a logging call wide, and a worker that has just finished its own file
+        spends it claiming the files the run was meant to skip.
+        """
+        stop = threading.Event()
+        order = []
+
+        def record(message):
+            order.append(("logged", stop.is_set()))
+
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(upload_module, "error", record)
+        try:
+            upload_module._upload_one_file(
+                object(),
+                tmp_path / "missing.parquet",
+                tmp_path,
+                "",
+                stop_requested=stop,
+            )
+        finally:
+            monkey.undo()
+
+        assert order == [("logged", True)], "the stop was not set before the error was logged"
 
     def test_continue_on_error_attempts_every_file_and_still_exits_non_zero(self, tmp_path):
         """Without ``--fail-fast`` nothing is skipped, but errors must still fail."""

@@ -153,11 +153,17 @@ def test_prose_between_comment_and_fence_detaches_the_directive(tmp_path):
     assert not block.directives.present
 
 
+#: A valid sample for each keyword whose value has a shape of its own, so the
+#: vocabulary test below can exercise it. Anything absent takes a bare "v".
+STRUCTURED_VALUES = {"skip-on": "win32: the shell mangles it"}
+
+
 def test_every_documented_keyword_is_parseable():
     """DIRECTIVE_KEYWORDS is the vocabulary the meta-test error messages promise."""
     for keyword, arity in DIRECTIVE_KEYWORDS.items():
-        text = f'{keyword}="v"' if arity in ("required", "optional") else keyword
-        assert parse_directives(text).present
+        value = STRUCTURED_VALUES.get(keyword, "v")
+        text = f'{keyword}="{value}"' if arity in ("required", "optional") else keyword
+        assert parse_directives(text).present, keyword
 
 
 MENU_BLOCK = """# Custom column name
@@ -318,3 +324,53 @@ def test_seeded_files_are_independent_copies(tmp_path):
 
 def test_every_seed_source_exists():
     assert missing_canonical_files() == []
+
+
+class TestSkipOnPlatform:
+    """``skip-on`` takes out one platform, not the block.
+
+    A command the shell on one platform cannot deliver intact still deserves
+    to run on the others. ``skip`` cannot express that: it stops the block
+    everywhere, and the no-passing-commands guard then (correctly) reports it
+    as hiding a command that works.
+    """
+
+    def test_the_named_platform_is_skipped_and_the_rest_run(self):
+        d = parse_directives('skip-on="win32: MSYS expands the quoted glob"')
+        assert d.skipped_here("win32") == "MSYS expands the quoted glob"
+        assert d.skipped_here("linux") == ""
+        assert d.skipped_here("darwin") == ""
+
+    def test_the_block_still_counts_as_running(self):
+        """Not ``skip``: `runs` stays true, so the coverage guard ignores it."""
+        d = parse_directives('skip-on="win32: the shell mangles it"')
+        assert d.runs is True
+        assert d.skip is False
+        assert d.present is True
+
+    def test_more_than_one_platform(self):
+        d = parse_directives('skip-on="win32: a", skip-on="darwin: b"')
+        assert (d.skipped_here("win32"), d.skipped_here("darwin")) == ("a", "b")
+
+    def test_it_composes_with_setup(self):
+        d = parse_directives('setup="echo hi", skip-on="win32: nope"')
+        assert d.setup == ("echo hi",)
+        assert d.skipped_here("win32") == "nope"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "skip-on",  # no value at all
+            'skip-on="win32"',  # no reason
+            'skip-on="win32:"',  # empty reason
+            'skip-on=": no platform"',
+            'skip-on=""',
+        ],
+    )
+    def test_a_platform_without_a_reason_is_refused(self, body):
+        """The reason is the point: a reader has to learn why, not just that."""
+        with pytest.raises(DirectiveSyntaxError):
+            parse_directives(body)
+
+    def test_it_is_a_known_keyword(self):
+        assert "skip-on" in DIRECTIVE_KEYWORDS

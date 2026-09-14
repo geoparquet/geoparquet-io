@@ -430,9 +430,13 @@ def _upload_one_file(
         success(f"{file_path.name} ({speed_mbps:.2f} MB/s)")
         return file_path, None
     except Exception as e:
-        error(f"{file_path.name}: {e}")
+        # Signal before logging, not after: a worker that has just finished its
+        # own file is free to pick up the next one while this thread is still
+        # inside error(), and everything it picks up in that window gets past
+        # the guard above and is attempted after the run was meant to stop.
         if stop_requested is not None:
             stop_requested.set()
+        error(f"{file_path.name}: {e}")
         return file_path, e
 
 
