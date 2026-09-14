@@ -220,7 +220,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--from-json",
         type=Path,
-        help="reuse an existing --cov-report=json file instead of running the suite",
+        help=(
+            "reuse an existing --cov-report=json file instead of running the suite. "
+            "A report carries no exit status, so --apply cannot refuse it for having "
+            "had failures -- only the refusal to lower the floor still stands."
+        ),
     )
     parser.add_argument(
         "--apply",
