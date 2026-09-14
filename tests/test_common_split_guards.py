@@ -1,14 +1,22 @@
 """Guards for the end state of the common.py split (#1083).
 
-import-linter's ``core-common-split-layers`` contract sees modules. These two
-see names: after stage D nothing reaches an owned name *through*
+import-linter's ``core-common-split-layers`` contract sees modules. These see
+names: after stage D nothing reaches an owned name *through*
 ``core/common.py``, and common.py carries no compatibility re-export that
 would let it start again.
+
+One of them reads the source as text rather than as a tree, because two of the
+importers stage D had to repoint were not in any tree: the subprocess programs
+``tests/test_spill_strategy.py`` and ``tests/test_secondary_geometry_carriers.py``
+carry as string literals. An AST walk of the test file cannot see them, and
+they were fixed by hand -- which is exactly the kind of fix that is not made
+the next time.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -59,6 +67,52 @@ def test_common_has_no_re_export_shims():
         if alias.asname == alias.name
     ]
     assert shims == [], f"common.py re-exports {shims}; import these from their owner"
+
+
+#: ``from geoparquet_io.core.common import a, b`` on one line, wherever it
+#: appears -- in code, or inside a string literal holding a program.
+_COMMON_IMPORT_LINE = re.compile(
+    r"^[ \t]*from geoparquet_io\.core\.common import[ \t]+(?P<names>[^(\n]+)$",
+    re.MULTILINE,
+)
+
+
+def _textual_imports_from_common() -> list[tuple[Path, int, str]]:
+    """The same imports, found by reading rather than by parsing."""
+    found: list[tuple[Path, int, str]] = []
+    for top in ("geoparquet_io", "tests", "scripts", "docs"):
+        for path in (REPO / top).rglob("*.py"):
+            if path == COMMON:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for match in _COMMON_IMPORT_LINE.finditer(text):
+                lineno = text.count("\n", 0, match.start()) + 1
+                for name in match["names"].split(","):
+                    name = name.strip().split(" as ")[0].strip()
+                    if name:
+                        found.append((path, lineno, name))
+    return found
+
+
+def test_nothing_imports_an_owned_name_through_common_in_an_embedded_program():
+    """The half the AST cannot reach: a program that lives in a string.
+
+    ``_DETERMINISM_SCRIPT`` and ``_READ_ONLY_CWD_SCRIPT`` are run in a fresh
+    interpreter, so an import through ``common.py`` inside them is a real
+    import that a shim deletion breaks -- and nothing else in this file, or in
+    import-linter, would say so.
+    """
+    defined = _names_common_defines()
+    routed_through = [
+        f"{path.relative_to(REPO)}:{lineno} {name}"
+        for path, lineno, name in _textual_imports_from_common()
+        if name not in defined
+    ]
+    assert routed_through == [], (
+        "these import a name through common.py that common.py does not define "
+        "(source read as text, so string-embedded programs count too); import "
+        "it from the module that does:\n  " + "\n  ".join(routed_through)
+    )
 
 
 def test_nothing_imports_an_owned_name_through_common():
