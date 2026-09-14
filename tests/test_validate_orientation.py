@@ -6,8 +6,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import get_duckdb_connection
-from geoparquet_io.core.duckdb_utils import sql_path
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_orientation_matches_data,

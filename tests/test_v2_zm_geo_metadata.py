@@ -10,8 +10,8 @@ import json
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from tests.conftest import get_geo_metadata, get_geoparquet_version, has_native_geo_types
 
 
@@ -97,7 +97,7 @@ def test_rewrite_keeps_row_group_structure_when_unspecified(tmp_path):
     """With row_group_rows=None the rewrite must mirror the file's own layout."""
     import pyarrow as pa
 
-    from geoparquet_io.core.common import _rewrite_file_with_geo_metadata
+    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
 
     path = tmp_path / "plain.parquet"
     pq.write_table(pa.table({"a": list(range(30))}), str(path), row_group_size=10)
@@ -111,7 +111,7 @@ def test_rewrite_preserves_lz4_codec_unit(tmp_path):
     """codec_map must cover the normalized 'LZ4' name callers actually pass."""
     import pyarrow as pa
 
-    from geoparquet_io.core.common import _rewrite_file_with_geo_metadata
+    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
 
     path = tmp_path / "plain.parquet"
     pq.write_table(pa.table({"a": [1, 2, 3]}), str(path), compression="lz4")
@@ -127,7 +127,7 @@ def test_rewrite_preserves_lz4_codec_unit(tmp_path):
 def test_repair_uses_real_primary_column_not_alphabetical(tmp_path):
     """With two geometry columns, the repair must honor the caller's primary
     column instead of picking the alphabetically-first one."""
-    from geoparquet_io.core.common import _ensure_v2_geo_metadata
+    from geoparquet_io.core.derive_geo_from_file import _ensure_v2_geo_metadata
 
     path = tmp_path / "two_geoms.parquet"
     con = get_duckdb_connection(load_spatial=True)
@@ -278,7 +278,7 @@ def test_unresolvable_native_crs_becomes_explicit_null_not_the_default(tmp_path)
     Omitting the key would *mean* the default; an explicit null says "unknown",
     which is what the file actually tells us.
     """
-    from geoparquet_io.core.common import _crs_from_geo_logical
+    from geoparquet_io.core.derive_geo_from_file import _crs_from_geo_logical
 
     present, crs = _crs_from_geo_logical(
         "Geometry(crs=projjson:absent_key)", str(tmp_path / "nonexistent.parquet")

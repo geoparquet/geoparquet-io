@@ -199,11 +199,12 @@ repos:
 
       # Forbid hand-rolling paginated-schema reconciliation in extractors.
       # WFS and ArcGIS each grew separate, separately-buggy schema-alignment code
-      # (18 + 8 fix commits). The canonical helpers live in core/common.py:
-      # _compute_unified_schema and _cast_table_to_schema. New extractors must reuse them.
+      # (18 + 8 fix commits). The canonical helpers live in core/arrow_types.py:
+      # _compute_unified_schema and _cast_table_to_schema (they were in
+      # core/common.py until #1007 moved them out). New extractors must reuse them.
       - id: forbid-bespoke-schema-reconciliation
         name: forbid-bespoke-schema-reconciliation
-        description: Use shared schema helpers from core/common.py, not hand-rolled ones
+        description: Use shared schema helpers from core/arrow_types.py, not hand-rolled ones
         entry: bash
         args:
           - -c
@@ -212,9 +213,10 @@ repos:
             # more: as a substring, "common.py" also matched
             # core/partition/common.py, core/process/aggregate/common.py and
             # core/process/aggregate/grid_common.py, so three modules nobody
-            # meant to exempt were outside the guard (#970).
-            if grep -rnE 'def _(align|unify|reconcile)[a-zA-Z_]*schema' geoparquet_io/core/ --include="*.py" | grep -v '^geoparquet_io/core/common.py:'; then
-              echo "ERROR: Reuse _compute_unified_schema / _cast_table_to_schema from core/common.py"
+            # meant to exempt were outside the guard (#970). The exempt module
+            # is the helpers' home, which is arrow_types.py since #1007.
+            if grep -rnE 'def _(align|unify|reconcile)[a-zA-Z_]*schema' geoparquet_io/core/ --include="*.py" | grep -v '^geoparquet_io/core/arrow_types.py:'; then
+              echo "ERROR: Reuse _compute_unified_schema / _cast_table_to_schema from core/arrow_types.py"
               echo "       instead of hand-rolling schema reconciliation. See the WFS/ArcGIS history"
               echo "       and docs/contributing.md (External extractors)."
               exit 1

@@ -17,15 +17,12 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
     split_column_list,
 )
-from geoparquet_io.core.common import (
-    check_bbox_structure,
-    get_parquet_metadata,
-    write_parquet_with_metadata,
-)
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import get_crs_display_name
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
@@ -70,6 +67,7 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 def get_parquet_row_count(parquet_file: str) -> int:

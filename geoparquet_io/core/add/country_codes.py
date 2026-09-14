@@ -2,13 +2,8 @@
 
 from typing import TYPE_CHECKING
 
-from geoparquet_io.core.common import (
-    check_bbox_structure,
-    get_bbox_advice,
-    get_dataset_bounds,
-    get_parquet_metadata,
-    write_parquet_with_metadata,
-)
+from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
+from geoparquet_io.core.common import get_dataset_bounds, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_BBOX_PREFILTER,
     SPATIAL_JOIN_NATIVE,
@@ -23,6 +18,7 @@ from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 from geoparquet_io.core.remote import _sanitize_url_for_logging, is_remote_url
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 if TYPE_CHECKING:
     import duckdb

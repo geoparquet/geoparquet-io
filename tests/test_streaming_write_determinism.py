@@ -30,12 +30,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import (
-    get_duckdb_connection,
-    get_parquet_metadata,
-    write_parquet_with_metadata,
-)
+from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import validate_geoparquet
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from geoparquet_io.core.write_strategies.arrow_streaming import ArrowStreamingStrategy
 
 # WKB point (little-endian, type 1) — the smallest valid geometry payload.

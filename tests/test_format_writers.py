@@ -726,7 +726,7 @@ class TestShapefileZip:
 
     def test_create_shapefile_zip_basic(self, output_file):
         """Test creating a zip archive from a shapefile."""
-        from geoparquet_io.core.common import create_shapefile_zip
+        from geoparquet_io.core.format_writers import create_shapefile_zip
 
         # First create a shapefile
         write_shapefile(
@@ -760,7 +760,7 @@ class TestShapefileZip:
 
     def test_create_shapefile_zip_missing_file(self):
         """Test that creating zip from non-existent shapefile raises error."""
-        from geoparquet_io.core.common import create_shapefile_zip
+        from geoparquet_io.core.format_writers import create_shapefile_zip
 
         nonexistent = str(Path(tempfile.gettempdir()) / f"nonexistent_{uuid.uuid4()}.shp")
 
@@ -769,7 +769,7 @@ class TestShapefileZip:
 
     def test_create_shapefile_zip_verbose(self, output_file):
         """Test creating zip with verbose output."""
-        from geoparquet_io.core.common import create_shapefile_zip
+        from geoparquet_io.core.format_writers import create_shapefile_zip
 
         # Create shapefile
         write_shapefile(

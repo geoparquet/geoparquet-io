@@ -5,7 +5,7 @@ from __future__ import annotations
 import duckdb
 import pyarrow as pa
 
-from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_usable_columns
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
@@ -23,6 +23,7 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import execute_transform
 from geoparquet_io.core.streaming import is_stdin, should_stream_output
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 def sort_by_column_table(

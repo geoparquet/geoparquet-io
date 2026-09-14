@@ -36,13 +36,13 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.common import detect_geoparquet_file_type
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     get_schema_info,
     parse_geometry_logical_type,
 )
+from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 from tests.conftest import get_geo_metadata, get_geoparquet_version, has_native_geo_types
 

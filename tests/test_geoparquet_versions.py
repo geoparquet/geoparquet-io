@@ -17,8 +17,8 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.common import DEFAULT_GEOPARQUET_VERSION, GEOPARQUET_VERSIONS
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION, GEOPARQUET_VERSIONS
 from geoparquet_io.core.validate import CheckStatus
 from tests.conftest import (
     get_geo_metadata,
@@ -412,7 +412,7 @@ class TestExistingTestFiles:
 
     def test_austria_bbox_covering_has_nonstandard_bbox_name(self, austria_bbox_covering_file):
         """Test austria_bbox_covering.parquet has 'geometry_bbox' column (not 'bbox')."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         bbox_info = check_bbox_structure(austria_bbox_covering_file)
         assert bbox_info["has_bbox_column"] is True
@@ -498,7 +498,7 @@ class TestCheckBboxVersionAware:
 
     def test_check_bbox_v2_file_type_detection(self, fields_v2_file):
         """V2 file should be correctly detected as geoparquet_v2."""
-        from geoparquet_io.core.common import detect_geoparquet_file_type
+        from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
         result = detect_geoparquet_file_type(fields_v2_file, verbose=False)
 
@@ -510,7 +510,7 @@ class TestCheckBboxVersionAware:
 
     def test_check_bbox_parquet_geo_only_file_type_detection(self, fields_geom_type_only_file):
         """Parquet-geo-only file should be correctly detected."""
-        from geoparquet_io.core.common import detect_geoparquet_file_type
+        from geoparquet_io.core.file_type import detect_geoparquet_file_type
 
         result = detect_geoparquet_file_type(fields_geom_type_only_file, verbose=False)
 
@@ -704,7 +704,7 @@ class TestConvertSkipsBbox:
 
     def test_convert_2_0_no_bbox_column(self, geojson_input, temp_output_file):
         """Converting to 2.0 should not add bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input,
@@ -718,7 +718,7 @@ class TestConvertSkipsBbox:
 
     def test_convert_parquet_geo_only_no_bbox_column(self, geojson_input, temp_output_file):
         """Converting to parquet-geo-only should not add bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input,
@@ -732,7 +732,7 @@ class TestConvertSkipsBbox:
 
     def test_convert_1_1_has_bbox_column(self, geojson_input, temp_output_file):
         """Converting to 1.1 should add bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input,
@@ -746,7 +746,7 @@ class TestConvertSkipsBbox:
 
     def test_convert_1_0_has_bbox_column(self, geojson_input, temp_output_file):
         """Converting to 1.0 should add bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input,
@@ -762,7 +762,7 @@ class TestConvertSkipsBbox:
         self, fields_geom_type_only_file, temp_output_file
     ):
         """Converting parquet with bbox to 2.0 should remove bbox."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         # Verify source has bbox
         source_bbox = check_bbox_structure(fields_geom_type_only_file)
@@ -783,7 +783,7 @@ class TestConvertSkipsBbox:
         self, fields_geom_type_only_file, temp_output_file
     ):
         """Converting parquet with bbox to parquet-geo-only should remove bbox."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         # Verify source has bbox
         source_bbox = check_bbox_structure(fields_geom_type_only_file)
@@ -804,7 +804,7 @@ class TestConvertSkipsBbox:
         self, fields_geom_type_only_file, temp_output_file
     ):
         """Converting parquet with bbox to 1.1 should preserve bbox."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             fields_geom_type_only_file,
@@ -1292,7 +1292,7 @@ class TestGeoParquet11GeoArrow:
 
     def test_output_has_no_bbox_column(self, geojson_input, temp_output_file):
         """Output must not have a bbox column (the key benefit over plain 1.1)."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input, temp_output_file, geoparquet_version="1.1-geoarrow", verbose=False
@@ -1302,7 +1302,7 @@ class TestGeoParquet11GeoArrow:
 
     def test_plain_1_1_has_bbox_column(self, geojson_input, temp_output_file):
         """Sanity check: plain 1.1 DOES add a bbox column."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         convert_to_geoparquet(
             geojson_input, temp_output_file, geoparquet_version="1.1", verbose=False
@@ -1440,7 +1440,7 @@ class TestGeoParquet11GeoArrow:
         """Every input format must yield native GeoArrow encoding + valid GeoParquet under 1.1-geoarrow."""
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
         from geoparquet_io.core.convert import convert_to_geoparquet
 
         input_file = str(test_data_dir / fixture_name)
@@ -1636,7 +1636,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
     @pytest.mark.parametrize("input_version", ["1.0.0", "1.1.0", "2.0.0"])
     def test_pgo_strips_carried_geo_key(self, input_version, tmp_path):
         """An explicit parquet-geo-only request must drop the input's geo key."""
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / f"pgo_{input_version}.parquet")
         write_geoparquet_table(
@@ -1656,7 +1656,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
         import shapely.wkb
         from shapely.geometry import Point
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         tbl = pa.table(
             {
@@ -1676,7 +1676,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
 
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         tbl = self._table_with_geo("1.1.0")
         metadata = dict(tbl.schema.metadata or {})
@@ -1694,8 +1694,8 @@ class TestWriteGeoParquetTableParquetGeoOnly:
 
     def test_pgo_validates_against_target_version_oracle(self, tmp_path):
         """The real validator, told to expect pgo, must find no failures."""
-        from geoparquet_io.core.common import write_geoparquet_table
         from geoparquet_io.core.validate import validate_geoparquet
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / "pgo_oracle.parquet")
         write_geoparquet_table(
@@ -1723,7 +1723,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
         import shapely.wkb
         from shapely.geometry import Point
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         # Build a stale descriptor from a table with an extra "ghost" column.
         stale_src = tmp_path / "stale_src.parquet"
@@ -1764,7 +1764,7 @@ class TestWriteGeoParquetTableParquetGeoOnly:
     @pytest.mark.parametrize("version", ["1.0", "1.1", "2.0"])
     def test_other_versions_still_write_geo_key(self, version, tmp_path):
         """Non-pgo versions are unaffected: the geo key is written as before."""
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / f"v{version}.parquet")
         write_geoparquet_table(
@@ -1804,7 +1804,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         """The reproducer from #701."""
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / "pgo_no_geom.parquet")
         write_geoparquet_table(
@@ -1837,7 +1837,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         # A real serialized schema for a shape the output does not have. It has
         # to be well-formed: pyarrow reconstructs `schema_arrow` from whatever
@@ -1877,7 +1877,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         """
         import json
 
-        from geoparquet_io.core.common import _apply_geoparquet_metadata
+        from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 
         result = _apply_geoparquet_metadata(
             self._attributes_only_table_with_geo(
@@ -1903,7 +1903,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         """
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         output_file = str(tmp_path / f"nogeom_{version}.parquet")
         write_geoparquet_table(
@@ -1919,7 +1919,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
         """The verbose path names what it dropped and why."""
         import logging
 
-        from geoparquet_io.core.common import _apply_geoparquet_metadata
+        from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 
         with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
             _apply_geoparquet_metadata(
@@ -1939,7 +1939,7 @@ class TestParquetGeoOnlyWithoutGeometryColumn:
 
     def test_apply_metadata_helper_strips_directly(self):
         """The helper itself honors the request, so every caller inherits the fix."""
-        from geoparquet_io.core.common import _apply_geoparquet_metadata
+        from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 
         result = _apply_geoparquet_metadata(
             self._attributes_only_table_with_geo(),
@@ -1961,7 +1961,7 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
     """
 
     def test_bytes_form_is_derived_from_the_string_form(self):
-        from geoparquet_io.core.common import (
+        from geoparquet_io.core.arrow_geo_metadata import (
             _CARRIED_SCHEMA_METADATA_KEYS,
             _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
         )
@@ -2010,8 +2010,8 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
         """
         import inspect
 
-        from geoparquet_io.core.common import (
-            _strip_geo_metadata_key,
+        from geoparquet_io.core.arrow_geo_metadata import _strip_geo_metadata_key
+        from geoparquet_io.core.write_funnels import (
             extract_preserved_kv_metadata,
             write_parquet_with_metadata,
         )

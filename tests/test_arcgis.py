@@ -1693,7 +1693,7 @@ class TestCastTableToSchema:
 
     def test_reorders_columns_to_match_schema(self):
         """Columns are reordered to match the target schema."""
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         # Source table with different column order
         source = pa.table(
@@ -1721,7 +1721,7 @@ class TestCastTableToSchema:
 
     def test_drops_extra_columns(self):
         """Extra columns not in the target schema are dropped."""
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table(
             {
@@ -1745,7 +1745,7 @@ class TestCastTableToSchema:
 
     def test_adds_missing_columns_with_nulls(self):
         """Missing columns are filled with typed nulls."""
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table(
             {
@@ -1767,7 +1767,7 @@ class TestCastTableToSchema:
 
     def test_handles_all_mismatches_together(self):
         """Reorder + drop + add + cast in combination."""
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table(
             {
@@ -1801,7 +1801,7 @@ class TestCastTableToSchema:
         """
         import datetime
 
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table(
             {"time_only": pa.array(["14:30:00", "05:06:07", None], type=pa.large_string())}
@@ -1820,7 +1820,7 @@ class TestCastTableToSchema:
         """Fractional seconds survive the string → time32(ms) parse."""
         import datetime
 
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table({"t": pa.array(["14:30:00.123", "00:00:01"], type=pa.string())})
         target_schema = pa.schema([pa.field("t", pa.time32("ms"))])
@@ -1838,7 +1838,7 @@ class TestCastTableToSchema:
         DuckDB's GeoJSON driver infers an all-null TimeOnly column as string, so
         this shape shows up on any sparse page even without --output-crs.
         """
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table({"t": pa.array([None, None], type=pa.string())})
         target_schema = pa.schema([pa.field("t", pa.time32("ms"))])
@@ -1852,7 +1852,7 @@ class TestCastTableToSchema:
         """A non-time string still fails loudly, with the column named."""
         import pytest
 
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table({"t": pa.array(["not a time"], type=pa.string())})
         target_schema = pa.schema([pa.field("t", pa.time32("ms"))])
@@ -1866,7 +1866,7 @@ class TestCastTableToSchema:
         Guards against any regression that coerces the geometry column toward
         string when reconciling an ArcGIS page table to the metadata schema.
         """
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table(
             {
@@ -1895,7 +1895,7 @@ class TestCastTableToSchema:
         directly (it raises ArrowNotImplementedError), so the helper upcasts to
         int64 first.
         """
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table({"valid_on": pa.array([0, 1000], type=pa.int32())})
         target_schema = pa.schema([pa.field("valid_on", pa.timestamp("ms"))])
@@ -1911,7 +1911,7 @@ class TestCastTableToSchema:
 
     def test_int16_column_upcast_to_timestamp(self):
         """Any sub-64-bit integer column is upcast before the timestamp cast."""
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         source = pa.table({"valid_on": pa.array([0, 500], type=pa.int16())})
         target_schema = pa.schema([pa.field("valid_on", pa.timestamp("ms"))])
@@ -1931,7 +1931,7 @@ class TestCastTableToSchema:
         ValueError into a GeoParquetError that names the batch and column,
         replacing the previous generic message.
         """
-        from geoparquet_io.core.common import _cast_table_to_schema
+        from geoparquet_io.core.arrow_types import _cast_table_to_schema
 
         # A non-numeric string cannot be safely cast to int64
         source = pa.table({"amount": ["not_a_number", "also_bad"]})

@@ -16,13 +16,11 @@ import json
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import (
-    get_duckdb_connection,
-    split_zm_suffix,
-    write_parquet_with_metadata,
-)
+from geoparquet_io.core.common import split_zm_suffix
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from tests.conftest import get_geo_metadata
 
 WKT_BY_DIM = {
@@ -136,7 +134,7 @@ def test_compute_geometry_types_from_arrow_is_dimension_aware():
     import shapely
     from shapely import wkt as shapely_wkt
 
-    from geoparquet_io.core import common, geo_metadata
+    from geoparquet_io.core import arrow_geo_metadata, geo_metadata
 
     for _dim, (wkt, expected) in POLYGON_BY_DIM.items():
         table = pa.table(
@@ -147,5 +145,5 @@ def test_compute_geometry_types_from_arrow_is_dimension_aware():
                 )
             }
         )
-        assert common._compute_geometry_types(table, "geometry", False) == [expected]
+        assert arrow_geo_metadata._compute_geometry_types(table, "geometry", False) == [expected]
         assert geo_metadata._compute_geometry_types(table, "geometry", False) == [expected]

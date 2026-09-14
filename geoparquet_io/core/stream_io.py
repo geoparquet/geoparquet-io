@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import duckdb
 import pyarrow as pa
 
-from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
@@ -43,6 +43,7 @@ from geoparquet_io.core.streaming import (
     validate_output,
     write_arrow_stream,
 )
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

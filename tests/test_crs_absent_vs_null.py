@@ -451,7 +451,7 @@ def _write_v2_file(tmp_path, name: str, geom_expr: str, col_meta_update: dict):
     ``col_meta_update`` is merged into the geo metadata's geometry column, so the
     two carriers can be made to agree or disagree on purpose.
     """
-    from geoparquet_io.core.common import get_duckdb_connection
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
     source = Path(__file__).parent / "data" / "buildings_test.parquet"
     out = tmp_path / name

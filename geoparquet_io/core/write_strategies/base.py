@@ -17,6 +17,13 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from geoparquet_io.core.geo_metadata import (
+    GEOPARQUET_VERSIONS,
+    decode_carried_geo,
+    sanitize_geo_metadata,
+    strip_unsupported_covering,
+)
+
 if TYPE_CHECKING:
     import duckdb
     import pyarrow as pa
@@ -150,7 +157,6 @@ def build_geo_metadata(
         dict: Complete geo metadata structure ready for embedding in Parquet
     """
     from geoparquet_io.core.crs_utils import apply_output_crs
-    from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS, strip_unsupported_covering
 
     version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
     metadata_version = version_config.get("metadata_version", "1.1.0")
@@ -218,7 +224,6 @@ def _parse_existing_geo_metadata(original_metadata: dict | None) -> dict | None:
     ``columns`` is not an object per column would otherwise abort the write with
     a bare ``TypeError`` (#771).
     """
-    from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 
     return sanitize_geo_metadata(_decode_geo_key(original_metadata))
 
@@ -230,7 +235,6 @@ def _decode_geo_key(original_metadata: dict | None):
     malformed block -- dropped with a warning, so fresh metadata gets built --
     via :func:`geo_metadata.decode_carried_geo` (#771 follow-up).
     """
-    from geoparquet_io.core.geo_metadata import decode_carried_geo
 
     if not isinstance(original_metadata, dict) or not original_metadata:
         return None
@@ -448,7 +452,6 @@ def needs_metadata_rewrite(
     Returns:
         True if metadata rewrite is needed
     """
-    from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS
 
     version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
 
@@ -466,8 +469,6 @@ def needs_metadata_rewrite(
             return False
         # For 2.0 output, check if input has different version that needs updating
         if original_metadata:
-            from geoparquet_io.core.geo_metadata import decode_carried_geo
-
             geo_data = original_metadata.get("geo") or original_metadata.get(b"geo")
             if geo_data:
                 # Undecodable or non-object carried metadata cannot vouch for a

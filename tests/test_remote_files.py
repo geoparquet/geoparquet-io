@@ -120,7 +120,7 @@ class TestRemoteFileReading:
 
     def test_bbox_structure_https(self):
         """Test checking bbox structure from HTTPS URL."""
-        from geoparquet_io.core.common import check_bbox_structure
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
 
         bbox_info = check_bbox_structure(self.HTTPS_URL)
         assert bbox_info["has_bbox_column"] is True

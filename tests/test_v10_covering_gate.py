@@ -16,8 +16,8 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.common import get_duckdb_connection
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.geo_metadata import create_geo_metadata
 from geoparquet_io.core.validate import validate_geoparquet
 from geoparquet_io.core.write_strategies.base import build_geo_metadata

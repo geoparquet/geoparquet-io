@@ -23,10 +23,10 @@ import tempfile
 from dataclasses import dataclass
 from urllib.parse import unquote
 
-from geoparquet_io.core.common import write_parquet_with_metadata
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from geoparquet_io.core.write_strategies.duckdb_kv import (
     get_default_memory_limit,
 )

@@ -5,11 +5,8 @@ from __future__ import annotations
 import mercantile
 import pyarrow as pa
 
-from geoparquet_io.core.common import (
-    get_bbox_advice,
-    get_parquet_metadata,
-    write_parquet_with_metadata,
-)
+from geoparquet_io.core.bbox_structure import get_bbox_advice
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME, DEFAULT_QUADKEY_RESOLUTION
 from geoparquet_io.core.crs_utils import (
     crs_string_from_geo_meta,
@@ -52,6 +49,7 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:

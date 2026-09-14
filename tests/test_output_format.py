@@ -13,7 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.common import check_bbox_structure
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 
 # ============================================================================
 # CENTRAL FORMAT REQUIREMENTS

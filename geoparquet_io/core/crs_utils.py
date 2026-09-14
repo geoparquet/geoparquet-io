@@ -12,6 +12,7 @@ from functools import lru_cache
 from typing import Any
 
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
+from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
 from geoparquet_io.core.logging_config import debug, warn
 
 
@@ -316,7 +317,6 @@ def geoparquet_crs_is_null(parquet_file) -> bool:
     it internally, so passing an already-escaped URL double-escapes it.
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-    from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 
     # `get_geo_metadata` is the read-only reader and hands the block back as the
     # file really holds it; the reproject paths that ask this question then act
@@ -629,7 +629,6 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     a malformed carried block goes through :func:`sanitize_geo_metadata` and is
     treated the way an absent one is (#887).
     """
-    from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
     from geoparquet_io.core.geometry_detection import detect_geometry_column_from_names
 
     metadata = table.schema.metadata
@@ -669,7 +668,6 @@ def _crs_from_geo_block(parquet_file) -> tuple[dict | str | None, str | None]:
     it and has to see the file as it really is.
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-    from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 
     geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
     if not geo_meta:
@@ -1208,7 +1206,6 @@ def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None
     ``parse_geo_metadata_from_schema``, which both callers parse with, is a
     read-only reader and deliberately hands the block over untouched.
     """
-    from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 
     geo_meta = sanitize_geo_metadata(geo_meta)
     if not geo_meta:

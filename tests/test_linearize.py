@@ -833,8 +833,8 @@ class TestStreamingLinearizedRead:
         batch size lowered pins that the configured value is actually used.
         """
         import geoparquet_io.core.convert as convert_mod
-        from geoparquet_io.core.common import get_duckdb_connection
         from geoparquet_io.core.convert import _LinearizedRead
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
         if not LINEAR_GPKG.exists():
             pytest.skip("buildings_test.gpkg not available")

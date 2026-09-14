@@ -22,7 +22,9 @@ uv tool install geoparquet-io  # Global install
 ## Before Writing Code
 
 1. Search for existing patterns (`grep -r "pattern"`)
-2. Check `core/common.py` and `cli/decorators.py` first
+2. Check the owner module for the question you are answering (table below) and
+   `cli/decorators.py` first. `core/common.py` is the stage-C residue of a split
+   (#1083), not a place to look for or put shared helpers
 3. Review tests for the area you're modifying
 
 ---
@@ -43,7 +45,11 @@ geoparquet_io/
 ├── cli/_shared.py     # Group-neutral plumbing (S3 activation, default-group factory)
 ├── cli/decorators.py  # Reusable Click options and cls= command classes
 ├── core/              # Business logic (63 modules)
-│   └── common.py      # Shared utilities - CHECK FIRST
+│   ├── duckdb_utils.py   # connections, quote_identifier, sql_path - CHECK FIRST
+│   ├── geo_metadata.py   # the geo block: parse, sanitize, versions, type codes
+│   ├── write_funnels.py  # write_parquet_with_metadata / write_geoparquet_table
+│   ├── parquet_writer.py # the write facade (row groups, output version, geo key)
+│   └── common.py         # stage-C residue only (#1083); nothing new goes here
 └── api/               # Python API (table.py, ops.py)
 ```
 
@@ -92,15 +98,25 @@ geoparquet_io/
 | `admin_datasets.py` | Admin partition dataset abstraction layer. | 1219 |
 | `extract_bigquery.py` | BigQuery extraction to GeoParquet. | 1204 |
 | `write_funnels.py` | The write funnels: the two front doors every gpio ... | 1098 |
-| `common.py` | Shared helpers for reading and writing GeoParquet (being taken apart). | 979 |
+| `common.py` | What is left of the old grab-bag after the split. | 749 |
 | ... | *49 more modules* | |
 <!-- END GENERATED: core-modules -->
 
-<!-- freshness: last-verified: 2026-09-11, maps-to: geoparquet_io/core/common.py, geoparquet_io/cli/decorators.py -->
+<!-- freshness: last-verified: 2026-09-13, maps-to: geoparquet_io/core/common.py, geoparquet_io/core/parquet_writer.py, geoparquet_io/cli/decorators.py, pyproject.toml -->
 ### Key Patterns
 
 1. **CLI/Core Separation**: CLI commands are thin wrappers; business logic in `core/`
-2. **Common Utilities**: Always check `core/common.py` before writing new utilities
+2. **Shared helpers live with their question**, not in `core/common.py`. The
+   split (#1010, #1066, #1083) put them here: connections and SQL escaping in
+   `duckdb_utils`; the `geo` block (parse, sanitize, versions, WKB type codes)
+   in `geo_metadata`; the block for an in-memory Arrow table in
+   `arrow_geo_metadata`, for a written file in `derive_geo_from_file`; bbox
+   column/covering detection in `bbox_structure`; file-type detection in
+   `file_type`; Arrow type promotion in `arrow_types`; compression validation
+   in `compression`; byte sizes in `sizing`; the two write funnels in
+   `write_funnels`. Import from the owner: the `core-common-split-layers`
+   import-linter contract and `tests/test_common_split_guards.py` fail the
+   build on a new import *through* `common.py`, and on a new public name in it.
 3. **Shared Decorators**: Use existing decorators from `cli/decorators.py`
 4. **Error Handling**: Use `ClickException` for user-facing errors
 5. **The write facade**: `core/parquet_writer.py` owns the three facts every write
@@ -119,11 +135,12 @@ geoparquet_io/
 
 ---
 
-<!-- freshness: last-verified: 2026-03-20, maps-to: geoparquet_io/core/common.py -->
+<!-- freshness: last-verified: 2026-09-13, maps-to: geoparquet_io/core/duckdb_utils.py, geoparquet_io/core/remote.py, geoparquet_io/core/logging_config.py -->
 ## Key Imports
 
 ```python
-from geoparquet_io.core.common import get_duckdb_connection, needs_httpfs
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.logging_config import success, warn, error, info, debug
 from pathlib import Path  # Prefer over os.path
 ```

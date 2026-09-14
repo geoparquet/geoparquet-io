@@ -2,17 +2,9 @@
 
 import pytest
 
-from geoparquet_io.core.common import (
-    _get_geometry_type_name,
-    check_bbox_structure,
-    detect_geoparquet_file_type,
-    format_size,
-    get_bbox_advice,
-    get_parquet_metadata,
-    parse_size_string,
-    should_skip_bbox,
-    validate_compression_settings,
-)
+from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
+from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
+from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
     _validate_projjson,
@@ -23,12 +15,14 @@ from geoparquet_io.core.crs_utils import (
     parse_crs_string_to_projjson,
 )
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import (
     has_glob_pattern,
     is_partition_path,
     safe_file_url,
     validate_parquet_extension,
 )
+from geoparquet_io.core.geo_metadata import _get_geometry_type_name
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -38,6 +32,7 @@ from geoparquet_io.core.remote import (
     is_s3_url,
     needs_httpfs,
 )
+from geoparquet_io.core.sizing import format_size, parse_size_string
 
 
 class TestIsRemoteUrl:

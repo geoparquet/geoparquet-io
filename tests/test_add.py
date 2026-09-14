@@ -726,7 +726,7 @@ class TestRemoteWriteSupport:
 
         import duckdb
 
-        from geoparquet_io.core.common import write_parquet_with_metadata
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
         # Mock the upload function to avoid actual upload
         mock_upload = MagicMock()

@@ -7,7 +7,6 @@ import gc
 
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
@@ -43,6 +42,7 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     bucket_point_expr,
     build_exclude_clause,
 )
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 
 def _get_admin_ref(dataset, con, level: str) -> str:

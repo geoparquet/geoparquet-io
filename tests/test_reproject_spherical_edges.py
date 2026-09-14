@@ -17,7 +17,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.common import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.reproject import reproject, reproject_table
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 from tests.conftest import get_geo_metadata

@@ -23,7 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import _apply_geoparquet_metadata
+from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 from geoparquet_io.core.geo_metadata import (
     reset_malformed_geo_warnings,
     sanitize_geo_metadata,
@@ -289,7 +289,7 @@ def test_strategy_base_reader_sanitizes_every_key_shape(metadata):
 
 def test_parse_geo_metadata_quietly_delegates_to_the_shared_check():
     """``common._parse_geo_metadata_quietly`` must not keep a second copy of the check."""
-    from geoparquet_io.core.common import _parse_geo_metadata_quietly
+    from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
     reset_malformed_geo_warnings()
     raw = json.dumps({"primary_column": 1, "columns": ["geometry"]}).encode("utf-8")
@@ -775,8 +775,8 @@ def _corrupt_geo_file(tmp_path, cause: str):
 @pytest.mark.parametrize("cause", ["JSON", "UTF-8"])
 def test_get_geo_metadata_tolerates_undecodable_bytes_on_both_paths(cause, tmp_path):
     """Both readers give the answer invalid JSON already got: no usable metadata."""
-    from geoparquet_io.core.common import get_duckdb_connection
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
     src = _corrupt_geo_file(tmp_path, cause)
     assert get_geo_metadata(str(src)) is None  # PyArrow fast path
@@ -950,8 +950,7 @@ def test_table_write_drops_a_wrong_typed_crs(strategy, tmp_path, caplog):
     "Geoparquet column 'geometry' has invalid CRS").
     """
     from geoparquet_io.api import Table
-    from geoparquet_io.core.common import get_duckdb_connection
-    from geoparquet_io.core.duckdb_utils import sql_path
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
     from geoparquet_io.core.validate import validate_geoparquet
 
     reset_malformed_geo_warnings()
@@ -1345,7 +1344,7 @@ def test_fast_path_carry_survives_a_malformed_block(col, case, block):
     ``'list' object has no attribute 'get'`` -- and this block would then have
     been written to the output verbatim.
     """
-    from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
     reset_malformed_geo_warnings()
     metadata = {"geo": json.dumps(block)}
@@ -1355,7 +1354,7 @@ def test_fast_path_carry_survives_a_malformed_block(col, case, block):
 
 def test_fast_path_carry_drops_a_wrong_typed_value_before_writing_it():
     """A carried ``crs: 42`` must not reach the output through the fast path."""
-    from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
     reset_malformed_geo_warnings()
     block = {
@@ -1383,7 +1382,7 @@ def test_write_geoparquet_table_survives_a_malformed_block(col, case, block, tmp
     a list-, string- or non-object-entry ``columns`` raised a ``TypeError`` or
     ``AttributeError`` one line later (#947).
     """
-    from geoparquet_io.core.common import write_geoparquet_table
+    from geoparquet_io.core.write_funnels import write_geoparquet_table
 
     reset_malformed_geo_warnings()
     out = tmp_path / f"wgt_{col}_{case}.parquet"
@@ -1401,7 +1400,7 @@ def test_check_bbox_structure_survives_a_malformed_block(col, case, block, tmp_p
     holds it and the reader guards instead. A ``columns`` that is not an object
     declares no covering, which is the truthful answer, not a crash.
     """
-    from geoparquet_io.core.common import check_bbox_structure
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
 
     reset_malformed_geo_warnings()
     path = tmp_path / f"checkbbox_{col}_{case}.parquet"
@@ -1414,7 +1413,7 @@ def test_check_bbox_structure_survives_a_malformed_block(col, case, block, tmp_p
 
 def test_check_bbox_structure_survives_a_non_object_covering(tmp_path):
     """``covering`` itself can be the wrong type; ``.get('bbox')`` crashed on it."""
-    from geoparquet_io.core.common import check_bbox_structure
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
 
     reset_malformed_geo_warnings()
     block = {
@@ -1430,7 +1429,7 @@ def test_check_bbox_structure_survives_a_non_object_covering(tmp_path):
 
 def test_check_bbox_structure_still_finds_a_real_covering(tmp_path):
     """The guard must not cost a well-formed file its covering."""
-    from geoparquet_io.core.common import check_bbox_structure
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
 
     covering = {
         "bbox": {
@@ -2042,7 +2041,7 @@ def test_carried_version_is_quiet_about_an_absent_version(absent, caplog):
 @pytest.mark.parametrize("col", GEOMETRY_COLUMN_NAMES)
 def test_detect_file_type_survives_a_non_string_version(case, bad, col, tmp_path):
     """`check spec`, `check bbox`, `check optimization` and `add bbox` all land here."""
-    from geoparquet_io.core.common import (
+    from geoparquet_io.core.file_type import (
         detect_geoparquet_file_type,
         detect_geoparquet_file_type_cache_clear,
     )
@@ -2065,7 +2064,7 @@ def test_detect_file_type_survives_a_non_string_version(case, bad, col, tmp_path
 )
 def test_detect_file_type_still_reads_a_real_version(version, expected, tmp_path):
     """The guard must not cost a well-formed file its version."""
-    from geoparquet_io.core.common import (
+    from geoparquet_io.core.file_type import (
         detect_geoparquet_file_type,
         detect_geoparquet_file_type_cache_clear,
     )

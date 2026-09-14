@@ -30,7 +30,7 @@ from geoparquet_io.core.carto import (
     _validate_table_name,
     carto_to_table,
 )
-from geoparquet_io.core.common import InvalidParameterError
+from geoparquet_io.core.exceptions import InvalidParameterError
 
 
 class TestValidateCartoUrl:

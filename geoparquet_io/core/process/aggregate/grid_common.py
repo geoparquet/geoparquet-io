@@ -17,8 +17,8 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.crs_utils import (
     crs_transform_sql_expr,
     extract_crs_from_parquet,
@@ -52,6 +52,7 @@ from geoparquet_io.core.process.aggregate.common import (
     validate_metric_nodata,
 )
 from geoparquet_io.core.remote import needs_httpfs
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 
 @dataclass(frozen=True)
@@ -606,7 +607,6 @@ def _validate_bbox_column_in_table(table, bbox_column: str) -> None:
 
 def _resolve_bbox_column_for_table(table, bbox_column: str | None) -> str:
     """Table-path variant of bbox column resolution (Arrow schema detection)."""
-    from geoparquet_io.core.common import _detect_bbox_column_from_table
 
     if bbox_column:
         _validate_bbox_column_in_table(table, bbox_column)

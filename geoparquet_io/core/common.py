@@ -1,30 +1,26 @@
-"""Shared helpers for reading and writing GeoParquet.
+"""What is left of the old grab-bag after the split.
 
-This module is being taken apart. It grew to 4,138 lines with 50 importers, and
-the deferred (function-level) imports written across ``core/`` to dodge cycles
-through it are the symptom -- a module this central is one every new helper has
-to route around. Blocks that answer a single question and carry no coupling to
-the rest have moved out to modules named for that question.
+This module grew to 4,138 lines with 50 importers, and the deferred
+(function-level) imports written across ``core/`` to dodge cycles through it
+were the symptom. Everything that answered a single question moved out to a
+module named for that question -- ``arrow_geo_metadata``, ``arrow_types``,
+``bbox_structure``, ``compression``, ``derive_geo_from_file``, ``file_type``,
+``format_writers``, ``sizing``, ``write_funnels`` -- and the compatibility
+re-exports that kept the old import paths alive are gone: every caller now
+imports from the owner. The ``core-common-split-layers`` import-linter contract
+keeps it that way -- this module is the top of that stack, so nothing below it
+may import it back -- and ``tests/test_common_split_guards.py`` refuses a new
+re-export shim.
 
-Every moved name that a caller imports is still importable from here, so that
-no caller had to change in the commit that moved the code; module-private
-helpers nothing else reached went with their module and were not shimmed. Those
-re-exports are written
-``import X as X`` -- the explicit re-export form -- which is both how a reader
-tells a compatibility shim from a helper this module actually uses, and how
-ruff and vulture tell the same thing. The shims are deleted, and their callers
-repointed at the real home, in a later pass. What went where:
-
-* :mod:`geoparquet_io.core.arrow_geo_metadata` -- the ``geo`` block for an Arrow table
-* :mod:`geoparquet_io.core.arrow_types` -- Arrow type promotion and casting
-* :mod:`geoparquet_io.core.bbox_structure` -- bbox column / covering detection
-* :mod:`geoparquet_io.core.compression` -- compression option validation
-* :mod:`geoparquet_io.core.file_type` -- GeoParquet file-type detection
-* :mod:`geoparquet_io.core.format_writers` -- ``create_shapefile_zip``
-* :mod:`geoparquet_io.core.derive_geo_from_file` -- the ``geo`` block for a written file
-* :mod:`geoparquet_io.core.write_funnels` -- ``write_parquet_with_metadata`` and
-  ``write_geoparquet_table``, the two write funnels
-* :mod:`geoparquet_io.core.sizing` -- byte-size parsing and formatting
+What remains is the stage-C residue, each block with a home already named in
+#1010's plan: the SQL-side geometry-type helpers (``zm_suffix_sql``,
+``split_zm_suffix``, ``compute_geometry_types_via_sql``,
+``compute_geometry_dimensions_via_sql``), auto-version resolution
+(``_resolve_auto_version``, ``resolve_geoparquet_version_from_file``,
+``resolve_geoparquet_version_from_table``), ``get_parquet_metadata``, the
+bounds helpers (``calculate_file_bounds``, ``get_dataset_bounds``),
+``add_computed_column``/``add_bbox`` and ``should_skip_bbox``. Nothing new
+belongs here.
 """
 
 import os
@@ -32,67 +28,8 @@ import os
 import duckdb
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.arrow_geo_metadata import (
-    _CARRIED_SCHEMA_METADATA_KEYS as _CARRIED_SCHEMA_METADATA_KEYS,
-)
-from geoparquet_io.core.arrow_geo_metadata import (
-    _CARRIED_SCHEMA_METADATA_KEYS_BYTES as _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
-)
-from geoparquet_io.core.arrow_geo_metadata import (
-    _apply_geoparquet_metadata as _apply_geoparquet_metadata,
-)
-from geoparquet_io.core.arrow_geo_metadata import (
-    _canonicalize_wkb_columns as _canonicalize_wkb_columns,
-)
-from geoparquet_io.core.arrow_geo_metadata import _compute_bbox_from_data as _compute_bbox_from_data
-from geoparquet_io.core.arrow_geo_metadata import _compute_geometry_types as _compute_geometry_types
-from geoparquet_io.core.arrow_geo_metadata import (
-    _detect_bbox_column_from_table as _detect_bbox_column_from_table,
-)
 from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
-from geoparquet_io.core.arrow_geo_metadata import _estimate_row_size as _estimate_row_size
-from geoparquet_io.core.arrow_geo_metadata import (
-    _normalize_arrow_large_types as _normalize_arrow_large_types,
-)
-from geoparquet_io.core.arrow_geo_metadata import (
-    _parse_geo_metadata_quietly as _parse_geo_metadata_quietly,
-)
-from geoparquet_io.core.arrow_geo_metadata import (
-    _process_geometry_column_for_version as _process_geometry_column_for_version,
-)
-from geoparquet_io.core.arrow_geo_metadata import (
-    _strip_geo_metadata_key as _strip_geo_metadata_key,
-)
-from geoparquet_io.core.arrow_geo_metadata import (
-    _strip_geoarrow_to_plain_wkb as _strip_geoarrow_to_plain_wkb,
-)
-from geoparquet_io.core.arrow_geo_metadata import (
-    _write_table_with_settings as _write_table_with_settings,
-)
-from geoparquet_io.core.arrow_types import _cast_table_to_schema as _cast_table_to_schema
-from geoparquet_io.core.arrow_types import _compute_unified_schema as _compute_unified_schema
-from geoparquet_io.core.arrow_types import _promote_numeric_type as _promote_numeric_type
-from geoparquet_io.core.bbox_structure import BboxInfo as BboxInfo
-from geoparquet_io.core.bbox_structure import (
-    _bbox_column_from_covering as _bbox_column_from_covering,
-)
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.bbox_structure import get_bbox_advice as get_bbox_advice
-from geoparquet_io.core.compression import (
-    validate_compression_settings as validate_compression_settings,
-)
-from geoparquet_io.core.derive_geo_from_file import _crs_from_geo_logical as _crs_from_geo_logical
-from geoparquet_io.core.derive_geo_from_file import (
-    _ensure_v2_geo_metadata as _ensure_v2_geo_metadata,
-)
-from geoparquet_io.core.derive_geo_from_file import (
-    _geography_edges_from_logical as _geography_edges_from_logical,
-)
-from geoparquet_io.core.derive_geo_from_file import (
-    _rewrite_file_with_geo_metadata as _rewrite_file_with_geo_metadata,
-)
-
-# Internal imports - used by functions in this module
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
     _get_query_column_type,
@@ -107,30 +44,12 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
-from geoparquet_io.core.file_type import (
-    detect_geoparquet_file_type_cache_clear as detect_geoparquet_file_type_cache_clear,
-)
 from geoparquet_io.core.file_utils import (
     get_first_parquet_file,
     is_partition_path,
     resolve_file_url,
 )
-from geoparquet_io.core.format_writers import create_shapefile_zip as create_shapefile_zip
-
-# The WKB type-code tables and their name helper live in ``geo_metadata``;
-# every other module (arrow_geo_metadata, derive_geo_from_file) consumes them.
-from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES as _DIMENSION_SUFFIXES
-from geoparquet_io.core.geo_metadata import _GEOMETRY_TYPE_CODES as _GEOMETRY_TYPE_CODES
-from geoparquet_io.core.geo_metadata import (
-    DEFAULT_GEOPARQUET_VERSION as DEFAULT_GEOPARQUET_VERSION,
-)
-from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS as GEOPARQUET_VERSIONS
-from geoparquet_io.core.geo_metadata import (
-    _get_geometry_type_name as _get_geometry_type_name,
-)
-from geoparquet_io.core.geo_metadata import (
-    build_bbox_covering,
-)
+from geoparquet_io.core.geo_metadata import build_bbox_covering
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -146,47 +65,6 @@ from geoparquet_io.core.remote import (
     is_remote_url,
     needs_httpfs,
 )
-from geoparquet_io.core.sizing import format_size as format_size
-from geoparquet_io.core.sizing import parse_size_string as parse_size_string
-from geoparquet_io.core.write_funnels import (
-    _DUCKDB_GENERATED_COLUMN_FIELDS as _DUCKDB_GENERATED_COLUMN_FIELDS,
-)
-from geoparquet_io.core.write_funnels import (
-    _REQUIRED_CARRIED_GEO_FIELDS as _REQUIRED_CARRIED_GEO_FIELDS,
-)
-from geoparquet_io.core.write_funnels import _apply_nonplanar_edges as _apply_nonplanar_edges
-from geoparquet_io.core.write_funnels import (
-    _auto_fix_vecorel_if_needed as _auto_fix_vecorel_if_needed,
-)
-from geoparquet_io.core.write_funnels import (
-    _carries_more_than_duckdb_generates as _carries_more_than_duckdb_generates,
-)
-from geoparquet_io.core.write_funnels import (
-    _collect_nonplanar_edges_from_metadata as _collect_nonplanar_edges_from_metadata,
-)
-from geoparquet_io.core.write_funnels import (
-    _edges_for_output_version as _edges_for_output_version,
-)
-from geoparquet_io.core.write_funnels import (
-    _geo_block_to_carry_on_fast_path as _geo_block_to_carry_on_fast_path,
-)
-from geoparquet_io.core.write_funnels import _plain_copy_to as _plain_copy_to
-from geoparquet_io.core.write_funnels import (
-    _preserve_edges_after_write as _preserve_edges_after_write,
-)
-from geoparquet_io.core.write_funnels import (
-    _prune_metadata_to_output_columns as _prune_metadata_to_output_columns,
-)
-from geoparquet_io.core.write_funnels import (
-    collect_nonplanar_edges as collect_nonplanar_edges,
-)
-from geoparquet_io.core.write_funnels import (
-    extract_preserved_kv_metadata as extract_preserved_kv_metadata,
-)
-from geoparquet_io.core.write_funnels import (
-    read_preserved_kv_metadata as read_preserved_kv_metadata,
-)
-from geoparquet_io.core.write_funnels import write_geoparquet_table as write_geoparquet_table
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 

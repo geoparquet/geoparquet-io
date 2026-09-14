@@ -25,11 +25,11 @@ from geoparquet_io.core.add.kdtree import (
     ITERATIONS_MISSING,
 )
 from geoparquet_io.core.check_parquet_structure import CheckProfile
-from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1278,7 +1278,7 @@ class Table:
             # including the default — rebuilt the KV block from scratch and
             # dropped it, so preservation depended on the strategy (#690).
             # 'geo' is deliberately excluded: it is regenerated from the table.
-            from geoparquet_io.core.common import extract_preserved_kv_metadata
+            from geoparquet_io.core.write_funnels import extract_preserved_kv_metadata
 
             preserved_kv = extract_preserved_kv_metadata(self._table.schema.metadata)
 
@@ -1407,7 +1407,7 @@ class Table:
                 # AWS_PROFILE env mutation to leak into the host process.
                 # Special handling for shapefiles: zip all sidecars into .shp.zip
                 if format == "shapefile":
-                    from geoparquet_io.core.common import create_shapefile_zip
+                    from geoparquet_io.core.format_writers import create_shapefile_zip
 
                     # Create zip archive with all sidecar files
                     zip_path = create_shapefile_zip(output_path, verbose=False)
@@ -1462,7 +1462,7 @@ class Table:
         import uuid
         from pathlib import Path as PathLib
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         temp_dir = PathLib(tempfile.gettempdir())
         temp_path = temp_dir / f"gpio_table_{uuid.uuid4()}.parquet"

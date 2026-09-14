@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from geoparquet_io.core.common import (
-    add_computed_column,
-    check_bbox_structure,
-    detect_geoparquet_file_type,
-)
+from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.common import add_computed_column
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
+from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
+from geoparquet_io.core.geo_metadata import covering_supported
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -32,13 +31,10 @@ def _bbox_metadata_advice(parquet_file: str) -> str:
     (which refuses) — it needs a version upgrade first.
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-    from geoparquet_io.core.geo_metadata import covering_supported
 
     geo_meta = get_geo_metadata(parquet_file) or {}
     version = geo_meta.get("version", "")
     if covering_supported(version):
-        from geoparquet_io.core.bbox_structure import check_bbox_structure
-
         if check_bbox_structure(parquet_file).get("covering_problem"):
             return "The existing column cannot carry a 'covering'; use --force to rewrite it."
         return "Run 'gpio add bbox-metadata' to add metadata, or use --force to replace."

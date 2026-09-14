@@ -17,7 +17,6 @@ from geoparquet_io.core.column_selection import (
     resolve_columns_against_schema,
     split_column_list,
 )
-from geoparquet_io.core.common import write_geoparquet_table
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     get_duckdb_connection,
@@ -36,6 +35,7 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 from geoparquet_io.core.write_strategies.duckdb_kv import validate_memory_limit
 
 # Regex patterns for GCP resource validation

@@ -110,8 +110,8 @@ def _actual_extent(path) -> tuple[float, float, float, float]:
 def _write_through(source: str, destination, force_rewrite: bool) -> dict:
     """Run one write of ``source`` through either the fast path or the rewrite path."""
     import geoparquet_io.core.write_strategies as write_strategies
-    from geoparquet_io.core.common import write_parquet_with_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     original = dict(pq.ParquetFile(source).schema_arrow.metadata or {})
     real = write_strategies.needs_metadata_rewrite
@@ -295,7 +295,7 @@ class TestTheCarryDeclines:
     """Cases where DuckDB's own generated block must stand."""
 
     def _carry(self, metadata, geometry_column="geometry", version="2.0"):
-        from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+        from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
         return _geo_block_to_carry_on_fast_path(metadata, geometry_column, version)
 
@@ -342,8 +342,8 @@ class TestTheCarryDeclines:
         so none of them exercises the gate as the write path actually reaches it:
         after the covering derivation has had its chance and declined.
         """
-        from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
         source = _write_v2_input(
             fields_v2_file, tmp_path / "no_bbox.parquet", BASE_GEO, bbox_expr=None
@@ -369,8 +369,8 @@ class TestTheCarryDeclines:
         rewrite path (``test_covering_v2.py::
         test_a_conventional_bbox_column_is_declared_at_v2``).
         """
-        from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
         thin = self._metadata({"encoding": "WKB", "geometry_types": ["Polygon"]})
         con = get_duckdb_connection(load_spatial=True)
@@ -392,7 +392,7 @@ class TestTheCarryDeclines:
         self, v2_epoch_orientation_bbox
     ):
         """Known output columns settle the common case without a schema probe."""
-        from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+        from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
         class _NoQueriesAllowed:
             def execute(self, *args, **kwargs):  # pragma: no cover - must not run
@@ -447,7 +447,7 @@ class TestMultiFileInputsDeclineTheCarry:
 
     def test_a_directory_input_declines_too(self, two_disjoint_files):
         """The guard covers both shapes ``is_partition_path`` recognises."""
-        from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+        from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
         metadata = {"geo": json.dumps(BASE_GEO)}
 
@@ -519,7 +519,7 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
 
     def test_a_stripped_default_crs_alone_does_not_justify_the_carry(self):
         """The CRS rule runs before the gate, so the block is judged as it will be written."""
-        from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+        from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
         metadata = {
             "geo": json.dumps(

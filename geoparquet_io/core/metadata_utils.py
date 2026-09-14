@@ -11,9 +11,9 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from geoparquet_io.core.common import format_size
 from geoparquet_io.core.geo_metadata import is_covering_path
 from geoparquet_io.core.parquet_schema import root_schema_columns
+from geoparquet_io.core.sizing import format_size
 
 
 def _calculate_overall_bbox(row_group_stats: list[dict]) -> dict[str, float] | None:

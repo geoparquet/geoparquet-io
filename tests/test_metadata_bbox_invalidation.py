@@ -231,7 +231,7 @@ class TestStripDerivedStatsRecomputedColumns:
 
 def _write_points(path, points, version="1.1"):
     """Write a CRS84 GeoParquet file from ``[(id, wkt), ...]``."""
-    from geoparquet_io.core.common import write_parquet_with_metadata
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     values = ", ".join(f"({pid}, ST_GeomFromText('{wkt}'))" for pid, wkt in points)
     con = duckdb.connect()
@@ -267,8 +267,8 @@ def _make_bbox_column_file(path):
     query below computes the bbox from the geometry, so this fixture can vouch
     for it. Writers no longer infer a covering from a column's name (#738).
     """
-    from geoparquet_io.core.common import write_parquet_with_metadata
     from geoparquet_io.core.geo_metadata import build_bbox_covering
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")

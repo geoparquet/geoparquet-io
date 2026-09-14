@@ -22,6 +22,11 @@ from typing import TYPE_CHECKING
 
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.arrow_geo_metadata import (
+    _canonicalize_wkb_columns,
+    _detect_version_from_table,
+    _parse_geo_metadata_quietly,
+)
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     build_kv_metadata_clause,
@@ -29,7 +34,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     validate_compression_level,
 )
-from geoparquet_io.core.geo_metadata import declare_carried_bbox_column
+from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql, declare_carried_bbox_column
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.write_strategies.base import (
@@ -185,10 +190,6 @@ def _plain_wkb_for_secondary_columns(table, geometry_column: str, verbose: bool)
     carrier (``geoarrow.point`` over ``struct<x, y>``) alone rather than forcing
     it through a binary cast PyArrow cannot perform.
     """
-    from geoparquet_io.core.common import (
-        _canonicalize_wkb_columns,
-        _parse_geo_metadata_quietly,
-    )
 
     carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
     secondaries = resolve_geometry_columns(geometry_column, None, carried_geo) - {geometry_column}
@@ -537,7 +538,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         Both come out of one scan, so a caller that invalidated both (a row
         filter, a reprojection, a multi-file merge) pays for a single pass.
         """
-        from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql
 
         need_bbox = "bbox" not in col_meta
         need_types = "geometry_types" not in col_meta
@@ -574,7 +574,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using DuckDB COPY TO with KV_METADATA."""
-        from geoparquet_io.core.common import _detect_version_from_table
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
         configure_verbose(verbose)

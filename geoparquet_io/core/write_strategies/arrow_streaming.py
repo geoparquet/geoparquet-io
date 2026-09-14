@@ -18,8 +18,18 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.arrow_geo_metadata import (
+    _compute_geometry_types,
+    _detect_version_from_table,
+)
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.duckdb_utils import quote_identifier
+from geoparquet_io.core.geo_metadata import (
+    GEOPARQUET_VERSIONS,
+    bbox_column_to_declare,
+    compute_geo_stats_via_sql,
+    create_geo_metadata,
+)
 from geoparquet_io.core.geoarrow_encoding import (
     WKB_EXTENSION_NAMES,
     arrow_extension_name,
@@ -199,7 +209,6 @@ def _has_carried_bbox(original_metadata: dict | None, geometry_column: str) -> b
 
 def _detect_bbox_column(schema: pa.Schema, original_metadata: dict | None) -> dict:
     """The bbox column this write may declare, through the shared gate (#1035)."""
-    from geoparquet_io.core.geo_metadata import bbox_column_to_declare
     from geoparquet_io.core.write_strategies.base import _parse_existing_geo_metadata
 
     name = bbox_column_to_declare(schema, _parse_existing_geo_metadata(original_metadata))
@@ -262,7 +271,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write query results to GeoParquet using streaming RecordBatch approach."""
-        from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -403,7 +411,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         need_bbox: bool,
     ) -> tuple[list[float] | None, list[str]]:
         """Pre-compute bbox and geometry types in a single scan of the query."""
-        from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql
 
         if not should_add_geo_metadata:
             return None, []
@@ -433,7 +440,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         native Parquet GEOMETRY types off it and then drops it (#848).
         """
         from geoparquet_io.core.crs_utils import apply_output_crs
-        from geoparquet_io.core.geo_metadata import create_geo_metadata
 
         bbox_info = _detect_bbox_column(schema, original_metadata)
         geo_meta = create_geo_metadata(
@@ -658,12 +664,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using batch streaming."""
-        from geoparquet_io.core.common import (
-            _compute_geometry_types,
-            _detect_version_from_table,
-        )
         from geoparquet_io.core.crs_utils import apply_output_crs
-        from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS, create_geo_metadata
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)

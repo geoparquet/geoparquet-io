@@ -7,7 +7,7 @@ suffixed names as valid and detect dimensionality when scanning data.
 
 import pytest
 
-from geoparquet_io.core.common import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_geometry_types_list,

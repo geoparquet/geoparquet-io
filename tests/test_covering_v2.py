@@ -461,7 +461,7 @@ def test_resolve_output_version_honours_an_explicit_version():
 def test_fast_path_carry_declines_a_geo_block_too_thin_to_stand_in(tmp_path):
     """Carrying a block that lacks the fields DuckDB would have written is worse
     than letting DuckDB write it, so the carry declines and the write falls back."""
-    from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
     thin = {
         "geo": json.dumps(
@@ -478,7 +478,7 @@ def test_fast_path_carry_declines_a_geo_block_too_thin_to_stand_in(tmp_path):
 
 def test_fast_path_carry_declines_a_block_duckdb_would_write_itself():
     """No covering, no epoch, no orientation: DuckDB's own generated block stands."""
-    from geoparquet_io.core.common import _geo_block_to_carry_on_fast_path
+    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
     plain = {
         "geo": json.dumps(

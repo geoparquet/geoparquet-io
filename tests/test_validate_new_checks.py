@@ -30,7 +30,7 @@ class TestVersionKnown:
 
 class TestVersionFeatures:
     def _write(self, tmp_path, version_option):
-        from geoparquet_io.core.common import get_duckdb_connection
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
         path = tmp_path / "f.parquet"
         con = get_duckdb_connection(load_spatial=True)

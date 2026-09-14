@@ -21,7 +21,7 @@ from geoparquet_io.core.partition.common import partition_by_column
 
 def _write_points(path, rows):
     """Write a tiny GeoParquet from ``rows`` of (cat, x, y); cat may be None."""
-    from geoparquet_io.core.common import write_parquet_with_metadata
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
@@ -44,7 +44,7 @@ def multi_value_file(temp_output_dir):
     Three categories with differing geographic extents so per-partition bbox
     must differ from the global bbox.
     """
-    from geoparquet_io.core.common import write_parquet_with_metadata
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
@@ -364,7 +364,7 @@ class TestOverwrite:
 def _write_two_column(path, rows):
     """Write a GeoParquet with two partitionable columns from ``rows`` of
     (country, subdivision, x, y)."""
-    from geoparquet_io.core.common import write_parquet_with_metadata
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")

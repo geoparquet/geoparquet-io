@@ -70,8 +70,7 @@ def places_named_covering_file(tmp_path):
     """
     from pathlib import Path
 
-    from geoparquet_io.core.common import get_duckdb_connection
-    from geoparquet_io.core.duckdb_utils import _escape_sql_string
+    from geoparquet_io.core.duckdb_utils import _escape_sql_string, get_duckdb_connection
 
     source = Path(__file__).parent / "data" / "places_test.parquet"
     path = tmp_path / "places_named_covering.parquet"

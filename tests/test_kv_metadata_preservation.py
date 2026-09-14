@@ -28,7 +28,10 @@ from click.testing import CliRunner
 
 import geoparquet_io.api as api
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.common import extract_preserved_kv_metadata, read_preserved_kv_metadata
+from geoparquet_io.core.write_funnels import (
+    extract_preserved_kv_metadata,
+    read_preserved_kv_metadata,
+)
 
 WRITE_STRATEGIES = ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"]
 

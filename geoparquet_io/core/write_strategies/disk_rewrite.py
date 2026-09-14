@@ -19,12 +19,17 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.arrow_geo_metadata import (
+    _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
+    _detect_version_from_table,
+)
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.geo_metadata import compute_bbox_via_sql
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
@@ -123,7 +128,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite."""
         from geoparquet_io.core.common import compute_geometry_types_via_sql
         from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
-        from geoparquet_io.core.geo_metadata import compute_bbox_via_sql
         from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 
         configure_verbose(verbose)
@@ -270,7 +274,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using temporary file and rewrite."""
-        from geoparquet_io.core.common import _detect_version_from_table
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -516,7 +519,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         native_crs: dict[str, dict | None],
     ) -> None:
         """Write the already-open source file out again, one row group at a time."""
-        from geoparquet_io.core.common import _CARRIED_SCHEMA_METADATA_KEYS_BYTES
 
         schema = _native_geometry_schema(pf.schema_arrow, native_crs)
 

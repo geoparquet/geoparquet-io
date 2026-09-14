@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     import duckdb
 
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
+from geoparquet_io.core.geo_metadata import parse_geo_metadata
 from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
 from geoparquet_io.core.geometry_repair import repair_geometry_sql
 
@@ -103,7 +104,6 @@ def _get_source_crs(input_path: str) -> str | None:
         CRS string (e.g., "EPSG:4326") or None if not found
     """
     from geoparquet_io.core.common import get_parquet_metadata
-    from geoparquet_io.core.geo_metadata import parse_geo_metadata
 
     try:
         metadata, _ = get_parquet_metadata(input_path, verbose=False)

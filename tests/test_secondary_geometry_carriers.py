@@ -31,9 +31,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.validate import validate_geoparquet
+from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
 from geoparquet_io.core.write_strategies.base import resolve_geometry_columns
 
@@ -422,8 +423,9 @@ _DETERMINISM_SCRIPT = textwrap.dedent(
     source, out, do_import = sys.argv[1], sys.argv[2], sys.argv[3] == "import"
     if do_import:
         import geoarrow.pyarrow  # noqa: F401
-    from geoparquet_io.core.common import get_parquet_metadata, write_parquet_with_metadata
+    from geoparquet_io.core.common import get_parquet_metadata
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
     con = get_duckdb_connection(load_spatial=True)
     metadata, _ = get_parquet_metadata(source)
@@ -521,14 +523,14 @@ class TestCarrierHelperDefensivePaths:
     """The error and empty-input branches of the helpers this PR adds or fixes."""
 
     def test_parse_geo_metadata_quietly_handles_every_absent_shape(self):
-        from geoparquet_io.core.common import _parse_geo_metadata_quietly
+        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
         assert _parse_geo_metadata_quietly(None) == {}
         assert _parse_geo_metadata_quietly({}) == {}
         assert _parse_geo_metadata_quietly({b"other": b"x"}) == {}
 
     def test_parse_geo_metadata_quietly_accepts_a_str_key(self):
-        from geoparquet_io.core.common import _parse_geo_metadata_quietly
+        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
         assert _parse_geo_metadata_quietly({"geo": json.dumps(_geo_dict())})["primary_column"] == (
             "geometry"
@@ -541,7 +543,7 @@ class TestCarrierHelperDefensivePaths:
     )
     def test_parse_geo_metadata_quietly_swallows_unreadable_values(self, raw):
         """An unreadable geo key must not break a write; it just names no columns."""
-        from geoparquet_io.core.common import _parse_geo_metadata_quietly
+        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
         assert _parse_geo_metadata_quietly({b"geo": raw}) == {}
 
@@ -549,7 +551,7 @@ class TestCarrierHelperDefensivePaths:
         """A conversion failure must leave the table alone, not raise mid-write."""
         import geoarrow.pyarrow as ga
 
-        from geoparquet_io.core import common
+        from geoparquet_io.core import arrow_geo_metadata
 
         table = pa.table(
             {"geometry": ga.as_wkb(pa.array([_wkb_point(1.0, 2.0)], type=pa.binary()))}
@@ -559,13 +561,13 @@ class TestCarrierHelperDefensivePaths:
             lambda array: (_ for _ in ()).throw(ValueError("boom")),
         )
 
-        result = common._strip_geoarrow_to_plain_wkb(table, "geometry", verbose=True)
+        result = arrow_geo_metadata._strip_geoarrow_to_plain_wkb(table, "geometry", verbose=True)
 
         assert result is table
 
     def test_canonicalize_skips_a_column_it_cannot_convert(self, monkeypatch):
         """Same contract for the field-metadata canonicalization pass."""
-        from geoparquet_io.core import common
+        from geoparquet_io.core import arrow_geo_metadata
 
         field = pa.field(
             "geometry", pa.large_binary(), metadata={b"ARROW:extension:name": b"geoarrow.wkb"}
@@ -579,12 +581,12 @@ class TestCarrierHelperDefensivePaths:
             lambda array: (_ for _ in ()).throw(ValueError("boom")),
         )
 
-        result = common._canonicalize_wkb_columns(table, {"geometry"}, verbose=True)
+        result = arrow_geo_metadata._canonicalize_wkb_columns(table, {"geometry"}, verbose=True)
 
         assert result.schema.field("geometry").type == pa.large_binary()
 
     def test_canonicalize_is_a_no_op_when_nothing_needs_changing(self):
-        from geoparquet_io.core.common import _canonicalize_wkb_columns
+        from geoparquet_io.core.arrow_geo_metadata import _canonicalize_wkb_columns
 
         table = pa.table({"geometry": pa.array([_wkb_point(1.0, 2.0)], type=pa.binary())})
 
@@ -592,7 +594,7 @@ class TestCarrierHelperDefensivePaths:
 
     def test_a_declared_column_missing_from_the_table_is_skipped(self, tmp_path):
         """geo metadata can name a column a projection has already dropped."""
-        from geoparquet_io.core.common import _apply_geoparquet_metadata
+        from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
 
         table = pa.table(
             {
@@ -653,7 +655,7 @@ class TestSchemaCarriedCrsSurvives:
     def test_crs_carried_only_by_the_schema_type_is_not_cleared(self, tmp_path):
         import geoarrow.pyarrow as ga
 
-        from geoparquet_io.core.common import write_geoparquet_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
 
         projected = {
             "type": "ProjectedCRS",
@@ -691,7 +693,7 @@ class TestMalformedCarriedColumns:
         ids=["null", "list", "string", "dict_of_non_dict"],
     )
     def test_a_malformed_columns_value_does_not_reach_the_carrier_logic(self, columns):
-        from geoparquet_io.core.common import _parse_geo_metadata_quietly
+        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
 
         raw = {"version": "1.1.0", "primary_column": "geometry", "columns": columns}
         parsed = _parse_geo_metadata_quietly({b"geo": json.dumps(raw).encode()})

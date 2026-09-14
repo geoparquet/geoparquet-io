@@ -561,7 +561,7 @@ def _write_parquet_with_covering(path, bbox_col, extra_bbox_col=None):
 
 def test_check_bbox_structure_uses_covering_metadata_first(tmp_path):
     """Spec-valid files with non-conventional covering names are detected."""
-    from geoparquet_io.core.common import check_bbox_structure
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
 
     src = tmp_path / "f.parquet"
     _write_parquet_with_covering(src, "my_box")
@@ -573,7 +573,7 @@ def test_check_bbox_structure_uses_covering_metadata_first(tmp_path):
 def test_check_bbox_structure_covering_beats_name_convention(tmp_path):
     """When covering points at one struct and a decoy conventional name exists,
     the authoritative covering wins."""
-    from geoparquet_io.core.common import check_bbox_structure
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
 
     src = tmp_path / "f.parquet"
     _write_parquet_with_covering(src, "my_box", extra_bbox_col="bbox")
@@ -581,7 +581,7 @@ def test_check_bbox_structure_covering_beats_name_convention(tmp_path):
 
 
 def test_detect_bbox_column_from_table_uses_covering_first(tmp_path):
-    from geoparquet_io.core.common import _detect_bbox_column_from_table
+    from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 
     table = _write_parquet_with_covering(tmp_path / "f.parquet", "my_box", extra_bbox_col="bbox")
     assert _detect_bbox_column_from_table(table, verbose=True) == "my_box"
@@ -759,7 +759,7 @@ def test_validate_keying_columns_accepts_existing_point_column(tmp_path):
 
 
 def test_bbox_column_from_covering_edge_cases():
-    from geoparquet_io.core.common import _bbox_column_from_covering
+    from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 
     refs = {k: ["my_box", k] for k in ("xmin", "ymin", "xmax", "ymax")}
     good = {"columns": {"geometry": {"covering": {"bbox": refs}}}}
@@ -779,7 +779,7 @@ def test_covering_reference_to_bad_column_falls_back(tmp_path):
 
     import pyarrow as pa
 
-    from geoparquet_io.core.common import check_bbox_structure
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
 
     box = {"xmin": 9.9, "ymin": 49.9, "xmax": 10.1, "ymax": 50.1}
     struct_type = pa.struct([(k, pa.float64()) for k in ("xmin", "ymin", "xmax", "ymax")])
@@ -817,7 +817,7 @@ def test_detect_bbox_column_from_table_bad_covering_falls_back():
 
     import pyarrow as pa
 
-    from geoparquet_io.core.common import _detect_bbox_column_from_table
+    from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 
     box = {"xmin": 9.9, "ymin": 49.9, "xmax": 10.1, "ymax": 50.1}
     struct_type = pa.struct([(k, pa.float64()) for k in ("xmin", "ymin", "xmax", "ymax")])

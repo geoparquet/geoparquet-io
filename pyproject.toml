@@ -526,6 +526,56 @@ ignore_imports = [
 ]
 unmatched_ignore_imports_alerting = "warn"
 
+# The common.py split (#1010, #1066, #1083). Layers are listed top to bottom; a
+# module may import anything below it and nothing above it, directly or through
+# any other module -- function-level imports count, so a deferred import cannot
+# be used to sneak a back-edge past this contract. `|` separates siblings that
+# must stay independent of each other; `:` separates siblings that may import
+# each other (the metadata readers below the split are a pre-existing tangle
+# -- crs_utils <-> duckdb_metadata, geo_metadata -> geometry_detection -> ...
+# -- that the split did not create and this contract does not pretend to fix).
+[[tool.importlinter.contracts]]
+id = "core-common-split-layers"
+name = "The common.py split is layered: nothing imports upward through it"
+type = "layers"
+layers = [
+    # The stage-C residue: get_parquet_metadata, add_computed_column, the SQL
+    # geometry-type helpers, auto-version resolution, bounds. It imports the
+    # whole stack below; nothing below may import it.
+    "geoparquet_io.core.common",
+    # The two write funnels; the only module that needs both geo-block builders.
+    "geoparquet_io.core.write_funnels",
+    # The geo block for an Arrow table / for a written file. Independent by
+    # construction (#1010): neither reaches the other.
+    "geoparquet_io.core.arrow_geo_metadata | geoparquet_io.core.derive_geo_from_file",
+    "geoparquet_io.core.bbox_structure",
+    # file_type: what kind of GeoParquet a file is. parquet_writer: the write
+    # facade's three decisions (#990). Neither needs the other.
+    "geoparquet_io.core.file_type | geoparquet_io.core.parquet_writer",
+    # The geo-metadata readers. geo_metadata owns the WKB type-code tables that
+    # arrow_geo_metadata and derive_geo_from_file consume, which is why it sits
+    # below both of them.
+    "geoparquet_io.core.geo_metadata : geoparquet_io.core.crs_utils : geoparquet_io.core.duckdb_metadata : geoparquet_io.core.geometry_detection",
+    # Leaves.
+    "geoparquet_io.core.duckdb_utils : geoparquet_io.core.arrow_types : geoparquet_io.core.compression : geoparquet_io.core.sizing",
+]
+# Each ignored edge is a deferred import of a stage-C resident that has not
+# moved out of common.py yet (#1010's "Stages C and D" table). Deleting the
+# resident's block from common.py removes the edge, and the `error` alerting
+# below then fails the build until its line here is deleted too -- the ignore
+# list is meant to shrink to nothing, never to grow.
+ignore_imports = [
+    # geometry_type_sql: compute_geometry_types_via_sql, zm_suffix_sql, ...
+    "geoparquet_io.core.geo_metadata -> geoparquet_io.core.common",
+    "geoparquet_io.core.write_strategies.arrow_streaming -> geoparquet_io.core.common",
+    "geoparquet_io.core.write_strategies.disk_rewrite -> geoparquet_io.core.common",
+    # version_resolution: _resolve_auto_version, resolve_geoparquet_version_from_file
+    "geoparquet_io.core.parquet_writer -> geoparquet_io.core.common",
+    # add/computed_column: add_computed_column
+    "geoparquet_io.core.constants -> geoparquet_io.core.common",
+]
+unmatched_ignore_imports_alerting = "error"
+
 [dependency-groups]
 dev = [
     "import-linter>=2.11",

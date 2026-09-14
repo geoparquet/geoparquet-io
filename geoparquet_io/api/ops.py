@@ -1237,8 +1237,8 @@ _SUB_PARTITION_RESOLUTION_ARG = {"s2": "level"}
 
 def _parse_min_size(min_size: str | int) -> int:
     """Bytes from either the CLI's '100MB' spelling or a plain byte count."""
-    from geoparquet_io.core.common import parse_size_string
     from geoparquet_io.core.exceptions import InvalidParameterError
+    from geoparquet_io.core.sizing import parse_size_string
 
     if isinstance(min_size, bool) or not isinstance(min_size, (str, int)):
         raise InvalidParameterError(
