@@ -55,7 +55,7 @@ SCHEMA_HOOK = "forbid-bespoke-schema-reconciliation"
 
 #: The one module each guard may exempt, as a full path from the repo root.
 CLICK_ECHO_EXEMPT = "geoparquet_io/core/logging_config.py"
-SCHEMA_EXEMPT = "geoparquet_io/core/common.py"
+SCHEMA_EXEMPT = "geoparquet_io/core/arrow_types.py"
 
 
 class _GuardCase:
@@ -92,8 +92,8 @@ SCHEMA = _GuardCase(
     hook_id=SCHEMA_HOOK,
     exempt_path=SCHEMA_EXEMPT,
     violation="def _align_schema(a, b):\n    return a\n",
-    comment_bypass="def _align_schema(a, b):  # mirrors common.py\n    return a\n",
-    clean="from geoparquet_io.core.common import _compute_unified_schema\n",
+    comment_bypass="def _align_schema(a, b):  # mirrors arrow_types.py\n    return a\n",
+    clean="from geoparquet_io.core.arrow_types import _compute_unified_schema\n",
 )
 
 GUARDS = [CLICK_ECHO, SCHEMA]

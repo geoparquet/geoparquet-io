@@ -7,8 +7,10 @@ module named for that question -- ``arrow_geo_metadata``, ``arrow_types``,
 ``bbox_structure``, ``compression``, ``derive_geo_from_file``, ``file_type``,
 ``format_writers``, ``sizing``, ``write_funnels`` -- and the compatibility
 re-exports that kept the old import paths alive are gone: every caller now
-imports from the owner, and the ``core-common-is-a-leaf`` import-linter contract
-keeps it that way.
+imports from the owner. The ``core-common-split-layers`` import-linter contract
+keeps it that way -- this module is the top of that stack, so nothing below it
+may import it back -- and ``tests/test_common_split_guards.py`` refuses a new
+re-export shim.
 
 What remains is the stage-C residue, each block with a home already named in
 #1010's plan: the SQL-side geometry-type helpers (``zm_suffix_sql``,
