@@ -2671,6 +2671,7 @@ def create_pmtiles_pyramid(
     output_path: str,
     *,
     levels: str | list[int | str] | None = None,
+    bands: str | None = None,
     max_tile_kb: int = 500,
     bytes_per_cell: float | None = None,
     layer_mode: str = "grouped",
@@ -2699,6 +2700,10 @@ def create_pmtiles_pyramid(
         output_path: Path for the output PMTiles archive
         levels: Explicit overview levels (comma string or list; admin:
             "country"). Default: auto-select against max_tile_kb
+        bands: Explicit zoom bands as level:minzoom pairs, e.g. "5:0,8:6,10:9".
+            Overrides levels/max_tile_kb/bytes_per_cell and skips the
+            worst-tile probe. Use when two pyramids must hand over at the same
+            zooms, so cells keep their size as a viewer switches between them
         max_tile_kb: Tile-size budget in KB for band selection (default: 500)
         bytes_per_cell: Override the estimated compressed bytes per cell
         layer_mode: "single", "grouped" (default), or "per-level"
@@ -2726,6 +2731,9 @@ def create_pmtiles_pyramid(
         ...     features_source='buildings.parquet',
         ...     max_zoom=8,
         ... )
+        >>> ops.create_pmtiles_pyramid(
+        ...     'alltime.parquet', 'alltime.pmtiles', bands='5:0,8:6,10:9'
+        ... )
     """
     from geoparquet_io.core.pmtiles_pyramid import (
         create_pmtiles_pyramid as _create_pmtiles_pyramid,
@@ -2735,6 +2743,7 @@ def create_pmtiles_pyramid(
         input_path,
         output_path,
         levels=levels,
+        bands=bands,
         max_tile_kb=max_tile_kb,
         bytes_per_cell=bytes_per_cell,
         layer_mode=layer_mode,

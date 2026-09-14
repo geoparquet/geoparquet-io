@@ -78,12 +78,33 @@ Without `--levels`, gpio picks levels against the `--max-tile-kb` budget (defaul
 
 The selected bands drive which levels are materialized; the same selection powers `gpio pmtiles pyramid` zoom bands. If the base level already fits the budget at every zoom — for grid and admin inputs alike — no overview is built. (A geometry-less admin aggregate cannot be probed and falls back to building `country`.)
 
+### Stating the bands instead
+
+`gpio pmtiles pyramid` also takes `--bands`, which replaces the budget and the
+probe with an explicit plan of `level:minzoom` pairs:
+
+    gpio pmtiles pyramid cells.parquet out.pmtiles --bands 5:0,8:6,10:9
+
+Each entry says which zoom a level starts at; ends follow from the next entry
+and the last band is open-ended, so the bands always cover every zoom. The
+first must start at z0, zooms must strictly increase, and a level may appear
+only once.
+
+Reach for this when several archives are browsed as one surface. Auto
+selection judges each file alone, so two archives with different data land
+their handovers on different zooms — and a viewer switching between them sees
+cells change size at a zoom where nothing about the map should have changed.
+Auto selection remains the better default for a single archive: it measures
+the data instead of guessing, and `--bands` will happily produce a 20 MB tile
+if that is what you asked for.
+
 ## Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--levels` | auto | Comma-separated levels to build (grid resolutions, or `country`) |
 | `--max-tile-kb` | 500 | Tile-size budget driving auto selection |
+| `--bands` (pyramid only) | auto | Explicit `level:minzoom` bands, e.g. `5:0,8:6,10:9`; skips the probe |
 | `--bytes-per-cell` | estimated | Override the compressed bytes-per-cell estimate |
 | `--cell-column` | auto | Cell id column when detection fails |
 | `--scheme` | auto | Bucketing scheme (`a5`/`h3`/`admin`) when inference is ambiguous, e.g. H3 ids stored as integers |

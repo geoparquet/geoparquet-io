@@ -29,7 +29,7 @@ from geoparquet_io.core.process.overview.detect import (
     aggregate_connection,
     detect_aggregate_info,
 )
-from geoparquet_io.core.process.overview.levels import Band
+from geoparquet_io.core.process.overview.levels import Band, parse_bands
 from geoparquet_io.core.process.overview.run import (
     create_overviews,
     overview_output_path,
@@ -295,6 +295,7 @@ def _detect_and_plan(
     bytes_per_cell: float | None,
     base_max_zoom: int | None,
     verbose: bool,
+    bands_spec: str | None = None,
 ) -> tuple[AggregateInfo, list[Band]]:
     """Detect the aggregate's shape and select zoom bands for the pyramid."""
     with aggregate_connection(input_path, verbose) as (con, relation):
@@ -305,6 +306,12 @@ def _detect_and_plan(
                 "aggregate has no geometry column; re-run gpio process aggregate "
                 "with --out-geometry polygon or centroid before tiling",
             )
+        if bands_spec is not None:
+            # An explicit plan replaces the probe entirely: the caller has
+            # stated the handovers, so there is nothing to estimate and no
+            # budget to respect. Probing anyway would only cost a full scan to
+            # produce an answer that is then discarded.
+            return info, parse_bands(bands_spec)
         parsed_levels = parse_levels(levels, info) if levels is not None else None
         # Cap band transitions one below the base band's max zoom so the base
         # band starts by that zoom (and never inverts into minzoom > maxzoom).
@@ -327,6 +334,7 @@ def create_pmtiles_pyramid(
     output_path: str,
     *,
     levels: str | list[int | str] | None = None,
+    bands: str | None = None,
     max_tile_kb: int = 500,
     bytes_per_cell: float | None = None,
     layer_mode: str = "grouped",
@@ -401,7 +409,7 @@ def create_pmtiles_pyramid(
         raise TileJoinNotFoundError()
 
     info, bands = _detect_and_plan(
-        input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose
+        input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose, bands_spec=bands
     )
     stem = Path(output_path).stem
 

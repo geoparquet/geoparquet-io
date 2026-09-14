@@ -294,6 +294,51 @@ class TestOrchestration:
         }
         assert pyramid["bands"][1]["maxzoom"] == 6
 
+    def test_explicit_bands_override_the_budget(self, tmp_path, fake_tools):
+        # Same fixture and the same band-forcing numbers as the test above,
+        # which the probe turns into country [0,0] + region [1,...]. Stating
+        # the plan has to beat that, or --bands cannot do the job it exists
+        # for: making two pyramids hand over at the same zooms.
+        from geoparquet_io.core.pmtiles_pyramid import create_pmtiles_pyramid
+
+        src = tmp_path / "by_region.parquet"
+        out = tmp_path / "pyramid.pmtiles"
+        _write_admin_region_aggregate(src)
+
+        create_pmtiles_pyramid(
+            str(src),
+            str(out),
+            layer_mode="per-level",
+            bands="country:0,region:3",
+            **_BAND_FORCING,
+        )
+
+        tiles = fake_tools["tiles"]
+        assert [t["layer"] for t in tiles] == ["country", "region"]
+        assert (tiles[0]["min_zoom"], tiles[0]["max_zoom"]) == (0, 2)
+        assert (tiles[1]["min_zoom"], tiles[1]["max_zoom"]) == (3, 6)
+
+        ((_, pyramid),) = fake_tools["metadata"]
+        assert [(b["level"], b["minzoom"], b["maxzoom"]) for b in pyramid["bands"]] == [
+            ("country", 0, 2),
+            ("region", 3, 6),
+        ]
+
+    def test_explicit_bands_reject_an_unusable_plan(self, tmp_path, fake_tools):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.pmtiles_pyramid import create_pmtiles_pyramid
+
+        src = tmp_path / "by_region.parquet"
+        _write_admin_region_aggregate(src)
+        with pytest.raises(InvalidParameterError, match="must start at z0"):
+            create_pmtiles_pyramid(
+                str(src),
+                str(tmp_path / "out.pmtiles"),
+                layer_mode="per-level",
+                bands="country:1,region:3",
+                **_BAND_FORCING,
+            )
+
     def test_existing_overview_sibling_is_reused(self, tmp_path, fake_tools):
         from geoparquet_io.core.pmtiles_pyramid import create_pmtiles_pyramid
         from geoparquet_io.core.process.overview import create_overviews

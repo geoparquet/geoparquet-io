@@ -6,6 +6,7 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.overview.levels import (
     Band,
     estimate_bytes_per_cell,
+    parse_bands,
     select_bands,
 )
 
@@ -132,3 +133,59 @@ class TestEstimateBytesPerCell:
         # one dataset.
         est = estimate_bytes_per_cell(num_attributes=5, out_geometry="polygon")
         assert 40 <= est <= 160
+
+
+class TestParseBands:
+    def test_pairs_become_contiguous_bands(self):
+        assert parse_bands("5:0,8:6,10:9") == [
+            Band(5, 0, 5),
+            Band(8, 6, 8),
+            Band(10, 9, None),
+        ]
+
+    def test_single_band_is_open_ended(self):
+        assert parse_bands("6:0") == [Band(6, 0, None)]
+
+    def test_admin_levels_stay_strings(self):
+        assert parse_bands("country:0,region:4") == [
+            Band("country", 0, 3),
+            Band("region", 4, None),
+        ]
+
+    def test_whitespace_is_tolerated(self):
+        assert parse_bands(" 5:0 , 8:6 ") == [Band(5, 0, 5), Band(8, 6, None)]
+
+    def test_bands_are_contiguous_and_cover_every_zoom(self):
+        bands = parse_bands("4:0,6:3,8:7,10:11")
+        assert bands[0].minzoom == 0
+        assert bands[-1].maxzoom is None
+        for prev, cur in zip(bands, bands[1:], strict=False):
+            assert prev.maxzoom == cur.minzoom - 1
+
+    def test_matches_select_bands_shape(self):
+        # The whole point is interchangeability: an explicit plan has to be
+        # the same kind of thing the probe produces, not a parallel format.
+        candidates = [4, 6, 8, 10]
+        worst = {lvl: uniform_worst_counts(12 * 4**lvl) for lvl in candidates}
+        probed = select_bands(worst, candidates, bytes_per_cell=100.0, max_tile_kb=500)
+        stated = parse_bands(",".join(f"{b.level}:{b.minzoom}" for b in probed))
+        assert stated == probed
+
+    @pytest.mark.parametrize(
+        "spec,message",
+        [
+            ("5:1,8:6", "must start at z0"),
+            ("5:0,8:6,8:9", "only once"),
+            ("5:0,8:0", "strictly increase"),
+            ("5:0,8:4,10:2", "strictly increase"),
+            ("abc", "level:minzoom"),
+            ("5:x", "must be an integer"),
+            ("5:-1", "cannot be negative"),
+            ("", "no bands given"),
+            ("   ", "no bands given"),
+            (":4", "missing level"),
+        ],
+    )
+    def test_rejects_unusable_specs(self, spec, message):
+        with pytest.raises(InvalidParameterError, match=message):
+            parse_bands(spec)
