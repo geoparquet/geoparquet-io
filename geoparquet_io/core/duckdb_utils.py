@@ -17,8 +17,10 @@ from contextvars import ContextVar
 
 import duckdb
 
+from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
+from geoparquet_io.core.remote import needs_httpfs
 
 # Per-bucket cache for S3 buckets that require authentication
 # Buckets not in this set are accessed without credentials (works for public buckets)
@@ -351,7 +353,6 @@ def validate_where_clause(where_clause: str) -> None:
         ValidationError: If dangerous SQL keywords are found, if the clause does
             not parse, or if it composes into more than one statement.
     """
-    from geoparquet_io.core.exceptions import ValidationError
 
     found_keywords = _dangerous_keywords_in(where_clause)
     if found_keywords:
@@ -944,7 +945,6 @@ def load_community_extension(con, name: str, feature: str | None = None) -> None
     Raises:
         ExtensionUnavailableError: If the extension cannot be installed or loaded.
     """
-    from geoparquet_io.core.exceptions import ExtensionUnavailableError
 
     _opt_out_of_extension_telemetry()
     try:
@@ -1002,7 +1002,6 @@ def get_duckdb_connection_for_s3(
     Returns:
         duckdb.DuckDBPyConnection: Configured connection with appropriate S3 access
     """
-    from geoparquet_io.core.remote import needs_httpfs
 
     s3_kwargs = {"s3_endpoint": s3_endpoint, "s3_region": s3_region, "s3_use_ssl": s3_use_ssl}
 

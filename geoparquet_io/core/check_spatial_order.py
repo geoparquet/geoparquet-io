@@ -4,10 +4,15 @@
 import random as _random
 from statistics import mean
 
+from geoparquet_io.core.duckdb_metadata import (
+    get_per_row_group_bbox_stats,
+    get_per_row_group_native_geo_stats,
+    has_bbox_column,
+)
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
-from geoparquet_io.core.logging_config import debug, progress
+from geoparquet_io.core.logging_config import debug, progress, warn
 from geoparquet_io.core.remote import needs_httpfs
 
 _OVERLAP_RATIO_THRESHOLD = 0.3
@@ -163,10 +168,6 @@ def check_spatial_order_bbox_stats(
     Returns:
         ratio (float) if return_results=False, or dict if return_results=True
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        get_per_row_group_bbox_stats,
-        has_bbox_column,
-    )
 
     has_bbox, bbox_col_name = has_bbox_column(parquet_file)
     if not has_bbox or not bbox_col_name:
@@ -307,11 +308,6 @@ def check_spatial_order(
     Returns:
         ratio (float) if return_results=False, or dict if return_results=True
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        get_per_row_group_native_geo_stats,
-        has_bbox_column,
-    )
-    from geoparquet_io.core.logging_config import warn
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
@@ -549,10 +545,6 @@ def check_spatial_pushdown_readiness(
             issues (list[str]): Problems found.
             recommendations (list[str]): Suggestions for improvement.
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        get_per_row_group_bbox_stats,
-        has_bbox_column,
-    )
 
     has_bbox, bbox_col_name = has_bbox_column(parquet_file)
 

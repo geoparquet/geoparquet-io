@@ -8,6 +8,7 @@ import uuid
 
 from geoparquet_io.core.add.h3 import add_h3_column
 from geoparquet_io.core.constants import DEFAULT_H3_COLUMN_NAME
+from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -33,7 +34,6 @@ def _ensure_h3_column(input_parquet, h3_column_name, resolution, verbose):
     Returns:
         tuple: (input_file_to_use, column_existed, temp_file_or_none)
     """
-    from geoparquet_io.core.duckdb_metadata import get_column_names
 
     column_names = get_column_names(input_parquet)
 

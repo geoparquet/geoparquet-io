@@ -20,6 +20,7 @@ from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     get_duckdb_connection,
     orphaned_spill_dirs,
+    s3_config_scope,
     spill_directory,
     sql_path,
     sweep_orphaned_spill_dirs,
@@ -29,7 +30,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.logging_config import debug, info, warn
-from geoparquet_io.core.overture import OVERTURE_FALLBACK_RELEASE
+from geoparquet_io.core.overture import OVERTURE_FALLBACK_RELEASE, get_latest_overture_release
 
 # =============================================================================
 # Cache Configuration
@@ -469,7 +470,6 @@ class AdminDataset(ABC):
         Raises:
             Exception: If download fails
         """
-        from geoparquet_io.core.duckdb_utils import s3_config_scope
 
         source = self.get_default_source()
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -896,8 +896,6 @@ class OvertureAdminDataset(AdminDataset):
     def get_version(self) -> str:
         import re
 
-        from geoparquet_io.core.overture import get_latest_overture_release
-
         release = get_latest_overture_release(verbose=self.verbose)
         if not re.match(r"^\d{4}-\d{2}-\d{2}\.\d+$", release):
             from geoparquet_io.core.logging_config import warn
@@ -1092,8 +1090,6 @@ class OvertureAdminDataset(AdminDataset):
         multiplication. Geometries are simplified to ~11m tolerance to keep
         files small.
         """
-        from geoparquet_io.core.duckdb_utils import s3_config_scope
-        from geoparquet_io.core.logging_config import info
 
         cache_dir = get_cache_dir()
         cache_dir.mkdir(parents=True, exist_ok=True)

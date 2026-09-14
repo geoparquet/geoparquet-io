@@ -48,6 +48,11 @@ from geoparquet_io.core.parquet_writer import (
     estimate_row_size,
     resolve_row_group_rows_for_table,
 )
+from geoparquet_io.core.write_strategies.base import (
+    merge_secondary_geometry_metadata,
+    native_geometry_crs,
+    resolve_geometry_columns,
+)
 
 
 def _detect_version_from_table(table, verbose: bool = False) -> str | None:
@@ -723,11 +728,6 @@ def _apply_geoparquet_metadata(
             debug(f"Geometry column '{geometry_column}' not found in table, skipping metadata")
         return table
 
-    from geoparquet_io.core.write_strategies.base import (
-        native_geometry_crs,
-        resolve_geometry_columns,
-    )
-
     # The table entry points (`write_geoparquet_table`, the strategies'
     # `write_from_table`) get no `geometry_info`, so fall back to naming the
     # secondaries from the carried geo metadata -- otherwise they would silently
@@ -874,7 +874,6 @@ def _build_geo_block(
 
     # Secondary entries are merged in here rather than after the stats pass, so
     # each one's own `crs` is available to the native-type decision.
-    from geoparquet_io.core.write_strategies.base import merge_secondary_geometry_metadata
 
     merge_secondary_geometry_metadata(geo_meta, geometry_info)
     return geo_meta

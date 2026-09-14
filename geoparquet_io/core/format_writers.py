@@ -16,7 +16,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet, is_default_crs
+from geoparquet_io.core.crs_utils import (
+    _extract_crs_identifier,
+    extract_crs_from_parquet,
+    is_default_crs,
+)
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     get_duckdb_connection,
@@ -38,6 +42,7 @@ from geoparquet_io.core.remote import (
     validate_profile_for_urls,
 )
 from geoparquet_io.core.sizing import format_size
+from geoparquet_io.core.streaming import is_stdin
 
 # Error message templates for consistency
 ERROR_REMOTE_OUTPUT = "{format} output path must be local. Use upload() for cloud destinations."
@@ -64,7 +69,6 @@ ERROR_STDIN_UNSUPPORTED = (
 
 def _reject_stdin_input(input_path: str, description: str, command: str, output: str) -> None:
     """Fail early and legibly when a non-streaming writer is handed ``-``."""
-    from geoparquet_io.core.streaming import is_stdin
 
     if is_stdin(input_path):
         raise GeoParquetError(
@@ -122,7 +126,6 @@ def _get_srs_parameter(input_path: str, verbose: bool = False) -> str | None:
     Returns:
         SRS string for GDAL (always returns a value for valid input)
     """
-    from geoparquet_io.core.crs_utils import _extract_crs_identifier
 
     crs = extract_crs_from_parquet(input_path, verbose)
 
@@ -479,7 +482,6 @@ def write_geojson(
     from pathlib import Path
 
     from geoparquet_io.core.geojson_stream import convert_to_geojson
-    from geoparquet_io.core.streaming import is_stdin
 
     configure_verbose(verbose)
 

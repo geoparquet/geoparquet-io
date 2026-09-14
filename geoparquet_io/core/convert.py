@@ -8,6 +8,7 @@ from pathlib import Path
 import duckdb
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.common import should_skip_bbox
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
     detect_crs_from_spatial_file,
@@ -17,6 +18,7 @@ from geoparquet_io.core.crs_utils import (
     note_default_crs_normalized,
     parse_crs_string_to_projjson,
 )
+from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _geoarrow_coord_exprs,
@@ -36,6 +38,10 @@ from geoparquet_io.core.file_utils import (
     validate_output_path,
 )
 from geoparquet_io.core.geo_metadata import build_bbox_covering, sanitize_geo_metadata
+from geoparquet_io.core.geometry_detection import (
+    STANDARD_GEOMETRY_NAMES,
+    detect_parquet_geometry_column,
+)
 from geoparquet_io.core.geometry_repair import (
     repair_arrow_table_geometry,
     repair_query_geometry,
@@ -146,10 +152,6 @@ def _detect_geometry_column(con, input_file, verbose, is_parquet=False, layer=No
     ``input_file`` is RAW: ``detect_parquet_geometry_column`` escapes its own
     argument, and ``_build_st_read_expr`` escapes at the SQL boundary.
     """
-    from geoparquet_io.core.geometry_detection import (
-        STANDARD_GEOMETRY_NAMES,
-        detect_parquet_geometry_column,
-    )
 
     if verbose:
         debug("Detecting geometry column from input...")
@@ -205,7 +207,6 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
             - "secondary": list[str] - names of secondary geometry columns
             - "metadata": dict - per-column metadata from input (crs, encoding, etc.)
     """
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 
     result = {"primary": None, "secondary": [], "metadata": {}}
 
@@ -1073,7 +1074,6 @@ def _convert_csv_path(
     queries. DuckDB 1.5 can segfault when ST_GeometryType() or spatial
     aggregates operate on inlined TRY() subqueries under parallel execution.
     """
-    from geoparquet_io.core.common import should_skip_bbox
 
     # Determine if bbox should be skipped for this version
     skip_bbox = should_skip_bbox(geoparquet_version)
@@ -1233,7 +1233,6 @@ def _convert_spatial_path(
         tuple: (query, geometry_info) where geometry_info contains primary/secondary columns
                and their metadata. Returns (None, None) if no geometry found.
     """
-    from geoparquet_io.core.common import should_skip_bbox
 
     # Use multi-geometry detection for parquet files
     if is_parquet:

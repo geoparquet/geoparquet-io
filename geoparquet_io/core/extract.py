@@ -24,6 +24,12 @@ from geoparquet_io.core.column_selection import (
 )
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import get_crs_display_name
+from geoparquet_io.core.duckdb_metadata import (
+    get_geo_metadata,
+    get_row_count,
+    get_schema_info,
+    parse_geometry_logical_type,
+)
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     get_duckdb_connection,
@@ -38,6 +44,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.file_utils import (
+    get_first_parquet_file,
     handle_output_overwrite,
     is_partition_path,
     resolve_file_url,
@@ -54,7 +61,7 @@ from geoparquet_io.core.geometry_detection import (
 )
 from geoparquet_io.core.geometry_repair import repair_query_geometry
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
-from geoparquet_io.core.partition.reader import require_parquet_files
+from geoparquet_io.core.partition.reader import build_read_parquet_expr, require_parquet_files
 from geoparquet_io.core.remote import (
     _sanitize_url_for_logging,
     is_remote_url,
@@ -72,7 +79,6 @@ from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 def get_parquet_row_count(parquet_file: str) -> int:
     """Get row count from parquet file metadata using DuckDB (O(1) - reads footer only)."""
-    from geoparquet_io.core.duckdb_metadata import get_row_count
 
     return get_row_count(parquet_file)
 
@@ -127,11 +133,6 @@ def _get_crs_from_file(input_parquet: str, geometry_col: str) -> dict | str | No
 
     Returns CRS info dict/string or None if not found.
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        get_geo_metadata,
-        get_schema_info,
-        parse_geometry_logical_type,
-    )
 
     # First try GeoParquet file-level metadata
     try:
@@ -438,7 +439,6 @@ def get_schema_columns(input_parquet: str) -> list[str]:
     Returns:
         list: Column names
     """
-    from geoparquet_io.core.file_utils import get_first_parquet_file, is_partition_path
 
     # For partitions, use first file for schema
     file_to_check = input_parquet
@@ -587,7 +587,6 @@ def build_extract_query(
     hive_input: bool = False,
 ) -> str:
     """Build the complete extraction query."""
-    from geoparquet_io.core.partition.reader import build_read_parquet_expr
 
     col_list = ", ".join(quote_identifier(c) for c in columns)
     # Use partition reader to build read_parquet expression with proper options

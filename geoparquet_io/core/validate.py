@@ -29,6 +29,12 @@ from geoparquet_io.core.crs_utils import (
     get_crs_display_name,
     is_geographic_crs,
 )
+from geoparquet_io.core.duckdb_metadata import (
+    is_geometry_column,
+    parse_geometry_logical_type,
+    resolve_authority_code_crs,
+    resolve_crs_reference,
+)
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _geoarrow_coord_exprs,
@@ -37,12 +43,15 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
+from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import BBOX_COVERING_FIELD_ORDERS, is_covering_path
+from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
     schema_direct_children,
     schema_entry_is_group,
 )
+from geoparquet_io.core.remote import is_remote_url, needs_httpfs
 
 
 class CheckStatus(Enum):
@@ -557,7 +566,6 @@ def _check_edges_spherical_on_projected_crs(
     Returns ``None`` when there is nothing to say (planar or absent edges, or a
     geographic/unknown CRS), so conformant files gain no output line.
     """
-    from geoparquet_io.core.duckdb_metadata import resolve_crs_reference
 
     edges = col_meta.get("edges")
     if not edges or edges == "planar":
@@ -1184,7 +1192,6 @@ def _check_encoding_matches_data(
     parquet_file: str, geom_col: str, encoding: str, con, sample_size: int
 ) -> ValidationCheck:
     """Check 17: all geometry values match the 'encoding' metadata."""
-    from geoparquet_io.core.file_utils import resolve_file_url
 
     raw_url = resolve_file_url(parquet_file, verbose=False)
     quoted_geom = quote_identifier(geom_col)
@@ -1361,7 +1368,6 @@ def _check_geometry_types_match_data(
     encoding: Any = "WKB",
 ) -> ValidationCheck:
     """Check 18: all geometry types must be included in 'geometry_types' metadata."""
-    from geoparquet_io.core.file_utils import resolve_file_url
 
     raw_url = resolve_file_url(parquet_file, verbose=False)
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
@@ -1479,9 +1485,6 @@ def _check_orientation_matches_data(
         return _result(
             CheckStatus.SKIPPED, f'orientation check not implemented for encoding "{encoding}"'
         )
-
-    from geoparquet_io.core.duckdb_utils import sql_path
-    from geoparquet_io.core.file_utils import resolve_file_url
 
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
     quoted_geom = quote_identifier(geom_col)
@@ -1698,8 +1701,6 @@ def _check_bbox_contains_data(
             message="no bbox specified, skipping check",
             category="data_validation",
         )
-
-    from geoparquet_io.core.file_utils import resolve_file_url
 
     raw_url = resolve_file_url(parquet_file, verbose=False)
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
@@ -2075,7 +2076,6 @@ def _check_file_extension(file_path: str) -> ValidationCheck:
 
 def _check_native_geo_type_present(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check PGO-1: GEOMETRY/GEOGRAPHY logical type must be present."""
-    from geoparquet_io.core.duckdb_metadata import is_geometry_column
 
     for col in schema_info:
         if col.get("name") == geom_col:
@@ -2105,7 +2105,6 @@ def _check_native_geo_type_present(schema_info: list, geom_col: str) -> Validati
 
 def _check_native_crs_format(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check PGO-3: optional CRS must be in valid format (srid:XXXX or inline PROJJSON)."""
-    from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
 
     for col in schema_info:
         if col.get("name") == geom_col:
@@ -2166,7 +2165,6 @@ def _check_native_crs_format(schema_info: list, geom_col: str) -> ValidationChec
 
 def _check_geography_edges_valid(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check PGO-4: for GEOGRAPHY, edges must be valid algorithm."""
-    from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
 
     for col in schema_info:
         if col.get("name") == geom_col:
@@ -2248,8 +2246,6 @@ def _check_geography_coordinate_bounds(
             message="not a GEOGRAPHY type, coordinate bounds check not applicable",
             category="parquet_geo_types",
         )
-
-    from geoparquet_io.core.file_utils import resolve_file_url
 
     raw_url = resolve_file_url(parquet_file, verbose=False)
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
@@ -2359,7 +2355,6 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
         aggregate_native_geo_stats,
         get_native_geo_stats_by_row_group,
     )
-    from geoparquet_io.core.remote import is_remote_url
 
     try:
         # For remote files, skip (may be slow)
@@ -2446,8 +2441,6 @@ def _check_native_geo_stats_contains_data(
     antimeridian line".
     """
     from geoparquet_io.core.duckdb_metadata import get_aggregated_native_geo_stats
-    from geoparquet_io.core.file_utils import resolve_file_url
-    from geoparquet_io.core.remote import is_remote_url
 
     try:
         # For remote files, skip (may be slow)
@@ -2592,7 +2585,6 @@ def _check_native_geo_types_match(
     parquet_file: str, geom_col: str, sample_size: int, con
 ) -> ValidationCheck:
     """Check that declared geo_types match actual geometry types in the data."""
-    from geoparquet_io.core.file_utils import resolve_file_url
 
     try:
         raw_url = resolve_file_url(parquet_file, verbose=False)
@@ -2684,7 +2676,6 @@ def _check_native_geo_types_match(
 
 def _check_native_columns_in_metadata(schema_info: list, columns: dict) -> ValidationCheck:
     """Check V2-6: every GEOMETRY/GEOGRAPHY column must be described in geo 'columns'."""
-    from geoparquet_io.core.duckdb_metadata import is_geometry_column
 
     missing = [
         col["name"]
@@ -2718,7 +2709,6 @@ def _check_geometry_types_match_stats(
 ) -> ValidationCheck:
     """Check V2-7: geometry_types must include every type in the geospatial statistics."""
     from geoparquet_io.core.duckdb_metadata import get_native_geo_stats_by_row_group
-    from geoparquet_io.core.remote import is_remote_url
 
     name = f"geometry_types_match_stats_{geom_col}"
     if not declared_types:
@@ -2772,7 +2762,6 @@ def _check_geometry_types_match_stats(
 
 def _check_v2_uses_native_types(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check V2-1: geometry columns MUST use Parquet GEOMETRY or GEOGRAPHY types."""
-    from geoparquet_io.core.duckdb_metadata import is_geometry_column
 
     for col in schema_info:
         if col.get("name") == geom_col:
@@ -2804,7 +2793,6 @@ def _check_v2_crs_in_parquet_type(
     geo_meta: dict, schema_info: list, geom_col: str
 ) -> ValidationCheck:
     """Check V2-2: if non-default CRS, must be inline PROJJSON in Parquet geo type."""
-    from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
 
     col_meta = geo_meta.get("columns", {}).get(geom_col, {})
     # Extract absent-vs-null faithfully: they mean different things here.
@@ -2898,10 +2886,6 @@ def _schema_crs_for_consistency(schema_info: list, geom_col: str) -> Any:
     compares unequal and the check reports a mismatch rather than guessing.
     Conservative, but never a silent false PASS.
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        parse_geometry_logical_type,
-        resolve_authority_code_crs,
-    )
 
     for col in schema_info:
         if col.get("name") != geom_col:
@@ -2977,7 +2961,6 @@ def _schema_crs_display(schema_crs: Any) -> str:
 
 def _edges_schema_facts(schema_info: list, geom_col: str) -> tuple[bool, bool, str | None]:
     """Return (is_geography, is_planar_geometry, schema_algorithm) for a column."""
-    from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
 
     for col in schema_info:
         if col.get("name") != geom_col:
@@ -3051,10 +3034,6 @@ def _check_parquet_geo_only_crs(
     schema_info: list, geom_col: str, parquet_file: str
 ) -> ValidationCheck:
     """Check CRS for parquet-geo-only files (no GeoParquet metadata)."""
-    from geoparquet_io.core.duckdb_metadata import (
-        parse_geometry_logical_type,
-        resolve_crs_reference,
-    )
 
     for col in schema_info:
         if col.get("name") == geom_col:
@@ -3398,7 +3377,6 @@ def _check_coordinates_valid_for_crs(
     encoding: Any = "WKB",
 ) -> ValidationCheck:
     """Check that geometry coordinates are within valid bounds for the declared CRS."""
-    from geoparquet_io.core.file_utils import resolve_file_url
 
     raw_url = resolve_file_url(parquet_file, verbose=False)
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
@@ -3487,7 +3465,6 @@ def _check_coordinates_valid_for_crs(
 
 def _get_crs_from_schema(schema_info: list, geom_col: str) -> Any:
     """Extract CRS from schema logical type for a geometry column."""
-    from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
 
     for col in schema_info:
         if col.get("name") == geom_col:
@@ -3622,8 +3599,6 @@ def validate_geoparquet(
         get_schema_info,
     )
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.logging_config import configure_verbose
-    from geoparquet_io.core.remote import needs_httpfs
 
     configure_verbose(verbose)
 

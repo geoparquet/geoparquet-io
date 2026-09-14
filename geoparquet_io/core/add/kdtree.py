@@ -8,6 +8,7 @@ import tempfile
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
@@ -640,7 +641,6 @@ def add_kdtree_column(
         return
 
     # Get metadata before processing
-    from geoparquet_io.core.common import get_parquet_metadata
 
     metadata, _ = get_parquet_metadata(input_parquet, verbose)
 

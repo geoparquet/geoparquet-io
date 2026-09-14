@@ -6,6 +6,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.common import add_computed_column
+from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
@@ -30,7 +31,6 @@ def _bbox_metadata_advice(parquet_file: str) -> str:
     'covering' is 1.1-only, so a 1.0 file cannot be fixed by 'add bbox-metadata'
     (which refuses) — it needs a version upgrade first.
     """
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 
     geo_meta = get_geo_metadata(parquet_file) or {}
     version = geo_meta.get("version", "")

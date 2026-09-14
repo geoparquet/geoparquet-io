@@ -21,8 +21,19 @@ from geoparquet_io.core.inspect_utils import (
     get_column_statistics,
     get_preview_data,
 )
+from geoparquet_io.core.metadata_utils import (
+    format_all_metadata,
+    format_geoparquet_metadata,
+    format_parquet_geo_metadata,
+    format_parquet_metadata_enhanced,
+    format_row_group_geo_stats,
+)
 from geoparquet_io.core.partition.reader import get_partition_info
-from geoparquet_io.core.remote import needs_httpfs
+from geoparquet_io.core.remote import (
+    needs_httpfs,
+    setup_aws_profile_if_needed,
+    validate_profile_for_urls,
+)
 
 
 def get_primary_geometry_column(parquet_file: str) -> str | None:
@@ -74,10 +85,6 @@ def inspect_summary(
     Returns:
         Dict with file_info, geo_info, columns_info, and optionally partition_summary
     """
-    from geoparquet_io.core.remote import (
-        setup_aws_profile_if_needed,
-        validate_profile_for_urls,
-    )
 
     validate_profile_for_urls(profile, parquet_file)
     setup_aws_profile_if_needed(profile, parquet_file)
@@ -200,10 +207,6 @@ def inspect_preview(
     Returns:
         Dict with file_info, geo_info, columns_info, preview_table, preview_mode
     """
-    from geoparquet_io.core.remote import (
-        setup_aws_profile_if_needed,
-        validate_profile_for_urls,
-    )
 
     validate_profile_for_urls(profile, parquet_file)
     setup_aws_profile_if_needed(profile, parquet_file)
@@ -305,10 +308,6 @@ def inspect_stats(
     Returns:
         Dict with file_info, geo_info, columns_info, statistics
     """
-    from geoparquet_io.core.remote import (
-        setup_aws_profile_if_needed,
-        validate_profile_for_urls,
-    )
 
     validate_profile_for_urls(profile, parquet_file)
     setup_aws_profile_if_needed(profile, parquet_file)
@@ -417,13 +416,6 @@ def display_metadata(
         json_output: Output as JSON
         geo_stats: Show per-row-group geo_bbox statistics
     """
-    from geoparquet_io.core.metadata_utils import (
-        format_all_metadata,
-        format_geoparquet_metadata,
-        format_parquet_geo_metadata,
-        format_parquet_metadata_enhanced,
-        format_row_group_geo_stats,
-    )
 
     if geo_stats:
         format_row_group_geo_stats(parquet_file, json_output, row_groups)

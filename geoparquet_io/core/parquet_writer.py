@@ -61,8 +61,10 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.logging_config import info
+from geoparquet_io.core.logging_config import debug, info
+from geoparquet_io.core.streaming import extract_version_from_metadata
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -387,7 +389,6 @@ def resolve_output_geoparquet_version(
         _resolve_auto_version,
         resolve_geoparquet_version_from_file,
     )
-    from geoparquet_io.core.streaming import extract_version_from_metadata
 
     if input_file:
         detected = resolve_geoparquet_version_from_file(input_file, verbose)
@@ -450,9 +451,6 @@ def resolve_input_crs(
         return input_crs
     if not input_file:
         return None
-
-    from geoparquet_io.core.crs_utils import extract_crs_from_parquet
-    from geoparquet_io.core.logging_config import debug
 
     try:
         # RAW path: extract_crs_from_parquet escapes its own argument (#718).

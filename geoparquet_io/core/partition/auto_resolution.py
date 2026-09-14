@@ -23,7 +23,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, warn
-from geoparquet_io.core.remote import needs_httpfs
+from geoparquet_io.core.remote import needs_httpfs, setup_aws_profile_if_needed
 
 # Tuning for the extent-aware probe (issue #524). Sampling a multiple of the
 # target partition count keeps cells near the target resolution well-populated,
@@ -81,7 +81,6 @@ def _get_total_row_count(
     Returns:
         Total number of rows
     """
-    from geoparquet_io.core.remote import setup_aws_profile_if_needed
 
     input_url = resolve_file_url(input_parquet, verbose)
 
@@ -472,7 +471,6 @@ def _probe_extent_resolution(
     geometry column, sampling error), so the caller can fall back to the global
     estimate.
     """
-    from geoparquet_io.core.remote import setup_aws_profile_if_needed
 
     url = resolve_file_url(input_parquet, verbose)
     resolutions = list(range(min_resolution, max_resolution + 1))

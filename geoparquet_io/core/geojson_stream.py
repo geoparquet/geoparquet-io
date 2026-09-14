@@ -32,10 +32,16 @@ if TYPE_CHECKING:
 
     import duckdb
 
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
+from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import parse_geo_metadata
 from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
 from geoparquet_io.core.geometry_repair import repair_geometry_sql
+from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
+from geoparquet_io.core.remote import needs_httpfs, setup_aws_profile_if_needed
+from geoparquet_io.core.stream_io import _create_view_with_geometry
+from geoparquet_io.core.streaming import is_stdin
 
 # RFC 8142 record separator character
 RS = "\x1e"
@@ -103,7 +109,6 @@ def _get_source_crs(input_path: str) -> str | None:
     Returns:
         CRS string (e.g., "EPSG:4326") or None if not found
     """
-    from geoparquet_io.core.common import get_parquet_metadata
 
     try:
         metadata, _ = get_parquet_metadata(input_path, verbose=False)
@@ -532,10 +537,6 @@ def convert_to_geojson_stream(
         Number of features written
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.file_utils import resolve_file_url
-    from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
-    from geoparquet_io.core.remote import needs_httpfs, setup_aws_profile_if_needed
-    from geoparquet_io.core.streaming import is_stdin
 
     configure_verbose(verbose)
 
@@ -649,8 +650,6 @@ def _convert_from_stream(
         ensure source data is already in WGS84 or use gpio convert reproject first.
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.logging_config import debug, info, success
-    from geoparquet_io.core.stream_io import _create_view_with_geometry
     from geoparquet_io.core.streaming import (
         find_geometry_column_from_table,
         get_crs_from_arrow_table,

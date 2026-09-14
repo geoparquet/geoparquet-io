@@ -19,6 +19,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _write_table_with_settings,
 )
 from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.duckdb_utils import _get_query_columns, _wrap_query_with_wkb_conversion
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
 from geoparquet_io.core.write_strategies.base import BaseWriteStrategy
@@ -60,10 +61,6 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write query results to GeoParquet using in-memory Arrow approach."""
-        from geoparquet_io.core.duckdb_utils import (
-            _get_query_columns,
-            _wrap_query_with_wkb_conversion,
-        )
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)

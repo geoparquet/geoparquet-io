@@ -18,6 +18,7 @@ from geoparquet_io.core.constants import (
     DEFAULT_S2_COLUMN_NAME,
     DEFAULT_S2_COMPRESSION_LEVEL,
 )
+from geoparquet_io.core.duckdb_metadata import get_column_names
 from geoparquet_io.core.duckdb_utils import require_community_extension
 from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
 from geoparquet_io.core.logging_config import (
@@ -44,7 +45,6 @@ def _ensure_s2_column(input_parquet, s2_column_name, level, verbose):
     Returns:
         tuple: (input_file_to_use, column_existed, temp_file_or_none)
     """
-    from geoparquet_io.core.duckdb_metadata import get_column_names
 
     column_names = get_column_names(input_parquet)
 

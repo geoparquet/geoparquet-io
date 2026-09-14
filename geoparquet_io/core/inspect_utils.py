@@ -24,8 +24,16 @@ from geoparquet_io.core.crs_utils import (
     is_geographic_crs,
     merge_longitude_ranges,
 )
+from geoparquet_io.core.duckdb_metadata import (
+    detect_geometry_columns,
+    get_compression_info,
+    get_file_metadata,
+    get_geo_metadata,
+    get_row_count,
+)
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
     extract_bbox_from_row_group_stats,
 )
@@ -44,10 +52,6 @@ def extract_file_info(parquet_file: str, con=None) -> dict[str, Any]:
     Returns:
         dict: File info including size, rows, row_groups, compression
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        get_compression_info,
-        get_file_metadata,
-    )
 
     # Get file metadata using DuckDB
     file_meta = get_file_metadata(parquet_file, con=con)
@@ -645,11 +649,6 @@ def get_preview_data(
     Returns:
         tuple: (PyArrow table with data, mode: "head" or "tail")
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        detect_geometry_columns,
-        get_geo_metadata,
-        get_row_count,
-    )
 
     raw_url = resolve_file_url(parquet_file, verbose=False)
     total_rows = get_row_count(parquet_file)
@@ -734,8 +733,6 @@ def _native_geoarrow_columns_to_wkt(
     """
     import geoarrow.pyarrow as ga
     import pyarrow as pa
-
-    from geoparquet_io.core.logging_config import debug
 
     def _nullable_type(t):
         """Rebuild an Arrow type with all nested fields/elements nullable.
@@ -1216,7 +1213,6 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
             - geoparquet_versions: Set of versions found
             - per_file_info: List of per-file details
     """
-    from geoparquet_io.core.logging_config import debug
     from geoparquet_io.core.validate import _bbox_xy
 
     total_rows = 0

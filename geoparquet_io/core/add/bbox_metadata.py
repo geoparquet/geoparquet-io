@@ -39,6 +39,7 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success
+from geoparquet_io.core.streaming import find_geometry_column_from_table
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -218,8 +219,6 @@ def add_bbox_metadata_table(
         ValueError: If the geometry or bbox column is missing, or the declared
             version predates GeoParquet 1.1
     """
-
-    from geoparquet_io.core.streaming import find_geometry_column_from_table
 
     geom_col = geometry_column or find_geometry_column_from_table(table)
     if geom_col is None:

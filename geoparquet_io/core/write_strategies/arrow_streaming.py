@@ -23,7 +23,8 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _detect_version_from_table,
 )
 from geoparquet_io.core.compression import validate_compression_settings
-from geoparquet_io.core.duckdb_utils import quote_identifier
+from geoparquet_io.core.crs_utils import apply_output_crs
+from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion, quote_identifier
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     bbox_column_to_declare,
@@ -34,11 +35,13 @@ from geoparquet_io.core.geoarrow_encoding import (
     WKB_EXTENSION_NAMES,
     arrow_extension_name,
     native_wkb_type,
+    wkb_array_to_geoarrow,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
+    _parse_existing_geo_metadata,
     merge_secondary_geometry_metadata,
     native_geometry_crs,
 )
@@ -198,7 +201,6 @@ def _has_carried_bbox(original_metadata: dict | None, geometry_column: str) -> b
     Callers that filter rows or move coordinates strip it first, which is the
     signal that this write must compute a fresh one.
     """
-    from geoparquet_io.core.write_strategies.base import _parse_existing_geo_metadata
 
     geo_meta = _parse_existing_geo_metadata(original_metadata)
     if not isinstance(geo_meta, dict):
@@ -209,7 +211,6 @@ def _has_carried_bbox(original_metadata: dict | None, geometry_column: str) -> b
 
 def _detect_bbox_column(schema: pa.Schema, original_metadata: dict | None) -> dict:
     """The bbox column this write may declare, through the shared gate (#1035)."""
-    from geoparquet_io.core.write_strategies.base import _parse_existing_geo_metadata
 
     name = bbox_column_to_declare(schema, _parse_existing_geo_metadata(original_metadata))
     return {"has_bbox_column": name is not None, "bbox_column_name": name}
@@ -222,7 +223,6 @@ def _check_geometry_type(
     verbose: bool,
 ) -> tuple[bool, str]:
     """Check if geometry column needs WKB conversion. Returns (needs_conversion, final_sql)."""
-    from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
 
     type_result = con.execute(
         f"SELECT TYPEOF({quote_identifier(geometry_column)}) FROM ({query}) LIMIT 1"
@@ -439,7 +439,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         Always returns a block, even for parquet-geo-only: the caller keys the
         native Parquet GEOMETRY types off it and then drops it (#848).
         """
-        from geoparquet_io.core.crs_utils import apply_output_crs
 
         bbox_info = _detect_bbox_column(schema, original_metadata)
         geo_meta = create_geo_metadata(
@@ -664,7 +663,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using batch streaming."""
-        from geoparquet_io.core.crs_utils import apply_output_crs
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -911,7 +909,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         left untouched — though this path should not normally be reached because Task 3
         routing sends already-native inputs to the duckdb-kv strategy instead.
         """
-        from geoparquet_io.core.geoarrow_encoding import wkb_array_to_geoarrow
 
         col_index = batch.schema.get_field_index(geometry_column)
         geom_col = batch.column(col_index)

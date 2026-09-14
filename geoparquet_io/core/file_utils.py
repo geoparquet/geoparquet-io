@@ -8,13 +8,14 @@ import glob as glob_module
 import os
 from pathlib import Path, PurePath
 
-from geoparquet_io.core.duckdb_utils import _escape_sql_string
+from geoparquet_io.core.duckdb_utils import _escape_sql_string, get_active_s3_config
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
 )
 from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.remote import is_remote_url
 
 
 def has_glob_pattern(path: str) -> bool:
@@ -22,8 +23,6 @@ def has_glob_pattern(path: str) -> bool:
 
 
 def is_partition_path(path: str) -> bool:
-    from geoparquet_io.core.remote import is_remote_url
-
     if has_glob_pattern(path):
         return True
 
@@ -40,8 +39,6 @@ def is_partition_path(path: str) -> bool:
 
 
 def resolve_partition_path(path: str, hive_partitioning: bool | None = None) -> tuple[str, dict]:
-    from geoparquet_io.core.remote import is_remote_url
-
     options = {}
     resolved = path
 
@@ -79,8 +76,6 @@ def resolve_partition_path(path: str, hive_partitioning: bool | None = None) -> 
 
 
 def get_first_parquet_file(partition_path: str) -> str | None:
-    from geoparquet_io.core.remote import is_remote_url
-
     if is_remote_url(partition_path):
         return partition_path
 
@@ -100,8 +95,6 @@ def get_first_parquet_file(partition_path: str) -> str | None:
 
 
 def get_all_parquet_files(partition_path: str) -> list[str]:
-    from geoparquet_io.core.remote import is_remote_url
-
     if is_remote_url(partition_path):
         return [partition_path]
 
@@ -124,8 +117,6 @@ def get_all_parquet_files(partition_path: str) -> list[str]:
 
 
 def validate_output_path(output_path, verbose=False):
-    from geoparquet_io.core.remote import is_remote_url
-
     if is_remote_url(output_path):
         return
 
@@ -224,7 +215,6 @@ def guard_output_not_read_as_input(input_path: str | None, output_path: str | No
         GeoParquetError: When the output lies inside the input directory, or
             matches the input glob.
     """
-    from geoparquet_io.core.remote import is_remote_url
 
     if not input_path or not output_path or "-" in (input_path, output_path):
         return
@@ -260,8 +250,6 @@ def is_same_file_path(first: str | None, second: str | None) -> bool:
         return False
     if first == second:
         return True
-
-    from geoparquet_io.core.remote import is_remote_url
 
     if is_remote_url(first) or is_remote_url(second):
         return False
@@ -444,7 +432,6 @@ def resolve_object_store(url: str) -> tuple[object, str]:
     _check_copyable_scheme("path", url, writing=False)
     _scheme, canonical = _canonical_remote_url(url)
 
-    from geoparquet_io.core.duckdb_utils import get_active_s3_config
     from geoparquet_io.core.upload import _setup_store_and_kwargs, parse_object_store_url
 
     bucket_url, key = parse_object_store_url(canonical)
@@ -485,8 +472,6 @@ def copy_file(source_path: str, dest_path: str, verbose: bool = False) -> None:
         InvalidParameterError: If either side is a remote URL gpio cannot copy
     """
     import shutil
-
-    from geoparquet_io.core.remote import is_remote_url
 
     if verbose:
         debug(f"Copying {source_path} to {dest_path}")
@@ -559,7 +544,6 @@ def resolve_file_url(file_path, verbose=False):
     Returns:
         str: Resolved, unescaped file path/URL
     """
-    from geoparquet_io.core.remote import is_remote_url
 
     if is_remote_url(file_path):
         # Azure reads are not supported: gpio never loads DuckDB's azure
@@ -621,8 +605,6 @@ def safe_file_url(file_path, verbose=False):
 
 
 def _get_file_cache_key(parquet_file: str) -> tuple[str, float]:
-    from geoparquet_io.core.remote import is_remote_url
-
     if is_remote_url(parquet_file):
         return (parquet_file, 0)
 

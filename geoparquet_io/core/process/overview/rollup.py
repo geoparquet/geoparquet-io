@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import gc
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.partition.admin_hierarchical import _setup_admin_dataset
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME
 from geoparquet_io.core.process.aggregate.common import geometry_to_geom_expr
@@ -128,9 +130,6 @@ def build_admin_rollup_sql(
 
 def get_admin_country_context(con, verbose: bool = False) -> tuple[str, str, str]:
     """Return (country_ref, code_col, geom_expr) for the Overture country cache."""
-    from geoparquet_io.core.duckdb_utils import sql_path
-    from geoparquet_io.core.file_utils import resolve_file_url
-    from geoparquet_io.core.partition.admin_hierarchical import _setup_admin_dataset
 
     dataset, _boundary_columns = _setup_admin_dataset("overture", verbose, ["country"])
     path = dataset.get_source_for_level("country")
