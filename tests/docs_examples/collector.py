@@ -102,6 +102,9 @@ class DocExampleItem(pytest.Item):
         if directives.skip:
             reason = directives.skip_reason or "marked skip by a doctest directive"
             self.add_marker(pytest.mark.skip(reason=reason))
+        platform_reason = directives.skipped_here(sys.platform)
+        if platform_reason:
+            self.add_marker(pytest.mark.skip(reason=f"{sys.platform}: {platform_reason}"))
         if directives.needs_tippecanoe and shutil.which("tippecanoe") is None:
             self.add_marker(pytest.mark.skip(reason="tippecanoe not installed"))
         if directives.needs_ogr and shutil.which("ogr2ogr") is None:
@@ -151,7 +154,7 @@ class DocExampleItem(pytest.Item):
             completed = subprocess.run(
                 argv,
                 cwd=workdir,
-                env=example_env(),
+                env=_subprocess_env(),
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
@@ -312,25 +315,13 @@ def _is_slow(block: Block) -> bool:
     return block.path.name not in FAST_PAGES
 
 
-def example_env() -> dict[str, str]:
-    """Environment for an example: the project's venv first on ``PATH``.
-
-    On Windows the shell is Git Bash, whose MSYS runtime rebuilds the command
-    line when it spawns a native ``.exe``. Part of that rebuild is expanding
-    wildcards itself -- including ones bash deliberately left alone because
-    they were quoted. ``gpio check spatial "partitions/*.parquet"`` then
-    reaches gpio as two positional paths and is rejected, while the identical
-    example passes everywhere else. ``noglob`` turns that off, so a quoted
-    glob is a quoted glob on every platform the docs lane runs on.
-    """
+def _subprocess_env() -> dict[str, str]:
+    """Environment for an example: the project's venv first on ``PATH``."""
     env = dict(os.environ)
     venv_bin = str(Path(sys.executable).parent)
     env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
     env["NO_COLOR"] = "1"
     env["COLUMNS"] = "100"
-    if sys.platform == "win32":
-        existing = [opt for opt in env.get("MSYS", "").split() if opt != "noglob"]
-        env["MSYS"] = " ".join([*existing, "noglob"])
     # Examples must never inherit the harness's own coverage instrumentation.
     env.pop("COV_CORE_SOURCE", None)
     return env

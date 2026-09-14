@@ -485,6 +485,13 @@ gpio check all partitions/ --sample-files 3
 
     # Fixes every file in the partition, in place
     gpio check spatial partitions/ --fix
+    ```
+
+    A quoted glob is fixed the same way — gpio expands it itself, so the
+    pattern has to reach it unexpanded:
+
+    <!-- doctest: setup="gpio partition quadkey input.parquet partitions/ --resolution 6 --partition-resolution 2", skip-on="win32: Git Bash's MSYS runtime expands the quoted glob before gpio sees it" -->
+    ```bash
     gpio check spatial "partitions/*.parquet" --fix
     ```
 
