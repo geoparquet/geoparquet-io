@@ -8,7 +8,14 @@ succeeded (#1053). These tests pin what that must and must not change: the
 status Click chose, everything the command printed, the atexit handlers, and
 that ``cli`` itself stays a plain Click group for embedders.
 
+``gpio add geometry-metrics`` was not special: the same teardown killed
+``gpio convert geoparquet <native-geo file> -`` -- stdout streaming, a whole
+Arrow IPC stream already on the pipe -- with SIGABRT or SIGSEGV in 5 of 832
+runs of the same Linux loop, which is #1028. It is the command whose *output*
+skipping finalization can damage, so it has a test of its own below.
+
 Refs: https://github.com/geoparquet/geoparquet-io/issues/1053
+Refs: https://github.com/geoparquet/geoparquet-io/issues/1028
 """
 
 from __future__ import annotations
@@ -38,12 +45,19 @@ _PROGRAM = (
 #: Windows keeps the interpreter's exit (see ADR-0007), so finalization runs there.
 _WINDOWS = sys.platform == "win32"
 
+#: Arrow's end-of-stream marker: a zero-length continuation, and the last eight
+#: bytes of every well-formed IPC stream.
+_IPC_END_OF_STREAM = b"\xff\xff\xff\xff\x00\x00\x00\x00"
 
-def _run_entry_point(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+
+def _run_entry_point(
+    *args: str, env: dict[str, str] | None = None, text: bool = True
+) -> subprocess.CompletedProcess:
+    """Run the console script's own program. ``text=False`` for a binary payload."""
     return subprocess.run(
         [sys.executable, "-c", _PROGRAM, *args],
         capture_output=True,
-        text=True,
+        text=text,
         timeout=300,
         env={**os.environ, **(env or {})},
     )
@@ -81,6 +95,41 @@ def test_a_successful_command_delivers_its_output_and_skips_finalization():
     assert completed.stdout.rstrip("\n") == expected.rstrip("\n")
     assert "ATEXIT-RAN" in completed.stderr
     assert ("FINALIZATION-RAN" in completed.stderr) is _WINDOWS
+
+
+def test_a_binary_stream_written_past_click_is_terminated(projected_conus):
+    """The flush also has to carry bytes gpio never handed to Click.
+
+    ``gpio convert geoparquet in.parquet -`` is the other command #1028 caught
+    aborting at teardown, and it is the one whose output ``os._exit`` can
+    silently damage. Its payload is an Arrow IPC stream that pyarrow's
+    ``RecordBatchStreamWriter`` writes straight into ``sys.stdout.buffer`` --
+    past Click, past the text layer -- and it ends in an eight-byte
+    end-of-stream marker (``ff ff ff ff 00 00 00 00``) small enough to sit in
+    the buffer indefinitely. The test above cannot see a missing flush, because
+    ``click.echo`` flushes the stream itself; this one can, and the damage it
+    sees is not a lost log line but an unterminated stream.
+
+    Sabotaged (``_leave_process`` flushing nothing) this command emits 27,944
+    bytes instead of 27,952: pyarrow's reader tolerates the truncation and
+    still yields 200 rows, so the assertion has to be on the marker rather than
+    on whether the stream parses.
+
+    Refs: https://github.com/geoparquet/geoparquet-io/issues/1028
+    """
+    completed = _run_entry_point("convert", "geoparquet", str(projected_conus), "-", text=False)
+    stderr = completed.stderr.decode("utf-8", "replace")
+
+    assert completed.returncode == 0, stderr
+    # What #1028 is: the work done, the stream written, and then a native
+    # teardown killing the process with SIGABRT or SIGSEGV. Measured on Linux
+    # under CPU contention, 5 of 832 runs on `main` died this way.
+    assert "terminate called" not in stderr, stderr
+    assert "ATEXIT-RAN" in stderr, stderr
+    assert ("FINALIZATION-RAN" in stderr) is _WINDOWS, stderr
+    assert completed.stdout.endswith(_IPC_END_OF_STREAM), (
+        f"the Arrow IPC stream lost its tail: {completed.stdout[-16:].hex()}"
+    )
 
 
 def test_the_escape_hatch_leaves_through_the_interpreter():

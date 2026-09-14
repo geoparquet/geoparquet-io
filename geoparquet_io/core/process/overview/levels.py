@@ -44,6 +44,76 @@ class Band:
     maxzoom: int | None
 
 
+def parse_bands(spec: str) -> list[Band]:
+    """Parse an explicit ``level:minzoom`` band plan, e.g. ``"5:0,8:6,10:9"``.
+
+    :func:`select_bands` infers handovers from a tile-size budget, which is the
+    right default but cannot express "put level 8 at z6 whatever it costs".
+    That matters when several archives are browsed as one surface: if their
+    handovers land on different zooms, cells visibly change size as the user
+    switches between them, even though each archive is individually well
+    tiled. Stating the plan is the only way to make two pyramids agree.
+
+    Each entry gives a level and the zoom it starts at. Ends are implied by the
+    next entry, and the last band is open-ended, so the bands are contiguous by
+    construction and cannot leave a zoom unserved.
+    """
+    entries: list[tuple[int | str, int]] = []
+    for part in (p.strip() for p in spec.split(",")):
+        if not part:
+            continue
+        level_text, sep, zoom_text = part.partition(":")
+        if not sep:
+            raise InvalidParameterError(
+                "bands", f"expected level:minzoom pairs like '5:0,8:6,10:9', got {part!r}"
+            )
+        level_text, zoom_text = level_text.strip(), zoom_text.strip()
+        try:
+            minzoom = int(zoom_text)
+        except ValueError:
+            raise InvalidParameterError("bands", f"zoom must be an integer in {part!r}") from None
+        if minzoom < 0:
+            raise InvalidParameterError("bands", f"zoom cannot be negative in {part!r}")
+        if level_text == "":
+            raise InvalidParameterError("bands", f"missing level in {part!r}")
+        # Levels are ints for grid schemes and names for admin ones.
+        level: int | str = int(level_text) if level_text.lstrip("-").isdigit() else level_text
+        if isinstance(level, int) and level < 0:
+            raise InvalidParameterError("bands", f"level cannot be negative in {part!r}")
+        entries.append((level, minzoom))
+
+    if not entries:
+        raise InvalidParameterError("bands", "no bands given")
+    if entries[0][1] != 0:
+        raise InvalidParameterError(
+            "bands", f"the first band must start at z0, got z{entries[0][1]}"
+        )
+    for (_, prev), (_, cur) in zip(entries, entries[1:], strict=False):
+        if cur <= prev:
+            raise InvalidParameterError(
+                "bands", f"band zooms must strictly increase, got z{prev} then z{cur}"
+            )
+    levels = [lvl for lvl, _ in entries]
+    if len(set(levels)) != len(levels):
+        raise InvalidParameterError("bands", f"a level may appear only once, got {levels}")
+    # A grid pyramid gets finer as it zooms in, which is what the probe always
+    # produces. A plan that goes the other way serves coarse cells at the zooms
+    # that need detail and is never what the caller meant -- it is a typo.
+    grid_levels = [lvl for lvl in levels if isinstance(lvl, int)]
+    if len(grid_levels) == len(levels):
+        for prev, cur in zip(grid_levels, grid_levels[1:], strict=False):
+            if cur < prev:
+                raise InvalidParameterError(
+                    "bands",
+                    f"levels must get finer as zoom increases, got {prev} then {cur}",
+                )
+
+    return [
+        Band(level, minzoom, entries[i + 1][1] - 1 if i + 1 < len(entries) else None)
+        for i, (level, minzoom) in enumerate(entries)
+    ]
+
+
 def estimate_bytes_per_cell(num_attributes: int, out_geometry: str) -> float:
     """Estimate compressed bytes one cell contributes to a tile.
 
