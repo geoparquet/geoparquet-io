@@ -70,6 +70,24 @@ class CheckResult:
         # Handle single check results
         return self._results.get("passed", False)
 
+    def judged(self) -> bool:
+        """
+        Whether every check reached a verdict.
+
+        The spatial-order check withholds its verdict below eight row groups:
+        ``passed()`` is then True, because no failure was found, and this is
+        False. ``warnings()`` carries the reason.
+        """
+        from geoparquet_io.core.check_spatial_order import spatial_verdict_withheld
+
+        if self._check_type == "all":
+            return not any(
+                spatial_verdict_withheld(cat_results)
+                for cat_results in self._results.values()
+                if isinstance(cat_results, dict)
+            )
+        return not spatial_verdict_withheld(self._results)
+
     def warnings(self) -> list[str]:
         """
         Get list of warning messages.

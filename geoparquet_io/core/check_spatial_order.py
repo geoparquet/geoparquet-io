@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 
+"""Spatial-order check: does this file's row-group layout let a reader prune?
+
+The verdict is the expected fraction of row groups a query window can skip,
+relative to the same expectation for a full tiling of the extent into as many
+cells, as defined by the Portolan spec (specs/portolan/formats.md, "Pruning
+efficiency") and enforced by its validator.
+"""
 
 import math
-import random as _random
 from statistics import mean
 
+from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 from geoparquet_io.core.duckdb_metadata import (
+    get_geo_metadata,
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
     has_bbox_column,
@@ -16,52 +24,28 @@ from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, progress, warn
 from geoparquet_io.core.remote import needs_httpfs
 
-# Consecutive-pair bbox overlap. Kept as a reported statistic, no longer a
-# verdict: on Hilbert-sorted data consecutive row groups are spatially adjacent
-# by construction, so their boxes touch and this runs at ~1.0 for a PERFECTLY
-# ordered file. Measured on ideal tilings: 0.75 at 13 row groups, 0.88 at 59,
-# 0.96 at 589. It cannot tell "every row group covers the whole country" from
-# "row groups tile the country perfectly but neighbours touch" (#755).
-_OVERLAP_RATIO_THRESHOLD = 0.3
+#: The spatial-order verdict, as the Portolan spec defines it
+#: (specs/portolan/formats.md, "Pruning efficiency"): a layout passes when its
+#: expected skip rate reaches this fraction of what a full tiling of the extent
+#: into the same number of row groups achieves.
+SPATIAL_ORDER_MIN_EFFICIENCY = 0.70
 
-# Ordering verdict: the estimated skip rate as a fraction of what an ideal grid
-# tiling of the same extent and row-group count achieves on the same queries.
-# Relative because the achievable skip rate depends on the row-group count -- two
-# row groups can never skip more than ~50%, 589 should skip ~98% -- so any
-# absolute cutoff is wrong at one end or the other.
-#
-# 0.65 sits in a gap measured on real data, not only synthetic. Across 206 files
-# with five or more row groups from every catalog in the Portolan registry, the
-# efficiencies were 0.000 for one genuinely unsorted file, then a cluster of eight
-# under-sorted files between 0.534 and 0.699, then nothing until 0.722, rising to a
-# median of 0.979. Every file in that 0.53-0.70 cluster reached 0.87-0.97 after a
-# re-sort, so the bar separates "could be fixed by sorting" from "already as good
-# as its row-group count allows" rather than flagging the merely imperfect.
-#
-# The synthetic corpus agrees: the worst well-sorted Hilbert file scores 0.603 at
-# five row groups, 0.759 at eight and 0.946 at fifty-nine (60 runs per count),
-# while unsorted data scores 0.000 at every count.
-_SKIP_RATE_EFFICIENCY_THRESHOLD = 0.7
+#: Below this many row groups the footer check does not decide (spec, "Footer
+#: check"): the numbers are reported and the verdict is withheld.
+SPATIAL_ORDER_MIN_ROW_GROUPS = 8
 
-# Below this many row groups the comparison is too noisy to fail a file on, so
-# the verdict is withheld. Measured on the same well-sorted data, a PERFECTLY
-# sorted file scores as low as 0.105 at two row groups and 0.295 at three (10th
-# percentiles 0.479 and 0.455): a grid of two or three cells is a poor model of
-# what a sort can do to clustered data, so a low score there says more about the
-# reference than about the file. Five matches the floor Portolan's formats.md
-# already sets for its footer check. The metrics are still computed and reported
-# at every count -- only the verdict is withheld.
-_MIN_VERDICT_ROW_GROUPS = 5
-
-# Pushdown readiness verdict: ABSOLUTE, and deliberately a different question
-# from ordering. "Is this sorted as well as it could be?" and "will queries
-# actually prune well?" have different answers for a file with few row groups,
-# and both are worth saying.
+#: Pushdown readiness is absolute -- will queries actually prune? -- where the
+#: ordering verdict above is relative to the row-group count.
 _SKIP_RATE_THRESHOLD = 0.5
 
-_DEFAULT_NUM_SAMPLES = 20
+#: The query window is this fraction of the extent in each dimension.
 _DEFAULT_QUERY_FRACTION = 0.1
-_DEFAULT_SEED = 42
+
+#: A reference skip rate at or under this is zero: a box equal to the extent
+#: evaluates to a hit probability of 1 up to an ulp either way.
+_ZERO_SKIP_TOLERANCE = 1e-9
+
+_WITHHELD_VERDICT = f"not judged below {SPATIAL_ORDER_MIN_ROW_GROUPS} row groups"
 
 
 def _bboxes_overlap(bbox1: dict, bbox2: dict) -> bool:
@@ -173,19 +157,93 @@ def _print_standalone_results(ratio, consecutive_avg, random_avg):
         progress("=> Data might not be strongly clustered (or is partially clustered).")
 
 
-def _print_bbox_stats_results(ratio, overlap_count, total_pairs, passed):
+def _print_bbox_stats_results(ratio, overlap_count, total_pairs, passed, judged, metrics):
     """Print bbox-stats results when running as standalone command."""
     progress("\nResults:")
     debug(f"Row group pairs analyzed: {total_pairs}")
     debug(f"Overlapping pairs: {overlap_count}")
     progress(f"Overlap ratio: {ratio:.2f}")
+    if metrics:
+        progress(_locality_summary(metrics))
 
-    # `passed` is the final verdict (overlap ratio plus the secondary locality
-    # check), so the printed message cannot contradict the structured result
-    if passed:
+    # `passed` is the final verdict, so the printed message cannot contradict
+    # the structured result -- and a withheld verdict is not a pass.
+    if not judged:
+        progress(f"=> Spatial ordering {_WITHHELD_VERDICT}.")
+    elif passed:
         progress("=> Data appears well spatially ordered.")
     else:
-        progress("=> Data may benefit from spatial ordering (high row group overlap).")
+        progress("=> Data may benefit from spatial ordering (queries prune few row groups).")
+
+
+def _locality_summary(metrics: dict) -> str:
+    """One line with every number the verdict rests on, plus the area sum."""
+    efficiency = metrics["skip_rate_efficiency"]
+    efficiency_text = "undefined" if efficiency is None else f"{efficiency:.2f}"
+    area_sum = metrics["bbox_area_sum"]
+    area_text = "" if area_sum is None else f", area sum={area_sum:.2f}"
+    return (
+        f"Locality: skip_rate={metrics['estimated_skip_rate']:.2%} of an achievable "
+        f"{metrics['ideal_skip_rate']:.2%} (efficiency {efficiency_text}){area_text}, "
+        f"area_ratio={metrics['avg_bbox_area_ratio']:.4f}"
+    )
+
+
+def spatial_verdict_withheld(result: dict) -> bool:
+    """Whether a spatial-order result reached no verdict at all.
+
+    The one predicate every layer asks. ``passed`` in a result means "no
+    failure found", so a consumer that only cares about failure needs nothing
+    else; one that prints a check mark or counts outcomes asks this first.
+    """
+    return not result.get("judged", True)
+
+
+def _spatial_order_verdict(
+    num_row_groups: int, efficiency: float | None
+) -> tuple[bool, bool, list[str]]:
+    """The verdict: ``(passed, judged, warnings)``.
+
+    ``judged`` is False below ``SPATIAL_ORDER_MIN_ROW_GROUPS`` row groups and
+    when the efficiency is undefined; ``passed`` is then True, because no
+    failure was found, and ``warnings`` says why there is no verdict and what
+    would make the file judgeable.
+    """
+    if num_row_groups == 0:
+        return True, False, ["Spatial ordering not judged: no row-group statistics"]
+    if num_row_groups < SPATIAL_ORDER_MIN_ROW_GROUPS:
+        return (
+            True,
+            False,
+            [
+                f"Spatial ordering {_WITHHELD_VERDICT} ({num_row_groups} in this file); "
+                "smaller row groups (--row-group-size, 2,048 minimum) would make it judgeable"
+            ],
+        )
+    if efficiency is None:
+        return (
+            True,
+            False,
+            [
+                "Spatial ordering not judged: the efficiency is undefined for an extent no query can miss"
+            ],
+        )
+    return efficiency >= SPATIAL_ORDER_MIN_EFFICIENCY, True, []
+
+
+def _bbox_column_name(parquet_file: str) -> str | None:
+    """The bbox column the covering metadata names, else the first conventional one.
+
+    The covering is the authoritative pointer: a file can carry a stale or
+    secondary bbox column earlier in its schema, or name its real one
+    ``bounding_box``, and the name-suffix heuristic would read the wrong
+    column -- or none -- for every verdict built on it.
+    """
+    covering = _bbox_column_from_covering(get_geo_metadata(parquet_file))
+    if covering:
+        return covering
+    has_bbox, name = has_bbox_column(parquet_file)
+    return name if has_bbox else None
 
 
 def check_spatial_order_bbox_stats(
@@ -193,16 +251,11 @@ def check_spatial_order_bbox_stats(
     verbose: bool = False,
     return_results: bool = False,
     quiet: bool = False,
-    num_samples: int = _DEFAULT_NUM_SAMPLES,
-    query_fraction: float = _DEFAULT_QUERY_FRACTION,
-    seed: int = _DEFAULT_SEED,
-    efficiency_threshold: float = _SKIP_RATE_EFFICIENCY_THRESHOLD,
 ) -> float | dict:
-    """Check spatial ordering using row group bbox statistics.
+    """Check spatial ordering from the row-group statistics of the bbox column.
 
-    This method is faster than sampling because it only reads row group metadata
-    instead of actual geometry data. It checks if consecutive row groups have
-    overlapping bounding boxes, which indicates poor spatial ordering.
+    Reads the footer only. The verdict is the pruning efficiency of the
+    row-group boxes; see ``SPATIAL_ORDER_MIN_EFFICIENCY``.
 
     Args:
         parquet_file: Path to parquet file
@@ -212,10 +265,12 @@ def check_spatial_order_bbox_stats(
 
     Returns:
         ratio (float) if return_results=False, or dict if return_results=True
-    """
 
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-    if not has_bbox or not bbox_col_name:
+    Raises:
+        ValueError: no bbox column, or one without row-group statistics.
+    """
+    bbox_col_name = _bbox_column_name(parquet_file)
+    if not bbox_col_name:
         raise ValueError(
             f"File {parquet_file} does not have a bbox column. "
             "Use the sampling-based method instead."
@@ -225,9 +280,11 @@ def check_spatial_order_bbox_stats(
         debug(f"Using bbox column: {bbox_col_name}")
 
     row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
+    if not row_group_bboxes:
+        raise ValueError(f"bbox column '{bbox_col_name}' carries no row-group statistics")
 
     if verbose:
-        debug(f"Analyzing {len(row_group_bboxes)} row groups")
+        debug(f"Analyzing {len(row_group_bboxes)} row groups with bbox statistics")
 
     return _check_spatial_order_from_row_group_bboxes(
         row_group_bboxes,
@@ -236,10 +293,6 @@ def check_spatial_order_bbox_stats(
         return_results,
         quiet,
         method="bbox_stats",
-        num_samples=num_samples,
-        query_fraction=query_fraction,
-        seed=seed,
-        efficiency_threshold=efficiency_threshold,
     )
 
 
@@ -250,10 +303,6 @@ def _check_spatial_order_from_row_group_bboxes(
     return_results: bool = False,
     quiet: bool = False,
     method: str = "native_geo_bbox",
-    num_samples: int = _DEFAULT_NUM_SAMPLES,
-    query_fraction: float = _DEFAULT_QUERY_FRACTION,
-    seed: int = _DEFAULT_SEED,
-    efficiency_threshold: float = _SKIP_RATE_EFFICIENCY_THRESHOLD,
 ) -> float | dict:
     """Check spatial ordering from row group bboxes.
 
@@ -269,11 +318,16 @@ def _check_spatial_order_from_row_group_bboxes(
         method: Method label for results dict ("bbox_stats" or "native_geo_bbox")
 
     Returns:
-        ratio (float) if return_results=False, or dict if return_results=True
+        ratio (float) if return_results=False, or dict if return_results=True.
+        In the dict ``passed`` means "no failure found" and ``judged`` whether a
+        verdict was reached at all: below ``SPATIAL_ORDER_MIN_ROW_GROUPS`` row
+        groups ``judged`` is False, ``passed`` is True, the numbers are still
+        reported and ``warnings`` says why there is no verdict.
+        ``num_row_groups`` counts the row groups that carry statistics.
     """
     if len(row_group_bboxes) <= 1:
         if verbose:
-            debug("Only one or zero row groups - assuming well ordered")
+            debug("Only one or zero row groups - no consecutive pairs to compare")
         ratio = 0.0
         overlap_count = 0
         total_pairs = 0
@@ -293,40 +347,22 @@ def _check_spatial_order_from_row_group_bboxes(
         if verbose:
             debug(f"Overlapping pairs: {overlap_count}/{total_pairs}")
 
-    # The verdict is how well this layout prunes, relative to what its row-group
-    # count allows -- not the consecutive-pair overlap above, which is ~1.0 for a
-    # perfectly ordered file and so cannot decide anything (#755). Metrics are
-    # computed for every file, not only suspect ones, so a passing file can show
-    # how good it is rather than only that it escaped a flag.
+    # The verdict is the expected skip rate relative to what this row-group
+    # count allows -- not the consecutive-pair overlap above, which is ~1.0
+    # for a perfectly ordered file and so cannot decide anything (#755).
     metrics: dict = {}
-    if len(row_group_bboxes) >= 2:
-        metrics = _spatial_locality_metrics(
-            row_group_bboxes,
-            num_samples=num_samples,
-            query_fraction=query_fraction,
-            seed=seed,
-        )
-    if len(row_group_bboxes) >= _MIN_VERDICT_ROW_GROUPS:
-        passed = metrics["skip_rate_efficiency"] >= efficiency_threshold
-    else:
-        # Too few row groups to judge: the ideal-tiling reference is noisy enough
-        # there that a well-sorted file can score badly, so measuring the layout
-        # would be measuring the row-group count. The numbers are still reported.
-        # Whether few row groups is a good LAYOUT is
-        # check_spatial_pushdown_readiness's question, and it answers separately.
-        passed = True
+    if row_group_bboxes:
+        metrics = _spatial_locality_metrics(row_group_bboxes)
+    efficiency: float | None = metrics.get("skip_rate_efficiency")
+
+    passed, judged, warnings = _spatial_order_verdict(len(row_group_bboxes), efficiency)
 
     avg_area_ratio: float | None = metrics.get("avg_bbox_area_ratio")
     avg_skip_rate: float | None = metrics.get("estimated_skip_rate")
     ideal_skip_rate: float | None = metrics.get("ideal_skip_rate")
-    efficiency: float | None = metrics.get("skip_rate_efficiency")
 
     if verbose and metrics:
-        debug(
-            f"Locality: skip_rate={avg_skip_rate:.2%} of an achievable "
-            f"{ideal_skip_rate:.2%} (efficiency {efficiency:.2f}), "
-            f"area_ratio={avg_area_ratio:.4f}, consecutive overlap={ratio:.2f}"
-        )
+        debug(_locality_summary(metrics) + f", consecutive overlap={ratio:.2f}")
 
     issues = []
     recommendations = []
@@ -338,7 +374,7 @@ def _check_spatial_order_from_row_group_bboxes(
         recommendations.append("Apply Hilbert spatial ordering for better query performance")
 
     if not quiet and not return_results and not verbose:
-        _print_bbox_stats_results(ratio, overlap_count, total_pairs, passed)
+        _print_bbox_stats_results(ratio, overlap_count, total_pairs, passed, judged, metrics)
 
     if return_results:
         return {
@@ -349,11 +385,15 @@ def _check_spatial_order_from_row_group_bboxes(
             "method": method,
             "issues": issues,
             "recommendations": recommendations,
-            "fix_available": not passed,
+            "warnings": warnings,
+            "judged": judged,
+            "num_row_groups": len(row_group_bboxes),
+            "fix_available": judged and not passed,
             "estimated_skip_rate": avg_skip_rate,
             "ideal_skip_rate": ideal_skip_rate,
             "skip_rate_efficiency": efficiency,
             "avg_bbox_area_ratio": avg_area_ratio,
+            "bbox_area_sum": metrics.get("bbox_area_sum"),
         }
 
     return ratio
@@ -366,10 +406,6 @@ def check_spatial_order(
     verbose: bool,
     return_results: bool = False,
     quiet: bool = False,
-    num_samples: int = _DEFAULT_NUM_SAMPLES,
-    query_fraction: float = _DEFAULT_QUERY_FRACTION,
-    seed: int = _DEFAULT_SEED,
-    efficiency_threshold: float = _SKIP_RATE_EFFICIENCY_THRESHOLD,
 ) -> float | dict | None:
     """Check if a GeoParquet file is spatially ordered.
 
@@ -391,8 +427,8 @@ def check_spatial_order(
     raw_url = resolve_file_url(parquet_file, verbose)
 
     # Try bbox-stats method first (faster)
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-    if has_bbox and bbox_col_name:
+    bbox_col_name = _bbox_column_name(parquet_file)
+    if bbox_col_name:
         if verbose:
             debug(f"Using bbox-stats method (bbox column: {bbox_col_name})")
         try:
@@ -401,10 +437,6 @@ def check_spatial_order(
                 verbose=verbose,
                 return_results=return_results,
                 quiet=quiet,
-                num_samples=num_samples,
-                query_fraction=query_fraction,
-                seed=seed,
-                efficiency_threshold=efficiency_threshold,
             )
         except (ValueError, KeyError, IndexError) as e:
             # ValueError: Invalid bbox column structure
@@ -427,10 +459,6 @@ def check_spatial_order(
                 verbose,
                 return_results,
                 quiet,
-                num_samples=num_samples,
-                query_fraction=query_fraction,
-                seed=seed,
-                efficiency_threshold=efficiency_threshold,
             )
         except (ValueError, KeyError, IndexError) as e:
             if verbose:
@@ -440,8 +468,9 @@ def check_spatial_order(
     # Fall back to sampling method
     if verbose or not quiet:
         warn(
-            "No bbox column or native geo_bbox stats found - using slower sampling method. "
-            "For faster checks, add bbox column with 'gpio add bbox' or use GeoParquet 2.0."
+            "No bbox column or native geo_bbox stats found - using slower sampling method, "
+            "which compares consecutive-feature distances and does not measure row-group "
+            "pruning. Add a bbox column with 'gpio add bbox' so the footer-based check can run."
         )
 
     geometry_column = find_primary_geometry_column(parquet_file, verbose)
@@ -495,134 +524,107 @@ def _compute_data_extent(row_group_bboxes: list[dict]) -> dict:
     }
 
 
-def _generate_sample_query_bboxes(
-    extent: dict,
-    num_samples: int = 10,
-    query_fraction: float = 0.1,
-    seed: int | None = None,
-) -> list[dict]:
-    """Generate random sample query bboxes within the data extent.
+def _axis_hit_probability(
+    lo: float, hi: float, ext_lo: float, ext_hi: float, window: float
+) -> float:
+    """Probability that a window of this width, placed uniformly, overlaps [lo, hi].
 
-    Each sample covers approximately ``query_fraction`` of the extent in each
-    dimension (so the area fraction is roughly query_fraction^2).
-
-    Args:
-        extent: Dict with xmin, ymin, xmax, ymax for the full data extent.
-        num_samples: Number of sample bboxes to generate.
-        query_fraction: Fraction of each dimension the query should span.
-        seed: Optional random seed for reproducibility.
-
-    Returns:
-        List of bbox dicts with xmin, ymin, xmax, ymax.
+    The window's low edge is uniform on [ext_lo, ext_hi - window]; it overlaps
+    the box when that edge lies in [lo - window, hi]. If the extent has no
+    room for the window on this axis (zero width, or a window at least as wide
+    as the extent) every placement hits every box.
     """
-    rng = _random.Random(seed)  # nosec B311 - not used for security
-    x_range = extent["xmax"] - extent["xmin"]
-    y_range = extent["ymax"] - extent["ymin"]
-    query_width = x_range * query_fraction
-    query_height = y_range * query_fraction
-
-    samples = []
-    for _ in range(num_samples):
-        x_start = rng.uniform(extent["xmin"], extent["xmax"] - query_width)  # nosec B311
-        y_start = rng.uniform(extent["ymin"], extent["ymax"] - query_height)  # nosec B311
-        samples.append(
-            {
-                "xmin": x_start,
-                "ymin": y_start,
-                "xmax": x_start + query_width,
-                "ymax": y_start + query_height,
-            }
-        )
-    return samples
+    span = ext_hi - ext_lo - window
+    if span <= 0:
+        return 1.0
+    overlap = min(hi, ext_hi - window) - max(lo - window, ext_lo)
+    # Clamped: a box spanning the extent evaluates to 1 up to an ulp either way.
+    return min(1.0, max(0.0, overlap / span))
 
 
-def _compute_skip_rate_for_query(query_bbox: dict, row_group_bboxes: list[dict]) -> float:
-    """Compute the fraction of row groups that can be skipped for a query bbox.
+def _hit_probability(box: dict, extent: dict, query_fraction: float) -> float:
+    """Probability that a uniformly placed query window overlaps this box."""
+    width = (extent["xmax"] - extent["xmin"]) * query_fraction
+    height = (extent["ymax"] - extent["ymin"]) * query_fraction
+    return _axis_hit_probability(
+        lo=box["xmin"], hi=box["xmax"], ext_lo=extent["xmin"], ext_hi=extent["xmax"], window=width
+    ) * _axis_hit_probability(
+        lo=box["ymin"], hi=box["ymax"], ext_lo=extent["ymin"], ext_hi=extent["ymax"], window=height
+    )
 
-    A row group can be skipped if its bbox does not overlap with the query bbox.
 
-    Args:
-        query_bbox: The query bbox dict with xmin, ymin, xmax, ymax.
-        row_group_bboxes: List of row group bbox dicts.
+def _expected_skip_rate(row_group_bboxes: list[dict], extent: dict, query_fraction: float) -> float:
+    """Expected fraction of row groups a random query window can skip.
 
-    Returns:
-        Float between 0.0 and 1.0 representing the fraction skippable.
+    The closed form of what a sample of windows estimates: the window's
+    lower-left corner is uniform over the extent (less the window), and a row
+    group is skipped when the window misses its box. Deterministic, O(n),
+    footer-only, no seed. Shared with portolan-spec#188 and rashid#174.
     """
-    if not row_group_bboxes:
-        return 0.0
-    skipped = sum(1 for rg in row_group_bboxes if not _bboxes_overlap(query_bbox, rg))
-    return skipped / len(row_group_bboxes)
+    hit = mean(_hit_probability(b, extent, query_fraction) for b in row_group_bboxes)
+    return max(0.0, 1.0 - hit)
 
 
-def _ideal_grid_bboxes(extent: dict, num_row_groups: int) -> list[dict]:
-    """The best row-group layout possible for this extent and row-group count.
+def _full_tiling_bboxes(extent: dict, num_row_groups: int) -> list[dict]:
+    """The reference layout: ``num_row_groups`` cells covering the whole extent.
 
-    A near-square grid tiling: every box the same size, no overlap, no gaps. It is
-    the reference the actual layout is judged against, so that "well ordered"
-    means "as good as this row-group count allows" rather than a fixed number
-    that only makes sense at one count (#755).
+    Not the best layout possible -- clustered data beats it, which is why the
+    efficiency is capped -- but the one every implementation judges against.
 
-    A grid is the right reference because it is what a perfect space-filling-curve
-    sort converges to. It is generous where the data is not uniform -- clustered
-    data cannot tile evenly -- which is why the threshold is 0.5 rather than
-    something near 1.0.
+    A near-square grid of ``cols = ceil(sqrt(n))`` columns whose last row holds
+    the remainder, stretched to the full width so nothing is left uncovered. A
+    grid that leaves its spare cells empty lets windows in the gap skip every
+    box, which inflated the reference by 13% at n=3 and 4% at n=5.
     """
-    if num_row_groups <= 0:
-        return []
     cols = math.ceil(math.sqrt(num_row_groups))
     rows = math.ceil(num_row_groups / cols)
-    width = (extent["xmax"] - extent["xmin"]) / cols
     height = (extent["ymax"] - extent["ymin"]) / rows
     boxes = []
-    for i in range(num_row_groups):
-        row, col = divmod(i, cols)
-        boxes.append(
-            {
-                "row_group_id": i,
-                "xmin": extent["xmin"] + col * width,
-                "xmax": extent["xmin"] + (col + 1) * width,
-                "ymin": extent["ymin"] + row * height,
-                "ymax": extent["ymin"] + (row + 1) * height,
-            }
-        )
+    for row in range(rows):
+        cells = min(cols, num_row_groups - row * cols)
+        width = (extent["xmax"] - extent["xmin"]) / cells
+        for col in range(cells):
+            boxes.append(
+                {
+                    "xmin": extent["xmin"] + col * width,
+                    "xmax": extent["xmin"] + (col + 1) * width,
+                    "ymin": extent["ymin"] + row * height,
+                    "ymax": extent["ymin"] + (row + 1) * height,
+                }
+            )
     return boxes
 
 
 def _spatial_locality_metrics(
     row_group_bboxes: list[dict],
-    num_samples: int = _DEFAULT_NUM_SAMPLES,
     query_fraction: float = _DEFAULT_QUERY_FRACTION,
-    seed: int = _DEFAULT_SEED,
 ) -> dict:
-    """Measure how well this row-group layout supports pruning.
+    """The pruning-efficiency numbers for a row-group layout, from the footer only.
 
-    One computation shared by the spatial-order check and
-    ``check_spatial_pushdown_readiness``, which used to run it twice per CLI
-    invocation and then answer with different halves of it.
-
-    Uses only the row-group bounding boxes from the footer -- no data is read.
-
-    Returns:
-        Dict with ``avg_bbox_area_ratio``, ``estimated_skip_rate``,
-        ``ideal_skip_rate`` and ``skip_rate_efficiency`` (the estimated rate as a
-        fraction of the ideal; 1.0 means this layout prunes as well as a perfect
-        grid tiling of the same row-group count).
+    Shared by the spatial-order check and ``check_spatial_pushdown_readiness``.
+    ``skip_rate_efficiency`` is None when the reference itself skips nothing
+    (one row group, or an extent with neither width nor height) and
+    ``bbox_area_sum`` when the extent has no area: undefined, not zero.
+    ``bbox_area_sum`` is the same expectation with a zero-size window; it keeps
+    seeing oversized boxes after the efficiency saturates at high counts.
     """
     extent = _compute_data_extent(row_group_bboxes)
-    samples = _generate_sample_query_bboxes(
-        extent, num_samples=num_samples, query_fraction=query_fraction, seed=seed
-    )
-    estimated = mean(_compute_skip_rate_for_query(s, row_group_bboxes) for s in samples)
-    ideal_boxes = _ideal_grid_bboxes(extent, len(row_group_bboxes))
-    ideal = mean(_compute_skip_rate_for_query(s, ideal_boxes) for s in samples)
-    # ideal == 0 means no layout could skip anything for these queries (one row
-    # group, or a degenerate extent), so there is nothing to fall short of.
-    efficiency = estimated / ideal if ideal > 0 else 1.0
+    estimated = _expected_skip_rate(row_group_bboxes, extent, query_fraction)
+    ideal_boxes = _full_tiling_bboxes(extent, len(row_group_bboxes))
+    ideal = _expected_skip_rate(ideal_boxes, extent, query_fraction)
+    # A reference that skips nothing (one row group, or a window as large as
+    # the extent) leaves nothing to fall short of: undefined, not zero. The
+    # tolerance absorbs the ulp a box-equals-extent hit probability can carry.
+    efficiency = min(estimated / ideal, 1.0) if ideal > _ZERO_SKIP_TOLERANCE else None
+    avg_area_ratio = _compute_avg_bbox_area_ratio(row_group_bboxes, extent)
+    extent_area = (extent["xmax"] - extent["xmin"]) * (extent["ymax"] - extent["ymin"])
     return {
-        "avg_bbox_area_ratio": _compute_avg_bbox_area_ratio(row_group_bboxes, extent),
+        "avg_bbox_area_ratio": avg_area_ratio,
+        # 0/0 on an extent with no area: undefined, never "vanishingly tight".
+        "bbox_area_sum": avg_area_ratio * len(row_group_bboxes) if extent_area > 0 else None,
         "estimated_skip_rate": estimated,
         "ideal_skip_rate": ideal,
-        "skip_rate_efficiency": min(efficiency, 1.0),
+        "skip_rate_efficiency": efficiency,
     }
 
 
@@ -651,9 +653,7 @@ def _compute_avg_bbox_area_ratio(row_group_bboxes: list[dict], extent: dict) -> 
 def check_spatial_pushdown_readiness(
     parquet_file: str,
     verbose: bool = False,
-    num_samples: int = _DEFAULT_NUM_SAMPLES,
     query_fraction: float = _DEFAULT_QUERY_FRACTION,
-    seed: int = _DEFAULT_SEED,
 ) -> dict:
     """Check how well a file supports spatial filter pushdown.
 
@@ -664,59 +664,68 @@ def check_spatial_pushdown_readiness(
     Args:
         parquet_file: Path to the GeoParquet file.
         verbose: If True, log detailed progress.
-        num_samples: Number of random sample queries to evaluate.
-        query_fraction: Fraction of each dimension each sample query spans.
-        seed: Random seed for reproducible sample queries.
+        query_fraction: Fraction of each dimension the query window spans.
 
     Returns:
         Dict with keys:
-            has_geo_bbox (bool): Whether file has per-RG geo_bbox stats.
-            num_row_groups (int): Number of row groups in the file.
-            estimated_skip_rate (float): Average fraction of RGs skippable.
+            has_geo_bbox (bool): Whether file has per-RG bbox stats (a bbox
+                column named by the covering, a conventional one, or native
+                GeoParquet 2.0 statistics).
+            num_row_groups (int): Number of row groups carrying statistics.
+            estimated_skip_rate (float): Expected fraction of RGs skippable.
             avg_bbox_area_ratio (float): Average RG bbox area / total extent area.
             passed (bool): True if skip rate >= 0.5 (good pushdown readiness).
             issues (list[str]): Problems found.
             recommendations (list[str]): Suggestions for improvement.
     """
 
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
+    bbox_col_name = _bbox_column_name(parquet_file)
+    row_group_bboxes: list[dict] = []
+    if bbox_col_name:
+        if verbose:
+            debug(f"Using bbox column: {bbox_col_name}")
+        row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
+    if not row_group_bboxes:
+        geometry_column = find_primary_geometry_column(parquet_file, verbose)
+        row_group_bboxes = get_per_row_group_native_geo_stats(parquet_file, geometry_column) or []
 
-    issues: list[str] = []
-    recommendations: list[str] = []
-
-    if not has_bbox or not bbox_col_name:
+    if not row_group_bboxes:
         if verbose:
             debug("No geo_bbox column found, pushdown not possible")
-        issues.append(
-            "File has no geo_bbox column. "
-            "Spatial filter pushdown requires per-row-group bbox stats (GeoParquet 2.0+)."
-        )
-        recommendations.append("Add bbox column with 'gpio add bbox' and upgrade to GeoParquet 2.0")
         return {
             "has_geo_bbox": False,
             "num_row_groups": 0,
             "estimated_skip_rate": 0.0,
             "avg_bbox_area_ratio": 0.0,
             "passed": False,
-            "issues": issues,
-            "recommendations": recommendations,
+            "issues": [
+                "File has no geo_bbox column. "
+                "Spatial filter pushdown requires per-row-group bbox stats (GeoParquet 2.0+)."
+            ],
+            "recommendations": [
+                "Add bbox column with 'gpio add bbox' and upgrade to GeoParquet 2.0"
+            ],
         }
 
     if verbose:
-        debug(f"Using bbox column: {bbox_col_name}")
+        debug(f"Found {len(row_group_bboxes)} row groups with bbox stats")
+    metrics: dict = {}
+    if len(row_group_bboxes) > 1:
+        metrics = _spatial_locality_metrics(row_group_bboxes, query_fraction=query_fraction)
+    return pushdown_readiness_from_locality(len(row_group_bboxes), metrics)
 
-    row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
-    num_rgs = len(row_group_bboxes)
 
-    if verbose:
-        debug(f"Found {num_rgs} row groups with bbox stats")
+def pushdown_readiness_from_locality(num_row_groups: int, metrics: dict) -> dict:
+    """The pushdown-readiness verdict from locality numbers already computed.
 
-    if num_rgs <= 1:
-        if verbose:
-            debug("Only 0 or 1 row groups, skip rate is trivially 0.0")
+    ``metrics`` is a ``_spatial_locality_metrics`` result, or any dict carrying
+    its keys -- the spatial-order payload does, so ``check spatial`` reaches
+    this verdict from the same numbers without a second footer read.
+    """
+    if num_row_groups <= 1:
         return {
             "has_geo_bbox": True,
-            "num_row_groups": num_rgs,
+            "num_row_groups": num_row_groups,
             "estimated_skip_rate": 0.0,
             "avg_bbox_area_ratio": 0.0,
             "passed": False,  # Can't skip any row groups with only 0-1 row groups
@@ -724,21 +733,12 @@ def check_spatial_pushdown_readiness(
             "recommendations": ["Consider using smaller row groups for spatial queries"],
         }
 
-    metrics = _spatial_locality_metrics(
-        row_group_bboxes, num_samples=num_samples, query_fraction=query_fraction, seed=seed
-    )
     avg_area_ratio = metrics["avg_bbox_area_ratio"]
     avg_skip_rate = metrics["estimated_skip_rate"]
+    issues: list[str] = []
+    recommendations: list[str] = []
 
-    if verbose:
-        debug(f"Average bbox area ratio: {avg_area_ratio:.4f}")
-        debug(f"Estimated average skip rate: {avg_skip_rate:.2%}")
-
-    # Deliberately absolute, unlike the ordering check's relative threshold: this
-    # answers "will queries actually prune well?", which a two-row-group file
-    # fails however perfectly it is sorted. The ordering check answers "is this
-    # sorted as well as its row-group count allows?" and passes the same file.
-    # Both are true and worth saying (#755).
+    # Absolute, unlike the ordering verdict: see _SKIP_RATE_THRESHOLD.
     passed = avg_skip_rate >= _SKIP_RATE_THRESHOLD
 
     if not passed:
@@ -759,11 +759,12 @@ def check_spatial_pushdown_readiness(
 
     return {
         "has_geo_bbox": True,
-        "num_row_groups": num_rgs,
+        "num_row_groups": num_row_groups,
         "estimated_skip_rate": avg_skip_rate,
         "ideal_skip_rate": metrics["ideal_skip_rate"],
         "skip_rate_efficiency": metrics["skip_rate_efficiency"],
         "avg_bbox_area_ratio": avg_area_ratio,
+        "bbox_area_sum": metrics["bbox_area_sum"],
         "passed": passed,
         "issues": issues,
         "recommendations": recommendations,

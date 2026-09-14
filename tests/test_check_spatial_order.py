@@ -190,8 +190,8 @@ class TestCheckSpatialOrderBboxStats:
         result = check_spatial_order_bbox_stats(
             places_test_file, verbose=False, return_results=True, quiet=False
         )
-        # Just verify structure - actual ordering depends on test data
-        assert isinstance(result["passed"], bool)
+        # One row group: the verdict is withheld, the statistics are still there
+        assert result["judged"] is False and result["passed"] is True
         assert isinstance(result["ratio"], float)
         assert 0.0 <= result["ratio"] <= 1.0
         assert result["overlap_count"] >= 0
@@ -220,19 +220,16 @@ class TestCheckSpatialOrderBboxStats:
         assert isinstance(result, dict)
         assert result["method"] == "bbox_stats"
 
-    def test_passing_threshold(self, places_test_file):
-        """Test that ratio < 0.3 means passed=True."""
+    def test_single_row_group_verdict_is_withheld(self, places_test_file):
+        """One row group is below the floor: no verdict, no issue, no fix offered."""
         result = check_spatial_order_bbox_stats(
             places_test_file, verbose=False, return_results=True, quiet=False
         )
-        if result["ratio"] < 0.3:
-            assert result["passed"] is True
-            assert len(result["issues"]) == 0
-            assert result["fix_available"] is False
-        else:
-            assert result["passed"] is False
-            assert len(result["issues"]) > 0
-            assert result["fix_available"] is True
+        assert result["judged"] is False
+        assert result["passed"] is True, "no failure found"
+        assert result["issues"] == []
+        assert result["fix_available"] is False
+        assert any("not judged below 8 row groups" in w for w in result["warnings"])
 
     def test_issues_and_recommendations_when_failed(self, unsorted_test_file):
         """Test that failing check includes proper issues and recommendations."""
@@ -473,13 +470,17 @@ class TestSpatialLocalitySecondaryCheck:
             _check_spatial_order_from_row_group_bboxes,
         )
 
-        # Each RG bbox covers nearly the entire extent → poor locality
+        # Each RG bbox covers nearly the entire extent → poor locality.
+        # Eight of them: the verdict is only given at eight row groups or more.
         row_group_bboxes = [
             {"row_group_id": 0, "xmin": 0.0, "ymin": 0.0, "xmax": 95.0, "ymax": 95.0},
             {"row_group_id": 1, "xmin": 5.0, "ymin": 5.0, "xmax": 100.0, "ymax": 100.0},
             {"row_group_id": 2, "xmin": 2.0, "ymin": 2.0, "xmax": 98.0, "ymax": 98.0},
             {"row_group_id": 3, "xmin": 1.0, "ymin": 1.0, "xmax": 99.0, "ymax": 99.0},
             {"row_group_id": 4, "xmin": 3.0, "ymin": 3.0, "xmax": 97.0, "ymax": 97.0},
+            {"row_group_id": 5, "xmin": 4.0, "ymin": 0.0, "xmax": 96.0, "ymax": 99.0},
+            {"row_group_id": 6, "xmin": 0.0, "ymin": 4.0, "xmax": 99.0, "ymax": 96.0},
+            {"row_group_id": 7, "xmin": 2.0, "ymin": 1.0, "xmax": 100.0, "ymax": 98.0},
         ]
 
         result = _check_spatial_order_from_row_group_bboxes(
@@ -496,14 +497,14 @@ class TestSpatialLocalitySecondaryCheck:
         )
 
     def test_two_row_groups_are_measured_not_skipped(self):
-        """Two row groups get the locality check like any other count (#755).
+        """Two row groups get the locality metrics like any other count (#755).
 
         This used to assert the opposite: the check was gated on >= 3 row groups,
         so a two-group file whose boxes overlap at all was reported "Poor spatial
         ordering (overlap ratio: 1.00)" with no metrics computed. These two boxes
-        prune exactly as well as two row groups allow -- estimated and ideal skip
-        rates are both 0.475 -- so failing it was measuring the row-group count,
-        not the ordering.
+        prune exactly as well as two row groups allow (efficiency 1.0), but two
+        row groups are below the verdict floor, so the verdict is withheld
+        rather than the pass the first version of this fix printed.
         """
         from geoparquet_io.core.check_spatial_order import (
             _check_spatial_order_from_row_group_bboxes,
@@ -523,18 +524,19 @@ class TestSpatialLocalitySecondaryCheck:
         )
 
         assert result["ratio"] == 1.0, "Both groups overlap - kept as a statistic"
-        assert result["passed"] is True
+        assert result["judged"] is False
         assert result["skip_rate_efficiency"] == pytest.approx(1.0)
         assert result["estimated_skip_rate"] is not None
         assert result["avg_bbox_area_ratio"] is not None
 
-    def test_hilbert_few_large_row_groups_pass(self):
-        """Hilbert-sorted data with few large row groups must still pass.
+    def test_hilbert_few_large_row_groups_are_not_failed(self):
+        """Hilbert-sorted data with few large row groups must not be failed.
 
         With only ~5 row groups each Hilbert segment legitimately covers a
-        larger share of the extent (roughly 1/N plus bbox slop), so the
-        area-ratio threshold must scale with the group count. Regression test
-        for the removed 80k-120k rows/group heuristic.
+        larger share of the extent (roughly 1/N plus bbox slop): a tiling of
+        five cells is a poor model of a curve sort, so below eight row groups
+        the verdict is withheld rather than measured against it. Regression
+        test for the removed 80k-120k rows/group heuristic.
         """
         from geoparquet_io.core.check_spatial_order import (
             _check_spatial_order_from_row_group_bboxes,
@@ -560,10 +562,10 @@ class TestSpatialLocalitySecondaryCheck:
         )
 
         assert result["ratio"] == 1.0, "All consecutive pairs overlap"
-        assert result["passed"] is True, (
-            "Should pass via the locality check with the count-scaled area threshold"
-        )
+        assert result["judged"] is False, "five row groups: the verdict is withheld"
+        assert result["passed"] is True, "no failure found"
         assert result["fix_available"] is False
+        assert result["issues"] == []
 
     def test_print_path_reflects_secondary_pass(self, caplog):
         """Standalone print output must match the structured passed verdict."""

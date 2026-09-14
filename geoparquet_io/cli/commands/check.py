@@ -26,10 +26,19 @@ from geoparquet_io.cli.decorators import (
     overwrite_option,
     verbose_option,
 )
-from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_common
+from geoparquet_io.cli.fix_helpers import (
+    NoBackupConfirmation,
+    display_spatial_result,
+    handle_fix_common,
+    no_fix_needed_message,
+)
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
+from geoparquet_io.core.check_spatial_order import (
+    pushdown_readiness_from_locality,
+    spatial_verdict_withheld,
+)
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.logging_config import configure_verbose
 
@@ -78,6 +87,7 @@ class MultiFileCheckRunner:
         #: The run's one ``--no-backup`` prompt, shared by every file it fixes.
         self.confirmation = confirmation or NoBackupConfirmation(False)
         self.passed = 0
+        self.not_judged = 0
         self.warnings = 0
         self.failed = 0
         self.issues: list[tuple[str, str, str]] = []  # (file, level, message)
@@ -120,28 +130,34 @@ class MultiFileCheckRunner:
             click.echo(click.style(f"{'=' * 60}", fg="bright_black"))
 
     def record_result(self, file_path: str, result: dict):
-        """Record the result of checking a file."""
-        if result.get("passed", True):
-            self.passed += 1
+        """Record the result of checking a file.
+
+        A check that withheld its verdict (``judged`` False: the spatial-order
+        check on too few row groups) is counted on its own, so the summary does
+        not claim a pass the check never gave.
+        """
+        if not result.get("passed", True):
+            self._record_not_passed(file_path, result)
+        elif spatial_verdict_withheld(result):
+            self.not_judged += 1
         else:
-            # Determine if it's a warning or failure
-            issues = result.get("issues", [])
-            has_error_flag = bool(result.get("failed", False))
-            has_error_issues = any("❌" in str(i) for i in issues)
-            has_error = has_error_flag or has_error_issues
-            if (
-                has_error
-                or result.get("size_status") == "poor"
-                or result.get("row_status") == "poor"
-            ):
-                self.failed += 1
-                for issue in issues:
-                    self._record_issue(file_path, "error", issue)
-            else:
-                self.warnings += 1
-                for issue in issues:
-                    self._record_issue(file_path, "warning", issue)
+            self.passed += 1
         self._update_progress()
+
+    def _record_not_passed(self, file_path: str, result: dict) -> None:
+        """A failed check is an error or a warning, by what its result carries."""
+        issues = result.get("issues", [])
+        has_error_flag = bool(result.get("failed", False))
+        has_error_issues = any("❌" in str(i) for i in issues)
+        has_error = has_error_flag or has_error_issues
+        if has_error or result.get("size_status") == "poor" or result.get("row_status") == "poor":
+            self.failed += 1
+            for issue in issues:
+                self._record_issue(file_path, "error", issue)
+        else:
+            self.warnings += 1
+            for issue in issues:
+                self._record_issue(file_path, "warning", issue)
 
     def record_fix(self, output_path: str, backup_path: str | None):
         """Record a file this run rewrote, for the end-of-run summary."""
@@ -261,6 +277,8 @@ class MultiFileCheckRunner:
         summary_parts = []
         if self.passed:
             summary_parts.append(click.style(f"{self.passed} passed", fg="green"))
+        if self.not_judged:
+            summary_parts.append(f"{self.not_judged} not judged")
         if self.warnings:
             summary_parts.append(click.style(f"{self.warnings} warnings", fg="yellow"))
         if self.failed:
@@ -521,10 +539,7 @@ def check_all(
             spatial_result = checked["spatial"]
             spec_result = checked["spec"]
 
-            from geoparquet_io.cli.fix_helpers import (
-                aggregate_check_results,
-                display_spatial_result,
-            )
+            from geoparquet_io.cli.fix_helpers import aggregate_check_results
 
             display_spatial_result(spatial_result, show_output)
 
@@ -569,7 +584,12 @@ def check_all(
                 combined_issues.append(f"Spec validation: {spec_result.failed_count} checks failed")
             runner.record_result(
                 file_path,
-                {"passed": combined_passed, "issues": combined_issues, **structure_results},
+                {
+                    "passed": combined_passed,
+                    "issues": combined_issues,
+                    "judged": not spatial_verdict_withheld(spatial_result),
+                    **structure_results,
+                },
             )
 
             # If --fix flag is set, apply fixes
@@ -643,37 +663,6 @@ def check_all(
     help="Max rows for spatial order check",
 )
 @click.option(
-    "--query-fraction",
-    default=0.1,
-    show_default=True,
-    type=click.FloatRange(0.0, 1.0, min_open=True),
-    help="Fraction of each dimension a sample query window spans",
-)
-@click.option(
-    "--num-samples",
-    default=20,
-    show_default=True,
-    type=click.IntRange(1),
-    help="Number of sample query windows used to estimate the skip rate",
-)
-@click.option(
-    "--seed",
-    default=42,
-    show_default=True,
-    type=int,
-    help="Random seed for the sample query windows (reproducible results)",
-)
-@click.option(
-    "--min-efficiency",
-    default=0.7,
-    show_default=True,
-    type=click.FloatRange(0.0, 1.0),
-    help=(
-        "Minimum skip rate as a fraction of what this row-group count allows. "
-        "1.0 demands an ideal grid tiling; 0 accepts anything."
-    ),
-)
-@click.option(
     "--verbose",
     is_flag=True,
     help="Print detailed diagnostics",
@@ -699,10 +688,6 @@ def check_spatial(
     parquet_file,
     random_sample_size,
     limit_rows,
-    query_fraction,
-    num_samples,
-    seed,
-    min_efficiency,
     verbose,
     fix,
     fix_output,
@@ -745,77 +730,36 @@ def check_spatial(
                     verbose and show_output,
                     return_results=True,
                     quiet=quiet,
-                    num_samples=num_samples,
-                    query_fraction=query_fraction,
-                    seed=seed,
-                    efficiency_threshold=min_efficiency,
                 ),
             )
             if result is None:
                 continue
-            ratio = result["ratio"]
-            passed = result.get("passed", ratio < 0.5 if ratio is not None else True)
+            display_spatial_result(result, show_output)
 
-            if show_output and ratio is not None:
-                if passed:
-                    click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
-                else:
-                    click.echo(
-                        click.style(
-                            "⚠️  Data may not be optimally spatially ordered\n"
-                            "Consider running 'gpio sort hilbert' to improve spatial locality",
-                            fg="yellow",
-                        )
-                    )
-
-            # Pushdown readiness. The ordering check above already measured the
-            # locality of the same row groups, so reuse it rather than reading
-            # the footer and running the sample queries a second time (#755).
+            # Pushdown readiness: from the numbers the ordering check just
+            # computed when it read the footer, else its own footer read.
             if show_output:
-                from geoparquet_io.core.check_spatial_order import (
-                    _SKIP_RATE_THRESHOLD,
-                    check_spatial_pushdown_readiness,
-                )
+                from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness
 
-                pushdown = None
-                if result.get("estimated_skip_rate") is not None:
-                    pushdown = {
-                        "has_geo_bbox": True,
-                        "num_row_groups": result["total_pairs"] + 1,
-                        "estimated_skip_rate": result["estimated_skip_rate"],
-                        "ideal_skip_rate": result["ideal_skip_rate"],
-                        "skip_rate_efficiency": result["skip_rate_efficiency"],
-                        "avg_bbox_area_ratio": result["avg_bbox_area_ratio"],
-                        # Absolute, unlike the ordering verdict: see the note in
-                        # check_spatial_pushdown_readiness.
-                        "passed": result["estimated_skip_rate"] >= _SKIP_RATE_THRESHOLD,
-                    }
-                else:
-                    try:
-                        pushdown = check_spatial_pushdown_readiness(
-                            file_path,
-                            verbose=verbose and show_output,
-                            num_samples=num_samples,
-                            query_fraction=query_fraction,
-                            seed=seed,
+                try:
+                    if "num_row_groups" in result:
+                        pushdown = pushdown_readiness_from_locality(
+                            result["num_row_groups"], result
                         )
-                    except Exception as e:
-                        if verbose:
-                            click.echo(f"  Debug: Pushdown check failed: {e}", err=True)
-                        pushdown = {"has_geo_bbox": False}
+                    else:
+                        pushdown = check_spatial_pushdown_readiness(
+                            file_path, verbose=verbose and show_output
+                        )
+                except Exception as e:
+                    if verbose:
+                        click.echo(f"  Debug: Pushdown check failed: {e}", err=True)
+                    pushdown = {"has_geo_bbox": False}
 
                 click.echo("\nSpatial Filter Pushdown Readiness:")
                 if pushdown.get("has_geo_bbox"):
                     skip_pct = pushdown["estimated_skip_rate"] * 100
                     click.echo(f"  Row groups: {pushdown['num_row_groups']}")
-                    ideal = pushdown.get("ideal_skip_rate")
-                    if ideal:
-                        click.echo(
-                            f"  Estimated skip rate: {skip_pct:.0f}% "
-                            f"(of {ideal * 100:.0f}% achievable at this row-group count)"
-                        )
-                    else:
-                        click.echo(f"  Estimated skip rate: {skip_pct:.0f}%")
+                    click.echo(f"  Estimated skip rate: {skip_pct:.0f}%")
                     click.echo(f"  Avg bbox area ratio: {pushdown['avg_bbox_area_ratio']:.2f}")
                     if pushdown["passed"]:
                         click.echo(click.style("  ✓ Good pushdown readiness", fg="green"))
@@ -836,11 +780,7 @@ def check_spatial(
             if fix:
                 if not result.get("fix_available", False):
                     if show_output:
-                        click.echo(
-                            click.style(
-                                "\n✓ No fix needed - already spatially ordered!", fg="green"
-                            )
-                        )
+                        click.echo(no_fix_needed_message(result))
                     continue
 
                 if show_output:
@@ -854,6 +794,19 @@ def check_spatial(
                     click.echo(
                         click.style("\n✓ Spatial ordering applied successfully!", fg="green")
                     )
+                    # The output's own verdict: a small file comes out in fewer
+                    # row groups than it went in with, and can be unjudgeable.
+                    after = check_spatial_impl(
+                        output_path,
+                        random_sample_size,
+                        limit_rows,
+                        False,
+                        return_results=True,
+                        quiet=True,
+                    )
+                    if isinstance(after, dict) and "num_row_groups" in after:
+                        click.echo(f"Output has {after['num_row_groups']} row groups")
+                    display_spatial_result(after, True)
                     click.echo(f"Optimized file: {output_path}")
                     if backup_path:
                         click.echo(f"Backup: {backup_path}")
