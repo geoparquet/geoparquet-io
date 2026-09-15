@@ -42,10 +42,13 @@ from geoparquet_io.core.process.aggregate.common import (
     VALID_OUT_GEOMETRY,
     aggregate_source_relation,
     antimeridian_aware_bbox,
+    breakdown_prefix,
+    breakdown_reserved_names,
     build_breakdown_column_names,
     build_breakdown_select,
     build_metric_select,
     geometry_to_geom_expr,
+    parse_breakdown_metric,
     resolve_breakdown_values,
     resolve_metric_column_types,
     validate_agg_columns,
@@ -380,20 +383,23 @@ def build_grid_query(
     breakdown_limit: int,
     out_geometry: str,
     metric_nodata: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> str:
     """Build the full grid aggregation SQL from a source relation exposing ``__pt``."""
-    metrics, nodata_values = validate_metric_nodata(metric, metric_nodata)
-    if metrics or breakdown:
+    bd_metric = parse_breakdown_metric(breakdown_metric)
+    metrics, nodata_values = validate_metric_nodata(metric, metric_nodata, bd_metric)
+    if metrics or breakdown or bd_metric:
         # Fail with a clear message (not a DuckDB binder error) when a requested
         # metric/breakdown column doesn't exist -- especially `--metric count`,
         # which is a no-op request since count is always emitted. Runs before the
         # type resolution below so a missing column reports as missing, not as a
         # non-numeric metric.
         cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM ({source_sql})").fetchall()}
-        validate_agg_columns(cols, metrics, breakdown)
+        validate_agg_columns(cols, metrics, breakdown, bd_metric)
     # Resolve metric column types so sentinel literals match the column's actual
     # precision (REAL vs DOUBLE, #613) and non-numeric columns fail up-front.
-    column_types = resolve_metric_column_types(con, source_sql, metrics) if nodata_values else None
+    typed = metrics + ([bd_metric] if bd_metric else [])
+    column_types = resolve_metric_column_types(con, source_sql, typed) if nodata_values else None
 
     key_expr = scheme.key_template.format(pt="__pt", res=resolution)
     keyed_sql = f"SELECT *, {key_expr} AS __key FROM ({source_sql})"
@@ -406,8 +412,19 @@ def build_grid_query(
         con.execute(f"CREATE TEMP TABLE __agg_keyed AS {keyed_sql}")
         keyed_ref = "SELECT * FROM __agg_keyed"
         top_values, has_other = resolve_breakdown_values(con, keyed_ref, breakdown, breakdown_limit)
-        colmap = build_breakdown_column_names(top_values, reserved={"count_other"})
-        breakdown_select = build_breakdown_select(breakdown, colmap, has_other)
+        colmap = build_breakdown_column_names(
+            top_values,
+            breakdown_reserved_names(metrics, bd_metric),
+            prefix=breakdown_prefix(bd_metric),
+        )
+        breakdown_select = build_breakdown_select(
+            breakdown,
+            colmap,
+            has_other,
+            spec=bd_metric,
+            nodata_values=nodata_values,
+            column_types=column_types,
+        )
     else:
         keyed_ref = keyed_sql
 
@@ -735,6 +752,7 @@ def aggregate_grid_file(
     metric_nodata: str | None = None,
     bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into grid cells. Writes the output file."""
     configure_verbose(verbose)
@@ -744,7 +762,7 @@ def aggregate_grid_file(
         validate_where_clause(where)
     # Validate metric/nodata pairing before any expensive setup (--auto scanning,
     # CRS reads, connection + community-extension install).
-    validate_metric_nodata(metric, metric_nodata)
+    validate_metric_nodata(metric, metric_nodata, parse_breakdown_metric(breakdown_metric))
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_BBOX:
         bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
@@ -782,6 +800,7 @@ def aggregate_grid_file(
             breakdown_limit,
             out_geometry,
             metric_nodata=metric_nodata,
+            breakdown_metric=breakdown_metric,
         )
         if show_sql or verbose:
             debug(final_sql)
@@ -844,6 +863,7 @@ def aggregate_grid_table(
     metric_nodata: str | None = None,
     bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table into grid cells. Returns a new Arrow table."""
     cell_column = cell_column or scheme.default_column
@@ -851,7 +871,7 @@ def aggregate_grid_table(
     if where:
         validate_where_clause(where)
     # Validate metric/nodata pairing before connection setup and extension install.
-    validate_metric_nodata(metric, metric_nodata)
+    validate_metric_nodata(metric, metric_nodata, parse_breakdown_metric(breakdown_metric))
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_BBOX:
         bbox_column = _resolve_bbox_column_for_table(table, bbox_column)
@@ -887,6 +907,7 @@ def aggregate_grid_table(
             breakdown_limit,
             out_geometry,
             metric_nodata=metric_nodata,
+            breakdown_metric=breakdown_metric,
         )
         return con.execute(final_sql).arrow().read_all()
     finally:

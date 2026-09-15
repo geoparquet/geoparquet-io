@@ -61,6 +61,7 @@ A coarser parent cell straddles the antimeridian more readily than its children,
 | `sum_*` | sum | exact |
 | `min_*` / `max_*` | min / max | exact |
 | `count_*` breakdowns (incl. `count_other`) | sum | exact |
+| `sum_*` / `min_*` / `max_*` breakdowns from `--breakdown-metric` | sum / min / max | exact |
 | `avg_*` | count-weighted mean over children with a value | exact **when the metric had no NULLs** |
 
 !!! note "The `avg_*` caveat"
