@@ -175,7 +175,6 @@ def aggregate_by_admin(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     dataset: str = "overture",
     compression: str = "ZSTD",
@@ -187,6 +186,7 @@ def aggregate_by_admin(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> None:
     """Aggregate input features by administrative region.
 
@@ -202,9 +202,6 @@ def aggregate_by_admin(
         metric: Comma-separated ``func:column`` metric specs (e.g. ``sum:area``).
         breakdown: Column name for pivot-style breakdown counts.
         breakdown_limit: Maximum number of breakdown values to pivot (default 20).
-        breakdown_metric: What each breakdown column holds: None/``count``
-            (default), or ``sum:col``/``min:col``/``max:col`` for a weighted
-            pivot named ``<func>_<col>_<value>``.
         out_geometry: One of ``polygon``, ``centroid``, ``both``, ``none``.
         dataset: Admin boundary dataset to use (default ``overture``).
         compression: Parquet compression codec (default ``ZSTD``).
@@ -220,6 +217,9 @@ def aggregate_by_admin(
             point column.
         bbox_column: Bbox covering column for ``bucket_point='bbox'``
             (auto-detected when omitted).
+        breakdown_metric: What each breakdown column holds: None/``count``
+            (default), or ``sum:col``/``min:col``/``max:col`` for a weighted
+            pivot named ``<func>_<col>_<value>``.
     """
     configure_verbose(verbose)
     if out_geometry not in VALID_OUT_GEOMETRY:

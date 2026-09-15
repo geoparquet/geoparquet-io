@@ -358,13 +358,13 @@ def aggregate_a5(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     geometry_column: str | None = None,
     where: str | None = None,
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into A5 grid cells with per-cell statistics.
@@ -375,9 +375,6 @@ def aggregate_a5(
         metric: Aggregation metric, e.g. "sum:area" or "mean:value"
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
-        breakdown_metric: What each breakdown column holds: None/'count'
-            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
-            pivot named <func>_<col>_<value>
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
         geometry_column: Geometry column name (defaults to "geometry")
         where: DuckDB WHERE clause filtering input rows before aggregation
@@ -387,6 +384,9 @@ def aggregate_a5(
             "bbox" (center of a bbox covering column), or a point column name
         bbox_column: Bbox covering column for bucket_point="bbox" (auto-detected
             when omitted)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
 
     Returns:
         New PyArrow Table with one row per A5 cell
@@ -399,13 +399,13 @@ def aggregate_a5(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
-        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         geometry_column=geometry_column,
         where=where,
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )
 
 
@@ -415,13 +415,13 @@ def aggregate_h3(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     geometry_column: str | None = None,
     where: str | None = None,
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into H3 grid cells with per-cell statistics.
@@ -432,9 +432,6 @@ def aggregate_h3(
         metric: Aggregation metric, e.g. "sum:area" or "mean:value"
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
-        breakdown_metric: What each breakdown column holds: None/'count'
-            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
-            pivot named <func>_<col>_<value>
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
         geometry_column: Geometry column name (defaults to "geometry")
         where: DuckDB WHERE clause filtering input rows before aggregation
@@ -444,6 +441,9 @@ def aggregate_h3(
             "bbox" (center of a bbox covering column), or a point column name
         bbox_column: Bbox covering column for bucket_point="bbox" (auto-detected
             when omitted)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
 
     Returns:
         New PyArrow Table with one row per H3 cell
@@ -456,13 +456,13 @@ def aggregate_h3(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
-        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         geometry_column=geometry_column,
         where=where,
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )
 
 
@@ -472,12 +472,12 @@ def aggregate_admin(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     where: str | None = None,
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into administrative regions with per-region statistics.
@@ -488,9 +488,6 @@ def aggregate_admin(
         metric: Aggregation metric, e.g. "sum:area" or "mean:value"
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
-        breakdown_metric: What each breakdown column holds: None/'count'
-            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
-            pivot named <func>_<col>_<value>
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
         where: DuckDB WHERE clause filtering input rows before aggregation
         metric_nodata: NoData sentinel value(s) mapped to NULL in metric columns,
@@ -499,6 +496,9 @@ def aggregate_admin(
             "bbox" (center of a bbox covering column), or a point column name
         bbox_column: Bbox covering column for bucket_point="bbox" (auto-detected
             when omitted)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
 
     Returns:
         New PyArrow Table with one row per admin region
@@ -517,12 +517,12 @@ def aggregate_admin(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
-        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         where=where,
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )
 
 

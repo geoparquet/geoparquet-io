@@ -473,3 +473,76 @@ def test_table_methods_accept_breakdown_metric(method):
     from geoparquet_io.api.table import Table
 
     assert "breakdown_metric" in inspect.signature(getattr(Table, method)).parameters
+
+
+# --- sentinel typing for a case-folded column name -------------------------
+
+
+_REAL_SENTINEL = "-3.4028235e+38"
+_REAL_SOURCE = (
+    "SELECT * FROM (VALUES (CAST(2.0 AS REAL), '202605'), "
+    f"(CAST({_REAL_SENTINEL} AS REAL), '202605'), "
+    "(CAST(4.0 AS REAL), '202606')) t(peak, month)"
+)
+
+
+def test_nodata_casts_a_real_column_asked_for_in_another_case():
+    """`sum:PEAK` against a `peak` column must still get the REAL sentinel cast.
+
+    `validate_agg_columns` accepts the request (DuckDB folds ASCII identifiers),
+    but DESCRIBE reports the *physical* name, so the resolved types come back
+    keyed `peak`. A case-sensitive lookup finds nothing, skips the REAL cast,
+    and the bare DOUBLE literal never equals the widened float32 value (#613).
+    """
+    con = duckdb.connect()
+    sql = build_grid_query(
+        con,
+        _DUMMY_SCHEME,
+        _REAL_SOURCE,
+        1,
+        "cell",
+        "sum:PEAK",
+        None,
+        20,
+        "none",
+        metric_nodata=_REAL_SENTINEL,
+    )
+    # The sentinel is excluded, so the sum is 2.0 + 4.0 -- not a huge negative.
+    assert con.execute(sql).fetchone() == (1, 3, 6.0)
+
+
+def test_nodata_casts_a_real_breakdown_metric_column_asked_for_in_another_case():
+    con = duckdb.connect()
+    sql = build_grid_query(
+        con,
+        _DUMMY_SCHEME,
+        _REAL_SOURCE,
+        1,
+        "cell",
+        None,
+        "month",
+        20,
+        "none",
+        metric_nodata=_REAL_SENTINEL,
+        breakdown_metric="sum:PEAK",
+    )
+    # May keeps only the 2.0; the sentinel row drops out.
+    assert con.execute(sql).fetchone() == (1, 3, 2.0, 4.0)
+
+
+def test_nodata_rejects_a_non_numeric_column_asked_for_in_another_case():
+    """The up-front non-numeric rejection must not be skipped by the same miss."""
+    con = duckdb.connect()
+    with pytest.raises(InvalidParameterError, match="numeric"):
+        build_grid_query(
+            con,
+            _DUMMY_SCHEME,
+            "SELECT * FROM (VALUES ('x', '202605')) t(label, month)",
+            1,
+            "cell",
+            "max:LABEL",
+            None,
+            20,
+            "none",
+            metric_nodata="-999",
+        )

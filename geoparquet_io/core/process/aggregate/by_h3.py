@@ -43,7 +43,6 @@ def aggregate_by_h3(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     h3_column_name: str = DEFAULT_H3_COLUMN_NAME,
     compression: str = "ZSTD",
@@ -55,6 +54,7 @@ def aggregate_by_h3(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into H3 cells. Writes the output file."""
     aggregate_grid_file(
@@ -68,7 +68,6 @@ def aggregate_by_h3(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
-        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         cell_column=h3_column_name,
         compression=compression,
@@ -80,6 +79,7 @@ def aggregate_by_h3(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )
 
 
@@ -89,7 +89,6 @@ def aggregate_h3_table(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     h3_column_name: str = DEFAULT_H3_COLUMN_NAME,
     geometry_column: str | None = None,
@@ -97,6 +96,7 @@ def aggregate_h3_table(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table by h3 cell. Returns a new Arrow table."""
     return aggregate_grid_table(
@@ -106,7 +106,6 @@ def aggregate_h3_table(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
-        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         cell_column=h3_column_name,
         geometry_column=geometry_column,
@@ -114,4 +113,5 @@ def aggregate_h3_table(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )

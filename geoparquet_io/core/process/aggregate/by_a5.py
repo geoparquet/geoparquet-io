@@ -46,7 +46,6 @@ def aggregate_by_a5(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     a5_column_name: str = DEFAULT_A5_COLUMN_NAME,
     compression: str = "ZSTD",
@@ -58,6 +57,7 @@ def aggregate_by_a5(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into A5 cells. Writes the output file."""
     aggregate_grid_file(
@@ -71,7 +71,6 @@ def aggregate_by_a5(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
-        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         cell_column=a5_column_name,
         compression=compression,
@@ -83,6 +82,7 @@ def aggregate_by_a5(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )
 
 
@@ -92,7 +92,6 @@ def aggregate_a5_table(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     a5_column_name: str = DEFAULT_A5_COLUMN_NAME,
     geometry_column: str | None = None,
@@ -100,6 +99,7 @@ def aggregate_a5_table(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table by a5 cell. Returns a new Arrow table."""
     return aggregate_grid_table(
@@ -109,7 +109,6 @@ def aggregate_a5_table(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
-        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         cell_column=a5_column_name,
         geometry_column=geometry_column,
@@ -117,4 +116,5 @@ def aggregate_a5_table(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )

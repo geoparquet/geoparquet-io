@@ -306,6 +306,25 @@ def _nodata_wrapped_column(
     return f"CASE WHEN {qcol} IN ({in_list}) THEN NULL ELSE {qcol} END"
 
 
+def _resolved_column_type(column_types: dict[str, str] | None, column: str) -> str | None:
+    """The resolved type of ``column``, matched the way DuckDB matched the name.
+
+    ``resolve_metric_column_types`` keys its result by the name DESCRIBE reports,
+    which is the column's *physical* spelling: asking for ``"PEAK"`` against a
+    ``peak`` column comes back keyed ``peak``. Since ``validate_agg_columns``
+    deliberately accepts that request (see :func:`_has_column`), a
+    case-sensitive lookup here would find nothing and silently skip both the
+    REAL cast (#613) and the non-numeric rejection below -- leaving the sentinel
+    summed as data.
+    """
+    if not column_types:
+        return None
+    if column in column_types:
+        return column_types[column]
+    folded = _fold(column)
+    return next((t for c, t in column_types.items() if _fold(c) == folded), None)
+
+
 def _aggregated_column_expr(
     column: str,
     nodata_values: list[str] | None,
@@ -320,7 +339,7 @@ def _aggregated_column_expr(
     """
     if not nodata_values:
         return quote_identifier(column)
-    col_type = (column_types or {}).get(column)
+    col_type = _resolved_column_type(column_types, column)
     if col_type is not None and not _is_numeric_sql_type(col_type):
         raise InvalidParameterError(
             "metric-nodata",

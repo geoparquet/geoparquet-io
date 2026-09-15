@@ -1675,12 +1675,12 @@ class Table:
         metric: str | None = None,
         breakdown: str | None = None,
         breakdown_limit: int = 20,
-        breakdown_metric: str | None = None,
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
         bucket_point: str = "geometry",
         bbox_column: str | None = None,
+        breakdown_metric: str | None = None,
     ) -> Table:
         """
         Aggregate features into A5 grid cells with per-cell statistics.
@@ -1690,15 +1690,15 @@ class Table:
             metric: Aggregation metric, e.g. "sum:area" or "mean:value"
             breakdown: Column name to pivot into per-category count columns
             breakdown_limit: Max number of breakdown categories (default: 20)
-            breakdown_metric: What each breakdown column holds: None/'count'
-                (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
-                pivot named <func>_<col>_<value>
             out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
             where: DuckDB WHERE clause filtering input rows before aggregation
             metric_nodata: NoData sentinel value(s) mapped to NULL in metric columns
             bucket_point: Keying point source: "geometry" (centroid, default),
                 "bbox" (center of a bbox covering column), or a point column name
             bbox_column: Bbox covering column for bucket_point="bbox"
+            breakdown_metric: What each breakdown column holds: None/'count'
+                (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+                pivot named <func>_<col>_<value>
 
         Returns:
             New Table with one row per A5 cell
@@ -1711,13 +1711,13 @@ class Table:
             metric=metric,
             breakdown=breakdown,
             breakdown_limit=breakdown_limit,
-            breakdown_metric=breakdown_metric,
             out_geometry=out_geometry,
             geometry_column=self._geometry_column,
             where=where,
             metric_nodata=metric_nodata,
             bucket_point=bucket_point,
             bbox_column=bbox_column,
+            breakdown_metric=breakdown_metric,
         )
         return self._wrap(result, "geometry" if out_geometry != "none" else None)
 
@@ -1727,12 +1727,12 @@ class Table:
         metric: str | None = None,
         breakdown: str | None = None,
         breakdown_limit: int = 20,
-        breakdown_metric: str | None = None,
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
         bucket_point: str = "geometry",
         bbox_column: str | None = None,
+        breakdown_metric: str | None = None,
     ) -> Table:
         """
         Aggregate features into H3 grid cells with per-cell statistics.
@@ -1742,15 +1742,15 @@ class Table:
             metric: Aggregation metric, e.g. "sum:area" or "mean:value"
             breakdown: Column name to pivot into per-category count columns
             breakdown_limit: Max number of breakdown categories (default: 20)
-            breakdown_metric: What each breakdown column holds: None/'count'
-                (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
-                pivot named <func>_<col>_<value>
             out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
             where: DuckDB WHERE clause filtering input rows before aggregation
             metric_nodata: NoData sentinel value(s) mapped to NULL in metric columns
             bucket_point: Keying point source: "geometry" (centroid, default),
                 "bbox" (center of a bbox covering column), or a point column name
             bbox_column: Bbox covering column for bucket_point="bbox"
+            breakdown_metric: What each breakdown column holds: None/'count'
+                (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+                pivot named <func>_<col>_<value>
 
         Returns:
             New Table with one row per H3 cell
@@ -1763,13 +1763,13 @@ class Table:
             metric=metric,
             breakdown=breakdown,
             breakdown_limit=breakdown_limit,
-            breakdown_metric=breakdown_metric,
             out_geometry=out_geometry,
             geometry_column=self._geometry_column,
             where=where,
             metric_nodata=metric_nodata,
             bucket_point=bucket_point,
             bbox_column=bbox_column,
+            breakdown_metric=breakdown_metric,
         )
         return self._wrap(result, "geometry" if out_geometry != "none" else None)
 
@@ -1779,12 +1779,12 @@ class Table:
         metric: str | None = None,
         breakdown: str | None = None,
         breakdown_limit: int = 20,
-        breakdown_metric: str | None = None,
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
         bucket_point: str = "geometry",
         bbox_column: str | None = None,
+        breakdown_metric: str | None = None,
     ) -> Table:
         """
         Aggregate features into administrative regions with per-region statistics.
@@ -1794,15 +1794,15 @@ class Table:
             metric: Aggregation metric, e.g. "sum:area" or "mean:value"
             breakdown: Column name to pivot into per-category count columns
             breakdown_limit: Max number of breakdown categories (default: 20)
-            breakdown_metric: What each breakdown column holds: None/'count'
-                (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
-                pivot named <func>_<col>_<value>
             out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
             where: DuckDB WHERE clause filtering input rows before aggregation
             metric_nodata: NoData sentinel value(s) mapped to NULL in metric columns
             bucket_point: Join-point source: "geometry" (centroid, default),
                 "bbox" (center of a bbox covering column), or a point column name
             bbox_column: Bbox covering column for bucket_point="bbox"
+            breakdown_metric: What each breakdown column holds: None/'count'
+                (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+                pivot named <func>_<col>_<value>
 
         Returns:
             New Table with one row per admin region
@@ -1815,12 +1815,12 @@ class Table:
             metric=metric,
             breakdown=breakdown,
             breakdown_limit=breakdown_limit,
-            breakdown_metric=breakdown_metric,
             out_geometry=out_geometry,
             where=where,
             metric_nodata=metric_nodata,
             bucket_point=bucket_point,
             bbox_column=bbox_column,
+            breakdown_metric=breakdown_metric,
         )
         return self._wrap(result, "geometry" if out_geometry != "none" else None)
 

@@ -741,7 +741,6 @@ def aggregate_grid_file(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     cell_column: str | None = None,
     compression: str = "ZSTD",
@@ -753,6 +752,7 @@ def aggregate_grid_file(
     metric_nodata: str | None = None,
     bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into grid cells. Writes the output file."""
     configure_verbose(verbose)
@@ -856,7 +856,6 @@ def aggregate_grid_table(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
-    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     cell_column: str | None = None,
     geometry_column: str | None = None,
@@ -864,6 +863,7 @@ def aggregate_grid_table(
     metric_nodata: str | None = None,
     bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table into grid cells. Returns a new Arrow table."""
     cell_column = cell_column or scheme.default_column
