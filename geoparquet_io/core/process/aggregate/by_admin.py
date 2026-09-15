@@ -27,9 +27,12 @@ from geoparquet_io.core.process.aggregate.common import (
     VALID_OUT_GEOMETRY,
     MetricSpec,
     aggregate_source_relation,
+    breakdown_prefix,
+    breakdown_reserved_names,
     build_breakdown_column_names,
     build_breakdown_select,
     build_metric_select,
+    parse_breakdown_metric,
     resolve_breakdown_values,
     resolve_metric_column_types,
     validate_agg_columns,
@@ -172,6 +175,7 @@ def aggregate_by_admin(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
+    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     dataset: str = "overture",
     compression: str = "ZSTD",
@@ -198,6 +202,9 @@ def aggregate_by_admin(
         metric: Comma-separated ``func:column`` metric specs (e.g. ``sum:area``).
         breakdown: Column name for pivot-style breakdown counts.
         breakdown_limit: Maximum number of breakdown values to pivot (default 20).
+        breakdown_metric: What each breakdown column holds: None/``count``
+            (default), or ``sum:col``/``min:col``/``max:col`` for a weighted
+            pivot named ``<func>_<col>_<value>``.
         out_geometry: One of ``polygon``, ``centroid``, ``both``, ``none``.
         dataset: Admin boundary dataset to use (default ``overture``).
         compression: Parquet compression codec (default ``ZSTD``).
@@ -222,7 +229,8 @@ def aggregate_by_admin(
         )
     if where:
         validate_where_clause(where)
-    metrics, nodata_values = validate_metric_nodata(metric, metric_nodata)
+    bd_metric = parse_breakdown_metric(breakdown_metric)
+    metrics, nodata_values = validate_metric_nodata(metric, metric_nodata, bd_metric)
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == "bbox":
         bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
@@ -249,14 +257,14 @@ def aggregate_by_admin(
         admin_dataset.configure_s3(con)
 
         read_rel = aggregate_source_relation(input_url)
-        if metrics or breakdown:
+        if metrics or breakdown or bd_metric:
             # Clear error (not a DuckDB binder error) for missing metric/breakdown
             # columns -- especially `--metric count`, a no-op request since count
             # is always emitted. Checked before _get_admin_ref so a typo fails now
             # rather than after downloading the admin boundary cache, and before
             # the type resolution below so a missing column reports as missing.
             cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {read_rel}").fetchall()}
-            validate_agg_columns(cols, metrics, breakdown)
+            validate_agg_columns(cols, metrics, breakdown, bd_metric)
 
         admin_ref = _get_admin_ref(admin_dataset, con, level)
 
@@ -264,7 +272,9 @@ def aggregate_by_admin(
         # column's actual precision (REAL vs DOUBLE, #613) and non-numeric metric
         # columns fail up-front instead of mid-query.
         column_types = (
-            resolve_metric_column_types(con, f"SELECT * FROM {read_rel}", metrics)
+            resolve_metric_column_types(
+                con, f"SELECT * FROM {read_rel}", metrics + ([bd_metric] if bd_metric else [])
+            )
             if nodata_values
             else None
         )
@@ -296,8 +306,19 @@ def aggregate_by_admin(
             top_values, has_other = resolve_breakdown_values(
                 con, joined_ref, breakdown, breakdown_limit
             )
-            colmap = build_breakdown_column_names(top_values, reserved={"count_other"})
-            breakdown_select = build_breakdown_select(breakdown, colmap, has_other)
+            colmap = build_breakdown_column_names(
+                top_values,
+                breakdown_reserved_names(metrics, bd_metric),
+                prefix=breakdown_prefix(bd_metric),
+            )
+            breakdown_select = build_breakdown_select(
+                breakdown,
+                colmap,
+                has_other,
+                spec=bd_metric,
+                nodata_values=nodata_values,
+                column_types=column_types,
+            )
             agg_sql = _build_agg_sql(
                 joined_ref, metrics, breakdown_select, nodata_values, column_types
             )

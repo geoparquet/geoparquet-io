@@ -358,6 +358,7 @@ def aggregate_a5(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
+    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     geometry_column: str | None = None,
     where: str | None = None,
@@ -374,6 +375,9 @@ def aggregate_a5(
         metric: Aggregation metric, e.g. "sum:area" or "mean:value"
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
         geometry_column: Geometry column name (defaults to "geometry")
         where: DuckDB WHERE clause filtering input rows before aggregation
@@ -395,6 +399,7 @@ def aggregate_a5(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
+        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         geometry_column=geometry_column,
         where=where,
@@ -410,6 +415,7 @@ def aggregate_h3(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
+    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     geometry_column: str | None = None,
     where: str | None = None,
@@ -426,6 +432,9 @@ def aggregate_h3(
         metric: Aggregation metric, e.g. "sum:area" or "mean:value"
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
         geometry_column: Geometry column name (defaults to "geometry")
         where: DuckDB WHERE clause filtering input rows before aggregation
@@ -447,6 +456,7 @@ def aggregate_h3(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
+        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         geometry_column=geometry_column,
         where=where,
@@ -462,6 +472,7 @@ def aggregate_admin(
     metric: str | None = None,
     breakdown: str | None = None,
     breakdown_limit: int = 20,
+    breakdown_metric: str | None = None,
     out_geometry: str = "polygon",
     where: str | None = None,
     metric_nodata: str | None = None,
@@ -477,6 +488,9 @@ def aggregate_admin(
         metric: Aggregation metric, e.g. "sum:area" or "mean:value"
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
         where: DuckDB WHERE clause filtering input rows before aggregation
         metric_nodata: NoData sentinel value(s) mapped to NULL in metric columns,
@@ -503,6 +517,7 @@ def aggregate_admin(
         metric=metric,
         breakdown=breakdown,
         breakdown_limit=breakdown_limit,
+        breakdown_metric=breakdown_metric,
         out_geometry=out_geometry,
         where=where,
         metric_nodata=metric_nodata,

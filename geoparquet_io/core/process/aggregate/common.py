@@ -12,6 +12,12 @@ from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 
 VALID_METRIC_FUNCS = {"sum", "avg", "min", "max"}
+# A breakdown pivot is one aggregate per category, so it must roll up to a
+# coarser overview level on its own. `avg` cannot: `overview/rollup.py` weights
+# an `avg_*` column by the row's total `count`, but a per-bucket mean needs the
+# bucket's own count, which the output does not carry. sum/min/max roll up
+# exactly, so those are what a breakdown metric may be (#1100).
+VALID_BREAKDOWN_METRIC_FUNCS = {"sum", "min", "max"}
 VALID_OUT_GEOMETRY = {"polygon", "centroid", "both", "none"}
 
 # Strict SQL-safe numeric literal: ASCII digits only (float() also accepts
@@ -125,6 +131,70 @@ def parse_metrics(metric_str: str | None) -> list[MetricSpec]:
     return specs
 
 
+def parse_breakdown_metric(spec_str: str | None) -> MetricSpec | None:
+    """Parse a --breakdown-metric string into the spec each pivot column carries.
+
+    Returns None for the default -- ``None``, empty, or the literal ``count`` --
+    which leaves the pivot as ``COUNT(*)`` and its columns named ``count_<value>``,
+    exactly as before this flag existed.
+
+    Otherwise accepts a single ``func:column`` (a bare ``column`` defaults to
+    ``sum``, matching --metric). One breakdown carries one metric, so a comma
+    list is rejected rather than silently pivoted twice into colliding names.
+    """
+    if spec_str is None:
+        return None
+    entry = spec_str.strip()
+    if not entry or entry.lower() == "count":
+        return None
+    if "," in entry:
+        raise InvalidParameterError(
+            "breakdown-metric",
+            f"'{entry}' names more than one metric. A breakdown carries exactly one "
+            'aggregate, e.g. "sum:peak".',
+        )
+    func, sep, column = entry.partition(":")
+    func = func.strip().lower()
+    column = column.strip()
+    if not sep:
+        func, column = "sum", entry.strip()
+    if func == "count":
+        raise InvalidParameterError(
+            "breakdown-metric",
+            "'count' takes no column: it is the default, one COUNT(*) per category. "
+            'Pass a column only with sum, min or max, e.g. "sum:peak".',
+        )
+    if func == "avg":
+        raise InvalidParameterError(
+            "breakdown-metric",
+            "'avg' is not available as a breakdown metric: a per-category mean cannot "
+            "be rolled up to a coarser overview level, because the output carries no "
+            "per-category count to weight it by. Use sum, min or max -- those roll up "
+            "exactly. (--metric avg:<column> still gives a per-cell mean.)",
+        )
+    if func not in VALID_BREAKDOWN_METRIC_FUNCS:
+        raise InvalidParameterError(
+            "breakdown-metric",
+            f"Unknown breakdown metric function '{func}'. "
+            f"Valid functions: count, {', '.join(sorted(VALID_BREAKDOWN_METRIC_FUNCS))}",
+        )
+    if not column:
+        raise InvalidParameterError(
+            "breakdown-metric", f"Breakdown metric '{entry}' is missing a column name"
+        )
+    return MetricSpec(func=func, column=column, output_name=f"{func}_{column}")
+
+
+def breakdown_prefix(spec: MetricSpec | None) -> str:
+    """Column-name prefix every pivot column of a breakdown shares.
+
+    ``count`` for a plain count breakdown, else the metric's own output name
+    (``sum_peak``), so a pivot column reads ``sum_peak_202605`` and lands on a
+    prefix ``overview/detect.py`` already knows how to roll up.
+    """
+    return spec.output_name if spec is not None else "count"
+
+
 def parse_metric_nodata(nodata_str: str | None) -> list[str]:
     """Parse a --metric-nodata string into validated numeric literals.
 
@@ -164,16 +234,21 @@ def parse_metric_nodata(nodata_str: str | None) -> list[str]:
 
 
 def validate_metric_nodata(
-    metric: str | None, metric_nodata: str | None
+    metric: str | None,
+    metric_nodata: str | None,
+    breakdown_metric: MetricSpec | None = None,
 ) -> tuple[list[MetricSpec], list[str]]:
     """Parse and cross-validate the metric and metric-nodata parameters together.
 
     Shared by the grid and admin aggregation paths (CLI and Python API), so the
     wording stays flag-neutral. Returns ``(metrics, nodata_values)``.
+
+    Sentinels also apply to a ``--breakdown-metric`` column, so that counts as a
+    metric for the "sentinels need something to affect" check (#1100).
     """
     metrics = parse_metrics(metric)
     nodata_values = parse_metric_nodata(metric_nodata)
-    if nodata_values and not metrics:
+    if nodata_values and not metrics and breakdown_metric is None:
         raise InvalidParameterError(
             "metric-nodata",
             "NoData sentinels require at least one metric (they only affect metric columns)",
@@ -231,6 +306,30 @@ def _nodata_wrapped_column(
     return f"CASE WHEN {qcol} IN ({in_list}) THEN NULL ELSE {qcol} END"
 
 
+def _aggregated_column_expr(
+    column: str,
+    nodata_values: list[str] | None,
+    column_types: dict[str, str] | None,
+) -> str:
+    """The expression an aggregate reads ``column`` through.
+
+    Bare quoted identifier, or -- when sentinels are configured -- the column
+    with its sentinel values mapped to NULL so sum/avg/min/max ignore them
+    (#566). Shared by the per-cell metrics and the per-category breakdown pivots
+    so both honour ``--metric-nodata`` the same way.
+    """
+    if not nodata_values:
+        return quote_identifier(column)
+    col_type = (column_types or {}).get(column)
+    if col_type is not None and not _is_numeric_sql_type(col_type):
+        raise InvalidParameterError(
+            "metric-nodata",
+            f"NoData sentinels apply only to numeric metric columns; "
+            f"column '{column}' has type {col_type}",
+        )
+    return _nodata_wrapped_column(column, nodata_values, col_type)
+
+
 def build_metric_select(
     metrics: list[MetricSpec],
     nodata_values: list[str] | None = None,
@@ -248,17 +347,7 @@ def build_metric_select(
     """
     parts = []
     for m in metrics:
-        if nodata_values:
-            col_type = (column_types or {}).get(m.column)
-            if col_type is not None and not _is_numeric_sql_type(col_type):
-                raise InvalidParameterError(
-                    "metric-nodata",
-                    f"NoData sentinels apply only to numeric metric columns; "
-                    f"column '{m.column}' has type {col_type}",
-                )
-            col_expr = _nodata_wrapped_column(m.column, nodata_values, col_type)
-        else:
-            col_expr = quote_identifier(m.column)
+        col_expr = _aggregated_column_expr(m.column, nodata_values, column_types)
         parts.append(f"{m.func.upper()}({col_expr}) AS {quote_identifier(m.output_name)}")
     return ", ".join(parts)
 
@@ -291,7 +380,10 @@ def _format_available(available: set[str]) -> str:
 
 
 def validate_agg_columns(
-    available: set[str], metrics: list[MetricSpec], breakdown: str | None
+    available: set[str],
+    metrics: list[MetricSpec],
+    breakdown: str | None,
+    breakdown_metric: MetricSpec | None = None,
 ) -> None:
     """Check that requested metric/breakdown columns exist in the input.
 
@@ -326,6 +418,21 @@ def validate_agg_columns(
             f"Breakdown column '{breakdown}' not found in input. "
             f"Available columns: {_format_available(available)}",
         )
+    if breakdown_metric is None:
+        return
+    if not breakdown:
+        raise InvalidParameterError(
+            "breakdown-metric",
+            "A breakdown metric needs a breakdown to pivot: pass --breakdown <column> "
+            "as well, or drop the breakdown metric and use --metric for a per-cell "
+            "rollup.",
+        )
+    if not _has_column(available, breakdown_metric.column):
+        raise InvalidParameterError(
+            "breakdown-metric",
+            f"Breakdown metric column '{breakdown_metric.column}' not found in input. "
+            f"Available columns: {_format_available(available)}",
+        )
 
 
 _UNSAFE_CHARS = re.compile(r"[^0-9a-zA-Z]+")
@@ -340,18 +447,23 @@ def sanitize_value_for_column(value: object) -> str:
 
 
 def build_breakdown_column_names(
-    values: list, reserved: set[str] | None = None
+    values: list, reserved: set[str] | None = None, prefix: str = "count"
 ) -> list[tuple[object, str]]:
-    """Map each raw value to a unique ``count_<sanitized>`` column name.
+    """Map each raw value to a unique ``<prefix>_<sanitized>`` column name.
+
+    ``prefix`` is :func:`breakdown_prefix` of the breakdown metric -- ``count``
+    for a plain count breakdown, ``sum_peak`` for ``--breakdown-metric sum:peak``.
 
     Collisions (distinct values that sanitize to the same fragment, or that hit a
     reserved name) are disambiguated with a numeric suffix so two categories are
-    never silently merged into one column.
+    never silently merged into one column. Callers pass the ``--metric`` output
+    names in ``reserved``, so a pivot can never land on the same name as a
+    per-cell metric either (#1100).
     """
     used = set(reserved or set())
     mapping: list[tuple[object, str]] = []
     for value in values:
-        base = f"count_{sanitize_value_for_column(value)}"
+        base = f"{prefix}_{sanitize_value_for_column(value)}"
         name = base
         suffix = 2
         while name in used:
@@ -360,6 +472,18 @@ def build_breakdown_column_names(
         used.add(name)
         mapping.append((value, name))
     return mapping
+
+
+def breakdown_reserved_names(
+    metrics: list[MetricSpec], breakdown_metric: MetricSpec | None
+) -> set[str]:
+    """Column names a breakdown pivot must not collide with.
+
+    The remainder bucket, plus every ``--metric`` output column: both are
+    emitted in the same SELECT, so a pivot landing on one of those names would
+    merge two different numbers into one column.
+    """
+    return {f"{breakdown_prefix(breakdown_metric)}_other"} | {m.output_name for m in metrics}
 
 
 def sql_literal(value: object) -> str:
@@ -386,42 +510,69 @@ def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> t
     return top, has_other
 
 
+def _breakdown_other_condition(qcol: str, value_colmap: list[tuple[object, str]]) -> str:
+    """WHERE condition matching every row the kept-value pivots did not match."""
+    kept_non_null = [v for v, _ in value_colmap if v is not None]
+    in_list = ", ".join(sql_literal(v) for v in kept_non_null)
+    if any(v is None for v, _ in value_colmap):
+        # NULL is explicitly kept, so "other" is NOT(kept values including NULL).
+        kept_conds = ([f"{qcol} IN ({in_list})"] if kept_non_null else []) + [f"{qcol} IS NULL"]
+        return f"NOT ({' OR '.join(kept_conds)})"
+    if not kept_non_null:
+        # No non-null values kept (shouldn't happen, but handle gracefully).
+        return "TRUE"
+    # NULL is not explicitly kept, so it belongs in "other". It needs spelling
+    # out: `NULL NOT IN (...)` is NULL, not TRUE.
+    return f"{qcol} NOT IN ({in_list}) OR {qcol} IS NULL"
+
+
+def _breakdown_agg_expr(spec: MetricSpec | None, value_expr: str, cond: str) -> str:
+    """One pivot's aggregate: a filtered COUNT(*), or a filtered metric.
+
+    A SUM over a category with no rows is NULL where the equivalent COUNT is 0,
+    so it is coalesced to 0 -- the pivot exists to be differenced and summed by
+    a client, and 0 is the identity a count already reports. MIN/MAX keep their
+    NULL: there is no identity value for an extremum.
+    """
+    if spec is None:
+        return f"COUNT(*) FILTER (WHERE {cond})"
+    agg = f"{spec.func.upper()}({value_expr}) FILTER (WHERE {cond})"
+    return f"COALESCE({agg}, 0)" if spec.func == "sum" else agg
+
+
 def build_breakdown_select(
-    column: str, value_colmap: list[tuple[object, str]], has_other: bool
+    column: str,
+    value_colmap: list[tuple[object, str]],
+    has_other: bool,
+    spec: MetricSpec | None = None,
+    nodata_values: list[str] | None = None,
+    column_types: dict[str, str] | None = None,
 ) -> str:
-    """Build COUNT(*) FILTER expressions for each kept value, plus count_other."""
+    """Build one filtered aggregate per kept value, plus the remainder bucket.
+
+    ``spec`` (from :func:`parse_breakdown_metric`) chooses what each pivot holds:
+    None gives the ``COUNT(*) FILTER (...) AS count_<value>`` this has always
+    emitted, a spec gives ``SUM(peak) FILTER (...) AS sum_peak_<value>`` (#1100).
+    ``nodata_values``/``column_types`` apply ``--metric-nodata`` to the metric
+    column, the same way :func:`build_metric_select` does.
+    """
     qcol = quote_identifier(column)
+    value_expr = (
+        _aggregated_column_expr(spec.column, nodata_values, column_types)
+        if spec is not None
+        else ""
+    )
     parts: list[str] = []
     for value, colname in value_colmap:
-        if value is None:
-            cond = f"{qcol} IS NULL"
-        else:
-            cond = f"{qcol} = {sql_literal(value)}"
-        parts.append(f"COUNT(*) FILTER (WHERE {cond}) AS {quote_identifier(colname)}")
+        cond = f"{qcol} IS NULL" if value is None else f"{qcol} = {sql_literal(value)}"
+        agg = _breakdown_agg_expr(spec, value_expr, cond)
+        parts.append(f"{agg} AS {quote_identifier(colname)}")
 
     if has_other:
-        kept_non_null = [v for v, _ in value_colmap if v is not None]
-        kept_null = any(v is None for v, _ in value_colmap)
-
-        if kept_null:
-            # NULL is explicitly kept, so count_other = NOT(kept values including NULL)
-            kept_conds: list[str] = []
-            if kept_non_null:
-                in_list = ", ".join(sql_literal(v) for v in kept_non_null)
-                kept_conds.append(f"{qcol} IN ({in_list})")
-            kept_conds.append(f"{qcol} IS NULL")
-            kept_clause = " OR ".join(kept_conds)
-            parts.append(f'COUNT(*) FILTER (WHERE NOT ({kept_clause})) AS "count_other"')
-        else:
-            # NULL is not explicitly kept, so include it in count_other
-            # Need to use NOT IN with explicit NULL handling since NULL NOT IN (...) = NULL
-            if kept_non_null:
-                in_list = ", ".join(sql_literal(v) for v in kept_non_null)
-                other_clause = f"{qcol} NOT IN ({in_list}) OR {qcol} IS NULL"
-            else:
-                # No non-null values kept (shouldn't happen, but handle gracefully)
-                other_clause = "TRUE"
-            parts.append(f'COUNT(*) FILTER (WHERE {other_clause}) AS "count_other"')
+        other_cond = _breakdown_other_condition(qcol, value_colmap)
+        other_name = f"{breakdown_prefix(spec)}_other"
+        agg = _breakdown_agg_expr(spec, value_expr, other_cond)
+        parts.append(f"{agg} AS {quote_identifier(other_name)}")
     return ", ".join(parts)
 
 
