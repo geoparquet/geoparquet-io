@@ -185,9 +185,13 @@ def resolve_metric_column_types(con, select_sql: str, metrics: list[MetricSpec])
     """Resolve the DuckDB type of each metric column via a cheap DESCRIBE bind.
 
     ``select_sql`` must be a SELECT statement exposing the metric columns.
-    Returns ``{column: TYPE}`` (uppercase). Resolution failures (e.g. a missing
-    column) return partial/empty info so the original error surfaces from the
-    real query instead of an opaque bind error here.
+    Returns ``{column: TYPE}`` (uppercase) keyed by the metric's *own* spelling
+    of the name: DESCRIBE reports the physical spelling (``Height`` for a
+    ``sum:HEIGHT`` request, which :func:`validate_agg_columns` accepts), and a
+    lookup by the requested spelling would then miss the REAL cast and the
+    non-numeric rejection (#613, #1104). Resolution failures (e.g. a missing
+    column) return empty info so the original error surfaces from the real
+    query instead of an opaque bind error here.
     """
     if not metrics:
         return {}
@@ -197,7 +201,8 @@ def resolve_metric_column_types(con, select_sql: str, metrics: list[MetricSpec])
         rows = con.execute(f"DESCRIBE SELECT {col_list} FROM ({select_sql})").fetchall()
     except Exception:  # noqa: BLE001 - typing is best-effort; real query reports errors
         return {}
-    return {row[0]: str(row[1]).upper() for row in rows}
+    # One DESCRIBE row per selected column, in SELECT order.
+    return {c: str(row[1]).upper() for c, row in zip(columns, rows, strict=True)}
 
 
 def _nodata_literal(token: str, col_type: str | None) -> str:
@@ -231,25 +236,6 @@ def _nodata_wrapped_column(
     return f"CASE WHEN {qcol} IN ({in_list}) THEN NULL ELSE {qcol} END"
 
 
-def _resolved_column_type(column_types: dict[str, str] | None, column: str) -> str | None:
-    """The resolved type of ``column``, matched the way DuckDB matched the name.
-
-    :func:`resolve_metric_column_types` keys its result by the name DESCRIBE
-    reports, which is the column's *physical* spelling: asking for ``"HEIGHT"``
-    against a ``Height`` column comes back keyed ``Height``. Since
-    :func:`validate_agg_columns` deliberately accepts that request (see
-    :func:`_has_column`), a case-sensitive lookup would find nothing and
-    silently skip both the REAL cast (#613) and the non-numeric rejection --
-    leaving the sentinel aggregated as data rather than dropped.
-    """
-    if not column_types:
-        return None
-    if column in column_types:
-        return column_types[column]
-    folded = _fold(column)
-    return next((t for c, t in column_types.items() if _fold(c) == folded), None)
-
-
 def build_metric_select(
     metrics: list[MetricSpec],
     nodata_values: list[str] | None = None,
@@ -268,7 +254,7 @@ def build_metric_select(
     parts = []
     for m in metrics:
         if nodata_values:
-            col_type = _resolved_column_type(column_types, m.column)
+            col_type = (column_types or {}).get(m.column)
             if col_type is not None and not _is_numeric_sql_type(col_type):
                 raise InvalidParameterError(
                     "metric-nodata",

@@ -160,6 +160,18 @@ def test_resolve_metric_column_types():
     assert types == {"height": "FLOAT", "name": "VARCHAR"}
 
 
+def test_resolve_metric_column_types_keys_by_the_requested_spelling():
+    """``sum:HEIGHT`` is accepted against a ``Height`` column (DuckDB folds ASCII
+    identifiers), so its type must be found under ``HEIGHT``, not under what
+    DESCRIBE reports."""
+    con = duckdb.connect()
+    types = resolve_metric_column_types(
+        con, "SELECT CAST(1 AS REAL) AS Height, 'x' AS Label", parse_metrics("sum:HEIGHT,max:LABEL")
+    )
+    con.close()
+    assert types == {"HEIGHT": "FLOAT", "LABEL": "VARCHAR"}
+
+
 def test_resolve_metric_column_types_missing_column_is_lenient():
     """Unknown/missing columns resolve to no type info (error surfaces later)."""
     con = duckdb.connect()
@@ -410,8 +422,11 @@ def test_build_grid_query_varchar_metric_with_nodata_raises():
     con.close()
 
 
-def test_build_grid_query_real_column_sentinel_executes():
-    """Grid wiring resolves the REAL column type so the sentinel actually matches."""
+@pytest.mark.parametrize("metric", ["avg:height", "avg:HEIGHT"])
+def test_build_grid_query_real_column_sentinel_executes(metric):
+    """Grid wiring resolves the REAL column type so the sentinel actually matches,
+    whichever case the metric spells the column in; without the cast the sentinel
+    is summed as data (a -3.4e+38 where a real mean belongs)."""
     con = duckdb.connect()
     source = (
         "SELECT * FROM (VALUES (CAST(2.0 AS REAL), NULL), "
@@ -423,7 +438,7 @@ def test_build_grid_query_real_column_sentinel_executes():
         source,
         3,
         "cell",
-        "avg:height",
+        metric,
         None,
         20,
         "none",
@@ -433,7 +448,7 @@ def test_build_grid_query_real_column_sentinel_executes():
     con.close()
     assert tbl.num_rows == 1
     assert tbl.column("count")[0].as_py() == 3
-    assert tbl.column("avg_height")[0].as_py() == 3.0
+    assert tbl.column(metric.replace(":", "_"))[0].as_py() == 3.0
 
 
 def test_build_grid_query_breakdown_with_nodata():
@@ -689,61 +704,3 @@ def test_table_aggregate_a5_metric_nodata():
     df = result.table.to_pandas()
     assert int(df["count"].sum()) == 2
     assert float(df["avg_height"].iloc[0]) == 2.0
-
-
-# ---------------------------------------------------------------------------
-# The metric column's name as asked for vs. as DuckDB reports it
-# ---------------------------------------------------------------------------
-#
-# `validate_agg_columns` deliberately accepts `sum:HEIGHT` against a `Height`
-# column, because DuckDB folds ASCII identifiers. But DESCRIBE reports a
-# column's *physical* name, so `resolve_metric_column_types` keys its result by
-# that name, not by the spelling the user asked for. A case-sensitive lookup of
-# those types therefore finds nothing for a case-differing request -- and both
-# things that lookup guards are then silently skipped.
-
-_REAL_SENTINEL = "-3.4028235e+38"
-
-
-def test_build_metric_select_casts_a_real_column_named_in_another_case():
-    """The REAL cast (#613) must not depend on how the metric spelled the name."""
-    specs = parse_metrics("sum:HEIGHT")
-    sql = build_metric_select(specs, [_REAL_SENTINEL], {"height": "FLOAT"})
-    assert f"CAST({_REAL_SENTINEL} AS REAL)" in sql
-
-
-def test_build_metric_select_rejects_a_non_numeric_column_named_in_another_case():
-    """So must the up-front non-numeric rejection."""
-    specs = parse_metrics("max:LABEL")
-    with pytest.raises(InvalidParameterError, match="numeric"):
-        build_metric_select(specs, ["-999"], {"label": "VARCHAR"})
-
-
-def test_real_column_sentinel_matches_when_the_metric_differs_in_case():
-    """End-to-end: without the cast the sentinel is aggregated as data.
-
-    A bare DOUBLE literal never equals the widened float32 value, so the
-    sentinel row survives into the sum -- a -3.4e+38 where a real total belongs.
-    """
-    con = duckdb.connect()
-    source = (
-        "SELECT * FROM (VALUES (CAST(2.0 AS REAL), NULL), "
-        f"(CAST({_REAL_SENTINEL} AS REAL), NULL), "
-        "(CAST(4.0 AS REAL), NULL)) t(height, __geom)"
-    )
-    sql = build_grid_query(
-        con,
-        _DUMMY_SCHEME,
-        source,
-        3,
-        "cell",
-        "sum:HEIGHT",
-        None,
-        20,
-        "none",
-        metric_nodata=_REAL_SENTINEL,
-    )
-    tbl = con.execute(sql).arrow().read_all()
-    con.close()
-    assert tbl.column("count")[0].as_py() == 3
-    assert tbl.column("sum_HEIGHT")[0].as_py() == 6.0
