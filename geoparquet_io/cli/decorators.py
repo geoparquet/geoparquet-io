@@ -754,13 +754,27 @@ def bucket_point_options(func):
     return func
 
 
+def breakdown_metric_option(func):
+    """Add ``--breakdown-metric``: what each breakdown pivot column holds (#1100).
+
+    Shared by the grid commands and `aggregate admin`, so the wording stays in
+    one place.
+    """
+    return click.option(
+        "--breakdown-metric",
+        default=None,
+        help='What each breakdown column holds: "count" (default), or "sum:col" / '
+        '"min:col" / "max:col" for a weighted pivot named <func>_<col>_<value>.',
+    )(func)
+
+
 def grid_aggregate_options(func):
     """Add the options shared by `gpio process aggregate <grid>` commands.
 
     Adds (the per-scheme ``--resolution`` is declared on each command, since its
     valid range differs between grids):
     - --auto, --target-per-cell, --max-cells
-    - --metric, --metric-nodata, --breakdown, --breakdown-limit
+    - --metric, --metric-nodata, --breakdown, --breakdown-limit, --breakdown-metric
     - --out-geometry, --where, --bucket-point, --bbox-column
     """
     func = bucket_point_options(func)
@@ -771,11 +785,12 @@ def grid_aggregate_options(func):
         default="polygon",
         help="Output geometry per cell (default: polygon).",
     )(func)
+    func = breakdown_metric_option(func)
     func = click.option(
         "--breakdown-limit",
         type=int,
         default=20,
-        help="Max breakdown values before remainder rolls into count_other (default: 20).",
+        help="Max breakdown values before remainder rolls into the other bucket (default: 20).",
     )(func)
     func = click.option(
         "--breakdown",

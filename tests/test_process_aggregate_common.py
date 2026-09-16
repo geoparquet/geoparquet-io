@@ -77,7 +77,7 @@ def test_sql_literal():
     assert sql_literal("wheat") == "'wheat'"
     assert sql_literal("O'Brien") == "'O''Brien'"
     assert sql_literal(2021) == "2021"
-    assert sql_literal(3.14) == "3.14"
+    assert sql_literal(3.14) == "CAST('3.14' AS DOUBLE)"
     assert sql_literal(True) == "TRUE"
     assert sql_literal(False) == "FALSE"
 
