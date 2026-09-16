@@ -160,6 +160,18 @@ def test_resolve_metric_column_types():
     assert types == {"height": "FLOAT", "name": "VARCHAR"}
 
 
+def test_resolve_metric_column_types_keys_by_the_requested_spelling():
+    """``sum:HEIGHT`` is accepted against a ``Height`` column (DuckDB folds ASCII
+    identifiers), so its type must be found under ``HEIGHT``, not under what
+    DESCRIBE reports."""
+    con = duckdb.connect()
+    types = resolve_metric_column_types(
+        con, "SELECT CAST(1 AS REAL) AS Height, 'x' AS Label", parse_metrics("sum:HEIGHT,max:LABEL")
+    )
+    con.close()
+    assert types == {"HEIGHT": "FLOAT", "LABEL": "VARCHAR"}
+
+
 def test_resolve_metric_column_types_missing_column_is_lenient():
     """Unknown/missing columns resolve to no type info (error surfaces later)."""
     con = duckdb.connect()
@@ -410,8 +422,11 @@ def test_build_grid_query_varchar_metric_with_nodata_raises():
     con.close()
 
 
-def test_build_grid_query_real_column_sentinel_executes():
-    """Grid wiring resolves the REAL column type so the sentinel actually matches."""
+@pytest.mark.parametrize("metric", ["avg:height", "avg:HEIGHT"])
+def test_build_grid_query_real_column_sentinel_executes(metric):
+    """Grid wiring resolves the REAL column type so the sentinel actually matches,
+    whichever case the metric spells the column in; without the cast the sentinel
+    is summed as data (a -3.4e+38 where a real mean belongs)."""
     con = duckdb.connect()
     source = (
         "SELECT * FROM (VALUES (CAST(2.0 AS REAL), NULL), "
@@ -423,7 +438,7 @@ def test_build_grid_query_real_column_sentinel_executes():
         source,
         3,
         "cell",
-        "avg:height",
+        metric,
         None,
         20,
         "none",
@@ -433,7 +448,7 @@ def test_build_grid_query_real_column_sentinel_executes():
     con.close()
     assert tbl.num_rows == 1
     assert tbl.column("count")[0].as_py() == 3
-    assert tbl.column("avg_height")[0].as_py() == 3.0
+    assert tbl.column(metric.replace(":", "_"))[0].as_py() == 3.0
 
 
 def test_build_grid_query_breakdown_with_nodata():

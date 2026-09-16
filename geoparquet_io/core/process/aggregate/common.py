@@ -185,9 +185,13 @@ def resolve_metric_column_types(con, select_sql: str, metrics: list[MetricSpec])
     """Resolve the DuckDB type of each metric column via a cheap DESCRIBE bind.
 
     ``select_sql`` must be a SELECT statement exposing the metric columns.
-    Returns ``{column: TYPE}`` (uppercase). Resolution failures (e.g. a missing
-    column) return partial/empty info so the original error surfaces from the
-    real query instead of an opaque bind error here.
+    Returns ``{column: TYPE}`` (uppercase) keyed by the metric's *own* spelling
+    of the name: DESCRIBE reports the physical spelling (``Height`` for a
+    ``sum:HEIGHT`` request, which :func:`validate_agg_columns` accepts), and a
+    lookup by the requested spelling would then miss the REAL cast and the
+    non-numeric rejection (#613, #1104). Resolution failures (e.g. a missing
+    column) return empty info so the original error surfaces from the real
+    query instead of an opaque bind error here.
     """
     if not metrics:
         return {}
@@ -197,7 +201,8 @@ def resolve_metric_column_types(con, select_sql: str, metrics: list[MetricSpec])
         rows = con.execute(f"DESCRIBE SELECT {col_list} FROM ({select_sql})").fetchall()
     except Exception:  # noqa: BLE001 - typing is best-effort; real query reports errors
         return {}
-    return {row[0]: str(row[1]).upper() for row in rows}
+    # One DESCRIBE row per selected column, in SELECT order.
+    return {c: str(row[1]).upper() for c, row in zip(columns, rows, strict=True)}
 
 
 def _nodata_literal(token: str, col_type: str | None) -> str:
