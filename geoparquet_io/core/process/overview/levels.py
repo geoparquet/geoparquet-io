@@ -84,6 +84,7 @@ def parse_bands(spec: str) -> list[Band]:
 
     if not entries:
         raise InvalidParameterError("bands", "no bands given")
+    _reject_reversed_plan(entries)
     if entries[0][1] != 0:
         raise InvalidParameterError(
             "bands", f"the first band must start at z0, got z{entries[0][1]}"
@@ -112,6 +113,35 @@ def parse_bands(spec: str) -> list[Band]:
         Band(level, minzoom, entries[i + 1][1] - 1 if i + 1 < len(entries) else None)
         for i, (level, minzoom) in enumerate(entries)
     ]
+
+
+def _reject_reversed_plan(entries: list[tuple[int | str, int]]) -> None:
+    """Catch a plan written finest-first and name the fix.
+
+    A ladder reads naturally from the detailed end -- "level 8 serves z11,
+    level 7 serves z10, ..." -- but a plan is stated coarsest first, because
+    each entry's end is implied by the next. Written the other way it trips the
+    z0 check, which is true of the first pair and says nothing about the order
+    of all of them (gpio#1103 spelled its own example that way).
+
+    The suggestion is parsed before it is offered, so a plan that is reversed
+    *and* otherwise unusable falls through to the error describing its real
+    problem rather than being handed a spelling that also fails.
+    """
+    zooms = [z for _, z in entries]
+    if len(entries) < 2 or any(b >= a for a, b in zip(zooms, zooms[1:], strict=False)):
+        return
+    corrected = ",".join(f"{lvl}:{z}" for lvl, z in reversed(entries))
+    try:
+        parse_bands(corrected)
+    except InvalidParameterError:
+        return
+    raise InvalidParameterError(
+        "bands",
+        f"bands look reversed: the zooms run from z{zooms[0]} down to z{zooms[-1]}. "
+        "A plan is written coarsest first, in ascending zoom order starting at z0, "
+        f"because each band ends where the next begins -- try '{corrected}'",
+    )
 
 
 def estimate_bytes_per_cell(num_attributes: int, out_geometry: str) -> float:

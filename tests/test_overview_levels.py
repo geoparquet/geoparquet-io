@@ -1,5 +1,7 @@
 """Unit tests for overview zoom-band selection (pure functions, no DuckDB)."""
 
+import re
+
 import pytest
 
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -192,3 +194,48 @@ class TestParseBands:
     def test_rejects_unusable_specs(self, spec, message):
         with pytest.raises(InvalidParameterError, match=message):
             parse_bands(spec)
+
+    def test_a_reversed_plan_says_so_and_prints_the_right_way_round(self):
+        """Finest-first is the natural way to write a ladder, and it is wrong here.
+
+        gpio#1103 spelled its own example `8:11,7:10,...,2:0`. That fails the
+        z0 check, which is true but reads as a problem with the first pair
+        rather than with the order of all of them.
+        """
+        with pytest.raises(InvalidParameterError) as exc:
+            parse_bands("8:11,7:10,6:9,5:7,4:5,2:0")
+        message = str(exc.value)
+        assert "reversed" in message
+        assert "2:0,4:5,5:7,6:9,7:10,8:11" in message
+
+    def test_the_suggested_spelling_actually_parses(self):
+        """The hint has to be a working plan, not just a plausible-looking one."""
+        reversed_spec = "8:11,7:10,6:9,5:7,4:5,2:0"
+        with pytest.raises(InvalidParameterError) as exc:
+            parse_bands(reversed_spec)
+        suggestion = re.search(r"try '([^']+)'", str(exc.value)).group(1)
+        bands = parse_bands(suggestion)
+        assert [b.level for b in bands] == [2, 4, 5, 6, 7, 8]
+        assert [b.minzoom for b in bands] == [0, 5, 7, 9, 10, 11]
+
+    def test_a_two_entry_reversed_plan_is_caught_too(self):
+        with pytest.raises(InvalidParameterError, match="reversed"):
+            parse_bands("8:6,5:0")
+
+    def test_a_reversed_plan_that_is_also_broken_gets_its_real_error(self):
+        """No point suggesting a spelling that fails too.
+
+        Reversing "8:6,8:0" gives "8:0,8:6", which repeats a level -- so the
+        hint is withheld and the plan's own problem is reported instead.
+        """
+        with pytest.raises(InvalidParameterError) as exc:
+            parse_bands("8:6,8:0")
+        assert "reversed" not in str(exc.value)
+
+    def test_a_plan_that_is_merely_wrong_keeps_its_own_message(self):
+        # Not descending -- this is a plan that starts late, not a flipped one.
+        with pytest.raises(InvalidParameterError, match="must start at z0"):
+            parse_bands("5:1,8:6")
+        # Descending levels at ascending zooms is the "must get finer" case.
+        with pytest.raises(InvalidParameterError, match="must get finer"):
+            parse_bands("8:0,5:4")
