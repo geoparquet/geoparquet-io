@@ -210,7 +210,7 @@ measurement is in the `fail_under` comment). When you raise the floor,
 re-measure the combined number; don't convert from a line percentage.
 `uv run python scripts/coverage_floor.py` runs that measurement and proposes
 the floor; `--apply` moves `fail_under`, its dated comment and the prose
-echoes together (policy: ADR-0008). The diff-cover gate is passed
+echoes together (policy: ADR-0006). The diff-cover gate is passed
 `--branch-coverage`, so a partial branch on a changed line counts as
 uncovered there too.
 
