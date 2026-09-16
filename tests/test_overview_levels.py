@@ -195,47 +195,38 @@ class TestParseBands:
         with pytest.raises(InvalidParameterError, match=message):
             parse_bands(spec)
 
-    def test_a_reversed_plan_says_so_and_prints_the_right_way_round(self):
-        """Finest-first is the natural way to write a ladder, and it is wrong here.
+    @pytest.mark.parametrize(
+        "spec,message",
+        [
+            # gpio#1103 spelled its own example finest-first; the z0 check was
+            # true of the first pair and silent about the order of all of them.
+            ("8:11,7:10,6:9,5:7,4:5,2:0", r"reversed.*try '2:0,4:5,5:7,6:9,7:10,8:11'"),
+            ("8:6,5:0", r"reversed.*try '5:0,8:6'"),
+            ("country:9,region:0", r"reversed.*try 'region:0,country:9'"),
+            # Reversed *and* broken: both are named, and no spelling is offered.
+            ("8:6,8:0", r"reversed.*still fail: a level may appear only once"),
+            ("8:11,7:10", r"reversed.*still fail: the first band must start at z0, got z10"),
+            # Not descending: a plan that starts late, not a flipped one.
+            ("5:1,8:6", r"^(?!.*reversed).*must start at z0"),
+            ("²:0", "level must be an integer"),
+            ("--5:0", "level must be an integer"),
+        ],
+    )
+    def test_a_finest_first_plan_is_told_so(self, spec, message):
+        with pytest.raises(InvalidParameterError, match=message):
+            parse_bands(spec)
 
-        gpio#1103 spelled its own example `8:11,7:10,...,2:0`. That fails the
-        z0 check, which is true but reads as a problem with the first pair
-        rather than with the order of all of them.
-        """
+    def test_the_suggested_spelling_is_the_plan_the_user_meant(self):
         with pytest.raises(InvalidParameterError) as exc:
             parse_bands("8:11,7:10,6:9,5:7,4:5,2:0")
-        message = str(exc.value)
-        assert "reversed" in message
-        assert "2:0,4:5,5:7,6:9,7:10,8:11" in message
-
-    def test_the_suggested_spelling_actually_parses(self):
-        """The hint has to be a working plan, not just a plausible-looking one."""
-        reversed_spec = "8:11,7:10,6:9,5:7,4:5,2:0"
-        with pytest.raises(InvalidParameterError) as exc:
-            parse_bands(reversed_spec)
-        suggestion = re.search(r"try '([^']+)'", str(exc.value)).group(1)
-        bands = parse_bands(suggestion)
-        assert [b.level for b in bands] == [2, 4, 5, 6, 7, 8]
-        assert [b.minzoom for b in bands] == [0, 5, 7, 9, 10, 11]
-
-    def test_a_two_entry_reversed_plan_is_caught_too(self):
-        with pytest.raises(InvalidParameterError, match="reversed"):
-            parse_bands("8:6,5:0")
-
-    def test_a_reversed_plan_that_is_also_broken_gets_its_real_error(self):
-        """No point suggesting a spelling that fails too.
-
-        Reversing "8:6,8:0" gives "8:0,8:6", which repeats a level -- so the
-        hint is withheld and the plan's own problem is reported instead.
-        """
-        with pytest.raises(InvalidParameterError) as exc:
-            parse_bands("8:6,8:0")
-        assert "reversed" not in str(exc.value)
-
-    def test_a_plan_that_is_merely_wrong_keeps_its_own_message(self):
-        # Not descending -- this is a plan that starts late, not a flipped one.
-        with pytest.raises(InvalidParameterError, match="must start at z0"):
-            parse_bands("5:1,8:6")
-        # Descending levels at ascending zooms is the "must get finer" case.
-        with pytest.raises(InvalidParameterError, match="must get finer"):
-            parse_bands("8:0,5:4")
+        suggestion = re.search(r"try '([^']+)'", str(exc.value))
+        assert suggestion is not None, str(exc.value)
+        bands = parse_bands(suggestion.group(1))
+        assert [(b.level, b.minzoom) for b in bands] == [
+            (2, 0),
+            (4, 5),
+            (5, 7),
+            (6, 9),
+            (7, 10),
+            (8, 11),
+        ]

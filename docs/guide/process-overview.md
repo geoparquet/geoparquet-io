@@ -102,7 +102,9 @@ probe with an explicit plan of `level:minzoom` pairs:
 Each entry says which zoom a level starts at; ends follow from the next entry
 and the last band is open-ended, so the bands always cover every zoom. The
 first must start at z0, zooms must strictly increase, a level may appear only
-once, and grid levels must get finer as the zoom rises.
+once, and grid levels must get finer as the zoom rises. A plan written from the
+detailed end (`8:11,7:10,...,2:0`) is refused with the coarsest-first spelling
+to use instead.
 
 Because there is no probe left to feed, `--max-tile-kb` no longer applies, and
 `--levels` or `--bytes-per-cell` alongside `--bands` is an error rather than a
