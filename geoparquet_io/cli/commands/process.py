@@ -10,6 +10,7 @@ import duckdb
 
 from geoparquet_io.cli._shared import _activate_s3
 from geoparquet_io.cli.decorators import (
+    breakdown_metric_option,
     bucket_point_options,
     compression_options,
     geoparquet_version_option,
@@ -206,6 +207,7 @@ def process_aggregate_a5(
     metric_nodata,
     breakdown,
     breakdown_limit,
+    breakdown_metric,
     out_geometry,
     where,
     bucket_point,
@@ -244,6 +246,7 @@ def process_aggregate_a5(
                 metric=metric,
                 breakdown=breakdown,
                 breakdown_limit=breakdown_limit,
+                breakdown_metric=breakdown_metric,
                 out_geometry=out_geometry,
                 compression=compression.upper(),
                 compression_level=compression_level,
@@ -286,6 +289,7 @@ def process_aggregate_h3(
     metric_nodata,
     breakdown,
     breakdown_limit,
+    breakdown_metric,
     out_geometry,
     where,
     bucket_point,
@@ -324,6 +328,7 @@ def process_aggregate_h3(
                 metric=metric,
                 breakdown=breakdown,
                 breakdown_limit=breakdown_limit,
+                breakdown_metric=breakdown_metric,
                 out_geometry=out_geometry,
                 compression=compression.upper(),
                 compression_level=compression_level,
@@ -363,8 +368,9 @@ def process_aggregate_h3(
     "--breakdown-limit",
     type=int,
     default=20,
-    help="Max breakdown values before remainder rolls into count_other (default: 20).",
+    help="Max breakdown values before remainder rolls into the other bucket (default: 20).",
 )
+@breakdown_metric_option
 @click.option(
     "--out-geometry",
     type=click.Choice(["polygon", "centroid", "both", "none"]),
@@ -387,6 +393,7 @@ def process_aggregate_admin(
     metric_nodata,
     breakdown,
     breakdown_limit,
+    breakdown_metric,
     out_geometry,
     where,
     bucket_point,
@@ -420,6 +427,7 @@ def process_aggregate_admin(
                 metric=metric,
                 breakdown=breakdown,
                 breakdown_limit=breakdown_limit,
+                breakdown_metric=breakdown_metric,
                 out_geometry=out_geometry,
                 compression=compression.upper(),
                 compression_level=compression_level,

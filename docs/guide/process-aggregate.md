@@ -87,6 +87,8 @@ Rules of thumb:
 
 Values beyond `--breakdown-limit` (default 20, ordered by frequency) collapse into `count_other`, so a high-cardinality column won't explode the schema.
 
+Each pivot holds a count by default. `--breakdown-metric` makes it hold a magnitude instead: `--breakdown month --breakdown-metric "sum:peak"` writes `sum_peak_202605`, `sum_peak_202606`, … each the total `peak` for that month, **in place of** the `count_<value>` columns. `sum`, `min` and `max` are available; `avg` is not, because a per-category mean cannot be rolled up to a coarser overview level without the category's own count, which the output does not carry (`--metric avg:<column>` still gives a per-cell mean). A category with no rows in a cell, or only NULL values, reads NULL, as `--metric sum:` does for the same cell.
+
 ---
 
 ## A5 Grid Aggregation
@@ -157,6 +159,8 @@ Aggregate numeric columns with `--metric` (`func:column`, comma-separated; bare 
 
 Use `--breakdown` to pivot a categorical column into per-category count columns (`count_<value>`). Values beyond the limit are rolled into `count_other`.
 
+`--breakdown-metric` changes what each pivot holds: `"sum:peak"` gives `sum_peak_<value>` columns (remainder `sum_peak_other`) carrying a weighted total instead of a row count. The names start with `sum_`/`min_`/`max_`, so [`gpio process overview`](process-overview.md) rolls them up exactly rather than dropping them.
+
 === "CLI"
 
     <!-- doctest: skip="breaks down by 'crop_type', a column the sample data does not have" -->
@@ -168,6 +172,10 @@ Use `--breakdown` to pivot a categorical column into per-category count columns 
     # Limit to top 10 categories
     gpio process aggregate a5 fields.parquet cells.parquet \
         --resolution 8 --breakdown crop_type --breakdown-limit 10
+
+    # Weighted pivot: total area per crop type, not a count of fields
+    gpio process aggregate a5 fields.parquet cells.parquet \
+        --resolution 8 --breakdown crop_type --breakdown-metric "sum:area_ha"
     ```
 
 === "Python"
@@ -183,6 +191,14 @@ Use `--breakdown` to pivot a categorical column into per-category count columns 
         breakdown_limit=10,
     )
     result.write('cells.parquet')
+
+    # Weighted pivot: total area per crop type, not a count of fields
+    weighted = gpio.read('fields.parquet').aggregate_a5(
+        resolution=8,
+        breakdown="crop_type",
+        breakdown_metric="sum:area_ha",
+    )
+    weighted.write('cells_weighted.parquet')
     ```
 
 ### Row Filtering
@@ -400,7 +416,8 @@ Combining all three kinds of statistics. The output cell carries `count`, `sum_a
 ## H3 Grid Aggregation
 
 H3 aggregation works exactly like A5 — the same `--metric`, `--breakdown`,
-`--breakdown-limit`, `--out-geometry`, `--resolution`, and `--auto` options apply.
+`--breakdown-limit`, `--breakdown-metric`, `--out-geometry`, `--resolution`, and
+`--auto` options apply.
 The differences are that H3 uses Uber's hexagonal grid, its resolution range is
 **0–15** (A5 is 0–30), and the bucket id column is `h3_cell` (a string, e.g.
 `861fa80e7ffffff`).
@@ -538,9 +555,11 @@ Regardless of the chosen bucket scheme, every output file contains:
 | `a5_cell` or `admin_code` | UBIGINT / VARCHAR | Bucket identifier |
 | `admin_name` | VARCHAR | Human-readable name (admin only; currently equals `admin_code`) |
 | `count` | BIGINT | Number of input features in the bucket |
-| `sum_<col>`, `avg_<col>`, etc. | DOUBLE | Numeric rollups from `--metric` |
+| `sum_<col>`, `avg_<col>`, etc. | the column's type (a `sum` of integers is HUGEINT, written as DECIMAL(38,0)) | Numeric rollups from `--metric` |
 | `count_<value>` | BIGINT | Per-category counts from `--breakdown` |
 | `count_other` | BIGINT | Count for categories beyond `--breakdown-limit` |
+| `sum_<col>_<value>`, `min_`/`max_` likewise | as for `--metric` | Per-category rollups when `--breakdown-metric` is set, replacing the `count_<value>` columns; NULL for a category with no rows or no values in the cell |
+| `sum_<col>_other` | as above | Rollup for categories beyond `--breakdown-limit` |
 | `geometry` | WKB | Bucket polygon or centroid (absent when `--out-geometry none`) |
 
 ### Cells at the antimeridian and the poles
