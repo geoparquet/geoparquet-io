@@ -80,13 +80,18 @@ The selected bands drive which levels are materialized; the same selection power
 
 ### Stating the bands instead
 
-`gpio pmtiles pyramid` also takes `--bands`, which replaces the budget and the
-probe with an explicit plan of `level:minzoom` pairs:
+Both `gpio process overview` and `gpio pmtiles pyramid` take `--bands`, which
+replaces the budget and the probe with an explicit plan of `level:minzoom`
+pairs. It is the same spelling on both, so one plan drives the whole ladder:
 
 === "CLI"
 
     <!-- doctest: skip="needs cells.parquet, which the harness does not seed" -->
     ```bash
+    # Build the overview levels the plan names...
+    gpio process overview cells.parquet --bands 5:0,8:6,10:9
+
+    # ...then tile them to the same handovers
     gpio pmtiles pyramid cells.parquet out.pmtiles --bands 5:0,8:6,10:9
     ```
 
@@ -96,8 +101,17 @@ probe with an explicit plan of `level:minzoom` pairs:
     ```python
     from geoparquet_io.api import ops
 
-    ops.create_pmtiles_pyramid('cells.parquet', 'out.pmtiles', bands='5:0,8:6,10:9')
+    plan = '5:0,8:6,10:9'
+    ops.create_overviews('cells.parquet', bands=plan)
+    ops.create_pmtiles_pyramid('cells.parquet', 'out.pmtiles', bands=plan)
     ```
+
+On `overview` the zooms are carried but not used — an overview file has no
+zoom — so the plan is read for the levels it names. The base level is the input
+itself rather than something to roll up, so it drops out: with a res-8 input,
+`5:0,8:6,10:9` builds level 5 alone. That is the translation you would
+otherwise do by hand into `--levels`, and getting the base wrong there is
+silent.
 
 Each entry says which zoom a level starts at; ends follow from the next entry
 and the last band is open-ended, so the bands always cover every zoom. The
@@ -105,8 +119,14 @@ first must start at z0, zooms must strictly increase, a level may appear only
 once, and grid levels must get finer as the zoom rises.
 
 Because there is no probe left to feed, `--max-tile-kb` no longer applies, and
-`--levels` or `--bytes-per-cell` alongside `--bands` is an error rather than a
-silently dropped option.
+`--levels` alongside `--bands` is an error rather than a silently dropped
+option. `--bytes-per-cell` is rejected by `pyramid` and warned about by
+`overview`.
+
+Writing the plan the other way round — finest first, as a ladder reads — is
+caught and answered with the same plan spelled correctly, so a reversed
+`10:9,8:6,5:0` names `5:0,8:6,10:9` back at you rather than complaining that
+the first band does not start at z0.
 
 Reach for this when several archives are browsed as one surface. Auto
 selection judges each file alone, so two archives with different data land
@@ -122,7 +142,7 @@ if that is what you asked for.
 |--------|---------|-------------|
 | `--levels` | auto | Comma-separated levels to build (grid resolutions, or `country`) |
 | `--max-tile-kb` | 500 | Tile-size budget driving auto selection |
-| `--bands` (pyramid only) | auto | Explicit `level:minzoom` bands, e.g. `5:0,8:6,10:9`; skips the probe, so `--max-tile-kb` no longer applies and `--levels`/`--bytes-per-cell` are rejected |
+| `--bands` | auto | Explicit `level:minzoom` bands, e.g. `5:0,8:6,10:9`; names the levels to build (base excluded) and skips the probe, so `--max-tile-kb` no longer applies and `--levels` is rejected. Same spelling on `gpio pmtiles pyramid` |
 | `--bytes-per-cell` | estimated | Override the compressed bytes-per-cell estimate |
 | `--cell-column` | auto | Cell id column when detection fails |
 | `--scheme` | auto | Bucketing scheme (`a5`/`h3`/`admin`) when inference is ambiguous, e.g. H3 ids stored as integers |

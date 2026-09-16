@@ -18,7 +18,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.logging_config import configure_verbose, debug, success, warn
 from geoparquet_io.core.logging_config import info as log_info
 from geoparquet_io.core.partition.auto_resolution import _register_quadkey_udf
 from geoparquet_io.core.process.aggregate.common import (
@@ -35,6 +35,7 @@ from geoparquet_io.core.process.overview.levels import (
     MAX_PROBE_ZOOM,
     Band,
     estimate_bytes_per_cell,
+    parse_bands,
     probe_worst_tile_counts,
     select_bands,
 )
@@ -78,6 +79,24 @@ def parse_levels(levels: str | Sequence[int | str], info: AggregateInfo) -> list
     if info.scheme == "admin":
         return parsed
     return sorted(parsed)
+
+
+def levels_from_bands(bands: str, info: AggregateInfo) -> list[int | str]:
+    """The overview levels an explicit band plan names, base level excluded.
+
+    A band plan says which level serves which zooms; overview files carry no
+    zoom, so only the levels matter here. The base level is the input itself,
+    not something to roll up, so it drops out -- which is what lets one plan
+    string drive both `gpio process overview` and `gpio pmtiles pyramid`
+    without the caller hand-translating it into `--levels` and getting the
+    base wrong.
+
+    The remaining levels go through :func:`parse_levels`, so a plan naming a
+    level that is not coarser than the base is rejected the same way an
+    explicit ``--levels`` would be.
+    """
+    named = [band.level for band in parse_bands(bands) if band.level != info.base_level]
+    return parse_levels(named, info) if named else []
 
 
 def _grid_cells_probe_sql(info: AggregateInfo, source_sql: str, level: int) -> str:
@@ -260,6 +279,7 @@ def create_overviews(
     force: bool = False,
     verbose: bool = False,
     show_sql: bool = False,
+    bands: str | None = None,
 ) -> list[tuple[int | str, str]]:
     """Build coarser overview levels from an aggregate GeoParquet file.
 
@@ -280,17 +300,39 @@ def create_overviews(
         force: Overwrite existing overview output files.
         verbose: Enable verbose debug logging.
         show_sql: Log the rollup SQL.
+        bands: Explicit ``level:minzoom`` band plan naming the levels to build,
+            e.g. ``"2:0,4:5,8:9"`` -- the same spelling `gpio pmtiles pyramid`
+            takes, so one plan can drive both. Skips auto-selection, so
+            ``max_tile_kb``/``bytes_per_cell`` no longer apply, and cannot be
+            combined with ``levels``.
 
     Returns:
         List of ``(level, output_path)`` for every overview written,
         coarse to fine.
     """
     configure_verbose(verbose)
+    if bands is not None and levels is not None:
+        raise InvalidParameterError(
+            "bands",
+            "--bands already names every level to build; drop --levels or drop --bands.",
+        )
+    if bands is not None and bytes_per_cell is not None:
+        # Same call as gpio pmtiles pyramid makes: a stated plan skips the
+        # worst-tile probe, and bytes-per-cell only feeds that probe.
+        warn("Ignoring --bytes-per-cell: --bands skips the tile-size probe it feeds.")
     with aggregate_connection(input_parquet, verbose) as (con, relation):
         info = detect_aggregate_info(con, relation, cell_column, scheme)
         source_sql = f"SELECT * FROM {relation}"
 
-        if levels is not None:
+        if bands is not None:
+            target_levels = levels_from_bands(bands, info)
+            if not target_levels:
+                log_info(
+                    f"Band plan names no level coarser than the base "
+                    f"({info.base_level}); no overview levels to build"
+                )
+                return []
+        elif levels is not None:
             target_levels = parse_levels(levels, info)
         else:
             target_levels = _auto_levels(

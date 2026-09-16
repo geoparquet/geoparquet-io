@@ -526,6 +526,7 @@ def create_overviews(
     force: bool = False,
     verbose: bool = False,
     show_sql: bool = False,
+    bands: str | None = None,
 ) -> list[tuple[int | str, str]]:
     """
     Build coarser overview levels from an aggregate GeoParquet file.
@@ -553,6 +554,10 @@ def create_overviews(
         force: Overwrite existing overview output files
         verbose: Enable verbose output
         show_sql: Log the rollup SQL
+        bands: Explicit "level:minzoom" band plan naming the levels to build,
+            e.g. "2:0,4:5,8:9" -- the same spelling `gpio pmtiles pyramid`
+            takes, so one plan drives both. Skips auto-selection, so
+            max_tile_kb/bytes_per_cell no longer apply; rejected with levels
 
     Returns:
         List of (level, output_path) tuples, coarse to fine
@@ -578,6 +583,7 @@ def create_overviews(
         force=force,
         verbose=verbose,
         show_sql=show_sql,
+        bands=bands,
     )
 
 

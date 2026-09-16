@@ -69,6 +69,16 @@ def process(ctx):
     ),
 )
 @click.option(
+    "--bands",
+    default=None,
+    help=(
+        "Explicit level:minzoom band plan naming the levels to build, e.g. "
+        "'2:0,4:5,8:9' -- the same spelling gpio pmtiles pyramid takes, so one "
+        "plan drives both. Skips auto-selection, so --max-tile-kb no longer "
+        "applies and --levels is rejected alongside it."
+    ),
+)
+@click.option(
     "--max-tile-kb",
     type=int,
     default=500,
@@ -116,6 +126,7 @@ def process_overview(
     ctx,
     input_parquet,
     levels,
+    bands,
     max_tile_kb,
     bytes_per_cell,
     cell_column,
@@ -151,6 +162,7 @@ def process_overview(
             create_overviews_impl(
                 input_parquet,
                 levels=levels,
+                bands=bands,
                 max_tile_kb=max_tile_kb,
                 bytes_per_cell=bytes_per_cell,
                 cell_column=cell_column,

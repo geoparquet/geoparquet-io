@@ -12031,6 +12031,22 @@
        "is_flag": false,
        "metavar": null,
        "multiple": false,
+       "name": "bands",
+       "nargs": 1,
+       "opts": [
+        "--bands"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
        "name": "bytes_per_cell",
        "nargs": 1,
        "opts": [
