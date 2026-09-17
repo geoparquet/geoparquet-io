@@ -99,6 +99,14 @@ def pmtiles(ctx):
     is_flag=True,
     help="Overwrite the output file if it already exists (tippecanoe --force)",
 )
+@click.option(
+    "--temporary-directory",
+    "-t",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Directory for tippecanoe scratch (defaults to $TMPDIR, else /tmp). "
+    "Scratch runs to several times the input size, so point this at a volume with room.",
+)
 @repair_geometry_option
 @verbose_option
 @aws_profile_option
@@ -124,6 +132,7 @@ def pmtiles_create(
     maximum_tile_bytes,
     force,
     repair_geometry,
+    temporary_directory,
 ):
     """Create PMTiles from a GeoParquet file.
 
@@ -171,6 +180,7 @@ def pmtiles_create(
             maximum_tile_bytes=maximum_tile_bytes,
             force=force,
             repair_geometry=repair_geometry,
+            temporary_directory=temporary_directory,
         )
         click.echo(click.style(f"✓ Created {output_file}", fg="green"))
     except Exception as e:
@@ -252,6 +262,14 @@ def pmtiles_create(
     is_flag=True,
     help="Overwrite the output archive if it already exists",
 )
+@click.option(
+    "--temporary-directory",
+    "-t",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Directory for tippecanoe scratch and the intermediate band archives "
+    "(defaults to $TMPDIR, else /tmp). Point this at a volume with room.",
+)
 @verbose_option
 def pmtiles_pyramid(
     input_parquet,
@@ -268,6 +286,7 @@ def pmtiles_pyramid(
     attribution,
     force,
     verbose,
+    temporary_directory,
 ):
     """Create a multi-level PMTiles pyramid from an aggregate file.
 
@@ -311,6 +330,7 @@ def pmtiles_pyramid(
             attribution=attribution,
             force=force,
             verbose=verbose,
+            temporary_directory=temporary_directory,
         )
         click.echo(click.style(f"✓ Created {output_pmtiles}", fg="green"))
     except Exception as e:

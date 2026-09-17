@@ -133,6 +133,19 @@ class TestTileJoinCommand:
         assert cmd[-2:] == ["a.pmtiles", "b.pmtiles"]
         assert "--force" not in cmd
 
+    def test_no_scratch_flag_because_tile_join_rejects_one(self, monkeypatch):
+        """#1115: tile-join takes neither -t nor --temporary-directory.
+
+        Passing one makes it exit 101 with "invalid option -- t", so the
+        pyramid steers tippecanoe's scratch and the band-archive parent and
+        leaves tile-join's own spill where upstream puts it.
+        """
+        monkeypatch.setenv("TMPDIR", "/data/from-env")
+        cmd = _build_tile_join_command("out.pmtiles", ["a.pmtiles"], name="out")
+        assert "-t" not in cmd
+        assert not any(c.startswith("--temporary-directory") for c in cmd)
+        assert cmd[-1:] == ["a.pmtiles"]
+
     def test_force_and_attribution(self):
         cmd = _build_tile_join_command(
             "out.pmtiles",

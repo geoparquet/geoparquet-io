@@ -6,6 +6,7 @@ Requires tippecanoe to be installed and available in PATH.
 
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -203,6 +204,7 @@ def _build_tippecanoe_command(
     drop_densest_as_needed: bool = True,
     maximum_tile_bytes: int | None = None,
     force: bool = False,
+    temporary_directory: str | None = None,
 ) -> list[str]:
     """Build the tippecanoe command with production-quality settings.
 
@@ -212,6 +214,16 @@ def _build_tippecanoe_command(
     ``no_tile_size_limit`` — the two are contradictory, and an explicit
     cap is what gives ``--drop-densest-as-needed`` a limit to drop
     features against.
+
+    ``temporary_directory`` becomes tippecanoe's ``-t``, falling back to
+    ``TMPDIR``. tippecanoe writes its sort and geometry scratch to ``/tmp``
+    and does not read ``TMPDIR`` itself, so without this the scratch lands on
+    whatever volume holds ``/tmp`` — the boot volume on macOS — with no way
+    for the caller to move it. The scratch is not proportional to the output:
+    168M polygons at ``-Z 12 -z 14`` reached ~270GB against a ~34GB archive
+    (#1115). tippecanoe creates those files with ``mkstemp`` + ``unlink``, so
+    they have no directory entry and are invisible to ``ls`` and ``du``; only
+    killing the process releases them.
     """
     cmd = ["tippecanoe", "-P", "-o", output_path]
 
@@ -255,6 +267,10 @@ def _build_tippecanoe_command(
 
     if force:
         cmd.append("--force")
+
+    scratch = temporary_directory or os.environ.get("TMPDIR")
+    if scratch:
+        cmd.extend(["-t", scratch])
 
     if verbose:
         cmd.append("--progress-interval=1")
@@ -527,6 +543,7 @@ def create_pmtiles_from_geoparquet(
     maximum_tile_bytes: int | None = None,
     force: bool = False,
     repair_geometry: bool = True,
+    temporary_directory: str | None = None,
 ) -> None:
     """
     Create PMTiles using gpio streaming + tippecanoe subprocess.
@@ -563,6 +580,9 @@ def create_pmtiles_from_geoparquet(
         maximum_tile_bytes: Set an explicit per-tile byte cap via
             --maximum-tile-bytes. Takes precedence over no_tile_size_limit.
         force: Pass --force to overwrite the output file if it already exists.
+        temporary_directory: Directory for tippecanoe's sort/geometry scratch
+            (its ``-t``), defaulting to ``TMPDIR``. The scratch is several
+            times the input and lands on ``/tmp`` otherwise; see #1115.
         repair_geometry: Repair invalid geometry with ST_MakeValid (default: True).
             Prevents tippecanoe TopologyExceptions on self-intersecting polygons.
             Set False to pass geometry through unrepaired.
@@ -623,6 +643,7 @@ def create_pmtiles_from_geoparquet(
         drop_densest_as_needed=drop_densest_as_needed,
         maximum_tile_bytes=maximum_tile_bytes,
         force=force,
+        temporary_directory=temporary_directory,
     )
 
     _run_pipeline(gpio_commands, tippecanoe_cmd, verbose, layer_by_column)

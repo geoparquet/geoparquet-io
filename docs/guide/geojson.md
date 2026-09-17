@@ -165,6 +165,52 @@ For national- or global-overview maps over dense data, re-enable the size limit 
     )
     ```
 
+#### Scratch space (`--temporary-directory`)
+
+tippecanoe sorts the whole input on disk before it writes a tile, and that
+scratch is **several times the input, not the output**. Tiling 168M polygons at
+`-Z 12 -z 14` (~12 GB of GeoParquet in, ~34 GB of PMTiles out) accumulated
+**~270 GB** of scratch. Budget for it.
+
+By default it lands in `$TMPDIR`, or `/tmp` when that is unset — on macOS the
+boot volume, which is usually not where your data lives. Point it somewhere
+with room:
+
+=== "CLI"
+
+    ```bash
+    gpio pmtiles create big.parquet out.pmtiles --temporary-directory /data/scratch
+
+    # Same flag on pyramid, where it also parents the intermediate band archives
+    gpio pmtiles pyramid cells.parquet out.pmtiles -t /data/scratch
+    ```
+
+=== "Python"
+
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.create_pmtiles(
+        'big.parquet', 'out.pmtiles', temporary_directory='/data/scratch'
+    )
+    ops.create_pmtiles_pyramid(
+        'cells.parquet', 'out.pmtiles', temporary_directory='/data/scratch'
+    )
+    ```
+
+gpio forwards `$TMPDIR` for you when the flag is absent — tippecanoe does not
+read that variable itself.
+
+!!! warning "A full scratch volume is hard to diagnose"
+
+    tippecanoe creates these files with `mkstemp` + `unlink`, so they have no
+    directory entry: they are invisible to `ls` and `du`, and `rm` cannot
+    reclaim them. From outside, the disk simply fills with nothing visible
+    consuming it, and only killing the process releases the space.
+
+    `tile-join`, used by `gpio pmtiles pyramid`, accepts no equivalent flag
+    upstream, so its own spill stays wherever it puts it.
+
 ## PMTiles Pyramids
 
 A fine-grained aggregate (say A5 resolution 10 over billions of buildings) renders beautifully zoomed in but overflows tile limits at low zooms, forcing tippecanoe to drop the densest cells — exactly the hotspots you care about. `gpio pmtiles pyramid` fixes this by building a **banded archive**: coarser aggregate levels serve low zooms, finer levels take over as you zoom in, and (optionally) the raw features appear at the highest zooms.

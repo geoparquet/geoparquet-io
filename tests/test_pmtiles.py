@@ -206,6 +206,79 @@ class TestBuildTippecanoeCommand:
         assert "-zg" in cmd
         assert "--drop-densest-as-needed" in cmd
 
+    def test_temporary_directory_is_passed_through_as_dash_t(self):
+        """#1115: tippecanoe's scratch must be redirectable off /tmp.
+
+        Tiling 168M polygons accumulated ~270GB of scratch in /private/tmp and
+        filled the boot volume. tippecanoe does not read TMPDIR, so ``-t`` is
+        the only control and gpio has to expose it.
+        """
+        from geoparquet_io.core.pmtiles import _build_tippecanoe_command
+
+        cmd = _build_tippecanoe_command(
+            output_path="output.pmtiles",
+            layer="test_layer",
+            min_zoom=None,
+            max_zoom=None,
+            verbose=False,
+            temporary_directory="/data/scratch",
+        )
+
+        assert "-t" in cmd
+        assert cmd[cmd.index("-t") + 1] == "/data/scratch"
+
+    def test_temporary_directory_defaults_to_tmpdir_env(self, monkeypatch):
+        """#1115: honour TMPDIR, which tippecanoe itself ignores.
+
+        A caller who sets TMPDIR has already said where scratch belongs; gpio
+        forwarding it as ``-t`` makes the command behave the way a CLI is
+        expected to, without the caller learning the flag exists.
+        """
+        from geoparquet_io.core.pmtiles import _build_tippecanoe_command
+
+        monkeypatch.setenv("TMPDIR", "/data/from-env")
+        cmd = _build_tippecanoe_command(
+            output_path="output.pmtiles",
+            layer="test_layer",
+            min_zoom=None,
+            max_zoom=None,
+            verbose=False,
+        )
+
+        assert cmd[cmd.index("-t") + 1] == "/data/from-env"
+
+    def test_explicit_temporary_directory_beats_tmpdir_env(self, monkeypatch):
+        """An explicit flag outranks the ambient environment."""
+        from geoparquet_io.core.pmtiles import _build_tippecanoe_command
+
+        monkeypatch.setenv("TMPDIR", "/data/from-env")
+        cmd = _build_tippecanoe_command(
+            output_path="output.pmtiles",
+            layer="test_layer",
+            min_zoom=None,
+            max_zoom=None,
+            verbose=False,
+            temporary_directory="/data/explicit",
+        )
+
+        assert cmd[cmd.index("-t") + 1] == "/data/explicit"
+        assert "/data/from-env" not in cmd
+
+    def test_no_temporary_directory_without_flag_or_env(self, monkeypatch):
+        """Unset stays unset, preserving today's behaviour."""
+        from geoparquet_io.core.pmtiles import _build_tippecanoe_command
+
+        monkeypatch.delenv("TMPDIR", raising=False)
+        cmd = _build_tippecanoe_command(
+            output_path="output.pmtiles",
+            layer="test_layer",
+            min_zoom=None,
+            max_zoom=None,
+            verbose=False,
+        )
+
+        assert "-t" not in cmd
+
     def test_with_zoom_levels(self):
         """Test building tippecanoe command with explicit zoom levels."""
         from geoparquet_io.core.pmtiles import _build_tippecanoe_command

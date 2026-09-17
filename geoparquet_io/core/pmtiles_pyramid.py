@@ -122,7 +122,14 @@ def _build_tile_join_command(
     attribution: str | None = None,
     force: bool = False,
 ) -> list[str]:
-    """argv for merging per-band archives (never joined through a shell)."""
+    """argv for merging per-band archives (never joined through a shell).
+
+    No scratch control here on purpose: tile-join accepts no
+    ``--temporary-directory`` and no ``-t`` (#1115). ``gpio pmtiles pyramid``
+    steers what it can -- tippecanoe's ``-t`` and the parent of the
+    intermediate band archives -- and tile-join's own spill is upstream's to
+    place.
+    """
     cmd = ["tile-join", "-o", output_path, "-pk"]
     if force:
         cmd.append("--force")
@@ -345,6 +352,7 @@ def create_pmtiles_pyramid(
     attribution: str | None = None,
     force: bool = False,
     verbose: bool = False,
+    temporary_directory: str | None = None,
 ) -> None:
     """Create a banded multi-level PMTiles archive from an aggregate file.
 
@@ -374,6 +382,10 @@ def create_pmtiles_pyramid(
         attribution: Attribution HTML for the tiles.
         force: Overwrite the output archive if it exists.
         verbose: Enable verbose output.
+        temporary_directory: Directory for scratch — tippecanoe's and
+            tile-join's ``-t``, and the parent of the intermediate per-band
+            archives. Defaults to ``TMPDIR``. See #1115: the scratch runs to
+            several times the input and otherwise lands on ``/tmp``.
 
     Raises:
         TippecanoeNotFoundError: tippecanoe missing from PATH.
@@ -427,7 +439,7 @@ def create_pmtiles_pyramid(
     )
     stem = Path(output_path).stem
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(dir=temporary_directory) as tmpdir:
         sources = _resolve_band_sources(input_path, info, plan, tmpdir, verbose)
         band_files: list[str] = []
         for i, band in enumerate(plan):
@@ -447,6 +459,7 @@ def create_pmtiles_pyramid(
                 attribution=attribution,
                 force=True,
                 verbose=verbose,
+                temporary_directory=temporary_directory,
             )
             band_files.append(band_file)
 
@@ -470,12 +483,17 @@ def create_pmtiles_pyramid(
                 attribution=attribution,
                 force=True,
                 verbose=verbose,
+                temporary_directory=temporary_directory,
             )
             band_files.append(features_file)
 
         _run_tile_join(
             _build_tile_join_command(
-                output_path, band_files, name=stem, attribution=attribution, force=force
+                output_path,
+                band_files,
+                name=stem,
+                attribution=attribution,
+                force=force,
             ),
             verbose,
         )

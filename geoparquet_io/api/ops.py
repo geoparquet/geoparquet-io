@@ -2604,6 +2604,7 @@ def create_pmtiles(
     maximum_tile_bytes: int | None = None,
     force: bool = False,
     repair_geometry: bool = True,
+    temporary_directory: str | None = None,
 ) -> None:
     """
     Create PMTiles from a GeoParquet file using tippecanoe.
@@ -2636,6 +2637,9 @@ def create_pmtiles(
         maximum_tile_bytes: Set an explicit per-tile byte cap via
             --maximum-tile-bytes. Takes precedence over no_tile_size_limit.
         force: Pass --force to overwrite the output file if it already exists.
+        temporary_directory: Directory for tippecanoe's scratch (its ``-t``),
+            defaulting to ``$TMPDIR``. The scratch is several times the input
+            and lands on ``/tmp`` otherwise; see #1115.
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -2678,6 +2682,7 @@ def create_pmtiles(
         maximum_tile_bytes=maximum_tile_bytes,
         force=force,
         repair_geometry=repair_geometry,
+        temporary_directory=temporary_directory,
     )
 
 
@@ -2697,6 +2702,7 @@ def create_pmtiles_pyramid(
     attribution: str | None = None,
     force: bool = False,
     verbose: bool = False,
+    temporary_directory: str | None = None,
 ) -> None:
     """
     Create a banded multi-level PMTiles pyramid from an aggregate file.
@@ -2731,6 +2737,8 @@ def create_pmtiles_pyramid(
         attribution: Attribution HTML for the tiles
         force: Overwrite the output archive if it exists
         verbose: Enable verbose output
+        temporary_directory: Directory for tippecanoe's scratch and the
+            intermediate band archives, defaulting to ``$TMPDIR`` (#1115)
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -2770,4 +2778,5 @@ def create_pmtiles_pyramid(
         attribution=attribution,
         force=force,
         verbose=verbose,
+        temporary_directory=temporary_directory,
     )
