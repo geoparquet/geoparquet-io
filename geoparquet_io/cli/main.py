@@ -250,7 +250,17 @@ def main() -> NoReturn:
 
     Only this function ends the process. ``cli`` itself is a plain Click group:
     ``CliRunner``, ``cli(standalone_mode=False)`` and the Python API are
-    untouched.
+    untouched; an embedding program is never ``os._exit``-ed. (A first version
+    put the exit on the group's ``__call__``, which is Click's documented alias
+    for ``main`` and so killed embedders' processes.)
+
+    What was ruled out: closing DuckDB connections first (there is nothing to
+    close; every connection is closed by its caller, and the abort is in native
+    teardown, not a leaked handle); changing import order (moves Python-level
+    teardown, not the C++ static destruction ``std::terminate`` comes from);
+    skipping the atexit handlers as well (forfeits logging's shutdown and
+    coverage's data write for every run, to avoid a crash that happens after
+    them). The retirement condition is an upstream fix in duckdb/pyarrow.
     """
     try:
         cli.main()
