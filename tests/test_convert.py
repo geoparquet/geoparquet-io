@@ -759,7 +759,7 @@ class TestConvertCSVCore:
             set_csv_max_line_size(None)
 
     def test_csv_read_expr_pins_the_reader_buffer_to_the_line_size(self):
-        """DuckDB sizes its CSV buffer at 16x ``max_line_size``.
+        """#1113: DuckDB sizes its CSV buffer at 16x ``max_line_size``.
 
         gpio raises ``max_line_size`` to 50MB so a coastline WKT still parses
         (#301), which silently turned DuckDB's 32MiB read buffer into a single
@@ -774,7 +774,7 @@ class TestConvertCSVCore:
             assert f"buffer_size={CSV_MAX_LINE_SIZE_DEFAULT}" in expr, expr
 
     def test_convert_csv_under_a_sub_gigabyte_memory_limit(self, tmp_path, temp_output_file):
-        """A tiny CSV converted under a sub-800MiB limit died of OOM.
+        """#1113: a tiny CSV under a sub-800MiB limit died of OOM.
 
         ``--write-memory`` defaults to half of *available* RAM, so on a loaded
         machine the limit lands under the reader's 800MiB buffer and every CSV

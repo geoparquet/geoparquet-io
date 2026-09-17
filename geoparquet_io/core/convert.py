@@ -390,7 +390,7 @@ def _build_csv_read_expr(input_url, delimiter):
     *available* RAM, lands there on a loaded machine -- then died with
     "could not allocate block of size 800.0 MiB" -- which is how this
     surfaced: journey 10 on the macOS slow-tests leg, where three pytest
-    workers left DuckDB a 703.8 MiB budget. The line size is the
+    workers left DuckDB a 703.8 MiB budget (#1113). The line size is the
     floor DuckDB accepts here ("Buffer Size of N must be a higher value than
     the maximum line size"), so this is the smallest buffer that still parses
     the longest line gpio promises to read.
