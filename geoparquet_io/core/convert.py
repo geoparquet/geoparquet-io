@@ -381,6 +381,20 @@ def set_csv_max_line_size(value):
 def _build_csv_read_expr(input_url, delimiter):
     """Build DuckDB CSV read expression with geospatial-appropriate max_line_size.
 
+    ``buffer_size`` is pinned to ``max_line_size`` rather than left to DuckDB,
+    which otherwise sizes the reader's buffer at 16x the line size: raising the
+    line size to 50MB for #301's coastline WKT turned DuckDB's 32MiB buffer
+    into a single 800MiB allocation, demanded for a three-row CSV as readily as
+    for a large one and too big to spill. Any CSV conversion under a memory
+    limit below that -- ``--write-memory``, which defaults to half of
+    *available* RAM, lands there on a loaded machine -- then died with
+    "could not allocate block of size 800.0 MiB" -- which is how this
+    surfaced: journey 10 on the macOS slow-tests leg, where three pytest
+    workers left DuckDB a 703.8 MiB budget. The line size is the
+    floor DuckDB accepts here ("Buffer Size of N must be a higher value than
+    the maximum line size"), so this is the smallest buffer that still parses
+    the longest line gpio promises to read.
+
     Args:
         input_url: A RAW path or URL. ``sql_path()`` quotes and escapes it
             here, so callers must not pre-escape it (#802).
@@ -389,12 +403,13 @@ def _build_csv_read_expr(input_url, delimiter):
             boundary -- rather than by the caller (#937).
     """
     max_line_size = get_csv_max_line_size()
+    sizing = f"max_line_size={max_line_size}, buffer_size={max_line_size}"
     if delimiter:
         return (
             f"read_csv({sql_path(input_url)}, delim='{_escape_sql_string(delimiter)}', "
-            f"header=true, AUTO_DETECT=TRUE, max_line_size={max_line_size})"
+            f"header=true, AUTO_DETECT=TRUE, {sizing})"
         )
-    return f"read_csv_auto({sql_path(input_url)}, max_line_size={max_line_size})"
+    return f"read_csv_auto({sql_path(input_url)}, {sizing})"
 
 
 def _get_csv_columns(con, csv_read):

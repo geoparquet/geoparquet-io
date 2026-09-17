@@ -758,6 +758,37 @@ class TestConvertCSVCore:
             # Reset to default
             set_csv_max_line_size(None)
 
+    def test_csv_read_expr_pins_the_reader_buffer_to_the_line_size(self):
+        """DuckDB sizes its CSV buffer at 16x ``max_line_size``.
+
+        gpio raises ``max_line_size`` to 50MB so a coastline WKT still parses
+        (#301), which silently turned DuckDB's 32MiB read buffer into a single
+        800MiB allocation -- demanded for a three-row CSV as readily as for a
+        large one, and too big to spill. Pinning ``buffer_size`` to the line
+        size keeps the #301 headroom and drops the 16x multiplier.
+        """
+        from geoparquet_io.core.convert import CSV_MAX_LINE_SIZE_DEFAULT, _build_csv_read_expr
+
+        for delimiter in (None, ";"):
+            expr = _build_csv_read_expr("/tmp/x.csv", delimiter)
+            assert f"buffer_size={CSV_MAX_LINE_SIZE_DEFAULT}" in expr, expr
+
+    def test_convert_csv_under_a_sub_gigabyte_memory_limit(self, tmp_path, temp_output_file):
+        """A tiny CSV converted under a sub-800MiB limit died of OOM.
+
+        ``--write-memory`` defaults to half of *available* RAM, so on a loaded
+        machine the limit lands under the reader's 800MiB buffer and every CSV
+        conversion fails, whatever its size. That is what broke journey 10 on
+        the macOS slow-tests leg, where three pytest workers left DuckDB a
+        703.8 MiB budget.
+        """
+        csv_path = tmp_path / "tiny.csv"
+        csv_path.write_text("id,wkt\n1,POINT (1 2)\n2,POINT (3 4)\n3,POINT (5 6)\n")
+
+        convert_to_geoparquet(str(csv_path), temp_output_file, memory_limit="512MB", verbose=False)
+
+        assert pq.read_table(temp_output_file).num_rows == 3
+
 
 class TestConvertCSVValidation:
     """Test CSV/TSV validation and error handling."""
