@@ -169,9 +169,24 @@ def validate_breakdown_metric(breakdown: str | None, spec: MetricSpec | None) ->
 
 
 def breakdown_prefix(spec: MetricSpec | None) -> str:
-    """Column-name prefix every pivot column of a breakdown shares: ``count`` for a
-    plain count, else the metric's output name (``sum_peak``), a prefix
-    ``overview/detect.py`` already rolls up."""
+    """Column-name prefix every pivot column of a breakdown shares.
+
+    ``count`` for a plain count, else the metric's output name (``sum_peak``),
+    so a pivot is ``<func>_<col>_<value>`` and its remainder ``<func>_<col>_other``.
+
+    The output column name is the contract with ``gpio process overview`` and
+    ``gpio pmtiles pyramid``: ``overview/detect.py`` recognises roll-up
+    behaviour by the ``sum_``/``min_``/``max_``/``avg_``/``count_`` head of the
+    name and drops what it does not recognise, so any other prefix would
+    survive the base band and vanish from every overview. Accepted with it:
+    the grammar is not invertible (``<col>`` and ``<value>`` may both carry
+    underscores, so a consumer may read the func off the head and nothing
+    else); collisions are resolved by suffix, never by merging; and ``avg`` is
+    refused as a breakdown metric because its rollup needs the *category's*
+    count, which a metric pivot replaces rather than sits beside. A per-file
+    manifest that would let the rollup stop parsing names, with this grammar
+    as the fallback, is #1110.
+    """
     return spec.output_name if spec is not None else "count"
 
 

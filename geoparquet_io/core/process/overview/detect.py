@@ -158,7 +158,9 @@ def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: 
         special.add("admin_name")
     # Single-sourced from the aggregate engine's metric functions so adding a
     # metric func there cannot silently drop its columns here; breakdown
-    # count_* columns roll up as sums.
+    # count_* columns roll up as sums, and --breakdown-metric pivots are named
+    # <func>_<col>_<value> precisely so this recogniser needs no new rule
+    # (see aggregate.common.breakdown_prefix for the contract and its limits).
     prefix_to_func = {f"{func}_": func for func in sorted(VALID_METRIC_FUNCS)}
     prefix_to_func["count_"] = "sum"
 
