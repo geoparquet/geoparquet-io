@@ -347,6 +347,12 @@ def _is_geojson_file(input_file):
 # 50MB should handle virtually any reasonable geospatial data.
 # See: https://github.com/geoparquet/geoparquet-io/issues/301
 CSV_MAX_LINE_SIZE_DEFAULT = 50 * 1024 * 1024  # 50 MB
+# Floor for the CSV reader's buffer. DuckDB hands parallel scan work out per
+# buffer, so a buffer that tracks a small --csv-max-line-size all the way down
+# starves the scan: a 200k-row read costs 170ms at a 1KB buffer against 26ms at
+# 4MiB. Overhead is flat from ~4MiB up, and 4MiB is nowhere near the 800MiB
+# allocation #1113 removed.
+CSV_READ_BUFFER_MIN = 4 * 1024 * 1024  # 4 MB
 
 # Module-level override (set by CLI --csv-max-line-size option)
 _csv_max_line_size_override = None
@@ -378,8 +384,8 @@ def set_csv_max_line_size(value):
     _csv_max_line_size_override = value
 
 
-def _build_csv_read_expr(input_url, delimiter):
-    """Build DuckDB CSV read expression with geospatial-appropriate max_line_size.
+def _build_csv_read_expr(input_url: str, delimiter: str | None) -> str:
+    """Build a DuckDB CSV read expression, pinning both reader size limits.
 
     Args:
         input_url: A RAW path or URL. ``sql_path()`` quotes and escapes it
@@ -387,14 +393,35 @@ def _build_csv_read_expr(input_url, delimiter):
         delimiter: A RAW CSV delimiter, or None to auto-detect. It goes into a
             SQL string literal, so it is escaped here -- exactly once, at the
             boundary -- rather than by the caller (#937).
+
+    Returns:
+        SQL expression for read_csv / read_csv_auto.
+
+    Note:
+        ``buffer_size`` is pinned to ``max_line_size`` rather than left to
+        DuckDB, which sizes the reader's buffer at 16x the line size. gpio
+        raises the line size to 50MB so a coastline WKT still parses (#301),
+        which made every CSV read demand a single 800MiB allocation -- for a
+        three-row file as readily as for a large one, and too big to spill.
+        Any CSV conversion under a smaller memory limit then failed outright
+        (#1113). The line size is the floor DuckDB accepts ("Buffer Size of N
+        must be a higher value than the maximum line size"), so this is the
+        smallest buffer that still parses the longest line gpio promises to
+        read. The two must scale together: a buffer fixed at the default would
+        break ``--csv-max-line-size`` values above it. Below
+        ``CSV_READ_BUFFER_MIN`` they part company -- the buffer is also the
+        scan's unit of parallel work, so tracking a tiny line size all the way
+        down costs more than the memory it saves.
     """
     max_line_size = get_csv_max_line_size()
+    buffer_size = max(max_line_size, CSV_READ_BUFFER_MIN)
+    size_options = f"max_line_size={max_line_size}, buffer_size={buffer_size}"
     if delimiter:
         return (
             f"read_csv({sql_path(input_url)}, delim='{_escape_sql_string(delimiter)}', "
-            f"header=true, AUTO_DETECT=TRUE, max_line_size={max_line_size})"
+            f"header=true, AUTO_DETECT=TRUE, {size_options})"
         )
-    return f"read_csv_auto({sql_path(input_url)}, max_line_size={max_line_size})"
+    return f"read_csv_auto({sql_path(input_url)}, {size_options})"
 
 
 def _get_csv_columns(con, csv_read):
