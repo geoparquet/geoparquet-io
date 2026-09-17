@@ -16,6 +16,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.common import get_dataset_bounds
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
@@ -336,3 +337,120 @@ def create_overviews(
             success(f"Wrote level {level} overview ({table.num_rows} rows) -> {out_path}")
             results.append((level, out_path))
         return results
+
+
+def create_overview_file(
+    input_parquet: str,
+    overview_out: str,
+    *,
+    levels: str | list[int | str] | None = None,
+    cell_detail: float | None = None,
+    explicit_gsd: str | list[float] | None = None,
+    max_tile_kb: int = DEFAULT_MAX_TILE_KB,
+    bytes_per_cell: float | None = None,
+    cell_column: str | None = None,
+    scheme: str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
+    geoparquet_version: str | None = None,
+    force: bool = False,
+    verbose: bool = False,
+    show_sql: bool = False,
+) -> str:
+    """Build the level ladder and assemble it into one overview GeoParquet.
+
+    `create_overviews` writes a sibling file per level, which a tiler then has
+    to pick zoom bands for. This emits the same ladder as a single levelled
+    file that ``tylertoo export-pmtiles`` tiles in one pass, reading the levels
+    as written (#1117).
+
+    Each level's ``gsd`` comes from the zoom gpio's own band selection assigns
+    it, so the emitted ladder agrees with what `gpio pmtiles pyramid` would
+    have produced. That keeps one source of truth for which zoom a level
+    serves -- the thing a pre-levelled file exists to stop re-deciding.
+    """
+    from geoparquet_io.core.process.overview.overview_file import (
+        DEFAULT_CELL_DETAIL,
+        LevelInput,
+        gsd_ladder,
+        write_overview_file,
+    )
+
+    if cell_detail is None:
+        cell_detail = DEFAULT_CELL_DETAIL
+
+    configure_verbose(verbose)
+    built = create_overviews(
+        input_parquet,
+        levels=levels,
+        max_tile_kb=max_tile_kb,
+        bytes_per_cell=bytes_per_cell,
+        cell_column=cell_column,
+        scheme=scheme,
+        compression=compression,
+        compression_level=compression_level,
+        geoparquet_version=geoparquet_version,
+        force=force,
+        verbose=verbose,
+        show_sql=show_sql,
+    )
+
+    with aggregate_connection(input_parquet, verbose) as (con, relation):
+        info = detect_aggregate_info(con, relation, cell_column, scheme)
+
+    # Coarse first: the built ladder, then the base, which is the input itself
+    # and always the finest (OVERVIEWS_SPEC 4.2).
+    ladder: list[tuple[int | str, str]] = [*built, (info.base_level, input_parquet)]
+
+    bounds = get_dataset_bounds(input_parquet, verbose=verbose)
+    if bounds is None:
+        raise InvalidParameterError(
+            "input", f"could not determine the bounds of {input_parquet} to size its levels"
+        )
+
+    # Cell counts come from the written files rather than a tile-size probe.
+    # Band selection cannot serve this: it discards a level whose coarser
+    # sibling already fits the budget (#1103), which is the very behaviour a
+    # pre-levelled file exists to remove (#1117). Every requested level has to
+    # reach the file with its own GSD.
+    counts = [pq.ParquetFile(path).metadata.num_rows for _, path in ladder]
+    gsds = (
+        list(gsd)
+        if (gsd := _parse_explicit_gsd(explicit_gsd, len(ladder)))
+        else gsd_ladder(tuple(bounds), counts, cell_detail=cell_detail)
+    )
+
+    inputs = [
+        LevelInput(key=level, path=path, gsd=g)
+        for (level, path), g in zip(ladder, gsds, strict=True)
+    ]
+    return write_overview_file(
+        inputs,
+        overview_out,
+        compression=compression,
+        compression_level=compression_level,
+        verbose=verbose,
+    )
+
+
+def _parse_explicit_gsd(spec: str | list[float] | None, expected: int) -> list[float] | None:
+    """An explicit, strictly decreasing GSD ladder, mirroring tylertoo's ``--gsd``.
+
+    Absolute metres, so it overrides the data-driven sizing entirely.
+    """
+    if spec is None:
+        return None
+    values = (
+        [float(part) for part in spec.split(",") if part.strip()]
+        if isinstance(spec, str)
+        else [float(v) for v in spec]
+    )
+    if len(values) != expected:
+        raise InvalidParameterError(
+            "gsd", f"expected {expected} GSD value(s), one per level, got {len(values)}"
+        )
+    if any(values[i] >= values[i - 1] for i in range(1, len(values))):
+        raise InvalidParameterError("gsd", f"GSDs must be strictly decreasing, got {values}")
+    if any(v <= 0 for v in values):
+        raise InvalidParameterError("gsd", f"GSDs must be positive metres, got {values}")
+    return values

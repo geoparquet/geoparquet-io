@@ -118,6 +118,82 @@ Auto selection remains the better default for a single archive: it measures
 the data instead of guessing, and `--bands` will happily produce a 20 MB tile
 if that is what you asked for.
 
+## One levelled file (`--overview-out`)
+
+By default each level is written as its own sibling (`cells_r7.parquet`, …),
+and a tiler then has to pick a zoom band per level. `--overview-out` also
+assembles the ladder into **one** GeoParquet in the
+[overviews format](https://github.com/geoparquet/tylertoo): levels are
+additional *rows* tagged by a `level` column, with a `geo:overviews` footer
+recording each level's ground sample distance.
+
+`tylertoo export-pmtiles` tiles that file in one pass, reading the levels as
+written — no per-level tippecanoe run and no hand-pinned zoom bands:
+
+=== "CLI"
+
+    ```bash
+    gpio process aggregate h3 fields.parquet cells.parquet --resolution 8
+    gpio process overview cells.parquet --levels 7,6,5,4,3,2 \
+        --overview-out pyramid.parquet
+
+    tylertoo export-pmtiles pyramid.parquet out.pmtiles
+    ```
+
+=== "Python"
+
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.aggregate_h3('fields.parquet', 'cells.parquet', resolution=8)
+    ops.create_overview_file(
+        'cells.parquet', 'pyramid.parquet', levels='7,6,5,4,3,2'
+    )
+    ```
+
+### Why the rollup belongs here
+
+Running a tiler straight at the finest cells does not give this pyramid, and
+should not. A tiler's coarse levels **generalize** — they thin, simplify and
+drop below visibility. For a count layer that is wrong rather than merely
+coarse: a coarse cell would show some of the fine cells and silently omit the
+rest, instead of showing their **sum**. Re-aggregation is a different
+operation, and gpio is where it belongs — it already has the cell hierarchy
+and DuckDB.
+
+### Controlling density (`--cell-detail`, `--gsd`)
+
+Each level's GSD is derived from the data: the extent divided among that
+level's cells, giving a characteristic cell width, divided by `--cell-detail`
+(default `4`). It is scheme-agnostic — H3, A5 and admin all work — and shrinks
+monotonically as levels refine, which is what the format requires.
+
+`--cell-detail` is the density knob, in the same direction as tylertoo's
+`--gsd-base`:
+
+```bash
+# More cells visible at coarse zooms; heavier tiles
+gpio process overview cells.parquet --overview-out pyramid.parquet --cell-detail 16
+
+# Sparser, cheaper coarse levels
+gpio process overview cells.parquet --overview-out pyramid.parquet --cell-detail 2
+```
+
+For full control, `--gsd` takes absolute metres per level, coarse to fine,
+strictly decreasing, and overrides the derived ladder:
+
+```bash
+gpio process overview cells.parquet --overview-out pyramid.parquet \
+    --levels 7,6,5 --gsd 4000,1500,600
+```
+
+!!! note "The finest level is the aggregate, not the source features"
+
+    The format's canonical level normally reproduces the source exactly. Here
+    the finest level *is* an aggregate — the base cells — so that is what the
+    file declares as canonical. The mode is `duplicating`: every level is a
+    complete self-contained rendering and a reader picks exactly one.
+
 ## Options
 
 | Option | Default | Description |
