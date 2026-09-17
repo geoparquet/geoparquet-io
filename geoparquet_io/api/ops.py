@@ -364,6 +364,7 @@ def aggregate_a5(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into A5 grid cells with per-cell statistics.
@@ -383,6 +384,9 @@ def aggregate_a5(
             "bbox" (center of a bbox covering column), or a point column name
         bbox_column: Bbox covering column for bucket_point="bbox" (auto-detected
             when omitted)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
 
     Returns:
         New PyArrow Table with one row per A5 cell
@@ -401,6 +405,7 @@ def aggregate_a5(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )
 
 
@@ -416,6 +421,7 @@ def aggregate_h3(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into H3 grid cells with per-cell statistics.
@@ -435,6 +441,9 @@ def aggregate_h3(
             "bbox" (center of a bbox covering column), or a point column name
         bbox_column: Bbox covering column for bucket_point="bbox" (auto-detected
             when omitted)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
 
     Returns:
         New PyArrow Table with one row per H3 cell
@@ -453,6 +462,7 @@ def aggregate_h3(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )
 
 
@@ -467,6 +477,7 @@ def aggregate_admin(
     metric_nodata: str | None = None,
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
+    breakdown_metric: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into administrative regions with per-region statistics.
@@ -485,6 +496,9 @@ def aggregate_admin(
             "bbox" (center of a bbox covering column), or a point column name
         bbox_column: Bbox covering column for bucket_point="bbox" (auto-detected
             when omitted)
+        breakdown_metric: What each breakdown column holds: None/'count'
+            (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
+            pivot named <func>_<col>_<value>
 
     Returns:
         New PyArrow Table with one row per admin region
@@ -508,6 +522,7 @@ def aggregate_admin(
         metric_nodata=metric_nodata,
         bucket_point=bucket_point,
         bbox_column=bbox_column,
+        breakdown_metric=breakdown_metric,
     )
 
 

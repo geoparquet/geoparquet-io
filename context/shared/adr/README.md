@@ -30,6 +30,7 @@ An ADR captures an architecturally significant decision along with its context a
 | [0006](0006-covering-gated-on-struct-shape-not-version.md) | A `covering` Is Gated on the Bbox Struct's Shape, Not on the Output Version | Accepted |
 | [0007](0007-console-script-leaves-via-os-exit.md) | The Console Script Leaves via `os._exit` | Accepted |
 | [0008](0008-coverage-floor-is-a-trailing-ratchet.md) | The Coverage Floor Is a Trailing Ratchet on the Combined Figure | Accepted |
+| [0009](0009-aggregate-output-column-names-are-the-rollup-contract.md) | Aggregate Output Column Names Are the Rollup Contract | Accepted |
 
 ## References
 

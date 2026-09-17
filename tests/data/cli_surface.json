@@ -11195,6 +11195,22 @@
          "type": "integer"
         },
         {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "breakdown_metric",
+         "nargs": 1,
+         "opts": [
+          "--breakdown-metric"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
+        },
+        {
          "default": "'geometry'",
          "hidden": false,
          "is_flag": false,
@@ -11491,6 +11507,22 @@
          "type": "integer"
         },
         {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "breakdown_metric",
+         "nargs": 1,
+         "opts": [
+          "--breakdown-metric"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
+        },
+        {
          "default": "'geometry'",
          "hidden": false,
          "is_flag": false,
@@ -11769,6 +11801,22 @@
          "required": false,
          "secondary_opts": [],
          "type": "integer"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "breakdown_metric",
+         "nargs": 1,
+         "opts": [
+          "--breakdown-metric"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
         },
         {
          "default": "'geometry'",

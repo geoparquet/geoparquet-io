@@ -295,7 +295,7 @@ def _detect_and_plan(
     bytes_per_cell: float | None,
     base_max_zoom: int | None,
     verbose: bool,
-    bands_spec: str | None = None,
+    stated_bands: list[Band] | None = None,
 ) -> tuple[AggregateInfo, list[Band]]:
     """Detect the aggregate's shape and select zoom bands for the pyramid."""
     with aggregate_connection(input_path, verbose) as (con, relation):
@@ -306,12 +306,12 @@ def _detect_and_plan(
                 "aggregate has no geometry column; re-run gpio process aggregate "
                 "with --out-geometry polygon or centroid before tiling",
             )
-        if bands_spec is not None:
+        if stated_bands is not None:
             # An explicit plan replaces the probe entirely: the caller has
             # stated the handovers, so there is nothing to estimate and no
             # budget to respect. Probing anyway would only cost a full scan to
             # produce an answer that is then discarded.
-            return info, parse_bands(bands_spec)
+            return info, stated_bands
         parsed_levels = parse_levels(levels, info) if levels is not None else None
         # Cap band transitions one below the base band's max zoom so the base
         # band starts by that zoom (and never inverts into minzoom > maxzoom).
@@ -404,6 +404,9 @@ def create_pmtiles_pyramid(
         # Not an error the way --levels is: this one tunes the probe rather
         # than restating the plan, and the probe simply does not run.
         warn("Ignoring --bytes-per-cell: --bands skips the tile-size probe it feeds.")
+    # A plan that cannot be used is reported now, not after the tool checks and
+    # a full scan of the input: parsing needs nothing from the file.
+    stated_bands = parse_bands(bands) if bands is not None else None
     if features_source:
         _validate_path(features_source)
     # Fail fast before any tiling work: tile-join would only reject an
@@ -420,7 +423,7 @@ def create_pmtiles_pyramid(
         raise TileJoinNotFoundError()
 
     info, plan = _detect_and_plan(
-        input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose, bands_spec=bands
+        input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose, stated_bands
     )
     stem = Path(output_path).stem
 
