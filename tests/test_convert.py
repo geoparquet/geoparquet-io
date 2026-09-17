@@ -766,14 +766,35 @@ class TestConvertCSVCore:
         800MiB allocation -- demanded for a three-row CSV as readily as for a
         large one, and too big to spill. Pinning ``buffer_size`` to the line
         size keeps the #301 headroom and drops the 16x multiplier.
+
+        The two must track each other, not the default constant:
+        ``docs/troubleshooting.md`` tells users to pass
+        ``--csv-max-line-size 100000000``, and a buffer left at 50MB under a
+        100MB line size is rejected outright by DuckDB with "Buffer Size of
+        52428800 must be a higher value than the maximum line size".
         """
-        from geoparquet_io.core.convert import CSV_MAX_LINE_SIZE_DEFAULT, _build_csv_read_expr
+        from geoparquet_io.core.convert import (
+            CSV_MAX_LINE_SIZE_DEFAULT,
+            _build_csv_read_expr,
+            set_csv_max_line_size,
+        )
 
-        for delimiter in (None, ";"):
-            expr = _build_csv_read_expr("/tmp/x.csv", delimiter)
-            assert f"buffer_size={CSV_MAX_LINE_SIZE_DEFAULT}" in expr, expr
+        # None exercises the default; the second value is the override path
+        # that docs/troubleshooting.md documents.
+        for override in (None, 100 * 1024 * 1024):
+            expected = CSV_MAX_LINE_SIZE_DEFAULT if override is None else override
+            set_csv_max_line_size(override)
+            try:
+                for delimiter in (None, ";"):
+                    expr = _build_csv_read_expr("/tmp/x.csv", delimiter)
+                    assert f"max_line_size={expected}" in expr, expr
+                    assert f"buffer_size={expected}" in expr, expr
+            finally:
+                set_csv_max_line_size(None)
 
-    def test_convert_csv_under_a_sub_gigabyte_memory_limit(self, tmp_path, temp_output_file):
+    def test_convert_csv_under_a_memory_limit_below_the_old_buffer(
+        self, tmp_path, temp_output_file
+    ):
         """#1113: a tiny CSV under a sub-800MiB limit died of OOM.
 
         ``--write-memory`` defaults to half of *available* RAM, so on a loaded
