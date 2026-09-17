@@ -779,18 +779,43 @@ class TestConvertCSVCore:
             set_csv_max_line_size,
         )
 
-        # None exercises the default; the second value is the override path
-        # that docs/troubleshooting.md documents.
+        # None exercises the default; 100MB is the override path that
+        # docs/troubleshooting.md documents.
         for override in (None, 100 * 1024 * 1024):
-            expected = CSV_MAX_LINE_SIZE_DEFAULT if override is None else override
+            line_size = CSV_MAX_LINE_SIZE_DEFAULT if override is None else override
             set_csv_max_line_size(override)
             try:
                 for delimiter in (None, ";"):
                     expr = _build_csv_read_expr("/tmp/x.csv", delimiter)
-                    assert f"max_line_size={expected}" in expr, expr
-                    assert f"buffer_size={expected}" in expr, expr
+                    assert f"max_line_size={line_size}" in expr, expr
+                    assert f"buffer_size={line_size}" in expr, expr
             finally:
                 set_csv_max_line_size(None)
+
+    def test_csv_read_buffer_does_not_follow_a_tiny_line_size_down(self):
+        """The buffer is also DuckDB's unit of parallel scan work.
+
+        Tracking ``max_line_size`` below ``CSV_READ_BUFFER_MIN`` starves the
+        scan for no memory worth having: a 200k-row read costs ~170ms at a 1KB
+        buffer against ~26ms at 4MiB. The floor never touches the default, so
+        #1113's 16x reduction is unaffected.
+        """
+        from geoparquet_io.core.convert import (
+            CSV_MAX_LINE_SIZE_DEFAULT,
+            CSV_READ_BUFFER_MIN,
+            _build_csv_read_expr,
+            set_csv_max_line_size,
+        )
+
+        assert CSV_READ_BUFFER_MIN < CSV_MAX_LINE_SIZE_DEFAULT
+
+        set_csv_max_line_size(1024)
+        try:
+            expr = _build_csv_read_expr("/tmp/x.csv", None)
+            assert "max_line_size=1024" in expr, expr
+            assert f"buffer_size={CSV_READ_BUFFER_MIN}" in expr, expr
+        finally:
+            set_csv_max_line_size(None)
 
     def test_convert_csv_under_a_memory_limit_below_the_old_buffer(
         self, tmp_path, temp_output_file
