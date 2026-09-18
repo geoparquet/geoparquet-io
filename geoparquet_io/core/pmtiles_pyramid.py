@@ -9,8 +9,6 @@ under a ``gpio:pyramid`` key in the archive's metadata JSON.
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -37,27 +35,14 @@ from geoparquet_io.core.process.overview.run import (
     parse_levels,
     plan_bands,
 )
+from geoparquet_io.core.tile_join import (
+    TileJoinNotFoundError,
+    _build_tile_join_command,
+    _check_tile_join,
+    _run_tile_join,
+)
 
 VALID_LAYER_MODES = ("single", "grouped", "per-level")
-
-
-class TileJoinNotFoundError(Exception):
-    """Raised when tile-join is not found in PATH."""
-
-    def __init__(self):
-        super().__init__(
-            "tile-join not found in PATH.\n\n"
-            "tile-join ships with tippecanoe; gpio pmtiles pyramid needs it to\n"
-            "merge the per-level archives. Install tippecanoe:\n"
-            "  macOS:  brew install tippecanoe\n"
-            "  Ubuntu: sudo apt install tippecanoe\n"
-            "  Source: https://github.com/felt/tippecanoe#installation"
-        )
-
-
-def _check_tile_join() -> bool:
-    """Check if tile-join is available in PATH."""
-    return shutil.which("tile-join") is not None
 
 
 def _layer_name(layer_mode: str, scheme: str, level: int | str, stem: str) -> str:
@@ -113,43 +98,6 @@ def _resolve_feature_zooms(
             "aggregate bands",
         )
     return max_zoom, features_min_zoom
-
-
-def _build_tile_join_command(
-    output_path: str,
-    band_files: list[str],
-    *,
-    name: str,
-    attribution: str | None = None,
-    force: bool = False,
-) -> list[str]:
-    """argv for merging per-band archives (never joined through a shell).
-
-    tile-join accepts no ``-t``/``--temporary-directory`` (#1115), so its own
-    spill is not steerable from here.
-    """
-    cmd = ["tile-join", "-o", output_path, "-pk"]
-    if force:
-        cmd.append("--force")
-    cmd.append(f"--name={name}")
-    if attribution:
-        cmd.append(f"--attribution={attribution}")
-    cmd.extend(band_files)
-    return cmd
-
-
-def _run_tile_join(cmd: list[str], verbose: bool) -> None:
-    if verbose:
-        debug(f"Running: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        stderr = proc.stderr.strip()
-        raise RuntimeError(
-            f"tile-join failed with exit code {proc.returncode}"
-            + (f"\nstderr:\n{stderr}" if stderr else "")
-        )
-    if verbose and proc.stderr.strip():
-        debug(proc.stderr.strip())
 
 
 def _merge_pyramid_metadata(pmtiles_path: str, pyramid: dict) -> None:

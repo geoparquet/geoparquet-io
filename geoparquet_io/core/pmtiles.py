@@ -582,6 +582,7 @@ def create_pmtiles_from_geoparquet(
     force: bool = False,
     repair_geometry: bool = True,
     temporary_directory: str | None = None,
+    chunks: str | None = None,
 ) -> None:
     """
     Create PMTiles using gpio streaming + tippecanoe subprocess.
@@ -618,6 +619,10 @@ def create_pmtiles_from_geoparquet(
         maximum_tile_bytes: Set an explicit per-tile byte cap via
             --maximum-tile-bytes. Takes precedence over no_tile_size_limit.
         force: Pass --force to overwrite the output file if it already exists.
+        chunks: Tile an ``NxM`` grid of disjoint chunks and tile-join them,
+            bounding tippecanoe's scratch by the chunk rather than the dataset
+            (#1116); see :mod:`geoparquet_io.core.pmtiles_chunks`. Needs
+            ``max_zoom``; cannot be combined with ``bbox``.
         repair_geometry: Repair invalid geometry with ST_MakeValid (default: True).
             Prevents tippecanoe TopologyExceptions on self-intersecting polygons.
             Set False to pass geometry through unrepaired.
@@ -648,6 +653,39 @@ def create_pmtiles_from_geoparquet(
 
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()
+
+    if chunks:
+        # Deferred: pmtiles_chunks tiles each chunk through this function.
+        from geoparquet_io.core.pmtiles_chunks import create_pmtiles_chunked
+
+        create_pmtiles_chunked(
+            input_path,
+            output_path,
+            chunks,
+            bbox=bbox,
+            where=where,
+            include_cols=include_cols,
+            layer=layer,
+            attribution=attribution,
+            force=force,
+            verbose=verbose,
+            profile=profile,
+            tiling={
+                "min_zoom": min_zoom,
+                "max_zoom": max_zoom,
+                "precision": precision,
+                "src_crs": src_crs,
+                "layer_by_column": layer_by_column,
+                "simplify_only_low_zooms": simplify_only_low_zooms,
+                "no_simplification_of_shared_nodes": no_simplification_of_shared_nodes,
+                "no_tile_size_limit": no_tile_size_limit,
+                "drop_densest_as_needed": drop_densest_as_needed,
+                "maximum_tile_bytes": maximum_tile_bytes,
+                "repair_geometry": repair_geometry,
+                "temporary_directory": scratch,
+            },
+        )
+        return
 
     # If layer_by_column is set, ensure that the group by column is always included
     include_cols_with_layer_by_column: str | None

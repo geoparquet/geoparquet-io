@@ -111,6 +111,13 @@ def pmtiles(ctx):
     help="Overwrite the output file if it already exists (tippecanoe --force)",
 )
 @temporary_directory_option
+@click.option(
+    "--chunks",
+    default=None,
+    help="Split the input into an NxM grid of chunks (e.g. 4x3), tile each and "
+    "tile-join them, bounding tippecanoe scratch by the chunk. Needs --max-zoom; not "
+    "combinable with --bbox. Parts persist in <output>.parts/ so a failed run resumes.",
+)
 @repair_geometry_option
 @verbose_option
 @aws_profile_option
@@ -137,6 +144,7 @@ def pmtiles_create(
     force,
     repair_geometry,
     temporary_directory,
+    chunks,
 ):
     """Create PMTiles from a GeoParquet file.
 
@@ -185,6 +193,7 @@ def pmtiles_create(
             force=force,
             repair_geometry=repair_geometry,
             temporary_directory=temporary_directory,
+            chunks=chunks,
         )
         click.echo(click.style(f"✓ Created {output_file}", fg="green"))
     except Exception as e:

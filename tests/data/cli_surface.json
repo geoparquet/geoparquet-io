@@ -10577,6 +10577,22 @@
        "type": "text"
       },
       {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "chunks",
+       "nargs": 1,
+       "opts": [
+        "--chunks"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
        "default": "True",
        "hidden": false,
        "is_flag": true,
