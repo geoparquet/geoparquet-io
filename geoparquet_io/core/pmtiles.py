@@ -12,24 +12,12 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
-import pyarrow.parquet as pq
-
 from geoparquet_io.core.column_selection import split_column_list
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.common import get_dataset_bounds
-from geoparquet_io.core.duckdb_utils import quote_identifier
-from geoparquet_io.core.inspect import get_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success
-from geoparquet_io.core.tile_join import (
-    TileJoinNotFoundError,
-    _build_tile_join_command,
-    _check_tile_join,
-    _run_tile_join,
-)
 
 
 class TippecanoeNotFoundError(Exception):
@@ -115,134 +103,6 @@ def scratch_env(scratch: str) -> dict[str, str]:
 def _check_tippecanoe() -> bool:
     """Check if tippecanoe is available in PATH."""
     return shutil.which("tippecanoe") is not None
-
-
-@dataclass(frozen=True)
-class ChunkCell:
-    """One cell of the chunk grid, with the column/row it came from."""
-
-    ix: int
-    iy: int
-    minx: float
-    miny: float
-    maxx: float
-    maxy: float
-    last_x: bool
-    last_y: bool
-
-
-def _parse_chunks(spec: str) -> tuple[int, int]:
-    """Parse a ``NxM`` chunk grid.
-
-    ``auto`` is deliberately unsupported: choosing a grid means modelling
-    tippecanoe's scratch against feature count and free space, and an
-    uncalibrated guess picks a grid that still fills the disk -- the exact
-    failure chunking exists to prevent (#1116).
-    """
-    text = (spec or "").strip()
-    if text.lower() == "auto":
-        raise ValueError("--chunks auto is not supported yet; give an explicit grid such as 4x3")
-    parts = text.lower().split("x")
-    if len(parts) != 2:
-        raise ValueError(f"--chunks must look like NxM (e.g. 4x3), got {spec!r}")
-    try:
-        nx, ny = int(parts[0]), int(parts[1])
-    except ValueError:
-        raise ValueError(f"--chunks must look like NxM (e.g. 4x3), got {spec!r}") from None
-    if nx < 1 or ny < 1:
-        raise ValueError(f"--chunks needs positive counts, got {spec!r}")
-    return nx, ny
-
-
-def _chunk_cells(bounds: tuple[float, float, float, float], nx: int, ny: int) -> list[ChunkCell]:
-    """Split ``bounds`` into an ``nx`` by ``ny`` grid of abutting cells."""
-    minx, miny, maxx, maxy = bounds
-    dx = (maxx - minx) / nx
-    dy = (maxy - miny) / ny
-    cells = []
-    for iy in range(ny):
-        for ix in range(nx):
-            cells.append(
-                ChunkCell(
-                    ix=ix,
-                    iy=iy,
-                    minx=minx + ix * dx,
-                    miny=miny + iy * dy,
-                    maxx=minx + (ix + 1) * dx if ix < nx - 1 else maxx,
-                    maxy=miny + (iy + 1) * dy if iy < ny - 1 else maxy,
-                    last_x=ix == nx - 1,
-                    last_y=iy == ny - 1,
-                )
-            )
-    return cells
-
-
-def _chunk_where(cell: ChunkCell, geometry_column: str, user_where: str | None) -> str:
-    """A predicate assigning each feature to exactly one chunk, by centroid.
-
-    ``--bbox`` selects features that *intersect* a box, so a polygon straddling
-    a chunk edge is tiled by both neighbours and appears twice in the joined
-    archive -- a visible seam under translucent fills. Assigning by centroid is
-    disjoint: the interval is half-open, closed only on the grid's far edge so
-    the extreme centroid still lands somewhere (#1116).
-    """
-    col = quote_identifier(geometry_column)
-    cx = f"ST_X(ST_Centroid({col}))"
-    cy = f"ST_Y(ST_Centroid({col}))"
-    x_hi = "<=" if cell.last_x else "<"
-    y_hi = "<=" if cell.last_y else "<"
-    clauses = [
-        f"{cx} >= {cell.minx!r}",
-        f"{cx} {x_hi} {cell.maxx!r}",
-        f"{cy} >= {cell.miny!r}",
-        f"{cy} {y_hi} {cell.maxy!r}",
-    ]
-    if user_where:
-        # Parenthesised so an OR inside the caller's clause cannot swallow the
-        # chunk predicate and pull in the whole dataset.
-        clauses.append(f"({user_where})")
-    return " AND ".join(clauses)
-
-
-def _parts_dir(output_path: str) -> str:
-    """Where per-chunk archives live between runs.
-
-    Beside the output, deterministically, so a re-run after a crash finds the
-    parts it already built and skips them. A TemporaryDirectory would be
-    removed on failure too, which is precisely when resume matters (#1116).
-    """
-    return f"{output_path}.parts"
-
-
-def _part_path(output_path: str, cell: ChunkCell) -> str:
-    return os.path.join(_parts_dir(output_path), f"chunk_{cell.iy}_{cell.ix}.pmtiles")
-
-
-def _reject_levelled_input(input_path: str) -> None:
-    """Refuse an overview GeoParquet: chunking it would multiply-count.
-
-    In the overviews spec's ``duplicating`` mode every feature appears at every
-    level, so a centroid grid would assign each copy to a chunk and the join
-    would stack all levels into the same tiles. Such a file is tiled by
-    ``tylertoo export-pmtiles``, which reads the levels as written (#1117).
-
-    The column check is case-insensitive because SQL engines resolve
-    identifiers that way, which is the same reason the spec forbids a
-    case-colliding source column (OVERVIEWS_SPEC 4.1).
-    """
-    try:
-        schema = pq.read_schema(input_path)
-    except Exception:  # not a local parquet (remote URL, say) -- nothing to check
-        return
-    names = {n.lower() for n in schema.names}
-    meta = schema.metadata or {}
-    has_key = any(k.decode(errors="replace") == "geo:overviews" for k in meta)
-    if "level" in names or has_key:
-        raise ValueError(
-            f"{input_path} looks like an overview GeoParquet (levelled rows). "
-            "--chunks would tile every level into the same tiles. Tile it with "
-            "`tylertoo export-pmtiles`, or chunk the single-level source instead."
-        )
 
 
 def _build_gpio_commands(
@@ -698,100 +558,6 @@ def _run_pipeline(
         raise
 
 
-def _count_chunk_features(input_path: str, where: str) -> int:
-    """Rows a chunk's predicate selects.
-
-    Checked before tiling rather than inferred from a tippecanoe failure: a
-    chunk over ocean is normal and must be skipped, but a chunk that fails for
-    any other reason must still surface. Counting separates the two (#1116).
-    """
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
-
-    con = get_duckdb_connection()
-    try:
-        row = con.execute(f"SELECT count(*) FROM {sql_path(input_path)} WHERE {where}").fetchone()
-        return int(row[0]) if row else 0
-    finally:
-        con.close()
-
-
-def _create_pmtiles_chunked(
-    input_path: str,
-    output_path: str,
-    chunks: str,
-    tiling_kwargs: dict,
-    *,
-    where: str | None,
-    attribution: str | None,
-    layer: str | None,
-    force: bool,
-    verbose: bool,
-) -> None:
-    """Tile a grid of disjoint chunks and tile-join them into one archive.
-
-    tippecanoe's scratch scales with the feature count, not the output: 168M
-    polygons reached ~270GB against a ~34GB archive. Tiling a spatial subset
-    at a time bounds peak scratch by the chunk (#1116). Parts persist beside
-    the output so a failed run resumes instead of restarting -- these runs
-    take hours, and losing the last chunk should not cost the first eleven.
-    """
-    nx, ny = _parse_chunks(chunks)
-    _reject_levelled_input(input_path)
-    if not _check_tile_join():
-        raise TileJoinNotFoundError()
-
-    geometry_column = get_primary_geometry_column(input_path) or "geometry"
-    bounds = get_dataset_bounds(input_path, geometry_column=geometry_column, verbose=verbose)
-    if bounds is None:
-        raise RuntimeError(f"Could not determine bounds of {input_path} to chunk it")
-
-    cells = _chunk_cells(tuple(bounds), nx, ny)
-    parts_dir = _parts_dir(output_path)
-    os.makedirs(parts_dir, exist_ok=True)
-
-    parts: list[str] = []
-    for n, cell in enumerate(cells, start=1):
-        part = _part_path(output_path, cell)
-        if os.path.exists(part):
-            debug(f"chunk {n}/{len(cells)}: reusing {part}")
-            parts.append(part)
-            continue
-
-        chunk_where = _chunk_where(cell, geometry_column, where)
-        if _count_chunk_features(input_path, chunk_where) == 0:
-            debug(f"chunk {n}/{len(cells)}: empty, skipping")
-            continue
-
-        debug(f"chunk {n}/{len(cells)}: tiling {part}")
-        create_pmtiles_from_geoparquet(
-            input_path,
-            part,
-            where=chunk_where,
-            attribution=attribution,
-            layer=layer or Path(output_path).stem,
-            force=True,
-            verbose=verbose,
-            **tiling_kwargs,
-        )
-        parts.append(part)
-
-    if not parts:
-        raise RuntimeError(f"No chunk of {input_path} contained any features; nothing to tile")
-
-    _run_tile_join(
-        _build_tile_join_command(
-            output_path,
-            parts,
-            name=Path(output_path).stem,
-            attribution=attribution,
-            force=force,
-        ),
-        verbose,
-    )
-    shutil.rmtree(parts_dir, ignore_errors=True)
-    success(f"Created {output_path} from {len(parts)} chunk(s)")
-
-
 def create_pmtiles_from_geoparquet(
     input_path: str,
     output_path: str,
@@ -855,7 +621,8 @@ def create_pmtiles_from_geoparquet(
         force: Pass --force to overwrite the output file if it already exists.
         chunks: Tile an ``NxM`` grid of disjoint chunks and tile-join them,
             bounding tippecanoe's scratch by the chunk rather than the dataset
-            (#1116). Features are assigned by centroid, so none is tiled twice.
+            (#1116); see :mod:`geoparquet_io.core.pmtiles_chunks`. Needs
+            ``max_zoom``; cannot be combined with ``bbox``.
         repair_geometry: Repair invalid geometry with ST_MakeValid (default: True).
             Prevents tippecanoe TopologyExceptions on self-intersecting polygons.
             Set False to pass geometry through unrepaired.
@@ -887,26 +654,26 @@ def create_pmtiles_from_geoparquet(
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()
 
-    # If layer_by_column is set, ensure that the group by column is always included
-    include_cols_with_layer_by_column: str | None
-    if layer_by_column and cols:
-        if layer_by_column not in cols:
-            cols = [*cols, layer_by_column]
-        include_cols_with_layer_by_column = ",".join(cols)
-    else:
-        include_cols_with_layer_by_column = include_cols
-
     if chunks:
-        _create_pmtiles_chunked(
+        # Deferred: pmtiles_chunks tiles each chunk through this function.
+        from geoparquet_io.core.pmtiles_chunks import create_pmtiles_chunked
+
+        create_pmtiles_chunked(
             input_path,
             output_path,
             chunks,
-            {
+            bbox=bbox,
+            where=where,
+            include_cols=include_cols,
+            layer=layer,
+            attribution=attribution,
+            force=force,
+            verbose=verbose,
+            profile=profile,
+            tiling={
                 "min_zoom": min_zoom,
                 "max_zoom": max_zoom,
-                "include_cols": include_cols,
                 "precision": precision,
-                "profile": profile,
                 "src_crs": src_crs,
                 "layer_by_column": layer_by_column,
                 "simplify_only_low_zooms": simplify_only_low_zooms,
@@ -915,15 +682,19 @@ def create_pmtiles_from_geoparquet(
                 "drop_densest_as_needed": drop_densest_as_needed,
                 "maximum_tile_bytes": maximum_tile_bytes,
                 "repair_geometry": repair_geometry,
-                "temporary_directory": temporary_directory,
+                "temporary_directory": scratch,
             },
-            where=where,
-            attribution=attribution,
-            layer=layer,
-            force=force,
-            verbose=verbose,
         )
         return
+
+    # If layer_by_column is set, ensure that the group by column is always included
+    include_cols_with_layer_by_column: str | None
+    if layer_by_column and cols:
+        if layer_by_column not in cols:
+            cols = [*cols, layer_by_column]
+        include_cols_with_layer_by_column = ",".join(cols)
+    else:
+        include_cols_with_layer_by_column = include_cols
 
     gpio_commands = _build_gpio_commands(
         input_path,

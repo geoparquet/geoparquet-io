@@ -56,6 +56,34 @@ GEOPARQUET_VERSIONS = {
 DEFAULT_GEOPARQUET_VERSION = "1.1"
 
 # =============================================================================
+# Levelled overview files (tylertoo OVERVIEWS_SPEC)
+# =============================================================================
+
+#: Footer key marking a levelled overview GeoParquet: every pyramid level
+#: stacked as rows, distinguished by an INT32 ``level`` column, with this key
+#: describing the row-group layout. The spec (OVERVIEWS_SPEC 3.1) requires the
+#: key to stay one named constant; this module owns it because the key sits
+#: beside ``geo`` in the same footer and every consumer -- the writer in
+#: ``process/overview``, the ``pmtiles`` chunker that must refuse such a file,
+#: the rewrite paths that must not carry a stale copy -- reads it from here.
+OVERVIEWS_KEY = "geo:overviews"
+OVERVIEW_LEVEL_COLUMN = "level"
+
+
+def is_levelled_overview(schema_or_metadata) -> bool:
+    """True when the footer carries the overviews key.
+
+    Takes a ``pyarrow.Schema`` or a KV-metadata mapping (PyArrow hands back
+    ``bytes`` keys, DuckDB ``str`` ones; both are accepted). Keyed on the
+    footer alone, not on a ``level`` column: buildings carry a ``level``
+    (storeys), flood models a water level. The key is the spec's marker; a
+    bare column is a coincidence.
+    """
+    metadata = getattr(schema_or_metadata, "metadata", schema_or_metadata) or {}
+    return OVERVIEWS_KEY in metadata or OVERVIEWS_KEY.encode("utf-8") in metadata
+
+
+# =============================================================================
 # Geometry Type Mappings
 # =============================================================================
 

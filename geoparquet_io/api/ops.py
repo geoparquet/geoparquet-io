@@ -2638,9 +2638,9 @@ def create_pmtiles(
         maximum_tile_bytes: Set an explicit per-tile byte cap via
             --maximum-tile-bytes. Takes precedence over no_tile_size_limit.
         force: Pass --force to overwrite the output file if it already exists.
-        chunks: Tile an ``NxM`` grid of chunks and tile-join them, bounding
-            tippecanoe's scratch by the chunk (#1116). Features are assigned by
-            centroid, so none is tiled twice into the joined archive.
+        chunks: Split the input into an ``NxM`` grid of chunks, tile each and
+            tile-join them, bounding tippecanoe's scratch by the chunk (#1116).
+            Needs ``max_zoom``; cannot be combined with ``bbox``.
         temporary_directory: Existing directory for this run's scratch
             (tippecanoe's ``-t`` and the gpio children's temp files);
             defaults to the OS temp directory.

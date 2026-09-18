@@ -114,9 +114,9 @@ def pmtiles(ctx):
 @click.option(
     "--chunks",
     default=None,
-    help="Tile an NxM grid of chunks and tile-join them (e.g. 4x3), bounding "
-    "tippecanoe scratch by the chunk. Features are assigned by centroid, so none "
-    "is tiled twice. Parts persist in <output>.parts/ so a failed run resumes.",
+    help="Split the input into an NxM grid of chunks (e.g. 4x3), tile each and "
+    "tile-join them, bounding tippecanoe scratch by the chunk. Needs --max-zoom; not "
+    "combinable with --bbox. Parts persist in <output>.parts/ so a failed run resumes.",
 )
 @repair_geometry_option
 @verbose_option
