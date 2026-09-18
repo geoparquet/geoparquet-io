@@ -10845,6 +10845,23 @@
        "type": "text"
       },
       {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "temporary_directory",
+       "nargs": 1,
+       "opts": [
+        "--temporary-directory",
+        "-t"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "path[exists=True,file_okay=False,dir_okay=True,writable=True,readable=True,resolve_path=True]"
+      },
+      {
        "default": "False",
        "hidden": false,
        "is_flag": true,
@@ -11092,6 +11109,23 @@
        "required": true,
        "secondary_opts": [],
        "type": "path[exists=False,file_okay=True,dir_okay=True,writable=False,readable=True,resolve_path=False]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "temporary_directory",
+       "nargs": 1,
+       "opts": [
+        "--temporary-directory",
+        "-t"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "path[exists=True,file_okay=False,dir_okay=True,writable=True,readable=True,resolve_path=True]"
       },
       {
        "default": "False",

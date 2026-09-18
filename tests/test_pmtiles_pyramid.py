@@ -133,6 +133,13 @@ class TestTileJoinCommand:
         assert cmd[-2:] == ["a.pmtiles", "b.pmtiles"]
         assert "--force" not in cmd
 
+    def test_no_scratch_flag_because_tile_join_rejects_one(self):
+        """#1115: tile-join exits 101 on ``-t``/``--temporary-directory``."""
+        cmd = _build_tile_join_command("out.pmtiles", ["a.pmtiles"], name="out")
+        assert "-t" not in cmd
+        assert not any(c.startswith("--temporary-directory") for c in cmd)
+        assert cmd[-1:] == ["a.pmtiles"]
+
     def test_force_and_attribution(self):
         cmd = _build_tile_join_command(
             "out.pmtiles",
@@ -294,6 +301,43 @@ class TestOrchestration:
             "maxzoom": 0,
         }
         assert pyramid["bands"][1]["maxzoom"] == 6
+
+    def test_temporary_directory_parents_bands_and_reaches_every_tiling_run(
+        self, tmp_path, fake_tools
+    ):
+        """#1115: the resolved scratch is the band-archive parent and is
+        forwarded to each per-band tippecanoe run."""
+        from geoparquet_io.core.pmtiles_pyramid import create_pmtiles_pyramid
+
+        src = tmp_path / "by_region.parquet"
+        out = tmp_path / "pyramid.pmtiles"
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        _write_admin_region_aggregate(src)
+
+        create_pmtiles_pyramid(
+            str(src), str(out), temporary_directory=str(scratch), **_BAND_FORCING
+        )
+
+        tiles = fake_tools["tiles"]
+        assert len(tiles) == 2
+        assert all(t["temporary_directory"] == str(scratch) for t in tiles)
+        assert all(t["output"].startswith(str(scratch)) for t in tiles)
+
+    def test_missing_temporary_directory_fails_before_the_tool_checks(self, tmp_path, monkeypatch):
+        import geoparquet_io.core.pmtiles_pyramid as pp
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        probed = []
+        monkeypatch.setattr(pp, "_check_tippecanoe", lambda: probed.append(1) or True)
+        src = tmp_path / "by_region.parquet"
+        _write_admin_region_aggregate(src)
+
+        with pytest.raises(InvalidParameterError, match="not a directory"):
+            pp.create_pmtiles_pyramid(
+                str(src), str(tmp_path / "out.pmtiles"), temporary_directory=str(tmp_path / "nope")
+            )
+        assert probed == []
 
     def test_explicit_bands_override_the_budget(self, tmp_path, fake_tools):
         # Same fixture and the same band-forcing numbers as the test above,

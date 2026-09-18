@@ -165,6 +165,55 @@ For national- or global-overview maps over dense data, re-enable the size limit 
     )
     ```
 
+#### Scratch space (`--temporary-directory`)
+
+tippecanoe sorts the whole input on disk before it writes a tile, and that
+scratch is **several times the input, not the output**. Tiling 168M polygons at
+`-Z 12 -z 14` (~12 GB of GeoParquet in, ~34 GB of PMTiles out) accumulated
+**~270 GB** of scratch. Budget for it.
+
+By default it goes to the OS temp directory (`$TMPDIR`, or `/tmp` when that is
+unset) — on macOS the boot volume, which is usually not where your data lives.
+Point the run at an existing directory with room; tippecanoe's scratch and the
+temp files of the `gpio` processes feeding it all follow:
+
+=== "CLI"
+
+    <!-- doctest: needs-tippecanoe, setup="mkdir -p scratch", setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
+    ```bash
+    gpio pmtiles create buildings.parquet out.pmtiles --temporary-directory scratch
+
+    # Same flag on pyramid, where it also parents the intermediate band archives
+    gpio pmtiles pyramid cells.parquet pyramid.pmtiles -t scratch
+    ```
+
+=== "Python"
+
+    <!-- doctest: needs-tippecanoe, setup="mkdir -p scratch", setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.create_pmtiles('buildings.parquet', 'out.pmtiles', temporary_directory='scratch')
+    ops.create_pmtiles_pyramid(
+        'cells.parquet', 'pyramid.pmtiles', temporary_directory='scratch'
+    )
+    ```
+
+Without the flag, `TMPDIR` is the knob — the same one every other gpio command
+follows, described under [Where Spilled Data Goes](write-strategies.md#where-spilled-data-goes).
+tippecanoe does not read that variable itself; gpio passes the resolved
+directory to it.
+
+!!! warning "A full scratch volume is hard to diagnose"
+
+    tippecanoe creates these files with `mkstemp` + `unlink`, so they have no
+    directory entry: they are invisible to `ls` and `du`, and `rm` cannot
+    reclaim them. From outside, the disk simply fills with nothing visible
+    consuming it, and only killing the process releases the space.
+
+    `tile-join`, used by `gpio pmtiles pyramid`, accepts no equivalent flag
+    upstream, so its own spill stays wherever it puts it.
+
 ## PMTiles Pyramids
 
 A fine-grained aggregate (say A5 resolution 10 over billions of buildings) renders beautifully zoomed in but overflows tile limits at low zooms, forcing tippecanoe to drop the densest cells — exactly the hotspots you care about. `gpio pmtiles pyramid` fixes this by building a **banded archive**: coarser aggregate levels serve low zooms, finer levels take over as you zoom in, and (optionally) the raw features appear at the highest zooms.

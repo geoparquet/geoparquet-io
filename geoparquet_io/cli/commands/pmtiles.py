@@ -20,6 +20,17 @@ from geoparquet_io.cli.decorators import (
 # =============================================================================
 
 
+# Used by both commands; the module keeps it because no other group tiles.
+temporary_directory_option = click.option(
+    "--temporary-directory",
+    "-t",
+    type=click.Path(exists=True, file_okay=False, writable=True, resolve_path=True),
+    help="Existing directory for this run's scratch: tippecanoe's -t and gpio's own temp "
+    "files (default: the OS temp directory, $TMPDIR). Scratch runs to several times the "
+    "input size, so point this at a volume with room.",
+)
+
+
 @click.group()
 @click.pass_context
 def pmtiles(ctx):
@@ -99,6 +110,7 @@ def pmtiles(ctx):
     is_flag=True,
     help="Overwrite the output file if it already exists (tippecanoe --force)",
 )
+@temporary_directory_option
 @repair_geometry_option
 @verbose_option
 @aws_profile_option
@@ -124,6 +136,7 @@ def pmtiles_create(
     maximum_tile_bytes,
     force,
     repair_geometry,
+    temporary_directory,
 ):
     """Create PMTiles from a GeoParquet file.
 
@@ -171,6 +184,7 @@ def pmtiles_create(
             maximum_tile_bytes=maximum_tile_bytes,
             force=force,
             repair_geometry=repair_geometry,
+            temporary_directory=temporary_directory,
         )
         click.echo(click.style(f"✓ Created {output_file}", fg="green"))
     except Exception as e:
@@ -252,6 +266,7 @@ def pmtiles_create(
     is_flag=True,
     help="Overwrite the output archive if it already exists",
 )
+@temporary_directory_option
 @verbose_option
 def pmtiles_pyramid(
     input_parquet,
@@ -268,6 +283,7 @@ def pmtiles_pyramid(
     attribution,
     force,
     verbose,
+    temporary_directory,
 ):
     """Create a multi-level PMTiles pyramid from an aggregate file.
 
@@ -311,6 +327,7 @@ def pmtiles_pyramid(
             attribution=attribution,
             force=force,
             verbose=verbose,
+            temporary_directory=temporary_directory,
         )
         click.echo(click.style(f"✓ Created {output_pmtiles}", fg="green"))
     except Exception as e:

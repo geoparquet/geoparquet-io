@@ -23,6 +23,7 @@ from geoparquet_io.core.pmtiles import (
     _check_tippecanoe,
     _validate_path,
     create_pmtiles_from_geoparquet,
+    resolve_scratch_directory,
 )
 from geoparquet_io.core.process.overview.detect import (
     AggregateInfo,
@@ -122,7 +123,11 @@ def _build_tile_join_command(
     attribution: str | None = None,
     force: bool = False,
 ) -> list[str]:
-    """argv for merging per-band archives (never joined through a shell)."""
+    """argv for merging per-band archives (never joined through a shell).
+
+    tile-join accepts no ``-t``/``--temporary-directory`` (#1115), so its own
+    spill is not steerable from here.
+    """
     cmd = ["tile-join", "-o", output_path, "-pk"]
     if force:
         cmd.append("--force")
@@ -345,6 +350,7 @@ def create_pmtiles_pyramid(
     attribution: str | None = None,
     force: bool = False,
     verbose: bool = False,
+    temporary_directory: str | None = None,
 ) -> None:
     """Create a banded multi-level PMTiles archive from an aggregate file.
 
@@ -374,6 +380,13 @@ def create_pmtiles_pyramid(
         attribution: Attribution HTML for the tiles.
         force: Overwrite the output archive if it exists.
         verbose: Enable verbose output.
+        temporary_directory: Scratch for this run -- tippecanoe's ``-t``, the
+            gpio children's temp files and the parent of the intermediate
+            per-band archives (and of any overview levels built on the fly).
+            Must exist; defaults to the OS temp directory (``TMPDIR``).
+            tile-join has no scratch flag, and the in-process DuckDB rollup
+            that builds missing overview levels spills under ``TMPDIR`` as
+            every gpio connection does.
 
     Raises:
         TippecanoeNotFoundError: tippecanoe missing from PATH.
@@ -407,6 +420,7 @@ def create_pmtiles_pyramid(
     # A plan that cannot be used is reported now, not after the tool checks and
     # a full scan of the input: parsing needs nothing from the file.
     stated_bands = parse_bands(bands) if bands is not None else None
+    scratch = resolve_scratch_directory(temporary_directory)
     if features_source:
         _validate_path(features_source)
     # Fail fast before any tiling work: tile-join would only reject an
@@ -427,7 +441,7 @@ def create_pmtiles_pyramid(
     )
     stem = Path(output_path).stem
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(dir=scratch) as tmpdir:
         sources = _resolve_band_sources(input_path, info, plan, tmpdir, verbose)
         band_files: list[str] = []
         for i, band in enumerate(plan):
@@ -447,6 +461,7 @@ def create_pmtiles_pyramid(
                 attribution=attribution,
                 force=True,
                 verbose=verbose,
+                temporary_directory=scratch,
             )
             band_files.append(band_file)
 
@@ -470,6 +485,7 @@ def create_pmtiles_pyramid(
                 attribution=attribution,
                 force=True,
                 verbose=verbose,
+                temporary_directory=scratch,
             )
             band_files.append(features_file)
 

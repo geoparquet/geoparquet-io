@@ -135,6 +135,10 @@ This matters in three situations:
     TMPDIR=/mnt/scratch gpio sort hilbert huge.parquet sorted.parquet
     ```
 
+    `gpio pmtiles create` and `pyramid` follow the same variable and also take
+    it as a flag, `--temporary-directory`, because tippecanoe's scratch is the
+    largest gpio ever produces — see [Scratch space](geojson.md#scratch-space-temporary-directory).
+
 - **A RAM-backed `/tmp`.** systemd mounts `/tmp` as a tmpfs sized at half of RAM
   by default on Fedora, Arch and openSUSE, and so do Kubernetes'
   `emptyDir: {medium: Memory}` and `docker run --tmpfs /tmp`. Spilling onto a
