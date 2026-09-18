@@ -27,6 +27,7 @@ from geoparquet_io.core.process.aggregate.by_admin import (
 )
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3 as aggregate_by_h3_impl
 from geoparquet_io.core.process.overview import create_overviews as create_overviews_impl
+from geoparquet_io.core.process.overview.run import create_overview_file
 
 # =============================================================================
 # Process Commands (aggregate, ...)
@@ -108,6 +109,30 @@ def process(ctx):
     is_flag=True,
     help="Overwrite existing overview output files.",
 )
+@click.option(
+    "--overview-out",
+    type=click.Path(),
+    default=None,
+    help="Also assemble the ladder into ONE levelled overview GeoParquet at this "
+    "path (levels as rows, tagged by a `level` column). Tile it in one pass with "
+    "`tylertoo export-pmtiles`.",
+)
+@click.option(
+    "--cell-detail",
+    type=float,
+    default=None,
+    help="Cell width in GSD units at the level serving it (default 4): each level's "
+    "GSD is its measured cell width divided by this. Larger serves every level at a "
+    "finer zoom. Only with --overview-out.",
+)
+@click.option(
+    "--gsd",
+    "explicit_gsd",
+    default=None,
+    help="Explicit GSDs in metres, coarse to fine, strictly decreasing, one per built "
+    "level plus the base (e.g. 2000,800,300,120 for --levels 5,6,7). Overrides "
+    "--cell-detail. Only with --overview-out.",
+)
 @compression_options
 @verbose_option
 @geoparquet_version_option
@@ -128,6 +153,9 @@ def process_overview(
     verbose,
     geoparquet_version,
     show_sql,
+    overview_out,
+    cell_detail,
+    explicit_gsd,
 ):
     """Build coarser overview levels from an aggregate output.
 
@@ -148,22 +176,36 @@ def process_overview(
         gpio process overview cells.parquet --max-tile-kb 300
     """
     with _activate_s3(ctx):
-        try:
-            create_overviews_impl(
-                input_parquet,
-                levels=levels,
-                max_tile_kb=max_tile_kb,
-                bytes_per_cell=bytes_per_cell,
-                cell_column=cell_column,
-                scheme=scheme,
-                output_dir=output_dir,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                geoparquet_version=geoparquet_version,
-                force=force,
-                verbose=verbose,
-                show_sql=show_sql,
+        if (cell_detail is not None or explicit_gsd is not None) and not overview_out:
+            raise click.ClickException(
+                "--cell-detail and --gsd size the levels of a single overview "
+                "file; pass --overview-out to write one."
             )
+        kwargs = {
+            "levels": levels,
+            "max_tile_kb": max_tile_kb,
+            "bytes_per_cell": bytes_per_cell,
+            "cell_column": cell_column,
+            "scheme": scheme,
+            "output_dir": output_dir,
+            "compression": compression.upper(),
+            "compression_level": compression_level,
+            "geoparquet_version": geoparquet_version,
+            "force": force,
+            "verbose": verbose,
+            "show_sql": show_sql,
+        }
+        try:
+            if overview_out:
+                create_overview_file(
+                    input_parquet,
+                    overview_out,
+                    cell_detail=cell_detail,
+                    explicit_gsd=explicit_gsd,
+                    **kwargs,
+                )
+            else:
+                create_overviews_impl(input_parquet, **kwargs)
         except (InvalidParameterError, ValueError, duckdb.Error) as exc:
             raise click.ClickException(str(exc)) from exc
 

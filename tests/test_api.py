@@ -762,6 +762,9 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "spelled twin",
     "convert_to_geopackage": "`Table.write(format=...)` is the method-side spelling",
     "convert_to_shapefile": "`Table.write(format=...)` is the method-side spelling",
+    "create_overview_file": "file in, one levelled overview GeoParquet out: the whole "
+    "point is the on-disk row-group layout the format requires, which a table "
+    "handed back in memory cannot carry",
     "create_overviews": "`Table.overview` <-> `ops.create_overviews`, differently spelled "
     "twin: the method rolls one level in memory, the function writes a whole pyramid",
     "create_pmtiles": "file in, PMTiles out through tippecanoe: no table on either end",

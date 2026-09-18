@@ -118,6 +118,82 @@ Auto selection remains the better default for a single archive: it measures
 the data instead of guessing, and `--bands` will happily produce a 20 MB tile
 if that is what you asked for.
 
+## One levelled file (`--overview-out`)
+
+By default each level is written as its own sibling (`cells_r7.parquet`, …),
+and a tiler then has to pick a zoom band per level. `--overview-out` also
+assembles the ladder into **one** GeoParquet in tylertoo's
+[overviews format](https://github.com/geoparquet/tylertoo/blob/main/context/OVERVIEWS_SPEC.md):
+levels are additional *rows* tagged by an INT32 `level` column, coarse to
+fine, each ending on a row-group boundary, with a `geo:overviews` footer
+recording each level's row-group range and ground sample distance (GSD, in
+metres). The sibling files are still written — under `--output-dir`, or beside
+the input.
+
+`tylertoo export-pmtiles` tiles that file in one pass, reading the levels as
+written — no per-level tippecanoe run and no hand-pinned zoom bands. The
+rollup lives in gpio because a coarse level of a count layer is a
+**re-aggregation**, not a generalization: a tiler's coarse zoom would show
+some of the fine cells and drop the rest, not their sum.
+
+=== "CLI"
+
+    <!-- doctest: setup="gpio process aggregate h3 buildings.parquet cells.parquet --resolution 9" -->
+    ```bash
+    gpio process overview cells.parquet --levels 8,7,6 --overview-out pyramid.parquet
+    ```
+
+    <!-- doctest: skip="tylertoo is not a gpio dependency" -->
+    ```bash
+    tylertoo export-pmtiles pyramid.parquet out.pmtiles
+    ```
+
+=== "Python"
+
+    <!-- doctest: setup="gpio process aggregate h3 buildings.parquet cells.parquet --resolution 9" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.create_overview_file('cells.parquet', 'pyramid.parquet', levels='8,7,6')
+    ```
+
+### Sizing the levels (`--cell-detail`, `--gsd`)
+
+Each level's GSD is measured from the level itself: the median width of its
+cells in metres (flat 111,320 m per degree, as the format prescribes), divided
+by `--cell-detail` (default `4`, so a cell spans four GSD units at the zoom
+that serves it). That is scheme-agnostic — H3, A5 and admin regions all have a
+measurable cell width — and shrinks as levels refine. A larger `--cell-detail`
+gives every level a smaller GSD, so tylertoo serves each level at a finer
+zoom; a smaller one serves them coarser:
+
+<!-- doctest: setup="gpio process aggregate h3 buildings.parquet cells.parquet --resolution 9" -->
+```bash
+gpio process overview cells.parquet --overview-out pyramid.parquet --levels 8,7 --cell-detail 8
+```
+
+For full control, `--gsd` takes absolute metres, coarse to fine, strictly
+decreasing — one per built level **plus the base** — and overrides the
+measurement:
+
+<!-- doctest: setup="gpio process aggregate h3 buildings.parquet cells.parquet --resolution 9" -->
+```bash
+gpio process overview cells.parquet --overview-out pyramid.parquet \
+    --levels 7,8 --gsd 4000,1500,600
+```
+
+The footer's `zoom` field is written only when the levels round to distinct
+zooms; tylertoo derives zooms from `gsd` otherwise.
+
+!!! note "The finest level is the aggregate, not the source features"
+
+    The format's canonical level normally reproduces the source exactly. Here
+    the finest level *is* an aggregate — the base cells — so that is what the
+    file declares as canonical, in `duplicating` mode: every level is a
+    complete rendering and a reader picks exactly one. Not yet written: the
+    1.1 bbox covering the format requires (§4.4) and a spatial order within a
+    level (§5.1); `tylertoo validate` reports the former.
+
 ## Options
 
 | Option | Default | Description |
@@ -130,6 +206,9 @@ if that is what you asked for.
 | `--scheme` | auto | Bucketing scheme (`a5`/`h3`/`admin`) when inference is ambiguous, e.g. H3 ids stored as integers |
 | `--output-dir` | input's directory | Where to write overview files |
 | `--force` | off | Overwrite existing overview output files |
+| `--overview-out` | off | Also assemble the ladder into one levelled GeoParquet at this path |
+| `--cell-detail` | 4 | Cell width in GSD units at the level serving it (with `--overview-out`) |
+| `--gsd` | measured | Explicit GSDs in metres, coarse to fine, one per built level plus the base (with `--overview-out`) |
 
 Compression (`--compression`, `--compression-level`), `--geoparquet-version`, `--verbose`, and `--show-sql` behave as elsewhere in gpio.
 

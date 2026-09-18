@@ -8,6 +8,7 @@ tile-size budget -- and writes one GeoParquet sibling per level.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,9 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.duckdb_utils import quote_identifier
+from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.logging_config import info as log_info
 from geoparquet_io.core.partition.auto_resolution import _register_quadkey_udf
@@ -288,51 +290,270 @@ def create_overviews(
     configure_verbose(verbose)
     with aggregate_connection(input_parquet, verbose) as (con, relation):
         info = detect_aggregate_info(con, relation, cell_column, scheme)
-        source_sql = f"SELECT * FROM {relation}"
-
-        if levels is not None:
-            target_levels = parse_levels(levels, info)
-        else:
-            target_levels = _auto_levels(
-                con, source_sql, info, max_tile_kb, bytes_per_cell, verbose
-            )
+        target_levels = _plan_levels(
+            con, relation, info, levels, max_tile_kb, bytes_per_cell, verbose
+        )
         if not target_levels:
             log_info("Base level fits the tile budget at every zoom; no overview levels needed")
             return []
-
-        # Refuse to silently overwrite derived sibling files the user never
-        # named (mirrors the --force gate on gpio pmtiles pyramid).
-        existing = [
-            path
-            for path in (
-                overview_output_path(input_parquet, info.scheme, level, output_dir)
-                for level in target_levels
-            )
-            if Path(path).exists()
+        outputs = [
+            overview_output_path(input_parquet, info.scheme, level, output_dir)
+            for level in target_levels
         ]
-        if existing and not force:
-            raise InvalidParameterError(
-                "output",
-                f"overview output already exists: {', '.join(existing)}. Use --force to overwrite.",
-            )
+        _refuse_existing(outputs, force)
+        return _build_levels(
+            con,
+            relation,
+            info,
+            target_levels,
+            outputs,
+            compression=compression,
+            compression_level=compression_level,
+            geoparquet_version=geoparquet_version,
+            verbose=verbose,
+            show_sql=show_sql,
+        )
 
-        results: list[tuple[int | str, str]] = []
-        for level in target_levels:
-            sql = build_level_sql(con, info, source_sql, level)
-            if show_sql or verbose:
-                debug(sql)
-            table = con.execute(sql).arrow().read_all()
-            out_path = overview_output_path(input_parquet, info.scheme, level, output_dir)
-            _write_overview(
-                table,
-                out_path,
-                info,
-                compression,
-                compression_level,
-                geoparquet_version,
-                verbose,
-                geo_bbox=_overview_geo_bbox(con, table, info),
+
+def _plan_levels(
+    con, relation: str, info: AggregateInfo, levels, max_tile_kb, bytes_per_cell, verbose
+) -> list[int | str]:
+    """The coarser levels to build: the user's list, or the tile-budget probe."""
+    if levels is not None:
+        return parse_levels(levels, info)
+    return _auto_levels(
+        con, f"SELECT * FROM {relation}", info, max_tile_kb, bytes_per_cell, verbose
+    )
+
+
+def _refuse_existing(paths: list[str], force: bool) -> None:
+    """Refuse to silently overwrite files the user did not name one by one
+    (mirrors the --force gate on gpio pmtiles pyramid)."""
+    existing = [path for path in paths if Path(path).exists()]
+    if existing and not force:
+        raise InvalidParameterError(
+            "output",
+            f"overview output already exists: {', '.join(existing)}. Use --force to overwrite.",
+        )
+
+
+def _build_levels(
+    con,
+    relation: str,
+    info: AggregateInfo,
+    target_levels: list[int | str],
+    outputs: list[str],
+    *,
+    compression: str,
+    compression_level: int | None,
+    geoparquet_version: str | None,
+    verbose: bool,
+    show_sql: bool,
+) -> list[tuple[int | str, str]]:
+    """Roll the input up to each level and write it as a sibling file."""
+    source_sql = f"SELECT * FROM {relation}"
+    results: list[tuple[int | str, str]] = []
+    for out_path in outputs:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    for level, out_path in zip(target_levels, outputs, strict=True):
+        sql = build_level_sql(con, info, source_sql, level)
+        if show_sql or verbose:
+            debug(sql)
+        table = con.execute(sql).arrow().read_all()
+        _write_overview(
+            table,
+            out_path,
+            info,
+            compression,
+            compression_level,
+            geoparquet_version,
+            verbose,
+            geo_bbox=_overview_geo_bbox(con, table, info),
+        )
+        success(f"Wrote level {level} overview ({table.num_rows} rows) -> {out_path}")
+        results.append((level, out_path))
+    return results
+
+
+def create_overview_file(
+    input_parquet: str,
+    overview_out: str,
+    *,
+    levels: str | list[int | str] | None = None,
+    cell_detail: float | None = None,
+    explicit_gsd: str | list[float] | None = None,
+    max_tile_kb: int = DEFAULT_MAX_TILE_KB,
+    bytes_per_cell: float | None = None,
+    cell_column: str | None = None,
+    scheme: str | None = None,
+    output_dir: str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
+    geoparquet_version: str | None = None,
+    force: bool = False,
+    verbose: bool = False,
+    show_sql: bool = False,
+) -> str:
+    """Build the level ladder and assemble it into one overview GeoParquet.
+
+    `create_overviews` writes a sibling file per level, which a tiler then has
+    to pick zoom bands for. This emits the same ladder as a single levelled
+    file that ``tylertoo export-pmtiles`` tiles in one pass, reading the levels
+    as written (#1117). The sibling files are written too (under
+    ``output_dir``, or beside the input) and left in place.
+
+    Each level's ``gsd`` is its measured cell width -- the median extent of
+    the level's own geometries, in metres -- divided by ``cell_detail``, or
+    the value ``explicit_gsd`` names for it. The band selection `gpio pmtiles
+    pyramid` performs is deliberately not the source: it discards a level
+    whose coarser sibling already fits the budget (#1103), which is the very
+    behaviour a pre-levelled file exists to remove. Every requested level
+    reaches the file with its own GSD.
+
+    Everything that can be checked before the rollups run is checked first:
+    the knobs, the output path against the input and the ``level`` column,
+    so a bad option costs no minutes of aggregation.
+    """
+    from geoparquet_io.core.process.overview.overview_file import (
+        DEFAULT_CELL_DETAIL,
+        LevelInput,
+        write_overview_file,
+    )
+
+    configure_verbose(verbose)
+    cell_detail = DEFAULT_CELL_DETAIL if cell_detail is None else cell_detail
+    if not (math.isfinite(cell_detail) and cell_detail > 0):
+        raise InvalidParameterError("cell_detail", f"must be a positive number, got {cell_detail}")
+    gsds_wanted = _parse_explicit_gsd(explicit_gsd)
+    _refuse_overview_out(input_parquet, overview_out, force)
+
+    with aggregate_connection(input_parquet, verbose) as (con, relation):
+        info = detect_aggregate_info(con, relation, cell_column, scheme)
+        target_levels = _plan_levels(
+            con, relation, info, levels, max_tile_kb, bytes_per_cell, verbose
+        )
+        if gsds_wanted is not None and len(gsds_wanted) != len(target_levels) + 1:
+            raise InvalidParameterError(
+                "gsd",
+                f"expected {len(target_levels) + 1} GSD value(s) -- one per built level "
+                f"({len(target_levels)}) plus the base -- got {len(gsds_wanted)}",
             )
-            success(f"Wrote level {level} overview ({table.num_rows} rows) -> {out_path}")
-            results.append((level, out_path))
-        return results
+        if gsds_wanted is None and info.out_geometry == "none":
+            raise InvalidParameterError(
+                "gsd",
+                "this aggregate carries no geometry, so cell widths cannot be measured; "
+                "pass --gsd with one value per level plus the base",
+            )
+        outputs = [
+            overview_output_path(input_parquet, info.scheme, level, output_dir)
+            for level in target_levels
+        ]
+        _refuse_existing(outputs, force)
+        built = _build_levels(
+            con,
+            relation,
+            info,
+            target_levels,
+            outputs,
+            compression=compression,
+            compression_level=compression_level,
+            geoparquet_version=geoparquet_version,
+            verbose=verbose,
+            show_sql=show_sql,
+        )
+        # Coarse first: the built ladder, then the base, which is the input
+        # itself and always the finest (OVERVIEWS_SPEC 4.2).
+        paths = [*(path for _, path in built), input_parquet]
+        gsds = gsds_wanted or _measured_gsds(con, paths, cell_detail)
+
+    write_overview_file(
+        [LevelInput(path=p, gsd=g) for p, g in zip(paths, gsds, strict=True)],
+        overview_out,
+        geoparquet_version=geoparquet_version,
+        compression=compression,
+        compression_level=compression_level,
+        verbose=verbose,
+    )
+    success(f"Wrote {overview_out} with {len(paths)} level(s)")
+    return overview_out
+
+
+def _refuse_overview_out(input_parquet: str, overview_out: str, force: bool) -> None:
+    """The levelled file must not be the input (read while written) and, like
+    the siblings, is not silently replaced. Its ``level`` column must not
+    shadow one the input already has (OVERVIEWS_SPEC 4.1) -- checked on the
+    input before any rollup runs."""
+    if Path(overview_out).exists():
+        if Path(overview_out).samefile(input_parquet):
+            raise InvalidParameterError(
+                "overview_out", f"{overview_out} is the input; it would be destroyed while read"
+            )
+        _refuse_existing([overview_out], force)
+    names = [n for n in pq.read_schema(input_parquet).names if n.lower() == "level"]
+    if names:
+        raise InvalidParameterError(
+            "input",
+            f"{input_parquet} already has a column named {names[0]!r}; an overview file's "
+            "`level` column would shadow it in reader predicates (OVERVIEWS_SPEC 4.1). "
+            "Rename the source column first.",
+        )
+
+
+def _measured_gsds(con, paths: list[str], cell_detail: float) -> list[float]:
+    """Each level's GSD from the median width of its own cells.
+
+    Measured, not derived from extent/count: sqrt(extent / cells) is the
+    spacing between cells, which equals the cell width only when cells tile
+    the extent densely. Two hundred scattered points aggregated at H3 r7 gave
+    a ~20x overestimate and every level the same value. The median extent of
+    the level's geometries is the cell width whatever the scheme, converted
+    with the flat 111,320 m/degree OVERVIEWS_SPEC 7.1 prescribes.
+    """
+    from geoparquet_io.core.process.overview.overview_file import METERS_PER_DEGREE
+
+    gsds: list[float] = []
+    for path in paths:
+        url = resolve_file_url(path)
+        row = con.execute(
+            "SELECT median(ST_XMax(geometry) - ST_XMin(geometry)), "
+            "median(ST_YMax(geometry) - ST_YMin(geometry)) "
+            f"FROM read_parquet({sql_path(url)}) WHERE geometry IS NOT NULL"
+        ).fetchone()
+        dx, dy = (float(v or 0.0) for v in (row or (0.0, 0.0)))
+        width_m = math.sqrt(dx * dy) * METERS_PER_DEGREE
+        if not width_m > 0:
+            raise InvalidParameterError(
+                "gsd", f"could not measure a cell width in {path}; pass --gsd explicitly"
+            )
+        gsds.append(width_m / cell_detail)
+    if any(gsds[i] >= gsds[i - 1] for i in range(1, len(gsds))):
+        raise InvalidParameterError(
+            "gsd",
+            f"measured cell widths do not shrink coarse->fine ({gsds}); pass --gsd explicitly",
+        )
+    return gsds
+
+
+def _parse_explicit_gsd(spec: str | list[float] | None) -> list[float] | None:
+    """An explicit, strictly decreasing GSD ladder, mirroring tylertoo's ``--gsd``.
+
+    Absolute metres, so it overrides the measured sizing entirely. The count
+    is checked against the ladder once the levels are known.
+    """
+    if spec is None:
+        return None
+    try:
+        values = (
+            [float(part) for part in spec.split(",") if part.strip()]
+            if isinstance(spec, str)
+            else [float(v) for v in spec]
+        )
+    except (TypeError, ValueError):
+        raise InvalidParameterError(
+            "gsd", f"expected comma-separated metres (e.g. 2000,800,300), got {spec!r}"
+        ) from None
+    if not values or any(not (math.isfinite(v) and v > 0) for v in values):
+        raise InvalidParameterError("gsd", f"GSDs must be positive metres, got {values}")
+    if any(values[i] >= values[i - 1] for i in range(1, len(values))):
+        raise InvalidParameterError("gsd", f"GSDs must be strictly decreasing, got {values}")
+    return values
