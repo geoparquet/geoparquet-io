@@ -72,8 +72,10 @@ Checks if data is spatially ordered. Spatially ordered data improves:
 
 **How it works:**
 
-- **Bbox-stats method**: Checks if consecutive row groups have overlapping bounding boxes. Non-overlapping row groups indicate good spatial ordering. Passes if < 30% of row group pairs overlap.
-- **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5.
+- **Bbox-stats method**: Passes when the expected fraction of row groups a spatial query can skip, computed from the bounding boxes in the file footer, reaches 70% of what a tiling of the extent into the same number of row groups would allow — the [Portolan spec's pruning-efficiency rule](https://github.com/portolan-sdi/portolan-spec/blob/main/specs/portolan/formats.md). The bbox column is the one `geo.covering.bbox` names; a conventionally named struct column is only the fallback. Below eight row groups the verdict is withheld: the output reports the numbers and `not judged below 8 row groups` instead of a pass or a fail, `--fix` declines, and the payload carries `judged: false` (with `passed: true`, since no failure was found). Smaller row groups (`--row-group-size`, 2,048 minimum) make such a file judgeable. `--verbose` adds the achievable skip rate, the consecutive-overlap fraction and the area sum (row-group box areas over the extent area), which are also in the JSON payload. The area sum helps read a high row-group count, where oversized boxes barely move the efficiency; like the efficiency it measures order against the extent, so it cannot separate a shuffled file whose extent is mostly empty from a well-sorted one.
+
+    A file rewritten by `--fix` gets the default row-group size (49,152 rows), so a file under about 393,000 rows comes out with fewer than eight row groups and its own verdict withheld; the output says so.
+- **Sampling method** (no bbox column or native statistics): Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5. This does not measure row-group pruning, and the verdict line says `(sampling method)`; add a bbox column with `gpio add bbox` so the footer-based check can run.
 
 ### Compression
 
@@ -254,8 +256,10 @@ The `gpio check spatial` command also reports spatial filter pushdown readiness 
 Shows:
 
 - **Row group count** and bbox coverage
-- **Estimated skip rate** - percentage of row groups that can be skipped for representative spatial queries
+- **Estimated skip rate** - the expected percentage of row groups a query window can skip
 - **Avg bbox area ratio** - how tight the row group bounding boxes are
+
+Pushdown readiness is absolute (at least 50% of row groups skippable) where the ordering verdict above is relative to the row-group count: a two-row-group file can be perfectly ordered and still poor for pushdown, and the fix there is smaller row groups, not re-sorting.
 
 !!! note "Requires bbox data"
     Pushdown readiness requires GeoParquet 2.0 native geo stats or a bbox column. For v1.1 files, add a bbox column with `gpio add bbox`.

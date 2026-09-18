@@ -5,6 +5,7 @@ import shutil
 
 import click
 
+from geoparquet_io.core.check_spatial_order import spatial_verdict_withheld
 from geoparquet_io.core.file_utils import is_same_file_path
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.remote import is_remote_url
@@ -148,7 +149,13 @@ def verify_fixes(
             )
         return all_passed
 
-    if all_passed:
+    spatial_withheld = isinstance(final_spatial_result, dict) and spatial_verdict_withheld(
+        final_spatial_result
+    )
+    if all_passed and spatial_withheld:
+        click.echo(click.style("\n✓ No check failed after fixes", fg="green", bold=True))
+        click.echo(click.style(f"   {_withheld_reason(final_spatial_result)}", fg="yellow"))
+    elif all_passed:
         click.echo(click.style("\n✓ All checks passed after fixes!", fg="green", bold=True))
     else:
         click.echo(click.style("\n⚠️  Some issues remain after fixes:", fg="yellow", bold=True))
@@ -287,16 +294,53 @@ def display_spatial_result(spatial_result, show_output):
     if ratio is None:
         return
 
-    if passed:
-        click.echo(click.style("✓ Data appears to be spatially ordered", fg="green"))
+    details = spatial_result if isinstance(spatial_result, dict) else {}
+    sampling = details.get("method") == "sampling"
+    efficiency = details.get("skip_rate_efficiency")
+    numbers = f" (efficiency {efficiency:.2f})" if efficiency is not None else ""
+    if spatial_verdict_withheld(details):
+        # A withheld verdict: the reason and the number, no check mark.
+        click.echo(f"  {_withheld_reason(details)}{numbers}")
+    elif passed:
+        what = (
+            "Consecutive features are spatially close (sampling method)"
+            if sampling
+            else "Data appears to be spatially ordered"
+        )
+        click.echo(click.style(f"✓ {what}{numbers}", fg="green"))
     else:
+        what = (
+            "Consecutive features are not spatially close (sampling method)"
+            if sampling
+            else "Data may not be optimally spatially ordered"
+        )
         click.echo(
             click.style(
-                "⚠️  Data may not be optimally spatially ordered\n"
+                f"⚠️  {what}{numbers}\n"
                 "Consider running 'gpio sort hilbert' to improve spatial locality",
                 fg="yellow",
             )
         )
+
+
+def _withheld_reason(spatial_result: dict) -> str:
+    return str((spatial_result.get("warnings") or ["Spatial ordering not judged"])[0])
+
+
+def no_fix_needed_message(spatial_result: dict) -> str:
+    """What ``--fix`` says when it leaves a file alone: ordered, not judged, or not measured."""
+    if spatial_verdict_withheld(spatial_result):
+        return click.style(
+            f"\n{_withheld_reason(spatial_result)}; nothing to fix automatically.", fg="yellow"
+        )
+    if spatial_result.get("method") == "sampling":
+        return click.style(
+            "\nNo fix applied: the sampling method found consecutive features close, but it "
+            "does not measure row-group pruning. Add a bbox column with 'gpio add bbox' to "
+            "judge pruning.",
+            fg="yellow",
+        )
+    return click.style("\n✓ No fix needed - already spatially ordered!", fg="green")
 
 
 def aggregate_check_results(structure_results, spatial_result):
