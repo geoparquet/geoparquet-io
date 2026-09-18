@@ -172,34 +172,37 @@ scratch is **several times the input, not the output**. Tiling 168M polygons at
 `-Z 12 -z 14` (~12 GB of GeoParquet in, ~34 GB of PMTiles out) accumulated
 **~270 GB** of scratch. Budget for it.
 
-By default it lands in `$TMPDIR`, or `/tmp` when that is unset — on macOS the
-boot volume, which is usually not where your data lives. Point it somewhere
-with room:
+By default it goes to the OS temp directory (`$TMPDIR`, or `/tmp` when that is
+unset) — on macOS the boot volume, which is usually not where your data lives.
+Point the run at an existing directory with room; tippecanoe's scratch and the
+temp files of the `gpio` processes feeding it all follow:
 
 === "CLI"
 
+    <!-- doctest: needs-tippecanoe, setup="mkdir -p scratch", setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
     ```bash
-    gpio pmtiles create big.parquet out.pmtiles --temporary-directory /data/scratch
+    gpio pmtiles create buildings.parquet out.pmtiles --temporary-directory scratch
 
     # Same flag on pyramid, where it also parents the intermediate band archives
-    gpio pmtiles pyramid cells.parquet out.pmtiles -t /data/scratch
+    gpio pmtiles pyramid cells.parquet pyramid.pmtiles -t scratch
     ```
 
 === "Python"
 
+    <!-- doctest: needs-tippecanoe, setup="mkdir -p scratch", setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
     ```python
     from geoparquet_io.api import ops
 
-    ops.create_pmtiles(
-        'big.parquet', 'out.pmtiles', temporary_directory='/data/scratch'
-    )
+    ops.create_pmtiles('buildings.parquet', 'out.pmtiles', temporary_directory='scratch')
     ops.create_pmtiles_pyramid(
-        'cells.parquet', 'out.pmtiles', temporary_directory='/data/scratch'
+        'cells.parquet', 'pyramid.pmtiles', temporary_directory='scratch'
     )
     ```
 
-gpio forwards `$TMPDIR` for you when the flag is absent — tippecanoe does not
-read that variable itself.
+Without the flag, `TMPDIR` is the knob — the same one every other gpio command
+follows, described under [Where Spilled Data Goes](write-strategies.md#where-spilled-data-goes).
+tippecanoe does not read that variable itself; gpio passes the resolved
+directory to it.
 
 !!! warning "A full scratch volume is hard to diagnose"
 

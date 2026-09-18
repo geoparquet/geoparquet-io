@@ -206,13 +206,13 @@ class TestBuildTippecanoeCommand:
         assert "-zg" in cmd
         assert "--drop-densest-as-needed" in cmd
 
-    def test_temporary_directory_is_passed_through_as_dash_t(self):
-        """#1115: tippecanoe's scratch must be redirectable off /tmp.
-
-        Tiling 168M polygons accumulated ~270GB of scratch in /private/tmp and
-        filled the boot volume. tippecanoe does not read TMPDIR, so ``-t`` is
-        the only control and gpio has to expose it.
-        """
+    @pytest.mark.parametrize(
+        ("explicit", "expected"),
+        [("/data/scratch", "/data/scratch"), (None, None)],
+        ids=["explicit", "none"],
+    )
+    def test_temporary_directory_becomes_dash_t(self, explicit, expected):
+        """#1115: the resolved scratch directory is tippecanoe's ``-t``."""
         from geoparquet_io.core.pmtiles import _build_tippecanoe_command
 
         cmd = _build_tippecanoe_command(
@@ -221,63 +221,12 @@ class TestBuildTippecanoeCommand:
             min_zoom=None,
             max_zoom=None,
             verbose=False,
-            temporary_directory="/data/scratch",
+            temporary_directory=explicit,
         )
 
-        assert "-t" in cmd
-        assert cmd[cmd.index("-t") + 1] == "/data/scratch"
-
-    def test_temporary_directory_defaults_to_tmpdir_env(self, monkeypatch):
-        """#1115: honour TMPDIR, which tippecanoe itself ignores.
-
-        A caller who sets TMPDIR has already said where scratch belongs; gpio
-        forwarding it as ``-t`` makes the command behave the way a CLI is
-        expected to, without the caller learning the flag exists.
-        """
-        from geoparquet_io.core.pmtiles import _build_tippecanoe_command
-
-        monkeypatch.setenv("TMPDIR", "/data/from-env")
-        cmd = _build_tippecanoe_command(
-            output_path="output.pmtiles",
-            layer="test_layer",
-            min_zoom=None,
-            max_zoom=None,
-            verbose=False,
-        )
-
-        assert cmd[cmd.index("-t") + 1] == "/data/from-env"
-
-    def test_explicit_temporary_directory_beats_tmpdir_env(self, monkeypatch):
-        """An explicit flag outranks the ambient environment."""
-        from geoparquet_io.core.pmtiles import _build_tippecanoe_command
-
-        monkeypatch.setenv("TMPDIR", "/data/from-env")
-        cmd = _build_tippecanoe_command(
-            output_path="output.pmtiles",
-            layer="test_layer",
-            min_zoom=None,
-            max_zoom=None,
-            verbose=False,
-            temporary_directory="/data/explicit",
-        )
-
-        assert cmd[cmd.index("-t") + 1] == "/data/explicit"
-        assert "/data/from-env" not in cmd
-
-    def test_no_temporary_directory_without_flag_or_env(self, monkeypatch):
-        """Unset stays unset, preserving today's behaviour."""
-        from geoparquet_io.core.pmtiles import _build_tippecanoe_command
-
-        monkeypatch.delenv("TMPDIR", raising=False)
-        cmd = _build_tippecanoe_command(
-            output_path="output.pmtiles",
-            layer="test_layer",
-            min_zoom=None,
-            max_zoom=None,
-            verbose=False,
-        )
-
-        assert "-t" not in cmd
+        assert ("-t" in cmd) is (expected is not None)
+        if expected:
+            assert cmd[cmd.index("-t") + 1] == expected
 
     def test_with_zoom_levels(self):
         """Test building tippecanoe command with explicit zoom levels."""
@@ -687,6 +636,107 @@ class TestPMTilesIntegration:
             )
 
 
+class TestScratchDirectory:
+    """#1115: one resolution rule for where a pmtiles run's scratch goes."""
+
+    def test_explicit_directory_is_made_absolute(self, tmp_path):
+        """tippecanoe warns on a relative ``-t``; the resolved path never is."""
+        import os
+
+        from geoparquet_io.core.pmtiles import resolve_scratch_directory
+
+        try:
+            relative = os.path.relpath(tmp_path)
+        except ValueError:  # Windows CI: tmp_path on another drive than the cwd
+            pytest.skip("no relative path to tmp_path from the cwd")
+        assert not os.path.isabs(relative)
+        assert resolve_scratch_directory(relative) == os.path.abspath(tmp_path)
+
+    def test_missing_directory_is_rejected_before_any_work(self, tmp_path):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.pmtiles import resolve_scratch_directory
+
+        with pytest.raises(InvalidParameterError, match="not a directory"):
+            resolve_scratch_directory(str(tmp_path / "nope"))
+
+    def test_unwritable_directory_is_rejected(self, tmp_path, monkeypatch):
+        import os
+
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.pmtiles import resolve_scratch_directory
+
+        monkeypatch.setattr(os, "access", lambda path, mode: False)
+        with pytest.raises(InvalidParameterError, match="not writable"):
+            resolve_scratch_directory(str(tmp_path))
+
+    @pytest.mark.parametrize("explicit", [None, ""], ids=["none", "empty"])
+    def test_unset_follows_the_package_temp_rule(self, explicit, tmp_path, monkeypatch):
+        """A stale TMPDIR falls back like every other gpio temp file does,
+        instead of being forwarded raw to tippecanoe (which would die on it)."""
+        import tempfile
+
+        from geoparquet_io.core.pmtiles import resolve_scratch_directory
+
+        monkeypatch.setenv("TMPDIR", str(tmp_path / "gone"))
+        monkeypatch.setattr(tempfile, "tempdir", None)
+        try:
+            resolved = resolve_scratch_directory(explicit)
+            assert resolved == tempfile.gettempdir()
+            assert resolved != str(tmp_path / "gone")
+        finally:
+            monkeypatch.setattr(tempfile, "tempdir", None)
+
+    def test_gpio_children_inherit_the_scratch_as_tmpdir(self, tmp_path):
+        """``-t`` only moves tippecanoe; the extract|convert chain spills where
+        its own TMPDIR points, so the run hands it the same directory."""
+        from unittest.mock import MagicMock, patch
+
+        from geoparquet_io.core.pmtiles import _run_pipeline
+
+        proc = MagicMock()
+        proc.stdout = MagicMock()
+        with (
+            patch("geoparquet_io.core.pmtiles.subprocess.Popen", return_value=proc) as popen,
+            patch("geoparquet_io.core.pmtiles._run_simple"),
+        ):
+            _run_pipeline([["gpio", "extract"]], ["tippecanoe"], False, None, str(tmp_path))
+
+        env = popen.call_args.kwargs["env"]
+        assert env["TMPDIR"] == env["TEMP"] == env["TMP"] == str(tmp_path)
+
+    def test_create_threads_the_resolved_directory_to_tippecanoe_and_children(self, tmp_path):
+        from unittest.mock import patch
+
+        from geoparquet_io.core.pmtiles import create_pmtiles_from_geoparquet
+
+        with (
+            patch("geoparquet_io.core.pmtiles._check_tippecanoe", return_value=True),
+            patch("geoparquet_io.core.pmtiles._run_pipeline") as run,
+        ):
+            create_pmtiles_from_geoparquet(
+                "in.parquet", "out.pmtiles", temporary_directory=str(tmp_path)
+            )
+
+        _gpio_cmds, tippecanoe_cmd, _verbose, _layer, scratch = run.call_args.args
+        assert tippecanoe_cmd[tippecanoe_cmd.index("-t") + 1] == str(tmp_path)
+        assert scratch == str(tmp_path)
+
+    def test_create_rejects_a_missing_directory_before_probing_tippecanoe(self, tmp_path):
+        from unittest.mock import patch
+
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.pmtiles import create_pmtiles_from_geoparquet
+
+        with (
+            patch("geoparquet_io.core.pmtiles._check_tippecanoe", return_value=False) as probe,
+            pytest.raises(InvalidParameterError, match="not a directory"),
+        ):
+            create_pmtiles_from_geoparquet(
+                "in.parquet", "out.pmtiles", temporary_directory=str(tmp_path / "nope")
+            )
+        probe.assert_not_called()
+
+
 class TestPMTilesCreateCLIFlags:
     """The pmtiles create CLI exposes the tippecanoe production flags."""
 
@@ -745,6 +795,21 @@ class TestPMTilesCreateCLIFlags:
 
         assert result.exit_code == 0, result.output
         assert mock_create.call_args.kwargs["force"] is True
+
+    def test_temporary_directory_thread_through(self, tmp_path):
+        import os
+
+        result, mock_create = self._invoke(["--temporary-directory", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        assert mock_create.call_args.kwargs["temporary_directory"] == os.path.realpath(tmp_path)
+
+    def test_temporary_directory_must_exist(self, tmp_path):
+        result, mock_create = self._invoke(["-t", str(tmp_path / "nope")])
+
+        assert result.exit_code == 2
+        assert "does not exist" in result.output
+        mock_create.assert_not_called()
 
     def test_force_short_flag_thread_through(self):
         result, mock_create = self._invoke(["-f"])

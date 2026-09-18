@@ -10,11 +10,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import IO
 
 from geoparquet_io.core.column_selection import split_column_list
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import debug, success
 
 
@@ -62,6 +64,40 @@ def _get_gpio_executable() -> str:
         return gpio_in_path
 
     return "gpio"
+
+
+def resolve_scratch_directory(explicit: str | None) -> str:
+    """Where one pmtiles run puts its scratch: tippecanoe's ``-t`` and gpio's own.
+
+    An explicit directory must already exist and be writable. Checked here,
+    before any input is scanned, because the alternative is tippecanoe's
+    ``mkstemp`` error after the streaming has started (#1115). Without one
+    the package rule applies -- ``tempfile.gettempdir()``, the same call
+    ``spill_directory`` and every other temp file in gpio use -- so
+    ``TMPDIR``/``TEMP``/``TMP`` are honoured and a stale value falls back to
+    ``/tmp`` instead of being forwarded raw to a tool that would die on it.
+    tippecanoe itself ignores ``TMPDIR``, which is why the directory is
+    always passed explicitly.
+    """
+    if not explicit:
+        return tempfile.gettempdir()
+    path = os.path.abspath(explicit)
+    if not os.path.isdir(path):
+        raise InvalidParameterError("temporary_directory", f"not a directory: {path}")
+    if not os.access(path, os.W_OK):
+        raise InvalidParameterError("temporary_directory", f"not writable: {path}")
+    return path
+
+
+def scratch_env(scratch: str) -> dict[str, str]:
+    """Environment for a child gpio process so its temp files follow ``scratch``.
+
+    ``-t`` moves tippecanoe's scratch only; the ``gpio extract | gpio convert``
+    chain feeding it spills DuckDB sorts and stdin buffers wherever the
+    child's ``tempfile.gettempdir()`` points. Setting all three variables
+    keeps every temp file of the run on the volume the user named.
+    """
+    return {**os.environ, "TMPDIR": scratch, "TEMP": scratch, "TMP": scratch}
 
 
 def _check_tippecanoe() -> bool:
@@ -215,15 +251,9 @@ def _build_tippecanoe_command(
     cap is what gives ``--drop-densest-as-needed`` a limit to drop
     features against.
 
-    ``temporary_directory`` becomes tippecanoe's ``-t``, falling back to
-    ``TMPDIR``. tippecanoe writes its sort and geometry scratch to ``/tmp``
-    and does not read ``TMPDIR`` itself, so without this the scratch lands on
-    whatever volume holds ``/tmp`` — the boot volume on macOS — with no way
-    for the caller to move it. The scratch is not proportional to the output:
-    168M polygons at ``-Z 12 -z 14`` reached ~270GB against a ~34GB archive
-    (#1115). tippecanoe creates those files with ``mkstemp`` + ``unlink``, so
-    they have no directory entry and are invisible to ``ls`` and ``du``; only
-    killing the process releases them.
+    ``temporary_directory`` becomes tippecanoe's ``-t``; callers resolve it
+    with :func:`resolve_scratch_directory` first (tippecanoe ignores
+    ``TMPDIR``, #1115).
     """
     cmd = ["tippecanoe", "-P", "-o", output_path]
 
@@ -268,9 +298,8 @@ def _build_tippecanoe_command(
     if force:
         cmd.append("--force")
 
-    scratch = temporary_directory or os.environ.get("TMPDIR")
-    if scratch:
-        cmd.extend(["-t", scratch])
+    if temporary_directory:
+        cmd.extend(["-t", temporary_directory])
 
     if verbose:
         cmd.append("--progress-interval=1")
@@ -316,11 +345,16 @@ def _log_pipeline(
         debug(f"Adding layer metadata into PMTiles from column '{layer_by_column}'")
 
 
-def _spawn_gpio_chain(gpio_commands: list[list[str]], verbose: bool) -> list["subprocess.Popen"]:
+def _spawn_gpio_chain(
+    gpio_commands: list[list[str]],
+    verbose: bool,
+    env: dict[str, str] | None = None,
+) -> list["subprocess.Popen"]:
     """Spawn the gpio commands as a connected stdin→stdout chain.
 
     Cleans up any already-spawned processes if a later spawn fails, so the
-    caller never leaks subprocesses on a partial chain.
+    caller never leaks subprocesses on a partial chain. ``env`` is handed to
+    every child (see :func:`scratch_env`).
     """
     processes: list[subprocess.Popen] = []
     try:
@@ -332,6 +366,7 @@ def _spawn_gpio_chain(gpio_commands: list[list[str]], verbose: bool) -> list["su
                 stdin=stdin_source,
                 stdout=subprocess.PIPE,
                 stderr=None if verbose else subprocess.PIPE,
+                env=env,
             )
             processes.append(proc)
 
@@ -492,17 +527,20 @@ def _run_pipeline(
     tippecanoe_cmd: list[str],
     verbose: bool,
     layer_by_column: str | None = None,
+    scratch: str | None = None,
 ) -> None:
     """Execute the gpio to tippecanoe pipeline.
 
     If layer_by_column is given, the gpio output is intercepted and each
     feature is annotated with a `tippecanoe.layer` value derived from
-    that column before being forwarded to tippecanoe.
+    that column before being forwarded to tippecanoe. ``scratch`` is the
+    run's resolved temp directory; the gpio children inherit it as their
+    ``TMPDIR`` so their spill lands beside tippecanoe's.
     """
     if verbose:
         _log_pipeline(gpio_commands, tippecanoe_cmd, layer_by_column)
 
-    processes = _spawn_gpio_chain(gpio_commands, verbose)
+    processes = _spawn_gpio_chain(gpio_commands, verbose, scratch_env(scratch) if scratch else None)
 
     try:
         if layer_by_column:
@@ -580,15 +618,16 @@ def create_pmtiles_from_geoparquet(
         maximum_tile_bytes: Set an explicit per-tile byte cap via
             --maximum-tile-bytes. Takes precedence over no_tile_size_limit.
         force: Pass --force to overwrite the output file if it already exists.
-        temporary_directory: Directory for tippecanoe's sort/geometry scratch
-            (its ``-t``), defaulting to ``TMPDIR``. The scratch is several
-            times the input and lands on ``/tmp`` otherwise; see #1115.
         repair_geometry: Repair invalid geometry with ST_MakeValid (default: True).
             Prevents tippecanoe TopologyExceptions on self-intersecting polygons.
             Set False to pass geometry through unrepaired.
+        temporary_directory: Scratch for this run -- tippecanoe's ``-t`` and
+            the gpio children's temp files. Must exist; defaults to the OS
+            temp directory (``TMPDIR``). Several times the input in size.
 
     Raises:
-        InvalidParameterError: If include_cols carries a blank entry
+        InvalidParameterError: If include_cols carries a blank entry or
+            temporary_directory is not a writable directory
         TippecanoeNotFoundError: If tippecanoe is not in PATH
         ValueError: If paths contain shell metacharacters or the user supplied an invalid layer_by_column
         RuntimeError: If any subprocess fails
@@ -605,6 +644,7 @@ def create_pmtiles_from_geoparquet(
     # (#980). Checked here, with the other usage errors and before the
     # tippecanoe probe, so a bad option is not reported as a missing binary.
     cols = split_column_list(include_cols, "--include-cols")
+    scratch = resolve_scratch_directory(temporary_directory)
 
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()
@@ -643,10 +683,10 @@ def create_pmtiles_from_geoparquet(
         drop_densest_as_needed=drop_densest_as_needed,
         maximum_tile_bytes=maximum_tile_bytes,
         force=force,
-        temporary_directory=temporary_directory,
+        temporary_directory=scratch,
     )
 
-    _run_pipeline(gpio_commands, tippecanoe_cmd, verbose, layer_by_column)
+    _run_pipeline(gpio_commands, tippecanoe_cmd, verbose, layer_by_column, scratch)
 
     if verbose:
         success(f"Created {output_path}")

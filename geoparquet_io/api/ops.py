@@ -2637,9 +2637,9 @@ def create_pmtiles(
         maximum_tile_bytes: Set an explicit per-tile byte cap via
             --maximum-tile-bytes. Takes precedence over no_tile_size_limit.
         force: Pass --force to overwrite the output file if it already exists.
-        temporary_directory: Directory for tippecanoe's scratch (its ``-t``),
-            defaulting to ``$TMPDIR``. The scratch is several times the input
-            and lands on ``/tmp`` otherwise; see #1115.
+        temporary_directory: Existing directory for this run's scratch
+            (tippecanoe's ``-t`` and the gpio children's temp files);
+            defaults to the OS temp directory.
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -2737,8 +2737,8 @@ def create_pmtiles_pyramid(
         attribution: Attribution HTML for the tiles
         force: Overwrite the output archive if it exists
         verbose: Enable verbose output
-        temporary_directory: Directory for tippecanoe's scratch and the
-            intermediate band archives, defaulting to ``$TMPDIR`` (#1115)
+        temporary_directory: Existing directory for this run's scratch and
+            the intermediate band archives; defaults to the OS temp directory
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
