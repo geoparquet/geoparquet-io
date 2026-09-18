@@ -27,6 +27,7 @@ from geoparquet_io.core.process.aggregate.by_admin import (
 )
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3 as aggregate_by_h3_impl
 from geoparquet_io.core.process.overview import create_overviews as create_overviews_impl
+from geoparquet_io.core.process.overview.run import create_overview_file
 
 # =============================================================================
 # Process Commands (aggregate, ...)
@@ -120,16 +121,17 @@ def process(ctx):
     "--cell-detail",
     type=float,
     default=None,
-    help="How many GSD units wide a cell should be at the level serving it "
-    "(default 4). Larger means a smaller GSD, so more cells survive at coarse "
-    "zooms -- denser and heavier. Mirrors tylertoo's --gsd-base direction.",
+    help="Cell width in GSD units at the level serving it (default 4): each level's "
+    "GSD is its measured cell width divided by this. Larger serves every level at a "
+    "finer zoom. Only with --overview-out.",
 )
 @click.option(
     "--gsd",
     "explicit_gsd",
     default=None,
-    help="Explicit per-level GSDs in metres, coarse to fine, strictly decreasing "
-    "(e.g. 2000,800,300). Overrides --cell-detail. Only with --overview-out.",
+    help="Explicit GSDs in metres, coarse to fine, strictly decreasing, one per built "
+    "level plus the base (e.g. 2000,800,300,120 for --levels 5,6,7). Overrides "
+    "--cell-detail. Only with --overview-out.",
 )
 @compression_options
 @verbose_option
@@ -174,48 +176,36 @@ def process_overview(
         gpio process overview cells.parquet --max-tile-kb 300
     """
     with _activate_s3(ctx):
+        if (cell_detail is not None or explicit_gsd is not None) and not overview_out:
+            raise click.ClickException(
+                "--cell-detail and --gsd size the levels of a single overview "
+                "file; pass --overview-out to write one."
+            )
+        kwargs = {
+            "levels": levels,
+            "max_tile_kb": max_tile_kb,
+            "bytes_per_cell": bytes_per_cell,
+            "cell_column": cell_column,
+            "scheme": scheme,
+            "output_dir": output_dir,
+            "compression": compression.upper(),
+            "compression_level": compression_level,
+            "geoparquet_version": geoparquet_version,
+            "force": force,
+            "verbose": verbose,
+            "show_sql": show_sql,
+        }
         try:
             if overview_out:
-                from geoparquet_io.core.process.overview.run import create_overview_file
-
                 create_overview_file(
                     input_parquet,
                     overview_out,
-                    levels=levels,
                     cell_detail=cell_detail,
                     explicit_gsd=explicit_gsd,
-                    max_tile_kb=max_tile_kb,
-                    bytes_per_cell=bytes_per_cell,
-                    cell_column=cell_column,
-                    scheme=scheme,
-                    compression=compression.upper(),
-                    compression_level=compression_level,
-                    geoparquet_version=geoparquet_version,
-                    force=force,
-                    verbose=verbose,
-                    show_sql=show_sql,
+                    **kwargs,
                 )
             else:
-                if cell_detail is not None or explicit_gsd is not None:
-                    raise click.ClickException(
-                        "--cell-detail and --gsd size the levels of a single overview "
-                        "file; pass --overview-out to write one."
-                    )
-                create_overviews_impl(
-                    input_parquet,
-                    levels=levels,
-                    max_tile_kb=max_tile_kb,
-                    bytes_per_cell=bytes_per_cell,
-                    cell_column=cell_column,
-                    scheme=scheme,
-                    output_dir=output_dir,
-                    compression=compression.upper(),
-                    compression_level=compression_level,
-                    geoparquet_version=geoparquet_version,
-                    force=force,
-                    verbose=verbose,
-                    show_sql=show_sql,
-                )
+                create_overviews_impl(input_parquet, **kwargs)
         except (InvalidParameterError, ValueError, duckdb.Error) as exc:
             raise click.ClickException(str(exc)) from exc
 

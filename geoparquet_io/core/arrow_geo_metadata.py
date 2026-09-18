@@ -30,6 +30,7 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
+    OVERVIEWS_KEY,
     _get_geometry_type_name,
     bbox_column_to_declare,
     carried_version,
@@ -527,7 +528,12 @@ def _assemble_and_apply_geo_metadata(
 # write_parquet_with_metadata's preserved-keys loop (which sees them decoded).
 # They were separate literals; a key added to one and not the other is a silent
 # metadata leak, so the bytes form is derived rather than written out again.
-_CARRIED_SCHEMA_METADATA_KEYS = frozenset({"geo", "ARROW:schema", "pandas"})
+# `geo:overviews` describes the file's own row-group layout (OVERVIEWS_SPEC
+# 3.1 calls it authoritative), so a rewrite that regroups or filters rows must
+# not carry it: an honest plain file with a `level` column beats a footer that
+# lies about where each level ends. The writer of a levelled file mints a fresh
+# one; nothing else may forward it.
+_CARRIED_SCHEMA_METADATA_KEYS = frozenset({"geo", "ARROW:schema", "pandas", OVERVIEWS_KEY})
 _CARRIED_SCHEMA_METADATA_KEYS_BYTES = frozenset(
     key.encode("utf-8") for key in _CARRIED_SCHEMA_METADATA_KEYS
 )

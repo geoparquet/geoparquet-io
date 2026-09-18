@@ -537,6 +537,7 @@ def create_overview_file(
     bytes_per_cell: float | None = None,
     cell_column: str | None = None,
     scheme: str | None = None,
+    output_dir: str | None = None,
     compression: str = "ZSTD",
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
@@ -553,29 +554,32 @@ def create_overview_file(
     ``tylertoo export-pmtiles`` tiles in one pass, reading the levels as
     written (#1117). No per-level tippecanoe run, no hand-pinned zoom bands.
 
-    Each level's ground sample distance is derived from the data -- the extent
-    divided among that level's cells -- so it is scheme-agnostic and shrinks
-    monotonically as levels refine.
+    Each level's ground sample distance is measured from the data -- the median
+    width of that level's own cells, in metres -- divided by ``cell_detail``,
+    so it is scheme-agnostic and shrinks as levels refine. The per-level
+    sibling files are written as well (see ``output_dir``) and left in place.
 
     Args:
         input_parquet: Path to a `gpio process aggregate` output.
         overview_out: Path for the assembled overview GeoParquet.
         levels: Coarser levels to build (comma string or list). Default:
             auto-select against ``max_tile_kb``.
-        cell_detail: How many GSD units wide a cell should be at the level
-            serving it (default 4). Larger means a smaller GSD, so more cells
-            survive at coarse zooms -- denser and heavier. Same direction as
-            tylertoo's ``--gsd-base``.
-        explicit_gsd: Explicit per-level GSDs in metres, coarse to fine,
-            strictly decreasing. Overrides ``cell_detail``.
+        cell_detail: Cell width in GSD units at the level serving it (default
+            4): a level's GSD is its measured cell width divided by this.
+            Larger serves every level at a finer zoom.
+        explicit_gsd: Explicit GSDs in metres, coarse to fine, strictly
+            decreasing, one per built level plus the base (a comma string or a
+            list). Overrides ``cell_detail``.
         max_tile_kb: Tile-size budget (KB) driving auto level selection.
         bytes_per_cell: Override the estimated compressed bytes per cell.
         cell_column: Cell id column when auto-detection fails.
         scheme: Bucketing scheme (a5/h3/admin) when inference is ambiguous.
+        output_dir: Directory for the per-level sibling files (default:
+            beside the input).
         compression: Parquet compression codec (default ZSTD).
         compression_level: Optional compression level.
         geoparquet_version: GeoParquet spec version to write.
-        force: Overwrite existing intermediate overview files.
+        force: Overwrite an existing ``overview_out`` or sibling file.
         verbose: Enable verbose debug logging.
         show_sql: Log the rollup SQL.
 
@@ -602,6 +606,7 @@ def create_overview_file(
         bytes_per_cell=bytes_per_cell,
         cell_column=cell_column,
         scheme=scheme,
+        output_dir=output_dir,
         compression=compression,
         compression_level=compression_level,
         geoparquet_version=geoparquet_version,

@@ -12156,6 +12156,22 @@
        "type": "text"
       },
       {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "cell_detail",
+       "nargs": 1,
+       "opts": [
+        "--cell-detail"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "float"
+      },
+      {
        "default": "'ZSTD'",
        "hidden": false,
        "is_flag": false,
@@ -12186,6 +12202,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "integer range[min=1,max=22,min_open=False,max_open=False,clamp=False]"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "explicit_gsd",
+       "nargs": 1,
+       "opts": [
+        "--gsd"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       },
       {
        "default": "False",
@@ -12278,6 +12310,22 @@
        "nargs": 1,
        "opts": [
         "--output-dir"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "path[exists=False,file_okay=True,dir_okay=True,writable=False,readable=True,resolve_path=False]"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "overview_out",
+       "nargs": 1,
+       "opts": [
+        "--overview-out"
        ],
        "param_type": "Option",
        "required": false,
