@@ -172,6 +172,17 @@ def convert(ctx):
     is_flag=True,
     help="Allow conversion to plain Parquet when no geometry column is detected (default: error)",
 )
+@click.option(
+    "--encoding",
+    default=None,
+    help="Source text encoding for drivers that cannot tell, e.g. a shapefile DBF without "
+    ".cpg (ISO-8859-1, UTF-8, ...). Passed to GDAL as open option ENCODING. Not for Parquet.",
+)
+@click.option(
+    "--force-2d",
+    is_flag=True,
+    help="Drop Z and M coordinates (ST_Force2D) so 3D sources become 2D GeoParquet",
+)
 @repair_geometry_option
 @linearize_curves_options
 @geoparquet_version_option
@@ -195,6 +206,8 @@ def convert_to_geoparquet_cmd(
     skip_invalid,
     csv_max_line_size,
     allow_no_geometry,
+    encoding,
+    force_2d,
     repair_geometry,
     linearize_curves,
     max_angle_deg,
@@ -260,6 +273,8 @@ def convert_to_geoparquet_cmd(
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
                 memory_limit=write_memory,
+                encoding=encoding,
+                force_2d=force_2d,
             )
         else:
             convert_to_geoparquet(
@@ -285,6 +300,8 @@ def convert_to_geoparquet_cmd(
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
                 memory_limit=write_memory,
+                encoding=encoding,
+                force_2d=force_2d,
             )
 
 
@@ -309,6 +326,8 @@ def _convert_streaming(
     linearize_curves=True,
     max_angle_deg=None,
     memory_limit=None,
+    encoding=None,
+    force_2d=False,
 ):
     """Handle streaming output for convert command."""
     import tempfile
@@ -351,6 +370,8 @@ def _convert_streaming(
             linearize_curves=linearize_curves,
             max_angle_deg=max_angle_deg,
             memory_limit=memory_limit,
+            encoding=encoding,
+            force_2d=force_2d,
         )
 
         # Read and stream to stdout. Through `ParquetFile` so the file handle is
