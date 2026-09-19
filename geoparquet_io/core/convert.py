@@ -199,6 +199,16 @@ def csv_encoding(encoding: str | None) -> str | None:
     return _DUCKDB_CSV_ENCODINGS.get(canonical, encoding)
 
 
+def force_2d_expr(table_expr: str, geom_column: str) -> str:
+    """Wrap a GEOMETRY-typed source so its geometry loses Z and M (``ST_Force2D``).
+
+    Applied to the read expression itself, so bounds, bbox, Hilbert ordering
+    and the write all see the same 2D geometry.
+    """
+    quoted = quote_identifier(geom_column)
+    return f"(SELECT * REPLACE (ST_Force2D({quoted}) AS {quoted}) FROM {table_expr})"
+
+
 def _build_st_read_expr(
     input_path: str,
     layer: str | None = None,
@@ -1394,11 +1404,13 @@ def _convert_spatial_path(
     max_angle_deg=None,
     force_linearize=False,
     encoding=None,
+    force_2d=False,
 ):
     """Handle standard spatial format conversion path.
 
     ``encoding`` names the source text encoding for drivers that cannot tell
-    (GDAL open option ``ENCODING``). It fixes the read expression up front, so
+    (GDAL open option ``ENCODING``); ``force_2d`` drops Z/M from every geometry
+    at the read expression. Either one fixes the read expression up front, so
     bounds, bbox, Hilbert ordering and the write all see the same source.
 
     ``input_file`` is the **RAW** path throughout: the metadata and filesystem
@@ -1461,6 +1473,31 @@ def _convert_spatial_path(
             linearized = True
         elif open_options:
             table_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
+
+    if force_2d:
+        if is_parquet:
+            source_encoding = geom_info["metadata"].get(geom_column, {}).get("encoding", "WKB")
+            if source_encoding.lower() != "wkb":
+                raise InvalidParameterError(
+                    "force_2d", "Parquet input must carry WKB geometry to drop Z/M"
+                )
+            quoted = quote_identifier(geom_column)
+            source = f"read_parquet({sql_path(input_file)})"
+            # A GeoParquet 2.0 file arrives as a native GEOMETRY column, a 1.x
+            # file as WKB blobs; keep whichever shape the column had.
+            (column_type,) = con.execute(
+                f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {source})"
+            ).fetchone()
+            if column_type.upper().startswith("GEOMETRY"):
+                flattened = f"ST_Force2D({quoted})"
+            else:
+                flattened = f"ST_AsWKB(ST_Force2D(ST_GeomFromWKB({quoted})))"
+            table_expr = f"(SELECT * REPLACE ({flattened} AS {quoted}) FROM {source})"
+        else:
+            table_expr = force_2d_expr(
+                table_expr or _build_st_read_expr(input_file, layer, open_options=open_options),
+                geom_column,
+            )
 
     # Determine if bbox should be skipped for this version
     skip_bbox = should_skip_bbox(geoparquet_version)
@@ -1567,6 +1604,7 @@ def read_spatial_to_arrow(
     linearize_curves=True,
     max_angle_deg=None,
     encoding=None,
+    force_2d=False,
 ):
     """
     Read a geospatial file and return an Arrow table with geometry.
@@ -1598,6 +1636,8 @@ def read_spatial_to_arrow(
             shapefile DBF without ``.cpg`` or a Latin-1 CSV (``ISO-8859-1``,
             ``UTF-8``, ...). Passed to GDAL as open option ``ENCODING``, or to
             DuckDB's CSV reader. Not for Parquet.
+        force_2d: Drop Z and M coordinates (``ST_Force2D``) so 3D sources
+            become 2D geometry (default: False).
 
     Returns:
         tuple: (arrow_table, detected_crs_projjson, geometry_column_name)
@@ -1699,6 +1739,7 @@ def read_spatial_to_arrow(
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
                 encoding=encoding,
+                force_2d=force_2d,
             )
 
         # No geometry found — read as plain table
@@ -1839,12 +1880,14 @@ def _read_spatial_to_arrow(
     linearize_curves=True,
     max_angle_deg=None,
     encoding=None,
+    force_2d=False,
 ):
     """Read spatial file to Arrow table with geometry as WKB. Returns None if no geometry.
 
     ``input_file`` is RAW; every helper below either escapes its own argument or
     escapes at the SQL boundary via ``sql_path`` (issue #718). ``encoding`` is
-    the source text encoding (GDAL open option ``ENCODING``).
+    the source text encoding (GDAL open option ``ENCODING``); ``force_2d``
+    drops Z/M from the geometry.
     """
     open_options = source_open_options(encoding)
     geom_column = _detect_geometry_column(
@@ -1875,13 +1918,21 @@ def _read_spatial_to_arrow(
                 geom_column,
                 max_angle_deg,
                 open_options=open_options,
+                force_2d=force_2d,
             )
         table_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
 
     # Convert geometry to WKB for geoarrow compatibility
+    geometry_expr = quoted_geom
+    if force_2d:
+        geometry_expr = (
+            f"ST_Force2D(ST_GeomFromWKB({quoted_geom}))"
+            if is_parquet
+            else f"ST_Force2D({quoted_geom})"
+        )
     query = f"""
         SELECT * EXCLUDE ({quoted_geom}),
-               ST_AsWKB({quoted_geom}) AS geometry
+               ST_AsWKB({geometry_expr}) AS geometry
         FROM {table_expr}
     """
 
@@ -2025,6 +2076,7 @@ def _read_spatial_linearized(
     max_angle_deg=None,
     read=None,
     open_options=None,
+    force_2d=False,
 ):
     """Linearized read shaped like the normal read path (WKB `geometry` column).
 
@@ -2041,9 +2093,12 @@ def _read_spatial_linearized(
     # WKB-encoded `geometry` column shape as the normal read path.
     con.register("_gpio_linearized_src", table)
     quoted_wkb = quote_identifier(read.wkb_col)
+    geometry_expr = f"ST_GeomFromWKB({quoted_wkb})"
+    if force_2d:
+        geometry_expr = f"ST_Force2D({geometry_expr})"
     result = con.execute(
         f"SELECT * EXCLUDE ({quoted_wkb}), "
-        f"ST_AsWKB(ST_GeomFromWKB({quoted_wkb})) AS geometry "
+        f"ST_AsWKB({geometry_expr}) AS geometry "
         f"FROM _gpio_linearized_src"
     )
     return result.arrow().read_all()
@@ -2219,6 +2274,7 @@ def convert_to_geoparquet(
     max_angle_deg=None,
     memory_limit=None,
     encoding=None,
+    force_2d=False,
 ):
     """
     Convert vector format to optimized GeoParquet.
@@ -2270,6 +2326,8 @@ def convert_to_geoparquet(
             shapefile DBF without ``.cpg`` or a Latin-1 CSV (``ISO-8859-1``,
             ``UTF-8``, ...). Passed to GDAL as open option ``ENCODING``, or to
             DuckDB's CSV reader. Not for Parquet.
+        force_2d: Drop Z and M coordinates (``ST_Force2D``) so 3D sources
+            become 2D GeoParquet (default: False).
 
     Raises:
         GeoParquetError: If input file not found or conversion fails
@@ -2351,6 +2409,7 @@ def convert_to_geoparquet(
                     max_angle_deg=max_angle_deg,
                     force_linearize=force_linearize,
                     encoding=encoding,
+                    force_2d=force_2d,
                 )
 
             # No geometry detected — error unless explicitly allowed
