@@ -187,6 +187,11 @@ def _extract_crs_identifier(crs_info):
                         return (authority, int(code))
                     except (ValueError, TypeError):
                         return (authority, str(code).upper())
+        # A CompoundCRS carries no id of its own; the XY part of any transform
+        # is fully described by its horizontal component, so identify by that.
+        component = horizontal_component(crs_info)
+        if component is not None:
+            return _extract_crs_identifier(component)
         return None
 
     if isinstance(crs_info, str):
@@ -207,6 +212,62 @@ def _extract_crs_identifier(crs_info):
                     return (parts[4], parts[-1])
 
     return None
+
+
+# PROJJSON CRS types that describe horizontal (XY) coordinates. A CompoundCRS
+# pairs one of these with a VerticalCRS (or another non-horizontal component).
+_HORIZONTAL_CRS_TYPES = frozenset(
+    {
+        "GeodeticCRS",
+        "GeographicCRS",
+        "ProjectedCRS",
+        "BoundCRS",
+        "EngineeringCRS",
+        "DerivedGeodeticCRS",
+        "DerivedGeographicCRS",
+        "DerivedProjectedCRS",
+    }
+)
+
+
+def horizontal_component(crs: dict) -> dict | None:
+    """Return the single horizontal component of a PROJJSON CompoundCRS, else None.
+
+    A compound CRS (e.g. "EST97 + EVRF2007 height") has no authority id of its
+    own; only its components do. Returns None for anything that is not a
+    CompoundCRS with exactly one horizontal component, so callers never guess.
+    """
+    if not isinstance(crs, dict) or crs.get("type") != "CompoundCRS":
+        return None
+    components = crs.get("components")
+    if not isinstance(components, list):
+        return None
+    horizontal = [
+        component
+        for component in components
+        if isinstance(component, dict) and component.get("type") in _HORIZONTAL_CRS_TYPES
+    ]
+    if len(horizontal) != 1:
+        return None
+    return horizontal[0]
+
+
+def horizontal_crs(crs):
+    """Reduce a PROJJSON CompoundCRS to its horizontal component; pass anything else through.
+
+    Used when Z is dropped from the geometry (``--force-2d``): the vertical
+    component then describes nothing, and keeping the CompoundCRS would leave a
+    2D file whose CRS no downstream transform can identify (a compound CRS has
+    no id of its own, so ``crs_string_for_transform`` returns None for it).
+    The ``$schema`` member of the compound CRS is kept on the result.
+    """
+    component = horizontal_component(crs)
+    if component is None:
+        return crs
+    result = dict(component)
+    if "$schema" in crs and "$schema" not in result:
+        result = {"$schema": crs["$schema"], **result}
+    return result
 
 
 def is_default_crs(crs):
