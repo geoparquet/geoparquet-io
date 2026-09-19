@@ -15,6 +15,7 @@ from geoparquet_io.core.crs_utils import (
     _format_crs_display,
     detect_crs_from_spatial_file,
     extract_crs_from_parquet,
+    horizontal_crs,
     is_default_crs,
     normalize_projjson_crs,
     note_default_crs_normalized,
@@ -1790,6 +1791,10 @@ def read_spatial_to_arrow(
                 detected_crs = normalize_projjson_crs(crs_from_file, input_file)
                 if verbose:
                     debug(f"Detected input CRS: {_format_crs_display(detected_crs)}")
+        if force_2d:
+            # Z is gone, so a compound "horizontal + height" CRS must not
+            # describe the output; keep only its horizontal component.
+            detected_crs = horizontal_crs(detected_crs)
 
         # Build and execute query
         if is_csv:
@@ -2448,6 +2453,9 @@ def convert_to_geoparquet(
                 debug("Could not detect input GeoParquet version; using writer default")
 
         effective_crs = _determine_effective_crs(input_file, crs, is_csv, is_parquet, con, verbose)
+        if force_2d:
+            # Same as the Arrow path: no Z, no vertical CRS component.
+            effective_crs = horizontal_crs(effective_crs)
 
         # Curved geometry the pre-scan cannot see (FileGDB, a GeoPackage on S3)
         # surfaces as a DuckDB error the first time something parses it. With
