@@ -214,3 +214,12 @@ docs/superpowers/
 
 # mutmut mutation-testing working tree
 mutants/
+
+# Auto-added by github-engineer
+*.pyc
+*.pyd
+*.obj
+*.whl
+nem_stats.c
+*.exp
+*.lib

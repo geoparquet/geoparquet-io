@@ -545,6 +545,18 @@ def fetch_features_page(
     # GeoJSON responses don't have the standard error format
     # Check if we got features or an error
     if "error" in data:
+        err = data["error"]
+        code = err.get("code", 0)
+        # Server-side query errors (500+) are usually caused by page/geometry
+        # pressure.  Route them through the same adaptive batch-size ladder
+        # that already handles non-JSON (HTML) oversized-page responses.
+        if code >= 500 and limit is not None:
+            message = err.get("message", "Unknown error")
+            raise BatchTooLargeError(
+                url=query_url,
+                batch_size=limit,
+                reason=f"ArcGIS JSON error {code}: {message}",
+            )
         _handle_arcgis_response(data, "Feature query")
 
     return data

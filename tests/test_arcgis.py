@@ -2546,8 +2546,12 @@ class TestAdaptiveBatchNetworkIntegration:
     def expected_feature_count(self):
         """Fetch current feature count from the service dynamically."""
         from geoparquet_io.core.arcgis import get_feature_count
+        from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
 
-        return get_feature_count(self.MOZ_ADMIN3_SERVICE)
+        try:
+            return get_feature_count(self.MOZ_ADMIN3_SERVICE)
+        except (RemoteAccessError, GeoParquetError) as exc:
+            pytest.skip(f"Mozambique server unavailable: {exc}")
 
     def test_mozambique_admin3_adaptive_batch_issue_382(self, output_file, expected_feature_count):
         """Test extraction from Mozambique Admin 3 that triggers issue #382.

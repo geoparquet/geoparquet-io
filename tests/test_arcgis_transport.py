@@ -753,6 +753,71 @@ def test_the_parallel_ladder_gives_up_at_batch_size_one(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# JSON error 500 enters the same adaptive ladder (#1134)
+# ---------------------------------------------------------------------------
+
+_JSON_ERROR_500 = {"error": {"code": 500, "message": "Error performing query operation.", "details": []}}
+
+
+def _refuses_pages_larger_than_json_500(limit: int, total: int):
+    """Like ``_refuses_pages_larger_than`` but returns a JSON error body."""
+    serve = _offset_aware(total)
+
+    def _serve(request):
+        if int(request.params["resultRecordCount"]) > limit:
+            return json_reply(_JSON_ERROR_500)(request)
+        return serve(request)
+
+    return _serve
+
+
+def test_json_error_500_triggers_sequential_batch_reduction(monkeypatch):
+    """A JSON ``{"error": {"code": 500, ...}}`` page is retried smaller."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=100,
+        page_replies=(json_reply(_JSON_ERROR_500), _offset_aware(100)),
+    )
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    offsets_and_sizes = [
+        (request.params["resultOffset"], request.params["resultRecordCount"])
+        for request in http.matching(_is_query)
+    ]
+    assert offsets_and_sizes == [("0", "100"), ("0", "50"), ("50", "50")]
+
+
+def test_json_error_500_triggers_parallel_batch_reduction(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=200, page_replies=(_refuses_pages_larger_than_json_500(10, 200),))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    _assert_ladder_walked_the_layer(http, pages)
+
+
+def test_json_error_500_gives_up_at_batch_size_one(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=1, page_replies=(json_reply(_JSON_ERROR_500),))
+
+    with pytest.raises(GeoParquetError, match="cannot handle even batch_size=1"):
+        list(fetch_all_features(SERVICE, _layer_info(1), batch_size=1))
+
+
+def test_json_error_400_is_not_retried_as_batch_too_large(monkeypatch):
+    """Client errors (< 500) must not enter the batch-size ladder."""
+    http = FakeTransport.install(monkeypatch)
+    error_body = {"error": {"code": 400, "message": "Invalid query parameters.", "details": []}}
+    stub_service(http, total=10, page_replies=(json_reply(error_body),))
+
+    with pytest.raises(GeoParquetError, match="Error 400"):
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+
+
+# ---------------------------------------------------------------------------
 # arcgis_to_table - the table that comes back
 # ---------------------------------------------------------------------------
 
