@@ -1521,7 +1521,7 @@ class TestCaseInsensitiveColumnCollision:
         strict=True,
         reason="gpio gap: SELECT * over ST_Read cannot bind two columns whose "
         "names differ only by case; convert fails with 'Binder Error: table "
-        "\"st_read\" has duplicate column name \"Id\"'",
+        '"st_read" has duplicate column name "Id"\'',
     )
     def test_convert_geojson_with_case_colliding_id(self, colliding_geojson, temp_output_file):
         """Both columns should survive conversion, under names Parquet can hold.
