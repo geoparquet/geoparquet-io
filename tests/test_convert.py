@@ -22,6 +22,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core import convert as convert_module
 from geoparquet_io.core.check_parquet_structure import (
     check_all,
     check_bbox_structure,
@@ -29,7 +30,15 @@ from geoparquet_io.core.check_parquet_structure import (
     get_row_group_stats,
 )
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.convert import _suffixed_to_unique, convert_to_geoparquet
+from geoparquet_io.core.convert import (
+    _case_collision_aliases,
+    _detect_spatial_geometry,
+    _spatial_source_aliases,
+    _st_read_layer_meta,
+    _suffixed_to_unique,
+    convert_to_geoparquet,
+)
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.geo_metadata import parse_geo_metadata
 from geoparquet_io.core.geometry_detection import (
     detect_parquet_geometry_column,
@@ -1585,6 +1594,138 @@ class TestCaseInsensitiveColumnCollision:
         names = pq.read_table(str(output)).schema.names
         assert "id" in names, f"lost the driver-supplied id: {names}"
         assert "Id_1" in names, f"lost the source's own Id: {names}"
+
+
+@pytest.fixture
+def colliding_geojson_path(tmp_path):
+    """A GeoJSON whose string ``id`` member collides with its own ``Id`` field."""
+    path = tmp_path / "colliding.geojson"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": "layer.1",
+                        "properties": {"Id": 0},
+                        "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+                    }
+                ],
+            }
+        )
+    )
+    return str(path)
+
+
+class TestCollisionRescueGivesUp:
+    """Every way the rescue declines, so it never renames on a guess.
+
+    The rescue exists to read a file the binder refuses. When it cannot work
+    out the file's real column names it has to leave the original error
+    standing: a wrong alias list renames a column silently, which is worse
+    than the error the user already had.
+    """
+
+    @pytest.fixture
+    def plain_geojson(self, tmp_path):
+        path = tmp_path / "plain.geojson"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"Id": 1},
+                            "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+                        }
+                    ],
+                }
+            )
+        )
+        return str(path)
+
+    def _con(self):
+        return get_duckdb_connection(load_spatial=True)
+
+    def test_no_aliases_when_the_names_do_not_collide(self, plain_geojson):
+        """The ordinary file: the rescue must decline and change nothing."""
+        con = self._con()
+        try:
+            assert _case_collision_aliases(con, plain_geojson, None) is None
+        finally:
+            con.close()
+
+    def test_declines_an_unknown_layer(self, plain_geojson):
+        con = self._con()
+        try:
+            assert _st_read_layer_meta(con, plain_geojson, "no-such-layer") is None
+        finally:
+            con.close()
+
+    def test_declines_when_the_file_reports_no_layers(self):
+        class NoLayers:
+            def execute(self, _query):
+                return self
+
+            def fetchone(self):
+                return ("GeoJSON", [])
+
+        assert _st_read_layer_meta(NoLayers(), "irrelevant.geojson", None) is None
+
+    def test_declines_when_the_schema_cannot_be_read(self, plain_geojson, monkeypatch):
+        """No metadata means no names to alias with."""
+        monkeypatch.setattr(convert_module, "_st_read_layer_meta", lambda *a, **k: None)
+        con = self._con()
+        try:
+            assert _case_collision_aliases(con, plain_geojson, None) is None
+        finally:
+            con.close()
+
+    def test_declines_an_unrecognised_column_layout(self, plain_geojson, monkeypatch):
+        """More unnamed columns in front than the one FID we know how to name."""
+        monkeypatch.setattr(convert_module, "_st_read_column_count", lambda *a, **k: 99)
+        con = self._con()
+        try:
+            assert _case_collision_aliases(con, plain_geojson, None) is None
+        finally:
+            con.close()
+
+    def test_a_failed_rescue_is_swallowed(self, plain_geojson, monkeypatch):
+        """The rescue's own failure must not replace the error it was rescuing."""
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("meta unavailable")
+
+        monkeypatch.setattr(convert_module, "_case_collision_aliases", boom)
+        con = self._con()
+        try:
+            assert _spatial_source_aliases(con, plain_geojson, None) is None
+        finally:
+            con.close()
+
+    def test_an_unrelated_error_is_not_treated_as_a_collision(self, tmp_path):
+        """Only the duplicate-name binder error triggers the retry."""
+        con = self._con()
+        try:
+            with pytest.raises(Exception) as caught:
+                _detect_spatial_geometry(con, str(tmp_path / "missing.geojson"), False, None, None)
+            assert "duplicate column name" not in str(caught.value)
+        finally:
+            con.close()
+
+    def test_the_original_error_stands_when_no_aliases_can_be_built(
+        self, colliding_geojson_path, monkeypatch
+    ):
+        """A collision the rescue declines still raises the binder error."""
+        monkeypatch.setattr(convert_module, "_spatial_source_aliases", lambda *a, **k: None)
+        con = self._con()
+        try:
+            with pytest.raises(Exception, match="duplicate column name"):
+                _detect_spatial_geometry(con, colliding_geojson_path, False, None, None)
+        finally:
+            con.close()
 
 
 class TestSuffixedToUnique:
