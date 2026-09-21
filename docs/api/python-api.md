@@ -238,6 +238,7 @@ gpio.extract_arcgis(
 | `include_cols` | str | Comma-separated columns to include |
 | `exclude_cols` | str | Comma-separated columns to exclude |
 | `limit` | int | Maximum number of features |
+| `batch_size` | int | Features per request (default: server's `maxRecordCount`); lower it for layers the server cannot serialize a full page of |
 | `max_workers` | int | Number of parallel fetch workers (default: 1) |
 | `output_crs` | str | Output CRS (e.g. `EPSG:25830`) or `native`; default reprojects to WGS84 |
 | `max_allowable_offset` | float | Server-side geometry generalization tolerance in output CRS units |

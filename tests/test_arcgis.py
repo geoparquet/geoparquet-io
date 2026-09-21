@@ -1311,6 +1311,52 @@ class TestApiOutputCrs:
         assert mock_to_table.call_args.kwargs["max_allowable_offset"] == 0.005
 
 
+class TestApiBatchSize:
+    """The page size must be reachable from the Python API, not just the CLI.
+
+    ``gpio extract arcgis --batch-size`` has existed since #382, but the API
+    front doors omitted the parameter, so every API caller was pinned to the
+    server's advertised ``maxRecordCount`` -- fatal for layers the server
+    cannot serialize a full page of (see #1134).
+    """
+
+    @patch("geoparquet_io.core.arcgis.arcgis_to_table")
+    def test_ops_from_arcgis_forwards_batch_size(self, mock_to_table):
+        from geoparquet_io.api import ops
+
+        mock_to_table.return_value = pa.table({"geometry": pa.array([], type=pa.binary())})
+        ops.from_arcgis("https://example.com/FeatureServer/0", batch_size=50)
+
+        assert mock_to_table.call_args.kwargs["batch_size"] == 50
+
+    @patch("geoparquet_io.core.arcgis.arcgis_to_table")
+    def test_extract_arcgis_forwards_batch_size(self, mock_to_table):
+        from geoparquet_io.api.table import extract_arcgis
+
+        mock_to_table.return_value = pa.table({"geometry": pa.array([], type=pa.binary())})
+        extract_arcgis("https://example.com/FeatureServer/0", batch_size=50)
+
+        assert mock_to_table.call_args.kwargs["batch_size"] == 50
+
+    @patch("geoparquet_io.core.arcgis.arcgis_to_table")
+    def test_ops_from_arcgis_omitted_batch_size_keeps_server_default(self, mock_to_table):
+        from geoparquet_io.api import ops
+
+        mock_to_table.return_value = pa.table({"geometry": pa.array([], type=pa.binary())})
+        ops.from_arcgis("https://example.com/FeatureServer/0")
+
+        assert mock_to_table.call_args.kwargs["batch_size"] is None
+
+    @patch("geoparquet_io.core.arcgis.arcgis_to_table")
+    def test_extract_arcgis_omitted_batch_size_keeps_server_default(self, mock_to_table):
+        from geoparquet_io.api.table import extract_arcgis
+
+        mock_to_table.return_value = pa.table({"geometry": pa.array([], type=pa.binary())})
+        extract_arcgis("https://example.com/FeatureServer/0")
+
+        assert mock_to_table.call_args.kwargs["batch_size"] is None
+
+
 class TestStreamingConversion:
     """Tests for memory-efficient streaming conversion."""
 
