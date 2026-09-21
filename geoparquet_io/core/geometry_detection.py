@@ -185,7 +185,11 @@ def _detect_geometry_from_query(
     """
     try:
         describe_result = con.execute(f"DESCRIBE ({query})").fetchall()
-        columns = [row[0].lower() for row in describe_result if row[0]]
+        # Lowercase key -> the column's own spelling. The match below is
+        # case-insensitive, but what is returned has to be the name the schema
+        # actually carries: it becomes the `geo.columns` key, and a lowercased
+        # `GEOMETRY` names a column the written file does not contain (#1138).
+        columns = {row[0].lower(): row[0] for row in describe_result if row[0]}
 
         if original_metadata and "primary_column" in original_metadata:
             primary = original_metadata["primary_column"].lower()
@@ -197,8 +201,8 @@ def _detect_geometry_from_query(
         for std_name in STANDARD_GEOMETRY_NAMES:
             if std_name in columns:
                 if verbose:
-                    debug(f"Found geometry column by standard name in query: {std_name}")
-                return std_name
+                    debug(f"Found geometry column by standard name in query: {columns[std_name]}")
+                return columns[std_name]
 
         for row in describe_result:
             col_name, col_type = row[0], row[1] if len(row) > 1 else ""
