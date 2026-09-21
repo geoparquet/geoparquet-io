@@ -10,6 +10,8 @@ Tests verify that convert applies all best practices:
 - Output passes validation
 """
 
+import json
+import logging
 import os
 import sys
 
@@ -27,7 +29,7 @@ from geoparquet_io.core.check_parquet_structure import (
     get_row_group_stats,
 )
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.convert import _suffixed_to_unique, convert_to_geoparquet
 from geoparquet_io.core.geo_metadata import parse_geo_metadata
 from geoparquet_io.core.geometry_detection import (
     detect_parquet_geometry_column,
@@ -1491,8 +1493,6 @@ class TestCaseInsensitiveColumnCollision:
         ``outputFormat=application/json`` response looks like: the publisher's
         ``DescribeFeatureType`` declares one ``Id`` and no ``id``.
         """
-        import json
-
         path = tmp_path / "colliding.geojson"
         path.write_text(
             json.dumps(
@@ -1517,24 +1517,86 @@ class TestCaseInsensitiveColumnCollision:
         )
         return str(path)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="gpio gap: SELECT * over ST_Read cannot bind two columns whose "
-        "names differ only by case; convert fails with 'Binder Error: table "
-        '"st_read" has duplicate column name "Id"\'',
-    )
     def test_convert_geojson_with_case_colliding_id(self, colliding_geojson, temp_output_file):
-        """Both columns should survive conversion, under names Parquet can hold.
+        """Both columns survive, the later one suffixed.
 
         Parquet field names are case-sensitive, so nothing about the target
-        format requires one of these columns to be lost. What shape the
-        disambiguation takes is the open question this test pins down: it
-        asserts only that conversion succeeds and that no data is dropped.
+        format requires either column to be lost -- they only have to stop
+        colliding under DuckDB's case-insensitive binder. The first spelling
+        seen keeps its name; the later one is suffixed.
         """
         convert_to_geoparquet(colliding_geojson, temp_output_file)
 
         table = pq.read_table(temp_output_file)
         assert table.num_rows == 2
-        # Two distinct fields whose names differ only by case, in some form.
-        id_like = [n for n in table.schema.names if n.lower() == "id"]
-        assert len(id_like) == 2, f"lost a column: {table.schema.names}"
+        names = table.schema.names
+        assert "id" in names, f"lost the driver-supplied id: {names}"
+        assert "Id_1" in names, f"lost the source's own Id: {names}"
+        # Both carry their own values: the suffix renames, it does not merge.
+        assert table.column("id").to_pylist() == ["layer.1", "layer.2"]
+        assert table.column("Id_1").to_pylist() == [0, 0]
+        assert table.column("name").to_pylist() == ["first", "second"]
+
+    def test_collision_rename_is_announced(self, colliding_geojson, temp_output_file, caplog):
+        """A renamed column is never silent -- the user has to be able to find it."""
+        with caplog.at_level(logging.WARNING):
+            convert_to_geoparquet(colliding_geojson, temp_output_file)
+
+        assert any("Id_1" in record.message for record in caplog.records), (
+            f"no warning named the rename: {[r.message for r in caplog.records]}"
+        )
+
+    def test_non_colliding_source_is_untouched(self, tmp_path, temp_output_file):
+        """The rescue path must not reach a file whose own names bind.
+
+        This is the regression that matters for everyone else: the collision
+        handling hangs off a failed bind, so an ordinary source has to come
+        out exactly as it did before.
+        """
+        path = tmp_path / "plain.geojson"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"Id": 7, "name": "only"},
+                            "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+                        }
+                    ],
+                }
+            )
+        )
+
+        convert_to_geoparquet(str(path), temp_output_file)
+
+        names = pq.read_table(temp_output_file).schema.names
+        assert "Id" in names
+        assert not [n for n in names if n.endswith("_1")], f"renamed something: {names}"
+
+    def test_python_api_survives_the_collision_too(self, colliding_geojson, tmp_path):
+        """The API reads through a different path, so parity is not free."""
+        import geoparquet_io as gpio
+
+        output = tmp_path / "api.parquet"
+        gpio.convert(colliding_geojson).write(str(output))
+
+        names = pq.read_table(str(output)).schema.names
+        assert "id" in names, f"lost the driver-supplied id: {names}"
+        assert "Id_1" in names, f"lost the source's own Id: {names}"
+
+
+class TestSuffixedToUnique:
+    """The naming rule on its own, without the cost of a conversion."""
+
+    def test_first_spelling_wins_and_later_ones_are_suffixed(self):
+        assert _suffixed_to_unique(["id", "Id", "ID"]) == ["id", "Id_1", "ID_2"]
+
+    def test_untouched_when_nothing_collides(self):
+        names = ["OGC_FID", "Id", "name", "geom"]
+        assert _suffixed_to_unique(names) == names
+
+    def test_suffix_that_would_itself_collide_is_skipped(self):
+        """``Id_1`` already taken means the rename has to keep counting."""
+        assert _suffixed_to_unique(["id", "Id_1", "Id"]) == ["id", "Id_1", "Id_2"]

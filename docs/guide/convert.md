@@ -904,6 +904,37 @@ Auto-detects comma and tab. Override with `--delimiter` for semicolon, pipe, or 
 gpio convert data.csv out.parquet --delimiter ";"
 ```
 
+## Columns Whose Names Differ Only by Case
+
+Some sources carry two columns whose names differ only by case -- most often a
+GeoServer WFS response, where the driver materialises the feature-level `id`
+member beside the publisher's own `Id`. DuckDB identifiers are
+case-insensitive, so such a file cannot be read as it stands.
+
+`convert` keeps both columns: the first spelling it meets keeps its name, and
+each later collision is suffixed (`Id` becomes `Id_1`). Parquet field names are
+case-sensitive, so nothing is dropped, and every rename is logged. Sources
+without a collision are unaffected.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a source carrying both 'id' and 'Id'" -->
+    ```bash
+    gpio convert geoparquet counties.geojson counties.parquet
+    # Renamed column "Id" to "Id_1": it collides with an earlier column
+    # under DuckDB's case-insensitive identifiers
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs a source carrying both 'id' and 'Id'" -->
+    ```python
+    import geoparquet_io as gpio
+
+    # columns land as 'id' and 'Id_1'
+    gpio.convert('counties.geojson').write('counties.parquet')
+    ```
+
 ## Performance
 
 The convert command uses DuckDB's spatial extension - the fastest option for GeoParquet conversion, especially for large files.
