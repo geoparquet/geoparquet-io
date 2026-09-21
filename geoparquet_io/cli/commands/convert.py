@@ -172,6 +172,13 @@ def convert(ctx):
     is_flag=True,
     help="Allow conversion to plain Parquet when no geometry column is detected (default: error)",
 )
+@click.option(
+    "--encoding",
+    default=None,
+    help="Source text encoding for sources that cannot say, e.g. a shapefile DBF without "
+    ".cpg or a Latin-1 CSV (ISO-8859-1, UTF-8, ...). Passed to GDAL as open option ENCODING, "
+    "or to the CSV reader. Not for Parquet.",
+)
 @repair_geometry_option
 @linearize_curves_options
 @geoparquet_version_option
@@ -195,6 +202,7 @@ def convert_to_geoparquet_cmd(
     skip_invalid,
     csv_max_line_size,
     allow_no_geometry,
+    encoding,
     repair_geometry,
     linearize_curves,
     max_angle_deg,
@@ -260,6 +268,7 @@ def convert_to_geoparquet_cmd(
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
                 memory_limit=write_memory,
+                encoding=encoding,
             )
         else:
             convert_to_geoparquet(
@@ -285,6 +294,7 @@ def convert_to_geoparquet_cmd(
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
                 memory_limit=write_memory,
+                encoding=encoding,
             )
 
 
@@ -309,6 +319,7 @@ def _convert_streaming(
     linearize_curves=True,
     max_angle_deg=None,
     memory_limit=None,
+    encoding=None,
 ):
     """Handle streaming output for convert command."""
     import tempfile
@@ -351,6 +362,7 @@ def _convert_streaming(
             linearize_curves=linearize_curves,
             max_angle_deg=max_angle_deg,
             memory_limit=memory_limit,
+            encoding=encoding,
         )
 
         # Read and stream to stdout. Through `ParquetFile` so the file handle is

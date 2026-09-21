@@ -672,7 +672,7 @@ def test_the_ladder_gives_up_at_batch_size_one(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     stub_service(http, total=1, page_replies=(html_reply(b"<html>nope</html>"),))
 
-    with pytest.raises(GeoParquetError, match="cannot handle even batch_size=1"):
+    with pytest.raises(GeoParquetError, match="refused even a page of batch_size=1"):
         list(fetch_all_features(SERVICE, _layer_info(1), batch_size=1))
 
 
@@ -748,8 +748,424 @@ def test_the_parallel_ladder_gives_up_at_batch_size_one(monkeypatch):
     http = FakeTransport.install(monkeypatch)
     stub_service(http, total=2, page_replies=(html_reply(b"<html>nope</html>"),))
 
-    with pytest.raises(GeoParquetError, match="cannot handle even batch_size=1"):
+    with pytest.raises(GeoParquetError, match="refused even a page of batch_size=1"):
         list(fetch_all_features(SERVICE, _layer_info(2), batch_size=1, max_workers=2))
+
+
+# ---------------------------------------------------------------------------
+# The ladder recognises how ArcGIS Server actually reports a failed page (#1134)
+#
+# Probed live against geoservices.wallonie.be on 2026-09-21: the same failure,
+# "Error performing query operation", arrives as HTTP 200 + a JSON error
+# envelope with code 500 on the EsriJSON (f=json) path, and as HTTP 500 + an
+# HTML error page on the GeoJSON (f=geojson) path. The layer serves fine at a
+# smaller page. Before this fix neither response reached the ladder.
+# ---------------------------------------------------------------------------
+
+_QUERY_FAILED = {
+    "error": {"code": 500, "message": "Error performing query operation.", "details": []}
+}
+
+
+def _serves_pages_up_to(limit: int, total: int, refusal):
+    """A server that answers any page wider than ``limit`` with ``refusal``."""
+    serve = _offset_aware(total)
+
+    def _serve(request):
+        if int(request.params["resultRecordCount"]) > limit:
+            return refusal(request)
+        return serve(request)
+
+    return _serve
+
+
+def test_a_json_error_500_page_is_retried_at_the_same_offset_smaller(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=100, page_replies=(json_reply(_QUERY_FAILED), _offset_aware(100)))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    offsets_and_sizes = [
+        (request.params["resultOffset"], request.params["resultRecordCount"])
+        for request in http.matching(_is_query)
+    ]
+    assert offsets_and_sizes == [("0", "100"), ("0", "50"), ("50", "50")]
+    assert http.sleeps == []  # an HTTP 200 body is the server's answer, not a blip
+
+
+def test_a_json_error_500_page_walks_the_parallel_ladder(monkeypatch, caplog):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=200,
+        page_replies=(_serves_pages_up_to(10, 200, json_reply(_QUERY_FAILED)),),
+    )
+
+    with caplog.at_level("WARNING"):
+        pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    _assert_ladder_walked_the_layer(http, pages)
+    # The window is re-walked from its start, whichever sibling was refused.
+    assert "Error performing query operation" in caplog.text
+    assert "Reducing to 50 and retrying from offset 0" in caplog.text
+    assert "Reducing to 10 and retrying from offset 0" in caplog.text
+
+
+def test_a_json_error_500_message_without_the_trailing_period_still_counts(monkeypatch):
+    """The live Wallonia envelope has no period; the issue's example does."""
+    http = FakeTransport.install(monkeypatch)
+    no_period = {
+        "error": {"code": 500, "message": "Error performing query operation", "details": []}
+    }
+    stub_service(http, total=100, page_replies=(json_reply(no_period), _offset_aware(100)))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    assert http.param_series("resultRecordCount") == ["100", "50", "50"]
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_json_error_500_at_batch_size_one_names_the_server_error(monkeypatch, workers):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=2, page_replies=(json_reply(_QUERY_FAILED),))
+
+    with pytest.raises(GeoParquetError) as excinfo:
+        list(fetch_all_features(SERVICE, _layer_info(2), batch_size=1, max_workers=workers))
+
+    message = str(excinfo.value)
+    assert "refused even a page of batch_size=1" in message
+    assert "Error performing query operation" in message  # what the server said
+    assert "--max-allowable-offset" in message  # the lever that is left
+
+
+def test_the_descent_warning_says_what_the_server_said_and_that_the_size_sticks(
+    monkeypatch, caplog
+):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=100, page_replies=(json_reply(_QUERY_FAILED), _offset_aware(100)))
+
+    with caplog.at_level("WARNING"):
+        list(fetch_all_features(SERVICE, _layer_info(100), batch_size=100))
+
+    assert "batch_size=100" in caplog.text
+    assert "offset 0" in caplog.text
+    assert "Error performing query operation" in caplog.text
+    assert "Reducing to 50" in caplog.text
+    assert "keep this size" in caplog.text
+
+
+@pytest.mark.parametrize("status", [500, 502, 504])
+def test_a_persistent_http_500_on_a_page_descends_the_ladder_after_the_retries(monkeypatch, status):
+    """The default (GeoJSON) path: ArcGIS answers HTTP 500 + HTML, not JSON; a
+    proxy in front of it gives up with 502/504.
+
+    The transport's same-size retries still run first (a 5xx can be a blip);
+    only when they are exhausted does the page size become the lever.
+    """
+    http = FakeTransport.install(monkeypatch)
+    arcgis_error_page = error_reply(
+        status, body=b"<html><title>Error: Error performing query operation</title></html>"
+    )
+    stub_service(http, total=100, page_replies=(_serves_pages_up_to(50, 100, arcgis_error_page),))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    offsets_and_sizes = [
+        (request.params["resultOffset"], request.params["resultRecordCount"])
+        for request in http.matching(_is_query)
+    ]
+    # Three same-size attempts at 100 (the transport's retry policy, unchanged),
+    # then the ladder takes over at the same offset.
+    assert offsets_and_sizes == [("0", "100")] * 3 + [("0", "50"), ("50", "50")]
+    assert http.sleeps == [1.0, 2.0]
+
+
+def test_a_persistent_http_502_on_a_parallel_window_descends_the_ladder(monkeypatch):
+    """Wallonia answered HTTP 502 from nginx for a heavy 1000-row page."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=200,
+        page_replies=(_serves_pages_up_to(10, 200, error_reply(502)),),
+    )
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    _assert_ladder_walked_the_layer(http, pages)
+
+
+def test_a_persistent_http_500_at_batch_size_one_is_reported_as_such(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=1, page_replies=(error_reply(500),))
+
+    with pytest.raises(GeoParquetError) as excinfo:
+        list(fetch_all_features(SERVICE, _layer_info(1), batch_size=1))
+
+    assert "refused even a page of batch_size=1" in str(excinfo.value)
+    assert "HTTP 500" in str(excinfo.value)
+    assert len(http.matching(_is_query)) == 3  # one rung, its retries, then stop
+
+
+def test_a_transient_http_500_on_a_page_is_still_retried_at_the_same_size(monkeypatch):
+    """The transport's transient tolerance is unchanged: one blip costs one retry, not a rung."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=100, page_replies=(error_reply(500), _offset_aware(100)))
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=100))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    assert http.param_series("resultRecordCount") == ["100", "100"]
+    assert http.sleeps == [1.0]
+
+
+def test_an_http_500_carrying_a_page_pressure_envelope_descends_at_once(monkeypatch):
+    """Newer servers mirror the JSON code into the HTTP status; the body still decides."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=100,
+        page_replies=(json_reply(_QUERY_FAILED, status=500), _offset_aware(100)),
+    )
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    assert http.param_series("resultRecordCount") == ["100", "50", "50"]
+    assert http.sleeps == []  # the envelope is the answer; no same-size retries
+
+
+def test_an_http_500_carrying_a_specific_envelope_is_fatal_with_the_servers_words(monkeypatch):
+    """The narrow classifier is not bypassed by the HTTP status (review of this PR)."""
+    http = FakeTransport.install(monkeypatch)
+    envelope = {
+        "error": {"code": 500, "message": "Database connection lost", "details": ["ORA-03113"]}
+    }
+    stub_service(http, total=10, page_replies=(json_reply(envelope, status=500),))
+
+    with pytest.raises(GeoParquetError) as excinfo:
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+
+    assert "Error 500 - Database connection lost. ORA-03113" in str(excinfo.value)
+    assert "--batch-size" in str(excinfo.value)
+    assert len(http.matching(_is_query)) == 1
+    assert http.sleeps == []
+
+
+def test_a_502_with_a_proxys_json_body_keeps_its_retries_and_then_descends(monkeypatch):
+    """Only ArcGIS's own 500 mirrors its envelope; a gateway's JSON body is not an answer."""
+    http = FakeTransport.install(monkeypatch)
+    gateway_body = {"error": {"code": "BAD_GATEWAY", "message": "upstream timed out"}}
+    stub_service(
+        http,
+        total=100,
+        page_replies=(_serves_pages_up_to(50, 100, json_reply(gateway_body, status=502)),),
+    )
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert sum(len(page["features"]) for page in pages) == 100
+    assert http.param_series("resultRecordCount") == ["100"] * 3 + ["50", "50"]
+    assert http.sleeps == [1.0, 2.0]
+
+
+def test_the_parallel_warning_names_the_refused_offset_and_the_window_restart(monkeypatch, caplog):
+    """Refuse only the sibling window, so the two offsets in the warning differ."""
+    http = FakeTransport.install(monkeypatch)
+    serve = _offset_aware(200)
+
+    def _serve(request):
+        window = (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
+        if window == (100, 100):
+            return json_reply(_QUERY_FAILED)(request)
+        return serve(request)
+
+    stub_service(http, total=200, page_replies=(_serve,))
+
+    with caplog.at_level("WARNING"):
+        pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    assert sum(len(page["features"]) for page in pages) == 200
+    assert "batch_size=100 at offset 100" in caplog.text
+    assert "Reducing to 50 and retrying from offset 0" in caplog.text
+    # The window is re-walked at 50 from its start, each page exactly once.
+    fifties = sorted(
+        int(r.params["resultOffset"])
+        for r in http.matching(_is_query)
+        if r.params["resultRecordCount"] == "50"
+    )
+    assert fifties == [0, 50, 100, 150]
+
+
+def test_an_error_key_that_is_not_an_envelope_is_still_reported(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=10, page_replies=(json_reply({"error": "boom"}),))
+
+    with pytest.raises(GeoParquetError, match="Feature query: Error Unknown - boom"):
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after", "expected_sleeps"),
+    [
+        (503, None, [1.0, 2.0]),
+        (503, 120, [120.0, 120.0]),
+        (501, None, [1.0, 2.0]),
+    ],
+)
+def test_a_persistent_503_or_501_on_a_page_is_an_outage_not_a_page_problem(
+    monkeypatch, status, retry_after, expected_sleeps
+):
+    """Service Unavailable / Not Implemented say something specific: no ladder walk."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=100, page_replies=(error_reply(status, retry_after=retry_after),))
+
+    with pytest.raises(RemoteAccessError, match=f"HTTP error {status}"):
+        list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000))
+
+    assert http.param_series("resultRecordCount") == ["100"] * 3
+    assert http.sleeps == expected_sleeps
+
+
+def test_an_exhausted_http_error_never_echoes_the_request_url(monkeypatch):
+    """`str(HTTPStatusError)` embeds the full URL, token included; it must not reach the user."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(500))
+
+    with pytest.raises(RemoteAccessError) as excinfo:
+        get_feature_count(SERVICE, token="SECRET-TOKEN")
+
+    assert "SECRET-TOKEN" not in str(excinfo.value)
+    assert "HTTP error 500" in str(excinfo.value)
+
+
+def test_the_ladder_keeps_the_esrijson_request_shape_across_a_rung(monkeypatch):
+    """The literal #1134 scenario: --output-crs sends f=json, and the retry must too."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(
+        http,
+        total=100,
+        page_replies=(json_reply(_QUERY_FAILED), _offset_aware(100)),
+    )
+
+    list(fetch_all_features(SERVICE, _layer_info(100), batch_size=1000, output_wkid=25830))
+
+    for request in http.matching(_is_query):
+        assert request.params["f"] == "json"
+        assert request.params["outSR"] == "25830"
+    assert http.param_series("resultRecordCount") == ["100", "50", "50"]
+
+
+def test_a_persistent_http_500_on_a_countless_request_is_still_fatal(monkeypatch):
+    """No page was requested, so the ladder has nothing to shrink (#606)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(_is_count, error_reply(500))
+
+    with pytest.raises(RemoteAccessError, match="HTTP error 500"):
+        get_feature_count(SERVICE)
+
+
+@pytest.mark.parametrize(
+    ("envelope", "needle"),
+    [
+        ({"code": 498, "message": "Invalid Token"}, "Invalid or expired token"),
+        ({"code": 499, "message": "Token Required"}, "Invalid or expired token"),
+        (
+            {"code": 400, "message": "Unable to complete operation.", "details": ["Invalid field"]},
+            "Error 400 - Unable to complete operation. Invalid field",
+        ),
+        (
+            {"code": 503, "message": "Service Unavailable", "details": []},
+            "Error 503 - Service Unavailable",
+        ),
+    ],
+)
+def test_json_errors_that_are_not_page_pressure_stay_fatal(monkeypatch, envelope, needle):
+    """Auth, bad parameters and an unavailable service are not a page-size problem."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=10, page_replies=(json_reply({"error": envelope}),))
+
+    with pytest.raises(GeoParquetError, match=needle):
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+    assert http.param_series("resultRecordCount") == ["10"]  # one request, no ladder
+
+
+def test_a_json_error_500_with_an_unrecognised_message_is_fatal_with_a_hint(monkeypatch):
+    """A 500 the classifier does not know stays fatal, but tells the user the lever."""
+    http = FakeTransport.install(monkeypatch)
+    envelope = {"code": 500, "message": "Database connection lost", "details": ["ORA-03113"]}
+    stub_service(http, total=10, page_replies=(json_reply({"error": envelope}),))
+
+    with pytest.raises(GeoParquetError) as excinfo:
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+
+    message = str(excinfo.value)
+    assert "Error 500 - Database connection lost. ORA-03113" in message
+    assert "--batch-size" in message
+    assert http.param_series("resultRecordCount") == ["10"]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Error performing query operation.", True),
+        ("Error performing query operation", True),
+        ("  error PERFORMING query operation  ", True),
+        ("Unable to complete operation.", True),
+        ("Unable to perform query operation.", True),
+        ("Database connection lost", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_the_page_pressure_classifier_normalises_the_message(message, expected):
+    from geoparquet_io.core.arcgis import _is_page_pressure_error
+
+    envelope = {"code": 500, "details": []}
+    if message is not None:
+        envelope["message"] = message
+    assert _is_page_pressure_error(envelope) is expected
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ([], True),
+        (None, True),
+        (["Unable to perform query operation."], True),  # the generic phrase, nested
+        (["Attempted to divide by zero."], False),  # the server said what went wrong
+        ("Unable to perform query operation.", True),  # a bare string, not a list
+        ("ORA-03113: end-of-file on communication channel", False),
+    ],
+)
+def test_the_page_pressure_classifier_reads_the_details_too(details, expected):
+    from geoparquet_io.core.arcgis import _is_page_pressure_error
+
+    envelope = {"code": 500, "message": "Unable to complete operation."}
+    if details is not None:
+        envelope["details"] = details
+    assert _is_page_pressure_error(envelope) is expected
+
+
+def test_a_string_details_field_is_reported_whole(monkeypatch):
+    http = FakeTransport.install(monkeypatch)
+    envelope = {"error": {"code": 400, "message": "Bad.", "details": "Invalid field"}}
+    stub_service(http, total=10, page_replies=(json_reply(envelope),))
+
+    with pytest.raises(GeoParquetError, match=r"Error 400 - Bad\. Invalid field$"):
+        list(fetch_all_features(SERVICE, _layer_info(10), batch_size=100))
+
+
+@pytest.mark.parametrize("code", [400, 498, 499, 501, 503, 504, "500", None])
+def test_the_page_pressure_classifier_wants_exactly_code_500(code):
+    from geoparquet_io.core.arcgis import _is_page_pressure_error
+
+    envelope: dict = {"message": "Error performing query operation."}
+    if code is not None:
+        envelope["code"] = code
+    assert _is_page_pressure_error(envelope) is False
 
 
 # ---------------------------------------------------------------------------

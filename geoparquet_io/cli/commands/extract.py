@@ -333,7 +333,7 @@ def extract_geoparquet(
     "--batch-size",
     type=click.IntRange(min=1, max=5000),
     default=None,
-    help="Features per request. Default: server's maxRecordCount. Auto-reduces on server errors. Use smaller values for layers with complex geometries.",
+    help="Features per request. Default: server's maxRecordCount. A page the server refuses (a generic JSON error 500, an HTML error page or a persistent HTTP 500/502/504) is retried at the same offset with a smaller size, which then sticks. Start smaller for layers with complex geometries.",
 )
 @click.option(
     "--timeout",

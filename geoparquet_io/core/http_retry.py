@@ -7,7 +7,7 @@ This module provides reusable HTTP request functions with:
 - Gzip compression support
 - Proper error classification (retryable vs. fatal)
 
-Used by: arcgis.py, wfs.py
+Used by: arcgis.py (wfs.py shares only the pooled client)
 """
 
 from __future__ import annotations
@@ -31,6 +31,24 @@ _http_client_lock = threading.Lock()
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 1.0
+
+# The HTTP statuses a server uses to refuse a page it could not produce: its
+# own 500 (ArcGIS Server's "Error performing query operation" HTML page) and a
+# proxy giving up on it (502, 504). Not 503 or 501, which say something specific
+# (unavailable, unsupported) and carry Retry-After, nor 429. Only a request that
+# asked for a page (``batch_size`` set) is refused in this sense (#1134).
+PAGE_REFUSAL_STATUSES = frozenset({500, 502, 504})
+
+
+def _json_error_envelope(response: httpx.Response) -> dict[str, Any] | None:
+    """The ArcGIS ``{"error": {...}}`` body of an error response, if it has one."""
+    try:
+        body = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        return body
+    return None
 
 
 def get_shared_http_client(
@@ -114,14 +132,20 @@ def make_request_with_retry(
         timeout: Request timeout in seconds
         parse_json: If True, parse response as JSON and raise BatchTooLargeError
             on parse failure. If False, return raw bytes.
-        batch_size: Current batch size (used for BatchTooLargeError context)
+        batch_size: The page size of a paged request, or None for a request
+            that asked for no page (layer info, count, token). Decides whether
+            a refused response is the caller's batch-size ladder's business.
 
     Returns:
         Parsed JSON dict if parse_json=True, otherwise raw bytes
 
     Raises:
-        RemoteAccessError: For fatal HTTP errors (401, 403, 404) or exhausted retries
-        BatchTooLargeError: When JSON parsing fails (server returned HTML error)
+        RemoteAccessError: For fatal HTTP errors (401, 403, 404), or exhausted
+            retries on a request that asked for no page
+        BatchTooLargeError: On a paged request, when a 200 body is not JSON
+            (an HTML error or block page) or a 500/502/504 without a JSON error
+            envelope survived every retry. An HTTP 500 *with* an envelope is
+            returned as-is for the caller to classify.
     """
     import httpx
 
@@ -197,6 +221,18 @@ def make_request_with_retry(
 
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
+            page_refused = batch_size is not None and status in PAGE_REFUSAL_STATUSES
+
+            if page_refused and parse_json and status == 500:
+                envelope = _json_error_envelope(e.response)
+                if envelope is not None:
+                    # Newer ArcGIS servers mirror their JSON error code into the
+                    # HTTP status - always their own 500, never a proxy's 502/504,
+                    # whose JSON bodies (if any) are the proxy's and keep the
+                    # retries below. The envelope is the server's considered
+                    # answer, and the caller's classifier (not this loop) decides
+                    # whether it is a page-size problem or a specific, fatal error.
+                    return envelope
 
             # Retry on rate limit or server errors
             if status == 429 or (500 <= status < 600):
@@ -211,6 +247,18 @@ def make_request_with_retry(
                     )
                     time.sleep(delay)
                     continue
+                if page_refused and batch_size is not None:  # the latter narrows the type
+                    # A 500/502/504 without a JSON body that survived every
+                    # same-size retry on a *paged* request: ArcGIS Server answers
+                    # a page it cannot serialize with HTTP 500 + an HTML error
+                    # page on the GeoJSON path, and a proxy in front of it gives
+                    # up with 502/504 (#1134). The page size is the one lever
+                    # left, and it belongs to the caller's batch-size ladder.
+                    raise BatchTooLargeError(
+                        url=url,
+                        batch_size=batch_size,
+                        reason=f"HTTP {status} persisted after {max_retries} attempts",
+                    ) from e
 
             # Fatal errors - don't retry
             if status == 401:
@@ -224,7 +272,10 @@ def make_request_with_retry(
             if status == 404:
                 raise RemoteAccessError(url, "Service not found (404). Check the URL.") from None
 
-            raise RemoteAccessError(url, f"HTTP error {status}: {e}") from e
+            # Not str(e): httpx spells out the full request URL there, and on
+            # ArcGIS the token rides in the query string.
+            reason_phrase = e.response.reason_phrase
+            raise RemoteAccessError(url, f"HTTP error {status} {reason_phrase}".rstrip()) from e
 
         except BatchTooLargeError:
             # Don't retry BatchTooLargeError - caller needs to reduce batch size
