@@ -1201,6 +1201,31 @@ Each HTTP request defaults to a 60-second timeout. FeatureServer layers with ver
 
 Combine `--timeout` with `--batch-size` (smaller pages) or `--max-allowable-offset` (fewer vertices per feature) when a layer is both slow and heavy.
 
+Some layers fail at the server's advertised page size outright, with an ArcGIS JSON error 500 or a timeout on every page, even when the whole layer holds only a few dozen features: it is the geometry complexity of a page that the server cannot serialize, not its row count. Ask for smaller pages with `--batch-size` (CLI) or `batch_size` (Python). The default is the server's `maxRecordCount`, capped at 2000; the value must be a positive integer.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs cloud credentials" -->
+    ```bash
+    # 50 features per request, 3 minutes per request
+    gpio extract arcgis "https://services.arcgis.com/.../FeatureServer/0" out.parquet \
+      --batch-size 50 --timeout 180
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs cloud credentials" -->
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        batch_size=50,
+        timeout=180,
+    )
+    table.write("out.parquet")
+    ```
+
 ### Finding Service URLs
 
 ArcGIS Feature Service URLs follow this pattern:

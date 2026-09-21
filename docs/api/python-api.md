@@ -238,7 +238,7 @@ gpio.extract_arcgis(
 | `include_cols` | str | Comma-separated columns to include |
 | `exclude_cols` | str | Comma-separated columns to exclude |
 | `limit` | int | Maximum number of features |
-| `batch_size` | int | Features per request (default: server's `maxRecordCount`); lower it for layers the server cannot serialize a full page of |
+| `batch_size` | int | Features per request (default: server's `maxRecordCount`, capped at 2000); lower it for layers the server cannot serialize a full page of |
 | `max_workers` | int | Number of parallel fetch workers (default: 1) |
 | `output_crs` | str | Output CRS (e.g. `EPSG:25830`) or `native`; default reprojects to WGS84 |
 | `max_allowable_offset` | float | Server-side geometry generalization tolerance in output CRS units |
@@ -1674,7 +1674,7 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.reproject(table, target_crs='EPSG:4326', source_crs=None, geometry_column=None, assume_crs84=False)` | Reproject geometry (`assume_crs84` treats an unknown/null CRS as OGC:CRS84) |
 | `ops.extract(table, columns=None, exclude_columns=None, bbox=None, where=None, limit=None, geometry_column=None)` | Filter columns/rows |
 | `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table (`None`/`[]` selects every column; a blank entry in the list raises) |
-| `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None)` | Fetch ArcGIS Feature Service |
+| `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None, max_workers=1, output_crs=None, max_allowable_offset=None, repair_geometry=True, timeout=60.0, batch_size=None)` | Fetch ArcGIS Feature Service (`batch_size` lowers the page size for layers the server cannot serialize a full page of) |
 | `ops.convert_to_geojson(table, output, precision=7, write_bbox=False, id_field=None)` | Convert to GeoJSON |
 | `ops.convert_to_geopackage(table, output, layer_name='features', overwrite=False)` | Convert to GeoPackage |
 | `ops.convert_to_flatgeobuf(table, output)` | Convert to FlatGeobuf |
