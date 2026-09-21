@@ -438,7 +438,11 @@ against the actual coordinate dimensions in both directions.
 throughout when the consumer is not: some tile renderers draw nothing for 3D
 geometry. It applies to every input format, including a WKT column in CSV and
 every geometry column of a GeoParquet input, and the bounds, bbox column and
-Hilbert ordering are all computed from the flattened geometry.
+Hilbert ordering are all computed from the flattened geometry. The written CRS
+follows: a compound "horizontal + height" CRS (EST97 + EVRF2007 height, say) is
+reduced to its horizontal component, and a 3D geographic CRS such as EPSG:4979
+to its 2D counterpart, so the file does not describe a dimension it no longer
+has. Without `--force-2d` a compound CRS is kept as declared.
 
 === "CLI"
 

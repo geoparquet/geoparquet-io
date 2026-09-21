@@ -1568,6 +1568,12 @@ def _convert_spatial_path(
     if force_2d:
         if is_parquet:
             table_expr = _force_2d_parquet_expr(con, input_file, geom_info)
+            # The primary column's CRS is reduced by the caller (effective_crs);
+            # the secondaries' travel inside geom_info and are reduced here.
+            for column in secondary_columns:
+                column_meta = geom_info["metadata"].get(column, {})
+                if column_meta.get("crs"):
+                    column_meta["crs"] = horizontal_crs(column_meta["crs"])
         else:
             table_expr = force_2d_expr(
                 table_expr or _build_st_read_expr(input_file, layer, open_options=open_options),
