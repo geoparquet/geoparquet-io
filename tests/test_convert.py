@@ -1470,3 +1470,71 @@ class TestDetectParquetGeometryColumn:
 
         result = detect_parquet_geometry_column(path)
         assert result == "the_real_geom"
+
+
+class TestCaseInsensitiveColumnCollision:
+    """A source field differing from the GeoJSON ``id`` member only by case.
+
+    ``SELECT *`` over ``ST_Read`` on such a file cannot be bound: DuckDB
+    identifiers are case-insensitive, so the driver-materialised ``id`` field
+    and the source's own ``Id`` are one name. See the class docstring of the
+    fixture below for how the second ``id`` gets there.
+    """
+
+    @pytest.fixture
+    def colliding_geojson(self, tmp_path):
+        """GeoJSON with a string feature ``id`` member and an ``Id`` property.
+
+        The ``id`` member is a *string*, so the GDAL GeoJSON driver cannot use
+        it as the FID and materialises it as a field literally named ``id``
+        alongside the ``Id`` property. This is what a GeoServer WFS
+        ``outputFormat=application/json`` response looks like: the publisher's
+        ``DescribeFeatureType`` declares one ``Id`` and no ``id``.
+        """
+        import json
+
+        path = tmp_path / "colliding.geojson"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "id": "layer.1",
+                            "properties": {"Id": 0, "name": "first"},
+                            "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+                        },
+                        {
+                            "type": "Feature",
+                            "id": "layer.2",
+                            "properties": {"Id": 0, "name": "second"},
+                            "geometry": {"type": "Point", "coordinates": [1.0, 1.0]},
+                        },
+                    ],
+                }
+            )
+        )
+        return str(path)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="gpio gap: SELECT * over ST_Read cannot bind two columns whose "
+        "names differ only by case; convert fails with 'Binder Error: table "
+        "\"st_read\" has duplicate column name \"Id\"'",
+    )
+    def test_convert_geojson_with_case_colliding_id(self, colliding_geojson, temp_output_file):
+        """Both columns should survive conversion, under names Parquet can hold.
+
+        Parquet field names are case-sensitive, so nothing about the target
+        format requires one of these columns to be lost. What shape the
+        disambiguation takes is the open question this test pins down: it
+        asserts only that conversion succeeds and that no data is dropped.
+        """
+        convert_to_geoparquet(colliding_geojson, temp_output_file)
+
+        table = pq.read_table(temp_output_file)
+        assert table.num_rows == 2
+        # Two distinct fields whose names differ only by case, in some form.
+        id_like = [n for n in table.schema.names if n.lower() == "id"]
+        assert len(id_like) == 2, f"lost a column: {table.schema.names}"
