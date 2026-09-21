@@ -558,6 +558,46 @@ geometry DuckDB cannot read; a file already at the output path is overwritten
 by the second attempt or, if that fails too, left as it was.
 `--no-linearize-curves` keeps the error instead.
 
+### Source Text Encoding
+
+Some sources cannot say how their text is encoded. A shapefile whose DBF has no
+`.cpg` sidecar, or a CSV saved from a Windows spreadsheet, reaches DuckDB byte
+for byte: the first accented value ("Lääne maakond") is then invalid UTF-8 and
+the conversion fails with no way to name what the file actually is. `--encoding`
+names it. For GDAL formats it is passed as the `ENCODING` open option; for
+CSV/TSV it goes to DuckDB's CSV reader. Parquet carries UTF-8 already, so the
+option is refused there.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a shapefile whose DBF is not UTF-8" -->
+    ```bash
+    # Shapefile with a Windows-ANSI attribute table and no .cpg
+    gpio convert ehak.shp ehak.parquet --encoding ISO-8859-1
+
+    # Latin-1 CSV with a WKT column
+    gpio convert points.csv points.parquet --encoding ISO-8859-1
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+    ```
+
+    <!-- doctest: skip="needs a shapefile whose DBF is not UTF-8" -->
+    ```python
+    gpio.convert("ehak.shp", encoding="ISO-8859-1").write("ehak.parquet")
+    gpio.convert("points.csv", encoding="ISO-8859-1").write("points.parquet")
+    ```
+
+Use the encoding names GDAL knows (`ISO-8859-1`, `CP1252`, `UTF-8`, ...). The
+CSV reader decodes UTF-8, UTF-16 and Latin-1 on its own; the common names are
+translated for it (`ISO-8859-1` and `latin1` both reach it as Latin-1). Every
+other encoding, CP1252 included, comes from DuckDB's `encodings` extension,
+which gpio loads on demand; offline, without a cached copy, the error names the
+extension.
+
 ### Skip Hilbert Ordering
 
 For faster conversion when spatial ordering isn't critical:

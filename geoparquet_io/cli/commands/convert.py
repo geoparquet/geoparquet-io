@@ -175,8 +175,9 @@ def convert(ctx):
 @click.option(
     "--encoding",
     default=None,
-    help="Source text encoding for drivers that cannot tell, e.g. a shapefile DBF without "
-    ".cpg (ISO-8859-1, UTF-8, ...). Passed to GDAL as open option ENCODING. Not for Parquet.",
+    help="Source text encoding for sources that cannot say, e.g. a shapefile DBF without "
+    ".cpg or a Latin-1 CSV (ISO-8859-1, UTF-8, ...). Passed to GDAL as open option ENCODING, "
+    "or to the CSV reader. Not for Parquet.",
 )
 @repair_geometry_option
 @linearize_curves_options
