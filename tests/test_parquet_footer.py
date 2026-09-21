@@ -9,6 +9,7 @@ default compression level, and inflated a zstd-15 file by 11.6%.
 
 import json
 import struct
+import sys
 from pathlib import Path
 
 import pyarrow as pa
@@ -253,6 +254,7 @@ class TestTheKeys:
         assert len(metadata) == 21, "the original ARROW:schema key should still be there"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod permissions not supported on Windows")
 class TestTheFileOnDisk:
     def test_the_mode_is_kept(self, geo_file):
         """Staging goes through mkstemp, which creates 0600."""

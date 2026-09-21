@@ -490,26 +490,27 @@ def patch_footer_kv(
         footer_start, footer_length = _footer_span(source, size, parquet_file)
         source.seek(footer_start)
         original = source.read(footer_length)
-        footer = _patch_footer(original, updates)
 
-        if footer == original and destination == parquet_file:
-            # Nothing to write, and copying a file onto itself to say so would
-            # cost a full pass over it.
-            return
+    footer = _patch_footer(original, updates)
+    if footer == original and destination == parquet_file:
+        # Nothing to write, and copying a file onto itself to say so would cost
+        # a full pass over it.
+        return
 
-        before = _read_metadata_or_refuse(parquet_file)
+    before = _read_metadata_or_refuse(parquet_file)
+    if verbose:
+        debug(
+            f"Footer: {footer_length:,} bytes in, {len(footer):,} out; "
+            f"{footer_start:,} bytes of data copied unchanged"
+        )
 
-        if verbose:
-            debug(
-                f"Footer: {footer_length:,} bytes in, {len(footer):,} out; "
-                f"{footer_start:,} bytes of data copied unchanged"
-            )
-
-        with atomic_write(destination) as staged:
-            with open(staged, "wb") as sink:
-                _copy_below_footer(source, sink, footer_start)
-                sink.write(footer)
-                sink.write(struct.pack("<I", len(footer)))
-                sink.write(MAGIC)
-            _verify_data_untouched(before, staged)
-            _inherit_mode(staged, parquet_file, destination)
+    with atomic_write(destination) as staged:
+        # The input is opened for the copy and closed again before the staged
+        # file is moved over it: Windows refuses to replace an open file.
+        with open(parquet_file, "rb") as source, open(staged, "wb") as sink:
+            _copy_below_footer(source, sink, footer_start)
+            sink.write(footer)
+            sink.write(struct.pack("<I", len(footer)))
+            sink.write(MAGIC)
+        _verify_data_untouched(before, staged)
+        _inherit_mode(staged, parquet_file, destination)
