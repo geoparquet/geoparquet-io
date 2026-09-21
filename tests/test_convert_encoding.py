@@ -212,7 +212,7 @@ class TestFallbacksKeepTheEncoding:
         monkeypatch.setattr(convert_mod, "_choose_read_strategy", lambda *a, **k: "normal")
         monkeypatch.setattr(convert_mod, "_read_spatial_linearized", fake_linearized)
         assert _read_spatial_to_arrow(Con(), "a.gdb", False, encoding="ISO-8859-1") == "table"
-        assert calls == [{"open_options": ["ENCODING=ISO-8859-1"]}]
+        assert [c["open_options"] for c in calls] == [["ENCODING=ISO-8859-1"]]
 
 
 class TestEncodingOnLinearizedReads:

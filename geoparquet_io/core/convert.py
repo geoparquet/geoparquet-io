@@ -209,6 +209,88 @@ def force_2d_expr(table_expr: str, geom_column: str) -> str:
     return f"(SELECT * REPLACE (ST_Force2D({quoted}) AS {quoted}) FROM {table_expr})"
 
 
+def _parquet_geometry_expr(con, source: str, geom_column: str) -> tuple[str, bool]:
+    """A GEOMETRY-typed expression for a Parquet geometry column, and whether it was native.
+
+    DuckDB hands a GeoParquet column back either as native ``GEOMETRY`` (a 2.0
+    file, or a 1.x file whose ``geo`` block it recognised) or as the WKB
+    ``BLOB`` it is stored as. ``ST_GeomFromWKB`` binds only against the latter,
+    so the column has to be asked which shape it has before either is wrapped.
+    """
+    quoted = quote_identifier(geom_column)
+    (column_type,) = con.execute(
+        f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {source})"
+    ).fetchone()
+    if column_type.upper().startswith("GEOMETRY"):
+        return quoted, True
+    return f"ST_GeomFromWKB({quoted})", False
+
+
+_DIMENSION_SUFFIX_RE = re.compile(r" (Z|M|ZM)$")
+
+
+def _flatten_geometry_metadata(column_meta: dict) -> dict:
+    """The input's declared facts about a geometry column, corrected for 2D.
+
+    A secondary column's ``geo`` entry is copied from the input rather than
+    measured from the converted data, so after ``--force-2d`` its
+    ``geometry_types`` would still carry the ``Z``/``M`` suffixes and a
+    six-element ``bbox`` its Z range. Both would then contradict the geometry
+    ``gpio check spec`` finds in the file.
+    """
+    meta = dict(column_meta)
+    types = meta.get("geometry_types")
+    if isinstance(types, list):
+        flat = [_DIMENSION_SUFFIX_RE.sub("", t) for t in types if isinstance(t, str)]
+        meta["geometry_types"] = list(dict.fromkeys(flat))
+    bbox = meta.get("bbox")
+    if isinstance(bbox, list) and len(bbox) == 6:
+        meta["bbox"] = [bbox[0], bbox[1], bbox[3], bbox[4]]
+    return meta
+
+
+def _force_2d_parquet_expr(con, input_file: str, geom_info: dict) -> str:
+    """Read a Parquet source with Z/M dropped from *every* geometry column.
+
+    The secondary geometry columns are preserved into the output's ``geo``
+    block, so leaving them 3D would ship a file that says 2D for its primary
+    column and still carries Z elsewhere. Each column keeps the shape it had
+    (native GEOMETRY stays GEOMETRY, WKB stays WKB), and the metadata copied
+    for the secondaries is corrected to match (``_flatten_geometry_metadata``),
+    in place on ``geom_info``.
+    """
+    source = f"read_parquet({sql_path(input_file)})"
+    replacements = []
+    for column in [geom_info["primary"], *geom_info["secondary"]]:
+        source_encoding = geom_info["metadata"].get(column, {}).get("encoding", "WKB")
+        if source_encoding.lower() != "wkb":
+            raise InvalidParameterError(
+                "force_2d", f"Parquet geometry column {column!r} must be WKB to drop Z/M"
+            )
+        expr, native = _parquet_geometry_expr(con, source, column)
+        flattened = f"ST_Force2D({expr})" if native else f"ST_AsWKB(ST_Force2D({expr}))"
+        replacements.append(f"{flattened} AS {quote_identifier(column)}")
+    for column in geom_info["secondary"]:
+        geom_info["metadata"][column] = _flatten_geometry_metadata(
+            geom_info["metadata"].get(column, {})
+        )
+    return f"(SELECT * REPLACE ({', '.join(replacements)}) FROM {source})"
+
+
+def _csv_wkt_geom_expr(wkt_col: str, geom_info: dict, *, try_parse: bool = False) -> str:
+    """``ST_GeomFromText`` over a quoted WKT column, honouring ``force_2d``.
+
+    ``try_parse`` wraps the parse in ``TRY()`` for ``--skip-invalid``;
+    ``ST_Force2D`` sits outside it so an unparsable row still yields NULL.
+    """
+    parsed = f"ST_GeomFromText({wkt_col})"
+    if try_parse:
+        parsed = f"TRY({parsed})"
+    if geom_info.get("force_2d"):
+        return f"ST_Force2D({parsed})"
+    return parsed
+
+
 def _build_st_read_expr(
     input_path: str,
     layer: str | None = None,
@@ -907,7 +989,7 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
     # Build geometry expression and exclusion list
     if geom_info["type"] == "wkt":
         wkt_col = quote_identifier(geom_info["wkt_column"])
-        geom_expr = f"ST_GeomFromText({wkt_col})"
+        geom_expr = _csv_wkt_geom_expr(wkt_col, geom_info)
         exclude_cols = wkt_col
 
         # For skip_invalid, use TRY() to silently return NULL for invalid WKT.
@@ -922,7 +1004,7 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
                 WITH parsed_geoms AS (
                     SELECT
                         *,
-                        TRY(ST_GeomFromText({wkt_col})) AS geometry
+                        {_csv_wkt_geom_expr(wkt_col, geom_info, try_parse=True)} AS geometry
                     FROM {csv_read}
                 )
                 SELECT
@@ -1243,6 +1325,7 @@ def _convert_csv_path(
     verbose,
     geoparquet_version=None,
     encoding=None,
+    force_2d=False,
 ):
     """Handle CSV/TSV conversion path. Returns SQL query.
 
@@ -1260,6 +1343,8 @@ def _convert_csv_path(
     )
     if geom_info is None:
         return None, None
+    # A WKT column can carry Z/M; lat/lon points are 2D by construction.
+    geom_info["force_2d"] = force_2d
 
     # Validate geometry
     if geom_info["type"] == "wkt":
@@ -1350,6 +1435,7 @@ def _bounds_with_curve_fallback(
     max_angle_deg,
     already_linearized=False,
     open_options=None,
+    force_2d=False,
 ):
     """Dataset bounds, linearizing curved sources the pre-scan cannot see.
 
@@ -1364,7 +1450,9 @@ def _bounds_with_curve_fallback(
     ``table_expr is not None``: a source read with GDAL ``open_options`` also
     arrives as a ready-made expression, and inferring from its presence would
     wrongly disable this fallback for it. ``open_options`` travels into the
-    linearized re-read so it sees the same source as the first read did.
+    linearized re-read so it sees the same source as the first read did, and
+    ``force_2d`` is re-applied on top of the view, since the caller's wrapped
+    expression is replaced by it.
 
     Returns:
         tuple: (bounds, table_expr) — table_expr is the linearized view when
@@ -1386,6 +1474,8 @@ def _bounds_with_curve_fallback(
         table_expr = _register_linearized_view(
             con, input_file, layer, geom_column, max_angle_deg, open_options=open_options
         )
+        if force_2d:
+            table_expr = force_2d_expr(table_expr, geom_column)
         bounds = _calculate_bounds(
             con, input_file, geom_column, verbose, table_expr=table_expr, **kwargs
         )
@@ -1476,23 +1566,7 @@ def _convert_spatial_path(
 
     if force_2d:
         if is_parquet:
-            source_encoding = geom_info["metadata"].get(geom_column, {}).get("encoding", "WKB")
-            if source_encoding.lower() != "wkb":
-                raise InvalidParameterError(
-                    "force_2d", "Parquet input must carry WKB geometry to drop Z/M"
-                )
-            quoted = quote_identifier(geom_column)
-            source = f"read_parquet({sql_path(input_file)})"
-            # A GeoParquet 2.0 file arrives as a native GEOMETRY column, a 1.x
-            # file as WKB blobs; keep whichever shape the column had.
-            (column_type,) = con.execute(
-                f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {source})"
-            ).fetchone()
-            if column_type.upper().startswith("GEOMETRY"):
-                flattened = f"ST_Force2D({quoted})"
-            else:
-                flattened = f"ST_AsWKB(ST_Force2D(ST_GeomFromWKB({quoted})))"
-            table_expr = f"(SELECT * REPLACE ({flattened} AS {quoted}) FROM {source})"
+            table_expr = _force_2d_parquet_expr(con, input_file, geom_info)
         else:
             table_expr = force_2d_expr(
                 table_expr or _build_st_read_expr(input_file, layer, open_options=open_options),
@@ -1537,6 +1611,7 @@ def _convert_spatial_path(
             max_angle_deg=max_angle_deg,
             already_linearized=linearized,
             open_options=open_options,
+            force_2d=force_2d,
         )
         skip_hilbert = bounds is None
         if skip_hilbert:
@@ -1728,6 +1803,7 @@ def read_spatial_to_arrow(
                 skip_invalid,
                 verbose,
                 encoding=encoding,
+                force_2d=force_2d,
             )
         else:
             arrow_table = _read_spatial_to_arrow(
@@ -1808,6 +1884,7 @@ def _read_csv_to_arrow(
     skip_invalid,
     verbose,
     encoding=None,
+    force_2d=False,
 ):
     """Read CSV/TSV to Arrow table with geometry as WKB. Returns None if no geometry."""
     geom_info = _detect_csv_geometry_column(
@@ -1816,6 +1893,7 @@ def _read_csv_to_arrow(
     if geom_info is None:
         warn("No geometry columns found in CSV/TSV. Reading as plain table.")
         return None
+    geom_info["force_2d"] = force_2d
 
     # Validate geometry
     if geom_info["type"] == "wkt":
@@ -1842,7 +1920,7 @@ def _read_csv_to_arrow(
             query = f"""
                 WITH _parsed AS (
                     SELECT * EXCLUDE ({wkt_col}),
-                           TRY(ST_GeomFromText({wkt_col})) AS _geom
+                           {_csv_wkt_geom_expr(wkt_col, geom_info, try_parse=True)} AS _geom
                     FROM {csv_read}
                 )
                 SELECT * EXCLUDE (_geom),
@@ -1853,7 +1931,7 @@ def _read_csv_to_arrow(
         else:
             query = f"""
                 SELECT * EXCLUDE ({wkt_col}),
-                       ST_AsWKB(ST_GeomFromText({wkt_col})) AS geometry
+                       ST_AsWKB({_csv_wkt_geom_expr(wkt_col, geom_info)}) AS geometry
                 FROM {csv_read}
                 WHERE {wkt_col} IS NOT NULL
             """
@@ -1925,11 +2003,9 @@ def _read_spatial_to_arrow(
     # Convert geometry to WKB for geoarrow compatibility
     geometry_expr = quoted_geom
     if force_2d:
-        geometry_expr = (
-            f"ST_Force2D(ST_GeomFromWKB({quoted_geom}))"
-            if is_parquet
-            else f"ST_Force2D({quoted_geom})"
-        )
+        if is_parquet:
+            geometry_expr, _native = _parquet_geometry_expr(con, table_expr, geom_column)
+        geometry_expr = f"ST_Force2D({geometry_expr})"
     query = f"""
         SELECT * EXCLUDE ({quoted_geom}),
                ST_AsWKB({geometry_expr}) AS geometry
@@ -1952,7 +2028,13 @@ def _read_spatial_to_arrow(
         if verbose:
             debug("Curved geometries detected; linearizing via keep_wkb read")
         return _read_spatial_linearized(
-            con, input_file, layer, geom_column, max_angle_deg, open_options=open_options
+            con,
+            input_file,
+            layer,
+            geom_column,
+            max_angle_deg,
+            open_options=open_options,
+            force_2d=force_2d,
         )
 
 
@@ -2394,6 +2476,7 @@ def convert_to_geoparquet(
                     verbose,
                     geoparquet_version=geoparquet_version,
                     encoding=encoding,
+                    force_2d=force_2d,
                 )
                 geometry_info = None
             else:
