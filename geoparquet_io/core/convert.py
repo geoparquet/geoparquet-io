@@ -292,11 +292,23 @@ def _csv_wkt_geom_expr(wkt_col: str, geom_info: dict, *, try_parse: bool = False
     return parsed
 
 
+#: The alias gpio gives an ST_Read that had to be renamed column by column.
+_ALIASED_SOURCE = "gpio_source"
+
+#: GDAL exposes the layer's FID under a driver-specific name, and
+#: ``ST_Read_Meta`` does not report which. It matters only on the collision
+#: path below, where the alias list has to name every column including this
+#: one; everywhere else the read keeps whatever GDAL called it.
+_DRIVER_FID_COLUMNS = {"GPKG": "fid", "OpenFileGDB": "OBJECTID", "FileGDB": "OBJECTID"}
+_DEFAULT_FID_COLUMN = "OGC_FID"
+
+
 def _build_st_read_expr(
     input_path: str,
     layer: str | None = None,
     keep_wkb: bool = False,
     open_options: list[str] | None = None,
+    column_aliases: list[str] | None = None,
 ) -> str:
     """Build ST_Read expression with optional layer/keep_wkb/open_options parameters.
 
@@ -308,6 +320,10 @@ def _build_st_read_expr(
         keep_wkb: Return raw WKB blobs instead of parsed GEOMETRY (DuckDB's
             escape hatch for geometry subtypes it cannot represent)
         open_options: GDAL ``KEY=VALUE`` open options, e.g. ``ENCODING=ISO-8859-1``
+        column_aliases: Positional names for the read's columns, used only to
+            break a case-insensitive collision the binder would otherwise
+            refuse (see :func:`_case_collision_aliases`). They are applied left
+            to right; any column past the end of the list keeps its own name.
 
     Returns:
         SQL expression for ST_Read
@@ -330,7 +346,131 @@ def _build_st_read_expr(
     if open_options:
         joined = ", ".join(f"'{_validate_open_option(option)}'" for option in open_options)
         params += f", open_options := [{joined}]"
-    return f"ST_Read({sql_path(input_path)}{params})"
+    expr = f"ST_Read({sql_path(input_path)}{params})"
+    if column_aliases:
+        names = ", ".join(quote_identifier(name) for name in column_aliases)
+        expr += f" AS {_ALIASED_SOURCE}({names})"
+    return expr
+
+
+def _duplicate_column_error(error: Exception) -> bool:
+    """Is this the binder refusing two column names that differ only by case?"""
+    return isinstance(error, duckdb.BinderException) and "duplicate column name" in str(error)
+
+
+def _st_read_layer_meta(con, input_path: str, layer: str | None) -> tuple[str, list[str]] | None:
+    """``(driver, column names)`` for the layer ``ST_Read`` would read.
+
+    ``ST_Read_Meta`` binds even when ``ST_Read`` itself does not, which is what
+    makes the collision recoverable at all: it is the only way to learn the
+    column names of a file whose names the binder refuses.
+    """
+    row = con.execute(
+        f"SELECT driver_short_name, layers FROM ST_Read_Meta({sql_path(input_path)})"
+    ).fetchone()
+    if not row or not row[1]:
+        return None
+    driver, layers = row[0], row[1]
+    chosen = layers[0]
+    if layer:
+        chosen = next((entry for entry in layers if entry["name"] == layer), None)
+        if chosen is None:
+            return None
+    fields = [field["name"] for field in chosen["fields"]]
+    geometries = [geom["name"] for geom in chosen["geometry_fields"]]
+    return driver, fields + geometries
+
+
+def _st_read_column_count(
+    con, input_path: str, layer: str | None, open_options: list[str] | None, probe_width: int
+) -> int:
+    """How many columns ``ST_Read`` actually returns, collision or not.
+
+    Binding with throwaway positional names is what makes this answerable:
+    surplus names are ignored, so a list wider than the read describes it
+    without the duplicate ever being bound.
+    """
+    probe = [f"c{index}" for index in range(probe_width)]
+    expr = _build_st_read_expr(input_path, layer, open_options=open_options, column_aliases=probe)
+    return len(con.execute(f"SELECT * FROM {expr} LIMIT 0").description)
+
+
+def _suffixed_to_unique(names: list[str]) -> list[str]:
+    """Keep the first spelling of each name; suffix every later case-collision.
+
+    ``['id', 'Id', 'ID']`` becomes ``['id', 'Id_1', 'ID_2']``. Parquet field
+    names are case-sensitive, so none of these columns has to be dropped --
+    they only have to stop colliding under DuckDB's case-insensitive binder.
+    """
+    seen: dict[str, int] = {}
+    unique = []
+    for name in names:
+        key = name.lower()
+        if key not in seen:
+            seen[key] = 0
+            unique.append(name)
+            continue
+        seen[key] += 1
+        candidate = f"{name}_{seen[key]}"
+        while candidate.lower() in seen:
+            seen[key] += 1
+            candidate = f"{name}_{seen[key]}"
+        seen[candidate.lower()] = 0
+        unique.append(candidate)
+    return unique
+
+
+def _case_collision_aliases(
+    con, input_path: str, layer: str | None, open_options: list[str] | None = None
+) -> list[str] | None:
+    """Positional names that let a case-colliding source be read, or None.
+
+    DuckDB identifiers are case-insensitive, so a source carrying both ``id``
+    and ``Id`` -- which a GeoServer WFS response produces routinely, the driver
+    materialising the feature-level ``id`` member beside the publisher's own
+    ``Id`` -- cannot be bound at all: not by ``SELECT *``, not by naming the
+    columns, not even by ``DESCRIBE``. Renaming in the projection is therefore
+    out of reach, and a positional alias list on the read is the only way in.
+
+    Returns None when the source's own names are usable, which is the ordinary
+    case and leaves the query gpio builds untouched.
+    """
+    meta = _st_read_layer_meta(con, input_path, layer)
+    if meta is None:
+        return None
+    driver, names = meta
+
+    total = _st_read_column_count(con, input_path, layer, open_options, len(names) + 8)
+    # Whatever sits in front of the declared columns is GDAL's FID, which
+    # ST_Read_Meta does not name. Guessing beyond that one column would rename
+    # something we cannot identify, so leave the collision unresolved instead.
+    prefix = total - len(names)
+    if prefix < 0 or prefix > 1:
+        return None
+    if prefix:
+        names = [_DRIVER_FID_COLUMNS.get(driver, _DEFAULT_FID_COLUMN)] + names
+
+    unique = _suffixed_to_unique(names)
+    if unique == names:
+        return None
+    for before, after in zip(names, unique, strict=True):
+        if before != after:
+            warn(
+                f'Renamed column "{before}" to "{after}": it collides with an earlier '
+                "column under DuckDB's case-insensitive identifiers"
+            )
+    return unique
+
+
+def _spatial_source_aliases(
+    con, input_path: str, layer: str | None, open_options: list[str] | None = None
+) -> list[str] | None:
+    """``_case_collision_aliases`` if the plain read will not bind, else None."""
+    try:
+        return _case_collision_aliases(con, input_path, layer, open_options)
+    except Exception as error:  # noqa: BLE001 - a failed rescue must not mask the original error
+        debug(f"Could not resolve colliding column names for {input_path}: {error}")
+        return None
 
 
 def _choose_read_strategy(input_path, layer=None, linearize_curves=True):
@@ -361,7 +501,7 @@ def _validate_max_angle(max_angle_deg):
 
 
 def _detect_geometry_column(
-    con, input_file, verbose, is_parquet=False, layer=None, open_options=None
+    con, input_file, verbose, is_parquet=False, layer=None, open_options=None, column_aliases=None
 ):
     """Detect geometry column name from input file.
 
@@ -378,7 +518,9 @@ def _detect_geometry_column(
         return result
 
     # For other formats, use schema-based detection with standard names
-    table_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
+    table_expr = _build_st_read_expr(
+        input_file, layer, open_options=open_options, column_aliases=column_aliases
+    )
     detect_query = f"SELECT * FROM {table_expr} LIMIT 0"
 
     schema_result = con.execute(detect_query).description
@@ -393,6 +535,41 @@ def _detect_geometry_column(
     if verbose:
         debug("No geometry column found in input file")
     return None
+
+
+def _detect_spatial_geometry(con, input_file, verbose, layer, open_options):
+    """Detect the geometry column of a non-parquet source, collisions included.
+
+    Returns ``(column, aliases)``. ``aliases`` is None for every source whose
+    own column names bind -- all of them bar the case-collision case -- and
+    when it is not None the caller must read through it, because the source
+    cannot be read any other way.
+    """
+    try:
+        return (
+            _detect_geometry_column(
+                con, input_file, verbose, is_parquet=False, layer=layer, open_options=open_options
+            ),
+            None,
+        )
+    except Exception as error:
+        if not _duplicate_column_error(error):
+            raise
+        aliases = _spatial_source_aliases(con, input_file, layer, open_options)
+        if aliases is None:
+            raise
+        return (
+            _detect_geometry_column(
+                con,
+                input_file,
+                verbose,
+                is_parquet=False,
+                layer=layer,
+                open_options=open_options,
+                column_aliases=aliases,
+            ),
+            aliases,
+        )
 
 
 def _schema_geometry_column(input_file: str, verbose: bool, is_parquet: bool = True) -> str | None:
@@ -1524,13 +1701,14 @@ def _convert_spatial_path(
     open_options = source_open_options(encoding)
 
     # Use multi-geometry detection for parquet files
+    column_aliases = None
     if is_parquet:
         geom_info = detect_all_geometry_columns(input_file, verbose=verbose)
         geom_column = geom_info["primary"]
         secondary_columns = geom_info["secondary"]
     else:
-        geom_column = _detect_geometry_column(
-            con, input_file, verbose, is_parquet=False, layer=layer, open_options=open_options
+        geom_column, column_aliases = _detect_spatial_geometry(
+            con, input_file, verbose, layer, open_options
         )
         secondary_columns = []
         geom_info = {
@@ -1562,8 +1740,10 @@ def _convert_spatial_path(
                 con, input_file, layer, geom_column, max_angle_deg, open_options=open_options
             )
             linearized = True
-        elif open_options:
-            table_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
+        elif open_options or column_aliases:
+            table_expr = _build_st_read_expr(
+                input_file, layer, open_options=open_options, column_aliases=column_aliases
+            )
 
     if force_2d:
         if is_parquet:
@@ -1979,9 +2159,15 @@ def _read_spatial_to_arrow(
     drops Z/M from the geometry.
     """
     open_options = source_open_options(encoding)
-    geom_column = _detect_geometry_column(
-        con, input_file, verbose, is_parquet=is_parquet, layer=layer, open_options=open_options
-    )
+    column_aliases = None
+    if is_parquet:
+        geom_column = _detect_geometry_column(
+            con, input_file, verbose, is_parquet=True, layer=layer, open_options=open_options
+        )
+    else:
+        geom_column, column_aliases = _detect_spatial_geometry(
+            con, input_file, verbose, layer, open_options
+        )
     if geom_column is None:
         warn("No geometry column found in input file. Reading as plain table.")
         return None
@@ -2009,7 +2195,9 @@ def _read_spatial_to_arrow(
                 open_options=open_options,
                 force_2d=force_2d,
             )
-        table_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
+        table_expr = _build_st_read_expr(
+            input_file, layer, open_options=open_options, column_aliases=column_aliases
+        )
 
     # Convert geometry to WKB for geoarrow compatibility
     geometry_expr = quoted_geom
