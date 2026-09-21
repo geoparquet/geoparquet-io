@@ -1201,6 +1201,20 @@ Each HTTP request defaults to a 60-second timeout. FeatureServer layers with ver
 
 Combine `--timeout` with `--batch-size` (smaller pages) or `--max-allowable-offset` (fewer vertices per feature) when a layer is both slow and heavy.
 
+### Adaptive page size
+
+A layer's advertised `maxRecordCount` is a row limit, not a promise that a page of that many rows can be serialized. Heavy polygon layers regularly fail at the advertised size and succeed at a smaller one, and a page of 55 detailed features can fail where 2,000 points would not. `gpio extract arcgis` therefore treats the page size as a lever: when the server refuses a page, the same offset is retried at the next rung of `1000 → 500 → 100 → 50 → 10 → 1`, and the rung that works is kept for the rest of the download. `--batch-size` sets the starting rung, so a threshold you already know skips the walk.
+
+The ladder is entered when a page comes back as any of:
+
+| The server answered | Which is how |
+|---|---|
+| HTTP 200 with a body that is not JSON | a proxy or WAF page, or a truncated payload |
+| A JSON error envelope with `code` 500 and one of ArcGIS's generic query-failure messages (`Error performing query operation`, `Unable to complete operation`, `Unable to perform query operation`) and no more specific `details` — whether it arrives with HTTP 200 or mirrored into an HTTP 500 | ArcGIS Server reports a page it could not serialize on the EsriJSON (`--output-crs`) path |
+| HTTP 500, 502 or 504 without a JSON body, persisting through the transport's three same-size attempts | the same failure as an HTML error page on the default GeoJSON path, or a proxy giving up on a heavy page |
+
+A JSON envelope is the server's considered answer, so it descends at once; a bare 5xx may be a blip, so the transport's usual attempts (each logged as `HTTP 500 (attempt n/3)`) run first. Each descent is then logged as one warning naming the offset, the size that failed, what the server said, the offset the download resumes from and that the smaller size sticks. Authentication errors (498/499), bad parameters (400), HTTP 501/503 (unsupported, unavailable) and a JSON error 500 whose message or `details` say what actually went wrong are not a page-size problem and fail as before, the last with a reminder that `--batch-size` exists. If even `batch_size=1` is refused, the error states that fact with the server's last message, then points at `--max-allowable-offset` and `--timeout` for a heavy layer or a retry later for a failing service.
+
 ### Finding Service URLs
 
 ArcGIS Feature Service URLs follow this pattern:
