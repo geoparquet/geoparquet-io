@@ -382,6 +382,7 @@ def convert(
     repair_geometry: bool = True,
     linearize_curves: bool = True,
     max_angle_deg: float | None = None,
+    encoding: str | None = None,
 ) -> Table:
     """
     Convert a geospatial file to a Table.
@@ -406,6 +407,9 @@ def convert(
                mirroring repair_geometry). False raises an actionable error instead.
         max_angle_deg: Maximum angular step per stroked arc segment in degrees
                (default: 4.0, GDAL's OGR_ARC_STEPSIZE default).
+        encoding: Source text encoding for sources that cannot say, e.g. a
+               shapefile DBF without ``.cpg`` or a Latin-1 CSV (``ISO-8859-1``,
+               ``UTF-8``, ...). Not for Parquet.
 
     Returns:
         Table for chaining operations
@@ -416,6 +420,7 @@ def convert(
         >>> gpio.convert('data.csv', lat_column='lat', lon_column='lon').write('out.parquet')
         >>> gpio.convert('s3://bucket/data.gpkg', profile='my-aws').write('out.parquet')
         >>> gpio.convert('multilayer.gpkg', layer='buildings').write('buildings.parquet')
+        >>> gpio.convert('ehak.shp', encoding='ISO-8859-1').write('ehak.parquet')
     """
     from geoparquet_io.core.convert import read_spatial_to_arrow
 
@@ -433,6 +438,7 @@ def convert(
         repair_geometry=repair_geometry,
         linearize_curves=linearize_curves,
         max_angle_deg=max_angle_deg,
+        encoding=encoding,
     )
 
     return Table(arrow_table, geometry_column=geom_col, crs=detected_crs)

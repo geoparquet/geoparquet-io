@@ -1430,6 +1430,9 @@ table = gpio.convert('data.csv', lat_column='latitude', lon_column='longitude')
 
 # Convert from S3 with authentication
 table = gpio.convert('s3://bucket/data.gpkg', profile='my-aws')
+
+# Name the text encoding of a source that cannot say (a DBF without .cpg, a Latin-1 CSV)
+table = gpio.convert('ehak.shp', encoding='ISO-8859-1')
 ```
 
 Unlike the CLI `convert` command, the Python API does NOT apply Hilbert sorting by default. Chain `.sort_hilbert()` explicitly if you want spatial ordering:

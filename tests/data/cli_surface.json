@@ -4395,6 +4395,22 @@
        "is_flag": false,
        "metavar": null,
        "multiple": false,
+       "name": "encoding",
+       "nargs": 1,
+       "opts": [
+        "--encoding"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
        "name": "geoparquet_version",
        "nargs": 1,
        "opts": [

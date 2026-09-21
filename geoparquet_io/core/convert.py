@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
+import codecs
 import gc
 import os
+import re
 import time
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _geoarrow_coord_exprs,
+    _install_and_load_extension,
     get_duckdb_connection,
     quote_identifier,
     sql_path,
@@ -87,8 +90,122 @@ def _validate_layer_name(layer: str) -> str:
     return _escape_sql_string(layer)
 
 
-def _build_st_read_expr(input_path: str, layer: str | None = None, keep_wkb: bool = False) -> str:
-    """Build ST_Read expression with optional layer/keep_wkb parameters.
+_OPEN_OPTION_RE = re.compile(r"^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/ -]+$")
+
+
+def _validate_open_option(option: str) -> str:
+    """Accept one GDAL ``KEY=VALUE`` open option, refusing anything SQL could misread."""
+    if not _OPEN_OPTION_RE.match(option):
+        raise InvalidParameterError(
+            "open_options", f"{option!r} is not a GDAL KEY=VALUE open option"
+        )
+    return option
+
+
+def _encoding_name(encoding: str) -> str:
+    """Strip a character encoding name and refuse anything that is not one."""
+    encoding = encoding.strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", encoding):
+        raise InvalidParameterError("encoding", f"{encoding!r} is not a character encoding name")
+    return encoding
+
+
+def validate_source_encoding(encoding: str | None, *, is_parquet: bool) -> None:
+    """Check a requested source text encoding before any work starts.
+
+    Both entry points call this first, ahead of opening a connection, validating
+    the output path or printing progress, so a bad value surfaces as
+    :class:`InvalidParameterError` itself and not re-wrapped as a generic
+    "Conversion failed" once the work is under way. Parquet carries its own
+    UTF-8 strings, so there is nothing for the option to decode there.
+    """
+    if not encoding:
+        return
+    _encoding_name(encoding)
+    if is_parquet:
+        raise InvalidParameterError(
+            "encoding", "only applies to sources GDAL or the CSV reader decode, not Parquet"
+        )
+
+
+def source_open_options(encoding: str | None) -> list[str] | None:
+    """GDAL open options for a source text encoding, or None when none is requested.
+
+    Shapefile DBFs without a ``.cpg`` (and other drivers that cannot tell) are
+    read by GDAL byte for byte, so a Windows-1252 or Latin-1 attribute table
+    reaches DuckDB as invalid UTF-8 and the conversion fails on the first
+    accented value. GDAL's ``ENCODING`` open option recodes at the driver.
+    """
+    if not encoding:
+        return None
+    return [f"ENCODING={_encoding_name(encoding)}"]
+
+
+#: DuckDB's CSV reader spells its encodings its own way; keyed by the codec
+#: registry's canonical name so ``ISO-8859-1``, ``latin1`` and ``latin-1`` all
+#: reach it as the one it knows.
+_DUCKDB_CSV_ENCODINGS = {
+    "iso8859-1": "latin-1",
+    "utf-8": "utf-8",
+    "utf-16": "utf-16",
+    "cp1252": "cp1252",
+}
+
+
+#: What the CSV reader decodes without help. Anything else (CP1252, the CJK
+#: code pages, ...) comes from DuckDB's ``encodings`` extension.
+_DUCKDB_CSV_BUILTIN_ENCODINGS = frozenset({"utf-8", "utf-16", "latin-1"})
+
+
+def _prepare_csv_encoding(con, encoding: str | None) -> None:
+    """Load DuckDB's ``encodings`` extension when the CSV reader needs it.
+
+    The reader knows UTF-8, UTF-16 and Latin-1 on its own; CP1252 and the
+    rest live in the ``encodings`` extension. DuckDB autoloads it when it can
+    reach the extension repository, which made ``--encoding windows-1252``
+    work online and fail offline with the reader's bare "does not support the
+    encoding". Loading it here makes the dependency explicit and, when it
+    cannot be loaded, says so in terms of the option the user set.
+    """
+    reader_encoding = csv_encoding(encoding)
+    if not reader_encoding or reader_encoding.lower() in _DUCKDB_CSV_BUILTIN_ENCODINGS:
+        return
+    try:
+        _install_and_load_extension(con, "encodings")
+    except Exception as e:
+        raise InvalidParameterError(
+            "encoding",
+            f"{reader_encoding!r} needs DuckDB's 'encodings' extension, "
+            f"which could not be loaded: {e}",
+        ) from e
+
+
+def csv_encoding(encoding: str | None) -> str | None:
+    """The DuckDB CSV reader's name for a source text encoding, or None.
+
+    The same ``--encoding`` serves a Latin-1 CSV and a Latin-1 shapefile, so the
+    names users know from GDAL are canonicalized through Python's codec registry
+    and mapped to the reader's spelling. A name the map does not know is handed
+    over as typed: DuckDB then says which encodings it supports, which is more
+    useful than a second list kept here.
+    """
+    if not encoding:
+        return None
+    encoding = _encoding_name(encoding)
+    try:
+        canonical = codecs.lookup(encoding).name
+    except LookupError:
+        return encoding
+    return _DUCKDB_CSV_ENCODINGS.get(canonical, encoding)
+
+
+def _build_st_read_expr(
+    input_path: str,
+    layer: str | None = None,
+    keep_wkb: bool = False,
+    open_options: list[str] | None = None,
+) -> str:
+    """Build ST_Read expression with optional layer/keep_wkb/open_options parameters.
 
     Args:
         input_path: RAW (unescaped) path or URL to the spatial file. It is
@@ -97,6 +214,7 @@ def _build_st_read_expr(input_path: str, layer: str | None = None, keep_wkb: boo
         layer: Optional layer name for multi-layer formats (GeoPackage, FileGDB)
         keep_wkb: Return raw WKB blobs instead of parsed GEOMETRY (DuckDB's
             escape hatch for geometry subtypes it cannot represent)
+        open_options: GDAL ``KEY=VALUE`` open options, e.g. ``ENCODING=ISO-8859-1``
 
     Returns:
         SQL expression for ST_Read
@@ -116,6 +234,9 @@ def _build_st_read_expr(input_path: str, layer: str | None = None, keep_wkb: boo
         params += ", keep_wkb := true"
     if layer:
         params += f", layer := '{_validate_layer_name(layer)}'"
+    if open_options:
+        joined = ", ".join(f"'{_validate_open_option(option)}'" for option in open_options)
+        params += f", open_options := [{joined}]"
     return f"ST_Read({sql_path(input_path)}{params})"
 
 
@@ -146,7 +267,9 @@ def _validate_max_angle(max_angle_deg):
         raise InvalidParameterError("max_angle_deg", "must be a positive number of degrees")
 
 
-def _detect_geometry_column(con, input_file, verbose, is_parquet=False, layer=None):
+def _detect_geometry_column(
+    con, input_file, verbose, is_parquet=False, layer=None, open_options=None
+):
     """Detect geometry column name from input file.
 
     ``input_file`` is RAW: ``detect_parquet_geometry_column`` escapes its own
@@ -162,7 +285,7 @@ def _detect_geometry_column(con, input_file, verbose, is_parquet=False, layer=No
         return result
 
     # For other formats, use schema-based detection with standard names
-    table_expr = _build_st_read_expr(input_file, layer)
+    table_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
     detect_query = f"SELECT * FROM {table_expr} LIMIT 0"
 
     schema_result = con.execute(detect_query).description
@@ -384,7 +507,7 @@ def set_csv_max_line_size(value):
     _csv_max_line_size_override = value
 
 
-def _build_csv_read_expr(input_url: str, delimiter: str | None) -> str:
+def _build_csv_read_expr(input_url: str, delimiter: str | None, encoding: str | None = None) -> str:
     """Build a DuckDB CSV read expression, pinning both reader size limits.
 
     Args:
@@ -393,6 +516,8 @@ def _build_csv_read_expr(input_url: str, delimiter: str | None) -> str:
         delimiter: A RAW CSV delimiter, or None to auto-detect. It goes into a
             SQL string literal, so it is escaped here -- exactly once, at the
             boundary -- rather than by the caller (#937).
+        encoding: Source text encoding (``--encoding``), or None for UTF-8.
+            Mapped to the reader's own spelling by :func:`csv_encoding`.
 
     Returns:
         SQL expression for read_csv / read_csv_auto.
@@ -416,6 +541,9 @@ def _build_csv_read_expr(input_url: str, delimiter: str | None) -> str:
     max_line_size = get_csv_max_line_size()
     buffer_size = max(max_line_size, CSV_READ_BUFFER_MIN)
     size_options = f"max_line_size={max_line_size}, buffer_size={buffer_size}"
+    reader_encoding = csv_encoding(encoding)
+    if reader_encoding:
+        size_options += f", encoding='{_escape_sql_string(reader_encoding)}'"
     if delimiter:
         return (
             f"read_csv({sql_path(input_url)}, delim='{_escape_sql_string(delimiter)}', "
@@ -538,10 +666,16 @@ def _auto_detect_geometry(con, csv_read, col_names_lower, verbose):
 
 
 def _detect_csv_geometry_column(
-    con, input_file, delimiter, wkt_column, lat_column, lon_column, verbose
+    con, input_file, delimiter, wkt_column, lat_column, lon_column, verbose, encoding=None
 ):
-    """Detect geometry columns in CSV/TSV."""
-    csv_read = _build_csv_read_expr(input_file, delimiter)
+    """Detect geometry columns in CSV/TSV.
+
+    The read expression built here is the one every later CSV query reuses
+    (``geom_info["csv_read"]``), so ``encoding`` only has to be applied once,
+    and the extension it may need is loaded on ``con`` once, here.
+    """
+    _prepare_csv_encoding(con, encoding)
+    csv_read = _build_csv_read_expr(input_file, delimiter, encoding=encoding)
     columns, col_names_lower = _get_csv_columns(con, csv_read)
 
     if verbose:
@@ -902,7 +1036,9 @@ def _calculate_csv_bounds(con, geom_info, skip_invalid, verbose):
     return bounds_result
 
 
-def _build_plain_select_query(input_url, is_parquet=False, is_csv=False, delimiter=None):
+def _build_plain_select_query(
+    input_url, is_parquet=False, is_csv=False, delimiter=None, encoding=None
+):
     """Build a SELECT * query for non-geometry file conversion.
 
     Args:
@@ -913,6 +1049,8 @@ def _build_plain_select_query(input_url, is_parquet=False, is_csv=False, delimit
         is_parquet: True if input is a parquet file
         is_csv: True if input is a CSV/TSV file
         delimiter: CSV delimiter (only used if is_csv=True)
+        encoding: Source text encoding (``--encoding``); the attribute table
+            still has to decode when there is no geometry to convert.
 
     Returns:
         SQL SELECT query string
@@ -920,10 +1058,11 @@ def _build_plain_select_query(input_url, is_parquet=False, is_csv=False, delimit
     if is_parquet:
         return f"SELECT * FROM read_parquet({sql_path(input_url)})"
     if is_csv:
-        csv_read = _build_csv_read_expr(input_url, delimiter)
+        csv_read = _build_csv_read_expr(input_url, delimiter, encoding=encoding)
         return f"SELECT * FROM {csv_read}"
     # Spatial formats (GeoJSON, Shapefile, GeoPackage, etc.) - use ST_Read
-    return f"SELECT * FROM ST_Read({sql_path(input_url)})"
+    st_read = _build_st_read_expr(input_url, open_options=source_open_options(encoding))
+    return f"SELECT * FROM {st_read}"
 
 
 #: Warned when Hilbert ordering is skipped for want of an envelope (#649). Both
@@ -1093,6 +1232,7 @@ def _convert_csv_path(
     skip_invalid,
     verbose,
     geoparquet_version=None,
+    encoding=None,
 ):
     """Handle CSV/TSV conversion path. Returns SQL query.
 
@@ -1106,7 +1246,7 @@ def _convert_csv_path(
     skip_bbox = should_skip_bbox(geoparquet_version)
 
     geom_info = _detect_csv_geometry_column(
-        con, input_file, delimiter, wkt_column, lat_column, lon_column, verbose
+        con, input_file, delimiter, wkt_column, lat_column, lon_column, verbose, encoding=encoding
     )
     if geom_info is None:
         return None, None
@@ -1198,6 +1338,8 @@ def _bounds_with_curve_fallback(
     layer,
     linearize_curves,
     max_angle_deg,
+    already_linearized=False,
+    open_options=None,
 ):
     """Dataset bounds, linearizing curved sources the pre-scan cannot see.
 
@@ -1206,6 +1348,13 @@ def _bounds_with_curve_fallback(
     bounds pass is what parses every geometry. Falling back to the linearized
     view keeps ``gpio convert`` in step with the Python API instead of
     surfacing DuckDB's bare "Unsupported geometry type in WKB" (issue #643).
+
+    ``already_linearized`` says whether ``table_expr`` is that view already, in
+    which case the curve error is final. It is an explicit flag rather than
+    ``table_expr is not None``: a source read with GDAL ``open_options`` also
+    arrives as a ready-made expression, and inferring from its presence would
+    wrongly disable this fallback for it. ``open_options`` travels into the
+    linearized re-read so it sees the same source as the first read did.
 
     Returns:
         tuple: (bounds, table_expr) — table_expr is the linearized view when
@@ -1218,14 +1367,15 @@ def _bounds_with_curve_fallback(
         )
         return bounds, table_expr
     except duckdb.Error as e:
-        already_linearized = table_expr is not None
         if already_linearized or not _is_linearizable_curve_error(
             e, is_parquet=is_parquet, linearize_curves=linearize_curves
         ):
             raise
         if verbose:
             debug("Curved geometries detected while measuring bounds; linearizing")
-        table_expr = _register_linearized_view(con, input_file, layer, geom_column, max_angle_deg)
+        table_expr = _register_linearized_view(
+            con, input_file, layer, geom_column, max_angle_deg, open_options=open_options
+        )
         bounds = _calculate_bounds(
             con, input_file, geom_column, verbose, table_expr=table_expr, **kwargs
         )
@@ -1243,8 +1393,13 @@ def _convert_spatial_path(
     linearize_curves=True,
     max_angle_deg=None,
     force_linearize=False,
+    encoding=None,
 ):
     """Handle standard spatial format conversion path.
+
+    ``encoding`` names the source text encoding for drivers that cannot tell
+    (GDAL open option ``ENCODING``). It fixes the read expression up front, so
+    bounds, bbox, Hilbert ordering and the write all see the same source.
 
     ``input_file`` is the **RAW** path throughout: the metadata and filesystem
     helpers each escape their own argument, and the SQL builders escape at the
@@ -1261,6 +1416,10 @@ def _convert_spatial_path(
                and their metadata. Returns (None, None) if no geometry found.
     """
 
+    # ``encoding`` was validated against the input type by the caller, before
+    # any work started; here it only has to become GDAL open options.
+    open_options = source_open_options(encoding)
+
     # Use multi-geometry detection for parquet files
     if is_parquet:
         geom_info = detect_all_geometry_columns(input_file, verbose=verbose)
@@ -1268,7 +1427,7 @@ def _convert_spatial_path(
         secondary_columns = geom_info["secondary"]
     else:
         geom_column = _detect_geometry_column(
-            con, input_file, verbose, is_parquet=False, layer=layer
+            con, input_file, verbose, is_parquet=False, layer=layer, open_options=open_options
         )
         secondary_columns = []
         geom_info = {
@@ -1284,6 +1443,7 @@ def _convert_spatial_path(
     # detected up front (GPKG pre-scan, issue #643) they are read once via
     # the linearize path and exposed as a view the query can use instead.
     table_expr = None
+    linearized = False
     if not is_parquet:
         strategy = _choose_read_strategy(input_file, layer, linearize_curves)
         if strategy == "error":
@@ -1296,8 +1456,11 @@ def _convert_spatial_path(
             if verbose:
                 debug("Curved geometries detected; linearizing via keep_wkb read")
             table_expr = _register_linearized_view(
-                con, input_file, layer, geom_column, max_angle_deg
+                con, input_file, layer, geom_column, max_angle_deg, open_options=open_options
             )
+            linearized = True
+        elif open_options:
+            table_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
 
     # Determine if bbox should be skipped for this version
     skip_bbox = should_skip_bbox(geoparquet_version)
@@ -1335,6 +1498,8 @@ def _convert_spatial_path(
             layer=layer,
             linearize_curves=linearize_curves,
             max_angle_deg=max_angle_deg,
+            already_linearized=linearized,
+            open_options=open_options,
         )
         skip_hilbert = bounds is None
         if skip_hilbert:
@@ -1401,6 +1566,7 @@ def read_spatial_to_arrow(
     repair_geometry=True,
     linearize_curves=True,
     max_angle_deg=None,
+    encoding=None,
 ):
     """
     Read a geospatial file and return an Arrow table with geometry.
@@ -1428,6 +1594,10 @@ def read_spatial_to_arrow(
             error instead.
         max_angle_deg: Maximum angular step per stroked arc segment in degrees
             (default: 4.0, GDAL's OGR_ARC_STEPSIZE default).
+        encoding: Source text encoding for sources that cannot say, e.g. a
+            shapefile DBF without ``.cpg`` or a Latin-1 CSV (``ISO-8859-1``,
+            ``UTF-8``, ...). Passed to GDAL as open option ``ENCODING``, or to
+            DuckDB's CSV reader. Not for Parquet.
 
     Returns:
         tuple: (arrow_table, detected_crs_projjson, geometry_column_name)
@@ -1436,6 +1606,7 @@ def read_spatial_to_arrow(
         GeoParquetError: If input file not found or reading fails
     """
     _validate_max_angle(max_angle_deg)
+    validate_source_encoding(encoding, is_parquet=_is_parquet_file(input_file))
     configure_verbose(verbose)
 
     # Validate profile is only used with S3
@@ -1508,7 +1679,15 @@ def read_spatial_to_arrow(
         # Build and execute query
         if is_csv:
             arrow_table = _read_csv_to_arrow(
-                con, input_url, delimiter, wkt_column, lat_column, lon_column, skip_invalid, verbose
+                con,
+                input_url,
+                delimiter,
+                wkt_column,
+                lat_column,
+                lon_column,
+                skip_invalid,
+                verbose,
+                encoding=encoding,
             )
         else:
             arrow_table = _read_spatial_to_arrow(
@@ -1519,6 +1698,7 @@ def read_spatial_to_arrow(
                 layer=layer,
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
+                encoding=encoding,
             )
 
         # No geometry found — read as plain table
@@ -1526,10 +1706,12 @@ def read_spatial_to_arrow(
             if is_parquet:
                 table_expr = f"read_parquet({sql_path(input_url)})"
             elif is_csv:
-                table_expr = _build_csv_read_expr(input_url, delimiter)
+                table_expr = _build_csv_read_expr(input_url, delimiter, encoding=encoding)
             else:
                 # Spatial formats (GeoJSON, Shapefile, GeoPackage, etc.)
-                table_expr = _build_st_read_expr(input_file, layer)
+                table_expr = _build_st_read_expr(
+                    input_file, layer, open_options=source_open_options(encoding)
+                )
             arrow_table = con.execute(f"SELECT * FROM {table_expr}").arrow().read_all()
             return arrow_table, None, None
 
@@ -1576,11 +1758,19 @@ def read_spatial_to_arrow(
 
 
 def _read_csv_to_arrow(
-    con, input_url, delimiter, wkt_column, lat_column, lon_column, skip_invalid, verbose
+    con,
+    input_url,
+    delimiter,
+    wkt_column,
+    lat_column,
+    lon_column,
+    skip_invalid,
+    verbose,
+    encoding=None,
 ):
     """Read CSV/TSV to Arrow table with geometry as WKB. Returns None if no geometry."""
     geom_info = _detect_csv_geometry_column(
-        con, input_url, delimiter, wkt_column, lat_column, lon_column, verbose
+        con, input_url, delimiter, wkt_column, lat_column, lon_column, verbose, encoding=encoding
     )
     if geom_info is None:
         warn("No geometry columns found in CSV/TSV. Reading as plain table.")
@@ -1648,14 +1838,17 @@ def _read_spatial_to_arrow(
     layer=None,
     linearize_curves=True,
     max_angle_deg=None,
+    encoding=None,
 ):
     """Read spatial file to Arrow table with geometry as WKB. Returns None if no geometry.
 
     ``input_file`` is RAW; every helper below either escapes its own argument or
-    escapes at the SQL boundary via ``sql_path`` (issue #718).
+    escapes at the SQL boundary via ``sql_path`` (issue #718). ``encoding`` is
+    the source text encoding (GDAL open option ``ENCODING``).
     """
+    open_options = source_open_options(encoding)
     geom_column = _detect_geometry_column(
-        con, input_file, verbose, is_parquet=is_parquet, layer=layer
+        con, input_file, verbose, is_parquet=is_parquet, layer=layer, open_options=open_options
     )
     if geom_column is None:
         warn("No geometry column found in input file. Reading as plain table.")
@@ -1675,8 +1868,15 @@ def _read_spatial_to_arrow(
         if strategy == "linearized":
             if verbose:
                 debug("Curved geometries detected; linearizing via keep_wkb read")
-            return _read_spatial_linearized(con, input_file, layer, geom_column, max_angle_deg)
-        table_expr = _build_st_read_expr(input_file, layer)
+            return _read_spatial_linearized(
+                con,
+                input_file,
+                layer,
+                geom_column,
+                max_angle_deg,
+                open_options=open_options,
+            )
+        table_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
 
     # Convert geometry to WKB for geoarrow compatibility
     query = f"""
@@ -1700,7 +1900,9 @@ def _read_spatial_to_arrow(
             raise
         if verbose:
             debug("Curved geometries detected; linearizing via keep_wkb read")
-        return _read_spatial_linearized(con, input_file, layer, geom_column, max_angle_deg)
+        return _read_spatial_linearized(
+            con, input_file, layer, geom_column, max_angle_deg, open_options=open_options
+        )
 
 
 #: Rows per batch for the linearized read. DuckDB's ``.arrow()`` defaults to
@@ -1727,10 +1929,11 @@ class _LinearizedRead:
     large curved dataset can exceed.
     """
 
-    def __init__(self, con, input_file, layer, geom_column, max_angle_deg=None):
+    def __init__(self, con, input_file, layer, geom_column, max_angle_deg=None, open_options=None):
         from geoparquet_io.core.linearize import DEFAULT_MAX_ANGLE_DEG
 
         self.con = con
+        self.open_options = open_options
         # RAW path: _build_st_read_expr escapes it at the SQL boundary, and the
         # error messages below quote it back to the user unmangled (#718).
         self.input_file = input_file
@@ -1759,7 +1962,10 @@ class _LinearizedRead:
         # keep_wkb read does not consult them.
         self._cursor = self.con.cursor()
         return self._cursor.execute(
-            f"SELECT * FROM {_build_st_read_expr(self.input_file, self.layer, keep_wkb=True)}"
+            "SELECT * FROM "
+            + _build_st_read_expr(
+                self.input_file, self.layer, keep_wkb=True, open_options=self.open_options
+            )
         ).arrow(rows_per_batch=_LINEARIZE_BATCH_ROWS)
 
     def batches(self):
@@ -1811,14 +2017,24 @@ class _LinearizedRead:
         )
 
 
-def _read_spatial_linearized(con, input_file, layer, geom_column, max_angle_deg=None, read=None):
+def _read_spatial_linearized(
+    con,
+    input_file,
+    layer,
+    geom_column,
+    max_angle_deg=None,
+    read=None,
+    open_options=None,
+):
     """Linearized read shaped like the normal read path (WKB `geometry` column).
 
     ``input_file`` is a RAW path (see :class:`_LinearizedRead`).
     """
     import pyarrow as pa
 
-    read = read or _LinearizedRead(con, input_file, layer, geom_column, max_angle_deg)
+    read = read or _LinearizedRead(
+        con, input_file, layer, geom_column, max_angle_deg, open_options=open_options
+    )
     table = pa.Table.from_batches(list(read.batches()), schema=read.schema)
 
     # Round-trip through DuckDB: validates the stroked WKB and yields the same
@@ -1833,7 +2049,9 @@ def _read_spatial_linearized(con, input_file, layer, geom_column, max_angle_deg=
     return result.arrow().read_all()
 
 
-def _register_linearized_view(con, input_file, layer, geom_column, max_angle_deg=None, read=None):
+def _register_linearized_view(
+    con, input_file, layer, geom_column, max_angle_deg=None, read=None, open_options=None
+):
     """Stream a linearized read into a temp relation shaped like ST_Read's output.
 
     The relation exposes a GEOMETRY-typed column under its original name and
@@ -1844,7 +2062,9 @@ def _register_linearized_view(con, input_file, layer, geom_column, max_angle_deg
     """
     import pyarrow as pa
 
-    read = read or _LinearizedRead(con, input_file, layer, geom_column, max_angle_deg)
+    read = read or _LinearizedRead(
+        con, input_file, layer, geom_column, max_angle_deg, open_options=open_options
+    )
     quoted_wkb = quote_identifier(read.wkb_col)
     select = (
         f"SELECT * REPLACE (ST_GeomFromWKB({quoted_wkb}) AS {quoted_wkb}) "
@@ -1998,6 +2218,7 @@ def convert_to_geoparquet(
     linearize_curves=True,
     max_angle_deg=None,
     memory_limit=None,
+    encoding=None,
 ):
     """
     Convert vector format to optimized GeoParquet.
@@ -2045,11 +2266,16 @@ def convert_to_geoparquet(
             (default: 4.0, GDAL's OGR_ARC_STEPSIZE default).
         memory_limit: DuckDB memory limit for the write, e.g. "2GB" (default: None,
             meaning half of available RAM).
+        encoding: Source text encoding for sources that cannot say, e.g. a
+            shapefile DBF without ``.cpg`` or a Latin-1 CSV (``ISO-8859-1``,
+            ``UTF-8``, ...). Passed to GDAL as open option ``ENCODING``, or to
+            DuckDB's CSV reader. Not for Parquet.
 
     Raises:
         GeoParquetError: If input file not found or conversion fails
     """
     _validate_max_angle(max_angle_deg)
+    validate_source_encoding(encoding, is_parquet=_is_parquet_file(input_file))
     configure_verbose(verbose)
     start_time = time.time()
 
@@ -2109,6 +2335,7 @@ def convert_to_geoparquet(
                     skip_invalid,
                     verbose,
                     geoparquet_version=geoparquet_version,
+                    encoding=encoding,
                 )
                 geometry_info = None
             else:
@@ -2123,6 +2350,7 @@ def convert_to_geoparquet(
                     linearize_curves=linearize_curves,
                     max_angle_deg=max_angle_deg,
                     force_linearize=force_linearize,
+                    encoding=encoding,
                 )
 
             # No geometry detected — error unless explicitly allowed
@@ -2147,7 +2375,11 @@ def convert_to_geoparquet(
                     "Converting as plain Parquet without GeoParquet metadata."
                 )
                 query = _build_plain_select_query(
-                    input_url, is_parquet=is_parquet, is_csv=is_csv, delimiter=delimiter
+                    input_url,
+                    is_parquet=is_parquet,
+                    is_csv=is_csv,
+                    delimiter=delimiter,
+                    encoding=encoding,
                 )
                 output_version = "parquet-geo-only"
                 output_crs = None
