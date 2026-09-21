@@ -291,9 +291,11 @@ class TestTheFileOnDisk:
 class TestAnInputThatChangesUnderTheCall:
     """`os.replace` is atomic; it is not a compare-and-swap.
 
-    Another writer landing between the footer being read and the pages being
-    copied would leave a file pairing one version's footer with another
-    version's data. gpio takes no locks, so the call checks and refuses.
+    Another writer landing while the pages are being copied would leave a file
+    pairing one version's footer with another version's data; one landing after
+    that, before the replace, would be overwritten by a staged file that is
+    already stale. gpio takes no locks, so the call checks and refuses at both
+    points, and the second check is the last thing it does.
     """
 
     def test_a_file_replaced_mid_copy_is_refused(self, geo_file, tmp_path, monkeypatch):
@@ -305,6 +307,27 @@ class TestAnInputThatChangesUnderTheCall:
             geo_file.write_bytes(other.read_bytes())
 
         monkeypatch.setattr(parquet_footer, "_copy_below_footer", copy_then_let_another_writer_land)
+
+        with pytest.raises(FooterPatchUnsupported, match="changed while it was being copied"):
+            patch_footer_kv(str(geo_file), {"note": "x"})
+
+        assert geo_file.read_bytes() == other.read_bytes(), "the other writer's file was clobbered"
+
+    def test_a_file_replaced_after_the_copy_is_refused(self, geo_file, tmp_path, monkeypatch):
+        """The narrow window: the staged file is complete and verified by now.
+
+        `_inherit_mode` is the last thing before the check, so a writer landing
+        there lands as late as this can still see. What is left after it is one
+        syscall, which no check can cover.
+        """
+        other = _write_geoparquet(tmp_path / "other.parquet", rows=2500, label="other")
+        real_inherit = parquet_footer._inherit_mode
+
+        def inherit_then_let_another_writer_land(staged, parquet_file, destination):
+            real_inherit(staged, parquet_file, destination)
+            geo_file.write_bytes(other.read_bytes())
+
+        monkeypatch.setattr(parquet_footer, "_inherit_mode", inherit_then_let_another_writer_land)
 
         with pytest.raises(FooterPatchUnsupported, match="changed while it was being copied"):
             patch_footer_kv(str(geo_file), {"note": "x"})

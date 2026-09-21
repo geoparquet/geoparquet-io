@@ -414,32 +414,47 @@ def _file_stamp(parquet_file: str) -> tuple[int, int, int]:
     return info.st_ino, info.st_size, info.st_mtime_ns
 
 
-def _refuse_if_the_input_changed(
+def _changed(parquet_file: str) -> FooterPatchUnsupported:
+    return FooterPatchUnsupported(
+        f"{parquet_file} changed while it was being copied; nothing was written"
+    )
+
+
+def _refuse_if_the_pages_changed(
     parquet_file: str,
-    stamp: tuple[int, int, int],
     source: BinaryIO,
     footer_start: int,
     original: bytes,
 ) -> None:
-    """Refuse a staged copy whose input changed while it was being read.
+    """Refuse a copy taken from pages that were rewritten under it.
 
-    `os.replace` is atomic but it is not a compare-and-swap. Nothing stops
-    another process rewriting the input between the footer being read and the
-    pages being copied, which would leave the staged file pairing one version's
-    footer with another version's data, and an in-place call would then publish
-    that mix over the writer's own work.
-
-    gpio coordinates writers nowhere, so this does not take a lock: it checks
-    and refuses rather than publishing a file it cannot vouch for. The stat
-    catches an input replaced under its path, the footer re-read catches one
-    rewritten in place through the handle this copy came from. A change in the
-    instant between this check and the replace is not detectable without one.
+    Another process rewriting the input in place, between the footer being read
+    and the pages being copied, would leave the staged file pairing one
+    version's footer with another version's data. This re-reads the footer
+    through the handle the copy came from, so it sees that inode as the copy
+    saw it, whatever the path now points at.
     """
     source.seek(footer_start)
-    if _file_stamp(parquet_file) != stamp or source.read(len(original)) != original:
-        raise FooterPatchUnsupported(
-            f"{parquet_file} changed while it was being copied; nothing was written"
-        )
+    if source.read(len(original)) != original:
+        raise _changed(parquet_file)
+
+
+def _refuse_if_the_file_changed(parquet_file: str, stamp: tuple[int, int, int]) -> None:
+    """Refuse to publish over an input that is no longer the one that was read.
+
+    `os.replace` is atomic but it is not a compare-and-swap: it will happily
+    overwrite a version of the file this call never saw, which for an in-place
+    patch means publishing over another writer's work. gpio coordinates writers
+    nowhere and an advisory lock taken here would bind only other calls to this
+    function, not the rewrite paths or whatever else holds the file, so this
+    checks instead of locking.
+
+    It is the last thing done before the replace, which leaves a window one
+    syscall wide. Closing that window needs a lock every writer takes, or a
+    conditional rename the platform does not offer.
+    """
+    if _file_stamp(parquet_file) != stamp:
+        raise _changed(parquet_file)
 
 
 def _read_metadata_or_refuse(parquet_file: str) -> pq.FileMetaData:
@@ -501,9 +516,9 @@ def patch_footer_kv(
     needs room for a second copy of the file while the call runs. An in-place
     call that would change nothing writes nothing at all.
 
-    An input that changes while it is being copied is refused rather than
-    published: see `_refuse_if_the_input_changed`, which is a check, not a
-    lock.
+    An input that changes while it is being copied, or between the copy and the
+    replace, is refused rather than published: see `_refuse_if_the_pages_changed`
+    and `_refuse_if_the_file_changed`. Both are checks, not locks.
 
     Args:
         parquet_file: Path to a local Parquet file. Only read.
@@ -551,6 +566,9 @@ def patch_footer_kv(
             sink.write(footer)
             sink.write(struct.pack("<I", len(footer)))
             sink.write(MAGIC)
-            _refuse_if_the_input_changed(parquet_file, stamp, source, footer_start, original)
+            _refuse_if_the_pages_changed(parquet_file, source, footer_start, original)
         _verify_data_untouched(before, staged)
         _inherit_mode(staged, parquet_file, destination)
+        # Last, so that the gap between deciding the input is still the one
+        # that was read and `atomic_write` replacing it is a single syscall.
+        _refuse_if_the_file_changed(parquet_file, stamp)
