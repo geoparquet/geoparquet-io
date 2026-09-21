@@ -1,28 +1,30 @@
 """``geo.columns`` must not name a column the file does not contain.
 
-When a file's sole geometry column is spelled in a case that is not the one in
-``STANDARD_GEOMETRY_NAMES`` -- ``GEOMETRY`` rather than ``geometry`` -- every
-gpio write path emits a ``geo.columns`` entry keyed by the *lowercase* literal.
-No such column is in the schema, and the real one is left without the metadata
-that belongs to it (its ``covering``, when ``--add-bbox`` computed one).
+A file whose sole geometry column is spelled in a case that is not the one in
+``STANDARD_GEOMETRY_NAMES`` -- ``GEOMETRY`` rather than ``geometry`` -- used to
+come out of every gpio write path with a ``geo.columns`` entry keyed by the
+*lowercase* literal. No such column was in the schema, and the real one was left
+without the metadata that belonged to it (its ``covering``, when ``--add-bbox``
+had computed one).
 
-Measured with 1.5.0, on a 50-row file whose only geometry column is
-``GEOMETRY``, after ``gpio sort str in.parquet out.parquet --add-bbox``:
+Measured on 1.5.0, on a 50-row file whose only geometry column is ``GEOMETRY``,
+after ``gpio sort str in.parquet out.parquet --add-bbox``:
 
     schema:  ['id', 'GEOMETRY', 'bbox']
     geo.primary_column: 'GEOMETRY'
     geo.columns['GEOMETRY'].covering  -> absent
     geo.columns['geometry'].covering  -> {'bbox': {'xmin': ['bbox', 'xmin'], ...}}
 
-``geometry`` is a phantom. gpio's own validator says so about gpio's own output
--- ``gpio check spec`` on that file reports five failures, all of the form
-``column "geometry" not found in schema``. So this is not a question of how
-strictly a reader should treat a missing covering; the written file is
-internally inconsistent, and a downstream validator that reads ``covering``
-(the per-row box a row-order check needs) sees none.
+``geometry`` was a phantom, and gpio's own validator said so about gpio's own
+output -- ``gpio check spec`` on that file reported five failures, all of the
+form ``column "geometry" not found in schema``. So this was not a question of
+how strictly a reader should treat a missing covering; the written file was
+internally inconsistent, and a downstream validator reading ``covering`` (the
+per-row box a row-order check needs) saw none.
 
-**This is not an ``--add-bbox`` bug.** The fault is in the write funnel's
-geometry detection, so it reaches every write path. On the same fixture:
+**It was never an ``--add-bbox`` bug.** The fault sat in the write funnel's
+geometry detection, so it reached every write path. On this fixture, before the
+fix:
 
     GEOMETRY  / gpio sort hilbert         phantom={'geometry'}  primary='GEOMETRY'
     GEOMETRY  / gpio add h3 -r 7          phantom={'geometry'}  primary='GEOMETRY'
@@ -30,23 +32,24 @@ geometry detection, so it reaches every write path. On the same fixture:
     footprint / ...                       phantom=set()
     the_geom  / ...                       phantom=set()
 
-``footprint`` and ``the_geom`` come out clean because no standard name matches
-at all, so control falls to the type-based branch, which returns the column's
-real name. The trigger is the *case* of a standard name, not the word -- so a
-publisher whose GeoPackage column is ``GEOMETRY`` (INSPIRE-derived national
-downloads use exactly that) can never get a valid ``geo`` block, and nothing on
-the command line overrides it: passing ``-g GEOMETRY`` explicitly makes no
-difference, and GeoParquet 1.1 output behaves the same way.
+``footprint`` and ``the_geom`` came out clean because no standard name matches
+them at all, so control fell to the type-based branch, which returns the
+column's real name. The trigger was the *case* of a standard name, not the word
+-- so a publisher whose GeoPackage column is ``GEOMETRY`` (INSPIRE-derived
+national downloads use exactly that) could never get a valid ``geo`` block, and
+nothing on the command line overrode it: ``-g GEOMETRY`` made no difference, and
+GeoParquet 1.1 output behaved the same way.
 
-Root cause -- ``geoparquet_io/core/geometry_detection.py``,
-``_detect_geometry_from_query``: it lowercases the ``DESCRIBE`` column list and
-then, on a standard-name match, returns ``std_name`` (the lowercase literal)
-rather than the column's own spelling, the way ``detect_geometry_column_from_names``
-already does. ``write_funnels.write_parquet_with_metadata`` takes that as
-``geometry_column`` and hands it to ``build_geo_metadata``, which writes
-``geo["columns"]["geometry"]``.
+Cause -- ``geoparquet_io/core/geometry_detection.py``,
+``_detect_geometry_from_query``: it lowercased the ``DESCRIBE`` column list and
+then, on a standard-name match, returned ``std_name`` (the lowercase literal)
+rather than the column's own spelling, unlike its own ``primary_column`` branch
+directly above it and unlike ``detect_geometry_column_from_names``.
+``write_funnels.write_parquet_with_metadata`` took that as ``geometry_column``
+and handed it to ``build_geo_metadata``, which wrote ``geo["columns"]["geometry"]``.
 
-This file only pins the behaviour; the fix is left to the maintainers.
+Found while mirroring Czech national open geodata (ČÚZK), where 19 layers could
+not be published because the covering never appeared.
 """
 
 import json
@@ -77,10 +80,10 @@ def _write_uppercase_geometry_parquet(path) -> None:
         con.close()
 
     # The whole scenario rests on the input declaring the uppercase column as
-    # its primary: that is what keeps 'GEOMETRY' the output's primary while the
-    # writer separately invents the lowercase key. If a DuckDB/spatial upgrade
-    # stops emitting the geo block, the strict xfails below would keep xfailing
-    # for an unrelated reason and quietly stop testing anything.
+    # its primary -- that is what the writer has to carry through. If a
+    # DuckDB/spatial upgrade stops emitting the geo block, the tests below would
+    # go on passing for an unrelated reason and quietly stop testing anything,
+    # so the fixture states its own premise rather than assuming it.
     geo = _geo_metadata(path)
     assert geo["primary_column"] == "GEOMETRY", (
         "fixture premise: the input must declare the uppercase column as primary"
@@ -115,16 +118,16 @@ def _hilbert_sorted(tmp_path):
 
 
 def test_add_bbox_writes_the_physical_bbox_column(tmp_path):
-    """The bbox column itself is computed correctly -- only its declaration is wrong."""
+    """The bbox column itself: the values, not just the column names."""
     output = _sorted_with_bbox(tmp_path)
     table = pq.read_table(str(output))
     assert "bbox" in table.column_names
     assert "GEOMETRY" in table.column_names
 
-    # Read the values, not just the names: the other tests are xfail(strict),
-    # so a regression that computed the bbox off the wrong column, or wrote
-    # nulls, would leave this file green if this positive control only counted
-    # columns.
+    # Keyed by id rather than by row position: `sort str` is what produces
+    # this file, so positional indices would pin its output order as a side
+    # effect. Reading the values is the point -- a regression that computed the
+    # bbox off the wrong column, or wrote nulls, passes a names-only check.
     boxes = table.column("bbox").combine_chunks().to_pylist()
     assert len(boxes) == 50
     ids = table.column("id").combine_chunks().to_pylist()
@@ -136,12 +139,8 @@ def test_add_bbox_writes_the_physical_bbox_column(tmp_path):
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="gpio gap: the covering is declared under a lowercase 'geometry' key when "
-    "the geometry column is 'GEOMETRY', leaving the real column without one",
-)
 def test_covering_is_declared_on_the_real_geometry_column(tmp_path):
+    """The covering belongs to the column the bbox was computed from."""
     geo = _geo_metadata(_sorted_with_bbox(tmp_path))
     assert geo["primary_column"] == "GEOMETRY"
     covering = geo["columns"]["GEOMETRY"].get("covering")
@@ -149,25 +148,16 @@ def test_covering_is_declared_on_the_real_geometry_column(tmp_path):
     assert covering["bbox"]["xmin"] == ["bbox", "xmin"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="gpio gap: the write funnel adds a geo.columns entry for a lowercase "
-    "'geometry' column that is not in the schema",
-)
 def test_geo_metadata_names_no_column_absent_from_the_schema(tmp_path):
+    """The spec point: every `geo.columns` key is a column the file has."""
     output = _sorted_with_bbox(tmp_path)
     schema_names = set(pq.ParquetFile(str(output)).schema_arrow.names)
     declared = set(_geo_metadata(output)["columns"])
     assert declared <= schema_names, f"geo declares absent column(s): {declared - schema_names}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="gpio gap: the phantom lowercase 'geometry' entry is written by the shared "
-    "write funnel, so a plain sort with no --add-bbox produces it too",
-)
 def test_geo_metadata_names_no_absent_column_without_add_bbox(tmp_path):
-    """The blast radius: no ``--add-bbox`` anywhere, same invalid ``geo`` block."""
+    """The blast radius: the same must hold with no ``--add-bbox`` anywhere."""
     output = _hilbert_sorted(tmp_path)
     schema_names = set(pq.ParquetFile(str(output)).schema_arrow.names)
     declared = set(_geo_metadata(output)["columns"])
