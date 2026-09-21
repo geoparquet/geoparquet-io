@@ -42,67 +42,130 @@ Two ways to close it, in preference order, both left to the maintainers:
    GeoPackage but it puts the burden on the caller.
 
 This file only pins the behaviour; it does not choose.
+
+The fixture carries **two** layers on purpose. Those archives are multi-layer,
+and ``gpkg_geometry_columns`` is keyed by ``table_name``: a fix that reads the
+table without honouring ``--layer`` -- ``SELECT column_name FROM
+gpkg_geometry_columns LIMIT 1`` -- would answer ``geom`` from the other layer
+and be wrong on every file this is about. Converting the *second* layer, while
+the first is conventionally named, is what makes that mistake visible.
+
+The failing expectation is marked xfail imperatively rather than with
+``pytest.mark.xfail(strict=True)``. The marker would swallow *any* failure of
+this test, so an unrelated breakage (a future duckdb-spatial that cannot read
+the fixture at all) would keep reading as a green xfail and quietly stop
+pinning anything. Calling :func:`pytest.xfail` only after the specific
+"No geometry column detected" refusal has been seen keeps every other failure
+loud, and lets the test turn into an ordinary passing regression test the day
+the gap is closed.
 """
 
+import json
 import sqlite3
+from pathlib import Path
 
 import duckdb
+import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import sql_path
 
 LAYER = "CablewayLink"
 GEOM_COLUMN = "CENTRELINE_GEOMETRY"
+LAYER_ROWS = 20
+
+OTHER_LAYER = "RoadLink"
+OTHER_GEOM_COLUMN = "geom"
+OTHER_LAYER_ROWS = 5
+
+REFUSAL = "No geometry column detected"
 
 
-def _write_gpkg_with_declared_geometry_column(path) -> None:
-    """A one-layer GeoPackage whose geometry column is ``CENTRELINE_GEOMETRY``."""
+def _write_layer(path: Path, layer: str, geom_column: str, rows: int) -> None:
+    """Write a single-layer GeoPackage whose geometry column is *geom_column*."""
     con = duckdb.connect()
     try:
         con.execute("INSTALL spatial; LOAD spatial;")
         con.execute(
-            "COPY (SELECT i AS id, ST_Point(i * 0.1, i * 0.1) AS geom FROM range(20) t(i)) "
-            f"TO '{path}' (FORMAT GDAL, DRIVER 'GPKG', LAYER_NAME '{LAYER}', "
-            f"LAYER_CREATION_OPTIONS 'GEOMETRY_NAME={GEOM_COLUMN}')"
+            f"COPY (SELECT i AS id, ST_Point(i * 0.1, i * 0.1) AS geom FROM range({rows}) t(i)) "
+            f"TO {sql_path(path)} (FORMAT GDAL, DRIVER 'GPKG', LAYER_NAME '{layer}', "
+            f"LAYER_CREATION_OPTIONS 'GEOMETRY_NAME={geom_column}')"
         )
     finally:
         con.close()
 
 
-def test_the_fixture_declares_the_column_it_claims_to(tmp_path):
-    """Guard the premise: the answer really is in gpkg_geometry_columns."""
+def _write_two_layer_gpkg(path: Path) -> None:
+    """A GeoPackage carrying a conventionally named layer *and* an INSPIRE one.
+
+    DuckDB's GDAL copy rewrites the file per layer, so the second layer is
+    written separately and grafted on over SQLite -- table DDL, ``gpkg_contents``
+    row and ``gpkg_geometry_columns`` row -- which is all GDAL needs to read it.
+    """
+    donor = path.with_name(f"donor-{path.name}")
+    _write_layer(path, OTHER_LAYER, OTHER_GEOM_COLUMN, OTHER_LAYER_ROWS)
+    _write_layer(donor, LAYER, GEOM_COLUMN, LAYER_ROWS)
+
+    con = sqlite3.connect(str(path))
+    try:
+        con.execute("ATTACH DATABASE ? AS donor", (str(donor),))
+        (ddl,) = con.execute(
+            "SELECT sql FROM donor.sqlite_master WHERE type = 'table' AND name = ?",
+            (LAYER,),
+        ).fetchone()
+        con.execute(ddl)
+        con.execute(f'INSERT INTO "{LAYER}" SELECT * FROM donor."{LAYER}"')
+        con.execute("INSERT INTO gpkg_contents SELECT * FROM donor.gpkg_contents")
+        con.execute("INSERT INTO gpkg_geometry_columns SELECT * FROM donor.gpkg_geometry_columns")
+        con.commit()
+    finally:
+        con.close()
+    donor.unlink()
+
+
+def test_the_fixture_declares_the_columns_it_claims_to(tmp_path):
+    """Guard the premise: the answer really is in gpkg_geometry_columns, per layer."""
     gpkg = tmp_path / "link.gpkg"
-    _write_gpkg_with_declared_geometry_column(gpkg)
+    _write_two_layer_gpkg(gpkg)
 
     con = sqlite3.connect(str(gpkg))
     try:
-        rows = con.execute("SELECT table_name, column_name FROM gpkg_geometry_columns").fetchall()
+        rows = con.execute(
+            "SELECT table_name, column_name FROM gpkg_geometry_columns ORDER BY table_name"
+        ).fetchall()
     finally:
         con.close()
-    assert rows == [(LAYER, GEOM_COLUMN)]
+    assert rows == [(LAYER, GEOM_COLUMN), (OTHER_LAYER, OTHER_GEOM_COLUMN)]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="gpio gap: convert geoparquet matches GeoPackage geometry columns against "
-    "STANDARD_GEOMETRY_NAMES instead of reading gpkg_geometry_columns.column_name",
-)
 def test_convert_reads_the_geometry_column_the_geopackage_declares(tmp_path):
-    import json
-
-    import pyarrow.parquet as pq
-
     gpkg = tmp_path / "link.gpkg"
     output = tmp_path / "link.parquet"
-    _write_gpkg_with_declared_geometry_column(gpkg)
+    _write_two_layer_gpkg(gpkg)
 
     result = CliRunner().invoke(
         cli, ["convert", "geoparquet", str(gpkg), str(output), "--layer", LAYER]
     )
-    assert result.exit_code == 0, result.output
+    if result.exit_code != 0:
+        # Only the unrecognised-name refusal is expected to fail here. Anything
+        # else is a different bug and must not hide behind the xfail.
+        assert REFUSAL in result.output, result.output
+        pytest.xfail(
+            "gpio gap: convert geoparquet matches GeoPackage geometry columns against "
+            "STANDARD_GEOMETRY_NAMES instead of reading gpkg_geometry_columns.column_name"
+        )
     assert output.exists()
 
-    geo = json.loads(pq.ParquetFile(str(output)).metadata.metadata[b"geo"])
-    assert geo["primary_column"] in pq.ParquetFile(str(output)).schema_arrow.names
-    assert pq.read_table(str(output)).num_rows == 20
+    parquet = pq.ParquetFile(str(output))
+    geo = json.loads(parquet.metadata.metadata[b"geo"])
+    # The declared column, not merely *a* column: a fix that reached for the
+    # other layer's `geom`, or renamed its way to a conventional name, is not
+    # the fix this asks for.
+    assert geo["primary_column"] == GEOM_COLUMN
+    assert GEOM_COLUMN in parquet.schema_arrow.names
+
+    table = pq.read_table(str(output))
+    assert table.num_rows == LAYER_ROWS
+    assert table.column(GEOM_COLUMN).null_count == 0
