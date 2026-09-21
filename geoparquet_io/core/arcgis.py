@@ -86,6 +86,59 @@ class ArcGISLayerInfo:
 # Adaptive batch size fallback sequence
 BATCH_SIZE_FALLBACKS = [1000, 500, 100, 50, 10, 1]
 
+# The ArcGIS REST error envelopes that mean "this query failed on the server"
+# and nothing more specific. On a *paged* feature query - issued only after the
+# layer metadata and the feature count for the same where/bbox/token have come
+# back fine, so what the page adds is the geometry and the requested outFields/
+# outSR - that is how a page too heavy to serialize is reported (#1134).
+# Compared after lower-casing, collapsing whitespace and dropping the trailing
+# period: the live Wallonia envelope has no period, the issue's example does.
+# Anything else with code 500 stays fatal; the message then names --batch-size.
+_PAGE_PRESSURE_CODE = 500
+_PAGE_PRESSURE_MESSAGES = frozenset(
+    {
+        "error performing query operation",
+        "unable to complete operation",
+        "unable to perform query operation",
+    }
+)
+
+
+def _error_envelope(data: dict) -> dict:
+    """The ``error`` object of an ArcGIS response; a bare string becomes its message."""
+    error = data["error"]
+    return error if isinstance(error, dict) else {"message": str(error)}
+
+
+def _error_details(error: dict) -> list:
+    """The ``details`` of an ArcGIS error envelope as a list (a bare string is one detail)."""
+    details = error.get("details")
+    if details is None or details == "":
+        return []
+    return details if isinstance(details, list) else [details]
+
+
+def _is_generic_query_failure(text: object) -> bool:
+    if not isinstance(text, str):
+        return False
+    return " ".join(text.lower().split()).rstrip(".") in _PAGE_PRESSURE_MESSAGES
+
+
+def _is_page_pressure_error(error: dict) -> bool:
+    """Whether an ArcGIS JSON ``error`` envelope is the generic "query failed".
+
+    Narrow on purpose: exactly code 500, one of the known query-failure
+    messages, and no ``details`` beyond those same phrases. Authentication
+    (498/499), bad parameters (400), an unsupported operation (501) and an
+    unavailable service (503) are not a page-size problem, and a 500 whose
+    message or details say what went wrong is reported as what it says.
+    """
+    if error.get("code") != _PAGE_PRESSURE_CODE:
+        return False
+    if not _is_generic_query_failure(error.get("message")):
+        return False
+    return all(_is_generic_query_failure(detail) for detail in _error_details(error))
+
 
 @contextmanager
 def _gdal_geojson_size_limit_lifted():
@@ -112,6 +165,33 @@ def _gdal_geojson_size_limit_lifted():
             os.environ.pop("OGR_GEOJSON_MAX_OBJ_SIZE", None)
         else:
             os.environ["OGR_GEOJSON_MAX_OBJ_SIZE"] = previous
+
+
+def _warn_batch_reduced(
+    failed_batch: int, offset: int, new_batch: int, reason: str, restart_from: int
+) -> None:
+    """The one line a user sees each time the ladder descends a rung.
+
+    ``restart_from`` is the offset the download resumes at: the refused offset
+    itself on the sequential path, the start of the window on the parallel path
+    (whose sibling pages are re-fetched at the new size).
+    """
+    warn(
+        f"Server returned an error for batch_size={failed_batch} at offset {offset} "
+        f"({reason}). Reducing to {new_batch} and retrying from offset {restart_from}; "
+        f"later pages keep this size."
+    )
+
+
+def _batch_ladder_exhausted(offset: int, reason: str) -> GeoParquetError:
+    """The terminal error once batch_size=1 has failed too: the facts, then the levers."""
+    return GeoParquetError(
+        f"Server refused even a page of batch_size=1 at offset {offset} ({reason}); "
+        "the batch-size ladder is exhausted. Either this layer's geometries are too "
+        "large to serialize one at a time - try --max-allowable-offset to generalize "
+        "them server-side, or --timeout for a slow server - or the service itself is "
+        "failing; retry later."
+    )
 
 
 def _get_reduced_batch_size(current_batch: int) -> int | None:
@@ -166,7 +246,8 @@ def _make_request(
 
     Raises:
         RemoteAccessError: For HTTP errors
-        BatchTooLargeError: When server returns non-JSON (batch too large)
+        BatchTooLargeError: On a paged request, when the server returns non-JSON
+            or a 5xx that survived every retry (batch too large)
     """
     return make_request_with_retry(
         method=method,
@@ -181,19 +262,22 @@ def _make_request(
     )
 
 
-def _handle_arcgis_response(data: dict, context: str) -> dict:
-    """Handle ArcGIS REST API response and check for errors."""
+def _handle_arcgis_response(data: dict, context: str, hint: str = "") -> dict:
+    """Handle ArcGIS REST API response and check for errors.
+
+    ``hint`` is appended to a non-auth error, for a caller that knows a lever
+    the user could still pull (a paged query names ``--batch-size``).
+    """
     if "error" in data:
-        error = data["error"]
+        error = _error_envelope(data)
         code = error.get("code", "Unknown")
-        message = error.get("message", "Unknown error")
-        details = error.get("details", [])
+        message = str(error.get("message", "Unknown error")).rstrip(".")
 
         if code in (498, 499):
             raise GeoParquetError(f"{context}: Invalid or expired token. Please re-authenticate.")
-        else:
-            detail_str = "; ".join(details) if details else ""
-            raise GeoParquetError(f"{context}: Error {code} - {message}. {detail_str}")
+        detail_str = "; ".join(str(detail) for detail in _error_details(error))
+        text = f"{context}: Error {code} - {message}. {detail_str}".rstrip()
+        raise GeoParquetError(f"{text} {hint}".rstrip())
 
     return data
 
@@ -542,10 +626,29 @@ def fetch_features_page(
 
     data = _make_request("GET", query_url, params=params, timeout=timeout, batch_size=limit)
 
-    # GeoJSON responses don't have the standard error format
-    # Check if we got features or an error
+    # A successful page has no "error" key in either GeoJSON or EsriJSON. ArcGIS
+    # reports a page it could not serialize as HTTP 200 + a JSON error envelope
+    # (code 500, "Error performing query operation") on the EsriJSON path, so
+    # that envelope has to reach the batch-size ladder exactly like the HTML
+    # error page the GeoJSON path gets for the same failure (#1134).
     if "error" in data:
-        _handle_arcgis_response(data, "Feature query")
+        error = _error_envelope(data)
+        if _is_page_pressure_error(error):
+            raise BatchTooLargeError(
+                url=query_url,
+                batch_size=limit,
+                reason=f"ArcGIS error {error['code']}: {str(error['message']).rstrip('.')}",
+            )
+        _handle_arcgis_response(
+            data,
+            "Feature query",
+            hint=(
+                f"If this page of {limit} features is too heavy for the server, "
+                f"retry with a smaller --batch-size."
+                if str(error.get("code")) == str(_PAGE_PRESSURE_CODE)
+                else ""
+            ),
+        )
 
     return data
 
@@ -642,16 +745,9 @@ def fetch_all_features(
                 new_batch = _get_reduced_batch_size(current_batch)
                 if new_batch is None:
                     # Already at minimum batch size, can't reduce further
-                    raise GeoParquetError(
-                        f"Server cannot handle even batch_size=1. "
-                        f"This layer may have geometry too complex to download. "
-                        f"Original error: {e.reason}"
-                    ) from e
+                    raise _batch_ladder_exhausted(offset, e.reason) from e
 
-                warn(
-                    f"Server returned error for batch_size={current_batch}. "
-                    f"Reducing to {new_batch} and retrying..."
-                )
+                _warn_batch_reduced(current_batch, offset, new_batch, e.reason, restart_from=offset)
                 effective_batch = new_batch
                 # Don't increment offset - retry same position with smaller batch
                 continue
@@ -720,18 +816,20 @@ def fetch_all_features(
 
                 # Collect results in order
                 results = []
-                batch_too_large = False
-                failed_batch_size = None
-                failed_at_index = None
+                batch_too_large: BatchTooLargeError | None = None
+                failed_batch_size = 0
+                failed_offset = 0
+                failed_at_index = 0
 
                 for idx, (offset, req_batch_size, future) in enumerate(futures):
                     try:
                         page = future.result()
                         results.append((offset, page))
-                    except BatchTooLargeError:
+                    except BatchTooLargeError as e:
                         # Mark for retry with smaller batch
-                        batch_too_large = True
+                        batch_too_large = e
                         failed_batch_size = req_batch_size
+                        failed_offset = offset
                         failed_at_index = idx
                         break
                     except Exception as e:
@@ -740,7 +838,7 @@ def fetch_all_features(
                             service_url, f"Failed to fetch features at offset {offset}: {e}"
                         ) from e
 
-                if batch_too_large:
+                if batch_too_large is not None:
                     # Cancel/drain remaining futures to avoid duplicate requests
                     from concurrent.futures import CancelledError
 
@@ -757,16 +855,18 @@ def fetch_all_features(
                     futures.clear()
                     results.clear()
 
-                    # Reduce batch size and restart from batch_start
-                    new_batch = _get_reduced_batch_size(failed_batch_size or effective_batch)
+                    # Reduce batch size and restart the whole window from batch_start
+                    new_batch = _get_reduced_batch_size(failed_batch_size)
                     if new_batch is None:
-                        raise GeoParquetError(
-                            "Server cannot handle even batch_size=1. "
-                            "This layer may have geometry too complex to download."
-                        )
-                    warn(
-                        f"Server returned error for batch_size={failed_batch_size}. "
-                        f"Reducing to {new_batch} and retrying..."
+                        raise _batch_ladder_exhausted(
+                            failed_offset, batch_too_large.reason
+                        ) from batch_too_large
+                    _warn_batch_reduced(
+                        failed_batch_size,
+                        failed_offset,
+                        new_batch,
+                        batch_too_large.reason,
+                        restart_from=batch_start,
                     )
                     effective_batch = new_batch
                     # Don't increment batch_start - retry from same position
