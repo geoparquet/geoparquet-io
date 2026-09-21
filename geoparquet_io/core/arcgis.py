@@ -1557,6 +1557,16 @@ def arcgis_to_table(
             "max_allowable_offset", "must be a positive number (units of the output CRS)."
         )
 
+    # The CLI's IntRange(1, 5000) never runs for the Python API, and
+    # fetch_all_features used to swap a non-positive value for the default page
+    # size -- the very page the caller was trying to escape -- or raise
+    # TypeError on a string after the metadata and count probes had gone out.
+    # Refuse here so every door fails fast, before any request.
+    if batch_size is not None and (
+        isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1
+    ):
+        raise InvalidParameterError("batch_size", "must be a positive integer (features per page).")
+
     # Split the column lists before any network work. A blank entry is rejected
     # here, not only by the Click callback: the Python API never goes through
     # Click, and ``include_cols="name,,pop"`` went to the server verbatim as

@@ -2269,6 +2269,12 @@ def from_arcgis(
     max_allowable_offset: float | None = None,
     repair_geometry: bool = True,
     timeout: float = 60.0,
+    # Convention: `ops` signatures are positional-or-keyword, so a new parameter
+    # is appended last (as max_allowable_offset was in d9c9282) rather than
+    # grouped with its core neighbour; inserting mid-signature would silently
+    # re-map existing positional calls. `Table.extract_arcgis` is keyword-only
+    # and groups by meaning instead.
+    batch_size: int | None = None,
 ) -> pa.Table:
     """
     Fetch ArcGIS Feature Service as a PyArrow Table.
@@ -2291,6 +2297,10 @@ def from_arcgis(
             output-CRS units (degrees on the default WGS84 path).
         timeout: Per-request HTTP timeout in seconds (default 60). Increase for
             layers with very large/complex geometries that are slow to serialize.
+        batch_size: Features requested per page. Default None pages at the
+            server's advertised maxRecordCount, capped at 2000. Lower it for
+            layers the server cannot serialize a full page of (JSON error 500,
+            or a request timeout). Must be a positive integer.
 
     Returns:
         PyArrow Table with WKB geometry column
@@ -2318,6 +2328,7 @@ def from_arcgis(
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         limit=limit,
+        batch_size=batch_size,
         max_workers=max_workers,
         output_crs=output_crs,
         max_allowable_offset=max_allowable_offset,

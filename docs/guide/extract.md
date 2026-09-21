@@ -1215,6 +1215,31 @@ The ladder is entered when a page comes back as any of:
 
 A JSON envelope is the server's considered answer, so it descends at once; a bare 5xx may be a blip, so the transport's usual attempts (each logged as `HTTP 500 (attempt n/3)`) run first. Each descent is then logged as one warning naming the offset, the size that failed, what the server said, the offset the download resumes from and that the smaller size sticks. Authentication errors (498/499), bad parameters (400), HTTP 501/503 (unsupported, unavailable) and a JSON error 500 whose message or `details` say what actually went wrong are not a page-size problem and fail as before, the last with a reminder that `--batch-size` exists. If even `batch_size=1` is refused, the error states that fact with the server's last message, then points at `--max-allowable-offset` and `--timeout` for a heavy layer or a retry later for a failing service.
 
+When you already know the page size a layer tolerates, set it up front with `--batch-size` (CLI) or `batch_size` (Python) and skip the walk. The default is the server's `maxRecordCount`, capped at 2000; the value must be a positive integer.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs cloud credentials" -->
+    ```bash
+    # 50 features per request, 3 minutes per request
+    gpio extract arcgis "https://services.arcgis.com/.../FeatureServer/0" out.parquet \
+      --batch-size 50 --timeout 180
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs cloud credentials" -->
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.extract_arcgis(
+        service_url="https://services.arcgis.com/.../FeatureServer/0",
+        batch_size=50,
+        timeout=180,
+    )
+    table.write("out.parquet")
+    ```
+
 ### Finding Service URLs
 
 ArcGIS Feature Service URLs follow this pattern:

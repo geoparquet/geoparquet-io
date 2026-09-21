@@ -457,6 +457,7 @@ def extract_arcgis(
     include_cols: str | None = None,
     exclude_cols: str | None = None,
     limit: int | None = None,
+    batch_size: int | None = None,
     max_workers: int = 1,
     output_crs: str | None = None,
     max_allowable_offset: float | None = None,
@@ -491,6 +492,10 @@ def extract_arcgis(
         include_cols: Comma-separated column names to include (server-side)
         exclude_cols: Comma-separated column names to exclude (client-side)
         limit: Maximum number of features to return
+        batch_size: Features requested per page. Default None pages at the
+            server's advertised maxRecordCount, capped at 2000. Lower it for
+            layers the server cannot serialize a full page of (JSON error 500,
+            or a request timeout). Must be a positive integer.
         max_workers: Number of concurrent requests (1 = sequential, 2-3 recommended)
         output_crs: Preserve native CRS. 'native' uses the layer's advertised SR,
             or pass an EPSG code (e.g. EPSG:25830). Default None reprojects to WGS84.
@@ -538,6 +543,7 @@ def extract_arcgis(
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         limit=limit,
+        batch_size=batch_size,
         max_workers=max_workers,
         output_crs=output_crs,
         max_allowable_offset=max_allowable_offset,

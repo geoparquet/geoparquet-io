@@ -84,15 +84,46 @@ MOCK_ESRI_FEATURES_PAGE = {
 }
 
 
-def stub_arcgis_service(http, *, layer=None, count=None, page=None):
+def windowed_pages(total):
+    """A page server that answers the window each request asks for.
+
+    ``resultOffset``/``resultRecordCount`` are honoured, out of ``total`` point
+    features, so the paginator sees pages of exactly the size it requested and
+    the request series stays a faithful record of the page size in effect.
+    """
+
+    def _serve(request):
+        offset = int(request.params.get("resultOffset", 0))
+        limit = int(request.params.get("resultRecordCount", total))
+        features = [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [-122.4 + i * 1e-3, 37.8]},
+                "properties": {"OBJECTID": i + 1, "name": f"Point {i + 1}"},
+            }
+            for i in range(offset, min(offset + limit, total))
+        ]
+        return json_reply({"type": "FeatureCollection", "features": features})(request)
+
+    return _serve
+
+
+def stub_arcgis_service(http, *, layer=None, count=None, page=None, total=None):
     """Route a whole FeatureServer layer at the fake transport.
 
     Metadata (`f=json` on the layer URL), the `returnCountOnly` probe and the
     feature pages, so a CLI or API call runs end to end with no network and the
-    request it issued stays assertable.
+    request it issued stays assertable. ``page`` is one fixed reply for every
+    feature request; ``total`` instead serves whatever window each request asks
+    for, out of that many features (see :func:`windowed_pages`).
     """
-    page = page if page is not None else MOCK_FEATURES_PAGE
-    count = count if count is not None else len(page["features"])
+    if total is not None:
+        count = total
+        page_reply = windowed_pages(total)
+    else:
+        page = page if page is not None else MOCK_FEATURES_PAGE
+        count = count if count is not None else len(page["features"])
+        page_reply = json_reply(page)
     http.respond(
         lambda request: not request.path.endswith("/query"),
         json_reply(layer if layer is not None else MOCK_LAYER_INFO),
@@ -101,7 +132,7 @@ def stub_arcgis_service(http, *, layer=None, count=None, page=None):
         lambda request: request.params.get("returnCountOnly") == "true",
         json_reply({"count": count}),
     )
-    http.respond(lambda request: True, json_reply(page))
+    http.respond(lambda request: True, page_reply)
     return http
 
 
@@ -1309,6 +1340,67 @@ class TestApiOutputCrs:
         extract_arcgis("https://example.com/FeatureServer/0", max_allowable_offset=0.005)
 
         assert mock_to_table.call_args.kwargs["max_allowable_offset"] == 0.005
+
+
+def _api_doors():
+    """The two Python front doors, by name, so a parametrize id reads as one."""
+    from geoparquet_io.api import ops
+    from geoparquet_io.api.table import extract_arcgis
+
+    return [
+        pytest.param(ops.from_arcgis, id="ops.from_arcgis"),
+        pytest.param(extract_arcgis, id="extract_arcgis"),
+    ]
+
+
+class TestApiBatchSize:
+    """The page size must be reachable from the Python API, not just the CLI.
+
+    ``gpio extract arcgis --batch-size`` has existed since #382, but the API
+    front doors omitted the parameter, so every API caller was pinned to the
+    server's advertised ``maxRecordCount`` -- fatal for layers the server
+    cannot serialize a full page of (see #1134). These tests watch the wire,
+    not a mock: what matters is the ``resultRecordCount`` each request carries.
+    """
+
+    URL = "https://example.com/FeatureServer/0"
+
+    @pytest.mark.parametrize("door", _api_doors())
+    def test_batch_size_sets_the_page_size_on_the_wire(self, door, monkeypatch):
+        http = stub_arcgis_service(FakeTransport.install(monkeypatch), total=120)
+
+        door(self.URL, batch_size=50)
+
+        assert [r.params["resultRecordCount"] for r in feature_page_requests(http)] == [
+            "50",
+            "50",
+            "20",
+        ]
+
+    @pytest.mark.parametrize("door", _api_doors())
+    def test_omitted_batch_size_pages_at_the_server_limit(self, door, monkeypatch):
+        # MOCK_LAYER_INFO advertises maxRecordCount 1000, so 120 features is one page.
+        http = stub_arcgis_service(FakeTransport.install(monkeypatch), total=120)
+
+        door(self.URL)
+
+        assert [r.params["resultRecordCount"] for r in feature_page_requests(http)] == ["120"]
+
+    @pytest.mark.parametrize("door", _api_doors())
+    @pytest.mark.parametrize("bad", [0, -50, "50", 2.5, True], ids=repr)
+    def test_invalid_batch_size_is_refused_before_any_request(self, door, bad, monkeypatch):
+        """The CLI's IntRange(1, 5000) never runs for the API, and core used to
+        swap a non-positive value for the default page size -- the exact page the
+        caller was trying to escape -- or raise TypeError on a string after the
+        metadata and count probes had already gone out."""
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        http = stub_arcgis_service(FakeTransport.install(monkeypatch), total=120)
+
+        with pytest.raises(InvalidParameterError, match="batch_size.*positive integer"):
+            door(self.URL, batch_size=bad)
+
+        assert http.requests == []
 
 
 class TestStreamingConversion:
