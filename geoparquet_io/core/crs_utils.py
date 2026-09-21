@@ -187,6 +187,12 @@ def _extract_crs_identifier(crs_info):
                         return (authority, int(code))
                     except (ValueError, TypeError):
                         return (authority, str(code).upper())
+        # A CompoundCRS has no id of its own and is deliberately *not* resolved
+        # to its horizontal component here: ``is_default_crs``, the inspect
+        # display and the metadata comparison all sit on this helper, and a
+        # "WGS 84 + EGM2008 height" file is neither the default CRS nor plain
+        # EPSG:4326. The transform helpers that only need the XY part fall
+        # back themselves (``_transform_identifier``).
         return None
 
     if isinstance(crs_info, str):
@@ -207,6 +213,103 @@ def _extract_crs_identifier(crs_info):
                     return (parts[4], parts[-1])
 
     return None
+
+
+# PROJJSON CRS types that describe horizontal (XY) coordinates. A CompoundCRS
+# pairs one of these with a VerticalCRS (or another non-horizontal component).
+_HORIZONTAL_CRS_TYPES = frozenset(
+    {
+        "GeodeticCRS",
+        "GeographicCRS",
+        "ProjectedCRS",
+        "BoundCRS",
+        "EngineeringCRS",
+        "DerivedGeodeticCRS",
+        "DerivedGeographicCRS",
+        "DerivedProjectedCRS",
+    }
+)
+
+
+def horizontal_component(crs: dict) -> dict | None:
+    """Return the single horizontal component of a PROJJSON CompoundCRS, else None.
+
+    A compound CRS (e.g. "EST97 + EVRF2007 height") has no authority id of its
+    own; only its components do. Returns None for anything that is not a
+    CompoundCRS with exactly one horizontal component, so callers never guess.
+    """
+    if not isinstance(crs, dict) or crs.get("type") != "CompoundCRS":
+        return None
+    components = crs.get("components")
+    if not isinstance(components, list):
+        return None
+    horizontal = [
+        component
+        for component in components
+        if isinstance(component, dict) and component.get("type") in _HORIZONTAL_CRS_TYPES
+    ]
+    if len(horizontal) != 1:
+        return None
+    return horizontal[0]
+
+
+def _transform_identifier(crs):
+    """``(authority, code)`` for the XY part of ``crs``, for the transform helpers only.
+
+    A CompoundCRS has no id of its own, but the XY part of any transform is
+    fully described by its horizontal component, so ``ST_Transform`` can be
+    fed that. This fallback lives here and not in ``_extract_crs_identifier``
+    so that the predicates built on the plain helper (``is_default_crs``, the
+    inspect display, the metadata comparison, the GDAL export SRS) keep
+    telling a compound CRS apart from its horizontal component.
+    """
+    identifier = _extract_crs_identifier(crs)
+    if identifier is not None:
+        return identifier
+    component = horizontal_component(crs)
+    if component is None:
+        return None
+    return _extract_crs_identifier(component)
+
+
+def _axis_count(crs) -> int:
+    """Number of axes a single (non-compound) PROJJSON CRS declares, or 0."""
+    if not isinstance(crs, dict):
+        return 0
+    axes = crs.get("coordinate_system", {}).get("axis")
+    return len(axes) if isinstance(axes, list) else 0
+
+
+def horizontal_crs(crs):
+    """The 2D CRS that describes ``crs``'s coordinates once Z is dropped.
+
+    Used when Z is dropped from the geometry (``--force-2d``), so the written
+    CRS does not describe a dimension the file no longer has:
+
+    - A PROJJSON CompoundCRS with one horizontal component becomes that
+      component (its ``$schema`` is kept). The vertical component described
+      nothing any more, and a compound CRS has no id of its own, so
+      ``crs_string_for_transform`` would have returned None for the 2D file.
+    - A single three-axis CRS (a 3D geographic one such as EPSG:4979) is
+      demoted with pyproj to its 2D counterpart (EPSG:4326).
+
+    Anything else -- None, a string, an already 2D CRS -- is passed through
+    unchanged, by identity.
+    """
+    component = horizontal_component(crs)
+    if component is not None:
+        result = dict(component)
+        if "$schema" in crs and "$schema" not in result:
+            result = {"$schema": crs["$schema"], **result}
+        return result
+    if _axis_count(crs) == 3:
+        try:
+            from pyproj import CRS as PyprojCRS
+
+            return PyprojCRS.from_json_dict(crs).to_2d().to_json_dict()
+        except Exception:
+            return crs
+    return crs
 
 
 def is_default_crs(crs):
@@ -559,7 +662,7 @@ def resolve_crs_to_string(crs_info) -> str | None:
     if not crs_info:
         return None
 
-    identifier = _extract_crs_identifier(crs_info)
+    identifier = _transform_identifier(crs_info)
     if identifier:
         authority, code = identifier
         return f"{authority}:{code}"
@@ -1117,7 +1220,7 @@ def crs_string_for_transform(crs) -> str | None:
     """
     if not crs or is_default_crs(crs):
         return None
-    identifier = _extract_crs_identifier(crs)
+    identifier = _transform_identifier(crs)
     if not identifier:
         return None
     authority, code = identifier

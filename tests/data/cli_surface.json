@@ -4406,6 +4406,22 @@
        "type": "text"
       },
       {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "force_2d",
+       "nargs": 1,
+       "opts": [
+        "--force-2d"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
        "default": "None",
        "hidden": false,
        "is_flag": false,

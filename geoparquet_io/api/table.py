@@ -383,6 +383,7 @@ def convert(
     linearize_curves: bool = True,
     max_angle_deg: float | None = None,
     encoding: str | None = None,
+    force_2d: bool = False,
 ) -> Table:
     """
     Convert a geospatial file to a Table.
@@ -410,6 +411,8 @@ def convert(
         encoding: Source text encoding for sources that cannot say, e.g. a
                shapefile DBF without ``.cpg`` or a Latin-1 CSV (``ISO-8859-1``,
                ``UTF-8``, ...). Not for Parquet.
+        force_2d: Drop Z and M coordinates (``ST_Force2D``) so a 3D source
+               becomes 2D geometry (default: False).
 
     Returns:
         Table for chaining operations
@@ -421,6 +424,7 @@ def convert(
         >>> gpio.convert('s3://bucket/data.gpkg', profile='my-aws').write('out.parquet')
         >>> gpio.convert('multilayer.gpkg', layer='buildings').write('buildings.parquet')
         >>> gpio.convert('ehak.shp', encoding='ISO-8859-1').write('ehak.parquet')
+        >>> gpio.convert('etak_3d.shp', force_2d=True).write('etak.parquet')
     """
     from geoparquet_io.core.convert import read_spatial_to_arrow
 
@@ -439,6 +443,7 @@ def convert(
         linearize_curves=linearize_curves,
         max_angle_deg=max_angle_deg,
         encoding=encoding,
+        force_2d=force_2d,
     )
 
     return Table(arrow_table, geometry_column=geom_col, crs=detected_crs)
