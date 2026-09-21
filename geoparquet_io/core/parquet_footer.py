@@ -408,6 +408,40 @@ def _inherit_mode(staged: str, parquet_file: str, destination: str) -> None:
     os.chmod(staged, stat.S_IMODE(os.stat(source).st_mode))
 
 
+def _file_stamp(parquet_file: str) -> tuple[int, int, int]:
+    """What identifies this version of the file: inode, size, modification time."""
+    info = os.stat(parquet_file)
+    return info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _refuse_if_the_input_changed(
+    parquet_file: str,
+    stamp: tuple[int, int, int],
+    source: BinaryIO,
+    footer_start: int,
+    original: bytes,
+) -> None:
+    """Refuse a staged copy whose input changed while it was being read.
+
+    `os.replace` is atomic but it is not a compare-and-swap. Nothing stops
+    another process rewriting the input between the footer being read and the
+    pages being copied, which would leave the staged file pairing one version's
+    footer with another version's data, and an in-place call would then publish
+    that mix over the writer's own work.
+
+    gpio coordinates writers nowhere, so this does not take a lock: it checks
+    and refuses rather than publishing a file it cannot vouch for. The stat
+    catches an input replaced under its path, the footer re-read catches one
+    rewritten in place through the handle this copy came from. A change in the
+    instant between this check and the replace is not detectable without one.
+    """
+    source.seek(footer_start)
+    if _file_stamp(parquet_file) != stamp or source.read(len(original)) != original:
+        raise FooterPatchUnsupported(
+            f"{parquet_file} changed while it was being copied; nothing was written"
+        )
+
+
 def _read_metadata_or_refuse(parquet_file: str) -> pq.FileMetaData:
     """The file's own metadata, as the baseline the patch is checked against."""
     try:
@@ -467,6 +501,10 @@ def patch_footer_kv(
     needs room for a second copy of the file while the call runs. An in-place
     call that would change nothing writes nothing at all.
 
+    An input that changes while it is being copied is refused rather than
+    published: see `_refuse_if_the_input_changed`, which is a check, not a
+    lock.
+
     Args:
         parquet_file: Path to a local Parquet file. Only read.
         updates: Keys to set, as `str` or `bytes`; a `None` value removes a key.
@@ -490,6 +528,7 @@ def patch_footer_kv(
         footer_start, footer_length = _footer_span(source, size, parquet_file)
         source.seek(footer_start)
         original = source.read(footer_length)
+    stamp = _file_stamp(parquet_file)
 
     footer = _patch_footer(original, updates)
     if footer == original and destination == parquet_file:
@@ -512,5 +551,6 @@ def patch_footer_kv(
             sink.write(footer)
             sink.write(struct.pack("<I", len(footer)))
             sink.write(MAGIC)
+            _refuse_if_the_input_changed(parquet_file, stamp, source, footer_start, original)
         _verify_data_untouched(before, staged)
         _inherit_mode(staged, parquet_file, destination)

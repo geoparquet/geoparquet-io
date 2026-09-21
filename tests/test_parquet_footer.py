@@ -7,6 +7,7 @@ reproduce it exactly. A rewrite cannot pass either of those, which is the point
 default compression level, and inflated a zstd-15 file by 11.6%.
 """
 
+import io
 import json
 import struct
 import sys
@@ -16,11 +17,21 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from geoparquet_io.core import parquet_footer
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.parquet_footer import (
+    _LIST,
     FooterPatchUnsupported,
+    _copy_below_footer,
     _decode_kv_list,
+    _encode_kv_list,
+    _field_header,
+    _patch_footer,
+    _read_metadata_or_refuse,
+    _read_varint,
+    _rewrite_kv_field,
     _struct_fields,
+    _verify_data_untouched,
     patch_footer_kv,
 )
 
@@ -62,11 +73,13 @@ def _keys(path) -> list[bytes]:
     return [key for key, _ in _entries(path)]
 
 
-def _write_geoparquet(path, *, geo=GEO, level=15, duplicate_geo=False):
+def _write_geoparquet(path, *, geo=GEO, level=15, duplicate_geo=False, rows=4000, label="n"):
     """A zstd-15 file with bloom filters, native GEOMETRY and a bbox column.
 
     `duplicate_geo` asks DuckDB to write its own `geo` block as well as the one
     passed through `KV_METADATA`, which leaves the file carrying the key twice.
+    `rows` and `label` are there to build a second file that differs from the
+    first in a chosen way.
     """
     version = "V2" if duplicate_geo else "NONE"
     conn = get_duckdb_connection(load_spatial=True)
@@ -75,12 +88,13 @@ def _write_geoparquet(path, *, geo=GEO, level=15, duplicate_geo=False):
             COPY (
               SELECT
                 id,
+                '{label}' || id AS name,
                 {{'xmin': ST_XMin(geom), 'ymin': ST_YMin(geom),
                   'xmax': ST_XMax(geom), 'ymax': ST_YMax(geom)}} AS bbox,
                 geom AS geometry
               FROM (
                 SELECT i AS id, ST_Point(-71.5 + (i % 97) / 100.0, 41.3 + (i % 61) / 100.0) AS geom
-                FROM range(4000) t(i)
+                FROM range({rows}) t(i)
               )
             ) TO '{path.as_posix()}'
             (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL {level},
@@ -152,7 +166,7 @@ class TestTheDataIsNeverTouched:
                 f"FROM parquet_metadata('{geo_file.as_posix()}') ORDER BY 1, 2"
             )
             before = conn.execute(query).fetchall()
-            patch_footer_kv(str(geo_file), {"geo": GEO})
+            patch_footer_kv(str(geo_file), {"geo": GEO, "note": "x"})
             assert conn.execute(query).fetchall() == before
         finally:
             conn.close()
@@ -162,7 +176,7 @@ class TestTheDataIsNeverTouched:
         try:
             query = f"SELECT count(*), sum(id) FROM '{geo_file.as_posix()}'"
             before = conn.execute(query).fetchone()
-            patch_footer_kv(str(geo_file), {"geo": GEO})
+            patch_footer_kv(str(geo_file), {"geo": GEO, "note": "x"})
             assert conn.execute(query).fetchone() == before
         finally:
             conn.close()
@@ -260,7 +274,7 @@ class TestTheFileOnDisk:
         """Staging goes through mkstemp, which creates 0600."""
         geo_file.chmod(0o644)
 
-        patch_footer_kv(str(geo_file), {"geo": GEO})
+        patch_footer_kv(str(geo_file), {"geo": GEO, "note": "x"})
 
         assert geo_file.stat().st_mode & 0o777 == 0o644
 
@@ -272,6 +286,131 @@ class TestTheFileOnDisk:
         patch_footer_kv(str(geo_file), {"geo": GEO}, output_file=str(destination))
 
         assert destination.stat().st_mode & 0o777 == 0o640
+
+
+class TestAnInputThatChangesUnderTheCall:
+    """`os.replace` is atomic; it is not a compare-and-swap.
+
+    Another writer landing between the footer being read and the pages being
+    copied would leave a file pairing one version's footer with another
+    version's data. gpio takes no locks, so the call checks and refuses.
+    """
+
+    def test_a_file_replaced_mid_copy_is_refused(self, geo_file, tmp_path, monkeypatch):
+        other = _write_geoparquet(tmp_path / "other.parquet", rows=2500, label="other")
+        real_copy = parquet_footer._copy_below_footer
+
+        def copy_then_let_another_writer_land(source, sink, footer_start):
+            real_copy(source, sink, footer_start)
+            geo_file.write_bytes(other.read_bytes())
+
+        monkeypatch.setattr(parquet_footer, "_copy_below_footer", copy_then_let_another_writer_land)
+
+        with pytest.raises(FooterPatchUnsupported, match="changed while it was being copied"):
+            patch_footer_kv(str(geo_file), {"note": "x"})
+
+        assert geo_file.read_bytes() == other.read_bytes(), "the other writer's file was clobbered"
+
+
+class TestTheGuards:
+    """Every refusal reached directly.
+
+    These are the promise that the module publishes nothing it cannot vouch
+    for, so each one is worth a case of its own rather than being left to a
+    file that happens to trigger it.
+    """
+
+    def test_a_runaway_varint(self):
+        with pytest.raises(FooterPatchUnsupported, match="past 64 bits"):
+            _read_varint(b"\xff" * 12, 0)
+
+    def test_an_empty_map_is_skipped(self):
+        """A map is one of the types a Parquet footer does not have to carry."""
+        fields, stop = _struct_fields(b"\x1b\x00\x00")
+
+        assert [field.field_id for field in fields] == [1]
+        assert stop == 2
+
+    def test_a_field_id_too_far_for_the_delta_nibble(self):
+        """Field 30 after field 5 needs the long form: type nibble, then the id."""
+        header = _field_header(30, 5, _LIST)
+
+        assert header == b"\x09\x3c"
+        fields, _ = _struct_fields(header + b"\x00\x00")
+        assert [(field.field_id, field.type_id) for field in fields] == [(30, _LIST)]
+
+    def test_a_key_with_no_value_keeps_having_none(self):
+        """`KeyValue.value` is optional, so a file may carry a key without one."""
+        encoded = b"\x1c\x18\x01k\x00"
+
+        entries = _decode_kv_list(encoded, 0)
+
+        assert entries == [(b"k", None)]
+        assert _encode_kv_list(entries) == encoded
+
+    def test_a_key_value_entry_that_is_not_a_string(self):
+        with pytest.raises(FooterPatchUnsupported, match="where a string was expected"):
+            _decode_kv_list(b"\x1c\x15\x02\x00", 0)
+
+    def test_a_key_value_list_that_is_not_structs(self):
+        with pytest.raises(FooterPatchUnsupported, match="where structs were expected"):
+            _decode_kv_list(b"\x15\x02", 0)
+
+    def test_the_field_is_appended_when_nothing_follows_it(self):
+        """A footer whose last field id is below 5 has no neighbour to move."""
+        patched = _rewrite_kv_field(b"\x15\x02\x00", {"k": "v"})
+
+        fields, _ = _struct_fields(patched)
+        assert [field.field_id for field in fields] == [1, 5]
+        assert _decode_kv_list(patched, fields[1].value_start) == [(b"k", b"v")]
+
+    def test_a_footer_that_runs_out_mid_structure(self):
+        with pytest.raises(FooterPatchUnsupported, match="thrift structure could not be read"):
+            _patch_footer(b"\x19\x3c", {"k": "v"})
+
+    def test_a_file_too_short_to_be_parquet(self, tmp_path):
+        path = tmp_path / "tiny.parquet"
+        path.write_bytes(b"PAR1")
+
+        with pytest.raises(FooterPatchUnsupported, match="too short"):
+            patch_footer_kv(str(path), {"geo": GEO})
+
+    def test_a_source_that_ends_before_its_footer(self):
+        with pytest.raises(FooterPatchUnsupported, match="ended before its footer"):
+            _copy_below_footer(io.BytesIO(b"short"), io.BytesIO(), 4096)
+
+    def test_metadata_that_pyarrow_cannot_read(self, tmp_path):
+        path = tmp_path / "prose.txt"
+        path.write_text("not a parquet file")
+
+        with pytest.raises(FooterPatchUnsupported, match="footer could not be read"):
+            _read_metadata_or_refuse(str(path))
+
+    def test_a_patched_file_pyarrow_cannot_read(self, geo_file, tmp_path):
+        prose = tmp_path / "prose.txt"
+        prose.write_text("not a parquet file")
+
+        with pytest.raises(FooterPatchUnsupported, match="could not be read back"):
+            _verify_data_untouched(pq.read_metadata(str(geo_file)), str(prose))
+
+    def test_a_patched_file_describing_a_different_shape(self, geo_file, tmp_path):
+        fewer = _write_geoparquet(tmp_path / "fewer.parquet", rows=1000)
+
+        with pytest.raises(FooterPatchUnsupported, match="describes"):
+            _verify_data_untouched(pq.read_metadata(str(geo_file)), str(fewer))
+
+    def test_a_patched_file_whose_row_groups_are_not_the_same(self, geo_file, tmp_path):
+        wider = _write_geoparquet(tmp_path / "wider.parquet", label="a-much-longer-label-")
+
+        with pytest.raises(FooterPatchUnsupported, match="row group 0"):
+            _verify_data_untouched(pq.read_metadata(str(geo_file)), str(wider))
+
+    def test_a_patched_file_whose_pages_moved(self, geo_file, tmp_path):
+        """Same rows, same columns, same uncompressed size, different offsets."""
+        looser = _write_geoparquet(tmp_path / "looser.parquet", level=1)
+
+        with pytest.raises(FooterPatchUnsupported, match="row group"):
+            _verify_data_untouched(pq.read_metadata(str(geo_file)), str(looser))
 
 
 class TestRefusals:

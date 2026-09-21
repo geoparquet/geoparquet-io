@@ -17,10 +17,13 @@ import json
 import struct
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 
+from geoparquet_io.core.add import bbox_metadata
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
 GEO_NO_COVERING = json.dumps(
     {
@@ -117,8 +120,6 @@ def test_row_groups_and_bloom_filters_are_untouched(zstd15_file):
 
 def test_the_covering_is_there(zstd15_file):
     """The command's own job, unchanged by how it is now written."""
-    import pyarrow.parquet as pq
-
     add_bbox_metadata(str(zstd15_file))
 
     geo = json.loads(pq.read_metadata(str(zstd15_file)).metadata[b"geo"])
@@ -140,3 +141,27 @@ def test_an_output_file_leaves_the_input_alone(zstd15_file, tmp_path):
 
     assert zstd15_file.read_bytes() == before
     assert _data_section(destination) == _data_section(zstd15_file)
+
+
+def test_a_footer_it_cannot_patch_falls_back_to_the_rewrite(zstd15_file, monkeypatch):
+    """The safety net: an unreadable footer costs what the command cost before.
+
+    The rewrite is still the only way to reach an encrypted footer or a thrift
+    structure the skip does not recognise, so it stays wired up. This plants
+    the refusal rather than crafting such a file, because what is under test is
+    the hand-off, not the refusal.
+    """
+
+    def refuse(*args, **kwargs):
+        raise FooterPatchUnsupported("planted")
+
+    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    before = zstd15_file.stat().st_size
+
+    add_bbox_metadata(str(zstd15_file))
+
+    geo = json.loads(pq.read_metadata(str(zstd15_file)).metadata[b"geo"])
+    assert "covering" in geo["columns"]["geometry"], "the fallback did not write the key"
+    assert zstd15_file.stat().st_size > before, (
+        "the fallback is the rewrite, so this file is expected to come back inflated"
+    )
