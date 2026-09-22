@@ -786,11 +786,13 @@ def _describe_schema(wfs, typename: str) -> dict | None:
     """
     version = str(getattr(wfs, "version", "") or "")
     if not version.startswith("2."):
-        return wfs.get_schema(typename)
-    from owslib.feature.schema import get_schema
+        schema = wfs.get_schema(typename)
+    else:
+        from owslib.feature.schema import get_schema
 
-    url = _merge_query_params(str(wfs.url), {"typeNames": typename})
-    return get_schema(url, typename, version, auth=getattr(wfs, "auth", None))
+        url = _merge_query_params(str(wfs.url), {"typeNames": typename})
+        schema = get_schema(url, typename, version, auth=getattr(wfs, "auth", None))
+    return schema if isinstance(schema, dict) else None
 
 
 def _detect_geometry_column(wfs, typename: str) -> str:
