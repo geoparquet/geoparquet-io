@@ -1037,6 +1037,30 @@ class TestDescribeSchemaNamesTheLayerPerVersion:
         assert query["apikey"] == ["k"], "the caller's own query string survives"
         assert list(schema["properties"]) == ["gemarkung_id", "flurnummer"]
 
+    def test_2_0_0_schema_request_overrides_stale_control_parameters(self, monkeypatch):
+        """OWSLib keeps service/request/version already in the URL; we must not.
+
+        A URL still carrying ``request=GetCapabilities`` or another version
+        would make the DescribeFeatureType request ask for something else.
+        """
+        seen = {}
+
+        def fake_get_schema(url, typename, version="1.0.0", **kwargs):
+            seen["url"] = url
+            return _lgl_like_get_schema(url, typename)
+
+        monkeypatch.setattr("owslib.feature.schema.get_schema", fake_get_schema)
+        wfs = self._wfs("2.0.0")
+        wfs.url = "https://example.test/wfs?service=WFS&request=GetCapabilities&version=1.1.0"
+        _describe_schema(wfs, "nora:v_al_flur")
+        from urllib.parse import parse_qs, urlparse
+
+        query = parse_qs(urlparse(seen["url"]).query)
+        assert query["request"] == ["DescribeFeatureType"]
+        assert query["version"] == ["2.0.0"]
+        assert query["service"] == ["WFS"]
+        assert query["typeNames"] == ["nora:v_al_flur"]
+
     def test_sortable_attribute_and_geometry_column_come_from_the_layer(self, monkeypatch):
         monkeypatch.setattr("owslib.feature.schema.get_schema", _lgl_like_get_schema)
         wfs = self._wfs("2.0.0")

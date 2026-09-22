@@ -790,7 +790,19 @@ def _describe_schema(wfs, typename: str) -> dict | None:
     else:
         from owslib.feature.schema import get_schema
 
-        url = _merge_query_params(str(wfs.url), {"typeNames": typename})
+        # OWSLib only adds service/request/version when the URL lacks them, so
+        # state them here: a URL still carrying request=GetCapabilities or a
+        # stale version would otherwise describe nothing or the wrong layer.
+        # _merge_query_params lets these override same-named params.
+        url = _merge_query_params(
+            str(wfs.url),
+            {
+                "service": "WFS",
+                "request": "DescribeFeatureType",
+                "version": version,
+                "typeNames": typename,
+            },
+        )
         schema = get_schema(url, typename, version, auth=getattr(wfs, "auth", None))
     return schema if isinstance(schema, dict) else None
 
