@@ -24,7 +24,9 @@ from geoparquet_io.core.wfs import (
     _build_bbox_param,
     _build_local_bbox_filter,
     _build_wfs_url,
+    _describe_schema,
     _detect_best_output_format,
+    _detect_geometry_column,
     _detect_sortable_attribute,
     _determine_bbox_strategy,
     _negotiate_crs,
@@ -960,6 +962,96 @@ class TestSortByParameter:
         mock_wfs.get_schema.side_effect = Exception("Schema unavailable")
         result = _detect_sortable_attribute(mock_wfs, "test:layer")
         assert result is None
+
+
+# =============================================================================
+# Unit Tests - DescribeFeatureType names the layer per WFS version (Issue #1144)
+# =============================================================================
+
+
+def _lgl_like_get_schema(url, typename, version="1.0.0", timeout=30, headers=None, **kw):
+    """OWSLib's get_schema against a 2.0.0 server that only reads ``typeNames``.
+
+    OWSLib appends ``typeName=<typename>`` (the WFS 1.x spelling) to whatever
+    URL it is given. owsproxy.lgl-bw.de ignores that parameter, describes every
+    feature type, and OWSLib returns the first one's schema; only a URL that
+    already carries ``typeNames`` gets the requested layer (2026-09-22).
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    schemas = {
+        "nora:v_al_land": {
+            "geometry": "MultiPolygon",
+            "geometry_column": "geom",
+            "properties": {"land_id": "string", "land_name": "string"},
+            "required": [],
+        },
+        "nora:v_al_flur": {
+            "geometry": "MultiPolygon",
+            "geometry_column": "the_geom",
+            "properties": {"gemarkung_id": "string", "flurnummer": "string"},
+            "required": [],
+        },
+    }
+    requested = parse_qs(urlparse(url).query).get("typeNames", ["nora:v_al_land"])[0]
+    return schemas[requested]
+
+
+class TestDescribeSchemaNamesTheLayerPerVersion:
+    """A WFS 2.0.0 DescribeFeatureType must say ``typeNames``, not ``typeName``.
+
+    Otherwise a server that only knows the 2.0.0 parameter answers with all of
+    its feature types and every layer looks like the first: gpio then sends
+    ``sortBy=land_id`` for a layer whose columns are gemarkung_id/flurnummer and
+    the server rejects every page with HTTP 400 ``Illegal property name``
+    (LGL Baden-Württemberg ALKIS service, portolan-pipeline run 35704483737).
+    """
+
+    def _wfs(self, version: str) -> MagicMock:
+        wfs = MagicMock()
+        wfs.version = version
+        wfs.url = "https://example.test/owsproxy/wfs/SERVICE?apikey=k"
+        wfs.auth = "auth-object"
+        # Behaves like OWSLib: the object's own get_schema cannot be told the
+        # parameter name, so it always describes the first feature type here.
+        wfs.get_schema.side_effect = lambda typename: _lgl_like_get_schema(wfs.url, typename)
+        return wfs
+
+    def test_2_0_0_schema_request_carries_typenames(self, monkeypatch):
+        seen = {}
+
+        def fake_get_schema(url, typename, version="1.0.0", **kwargs):
+            seen.update(url=url, typename=typename, version=version, **kwargs)
+            return _lgl_like_get_schema(url, typename)
+
+        monkeypatch.setattr("owslib.feature.schema.get_schema", fake_get_schema)
+        schema = _describe_schema(self._wfs("2.0.0"), "nora:v_al_flur")
+
+        assert seen["typename"] == "nora:v_al_flur"
+        assert seen["version"] == "2.0.0"
+        assert seen["auth"] == "auth-object"
+        from urllib.parse import parse_qs, urlparse
+
+        query = parse_qs(urlparse(seen["url"]).query)
+        assert query["typeNames"] == ["nora:v_al_flur"]
+        assert query["apikey"] == ["k"], "the caller's own query string survives"
+        assert list(schema["properties"]) == ["gemarkung_id", "flurnummer"]
+
+    def test_sortable_attribute_and_geometry_column_come_from_the_layer(self, monkeypatch):
+        monkeypatch.setattr("owslib.feature.schema.get_schema", _lgl_like_get_schema)
+        wfs = self._wfs("2.0.0")
+        assert _detect_sortable_attribute(wfs, "nora:v_al_flur") == "gemarkung_id"
+        assert _detect_geometry_column(wfs, "nora:v_al_flur") == "the_geom"
+
+    @pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+    def test_1_x_keeps_owslibs_own_request(self, version, monkeypatch):
+        def must_not_be_called(*args, **kwargs):
+            raise AssertionError("1.x uses wfs.get_schema, whose typeName is correct")
+
+        monkeypatch.setattr("owslib.feature.schema.get_schema", must_not_be_called)
+        wfs = self._wfs(version)
+        _describe_schema(wfs, "nora:v_al_flur")
+        wfs.get_schema.assert_called_once_with("nora:v_al_flur")
 
 
 # =============================================================================
