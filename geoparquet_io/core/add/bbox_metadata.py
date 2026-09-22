@@ -4,9 +4,12 @@
 This module adds bbox covering metadata to existing GeoParquet files,
 enabling spatial filtering optimizations in readers that support it.
 
-Uses DuckDB COPY TO with KV_METADATA to preserve file properties including
-bloom filters, native GEOMETRY logical type, and existing key-value metadata
-(fixes #433).
+The file path patches the footer in place and copies the data pages verbatim
+(`core/parquet_footer.py`, #1141). It used to re-encode the whole file with a
+DuckDB COPY, which a Parquet file's own metadata cannot make exact: the
+compression *level* is not recorded anywhere, so a file written above the
+default came back inflated. That rewrite is still here as the fallback for a
+footer that cannot be read.
 
 Note: This operation only supports local files. Remote URLs (S3, GCS, Azure)
 are not supported for in-place metadata modification.
@@ -38,7 +41,8 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
-from geoparquet_io.core.logging_config import debug, success
+from geoparquet_io.core.logging_config import debug, success, warn
+from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
 from geoparquet_io.core.streaming import find_geometry_column_from_table
 
 if TYPE_CHECKING:
@@ -283,12 +287,15 @@ def add_bbox_metadata(
     Updates the GeoParquet metadata to include bbox covering information,
     which enables spatial filtering optimizations in readers that support it.
 
-    This operation preserves all file properties including:
-    - Bloom filters on all columns
-    - Native GEOMETRY logical type (GeoParquet 2.0)
-    - Compression settings
-    - Row group structure
-    - All existing key-value metadata (pandas, ARROW:schema, custom, etc.)
+    The `geo` key is rewritten in the footer and every page below it is copied
+    verbatim (#1141), so the data is not decoded and cannot change: compression
+    codec *and level*, encodings, bloom filters, the page index, row-group
+    boundaries, row order and every other footer key are all kept as they were.
+    The work is proportional to the footer rather than to the file.
+
+    A footer that cannot be read -- an encrypted one, or a thrift structure
+    this does not recognise -- falls back to a full DuckDB rewrite, which is
+    what this command did before and which does re-encode the data.
 
     Note: Only local files are supported. Remote URLs will raise an error.
 
@@ -382,6 +389,43 @@ def add_bbox_metadata(
         debug("\nUpdated geo metadata:")
         debug(json.dumps(geo_meta, indent=2))
 
+    # One footer key does not need the data decoded. Patching the footer copies
+    # every page verbatim, so the compression level, the encodings, the bloom
+    # filters, the page index, the row-group boundaries and the row order are
+    # all kept by construction rather than by re-derivation (#1141). The
+    # rewrite below stays as the fallback for a footer that cannot be read.
+    try:
+        patch_footer_kv(
+            parquet_file,
+            {"geo": json.dumps(geo_meta)},
+            output_file=output_file,
+            verbose=verbose,
+        )
+    except FooterPatchUnsupported as exc:
+        warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
+        _rewrite_with_geo(parquet_file, read_url, output_file, geo_meta, primary_col, verbose)
+
+    success(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
+
+
+def _rewrite_with_geo(
+    parquet_file: str,
+    read_url: str,
+    output_file: str,
+    geo_meta: dict,
+    primary_col: str,
+    verbose: bool,
+) -> None:
+    """Re-encode the file with DuckDB, carrying the amended `geo` block.
+
+    The fallback for a file whose footer cannot be patched. It decodes and
+    re-encodes every page, which is why it cannot preserve the compression
+    level -- Parquet does not record it, so the output comes back at DuckDB's
+    default -- and why it re-chunks a file with uneven row groups. Everything
+    it does defend (the geometry column's physical type, #712; the quoting of
+    preserved keys, #700 and #756) is a consequence of re-encoding that the
+    footer patch does not have to think about.
+    """
     # Get original file properties
     row_group_stats = get_row_group_stats(parquet_file)
     compression_info = get_compression_info(parquet_file, primary_col)
@@ -464,8 +508,6 @@ def add_bbox_metadata(
         if temp_file != output_file:
             # Replace the existing destination atomically
             os.replace(temp_file, output_file)
-
-        success(f"Added bbox covering metadata for column '{bbox_info['bbox_column_name']}'")
 
     except Exception as e:
         # Clean up temporary file if something goes wrong
