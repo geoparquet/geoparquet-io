@@ -860,7 +860,7 @@ class GAULAdminDataset(AdminDataset):
 
 class OvertureAdminDataset(AdminDataset):
     """
-    Overture Maps Divisions dataset (release 2026-05-20.0).
+    Overture Maps Divisions dataset (the latest release, see core/overture.py).
 
     Provides hierarchical administrative boundaries at two levels, compliant with
     the Vecorel administrative division extension specification:
