@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from geoparquet_io.core.logging_config import debug, warn
 
-OVERTURE_RELEASES_URL = "https://labs.overturemaps.org/data/releases.json"
-OVERTURE_FALLBACK_RELEASE = "2026-05-20.0"
+# Overture's STAC root names the latest release. Its older releases.json is frozen
+# at a release since deleted from S3, so it must not be read.
+OVERTURE_RELEASES_URL = "https://stac.overturemaps.org/catalog.json"
+OVERTURE_FALLBACK_RELEASE = "2026-08-19.0"
 OVERTURE_S3_TEMPLATE = (
     "s3://overturemaps-us-west-2/release/{release}/theme=divisions/type=division_area/*"
 )
