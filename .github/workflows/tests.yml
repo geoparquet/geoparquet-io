@@ -95,6 +95,13 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    permissions:
+      contents: read
+      # Codecov uploads authenticate via OIDC (use_oidc on the upload step);
+      # without a token every upload is silently dropped and the badge goes
+      # stale. Not available to fork PRs, where the upload step fails softly
+      # (fail_ci_if_error: false).
+      id-token: write
     env:
       # THE single place that decides which matrix leg reports coverage.
       # Four things key off it (fetch-depth, COV_ARGS, the Codecov upload, the
@@ -219,6 +226,7 @@ jobs:
           files: ./coverage.xml
           flags: unittests
           name: codecov-umbrella
+          use_oidc: true
           fail_ci_if_error: false
 
       - name: Diff coverage gate (changed lines >= 90% covered)
@@ -354,6 +362,10 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'run-slow-tests'))
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    permissions:
+      contents: read
+      # OIDC for the Codecov upload, same as the test job above.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -463,6 +475,7 @@ jobs:
           files: ./coverage.xml
           flags: slowtests
           name: codecov-slow
+          use_oidc: true
           fail_ci_if_error: false
 
   network-tests:
