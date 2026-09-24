@@ -56,6 +56,34 @@ GEOPARQUET_VERSIONS = {
 DEFAULT_GEOPARQUET_VERSION = "1.1"
 
 # =============================================================================
+# Levelled overview files (tylertoo OVERVIEWS_SPEC)
+# =============================================================================
+
+#: Footer key marking a levelled overview GeoParquet: every pyramid level
+#: stacked as rows, distinguished by an INT32 ``level`` column, with this key
+#: describing the row-group layout. The spec (OVERVIEWS_SPEC 3.1) requires the
+#: key to stay one named constant; this module owns it because the key sits
+#: beside ``geo`` in the same footer and every consumer -- the writer in
+#: ``process/overview``, the ``pmtiles`` chunker that must refuse such a file,
+#: the rewrite paths that must not carry a stale copy -- reads it from here.
+OVERVIEWS_KEY = "geo:overviews"
+OVERVIEW_LEVEL_COLUMN = "level"
+
+
+def is_levelled_overview(schema_or_metadata) -> bool:
+    """True when the footer carries the overviews key.
+
+    Takes a ``pyarrow.Schema`` or a KV-metadata mapping (PyArrow hands back
+    ``bytes`` keys, DuckDB ``str`` ones; both are accepted). Keyed on the
+    footer alone, not on a ``level`` column: buildings carry a ``level``
+    (storeys), flood models a water level. The key is the spec's marker; a
+    bare column is a coincidence.
+    """
+    metadata = getattr(schema_or_metadata, "metadata", schema_or_metadata) or {}
+    return OVERVIEWS_KEY in metadata or OVERVIEWS_KEY.encode("utf-8") in metadata
+
+
+# =============================================================================
 # Geometry Type Mappings
 # =============================================================================
 
@@ -1329,11 +1357,29 @@ def _declared_bbox_column(geo_meta: object) -> str | None:
 def bbox_column_to_declare(
     schema: pa.Schema, geo_meta: dict | None = None, *, verbose: bool = False
 ) -> str | None:
-    """The bbox column this write may put in a ``covering``, or None.
+    """The bbox column this write may put in a ``covering``, or None. The one gate.
 
-    The one gate every writer that invents a covering goes through. A column
-    the input's own covering names is judged the same way: an illegal one is
-    dropped, and said so, because ``check spec`` rejects the file otherwise.
+    Every write path that invents a covering asks here, so the rule has one
+    spelling: the struct's field order and types decide (see
+    :func:`bbox_covering_problem`), never the output version. Three rules follow:
+
+    1. A carried bbox column whose struct the spec forbids (Overture's
+       ``xmin, xmax, ymin, ymax``) is written through unchanged and left
+       undeclared, with one warning per process pointing at
+       ``gpio add bbox --force``, which rewrites it in the spec's order.
+    2. An input that already declares a covering over such a struct is written
+       *without* that entry, with a warning saying it was dropped: gpio does not
+       write a file its own validator rejects, even when the input asked it to.
+       A legal declared covering is carried unchanged (#738).
+    3. The output version is left alone. Issue #1035 offered "keep a 1.0 input at
+       1.0 so no covering is written" instead; that was measured and rejected,
+       because auto mode's 1.x -> 1.1 is shared policy and, more to the point, a
+       clean 1.1 input with an Overture-order column and no covering is valid
+       and was still turned invalid by every rewrite -- version preservation
+       cannot help a file already at the version it will be written at.
+
+    Reordering the struct during a rewrite was also rejected: that is a data
+    change, and the rewrite fixes promise not to make one.
     """
     declared = _declared_bbox_column(geo_meta)
     name = declared if declared in schema.names else detect_bbox_column_from_schema(schema, verbose)

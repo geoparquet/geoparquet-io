@@ -353,8 +353,8 @@ def resolve_output_geoparquet_version(
     key) that means writing native 2.0, which is what ``convert`` and
     ``reproject`` already did via ``resolve_geoparquet_version_from_file``.
     Whether the output may declare a bbox ``covering`` is a separate decision,
-    gated on the struct's shape by ``geo_metadata.bbox_column_to_declare``
-    (ADR-0006), never on the version chosen here.
+    gated on the struct's shape by ``geo_metadata.bbox_column_to_declare``,
+    never on the version chosen here.
 
     Every other entry point resolved auto mode from the carried KV metadata
     alone, and a native-geo-only input has no ``geo`` key for that to read: it

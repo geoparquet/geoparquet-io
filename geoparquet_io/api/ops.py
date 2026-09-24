@@ -526,6 +526,96 @@ def aggregate_admin(
     )
 
 
+def create_overview_file(
+    input_parquet: str,
+    overview_out: str,
+    *,
+    levels: str | list[int | str] | None = None,
+    cell_detail: float | None = None,
+    explicit_gsd: str | list[float] | None = None,
+    max_tile_kb: int = 500,
+    bytes_per_cell: float | None = None,
+    cell_column: str | None = None,
+    scheme: str | None = None,
+    output_dir: str | None = None,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
+    geoparquet_version: str | None = None,
+    force: bool = False,
+    verbose: bool = False,
+    show_sql: bool = False,
+) -> str:
+    """
+    Assemble an aggregate's level ladder into ONE levelled overview GeoParquet.
+
+    `create_overviews` writes a sibling file per level, which a tiler then has
+    to pick zoom bands for. This writes the same ladder as a single file whose
+    levels are additional *rows* tagged by a ``level`` column, which
+    ``tylertoo export-pmtiles`` tiles in one pass, reading the levels as
+    written (#1117). No per-level tippecanoe run, no hand-pinned zoom bands.
+
+    Each level's ground sample distance is measured from the data -- the median
+    width of that level's own cells, in metres -- divided by ``cell_detail``,
+    so it is scheme-agnostic and shrinks as levels refine. The per-level
+    sibling files are written as well (see ``output_dir``) and left in place.
+
+    Args:
+        input_parquet: Path to a `gpio process aggregate` output.
+        overview_out: Path for the assembled overview GeoParquet.
+        levels: Coarser levels to build (comma string or list). Default:
+            auto-select against ``max_tile_kb``.
+        cell_detail: Cell width in GSD units at the level serving it (default
+            4): a level's GSD is its measured cell width divided by this.
+            Larger serves every level at a finer zoom.
+        explicit_gsd: Explicit GSDs in metres, coarse to fine, strictly
+            decreasing, one per built level plus the base (a comma string or a
+            list). Overrides ``cell_detail``.
+        max_tile_kb: Tile-size budget (KB) driving auto level selection.
+        bytes_per_cell: Override the estimated compressed bytes per cell.
+        cell_column: Cell id column when auto-detection fails.
+        scheme: Bucketing scheme (a5/h3/admin) when inference is ambiguous.
+        output_dir: Directory for the per-level sibling files (default:
+            beside the input).
+        compression: Parquet compression codec (default ZSTD).
+        compression_level: Optional compression level.
+        geoparquet_version: GeoParquet spec version to write.
+        force: Overwrite an existing ``overview_out`` or sibling file.
+        verbose: Enable verbose debug logging.
+        show_sql: Log the rollup SQL.
+
+    Returns:
+        The path written.
+
+    Example:
+        >>> from geoparquet_io.api import ops
+        >>> ops.create_overview_file('cells.parquet', 'pyramid.parquet',
+        ...                          levels='8,7,6,5')
+        'pyramid.parquet'
+    """
+    from geoparquet_io.core.process.overview.run import (
+        create_overview_file as _create_overview_file,
+    )
+
+    return _create_overview_file(
+        input_parquet,
+        overview_out,
+        levels=levels,
+        cell_detail=cell_detail,
+        explicit_gsd=explicit_gsd,
+        max_tile_kb=max_tile_kb,
+        bytes_per_cell=bytes_per_cell,
+        cell_column=cell_column,
+        scheme=scheme,
+        output_dir=output_dir,
+        compression=compression,
+        compression_level=compression_level,
+        geoparquet_version=geoparquet_version,
+        force=force,
+        verbose=verbose,
+        show_sql=show_sql,
+    )
+
+
 def create_overviews(
     input_parquet: str,
     *,
@@ -2179,6 +2269,12 @@ def from_arcgis(
     max_allowable_offset: float | None = None,
     repair_geometry: bool = True,
     timeout: float = 60.0,
+    # Convention: `ops` signatures are positional-or-keyword, so a new parameter
+    # is appended last (as max_allowable_offset was in d9c9282) rather than
+    # grouped with its core neighbour; inserting mid-signature would silently
+    # re-map existing positional calls. `Table.extract_arcgis` is keyword-only
+    # and groups by meaning instead.
+    batch_size: int | None = None,
 ) -> pa.Table:
     """
     Fetch ArcGIS Feature Service as a PyArrow Table.
@@ -2201,6 +2297,10 @@ def from_arcgis(
             output-CRS units (degrees on the default WGS84 path).
         timeout: Per-request HTTP timeout in seconds (default 60). Increase for
             layers with very large/complex geometries that are slow to serialize.
+        batch_size: Features requested per page. Default None pages at the
+            server's advertised maxRecordCount, capped at 2000. Lower it for
+            layers the server cannot serialize a full page of (JSON error 500,
+            or a request timeout). Must be a positive integer.
 
     Returns:
         PyArrow Table with WKB geometry column
@@ -2228,6 +2328,7 @@ def from_arcgis(
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         limit=limit,
+        batch_size=batch_size,
         max_workers=max_workers,
         output_crs=output_crs,
         max_allowable_offset=max_allowable_offset,
@@ -2604,6 +2705,8 @@ def create_pmtiles(
     maximum_tile_bytes: int | None = None,
     force: bool = False,
     repair_geometry: bool = True,
+    temporary_directory: str | None = None,
+    chunks: str | None = None,
 ) -> None:
     """
     Create PMTiles from a GeoParquet file using tippecanoe.
@@ -2636,6 +2739,12 @@ def create_pmtiles(
         maximum_tile_bytes: Set an explicit per-tile byte cap via
             --maximum-tile-bytes. Takes precedence over no_tile_size_limit.
         force: Pass --force to overwrite the output file if it already exists.
+        chunks: Split the input into an ``NxM`` grid of chunks, tile each and
+            tile-join them, bounding tippecanoe's scratch by the chunk (#1116).
+            Needs ``max_zoom``; cannot be combined with ``bbox``.
+        temporary_directory: Existing directory for this run's scratch
+            (tippecanoe's ``-t`` and the gpio children's temp files);
+            defaults to the OS temp directory.
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -2678,6 +2787,8 @@ def create_pmtiles(
         maximum_tile_bytes=maximum_tile_bytes,
         force=force,
         repair_geometry=repair_geometry,
+        temporary_directory=temporary_directory,
+        chunks=chunks,
     )
 
 
@@ -2697,6 +2808,7 @@ def create_pmtiles_pyramid(
     attribution: str | None = None,
     force: bool = False,
     verbose: bool = False,
+    temporary_directory: str | None = None,
 ) -> None:
     """
     Create a banded multi-level PMTiles pyramid from an aggregate file.
@@ -2731,6 +2843,8 @@ def create_pmtiles_pyramid(
         attribution: Attribution HTML for the tiles
         force: Overwrite the output archive if it exists
         verbose: Enable verbose output
+        temporary_directory: Existing directory for this run's scratch and
+            the intermediate band archives; defaults to the OS temp directory
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -2770,4 +2884,5 @@ def create_pmtiles_pyramid(
         attribution=attribution,
         force=force,
         verbose=verbose,
+        temporary_directory=temporary_directory,
     )

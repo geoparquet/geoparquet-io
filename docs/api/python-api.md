@@ -238,6 +238,7 @@ gpio.extract_arcgis(
 | `include_cols` | str | Comma-separated columns to include |
 | `exclude_cols` | str | Comma-separated columns to exclude |
 | `limit` | int | Maximum number of features |
+| `batch_size` | int | Features per request (default: server's `maxRecordCount`, capped at 2000); lower it for layers the server cannot serialize a full page of |
 | `max_workers` | int | Number of parallel fetch workers (default: 1) |
 | `output_crs` | str | Output CRS (e.g. `EPSG:25830`) or `native`; default reprojects to WGS84 |
 | `max_allowable_offset` | float | Server-side geometry generalization tolerance in output CRS units |
@@ -1430,6 +1431,12 @@ table = gpio.convert('data.csv', lat_column='latitude', lon_column='longitude')
 
 # Convert from S3 with authentication
 table = gpio.convert('s3://bucket/data.gpkg', profile='my-aws')
+
+# Name the text encoding of a source that cannot say (a DBF without .cpg, a Latin-1 CSV)
+table = gpio.convert('ehak.shp', encoding='ISO-8859-1')
+
+# Drop Z/M so a 3D source becomes 2D geometry
+table = gpio.convert('etak_3d.shp', force_2d=True)
 ```
 
 Unlike the CLI `convert` command, the Python API does NOT apply Hilbert sorting by default. Chain `.sort_hilbert()` explicitly if you want spatial ordering:
@@ -1673,7 +1680,7 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.reproject(table, target_crs='EPSG:4326', source_crs=None, geometry_column=None, assume_crs84=False)` | Reproject geometry (`assume_crs84` treats an unknown/null CRS as OGC:CRS84) |
 | `ops.extract(table, columns=None, exclude_columns=None, bbox=None, where=None, limit=None, geometry_column=None)` | Filter columns/rows |
 | `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table (`None`/`[]` selects every column; a blank entry in the list raises) |
-| `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None)` | Fetch ArcGIS Feature Service |
+| `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None, max_workers=1, output_crs=None, max_allowable_offset=None, repair_geometry=True, timeout=60.0, batch_size=None)` | Fetch ArcGIS Feature Service (`batch_size` lowers the page size for layers the server cannot serialize a full page of) |
 | `ops.convert_to_geojson(table, output, precision=7, write_bbox=False, id_field=None)` | Convert to GeoJSON |
 | `ops.convert_to_geopackage(table, output, layer_name='features', overwrite=False)` | Convert to GeoPackage |
 | `ops.convert_to_flatgeobuf(table, output)` | Convert to FlatGeobuf |
@@ -1682,7 +1689,9 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.from_wfs(service_url, typename, version='auto', bbox=None, limit=None, max_workers=1, page_size=100000, auto_tile=True, ...)` | Fetch from WFS service |
 | `ops.from_wfs_layers(service_url, typenames, output_dir, parallel_layers=1, max_workers=1, page_size=100000, ...)` | Fetch multiple WFS layers to directory |
 | `ops.create_overviews(input_parquet, levels=None, max_tile_kb=500, bytes_per_cell=None, cell_column=None, scheme=None, output_dir=None, force=False, ...)` | Build coarser overview levels from an aggregate file |
-| `ops.create_pmtiles_pyramid(input_path, output_path, levels=None, max_tile_kb=500, layer_mode='grouped', include_features=False, features_source=None, max_zoom=None, ...)` | Build a zoom-banded multi-level PMTiles archive from an aggregate file (requires tippecanoe + tile-join) |
+| `ops.create_overview_file(input_parquet, overview_out, levels=None, cell_detail=None, explicit_gsd=None, output_dir=None, force=False, ...)` | Assemble the overview ladder into one levelled GeoParquet (tylertoo overviews format) |
+| `ops.create_pmtiles(input_path, output_path, layer=None, min_zoom=None, max_zoom=None, bbox=None, where=None, include_cols=None, chunks=None, temporary_directory=None, ...)` | Stream a GeoParquet file into a PMTiles archive (requires tippecanoe; `chunks` also tile-join) |
+| `ops.create_pmtiles_pyramid(input_path, output_path, levels=None, max_tile_kb=500, layer_mode='grouped', include_features=False, features_source=None, max_zoom=None, temporary_directory=None, ...)` | Build a zoom-banded multi-level PMTiles archive from an aggregate file (requires tippecanoe + tile-join) |
 | `ops.partition_by_h3(table, output_dir, resolution=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_h3_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by H3 cell |
 | `ops.partition_by_a5(table, output_dir, resolution=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_a5_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by A5 cell |
 | `ops.partition_by_s2(table, output_dir, level=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_s2_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by S2 cell |

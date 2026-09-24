@@ -165,6 +165,122 @@ For national- or global-overview maps over dense data, re-enable the size limit 
     )
     ```
 
+#### Chunking very large inputs (`--chunks`)
+
+`--temporary-directory` puts the scratch somewhere it fits. `--chunks` stops it
+being enormous in the first place: gpio splits the input into an `NxM` grid of
+disjoint spatial chunks, tiles each one, and merges them with `tile-join`, so
+peak scratch is bounded by the chunk rather than the dataset. `--max-zoom` is
+required with it (see below).
+
+=== "CLI"
+
+    <!-- doctest: needs-tippecanoe -->
+    ```bash
+    gpio pmtiles create buildings.parquet out.pmtiles --chunks 2x2 --max-zoom 14
+    ```
+
+=== "Python"
+
+    <!-- doctest: needs-tippecanoe -->
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.create_pmtiles('buildings.parquet', 'out.pmtiles', chunks='2x2', max_zoom=14)
+    ```
+
+**The input is split once, on disk.** One DuckDB pass — the same single-scan
+partitioned write `gpio partition` uses — writes each non-empty chunk to
+`<output>.parts/chunk_<row>_<col>.parquet`. Each chunk is then streamed to
+tippecanoe the way a whole file is, so memory stays flat; an ocean chunk with
+no features is simply absent and never fails the join.
+
+**Features are assigned by centroid, not by bounding box.** `--bbox` selects
+features that *intersect* a box, so a polygon straddling a chunk edge would be
+tiled by both neighbours and appear twice in the joined archive — a visible
+seam under translucent fills. Each feature lands in exactly one chunk by its
+centroid, and the grid index is clamped so a centroid that a rounded bbox
+covering places just outside the dataset bounds still tiles. For the same
+reason `--bbox` cannot be combined with `--chunks`: filter first with
+`gpio extract --bbox`, then chunk the result. `--where` and `--include-cols`
+are applied while splitting.
+
+**Failed runs resume.** These runs take hours; losing the last chunk should not
+cost the first eleven. A chunk's archive gets its final name only once
+tippecanoe has finished it, so a re-run reuses exactly the complete parts, and
+a `manifest.json` records the input, grid, filters and tiling flags the parts
+were built with — a re-run with different options is refused rather than
+joining a stale grid into the archive. The directory is removed once the join
+succeeds.
+
+!!! note "Why `--max-zoom` is required"
+
+    Without it tippecanoe guesses a maximum zoom per run (`-zg`), and it would
+    guess differently for a dense chunk and a sparse one. The joined archive
+    would claim the dense chunk's maximum while the sparse regions had no
+    tiles above their own guess — blank map past that zoom.
+
+!!! note "Chunking is not bit-identical to a single pass"
+
+    Every source feature survives and none is duplicated, but
+    `--simplify-only-low-zooms` generalizes each chunk against only its own
+    neighbours, so low-zoom geometry can differ slightly from a whole-dataset
+    run. Use the smallest grid that fits your disk rather than the largest.
+
+    A levelled overview GeoParquet (one carrying the `geo:overviews` footer
+    key) is rejected: in `duplicating` mode every feature appears at every
+    level, so chunking would stack all levels into the same tiles. Tile those
+    with `tylertoo export-pmtiles`, which reads the levels as written.
+
+#### Scratch space (`--temporary-directory`)
+
+tippecanoe sorts the whole input on disk before it writes a tile, and that
+scratch is **several times the input, not the output**. Tiling 168M polygons at
+`-Z 12 -z 14` (~12 GB of GeoParquet in, ~34 GB of PMTiles out) accumulated
+**~270 GB** of scratch. Budget for it.
+
+By default it goes to the OS temp directory (`$TMPDIR`, or `/tmp` when that is
+unset) — on macOS the boot volume, which is usually not where your data lives.
+Point the run at an existing directory with room; tippecanoe's scratch and the
+temp files of the `gpio` processes feeding it all follow:
+
+=== "CLI"
+
+    <!-- doctest: needs-tippecanoe, setup="mkdir -p scratch", setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
+    ```bash
+    gpio pmtiles create buildings.parquet out.pmtiles --temporary-directory scratch
+
+    # Same flag on pyramid, where it also parents the intermediate band archives
+    gpio pmtiles pyramid cells.parquet pyramid.pmtiles -t scratch
+    ```
+
+=== "Python"
+
+    <!-- doctest: needs-tippecanoe, setup="mkdir -p scratch", setup="gpio process aggregate h3 input.parquet cells.parquet --resolution 5" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    ops.create_pmtiles('buildings.parquet', 'out.pmtiles', temporary_directory='scratch')
+    ops.create_pmtiles_pyramid(
+        'cells.parquet', 'pyramid.pmtiles', temporary_directory='scratch'
+    )
+    ```
+
+Without the flag, `TMPDIR` is the knob — the same one every other gpio command
+follows, described under [Where Spilled Data Goes](write-strategies.md#where-spilled-data-goes).
+tippecanoe does not read that variable itself; gpio passes the resolved
+directory to it.
+
+!!! warning "A full scratch volume is hard to diagnose"
+
+    tippecanoe creates these files with `mkstemp` + `unlink`, so they have no
+    directory entry: they are invisible to `ls` and `du`, and `rm` cannot
+    reclaim them. From outside, the disk simply fills with nothing visible
+    consuming it, and only killing the process releases the space.
+
+    `tile-join`, used by `gpio pmtiles pyramid`, accepts no equivalent flag
+    upstream, so its own spill stays wherever it puts it.
+
 ## PMTiles Pyramids
 
 A fine-grained aggregate (say A5 resolution 10 over billions of buildings) renders beautifully zoomed in but overflows tile limits at low zooms, forcing tippecanoe to drop the densest cells — exactly the hotspots you care about. `gpio pmtiles pyramid` fixes this by building a **banded archive**: coarser aggregate levels serve low zooms, finer levels take over as you zoom in, and (optionally) the raw features appear at the highest zooms.

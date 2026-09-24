@@ -434,6 +434,34 @@ written `geometry_types` metadata carries the spec's dimension suffixes
 (`"Point Z"`, `"LineString ZM"`). `gpio check spec` validates these suffixes
 against the actual coordinate dimensions in both directions.
 
+`--force-2d` drops Z and M instead (`ST_Force2D`), for sources that are 3D
+throughout when the consumer is not: some tile renderers draw nothing for 3D
+geometry. It applies to every input format, including a WKT column in CSV and
+every geometry column of a GeoParquet input, and the bounds, bbox column and
+Hilbert ordering are all computed from the flattened geometry. The written CRS
+follows: a compound "horizontal + height" CRS (EST97 + EVRF2007 height, say) is
+reduced to its horizontal component, and a 3D geographic CRS such as EPSG:4979
+to its 2D counterpart, so the file does not describe a dimension it no longer
+has. Without `--force-2d` a compound CRS is kept as declared.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a 3D source" -->
+    ```bash
+    gpio convert etak_3d.shp etak.parquet --force-2d
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+    ```
+
+    <!-- doctest: skip="needs a 3D source" -->
+    ```python
+    gpio.convert("etak_3d.shp", force_2d=True).write("etak.parquet")
+    ```
+
 ## Remote Files
 
 Read from cloud storage or HTTPS:
@@ -557,6 +585,46 @@ converts again. That costs one extra read of the source, and only when it holds
 geometry DuckDB cannot read; a file already at the output path is overwritten
 by the second attempt or, if that fails too, left as it was.
 `--no-linearize-curves` keeps the error instead.
+
+### Source Text Encoding
+
+Some sources cannot say how their text is encoded. A shapefile whose DBF has no
+`.cpg` sidecar, or a CSV saved from a Windows spreadsheet, reaches DuckDB byte
+for byte: the first accented value ("Lääne maakond") is then invalid UTF-8 and
+the conversion fails with no way to name what the file actually is. `--encoding`
+names it. For GDAL formats it is passed as the `ENCODING` open option; for
+CSV/TSV it goes to DuckDB's CSV reader. Parquet carries UTF-8 already, so the
+option is refused there.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a shapefile whose DBF is not UTF-8" -->
+    ```bash
+    # Shapefile with a Windows-ANSI attribute table and no .cpg
+    gpio convert ehak.shp ehak.parquet --encoding ISO-8859-1
+
+    # Latin-1 CSV with a WKT column
+    gpio convert points.csv points.parquet --encoding ISO-8859-1
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+    ```
+
+    <!-- doctest: skip="needs a shapefile whose DBF is not UTF-8" -->
+    ```python
+    gpio.convert("ehak.shp", encoding="ISO-8859-1").write("ehak.parquet")
+    gpio.convert("points.csv", encoding="ISO-8859-1").write("points.parquet")
+    ```
+
+Use the encoding names GDAL knows (`ISO-8859-1`, `CP1252`, `UTF-8`, ...). The
+CSV reader decodes UTF-8, UTF-16 and Latin-1 on its own; the common names are
+translated for it (`ISO-8859-1` and `latin1` both reach it as Latin-1). Every
+other encoding, CP1252 included, comes from DuckDB's `encodings` extension,
+which gpio loads on demand; offline, without a cached copy, the error names the
+extension.
 
 ### Skip Hilbert Ordering
 
@@ -835,6 +903,37 @@ Auto-detects comma and tab. Override with `--delimiter` for semicolon, pipe, or 
 ```bash
 gpio convert data.csv out.parquet --delimiter ";"
 ```
+
+## Columns Whose Names Differ Only by Case
+
+Some sources carry two columns whose names differ only by case -- most often a
+GeoServer WFS response, where the driver materialises the feature-level `id`
+member beside the publisher's own `Id`. DuckDB identifiers are
+case-insensitive, so such a file cannot be read as it stands.
+
+`convert` keeps both columns: the first spelling it meets keeps its name, and
+each later collision is suffixed (`Id` becomes `Id_1`). Parquet field names are
+case-sensitive, so nothing is dropped, and every rename is logged. Sources
+without a collision are unaffected.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a source carrying both 'id' and 'Id'" -->
+    ```bash
+    gpio convert geoparquet counties.geojson counties.parquet
+    # Renamed column "Id" to "Id_1": it collides with an earlier column
+    # under DuckDB's case-insensitive identifiers
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs a source carrying both 'id' and 'Id'" -->
+    ```python
+    import geoparquet_io as gpio
+
+    # columns land as 'id' and 'Id_1'
+    gpio.convert('counties.geojson').write('counties.parquet')
+    ```
 
 ## Performance
 

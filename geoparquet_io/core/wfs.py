@@ -758,6 +758,55 @@ def _resolve_crs_for_output(
     )
 
 
+def _describe_schema(wfs, typename: str) -> dict | None:
+    """
+    Fetch one layer's DescribeFeatureType schema, naming it per the WFS version.
+
+    OWSLib builds the DescribeFeatureType request with the WFS 1.x parameter
+    ``typeName`` whatever the negotiated version is. WFS 2.0.0 defines
+    ``typeNames``; a server that only reads the 2.0.0 spelling ignores the
+    request's ``typeName``, describes every feature type it serves, and OWSLib
+    returns the first one's schema. Every layer of such a service then looks
+    like the first: ``sortBy`` was auto-detected as ``land_id`` for a layer
+    whose columns are ``gemarkung_id``/``flurnummer``, and the server refused
+    every page with HTTP 400 ``Illegal property name`` (owsproxy.lgl-bw.de,
+    2026-09-22, Issue #1144). GeoServer accepts both spellings, which is why
+    this went unnoticed.
+
+    For 2.x the layer is named with ``typeNames`` in the URL handed to OWSLib's
+    schema parser; OWSLib still appends its ``typeName``, which a 2.0.0 server
+    that honours both reads consistently. 1.x keeps OWSLib's own request.
+
+    Args:
+        wfs: OWSLib WebFeatureService object
+        typename: Layer typename
+
+    Returns:
+        OWSLib schema dict, or None when the server describes nothing
+    """
+    version = str(getattr(wfs, "version", "") or "")
+    if not version.startswith("2."):
+        schema = wfs.get_schema(typename)
+    else:
+        from owslib.feature.schema import get_schema
+
+        # OWSLib only adds service/request/version when the URL lacks them, so
+        # state them here: a URL still carrying request=GetCapabilities or a
+        # stale version would otherwise describe nothing or the wrong layer.
+        # _merge_query_params lets these override same-named params.
+        url = _merge_query_params(
+            str(wfs.url),
+            {
+                "service": "WFS",
+                "request": "DescribeFeatureType",
+                "version": version,
+                "typeNames": typename,
+            },
+        )
+        schema = get_schema(url, typename, version, auth=getattr(wfs, "auth", None))
+    return schema if isinstance(schema, dict) else None
+
+
 def _detect_geometry_column(wfs, typename: str) -> str:
     """
     Detect geometry column name from DescribeFeatureType.
@@ -770,7 +819,7 @@ def _detect_geometry_column(wfs, typename: str) -> str:
         Geometry column name (default: "geometry")
     """
     try:
-        schema = wfs.get_schema(typename)
+        schema = _describe_schema(wfs, typename)
         if schema and "geometry" in schema:
             return str(schema.get("geometry_column", "geometry"))
         # Check for common geometry column names in properties
@@ -803,7 +852,7 @@ def _detect_sortable_attribute(wfs, typename: str) -> str | None:
         First sortable attribute name, or None if none found
     """
     try:
-        schema = wfs.get_schema(typename)
+        schema = _describe_schema(wfs, typename)
         if schema and "properties" in schema:
             geometry_col = schema.get("geometry_column", "geometry")
             for prop_name, prop_type in schema["properties"].items():

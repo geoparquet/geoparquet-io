@@ -382,6 +382,8 @@ def convert(
     repair_geometry: bool = True,
     linearize_curves: bool = True,
     max_angle_deg: float | None = None,
+    encoding: str | None = None,
+    force_2d: bool = False,
 ) -> Table:
     """
     Convert a geospatial file to a Table.
@@ -406,6 +408,11 @@ def convert(
                mirroring repair_geometry). False raises an actionable error instead.
         max_angle_deg: Maximum angular step per stroked arc segment in degrees
                (default: 4.0, GDAL's OGR_ARC_STEPSIZE default).
+        encoding: Source text encoding for sources that cannot say, e.g. a
+               shapefile DBF without ``.cpg`` or a Latin-1 CSV (``ISO-8859-1``,
+               ``UTF-8``, ...). Not for Parquet.
+        force_2d: Drop Z and M coordinates (``ST_Force2D``) so a 3D source
+               becomes 2D geometry (default: False).
 
     Returns:
         Table for chaining operations
@@ -416,6 +423,8 @@ def convert(
         >>> gpio.convert('data.csv', lat_column='lat', lon_column='lon').write('out.parquet')
         >>> gpio.convert('s3://bucket/data.gpkg', profile='my-aws').write('out.parquet')
         >>> gpio.convert('multilayer.gpkg', layer='buildings').write('buildings.parquet')
+        >>> gpio.convert('ehak.shp', encoding='ISO-8859-1').write('ehak.parquet')
+        >>> gpio.convert('etak_3d.shp', force_2d=True).write('etak.parquet')
     """
     from geoparquet_io.core.convert import read_spatial_to_arrow
 
@@ -433,6 +442,8 @@ def convert(
         repair_geometry=repair_geometry,
         linearize_curves=linearize_curves,
         max_angle_deg=max_angle_deg,
+        encoding=encoding,
+        force_2d=force_2d,
     )
 
     return Table(arrow_table, geometry_column=geom_col, crs=detected_crs)
@@ -451,6 +462,7 @@ def extract_arcgis(
     include_cols: str | None = None,
     exclude_cols: str | None = None,
     limit: int | None = None,
+    batch_size: int | None = None,
     max_workers: int = 1,
     output_crs: str | None = None,
     max_allowable_offset: float | None = None,
@@ -485,6 +497,10 @@ def extract_arcgis(
         include_cols: Comma-separated column names to include (server-side)
         exclude_cols: Comma-separated column names to exclude (client-side)
         limit: Maximum number of features to return
+        batch_size: Features requested per page. Default None pages at the
+            server's advertised maxRecordCount, capped at 2000. Lower it for
+            layers the server cannot serialize a full page of (JSON error 500,
+            or a request timeout). Must be a positive integer.
         max_workers: Number of concurrent requests (1 = sequential, 2-3 recommended)
         output_crs: Preserve native CRS. 'native' uses the layer's advertised SR,
             or pass an EPSG code (e.g. EPSG:25830). Default None reprojects to WGS84.
@@ -532,6 +548,7 @@ def extract_arcgis(
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         limit=limit,
+        batch_size=batch_size,
         max_workers=max_workers,
         output_crs=output_crs,
         max_allowable_offset=max_allowable_offset,

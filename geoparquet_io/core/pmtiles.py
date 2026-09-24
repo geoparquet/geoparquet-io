@@ -6,14 +6,17 @@ Requires tippecanoe to be installed and available in PATH.
 
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import IO
 
 from geoparquet_io.core.column_selection import split_column_list
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import debug, success
 
 
@@ -61,6 +64,40 @@ def _get_gpio_executable() -> str:
         return gpio_in_path
 
     return "gpio"
+
+
+def resolve_scratch_directory(explicit: str | None) -> str:
+    """Where one pmtiles run puts its scratch: tippecanoe's ``-t`` and gpio's own.
+
+    An explicit directory must already exist and be writable. Checked here,
+    before any input is scanned, because the alternative is tippecanoe's
+    ``mkstemp`` error after the streaming has started (#1115). Without one
+    the package rule applies -- ``tempfile.gettempdir()``, the same call
+    ``spill_directory`` and every other temp file in gpio use -- so
+    ``TMPDIR``/``TEMP``/``TMP`` are honoured and a stale value falls back to
+    ``/tmp`` instead of being forwarded raw to a tool that would die on it.
+    tippecanoe itself ignores ``TMPDIR``, which is why the directory is
+    always passed explicitly.
+    """
+    if not explicit:
+        return tempfile.gettempdir()
+    path = os.path.abspath(explicit)
+    if not os.path.isdir(path):
+        raise InvalidParameterError("temporary_directory", f"not a directory: {path}")
+    if not os.access(path, os.W_OK):
+        raise InvalidParameterError("temporary_directory", f"not writable: {path}")
+    return path
+
+
+def scratch_env(scratch: str) -> dict[str, str]:
+    """Environment for a child gpio process so its temp files follow ``scratch``.
+
+    ``-t`` moves tippecanoe's scratch only; the ``gpio extract | gpio convert``
+    chain feeding it spills DuckDB sorts and stdin buffers wherever the
+    child's ``tempfile.gettempdir()`` points. Setting all three variables
+    keeps every temp file of the run on the volume the user named.
+    """
+    return {**os.environ, "TMPDIR": scratch, "TEMP": scratch, "TMP": scratch}
 
 
 def _check_tippecanoe() -> bool:
@@ -203,6 +240,7 @@ def _build_tippecanoe_command(
     drop_densest_as_needed: bool = True,
     maximum_tile_bytes: int | None = None,
     force: bool = False,
+    temporary_directory: str | None = None,
 ) -> list[str]:
     """Build the tippecanoe command with production-quality settings.
 
@@ -212,6 +250,10 @@ def _build_tippecanoe_command(
     ``no_tile_size_limit`` — the two are contradictory, and an explicit
     cap is what gives ``--drop-densest-as-needed`` a limit to drop
     features against.
+
+    ``temporary_directory`` becomes tippecanoe's ``-t``; callers resolve it
+    with :func:`resolve_scratch_directory` first (tippecanoe ignores
+    ``TMPDIR``, #1115).
     """
     cmd = ["tippecanoe", "-P", "-o", output_path]
 
@@ -255,6 +297,9 @@ def _build_tippecanoe_command(
 
     if force:
         cmd.append("--force")
+
+    if temporary_directory:
+        cmd.extend(["-t", temporary_directory])
 
     if verbose:
         cmd.append("--progress-interval=1")
@@ -300,11 +345,16 @@ def _log_pipeline(
         debug(f"Adding layer metadata into PMTiles from column '{layer_by_column}'")
 
 
-def _spawn_gpio_chain(gpio_commands: list[list[str]], verbose: bool) -> list["subprocess.Popen"]:
+def _spawn_gpio_chain(
+    gpio_commands: list[list[str]],
+    verbose: bool,
+    env: dict[str, str] | None = None,
+) -> list["subprocess.Popen"]:
     """Spawn the gpio commands as a connected stdin→stdout chain.
 
     Cleans up any already-spawned processes if a later spawn fails, so the
-    caller never leaks subprocesses on a partial chain.
+    caller never leaks subprocesses on a partial chain. ``env`` is handed to
+    every child (see :func:`scratch_env`).
     """
     processes: list[subprocess.Popen] = []
     try:
@@ -316,6 +366,7 @@ def _spawn_gpio_chain(gpio_commands: list[list[str]], verbose: bool) -> list["su
                 stdin=stdin_source,
                 stdout=subprocess.PIPE,
                 stderr=None if verbose else subprocess.PIPE,
+                env=env,
             )
             processes.append(proc)
 
@@ -476,17 +527,20 @@ def _run_pipeline(
     tippecanoe_cmd: list[str],
     verbose: bool,
     layer_by_column: str | None = None,
+    scratch: str | None = None,
 ) -> None:
     """Execute the gpio to tippecanoe pipeline.
 
     If layer_by_column is given, the gpio output is intercepted and each
     feature is annotated with a `tippecanoe.layer` value derived from
-    that column before being forwarded to tippecanoe.
+    that column before being forwarded to tippecanoe. ``scratch`` is the
+    run's resolved temp directory; the gpio children inherit it as their
+    ``TMPDIR`` so their spill lands beside tippecanoe's.
     """
     if verbose:
         _log_pipeline(gpio_commands, tippecanoe_cmd, layer_by_column)
 
-    processes = _spawn_gpio_chain(gpio_commands, verbose)
+    processes = _spawn_gpio_chain(gpio_commands, verbose, scratch_env(scratch) if scratch else None)
 
     try:
         if layer_by_column:
@@ -527,6 +581,8 @@ def create_pmtiles_from_geoparquet(
     maximum_tile_bytes: int | None = None,
     force: bool = False,
     repair_geometry: bool = True,
+    temporary_directory: str | None = None,
+    chunks: str | None = None,
 ) -> None:
     """
     Create PMTiles using gpio streaming + tippecanoe subprocess.
@@ -563,12 +619,20 @@ def create_pmtiles_from_geoparquet(
         maximum_tile_bytes: Set an explicit per-tile byte cap via
             --maximum-tile-bytes. Takes precedence over no_tile_size_limit.
         force: Pass --force to overwrite the output file if it already exists.
+        chunks: Tile an ``NxM`` grid of disjoint chunks and tile-join them,
+            bounding tippecanoe's scratch by the chunk rather than the dataset
+            (#1116); see :mod:`geoparquet_io.core.pmtiles_chunks`. Needs
+            ``max_zoom``; cannot be combined with ``bbox``.
         repair_geometry: Repair invalid geometry with ST_MakeValid (default: True).
             Prevents tippecanoe TopologyExceptions on self-intersecting polygons.
             Set False to pass geometry through unrepaired.
+        temporary_directory: Scratch for this run -- tippecanoe's ``-t`` and
+            the gpio children's temp files. Must exist; defaults to the OS
+            temp directory (``TMPDIR``). Several times the input in size.
 
     Raises:
-        InvalidParameterError: If include_cols carries a blank entry
+        InvalidParameterError: If include_cols carries a blank entry or
+            temporary_directory is not a writable directory
         TippecanoeNotFoundError: If tippecanoe is not in PATH
         ValueError: If paths contain shell metacharacters or the user supplied an invalid layer_by_column
         RuntimeError: If any subprocess fails
@@ -585,9 +649,43 @@ def create_pmtiles_from_geoparquet(
     # (#980). Checked here, with the other usage errors and before the
     # tippecanoe probe, so a bad option is not reported as a missing binary.
     cols = split_column_list(include_cols, "--include-cols")
+    scratch = resolve_scratch_directory(temporary_directory)
 
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()
+
+    if chunks:
+        # Deferred: pmtiles_chunks tiles each chunk through this function.
+        from geoparquet_io.core.pmtiles_chunks import create_pmtiles_chunked
+
+        create_pmtiles_chunked(
+            input_path,
+            output_path,
+            chunks,
+            bbox=bbox,
+            where=where,
+            include_cols=include_cols,
+            layer=layer,
+            attribution=attribution,
+            force=force,
+            verbose=verbose,
+            profile=profile,
+            tiling={
+                "min_zoom": min_zoom,
+                "max_zoom": max_zoom,
+                "precision": precision,
+                "src_crs": src_crs,
+                "layer_by_column": layer_by_column,
+                "simplify_only_low_zooms": simplify_only_low_zooms,
+                "no_simplification_of_shared_nodes": no_simplification_of_shared_nodes,
+                "no_tile_size_limit": no_tile_size_limit,
+                "drop_densest_as_needed": drop_densest_as_needed,
+                "maximum_tile_bytes": maximum_tile_bytes,
+                "repair_geometry": repair_geometry,
+                "temporary_directory": scratch,
+            },
+        )
+        return
 
     # If layer_by_column is set, ensure that the group by column is always included
     include_cols_with_layer_by_column: str | None
@@ -623,9 +721,10 @@ def create_pmtiles_from_geoparquet(
         drop_densest_as_needed=drop_densest_as_needed,
         maximum_tile_bytes=maximum_tile_bytes,
         force=force,
+        temporary_directory=scratch,
     )
 
-    _run_pipeline(gpio_commands, tippecanoe_cmd, verbose, layer_by_column)
+    _run_pipeline(gpio_commands, tippecanoe_cmd, verbose, layer_by_column, scratch)
 
     if verbose:
         success(f"Created {output_path}")

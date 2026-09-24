@@ -127,6 +127,24 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
 
     This modifies the file in-place to add only the metadata, without creating a new file.
 
+    !!! info "The data is not re-encoded"
+
+        The `geo` key is rewritten in the footer and every page below it is copied
+        byte for byte ([#1141](https://github.com/geoparquet/geoparquet-io/issues/1141)),
+        so the compression codec *and its level*, the encodings, the bloom filters,
+        the page index, the row-group boundaries, the row order and every other
+        footer key come out exactly as they went in. The file grows by the size of
+        the key and nothing else, and the work is proportional to the footer rather
+        than to the file.
+
+        This matters because a Parquet file does not record the compression *level*
+        it was written at. The command used to re-encode every page with a DuckDB
+        `COPY`, which had no level to carry over and fell back to DuckDB's default
+        of 3: a file written at zstd 15 came back 11.6% bigger on the reported
+        fixture and 36% bigger on a real one. A footer gpio cannot read — an
+        encrypted one, or a thrift structure it does not recognise — falls back to
+        that rewrite, with a warning saying so.
+
     !!! note "Requires GeoParquet 1.1+"
 
         The `covering` key was introduced in GeoParquet 1.1, so this command fails on a

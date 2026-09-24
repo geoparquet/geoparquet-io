@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "geoparquet-io"
-version = "1.5.0"
+version = "1.6.0"
 description = "Fast I/O and transformation tools for GeoParquet files"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -380,7 +380,7 @@ skips = [
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "1.5.0"
+version = "1.6.0"
 version_files = ["pyproject.toml:^version"]
 tag_format = "v$version"
 # Off: the changelog is generated from merged pull requests by
@@ -439,7 +439,7 @@ omit = [
 # rounded down); never lower it to admit a regression. The move is one command,
 # `uv run python scripts/coverage_floor.py --apply`, which re-measures and
 # rewrites this value, the dated figure above, and the prose that repeats it
-# (see ADR-0008). This is the ONE place the number lives: pytest-cov reads it
+# (see ADR-0006). This is the ONE place the number lives: pytest-cov reads it
 # on the CI coverage leg because COV_ARGS passes no --cov-fail-under, and
 # tests/test_coverage_job.py asserts that stays so (and that branch = true
 # stays on, since turning it off would silently turn this into a looser

@@ -313,10 +313,13 @@ class ExtensionUnavailableError(GeoParquetError):
 
 
 class BatchTooLargeError(GeoParquetError):
-    """Raised when server returns non-JSON response due to batch size limits.
+    """Raised when a server refused a page of features because of its size.
 
     This typically happens when a server's actual payload limit is lower than
-    its advertised maxRecordCount. The caller should retry with a smaller batch.
+    its advertised maxRecordCount: the page comes back as a non-JSON body, as
+    an ArcGIS JSON error envelope (code 500, "Error performing query
+    operation"), or as a 5xx that survives every same-size retry. The caller
+    should retry the same offset with a smaller batch.
     """
 
     def __init__(self, url: str, batch_size: int, reason: str) -> None:

@@ -263,7 +263,23 @@ _KDTREE_AUTO_SPELLING = (
     "tests/test_cli_api_call_parity_scaffold.py's 'add kdtree' case compares."
 )
 
+_ENCODING_IS_TWO_KNOBS = (
+    "Intentional. The two `encoding` parameters are homonyms, not one default spelled twice. "
+    "`gpio convert geoparquet --encoding` names the *source* text encoding (a shapefile DBF "
+    "without .cpg, a Latin-1 CSV), unset meaning 'trust the driver'; its API twin is "
+    "`gpio.convert(encoding=)`, where the default is the same None. `Table.write(encoding=)` "
+    "is the GDAL *output* encoding for Shapefile/GeoPackage writes, which Parquet output "
+    "never uses, so `convert geoparquet` has no output-encoding knob at all."
+)
+
 KNOWN_DIVERGENCES: dict[tuple[str, str, str, str, str], str] = {
+    (
+        "convert geoparquet",
+        "Table.write",
+        "encoding",
+        "'<unset>'",
+        "'UTF-8'",
+    ): _ENCODING_IS_TWO_KNOBS,
     ("add kdtree", "ops.add_kdtree", "auto", "'<unset>'", "False"): _KDTREE_AUTO_SPELLING,
     ("add kdtree", "Table.add_kdtree", "auto", "'<unset>'", "False"): _KDTREE_AUTO_SPELLING,
     (

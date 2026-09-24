@@ -6,6 +6,111 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## v1.6.0 (2026-09-23)
+
+This release makes PMTiles and overviews workable on large inputs. `gpio pmtiles` can move tippecanoe's scratch space off `/tmp` with `--temporary-directory`, and can tile a large input in `--chunks` so the scratch space stays bounded. A pyramid can be given explicit zoom `--bands` instead of having them inferred. `gpio process overview --overview-out` writes the whole level ladder into one levelled overview GeoParquet, and `aggregate --breakdown` can carry a metric other than COUNT. @cayetanobv sent seven pull requests that make `convert` far more forgiving of real-world sources: `--force-2d` drops Z and M values, `--encoding` reads files whose text encoding GDAL can't detect, curved geometry is linearized under `--skip-hilbert` instead of failing, two columns whose names differ only by case are both kept, the geometry column keeps its own spelling in the `geo` metadata, and a rounded `--row-group-size` now names the size actually written.
+
+We also undertook a major restructuring to make the core of gpio more robust and easier to maintain. gpio's roughly thirty write paths each decided for themselves the row-group size, what "auto" GeoParquet version means, and whether to write a `geo` key, and they disagreed. `sort`, `check --fix`, `convert` and `Table.write` each wrote a different row-group size, and `gpio add` dropped a native file's CRS. Each difference surfaced as its own bug. A single write facade now makes those three decisions for every path, and the rest of the shared plumbing (SQL escaping, `geo` parsing, bbox and CRS handling) now has one owner each, enforced by tests. The same request now produces the same file from any command, and a fix lands everywhere at once. In practice, `gpio add`, `extract`, `sort` and `check --fix` keep a file's CRS, native geometry type and bbox covering, and `check --fix` no longer overwrites or deletes its own input. Remote sources are sturdier too: ArcGIS services that return error 500 fall back to smaller batches, WFS 2.0.0 schemas are described with `typeNames`, and `add admin-divisions --dataset overture` works again, now reading Overture's STAC catalog after its deprecated release list went stale.
+
+The breaking changes are all corrections, but some change what gets written. **Row groups default to 49,152 rows** in `sort`, `convert geoparquet` (previously DuckDB's 122,880), `Table.write`, `check --fix` and geometry-less BigQuery extracts. An explicit `--row-group-size` is rounded to a whole 2,048-row vector, with a message saying so; pass `--row-group-size` if you depend on the old size. `check <cmd> "*.parquet" --fix` now repairs every file the glob matches, not just the first. The Python API's `Table.check_*` and `validate()` now inspect the file the table was read from, so they can report failures that a temporary re-write used to hide. `extract arcgis` refuses a WKID it can't resolve (pass an explicit `--output-crs EPSG:<code>`) instead of writing projected coordinates labelled as lon/lat. `--fix` no longer declares a bbox covering whose struct fields are out of the spec's order, such as Overture's `xmin, xmax, ymin, ymax`. A `gpio add` rewrite of a native-geometry-only file now keeps it native, with its CRS.
+
+Welcome to our first-time contributor @gsueur, who rewrote `gpio add bbox-metadata` to do what its documentation always said: patch the metadata only. The old implementation re-copied every page and quietly re-compressed the file at DuckDB's default level, making a zstd-15 file about 10% larger. The new `core/parquet_footer.py` rewrites only the footer's key-value metadata and copies every byte below it verbatim. It's verified by byte-identity and preserves duplicate keys, and the command went from 490 ms to 12 ms on their benchmark. Thank you for a careful, well-tested first contribution. We hope to see more from you.
+
+### Breaking
+
+- fix(sort)!: snap --row-group-size to the writer's 2,048-row vector; default 50,000 → 49,152 by [@cholmes](https://github.com/cholmes) in [#967](https://github.com/geoparquet/geoparquet-io/pull/967)
+- fix(write)!: one row-group default, one auto-version rule and one geo-key rule for every write path by [@cholmes](https://github.com/cholmes) in [#990](https://github.com/geoparquet/geoparquet-io/pull/990)
+- fix(add)!: keep native geo and the CRS when a gpio add subcommand rewrites a file by [@cholmes](https://github.com/cholmes) in [#997](https://github.com/geoparquet/geoparquet-io/pull/997)
+- fix(extract)!: give a geometry-less BigQuery extract the row groups a geometry one gets by [@cholmes](https://github.com/cholmes) in [#1024](https://github.com/geoparquet/geoparquet-io/pull/1024)
+- fix(extract)!: stop an unresolvable ArcGIS WKID labelling projected coordinates as lon/lat by [@cholmes](https://github.com/cholmes) in [#1045](https://github.com/geoparquet/geoparquet-io/pull/1045)
+- fix(check)!: --fix repairs every file the input matched, not just the first by [@cholmes](https://github.com/cholmes) in [#1069](https://github.com/geoparquet/geoparquet-io/pull/1069)
+- fix(api)!: check the file a Table was read from, not a re-write of it by [@cholmes](https://github.com/cholmes) in [#1071](https://github.com/geoparquet/geoparquet-io/pull/1071)
+- fix(check)!: stop --fix declaring a covering the spec's field order forbids by [@cholmes](https://github.com/cholmes) in [#1070](https://github.com/geoparquet/geoparquet-io/pull/1070)
+
+### Added
+
+- feat(pmtiles): let a pyramid be given its zoom bands instead of inferring them by [@cholmes](https://github.com/cholmes) in [#1096](https://github.com/geoparquet/geoparquet-io/pull/1096)
+- feat(aggregate): let --breakdown carry a metric other than COUNT by [@cholmes](https://github.com/cholmes) in [#1101](https://github.com/geoparquet/geoparquet-io/pull/1101)
+- feat(pmtiles): let --temporary-directory move tippecanoe's scratch off /tmp by [@cholmes](https://github.com/cholmes) in [#1118](https://github.com/geoparquet/geoparquet-io/pull/1118)
+- feat(pmtiles): add --chunks to bound tippecanoe scratch on large inputs by [@cholmes](https://github.com/cholmes) in [#1119](https://github.com/geoparquet/geoparquet-io/pull/1119)
+- feat(overview): add --overview-out to emit one levelled overview GeoParquet by [@cholmes](https://github.com/cholmes) in [#1120](https://github.com/geoparquet/geoparquet-io/pull/1120)
+- feat(convert): --encoding for sources whose text encoding GDAL cannot detect by [@cayetanobv](https://github.com/cayetanobv) in [#1129](https://github.com/geoparquet/geoparquet-io/pull/1129)
+- feat(api): expose batch_size on extract_arcgis and from_arcgis by [@cayetanobv](https://github.com/cayetanobv) in [#1136](https://github.com/geoparquet/geoparquet-io/pull/1136)
+- feat(convert): --force-2d drops Z and M so 3D sources become 2D GeoParquet by [@cayetanobv](https://github.com/cayetanobv) in [#1130](https://github.com/geoparquet/geoparquet-io/pull/1130)
+
+### Changed
+
+- refactor(cli): split cli/main.py, starting with the shared helpers and the sort group by [@cholmes](https://github.com/cholmes) in [#914](https://github.com/geoparquet/geoparquet-io/pull/914)
+- refactor(cli): move the publish and process groups into their own modules by [@cholmes](https://github.com/cholmes) in [#915](https://github.com/geoparquet/geoparquet-io/pull/915)
+- refactor(cli): move the seven remaining single-region command groups into their own modules by [@cholmes](https://github.com/cholmes) in [#916](https://github.com/geoparquet/geoparquet-io/pull/916)
+- refactor(cli): move the check group into its own module by [@cholmes](https://github.com/cholmes) in [#929](https://github.com/geoparquet/geoparquet-io/pull/929)
+- refactor(cli): extract the duplicated command prologue, group callback and kdtree option resolution by [@cholmes](https://github.com/cholmes) in [#948](https://github.com/geoparquet/geoparquet-io/pull/948)
+- refactor(core): split six self-contained blocks out of core/common.py by [@cholmes](https://github.com/cholmes) in [#1007](https://github.com/geoparquet/geoparquet-io/pull/1007)
+- refactor(core): move the geo-metadata layer out of core/common.py by [@cholmes](https://github.com/cholmes) in [#1010](https://github.com/geoparquet/geoparquet-io/pull/1010)
+- refactor(core): move the write funnels out of core/common.py into core/parquet_write.py by [@cholmes](https://github.com/cholmes) in [#1011](https://github.com/geoparquet/geoparquet-io/pull/1011)
+- refactor(core): rename parquet_write to write_funnels and geo_metadata_repair to derive_geo_from_file by [@cholmes](https://github.com/cholmes) in [#1066](https://github.com/geoparquet/geoparquet-io/pull/1066)
+- refactor(core): repoint the common.py importers at their owners, delete the shims and add the layers contract by [@cholmes](https://github.com/cholmes) in [#1094](https://github.com/geoparquet/geoparquet-io/pull/1094)
+- refactor(core): promote the deferred imports whose cycle through common.py is gone by [@cholmes](https://github.com/cholmes) in [#1095](https://github.com/geoparquet/geoparquet-io/pull/1095)
+
+### Fixed
+
+- fix(check): quote the bbox column identifier in the check --fix rewrite by [@cholmes](https://github.com/cholmes) in [#923](https://github.com/geoparquet/geoparquet-io/pull/923)
+- fix(cli): quote the kdtree column identifier and stop the process group crashing when invoked directly by [@cholmes](https://github.com/cholmes) in [#925](https://github.com/geoparquet/geoparquet-io/pull/925)
+- fix(write): keep geometry_types on carried secondary columns and Z/M/ZM data by [@cholmes](https://github.com/cholmes) in [#927](https://github.com/geoparquet/geoparquet-io/pull/927)
+- fix(validate,inspect): enforce root placement for covering bbox and handle 6-element bboxes and antimeridian wrap by [@cholmes](https://github.com/cholmes) in [#930](https://github.com/geoparquet/geoparquet-io/pull/930)
+- fix(extract,carto,validate,convert): quote the last bare SQL identifiers and escape paths once by [@cholmes](https://github.com/cholmes) in [#939](https://github.com/geoparquet/geoparquet-io/pull/939)
+- fix(partition): quote bbox column identifiers from the input file in the admin join by [@cholmes](https://github.com/cholmes) in [#935](https://github.com/geoparquet/geoparquet-io/pull/935)
+- fix(extract): quote the BigQuery geometry column in both SQL dialects by [@cholmes](https://github.com/cholmes) in [#944](https://github.com/geoparquet/geoparquet-io/pull/944)
+- fix(extract,sort,partition): keep a secondary geometry column readable after a row filter by [@cholmes](https://github.com/cholmes) in [#949](https://github.com/geoparquet/geoparquet-io/pull/949)
+- fix(crs,reproject): recover the real geometry column from malformed 'geo' metadata by [@cholmes](https://github.com/cholmes) in [#945](https://github.com/geoparquet/geoparquet-io/pull/945)
+- fix(aggregate): cut grid cell rings at the antimeridian into MultiPolygons by [@cholmes](https://github.com/cholmes) in [#911](https://github.com/geoparquet/geoparquet-io/pull/911)
+- fix(extract): compute arcgis geometry_types from the data, not a five-entry table by [@cholmes](https://github.com/cholmes) in [#956](https://github.com/geoparquet/geoparquet-io/pull/956)
+- fix(check): say which row-count band is a verdict and which is advice, and make unsorted.parquet actually unsorted by [@cholmes](https://github.com/cholmes) in [#958](https://github.com/geoparquet/geoparquet-io/pull/958)
+- fix(inspect): stop counting bbox struct children as top-level columns by [@cholmes](https://github.com/cholmes) in [#955](https://github.com/geoparquet/geoparquet-io/pull/955)
+- fix(common,stac,stream): stop the last malformed-'geo' readers crashing the write by [@cholmes](https://github.com/cholmes) in [#960](https://github.com/geoparquet/geoparquet-io/pull/960)
+- fix(extract): stop arcgis guessing geometry_types when the data does not say by [@cholmes](https://github.com/cholmes) in [#965](https://github.com/geoparquet/geoparquet-io/pull/965)
+- fix(cli): guard empty --*-name values and let 'check spatial --fix' work in place by [@cholmes](https://github.com/cholmes) in [#959](https://github.com/geoparquet/geoparquet-io/pull/959)
+- fix(geo-metadata): keep a projected CRS through extract and sort, and stop 'check' crashing on the file it diagnoses by [@cholmes](https://github.com/cholmes) in [#978](https://github.com/geoparquet/geoparquet-io/pull/978)
+- fix(duckdb): spill to a private temp directory instead of ".tmp" under the working directory by [@cholmes](https://github.com/cholmes) in [#977](https://github.com/geoparquet/geoparquet-io/pull/977)
+- fix(extract): reject blank --include-cols/--exclude-cols entries and check BigQuery names against the table by [@cholmes](https://github.com/cholmes) in [#973](https://github.com/geoparquet/geoparquet-io/pull/973)
+- fix(check): write 49,152-row groups from --fix, and anchor two unanchored hook exemptions by [@cholmes](https://github.com/cholmes) in [#974](https://github.com/geoparquet/geoparquet-io/pull/974)
+- fix(core): report a non-string geo.version in check spec and check bbox instead of crashing by [@cholmes](https://github.com/cholmes) in [#984](https://github.com/geoparquet/geoparquet-io/pull/984)
+- fix(extract): reject blank --include-cols/--exclude-cols entries from the Python API too by [@cholmes](https://github.com/cholmes) in [#989](https://github.com/geoparquet/geoparquet-io/pull/989)
+- fix(convert): linearize curved geometry under --skip-hilbert instead of failing by [@cayetanobv](https://github.com/cayetanobv) in [#988](https://github.com/geoparquet/geoparquet-io/pull/988)
+- fix(convert): name the row-group size the writer will use when --row-group-size is rounded up by [@cayetanobv](https://github.com/cayetanobv) in [#987](https://github.com/geoparquet/geoparquet-io/pull/987)
+- fix(extract): match carto --exclude-cols case-insensitively, and reject a blank entry in a columns list by [@cholmes](https://github.com/cholmes) in [#994](https://github.com/geoparquet/geoparquet-io/pull/994)
+- fix(cli): answer a DuckDB-rejected file with an error line instead of a traceback by [@cholmes](https://github.com/cholmes) in [#995](https://github.com/geoparquet/geoparquet-io/pull/995)
+- fix(check): keep a file's CRS, native geo type and bbox covering through --fix by [@cholmes](https://github.com/cholmes) in [#1009](https://github.com/geoparquet/geoparquet-io/pull/1009)
+- fix(write): warn on disagreeing CRS sources, and keep a streamed geometry field typed by [@cholmes](https://github.com/cholmes) in [#1008](https://github.com/geoparquet/geoparquet-io/pull/1008)
+- fix(test): clear the package logger before each test so --verbose cannot leak into the next by [@cholmes](https://github.com/cholmes) in [#1016](https://github.com/geoparquet/geoparquet-io/pull/1016)
+- fix(upload): report the files a directory upload actually sent, and exit non-zero when any is missing by [@cholmes](https://github.com/cholmes) in [#1025](https://github.com/geoparquet/geoparquet-io/pull/1025)
+- fix(extract): classify Carto failures by HTTP status, not by digits in your SQL by [@cholmes](https://github.com/cholmes) in [#1027](https://github.com/geoparquet/geoparquet-io/pull/1027)
+- fix(check): stop --fix rewriting a file with a DuckDB COPY that overwrites its own input by [@cholmes](https://github.com/cholmes) in [#1033](https://github.com/geoparquet/geoparquet-io/pull/1033)
+- fix(check): stop --fix --fix-output deleting the input file by [@cholmes](https://github.com/cholmes) in [#1048](https://github.com/geoparquet/geoparquet-io/pull/1048)
+- fix(check): report a malformed `geo` value instead of crashing on it by [@cholmes](https://github.com/cholmes) in [#1072](https://github.com/geoparquet/geoparquet-io/pull/1072)
+- fix(cli): stop a native teardown crash turning a successful gpio run into exit 134 by [@cholmes](https://github.com/cholmes) in [#1073](https://github.com/geoparquet/geoparquet-io/pull/1073)
+- fix(aggregate): apply --metric-nodata when the metric names a column in another case by [@cholmes](https://github.com/cholmes) in [#1104](https://github.com/geoparquet/geoparquet-io/pull/1104)
+- fix(pmtiles): tell a reversed --bands plan to turn around, and print the plan that works by [@cholmes](https://github.com/cholmes) in [#1105](https://github.com/geoparquet/geoparquet-io/pull/1105)
+- fix(convert): stop a CSV read demanding an 800MiB buffer by [@cholmes](https://github.com/cholmes) in [#1113](https://github.com/geoparquet/geoparquet-io/pull/1113)
+- fix(arcgis): enter the batch-size ladder on JSON error 500 and persistent HTTP 500/502/504 pages by [@yharby](https://github.com/yharby) in [#1140](https://github.com/geoparquet/geoparquet-io/pull/1140)
+- fix(geo): keep the geometry column's own spelling in geo.columns by [@cayetanobv](https://github.com/cayetanobv) in [#1138](https://github.com/geoparquet/geoparquet-io/pull/1138)
+- fix(convert): keep both columns when two source names differ only by case by [@cayetanobv](https://github.com/cayetanobv) in [#1137](https://github.com/geoparquet/geoparquet-io/pull/1137)
+- fix(wfs): name the layer with typeNames when describing a WFS 2.0.0 schema by [@yharby](https://github.com/yharby) in [#1145](https://github.com/geoparquet/geoparquet-io/pull/1145)
+- fix(add): keep the file's compression when adding bbox covering metadata by [@gsueur](https://github.com/gsueur) in [#1142](https://github.com/geoparquet/geoparquet-io/pull/1142)
+- fix(admin): read the latest Overture release from its STAC catalog by [@cholmes](https://github.com/cholmes) in [#1147](https://github.com/geoparquet/geoparquet-io/pull/1147)
+
+### Documentation
+
+- docs(check): run the partition sampling and --fix examples against a seeded partition by [@cholmes](https://github.com/cholmes) in [#1092](https://github.com/geoparquet/geoparquet-io/pull/1092)
+
+### New Contributors
+
+- @gsueur made their first contribution in https://github.com/geoparquet/geoparquet-io/pull/1142
+
+_14 internal changes and 6 dependency updates are not listed here; the full changelog has them._
+
+**Full Changelog**: https://github.com/geoparquet/geoparquet-io/compare/v1.5.0...v1.6.0
+
 ## v1.5.0 (2026-09-08)
 
 What is newly possible in this release:

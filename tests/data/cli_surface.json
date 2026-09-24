@@ -4395,6 +4395,38 @@
        "is_flag": false,
        "metavar": null,
        "multiple": false,
+       "name": "encoding",
+       "nargs": 1,
+       "opts": [
+        "--encoding"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "force_2d",
+       "nargs": 1,
+       "opts": [
+        "--force-2d"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
        "name": "geoparquet_version",
        "nargs": 1,
        "opts": [
@@ -10577,6 +10609,22 @@
        "type": "text"
       },
       {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "chunks",
+       "nargs": 1,
+       "opts": [
+        "--chunks"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
        "default": "True",
        "hidden": false,
        "is_flag": true,
@@ -10845,6 +10893,23 @@
        "type": "text"
       },
       {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "temporary_directory",
+       "nargs": 1,
+       "opts": [
+        "--temporary-directory",
+        "-t"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "path[exists=True,file_okay=False,dir_okay=True,writable=True,readable=True,resolve_path=True]"
+      },
+      {
        "default": "False",
        "hidden": false,
        "is_flag": true,
@@ -11092,6 +11157,23 @@
        "required": true,
        "secondary_opts": [],
        "type": "path[exists=False,file_okay=True,dir_okay=True,writable=False,readable=True,resolve_path=False]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "temporary_directory",
+       "nargs": 1,
+       "opts": [
+        "--temporary-directory",
+        "-t"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "path[exists=True,file_okay=False,dir_okay=True,writable=True,readable=True,resolve_path=True]"
       },
       {
        "default": "False",
@@ -12106,6 +12188,22 @@
        "type": "text"
       },
       {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "cell_detail",
+       "nargs": 1,
+       "opts": [
+        "--cell-detail"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "float"
+      },
+      {
        "default": "'ZSTD'",
        "hidden": false,
        "is_flag": false,
@@ -12136,6 +12234,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "integer range[min=1,max=22,min_open=False,max_open=False,clamp=False]"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "explicit_gsd",
+       "nargs": 1,
+       "opts": [
+        "--gsd"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       },
       {
        "default": "False",
@@ -12228,6 +12342,22 @@
        "nargs": 1,
        "opts": [
         "--output-dir"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "path[exists=False,file_okay=True,dir_okay=True,writable=False,readable=True,resolve_path=False]"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "overview_out",
+       "nargs": 1,
+       "opts": [
+        "--overview-out"
        ],
        "param_type": "Option",
        "required": false,

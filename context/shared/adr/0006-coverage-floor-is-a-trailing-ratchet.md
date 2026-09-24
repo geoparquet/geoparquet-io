@@ -1,4 +1,4 @@
-# ADR-0008: The Coverage Floor Is a Trailing Ratchet on the Combined Figure
+# ADR-0006: The Coverage Floor Is a Trailing Ratchet on the Combined Figure
 
 ## Status
 
