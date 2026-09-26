@@ -545,7 +545,8 @@ def _validate_write_memory(ctx, param, value):
 # verbatim.
 _WRITE_MEMORY_HELP = (
     "Memory limit for streaming writes (e.g., '512MB', '2GB'). "
-    "Default: 50% of available RAM (container-aware)."
+    "Default: 50% of available RAM, or 50% of total RAM for GeoParquet 2.0 "
+    "output (container- and Slurm-aware)."
 )
 
 

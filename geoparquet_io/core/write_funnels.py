@@ -84,6 +84,7 @@ from geoparquet_io.core.write_strategies import (
     WriteStrategyFactory,
     needs_metadata_rewrite,
 )
+from geoparquet_io.core.write_strategies.duckdb_kv import scoped_copy_memory_limit
 
 
 def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
@@ -221,6 +222,7 @@ def _plain_copy_to(
     geometry_column: str | None = None,
     carry_geo_metadata: dict | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """
     Execute a plain DuckDB COPY TO without geo metadata manipulation.
@@ -252,6 +254,10 @@ def _plain_copy_to(
             to carry into the output. DuckDB accepts KV_METADATA alongside
             GEOPARQUET_VERSION, so these ride along on the fast path instead of
             forcing a full metadata rewrite for an unrelated key (#709).
+        memory_limit: DuckDB memory limit for the COPY (``--write-memory``).
+            None means a default with headroom under the machine's memory
+            ceiling -- never DuckDB's own 80%, which the allocations DuckDB
+            makes outside its limit carry past a cgroup cap (#1153).
     """
     compression_map = {
         "zstd": "ZSTD",
@@ -305,7 +311,8 @@ def _plain_copy_to(
     if verbose:
         debug(f"Executing plain COPY TO with {duckdb_compression} compression...")
 
-    con.execute(copy_query)
+    with scoped_copy_memory_limit(con, memory_limit, verbose):
+        con.execute(copy_query)
 
     # DuckDB 1.5.4's V2 writer omits the geo KV metadata for geometries with
     # an M dimension (XY/XYZ are written correctly). Without it the output
@@ -603,8 +610,9 @@ def write_parquet_with_metadata(
             - "in-memory": Load entire dataset into memory
             - "streaming": Stream Arrow RecordBatches
             - "disk-rewrite": Write with DuckDB, then rewrite with PyArrow
-        memory_limit: DuckDB memory limit for streaming writes (e.g., '2GB', '512MB').
-            If None, auto-detects based on available system/container memory.
+        memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB').
+            Honoured on the plain-COPY fast path and by the duckdb-kv strategy.
+            If None, each picks a default from the system/container memory.
         geometry_info: Dict containing multi-geometry column info with keys:
             - "primary": primary geometry column name
             - "secondary": list of secondary geometry column names
@@ -804,6 +812,7 @@ def write_parquet_with_metadata(
                     output_columns=output_columns,
                 ),
                 extra_kv_metadata=extra_kv_metadata,
+                memory_limit=memory_limit,
             )
         else:
             # Metadata rewrite needed - use strategy pattern

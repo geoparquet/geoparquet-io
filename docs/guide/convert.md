@@ -637,6 +637,23 @@ gpio convert large.gpkg output.parquet --skip-hilbert
 
 Trade-off: Faster conversion but less optimal for spatial queries.
 
+### Memory on Very Large Inputs
+
+Hilbert ordering sorts the whole input, so a conversion larger than memory
+spills the sort to disk under `TMPDIR`. gpio caps DuckDB at half the memory
+ceiling it detects — physical RAM, or the container or batch-job (Slurm) cgroup
+limit when that is lower — leaving room for the memory DuckDB allocates outside
+its limit. Set the cap yourself with `--write-memory`:
+
+<!-- doctest: setup="gpio convert geopackage input.parquet large.gpkg" -->
+```bash
+gpio convert large.gpkg output.parquet --geoparquet-version 2.0 --write-memory 8GB
+```
+
+If DuckDB reports `Out of Memory Error` rather than spilling, raise the limit
+or point `TMPDIR` at a volume with room for the spill. See
+[Write Strategies](write-strategies.md#memory-configuration).
+
 ### Custom Compression
 
 Control compression type and level:

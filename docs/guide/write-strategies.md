@@ -197,11 +197,24 @@ Leftover spill directories: 1 (250.00 MB)
 
 ### Automatic Detection
 
-gpio automatically detects available memory and configures DuckDB to use 50% of it. This detection is container-aware:
+gpio sets a DuckDB memory limit on every file write, and `--write-memory` overrides it:
 
-- **cgroup v2** (modern Docker, Kubernetes): Reads `/sys/fs/cgroup/memory.max`
-- **cgroup v1** (older Docker): Reads `/sys/fs/cgroup/memory/memory.limit_in_bytes`
-- **Bare metal**: Falls back to psutil for system memory detection
+- **`duckdb-kv` strategy** (GeoParquet 1.x output): 50% of the memory currently available.
+- **Plain COPY** (GeoParquet 2.0 and `parquet-geo-only` output, which need no metadata
+  rewrite): 50% of the total memory ceiling. DuckDB's limit covers only its own buffers;
+  the Parquet writer and compression allocate beside it, and a large Hilbert sort was
+  measured running 30–40% past the limit. DuckDB's own default of 80% can therefore
+  reach a container or job cap before DuckDB spills, and the process is killed.
+
+The ceiling is container- and scheduler-aware. gpio reads the process's own cgroup from
+`/proc/self/cgroup` and walks up to the root, taking the tightest cap it finds:
+
+- **cgroup v2** (modern Docker, Kubernetes, Slurm): `memory.max`
+- **cgroup v1** (older Docker, Slurm on RHEL/Rocky 8): `memory/…/memory.limit_in_bytes`
+- **Bare metal**: physical RAM via psutil
+
+A batch scheduler such as Slurm caps the *job's* cgroup, not the root of the hierarchy,
+so a check of the root alone sees no limit there.
 
 ### Explicit Memory Limits
 
