@@ -204,7 +204,8 @@ def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> 
     if default is None:
         return None
     session = parse_size(str(_current_setting(con, "memory_limit")))
-    if session is not None and session < parse_size(default):
+    default_bytes = parse_size(default)
+    if session is not None and default_bytes is not None and session < default_bytes:
         return None
     return validate_memory_limit(default)
 
@@ -231,7 +232,7 @@ def scoped_write_memory_limit(
         limit_bytes = parse_size(str(_current_setting(con, "memory_limit")))
         if limit_bytes:
             threads = max(1, limit_bytes // _BYTES_PER_THREAD)
-            if threads < int(saved["threads"]):
+            if threads < int(str(saved["threads"])):
                 con.execute(f"SET threads = {threads}")
                 if verbose:
                     debug(f"DuckDB threads: {threads} (for the memory limit)")
