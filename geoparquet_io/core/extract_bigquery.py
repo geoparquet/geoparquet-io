@@ -34,9 +34,9 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.memory_limits import validate_memory_limit
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_table
 from geoparquet_io.core.write_funnels import write_geoparquet_table
-from geoparquet_io.core.write_strategies.duckdb_kv import validate_memory_limit
 
 # Regex patterns for GCP resource validation
 # Project IDs: 6-30 chars, lowercase letters, digits, hyphens, must start with letter

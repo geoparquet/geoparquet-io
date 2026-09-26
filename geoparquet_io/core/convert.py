@@ -1225,7 +1225,7 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
     if skip_hilbert:
         return query, None
     # A WKT column can hold empty geometry, which ST_Hilbert rejects (#649).
-    return query, _hilbert_order_by(quote_identifier("geometry"), bounds)
+    return query, _geometry_order_by(quote_identifier("geometry"), bounds)
 
 
 def _get_geom_expr_and_where(geom_info, skip_invalid):
@@ -1359,12 +1359,20 @@ def _orderable_geom(geom_expr, xmin, ymin):
     )
 
 
-def _hilbert_order_by(geom_expr, bounds):
-    """ORDER BY terms: Hilbert key within ``bounds``, empty/NULL geometry last."""
+def _hilbert_order_by(bounds, unorderable, key):
+    """ORDER BY terms: ``unorderable`` rows last, the rest by Hilbert ``key`` in ``bounds``."""
     xmin, ymin, xmax, ymax = bounds
     bounds_box = f"ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
-    unorderable = f"{geom_expr} IS NULL OR ST_IsEmpty({geom_expr})"
-    return f"({unorderable}), ST_Hilbert({_orderable_geom(geom_expr, xmin, ymin)}, {bounds_box})"
+    return f"({unorderable}), ST_Hilbert({key}, {bounds_box})"
+
+
+def _geometry_order_by(geom_expr, bounds):
+    """Hilbert ORDER BY over a GEOMETRY/WKB expression, empty or NULL geometry last."""
+    return _hilbert_order_by(
+        bounds,
+        f"{geom_expr} IS NULL OR ST_IsEmpty({geom_expr})",
+        _orderable_geom(geom_expr, bounds[0], bounds[1]),
+    )
 
 
 def _apply_order(query, order_by):
@@ -1485,15 +1493,13 @@ def _build_conversion_query(
         return base_select, None
 
     if not geoarrow_native:
-        return base_select, _hilbert_order_by(quoted_geom, bounds)
+        return base_select, _geometry_order_by(quoted_geom, bounds)
 
     # Native encodings key on centroid coordinates, which are NULL for a
     # geometry with no coordinates — ST_Hilbert returns NULL rather than
     # failing, so those rows only need the flag to pin them last.
-    xmin, ymin, xmax, ymax = bounds
-    bounds_box = f"ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
-    return base_select, (
-        f"({cx_e} IS NULL OR {cy_e} IS NULL), ST_Hilbert({cx_e}, {cy_e}, {bounds_box})"
+    return base_select, _hilbert_order_by(
+        bounds, f"{cx_e} IS NULL OR {cy_e} IS NULL", f"{cx_e}, {cy_e}"
     )
 
 

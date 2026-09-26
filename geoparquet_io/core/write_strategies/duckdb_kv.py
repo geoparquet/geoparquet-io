@@ -15,10 +15,7 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,16 +29,17 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     quote_identifier,
+    restore_duckdb_settings,
     sql_path,
     validate_compression_level,
 )
 from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql, declare_carried_bbox_column
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.memory_limits import get_default_memory_limit, validate_memory_limit
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -55,252 +53,6 @@ if TYPE_CHECKING:
 
 # Valid compression values whitelist (prevents injection via compression param)
 VALID_COMPRESSIONS = frozenset({"ZSTD", "SNAPPY", "GZIP", "LZ4", "UNCOMPRESSED", "BROTLI"})
-
-# DuckDB's memory_limit is a SET value, which cannot be parameterised, so the
-# value has to be interpolated into SQL. Only accept a plain size literal: a
-# decimal number with an optional decimal (KB/MB/GB/TB) or binary (KiB/…) unit.
-_MEMORY_LIMIT_RE = re.compile(r"^\d+(\.\d+)?\s*(K|M|G|T)?i?B$", re.IGNORECASE)
-
-
-def validate_memory_limit(value: str) -> str:
-    """Validate/normalize a DuckDB memory limit before interpolating it into SQL.
-
-    ``memory_limit`` originates from ``--write-memory`` (or from a library
-    caller's config) and ends up inside ``SET memory_limit = '…'``. DuckDB's
-    ``execute`` runs multi-statement strings, so an unvalidated value can close
-    the string literal and append arbitrary SQL. Reject anything that is not a
-    plain size.
-
-    Args:
-        value: Candidate memory limit, e.g. "512MB", "2GB", "4.5 GB", "1GiB"
-
-    Returns:
-        The normalized value (whitespace removed, unit upper-cased).
-
-    Raises:
-        ValueError: If the value is not a plain size literal.
-    """
-    text = str(value).strip()
-    if not _MEMORY_LIMIT_RE.match(text):
-        raise ValueError(
-            f"Invalid memory_limit {value!r}; expected a size like "
-            f"'512MB', '2GB', '4.5GB', or '1GiB'."
-        )
-    return text.upper().replace(" ", "")
-
-
-#: Where the process's own cgroup is named, and where the hierarchy is mounted.
-#: Module attributes so tests can point them at a fake tree.
-_PROC_SELF_CGROUP = "/proc/self/cgroup"
-_CGROUP_ROOT = "/sys/fs/cgroup"
-
-# A cgroup v1 limit at or above this is the kernel's "no limit" sentinel.
-_V1_UNLIMITED = 2**60
-
-
-def _read_int(path: str) -> int | None:
-    try:
-        with open(path) as f:
-            text = f.read().strip()
-    except OSError:
-        return None
-    return int(text) if text.isdigit() else None  # "max" (v2) reads as no limit
-
-
-def _cgroup_dirs(proc_self_cgroup: str, cgroup_root: str) -> list[tuple[str, str, str]]:
-    """Every cgroup directory that can cap this process, with its file names.
-
-    A batch scheduler does not give the job a cgroup namespace: Slurm puts it at
-    ``/slurm/uid_N/job_N/step_batch`` (v1) or ``.../job_N/step_batch/...`` (v2)
-    and caps the *job* directory, so the root of the hierarchy -- the only place
-    gpio used to look -- says "no limit" (#1153). Walk from the process's own
-    cgroup up to the root; a container that does have a namespace shows ``/``
-    and reduces to the root check that was here before.
-    """
-    v2_path, v1_path = "/", "/"
-    try:
-        with open(proc_self_cgroup) as f:
-            for line in f:
-                parts = line.strip().split(":", 2)
-                if len(parts) != 3:
-                    continue
-                if parts[0] == "0" and parts[1] == "":
-                    v2_path = parts[2]
-                elif "memory" in parts[1].split(","):
-                    v1_path = parts[2]
-    except OSError:
-        pass
-
-    def ancestors(path: str) -> list[str]:
-        segments = [s for s in path.split("/") if s]
-        return ["/".join(segments[:i]) for i in range(len(segments), -1, -1)]
-
-    dirs = [
-        (os.path.join(cgroup_root, rel), "memory.max", "memory.current")
-        for rel in ancestors(v2_path)
-    ]
-    dirs += [
-        (os.path.join(cgroup_root, "memory", rel), "memory.limit_in_bytes", "memory.usage_in_bytes")
-        for rel in ancestors(v1_path)
-    ]
-    return dirs
-
-
-def _cgroup_memory(
-    proc_self_cgroup: str = _PROC_SELF_CGROUP, cgroup_root: str = _CGROUP_ROOT
-) -> tuple[int, int | None] | None:
-    """The tightest cgroup memory cap on this process, and that cgroup's usage.
-
-    Returns ``(limit_bytes, usage_bytes)`` -- usage ``None`` when the cgroup
-    does not report it -- or ``None`` when no cgroup caps the process.
-    """
-    tightest: tuple[int, int | None] | None = None
-    for directory, limit_file, usage_file in _cgroup_dirs(proc_self_cgroup, cgroup_root):
-        limit = _read_int(os.path.join(directory, limit_file))
-        if limit is None or limit >= _V1_UNLIMITED:
-            continue
-        if tightest is None or limit < tightest[0]:
-            tightest = (limit, _read_int(os.path.join(directory, usage_file)))
-    return tightest
-
-
-def memory_ceiling() -> int | None:
-    """Bytes this process may use in total: its cgroup cap or physical RAM, the lower."""
-    cgroup = _cgroup_memory(_PROC_SELF_CGROUP, _CGROUP_ROOT)
-    try:
-        import psutil
-
-        ram = psutil.virtual_memory().total
-    except ImportError:  # pragma: no cover - psutil is a dependency
-        ram = None
-    candidates = [v for v in (cgroup[0] if cgroup else None, ram) if v is not None]
-    return min(candidates) if candidates else None
-
-
-def _get_available_memory() -> int | None:
-    """
-    Get available memory in bytes, accounting for container limits.
-
-    Checks the cgroup limits on this process first (Docker, Kubernetes, Slurm
-    and other batch schedulers), then falls back to psutil for bare-metal
-    systems.
-
-    Returns:
-        Available memory in bytes, or None if detection fails
-    """
-    cgroup = _cgroup_memory(_PROC_SELF_CGROUP, _CGROUP_ROOT)
-    if cgroup is not None:
-        limit, usage = cgroup
-        # 80% of the limit if the cgroup does not report its usage
-        return limit - usage if usage is not None else int(limit * 0.8)
-
-    # Fall back to psutil for non-containerized environments
-    try:
-        import psutil
-
-        return psutil.virtual_memory().available
-    except ImportError:
-        return None
-
-
-def _format_memory_limit(limit_bytes: int) -> str:
-    limit_gb = limit_bytes / (1024**3)
-    if limit_gb >= 1:
-        return f"{limit_gb:.1f}GB"
-    limit_mb = limit_bytes / (1024**2)
-    return f"{max(128, int(limit_mb))}MB"  # Minimum 128MB
-
-
-#: Share of the memory ceiling a plain COPY may give DuckDB by default.
-#:
-#: DuckDB's own default is 80%, but its limit covers only its buffer manager:
-#: the Parquet writer, compression and spatial functions allocate beside it.
-#: Measured on a 6M-row, 1.2 GB Hilbert-sorted 2.0 convert (duckdb 1.5.5, 12
-#: threads), peak RSS ran 30-40% past a 2 GB limit -- so 80% reaches a cgroup
-#: cap before DuckDB spills or raises, and the kernel kills the process instead
-#: (#1153). Half the ceiling plus that overshoot stays under it.
-COPY_MEMORY_FRACTION = 0.5
-
-
-def default_copy_memory_limit() -> str | None:
-    """DuckDB memory limit for a plain COPY when the caller names none.
-
-    A fraction of the total ceiling, not of what happens to be free, so the
-    same command gets the same limit from one run to the next. ``None`` when
-    the ceiling cannot be read, leaving DuckDB's own default in place.
-    """
-    ceiling = memory_ceiling()
-    if ceiling is None:
-        return None
-    return _format_memory_limit(int(ceiling * COPY_MEMORY_FRACTION))
-
-
-def get_default_memory_limit() -> str:
-    """
-    Get default memory limit for DuckDB streaming (50% of available RAM).
-
-    Container-aware: detects Docker/Kubernetes memory limits via cgroups
-    before falling back to psutil for bare-metal systems.
-
-    Returns:
-        Memory limit string for DuckDB (e.g., '2GB', '512MB')
-    """
-    available = _get_available_memory()
-
-    if available is None:
-        return "2GB"  # Conservative fallback
-
-    # Use 50% of available memory
-    return _format_memory_limit(int(available * 0.5))
-
-
-def restore_duckdb_settings(
-    con: duckdb.DuckDBPyConnection, saved: dict[str, object], verbose: bool
-) -> None:
-    """Put back session settings a write overrode, as read by ``current_setting``."""
-    for key, value in saved.items():
-        try:
-            if isinstance(value, str):
-                con.execute(f"SET {key} = '{_escape_sql_string(value)}'")
-            else:
-                con.execute(f"SET {key} = {value}")
-            # DuckDB reports sizes as rounded display strings ("14.3 GiB"),
-            # so writing one back can land a hair off and drift further on
-            # every write in a partition loop. A value that will not
-            # round-trip was the engine's own default, so ask for that
-            # instead of an approximation of it.
-            if con.execute(f"SELECT current_setting('{key}')").fetchone()[0] != value:
-                con.execute(f"RESET {key}")
-        except duckdb.Error as e:  # pragma: no cover - defensive
-            if verbose:
-                debug(f"Could not restore DuckDB setting {key}: {e}")
-
-
-@contextmanager
-def scoped_copy_memory_limit(
-    con: duckdb.DuckDBPyConnection, memory_limit: str | None, verbose: bool
-) -> Iterator[None]:
-    """Hold ``memory_limit`` on ``con`` for one COPY, then restore the session's.
-
-    ``memory_limit`` is the user's ``--write-memory``; without one the default
-    leaves headroom under the machine's ceiling (``default_copy_memory_limit``).
-    Only the limit is touched: unlike the duckdb-kv strategy this keeps every
-    thread and the input's row order, so a plain COPY is no slower than before
-    until it actually needs to spill.
-    """
-    effective = memory_limit or default_copy_memory_limit()
-    if effective is None:
-        yield
-        return
-    effective = validate_memory_limit(effective)
-    saved = {"memory_limit": con.execute("SELECT current_setting('memory_limit')").fetchone()[0]}
-    con.execute(f"SET memory_limit = '{effective}'")
-    if verbose:
-        debug(f"DuckDB memory limit: {effective}")
-    try:
-        yield
-    finally:
-        restore_duckdb_settings(con, saved, verbose)
 
 
 def _wrap_query_with_crs(
@@ -485,28 +237,12 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 
         finally:
-            self._restore_duckdb_settings(con, saved_settings, verbose)
+            restore_duckdb_settings(con, saved_settings, verbose)
             if is_remote and Path(local_path).exists():
                 Path(local_path).unlink()
 
     #: Session settings this strategy overrides for the duration of one write.
     _MANAGED_SETTINGS = ("threads", "preserve_insertion_order", "memory_limit")
-
-    def _restore_duckdb_settings(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        saved: dict[str, object],
-        verbose: bool,
-    ) -> None:
-        """Put back the session settings this strategy clamped.
-
-        The connection belongs to the caller, not to this write. Leaving
-        threads=1 and a halved memory_limit behind meant one write pinned every
-        later query on that connection -- partition loops finalize N files on a
-        shared connection, so the first partition throttled the whole run, and
-        the Python API holds a connection across operations.
-        """
-        restore_duckdb_settings(con, saved, verbose)
 
     def _configure_duckdb_memory(
         self,
@@ -517,7 +253,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         """Configure DuckDB memory settings for streaming.
 
         Returns the prior values so the caller can restore them; see
-        ``_restore_duckdb_settings``.
+        ``restore_duckdb_settings``.
         """
         saved: dict[str, object] = {}
         for key in self._MANAGED_SETTINGS:

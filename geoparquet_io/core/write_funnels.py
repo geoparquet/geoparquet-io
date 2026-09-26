@@ -72,6 +72,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
     note_duckdb_copy_rounding,
     resolve_input_crs,
@@ -84,7 +85,6 @@ from geoparquet_io.core.write_strategies import (
     WriteStrategyFactory,
     needs_metadata_rewrite,
 )
-from geoparquet_io.core.write_strategies.duckdb_kv import scoped_copy_memory_limit
 
 
 def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
@@ -311,7 +311,7 @@ def _plain_copy_to(
     if verbose:
         debug(f"Executing plain COPY TO with {duckdb_compression} compression...")
 
-    with scoped_copy_memory_limit(con, memory_limit, verbose):
+    with scoped_write_memory_limit(con, memory_limit, verbose):
         con.execute(copy_query)
 
     # DuckDB 1.5.4's V2 writer omits the geo KV metadata for geometries with
@@ -839,7 +839,7 @@ def write_parquet_with_metadata(
             strategy_enum = WriteStrategy(write_strategy)
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
-            # Only duckdb-kv can honour a memory limit. If *we* rerouted the
+            # Of the rewrite strategies only duckdb-kv honours a memory limit. If *we* rerouted the
             # strategy (1.1-geoarrow above), the user did nothing wrong: warn and
             # drop the limit rather than aborting a command that worked before
             # --write-memory was plumbed through (#663). A strategy the user

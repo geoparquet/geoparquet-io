@@ -640,10 +640,10 @@ Trade-off: Faster conversion but less optimal for spatial queries.
 ### Memory on Very Large Inputs
 
 Hilbert ordering sorts the whole input, so a conversion larger than memory
-spills the sort to disk under `TMPDIR`. gpio caps DuckDB at half the memory
-ceiling it detects — physical RAM, or the container or batch-job (Slurm) cgroup
-limit when that is lower — leaving room for the memory DuckDB allocates outside
-its limit. Set the cap yourself with `--write-memory`:
+spills the sort to disk under `TMPDIR`. gpio caps DuckDB's write at half the
+memory ceiling it detects — physical RAM, or the container or batch-job (Slurm)
+cgroup limit when that is lower — leaving room for the memory DuckDB allocates
+outside its limit. Set the cap yourself with `--write-memory`:
 
 <!-- doctest: setup="gpio convert geopackage input.parquet large.gpkg" -->
 ```bash

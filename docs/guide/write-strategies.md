@@ -197,14 +197,24 @@ Leftover spill directories: 1 (250.00 MB)
 
 ### Automatic Detection
 
-gpio sets a DuckDB memory limit on every file write, and `--write-memory` overrides it:
+Every write DuckDB performs — the `duckdb-kv` strategy, and the plain COPY that writes
+GeoParquet 2.0 and `parquet-geo-only` output when no metadata rewrite is needed — runs under
+a DuckDB memory limit of 50% of the process's memory *ceiling*. `--write-memory` overrides
+it. (The `streaming`, `in-memory` and `disk-rewrite` strategies hold data in Arrow and take
+no DuckDB limit.)
 
-- **`duckdb-kv` strategy** (GeoParquet 1.x output): 50% of the memory currently available.
-- **Plain COPY** (GeoParquet 2.0 and `parquet-geo-only` output, which need no metadata
-  rewrite): 50% of the total memory ceiling. DuckDB's limit covers only its own buffers;
-  the Parquet writer and compression allocate beside it, and a large Hilbert sort was
-  measured running 30–40% past the limit. DuckDB's own default of 80% can therefore
-  reach a container or job cap before DuckDB spills, and the process is killed.
+Half, not DuckDB's own default of 80%: DuckDB's limit covers only its own buffers. The
+Parquet writer, compression and spatial functions allocate beside it, and a large Hilbert
+sort was measured running 30–70% past the limit, so 80% can reach a container or job cap
+before DuckDB spills, and the process is killed. For the same reason gpio lowers DuckDB's
+thread count while a small limit is in force (about 512 MB per thread): spread too thin,
+DuckDB raises `Out of Memory Error` instead of spilling.
+
+The ceiling, not the memory currently free: a cgroup counts its page cache as used, so
+after a job has read a large input, "free" memory can read near zero.
+
+A limit you set on your own DuckDB connection (Python API) is respected when it is
+stricter, and restored after the write.
 
 The ceiling is container- and scheduler-aware. gpio reads the process's own cgroup from
 `/proc/self/cgroup` and walks up to the root, taking the tightest cap it finds:

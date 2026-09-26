@@ -26,13 +26,9 @@ from urllib.parse import unquote
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.memory_limits import get_default_memory_limit
+from geoparquet_io.core.memory_limits import validate_memory_limit as _validate_memory_limit
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
-from geoparquet_io.core.write_strategies.duckdb_kv import (
-    get_default_memory_limit,
-)
-from geoparquet_io.core.write_strategies.duckdb_kv import (
-    validate_memory_limit as _validate_memory_limit,
-)
 
 # Internal alias used to drive the single-pass PARTITION_BY split. DuckDB drops
 # the PARTITION_BY column from the written files, so using a dedicated alias lets

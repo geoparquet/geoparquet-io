@@ -18,7 +18,7 @@ from contextvars import ContextVar
 import duckdb
 
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
-from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import needs_httpfs
 
@@ -108,6 +108,66 @@ def _escape_sql_string(value: str) -> str:
         String with single quotes escaped for safe SQL interpolation
     """
     return value.replace("'", "''")
+
+
+_SETTING_KEY_RE = re.compile(r"[a-z_]+")
+# A size as current_setting() displays it: "2.7 GiB", "953.6 MiB".
+_DISPLAYED_SIZE_RE = re.compile(r"^(\d+)\.(\d+) ([KMGT]iB)$")
+
+
+def _nudged_size(displayed: str) -> str | None:
+    """A size that DuckDB displays back as ``displayed``; None if it is not a size.
+
+    ``current_setting`` truncates a size to one decimal, so writing the display
+    string back lands a step low ("2.7 GiB" reads back "2.6 GiB") and a loop of
+    save/restore drifts down. Half a displayed step up reads back unchanged.
+    """
+    match = _DISPLAYED_SIZE_RE.match(displayed)
+    if not match:
+        return None
+    whole, frac, unit = match.groups()
+    return f"{whole}.{frac}5{unit}"
+
+
+def restore_duckdb_settings(
+    con: duckdb.DuckDBPyConnection, saved: Mapping[str, object], verbose: bool = False
+) -> None:
+    """Put back session settings a write overrode, as ``current_setting`` read them.
+
+    The connection belongs to the caller, not to the write: partition loops
+    finalize N files on one connection, and the Python API holds a connection
+    across operations, so a setting left behind throttles everything after it.
+    A value is restored exactly when DuckDB's display of it round-trips; a
+    displayed size that does not was either the engine default (RESET) or one
+    the caller set (re-SET half a displayed step up, which reads back the same).
+
+    ``saved`` keys are setting names from gpio's own code, never user input.
+    """
+    for key, value in saved.items():
+        if not _SETTING_KEY_RE.fullmatch(key):
+            raise ValueError(f"Not a DuckDB setting name: {key!r}")
+        try:
+            _set_setting(con, key, value)
+            if _current_setting(con, key) == value:
+                continue
+            con.execute(f"RESET {key}")
+            nudged = _nudged_size(value) if isinstance(value, str) else None
+            if _current_setting(con, key) != value and nudged:
+                _set_setting(con, key, nudged)
+        except duckdb.Error as e:  # pragma: no cover - defensive
+            if verbose:
+                debug(f"Could not restore DuckDB setting {key}: {e}")
+
+
+def _current_setting(con: duckdb.DuckDBPyConnection, key: str) -> object:
+    return con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
+
+
+def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> None:
+    if isinstance(value, str):
+        con.execute(f"SET {key} = '{_escape_sql_string(value)}'")
+    else:
+        con.execute(f"SET {key} = {value}")
 
 
 def sql_path(path: str | os.PathLike[str]) -> str:
