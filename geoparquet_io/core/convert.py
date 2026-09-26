@@ -1143,6 +1143,10 @@ def _validate_wkt_and_check_crs(con, csv_read, wkt_col, skip_invalid, verbose):
 def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, skip_bbox=False):
     """Build SQL query for CSV/TSV conversion with geometry construction.
 
+    Returns ``(query, order_by)``: the unordered SELECT, and the Hilbert ORDER BY
+    terms over its ``geometry`` column (None when not ordering). The caller
+    applies the ordering last, so a pass that only counts rows does not sort.
+
     Args:
         geom_info: Dict with geometry detection info
         skip_hilbert: Skip Hilbert ordering
@@ -1191,7 +1195,7 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
                 FROM parsed_geoms
                 WHERE {wkt_col} IS NULL OR geometry IS NOT NULL
             """
-            return query_base
+            return query_base, None
         else:
             # NULL WKT yields NULL geometry (ST_GeomFromText propagates it), so
             # the row survives with its attributes instead of being filtered.
@@ -1211,30 +1215,17 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
     else:
         raise GeoParquetError("Unknown geometry type in CSV detection")
 
-    # Build base query (for non-skip_invalid or lat/lon)
-    if skip_hilbert:
-        return f"""
+    query = f"""
             SELECT
                 * EXCLUDE ({exclude_cols}),
                 {geom_expr} AS geometry{bbox_expr(geom_expr)}
             FROM {csv_read}
             {where_clause}
         """
-
-    # With Hilbert ordering - use subquery
-    xmin, ymin, xmax, ymax = bounds
-    bounds_box = f"ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
+    if skip_hilbert:
+        return query, None
     # A WKT column can hold empty geometry, which ST_Hilbert rejects (#649).
-    unorderable = f"{geom_expr} IS NULL OR ST_IsEmpty({geom_expr})"
-    return f"""
-        SELECT
-            * EXCLUDE ({exclude_cols}),
-            {geom_expr} AS geometry{bbox_expr(geom_expr)}
-        FROM {csv_read}
-        {where_clause}
-        ORDER BY ({unorderable}),
-            ST_Hilbert({_orderable_geom(geom_expr, xmin, ymin)}, {bounds_box})
-    """
+    return query, _hilbert_order_by(quote_identifier("geometry"), bounds)
 
 
 def _get_geom_expr_and_where(geom_info, skip_invalid):
@@ -1368,6 +1359,21 @@ def _orderable_geom(geom_expr, xmin, ymin):
     )
 
 
+def _hilbert_order_by(geom_expr, bounds):
+    """ORDER BY terms: Hilbert key within ``bounds``, empty/NULL geometry last."""
+    xmin, ymin, xmax, ymax = bounds
+    bounds_box = f"ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
+    unorderable = f"{geom_expr} IS NULL OR ST_IsEmpty({geom_expr})"
+    return f"({unorderable}), ST_Hilbert({_orderable_geom(geom_expr, xmin, ymin)}, {bounds_box})"
+
+
+def _apply_order(query, order_by):
+    """``query`` sorted by ``order_by``; unchanged when there is no ordering."""
+    if not order_by:
+        return query
+    return f"SELECT * FROM ({query}) ORDER BY {order_by}"
+
+
 def _build_conversion_query(
     input_file,
     geom_column,
@@ -1382,6 +1388,10 @@ def _build_conversion_query(
     table_expr=None,
 ):
     """Build SQL query for conversion with optional Hilbert ordering.
+
+    Returns ``(query, order_by)``: the unordered SELECT, and the Hilbert ORDER BY
+    terms over its geometry column (None with ``skip_hilbert``). The caller
+    applies the ordering last, so a pass that only counts rows does not sort.
 
     Args:
         input_file: Path to input file
@@ -1472,22 +1482,19 @@ def _build_conversion_query(
             """
 
     if skip_hilbert:
-        return base_select
+        return base_select, None
 
+    if not geoarrow_native:
+        return base_select, _hilbert_order_by(quoted_geom, bounds)
+
+    # Native encodings key on centroid coordinates, which are NULL for a
+    # geometry with no coordinates — ST_Hilbert returns NULL rather than
+    # failing, so those rows only need the flag to pin them last.
     xmin, ymin, xmax, ymax = bounds
     bounds_box = f"ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
-    if geoarrow_native:
-        # Native encodings key on centroid coordinates, which are NULL for a
-        # geometry with no coordinates — ST_Hilbert returns NULL rather than
-        # failing, so those rows only need the flag to pin them last.
-        unorderable = f"{cx_e} IS NULL OR {cy_e} IS NULL"
-        hilbert_expr = f"ST_Hilbert({cx_e}, {cy_e}, {bounds_box})"
-    else:
-        unorderable = f"{quoted_geom} IS NULL OR ST_IsEmpty({quoted_geom})"
-        hilbert_expr = f"ST_Hilbert({_orderable_geom(quoted_geom, xmin, ymin)}, {bounds_box})"
-    return f"""{base_select}
-        ORDER BY ({unorderable}), {hilbert_expr}
-    """
+    return base_select, (
+        f"({cx_e} IS NULL OR {cy_e} IS NULL), ST_Hilbert({cx_e}, {cy_e}, {bounds_box})"
+    )
 
 
 def _convert_csv_path(
@@ -1505,7 +1512,10 @@ def _convert_csv_path(
     encoding=None,
     force_2d=False,
 ):
-    """Handle CSV/TSV conversion path. Returns SQL query.
+    """Handle CSV/TSV conversion path.
+
+    Returns ``(query, bbox_covering_column, order_by)``, all None when no
+    geometry is found; ``order_by`` is for the caller to apply last.
 
     When skip_invalid=True, materializes parsed geometries into a temp table
     to avoid re-evaluating TRY(ST_GeomFromText(...)) in downstream metadata
@@ -1520,7 +1530,7 @@ def _convert_csv_path(
         con, input_file, delimiter, wkt_column, lat_column, lon_column, verbose, encoding=encoding
     )
     if geom_info is None:
-        return None, None
+        return None, None, None
     # A WKT column can carry Z/M; lat/lon points are 2D by construction.
     geom_info["force_2d"] = force_2d
 
@@ -1565,7 +1575,7 @@ def _convert_csv_path(
         warn(_NO_BOUNDS_WARNING)
         effective_skip_hilbert = True
 
-    query = _build_csv_conversion_query(
+    query, order_by = _build_csv_conversion_query(
         geom_info, effective_skip_hilbert, bounds, skip_invalid, skip_bbox=skip_bbox
     )
 
@@ -1584,7 +1594,7 @@ def _convert_csv_path(
     # The bbox column, when written, is computed from the geometry right here,
     # so this path can vouch for it. Report it rather than leaving a writer to
     # infer a covering from the column's name (#738).
-    return query, (None if skip_bbox else "bbox")
+    return query, (None if skip_bbox else "bbox"), order_by
 
 
 def _is_linearizable_curve_error(e, *, is_parquet, linearize_curves):
@@ -1692,8 +1702,10 @@ def _convert_spatial_path(
     curved geometry that nothing parsed early enough to see (#985).
 
     Returns:
-        tuple: (query, geometry_info) where geometry_info contains primary/secondary columns
-               and their metadata. Returns (None, None) if no geometry found.
+        tuple: (query, geometry_info, bbox_covering_column, order_by). geometry_info
+               holds the primary/secondary columns and their metadata; order_by is the
+               Hilbert ORDER BY terms for the caller to apply last (None when not
+               ordering). All four are None if no geometry is found.
     """
 
     # ``encoding`` was validated against the input type by the caller, before
@@ -1718,7 +1730,7 @@ def _convert_spatial_path(
         }
 
     if geom_column is None:
-        return None, None, None
+        return None, None, None, None
 
     # Curved geometries cannot pass through the ST_Read-based query below;
     # detected up front (GPKG pre-scan, issue #643) they are read once via
@@ -1821,7 +1833,7 @@ def _convert_spatial_path(
                 msg = "Pass 1: Reading input, adding bbox, and applying Hilbert ordering..."
         debug(msg)
 
-    query = _build_conversion_query(
+    query, order_by = _build_conversion_query(
         input_file,
         geom_column,
         skip_hilbert,
@@ -1846,7 +1858,7 @@ def _convert_spatial_path(
     else:
         bbox_covering_column = "bbox"
 
-    return query, geom_info, bbox_covering_column
+    return query, geom_info, bbox_covering_column, order_by
 
 
 def read_spatial_to_arrow(
@@ -2665,7 +2677,7 @@ def convert_to_geoparquet(
             output_version = geoparquet_version
             output_crs = effective_crs
             if is_csv:
-                query, bbox_covering_column = _convert_csv_path(
+                query, bbox_covering_column, order_by = _convert_csv_path(
                     con,
                     input_url,
                     delimiter,
@@ -2682,7 +2694,7 @@ def convert_to_geoparquet(
                 )
                 geometry_info = None
             else:
-                query, geometry_info, bbox_covering_column = _convert_spatial_path(
+                query, geometry_info, bbox_covering_column, order_by = _convert_spatial_path(
                     con,
                     input_file,
                     skip_hilbert,
@@ -2738,6 +2750,11 @@ def convert_to_geoparquet(
             if has_geometry:
                 geom_col = "geometry" if is_csv else geometry_info["primary"]
                 query = repair_query_geometry(con, query, geom_col, repair=repair_geometry)
+                # Sort last. The repair count above is a full pass over the
+                # rows, and DuckDB keeps an ORDER BY inside a COUNT subquery:
+                # counting the ordered query sorted the whole input once more,
+                # outside the write's memory limit (#1153).
+                query = _apply_order(query, order_by)
 
                 # This convert rebuilds the output's `geo` block from the converted
                 # data (`original_metadata=None` below, and at 2.0 DuckDB regenerates

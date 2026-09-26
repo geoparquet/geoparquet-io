@@ -36,13 +36,6 @@
       "reviewed_by": "Claude"
     },
     {
-      "code_file": "geoparquet_io/cli/decorators.py",
-      "doc_target": "CLAUDE.md#Key Patterns",
-      "reviewed_at": "2026-04-02T15:00:51.351185+00:00",
-      "code_commit_at_review": "f454dfe",
-      "reviewed_by": "Claude"
-    },
-    {
       "code_file": "geoparquet_io/skills/__init__.py",
       "doc_target": "docs/guide/llm-integration.md",
       "reviewed_at": "2026-04-02T19:37:26.225040+00:00",
@@ -202,6 +195,20 @@
       "reviewed_at": "2026-09-13T09:29:41.211704+00:00",
       "code_commit_at_review": "69ac6ed",
       "reviewed_by": "Claude"
+    },
+    {
+      "code_file": "geoparquet_io/cli/decorators.py",
+      "doc_target": "CLAUDE.md#Key Patterns",
+      "reviewed_at": "2026-09-26T15:14:20.279687+00:00",
+      "code_commit_at_review": "86621e4",
+      "reviewed_by": "claude"
+    },
+    {
+      "code_file": "geoparquet_io/cli/decorators.py",
+      "doc_target": "geoparquet_io/skills/geoparquet.md#Compression Options",
+      "reviewed_at": "2026-09-26T15:14:20.377200+00:00",
+      "code_commit_at_review": "86621e4",
+      "reviewed_by": "claude"
     }
   ]
 }
