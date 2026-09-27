@@ -335,6 +335,11 @@ GeoParquet files can have multiple geometry columns (e.g., `geometry` for point 
     that genuinely match. Declare such a column deliberately with
     [`gpio add bbox-metadata`](add.md); `gpio check bbox` will point this out.
 
+    If the input already has a column named `bbox` that is not a bbox struct
+    (a string tile id, say), it is kept as it is, and the computed bbox is
+    written under the next free name (`bbox_1`, `bbox_2`, …) with the covering
+    declared over that column; a warning names both.
+
 !!! note "When the input's CRS is not valid PROJJSON"
     GeoParquet requires a column's `crs` to be a PROJJSON object, which means it
     must carry a `type` member such as `"GeographicCRS"` or `"ProjectedCRS"`.

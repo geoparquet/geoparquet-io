@@ -142,3 +142,113 @@ class TestCsvStringBboxCollision:
 
         out_table = pq.read_table(str(output))
         assert out_table.column("bbox").to_pylist() == ["tile-a", "tile-b"]
+
+
+class TestOnlyOutputColumnsCollide:
+    """The free name is picked from what the query EMITS, not from the raw source."""
+
+    def test_a_wkt_column_named_bbox_is_not_a_collision(self, tmp_path, caplog):
+        """The WKT source column is excluded from the output, so `bbox` is free."""
+        import logging
+
+        csv_path = tmp_path / "tiles.csv"
+        csv_path.write_text(
+            "id,bbox\n"
+            '1,"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"\n'
+            '2,"POLYGON((2 2, 3 2, 3 3, 2 3, 2 2))"\n',
+            encoding="utf-8",
+        )
+        output = tmp_path / "out.parquet"
+
+        with caplog.at_level(logging.WARNING):
+            convert_to_geoparquet(
+                str(csv_path), str(output), wkt_column="bbox", geoparquet_version="1.1"
+            )
+
+        assert "already has a column named" not in caplog.text
+        assert _assert_covering_matches_schema(output) == "bbox"
+        assert "bbox_1" not in pq.read_schema(str(output)).names
+
+    def test_a_geojson_property_named_bbox_collides(self, tmp_path):
+        """The ST_Read path: a source attribute called `bbox` gets `bbox_1` beside it."""
+        geojson = tmp_path / "tiles.geojson"
+        geojson.write_text(
+            json.dumps(
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"id": i, "bbox": f"tile-{i}"},
+                            "geometry": {"type": "Point", "coordinates": [i, i]},
+                        }
+                        for i in range(3)
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = tmp_path / "out.parquet"
+
+        convert_to_geoparquet(str(geojson), str(output), geoparquet_version="1.1")
+
+        assert _assert_covering_matches_schema(output) == "bbox_1"
+        assert pq.read_table(str(output)).column("bbox").to_pylist() == [
+            "tile-0",
+            "tile-1",
+            "tile-2",
+        ]
+
+
+class TestCollisionWarning:
+    def test_names_the_colliding_column_as_spelled(
+        self, parquet_with_string_bbox, tmp_path, caplog
+    ):
+        import logging
+
+        source = pq.read_table(str(parquet_with_string_bbox))
+        table = source.rename_columns(
+            ["BBOX" if name == "bbox" else name for name in source.column_names]
+        ).replace_schema_metadata(source.schema.metadata)
+        upper = tmp_path / "upper.parquet"
+        pq.write_table(table, str(upper))
+        output = tmp_path / "out.parquet"
+
+        with caplog.at_level(logging.WARNING):
+            convert_to_geoparquet(str(upper), str(output), geoparquet_version="1.1")
+
+        assert "column named 'BBOX'" in caplog.text
+        assert "declaring the covering over it" in caplog.text
+
+    def test_promises_no_covering_at_1_0(self, parquet_with_string_bbox, tmp_path, caplog):
+        """1.0 has no covering key, so the warning must not claim one."""
+        import logging
+
+        output = tmp_path / "out.parquet"
+        with caplog.at_level(logging.WARNING):
+            convert_to_geoparquet(
+                str(parquet_with_string_bbox), str(output), geoparquet_version="1.0"
+            )
+
+        assert "bbox_1" in caplog.text
+        assert "declaring the covering" not in caplog.text
+        assert "no covering metadata" in caplog.text
+        geo = json.loads(pq.read_schema(str(output)).metadata[b"geo"])
+        assert "covering" not in geo["columns"][geo["primary_column"]]
+
+    def test_no_computed_bbox_and_no_warning_at_2_0(
+        self, parquet_with_string_bbox, tmp_path, caplog
+    ):
+        """2.0 computes no bbox, so nothing can collide with the user's column."""
+        import logging
+
+        output = tmp_path / "out.parquet"
+        with caplog.at_level(logging.WARNING):
+            convert_to_geoparquet(
+                str(parquet_with_string_bbox), str(output), geoparquet_version="2.0"
+            )
+
+        assert "already has a column named" not in caplog.text
+        names = pq.read_schema(str(output)).names
+        assert "bbox_1" not in names
+        assert pa.types.is_string(pq.read_schema(str(output)).field("bbox").type)

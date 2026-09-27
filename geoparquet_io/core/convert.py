@@ -26,6 +26,7 @@ from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _geoarrow_coord_exprs,
+    _get_query_columns,
     _install_and_load_extension,
     get_duckdb_connection,
     quote_identifier,
@@ -42,7 +43,11 @@ from geoparquet_io.core.file_utils import (
     resolve_file_url,
     validate_output_path,
 )
-from geoparquet_io.core.geo_metadata import build_bbox_covering, sanitize_geo_metadata
+from geoparquet_io.core.geo_metadata import (
+    build_bbox_covering,
+    covering_supported,
+    sanitize_geo_metadata,
+)
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     detect_parquet_geometry_column,
@@ -502,12 +507,23 @@ def _validate_max_angle(max_angle_deg):
 
 
 def _detect_geometry_column(
-    con, input_file, verbose, is_parquet=False, layer=None, open_options=None, column_aliases=None
+    con,
+    input_file,
+    verbose,
+    is_parquet=False,
+    layer=None,
+    open_options=None,
+    column_aliases=None,
+    columns_out=None,
 ):
     """Detect geometry column name from input file.
 
     ``input_file`` is RAW: ``detect_parquet_geometry_column`` escapes its own
     argument, and ``_build_st_read_expr`` escapes at the SQL boundary.
+
+    ``columns_out``, when a list, receives every column name a non-parquet
+    source binds to: the same ``LIMIT 0`` bind answers the free bbox name
+    (#1079), and for GeoJSON a second bind would be a second full GDAL parse.
     """
 
     if verbose:
@@ -522,34 +538,40 @@ def _detect_geometry_column(
     table_expr = _build_st_read_expr(
         input_file, layer, open_options=open_options, column_aliases=column_aliases
     )
-    detect_query = f"SELECT * FROM {table_expr} LIMIT 0"
+    names = [col[0] for col in con.execute(f"SELECT * FROM {table_expr} LIMIT 0").description]
+    if columns_out is not None:
+        columns_out[:] = names
 
-    schema_result = con.execute(detect_query).description
-
-    for col_info in schema_result:
-        col_name = col_info[0].lower()
-        if col_name in STANDARD_GEOMETRY_NAMES:
+    for name in names:
+        if name.lower() in STANDARD_GEOMETRY_NAMES:
             if verbose:
-                debug(f"Detected geometry column: {col_info[0]}")
-            return col_info[0]
+                debug(f"Detected geometry column: {name}")
+            return name
 
     if verbose:
         debug("No geometry column found in input file")
     return None
 
 
-def _detect_spatial_geometry(con, input_file, verbose, layer, open_options):
+def _detect_spatial_geometry(con, input_file, verbose, layer, open_options, columns_out=None):
     """Detect the geometry column of a non-parquet source, collisions included.
 
     Returns ``(column, aliases)``. ``aliases`` is None for every source whose
     own column names bind -- all of them bar the case-collision case -- and
     when it is not None the caller must read through it, because the source
-    cannot be read any other way.
+    cannot be read any other way. ``columns_out`` is passed on to
+    :func:`_detect_geometry_column`.
     """
     try:
         return (
             _detect_geometry_column(
-                con, input_file, verbose, is_parquet=False, layer=layer, open_options=open_options
+                con,
+                input_file,
+                verbose,
+                is_parquet=False,
+                layer=layer,
+                open_options=open_options,
+                columns_out=columns_out,
             ),
             None,
         )
@@ -568,6 +590,7 @@ def _detect_spatial_geometry(con, input_file, verbose, layer, open_options):
                 layer=layer,
                 open_options=open_options,
                 column_aliases=aliases,
+                columns_out=columns_out,
             ),
             aliases,
         )
@@ -954,14 +977,14 @@ def _detect_csv_geometry_column(
         debug(f"Reading CSV/TSV with delimiter: {delim_msg}")
         debug(f"Detected columns: {', '.join([col[0] for col in columns])}")
 
-    # Try explicit columns first
-    geom_info = _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, csv_read)
+    # Explicit columns first, then auto-detection. The column names already
+    # bound here ride along, so later steps (the free bbox name, #1079) need no
+    # second bind of the CSV.
+    geom_info = _handle_explicit_columns(
+        wkt_column, lat_column, lon_column, columns, csv_read
+    ) or _auto_detect_geometry(con, csv_read, col_names_lower, verbose)
     if geom_info:
-        return geom_info
-
-    # Auto-detect
-    geom_info = _auto_detect_geometry(con, csv_read, col_names_lower, verbose)
-    if geom_info:
+        geom_info["source_columns"] = [col[0] for col in columns]
         return geom_info
 
     # No geometry found
@@ -1161,21 +1184,34 @@ def _free_bbox_name(column_names):
     return candidate
 
 
-def _source_column_names(con, table_expr):
-    """Column names of ``table_expr`` (already SQL-ready) via a LIMIT 0 bind."""
-    return [col[0] for col in con.execute(f"SELECT * FROM {table_expr} LIMIT 0").description]
+def _resolve_bbox_name(column_names, geoparquet_version, announce=True):
+    """The free bbox name beside ``column_names``, warning on a collision.
 
-
-def _resolve_bbox_name(con, table_expr):
-    """The free bbox name for ``table_expr``'s columns, warning on a collision."""
-    bbox_name = _free_bbox_name(_source_column_names(con, table_expr))
-    if bbox_name != "bbox":
+    ``column_names`` are the columns the query emits next to the computed bbox
+    (not the raw source's: a CSV's WKT or lat/lon columns are excluded from the
+    output, so they cannot collide). ``announce=False`` keeps the warning to
+    one per conversion when a curve retry resolves the name again.
+    """
+    bbox_name = _free_bbox_name(column_names)
+    if bbox_name != "bbox" and announce:
+        taken = next(str(name) for name in column_names if str(name).lower() == "bbox")
+        if covering_supported(geoparquet_version):
+            outcome = "and declaring the covering over it"
+        else:
+            outcome = f"(GeoParquet {geoparquet_version} has no covering metadata to declare it)"
         warn(
-            f"Input already has a column named 'bbox' that is not a computed bbox; "
-            f"writing the computed bbox column as '{bbox_name}' and declaring the "
-            f"covering over it"
+            f"Input already has a column named '{taken}' that gpio does not recognize "
+            f"as a bbox column; writing the computed bbox column as '{bbox_name}' {outcome}"
         )
     return bbox_name
+
+
+def _csv_output_columns(geom_info):
+    """The columns the CSV conversion query emits besides the bbox."""
+    source = [geom_info.get(key) for key in ("wkt_column", "lat_column", "lon_column")]
+    excluded = {str(name).lower() for name in source if name}
+    kept = [name for name in geom_info["source_columns"] if str(name).lower() not in excluded]
+    return [*kept, "geometry"]
 
 
 def _build_csv_conversion_query(
@@ -1527,31 +1563,19 @@ def _build_conversion_query(
             FROM {table_expr}
         """
     else:
-        # For 1.x without existing bbox: add bbox column, preserve original geometry name
-        quoted_bbox_name = quote_identifier(bbox_name)
-        if existing_bbox_col:
-            # Remove old bbox before adding new one
-            base_select = f"""
-                SELECT * EXCLUDE ({quoted_bbox}),
-                    STRUCT_PACK(
-                        xmin := {xmin_e},
-                        ymin := {ymin_e},
-                        xmax := {xmax_e},
-                        ymax := {ymax_e}
-                    ) AS {quoted_bbox_name}
-                FROM {table_expr}
-            """
-        else:
-            base_select = f"""
-                SELECT *,
-                    STRUCT_PACK(
-                        xmin := {xmin_e},
-                        ymin := {ymin_e},
-                        xmax := {xmax_e},
-                        ymax := {ymax_e}
-                    ) AS {quoted_bbox_name}
-                FROM {table_expr}
-            """
+        # For 1.x without existing bbox: add bbox column, preserve original
+        # geometry name. (An existing bbox column never reaches this arm: the
+        # caller either preserves it or, for 2.0, skips the bbox.)
+        base_select = f"""
+            SELECT *,
+                STRUCT_PACK(
+                    xmin := {xmin_e},
+                    ymin := {ymin_e},
+                    xmax := {xmax_e},
+                    ymax := {ymax_e}
+                ) AS {quote_identifier(bbox_name)}
+            FROM {table_expr}
+        """
 
     if skip_hilbert:
         return base_select, None
@@ -1645,10 +1669,14 @@ def _convert_csv_path(
         bounds = _usable_bounds(bounds)
         effective_skip_hilbert = bounds is None
 
-    # The computed bbox column must not collide with an input column named
+    # The computed bbox column must not collide with an output column named
     # "bbox" (a string tile id, say) — DuckDB would silently rename the
     # computed one while the covering pointed at the input's column (#1079).
-    bbox_name = "bbox" if skip_bbox else _resolve_bbox_name(con, geom_info["csv_read"])
+    bbox_name = (
+        "bbox"
+        if skip_bbox
+        else _resolve_bbox_name(_csv_output_columns(geom_info), geoparquet_version)
+    )
 
     query, order_by = _build_csv_conversion_query(
         geom_info,
@@ -1801,13 +1829,15 @@ def _convert_spatial_path(
 
     # Use multi-geometry detection for parquet files
     column_aliases = None
+    source_columns = None
     if is_parquet:
         geom_info = detect_all_geometry_columns(input_file, verbose=verbose)
         geom_column = geom_info["primary"]
         secondary_columns = geom_info["secondary"]
     else:
+        source_columns = []
         geom_column, column_aliases = _detect_spatial_geometry(
-            con, input_file, verbose, layer, open_options
+            con, input_file, verbose, layer, open_options, columns_out=source_columns
         )
         secondary_columns = []
         geom_info = {
@@ -1884,6 +1914,7 @@ def _convert_spatial_path(
     geom_encoding = geom_info["metadata"].get(geom_column, {}).get("encoding", "WKB")
     bounds = None
     if not skip_hilbert:
+        read_expr = table_expr
         bounds, table_expr = _bounds_with_curve_fallback(
             con,
             input_file,
@@ -1900,6 +1931,8 @@ def _convert_spatial_path(
             force_2d=force_2d,
         )
         bounds = _usable_bounds(bounds)
+        # The fallback swaps in the linearized view when bounds hit curves.
+        linearized = linearized or table_expr is not read_expr
         skip_hilbert = bounds is None
 
     if verbose:
@@ -1922,16 +1955,19 @@ def _convert_spatial_path(
     # When computing a bbox, its name must not collide with an input column
     # already named "bbox" that check_bbox_structure rightly rejected (a string
     # tile id, say). DuckDB would silently rename the computed struct while the
-    # covering pointed at the input's column (#1079).
+    # covering pointed at the input's column (#1079). The compute arm emits
+    # every source column, so the source's names are the ones that can collide:
+    # a non-parquet source already bound them during detection (the linearized
+    # view is a different source, so it is bound again).
     bbox_name = "bbox"
     if not skip_bbox and not preserve_existing_bbox:
-        source_expr = table_expr
-        if source_expr is None:
-            if is_parquet:
-                source_expr = f"read_parquet({sql_path(input_file)})"
-            else:
-                source_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
-        bbox_name = _resolve_bbox_name(con, source_expr)
+        if is_parquet or linearized:
+            source_expr = table_expr or f"read_parquet({sql_path(input_file)})"
+            source_columns = _get_query_columns(con, f"SELECT * FROM {source_expr}")
+        # A curve retry resolves the name again; it was announced the first time.
+        bbox_name = _resolve_bbox_name(
+            source_columns, geoparquet_version, announce=not force_linearize
+        )
 
     query, order_by = _build_conversion_query(
         input_file,
