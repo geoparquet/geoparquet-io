@@ -1425,9 +1425,17 @@ def bbox_column_to_declare(
 
     Reordering the struct during a rewrite was also rejected: that is a data
     change, and the rewrite fixes promise not to make one.
+
+    Provenance comes only from the PRIMARY column's own ``covering``. With
+    none, only the exact conventional name (:data:`SELF_EVIDENT_BBOX_COLUMN`)
+    may be declared -- the #738 policy. The broader read-side matching
+    (``bounds``, ``extent``, ``*_bbox``) used to leak in here, so a
+    multi-geometry file whose secondary ``boundary`` travelled with a
+    ``boundary_bbox`` struct got that struct declared as the *primary*'s
+    covering: a Point column advertising a Polygon column's extents (#953).
     """
     declared = _declared_bbox_column(geo_meta)
-    name = declared if declared in schema.names else detect_bbox_column_from_schema(schema, verbose)
+    name = declared if declared in schema.names else _self_evident_bbox_column(schema, verbose)
     if name is None:
         return None
     problem = arrow_bbox_covering_problem(name, schema.field(name))
@@ -1458,6 +1466,31 @@ def build_bbox_covering(column: str) -> dict:
 #: so readers pruned away rows that genuinely matched; those names now require
 #: explicit provenance (#738).
 SELF_EVIDENT_BBOX_COLUMN = "bbox"
+
+
+def _self_evident_bbox_column(schema: pa.Schema, verbose: bool = False) -> str | None:
+    """The one column a writer may declare with no provenance, if the schema has it.
+
+    The declare-side twin of :func:`detect_bbox_column_from_schema`, which
+    matches the broader read-side names (``bounds``, ``extent``, ``*_bbox``)
+    and must never decide *whether* a covering is declared: a ``boundary_bbox``
+    that name-matches is the *secondary* ``boundary`` column's envelope, not
+    the primary's (#953). Only the exact :data:`SELF_EVIDENT_BBOX_COLUMN`
+    qualifies here (#738); the struct-shape gate stays with the caller.
+    """
+    import pyarrow as pa
+
+    if SELF_EVIDENT_BBOX_COLUMN not in schema.names:
+        return None
+    field = schema.field(SELF_EVIDENT_BBOX_COLUMN)
+    if not (
+        pa.types.is_struct(field.type)
+        and _BBOX_STRUCT_FIELDS.issubset({f.name for f in field.type})
+    ):
+        return None
+    if verbose:
+        debug(f"Found conventional bbox column in table: {SELF_EVIDENT_BBOX_COLUMN}")
+    return SELF_EVIDENT_BBOX_COLUMN
 
 
 def declare_carried_bbox_column(

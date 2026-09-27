@@ -298,3 +298,78 @@ def create_multi_geometry_with_custom_primary_name(
 
     pq.write_table(table, output_path)
     return output_path
+
+
+def create_multi_geometry_with_secondary_bbox(
+    output_path: str, declare_boundary_covering: bool = False
+) -> str:
+    """Create a multi-geometry GeoParquet whose SECONDARY column has a bbox struct.
+
+    The #953 shape: primary Point ``geometry``, secondary Polygon ``boundary``,
+    and a ``boundary_bbox`` struct column holding the *boundary*'s extents. The
+    primary declares no covering, so a writer that name-matches any ``*_bbox``
+    struct would wrongly declare ``boundary_bbox`` as the primary's covering.
+
+    Args:
+        output_path: Path to write the file
+        declare_boundary_covering: When True, the input's ``boundary`` entry
+            declares ``covering.bbox`` over ``boundary_bbox`` (provenance on the
+            secondary, still none on the primary).
+
+    Returns:
+        Path to created file.
+    """
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial;")
+
+    point_wkbs = []
+    polygon_wkbs = []
+    bbox_structs = []
+    for x, y in [(0, 0), (1, 1), (2, 2)]:
+        point_wkbs.append(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))").fetchone()[0])
+        wkt = f"POLYGON(({x - 0.5} {y - 0.5}, {x + 0.5} {y - 0.5}, {x + 0.5} {y + 0.5}, {x - 0.5} {y + 0.5}, {x - 0.5} {y - 0.5}))"
+        polygon_wkbs.append(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()[0])
+        bbox_structs.append({"xmin": x - 0.5, "ymin": y - 0.5, "xmax": x + 0.5, "ymax": y + 0.5})
+
+    con.close()
+
+    bbox_type = pa.struct(
+        [
+            ("xmin", pa.float64()),
+            ("ymin", pa.float64()),
+            ("xmax", pa.float64()),
+            ("ymax", pa.float64()),
+        ]
+    )
+    table = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int32()),
+            "geometry": pa.array(point_wkbs, type=pa.binary()),
+            "boundary": pa.array(polygon_wkbs, type=pa.binary()),
+            "boundary_bbox": pa.array(bbox_structs, type=bbox_type),
+        }
+    )
+
+    boundary_meta = {"encoding": "WKB", "geometry_types": ["Polygon"]}
+    if declare_boundary_covering:
+        boundary_meta["covering"] = {
+            "bbox": {axis: ["boundary_bbox", axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
+        }
+
+    geo_meta = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {"encoding": "WKB", "geometry_types": ["Point"]},
+            "boundary": boundary_meta,
+        },
+    }
+
+    existing_meta = table.schema.metadata or {}
+    new_meta = {**existing_meta, b"geo": json.dumps(geo_meta).encode("utf-8")}
+    table = table.replace_schema_metadata(new_meta)
+
+    pq.write_table(table, output_path)
+    return output_path
