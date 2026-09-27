@@ -2,6 +2,7 @@
 
 import codecs
 import gc
+import math
 import os
 import re
 import time
@@ -1195,7 +1196,11 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
                 FROM parsed_geoms
                 WHERE {wkt_col} IS NULL OR geometry IS NOT NULL
             """
-            return query_base, None
+            if skip_hilbert:
+                return query_base, None
+            # Hilbert-order like every other path (#1157); empty geometry
+            # sorts last, same as below (#649).
+            return query_base, _geometry_order_by(quote_identifier("geometry"), bounds)
         else:
             # NULL WKT yields NULL geometry (ST_GeomFromText propagates it), so
             # the row survives with its attributes instead of being filtered.
@@ -1333,6 +1338,29 @@ _NO_BOUNDS_WARNING = (
     "No geometry to measure (no rows, or every geometry empty or NULL); "
     "writing without Hilbert ordering."
 )
+
+#: Warned when the envelope exists but cannot be rendered into SQL (#1157): a
+#: NaN/inf bound interpolated as a Python float becomes the bare token
+#: ``nan``/``inf`` inside ``ST_MakeEnvelope`` and fails binding.
+_NONFINITE_BOUNDS_WARNING = (
+    "Dataset bounds contain a NaN or infinite coordinate; writing without Hilbert ordering."
+)
+
+
+def _usable_bounds(bounds):
+    """``bounds`` when Hilbert ordering can use them, else None with a warning.
+
+    None means there was nothing to measure (#649); a non-finite value would
+    fail binding once interpolated into ``ST_MakeEnvelope`` (#1157). Either
+    way the caller falls back to an unordered write.
+    """
+    if bounds is None:
+        warn(_NO_BOUNDS_WARNING)
+        return None
+    if not all(math.isfinite(v) for v in bounds):
+        warn(_NONFINITE_BOUNDS_WARNING)
+        return None
+    return bounds
 
 
 def _orderable_geom(geom_expr, xmin, ymin):
@@ -1554,12 +1582,8 @@ def _convert_csv_path(
 
     progress(f"Assuming CRS: {crs}")
 
-    # Skip Hilbert if using skip_invalid
-    effective_skip_hilbert = skip_hilbert or skip_invalid
-    if skip_invalid and not skip_hilbert:
-        warn("Note: Skipping Hilbert ordering due to --skip-invalid flag")
-
     # Calculate bounds if needed
+    effective_skip_hilbert = skip_hilbert
     bounds = (
         None
         if effective_skip_hilbert
@@ -1577,9 +1601,9 @@ def _convert_csv_path(
                 msg = "Reading CSV, creating geometries, and applying Hilbert ordering..."
         debug(msg)
 
-    if not effective_skip_hilbert and bounds is None:
-        warn(_NO_BOUNDS_WARNING)
-        effective_skip_hilbert = True
+    if not effective_skip_hilbert:
+        bounds = _usable_bounds(bounds)
+        effective_skip_hilbert = bounds is None
 
     query, order_by = _build_csv_conversion_query(
         geom_info, effective_skip_hilbert, bounds, skip_invalid, skip_bbox=skip_bbox
@@ -1818,9 +1842,8 @@ def _convert_spatial_path(
             open_options=open_options,
             force_2d=force_2d,
         )
+        bounds = _usable_bounds(bounds)
         skip_hilbert = bounds is None
-        if skip_hilbert:
-            warn(_NO_BOUNDS_WARNING)
 
     if verbose:
         if secondary_columns:
