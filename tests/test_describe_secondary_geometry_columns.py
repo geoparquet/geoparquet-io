@@ -25,7 +25,9 @@ knew about the PRIMARY geometry column:
 import json
 import logging
 from collections import Counter
+from unittest.mock import patch
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -424,6 +426,17 @@ class TestOddInputs:
 
         assert info["secondary"] == ["centroid"]
 
+    def test_a_geo_key_that_does_not_parse_keeps_the_native_half(
+        self, two_native_columns, tmp_path
+    ):
+        table = pq.read_table(str(two_native_columns))
+        odd = tmp_path / "broken_geo.parquet"
+        pq.write_table(table.replace_schema_metadata({b"geo": b"{not json"}), str(odd))
+
+        info = derive_secondary_geometry_info(str(odd), "geometry")
+
+        assert info["secondary"] == ["centroid"]
+
     def test_a_plain_binary_secondary_in_the_query_is_left_alone(self, tmp_path):
         """A secondary the query carries as BLOB (a non-gpio Arrow stream) cannot be measured.
 
@@ -508,3 +521,78 @@ class TestThePrimaryCrsIsThePrimarysOwn:
             assert geo_block_crs_id(output, "geometry") == expected
             assert logical_crs_id(output, "geometry") in (expected, NO_NATIVE_GEO_TYPE)
         assert geo_block_crs_id(output, "centroid") == {"authority": "EPSG", "code": 3857}
+
+
+class TestWhatANativeSecondaryDerives:
+    """Each thing a native secondary's own type can (or cannot) say."""
+
+    @staticmethod
+    def _two_native(tmp_path, centroid_type):
+        import geoarrow.pyarrow as ga
+
+        from tests.native_geo_probes import conus_wkb, projjson, write_native_geo_only
+
+        rows = conus_wkb("cell", "ST_Centroid(cell)")
+        return write_native_geo_only(
+            tmp_path / "in.parquet",
+            rows,
+            {"geometry": (2, ga.wkb().with_crs(projjson(4326))), "centroid": (3, centroid_type)},
+        )
+
+    def test_a_default_crs_is_stated_by_omission(self, tmp_path):
+        import geoarrow.pyarrow as ga
+
+        info = derive_secondary_geometry_info(str(self._two_native(tmp_path, ga.wkb())), "geometry")
+
+        assert info["metadata"] == {"centroid": {"geometry_types": []}}
+
+    def test_a_geography_secondary_keeps_its_edges(self, tmp_path):
+        import geoarrow.pyarrow as ga
+
+        spherical = ga.wkb().with_edge_type(ga.EdgeType.SPHERICAL)
+        info = derive_secondary_geometry_info(
+            str(self._two_native(tmp_path, spherical)), "geometry"
+        )
+
+        assert info["metadata"]["centroid"]["edges"] == "spherical"
+        assert info["metadata"]["centroid"]["geometry_types"] == []
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_an_unreadable_output_schema_derives_nothing(two_native_columns, tmp_path, caplog, verbose):
+    """The derivation needs the output's columns; without them it stays out of the way."""
+    from geoparquet_io.core import write_funnels
+
+    def failing_probe(con, query):
+        raise duckdb.Error("boom")
+
+    derived = []
+    real_derive = write_funnels.derive_secondary_geometry_info
+
+    def spy(*args, **kwargs):
+        derived.append(args)
+        return real_derive(*args, **kwargs)
+
+    output = tmp_path / "out.parquet"
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        with (
+            patch.object(write_funnels, "_get_query_columns", side_effect=failing_probe),
+            patch.object(write_funnels, "derive_secondary_geometry_info", side_effect=spy),
+            caplog.at_level(logging.DEBUG, logger="geoparquet_io"),
+        ):
+            write_funnels.write_parquet_with_metadata(
+                con,
+                f"SELECT * FROM read_parquet({sql_path(str(two_native_columns))})",
+                str(output),
+                original_metadata=None,
+                input_file=str(two_native_columns),
+                geoparquet_version="1.1",
+                verbose=verbose,
+            )
+    finally:
+        con.close()
+
+    assert derived == []
+    assert _duckdb_rows(output) == 200
+    assert ("Could not read output schema" in caplog.text) is verbose
