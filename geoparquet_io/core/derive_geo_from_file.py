@@ -212,7 +212,7 @@ def _rewrite_writer_kwargs(compression: str, compression_level: int | None) -> d
 
 
 def _copy_row_groups(
-    pf: pq.ParquetFile, writer: pq.ParquetWriter, schema: pa.Schema, row_group_rows: int | None
+    pf: pq.ParquetFile, writer: pq.ParquetWriter, row_group_rows: int | None
 ) -> None:
     """Copy ``pf`` into ``writer`` one bounded piece at a time.
 
@@ -220,14 +220,16 @@ def _copy_row_groups(
     piece, matching what ``write_table(row_group_size=...)`` produced);
     otherwise each existing row group is copied as-is, so the file keeps its
     own layout instead of pyarrow's ~1Mi-row default collapsing the groups.
+    The pieces' own schema metadata is irrelevant: the footer's key/value
+    metadata (``geo`` included) comes from the schema ``writer`` was opened
+    with, and ``write_table`` compares schemas without metadata.
     """
     if row_group_rows:
         for batch in pf.iter_batches(batch_size=row_group_rows):
-            piece = pa.Table.from_batches([batch]).replace_schema_metadata(schema.metadata)
-            writer.write_table(piece, row_group_size=row_group_rows)
+            writer.write_table(pa.Table.from_batches([batch]), row_group_size=row_group_rows)
         return
     for rg in range(pf.metadata.num_row_groups):
-        piece = pf.read_row_group(rg).replace_schema_metadata(schema.metadata)
+        piece = pf.read_row_group(rg)
         writer.write_table(piece, row_group_size=piece.num_rows or None)
 
 
@@ -253,13 +255,17 @@ def _rewrite_file_with_geo_metadata(
     tmp_path = f"{output_path}.geometa.tmp"
     try:
         # Both handles are closed (`with`) before os.replace runs — Windows
-        # refuses to replace/unlink a file that is still open.
-        with pq.ParquetFile(output_path) as pf:
+        # refuses to replace/unlink a file that is still open. pre_buffer is
+        # off because pyarrow's pre-buffer cache keeps every column chunk
+        # `iter_batches` has read until the file closes: with it on, the
+        # explicit-row_group_rows branch (the default convert path) grew to
+        # roughly the whole compressed file instead of one row group.
+        with pq.ParquetFile(output_path, pre_buffer=False) as pf:
             new_meta = dict(pf.schema_arrow.metadata or {})
             new_meta[b"geo"] = json.dumps(geo_meta).encode()
             schema = pf.schema_arrow.with_metadata(new_meta)
             with pq.ParquetWriter(tmp_path, schema, **write_kwargs) as writer:
-                _copy_row_groups(pf, writer, schema, row_group_rows)
+                _copy_row_groups(pf, writer, row_group_rows)
         os.replace(tmp_path, output_path)
     finally:
         # os.replace consumes the tmp file on success; clean it up on failure.

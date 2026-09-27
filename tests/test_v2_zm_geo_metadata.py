@@ -121,12 +121,14 @@ def test_rewrite_preserves_lz4_codec_unit(tmp_path):
     assert codec in ("LZ4", "LZ4_RAW"), codec
 
 
-def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch):
+@pytest.mark.parametrize("row_group_rows", [None, 10], ids=["mirror", "explicit"])
+def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch, row_group_rows):
     """The rewrite must never materialize the whole file in memory (#1155).
 
     A memory-bounded 2.0 convert of a large XYM/XYZM input finishes the COPY
     and then runs this rewrite; a full ``pq.read_table`` here is the one
-    remaining unbounded pass on that path.
+    remaining unbounded pass on that path. Both branches: the convert path
+    passes an explicit ``row_group_rows`` (49,152 by default).
     """
     import pyarrow as pa
 
@@ -139,11 +141,60 @@ def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch):
         raise AssertionError("pq.read_table must not run on the rewrite path (#1155)")
 
     monkeypatch.setattr(pq, "read_table", boom)
-    _rewrite_file_with_geo_metadata(str(path), {"version": "2.0.0"}, "ZSTD", None, None)
+    _rewrite_file_with_geo_metadata(str(path), {"version": "2.0.0"}, "ZSTD", None, row_group_rows)
 
-    pf = pq.ParquetFile(str(path))
-    assert pf.metadata.num_rows == 20
-    assert json.loads(pf.metadata.metadata[b"geo"]) == {"version": "2.0.0"}
+    with pq.ParquetFile(str(path)) as pf:
+        assert pf.metadata.num_rows == 20
+        assert json.loads(pf.metadata.metadata[b"geo"]) == {"version": "2.0.0"}
+
+
+@pytest.mark.parametrize("row_group_rows", [None, 4_000], ids=["mirror", "explicit"])
+def test_rewrite_memory_is_bounded_by_a_row_group(tmp_path, monkeypatch, row_group_rows):
+    """Peak Arrow memory during the rewrite stays near one row group (#1155).
+
+    Forbidding ``pq.read_table`` is not enough: with pyarrow's default
+    ``pre_buffer=True`` the explicit-``row_group_rows`` branch (``iter_batches``,
+    the default convert path) kept every column chunk it had read cached until
+    the file closed, so memory grew to the whole compressed file.
+    """
+    import numpy as np
+    import pyarrow as pa
+
+    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+
+    groups, rows, width = 16, 4_000, 128  # 16 groups of ~0.5 MB incompressible bytes
+    path = str(tmp_path / "big.parquet")
+    rng = np.random.default_rng(0)
+    schema = pa.schema([("blob", pa.binary())])
+    with pq.ParquetWriter(path, schema, compression="zstd") as writer:
+        for _ in range(groups):
+            data = rng.integers(0, 256, size=rows * width, dtype=np.uint8).tobytes()
+            offsets = np.arange(0, (rows + 1) * width, width, dtype=np.int32)
+            blob = pa.BinaryArray.from_buffers(
+                pa.binary(), rows, [None, pa.py_buffer(offsets), pa.py_buffer(data)]
+            )
+            writer.write_table(pa.table({"blob": blob}), row_group_size=rows)
+
+    peaks = []
+    real_write_table = pq.ParquetWriter.write_table
+
+    def spy(self, table, row_group_size=None):
+        peaks.append(pa.total_allocated_bytes())
+        return real_write_table(self, table, row_group_size=row_group_size)
+
+    monkeypatch.setattr(pq.ParquetWriter, "write_table", spy)
+    # Relative to what the process already holds: an earlier test in the same
+    # worker may leave Arrow allocations alive.
+    baseline = pa.total_allocated_bytes()
+    _rewrite_file_with_geo_metadata(path, {"version": "2.0.0"}, "ZSTD", None, row_group_rows)
+
+    one_group = rows * width
+    assert peaks, "the rewrite wrote nothing"
+    growth = max(peaks) - baseline
+    assert growth < (groups // 2) * one_group, (
+        f"rewrite grew Arrow memory by {growth / 1e6:.1f} MB; "
+        f"one row group is {one_group / 1e6:.1f} MB"
+    )
 
 
 def test_rewrite_preserves_uneven_row_group_boundaries(tmp_path):
