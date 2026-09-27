@@ -557,7 +557,10 @@ def extract_arcgis(
         timeout=timeout,
     )
 
-    return Table(arrow_table, geometry_column="geometry")
+    # exclude_cols="geometry" leaves an attribute table with no geo block
+    # (#966): report no geometry column, so write() emits plain Parquet on every
+    # strategy instead of asking the writer for a column that is not there.
+    return Table(arrow_table, geometry_column=_surviving_geometry_column("geometry", arrow_table))
 
 
 class Table:

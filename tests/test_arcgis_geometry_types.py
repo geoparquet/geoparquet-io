@@ -18,7 +18,8 @@ which put the guess straight back on three reachable paths (#962): one malformed
 row makes the all-or-nothing compute return nothing for the whole column, an
 all-NULL geometry column has nothing to describe, and ``--exclude-cols geometry``
 leaves no geometry column at all. The fallback is gone: when the data does not
-say, the file says ``[]``.
+say, the file says ``[]`` -- except for an excluded geometry column, where there
+is no geo block left to say anything (#966): the output is plain Parquet.
 """
 
 import json

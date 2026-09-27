@@ -2005,11 +2005,6 @@ refused with a warning, since GeoParquet output requires the column; on a
 geometry-less (tabular) table there is no such column, so naming it is an
 unknown-column error like any other.
 
-On `arcgis`, excluding `geometry` is allowed and behaves like
-`gpio extract geoparquet`: the output is an attribute table — plain Parquet
-with no `geo` metadata — and the geometry-dependent steps (Hilbert ordering,
-the `bbox` column) are skipped.
-
 Because that check reads the fetched table, it needs no extra request and holds
 whatever else you pass — including `--geometry`/`--no-geometry`, which skip the
 shape probe. It does report after the fetch rather than before it. `--include-cols`
@@ -2017,6 +2012,12 @@ is checked *before* the fetch instead, since it becomes the SELECT list: under
 `--geometry`/`--no-geometry` it issues one bounded `SELECT * … LIMIT 0` of its
 own to do so, and if that cannot be reached, extraction proceeds unchecked
 rather than failing.
+
+On `arcgis`, by contrast, excluding `geometry` is allowed and behaves like
+`gpio extract geoparquet`: the output is an attribute table — plain Parquet
+with no `geo` metadata — and the geometry-dependent steps (Hilbert ordering,
+the `bbox` column) are skipped. That holds for a filter that matches no
+features too, which writes the layer's remaining columns with zero rows.
 
 A **blank entry** in the list — `--include-cols id,,name`, or `--include-cols '   '` —
 is a usage error and is rejected before anything is opened or contacted. That
