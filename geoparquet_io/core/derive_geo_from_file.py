@@ -19,6 +19,7 @@ import os
 import re
 from typing import Any
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs
@@ -190,41 +191,8 @@ def _ensure_v2_geo_metadata(
         debug("Re-attached geo metadata (writer omitted it for M/ZM geometries)")
 
 
-def _infer_row_group_size(output_path: str) -> int | None:
-    """Max rows per existing row group, so a rewrite can mirror the file's layout."""
-    pf = pq.ParquetFile(output_path)
-    try:
-        num_groups = pf.metadata.num_row_groups
-        if num_groups == 0:
-            return None
-        return max(pf.metadata.row_group(i).num_rows for i in range(num_groups))
-    finally:
-        # Release the read handle before any rewrite (Windows requires it).
-        pf.close()
-
-
-def _rewrite_file_with_geo_metadata(
-    output_path: str,
-    geo_meta: dict,
-    compression: str = "ZSTD",
-    compression_level: int | None = None,
-    row_group_rows: int | None = None,
-) -> None:
-    """Rewrite a parquet file in place with the given geo metadata attached."""
-    # geoarrow registration makes pyarrow round-trip the native GEOMETRY/
-    # GEOGRAPHY logical types (and their CRS) instead of demoting to binary.
-    import geoarrow.pyarrow  # noqa: F401
-
-    # Preserve the file's own row-group layout when the caller didn't specify
-    # one — pyarrow's ~1Mi-row default would otherwise collapse the groups.
-    if not row_group_rows:
-        row_group_rows = _infer_row_group_size(output_path)
-
-    table = pq.read_table(output_path)
-    new_meta = dict(table.schema.metadata or {})
-    new_meta[b"geo"] = json.dumps(geo_meta).encode()
-    table = table.replace_schema_metadata(new_meta)
-
+def _rewrite_writer_kwargs(compression: str, compression_level: int | None) -> dict:
+    """ParquetWriter kwargs mirroring the codec the original writer used."""
     # Keys cover every normalized name callers can pass (DuckDB COPY names
     # from _plain_copy_to's compression_map plus pyarrow-style variants).
     codec_map = {
@@ -240,12 +208,58 @@ def _rewrite_file_with_geo_metadata(
     write_kwargs: dict = {"compression": codec_map.get(compression.upper(), "zstd")}
     if compression_level is not None and write_kwargs["compression"] in ("zstd", "gzip", "brotli"):
         write_kwargs["compression_level"] = compression_level
-    if row_group_rows:
-        write_kwargs["row_group_size"] = row_group_rows
+    return write_kwargs
 
+
+def _copy_row_groups(
+    pf: pq.ParquetFile, writer: pq.ParquetWriter, schema: pa.Schema, row_group_rows: int | None
+) -> None:
+    """Copy ``pf`` into ``writer`` one bounded piece at a time.
+
+    An explicit ``row_group_rows`` re-chunks to that size (one group per
+    piece, matching what ``write_table(row_group_size=...)`` produced);
+    otherwise each existing row group is copied as-is, so the file keeps its
+    own layout instead of pyarrow's ~1Mi-row default collapsing the groups.
+    """
+    if row_group_rows:
+        for batch in pf.iter_batches(batch_size=row_group_rows):
+            piece = pa.Table.from_batches([batch]).replace_schema_metadata(schema.metadata)
+            writer.write_table(piece, row_group_size=row_group_rows)
+        return
+    for rg in range(pf.metadata.num_row_groups):
+        piece = pf.read_row_group(rg).replace_schema_metadata(schema.metadata)
+        writer.write_table(piece, row_group_size=piece.num_rows or None)
+
+
+def _rewrite_file_with_geo_metadata(
+    output_path: str,
+    geo_meta: dict,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
+    row_group_rows: int | None = None,
+) -> None:
+    """Rewrite a parquet file in place with the given geo metadata attached.
+
+    Streams row group by row group into a staged file, so memory is bounded
+    by one row group — never the whole file (#1155): this runs right after
+    the memory-bounded COPY of an XYM/XYZM 2.0 convert, which may be far
+    larger than RAM.
+    """
+    # geoarrow registration makes pyarrow round-trip the native GEOMETRY/
+    # GEOGRAPHY logical types (and their CRS) instead of demoting to binary.
+    import geoarrow.pyarrow  # noqa: F401
+
+    write_kwargs = _rewrite_writer_kwargs(compression, compression_level)
     tmp_path = f"{output_path}.geometa.tmp"
     try:
-        pq.write_table(table, tmp_path, **write_kwargs)
+        # Both handles are closed (`with`) before os.replace runs — Windows
+        # refuses to replace/unlink a file that is still open.
+        with pq.ParquetFile(output_path) as pf:
+            new_meta = dict(pf.schema_arrow.metadata or {})
+            new_meta[b"geo"] = json.dumps(geo_meta).encode()
+            schema = pf.schema_arrow.with_metadata(new_meta)
+            with pq.ParquetWriter(tmp_path, schema, **write_kwargs) as writer:
+                _copy_row_groups(pf, writer, schema, row_group_rows)
         os.replace(tmp_path, output_path)
     finally:
         # os.replace consumes the tmp file on success; clean it up on failure.

@@ -121,6 +121,52 @@ def test_rewrite_preserves_lz4_codec_unit(tmp_path):
     assert codec in ("LZ4", "LZ4_RAW"), codec
 
 
+def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch):
+    """The rewrite must never materialize the whole file in memory (#1155).
+
+    A memory-bounded 2.0 convert of a large XYM/XYZM input finishes the COPY
+    and then runs this rewrite; a full ``pq.read_table`` here is the one
+    remaining unbounded pass on that path.
+    """
+    import pyarrow as pa
+
+    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+
+    path = tmp_path / "plain.parquet"
+    pq.write_table(pa.table({"a": list(range(20))}), str(path), row_group_size=10)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("pq.read_table must not run on the rewrite path (#1155)")
+
+    monkeypatch.setattr(pq, "read_table", boom)
+    _rewrite_file_with_geo_metadata(str(path), {"version": "2.0.0"}, "ZSTD", None, None)
+
+    pf = pq.ParquetFile(str(path))
+    assert pf.metadata.num_rows == 20
+    assert json.loads(pf.metadata.metadata[b"geo"]) == {"version": "2.0.0"}
+
+
+def test_rewrite_preserves_uneven_row_group_boundaries(tmp_path):
+    """With no explicit size the rewrite mirrors each existing group exactly,
+    not a re-chunk at the largest group's size."""
+    import pyarrow as pa
+
+    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+
+    path = tmp_path / "uneven.parquet"
+    schema = pa.schema([("a", pa.int64())])
+    with pq.ParquetWriter(str(path), schema) as writer:
+        for n in (3, 10, 5):
+            writer.write_table(pa.table({"a": list(range(n))}, schema=schema))
+
+    _rewrite_file_with_geo_metadata(str(path), {"version": "2.0.0"}, "ZSTD", None, None)
+
+    pf = pq.ParquetFile(str(path))
+    groups = [pf.metadata.row_group(i).num_rows for i in range(pf.metadata.num_row_groups)]
+    assert groups == [3, 10, 5], groups
+    assert b"geo" in pf.metadata.metadata
+
+
 # --- Primary-column choice for multi-geometry repairs (todo 047-C6) ---
 
 
