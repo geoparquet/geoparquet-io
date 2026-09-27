@@ -243,13 +243,19 @@ def test_create_geo_metadata_gates_covering_by_version():
 
 
 def test_create_geo_metadata_drops_custom_covering_for_v10():
-    """Spatial-index coverings (h3/s2/...) are also 1.1-only."""
-    custom = {"covering": {"h3": {"column": "h3", "resolution": 8}}}
+    """Spatial-index coverings (h3/s2/...) are also 1.1-only.
 
-    v10 = create_geo_metadata(None, "geometry", None, custom, version="1.0.0")
+    The 1.1 branch supplies a bbox column: since #954 an index entry is only
+    recorded beside a bbox member, so a bare custom covering never reaches any
+    version and would make this gate test vacuous.
+    """
+    custom = {"covering": {"h3": {"column": "h3", "resolution": 8}}}
+    bbox_info = {"has_bbox_column": True, "bbox_column_name": "bbox"}
+
+    v10 = create_geo_metadata(None, "geometry", bbox_info, custom, version="1.0.0")
     assert "covering" not in v10["columns"]["geometry"]
 
-    v11 = create_geo_metadata(None, "geometry", None, custom, version="1.1.0")
+    v11 = create_geo_metadata(None, "geometry", bbox_info, custom, version="1.1.0")
     assert "h3" in v11["columns"]["geometry"]["covering"]
 
 

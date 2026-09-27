@@ -36,7 +36,11 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     validate_compression_level,
 )
-from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql, declare_carried_bbox_column
+from geoparquet_io.core.geo_metadata import (
+    compute_geo_stats_via_sql,
+    declare_carried_bbox_column,
+    strip_bboxless_covering,
+)
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import get_default_memory_limit, validate_memory_limit
@@ -354,6 +358,10 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         col_meta = geo_meta["columns"][geometry_column]
         self._compute_missing_metadata(con, query, geometry_column, col_meta, verbose)
         declare_carried_bbox_column(con, query, col_meta, verbose, geoparquet_version)
+        # After the declare above, so an undeclared conventional bbox column
+        # gets its chance to supply the one member the spec defines; a covering
+        # still without a bbox member is one geopandas cannot read (#954).
+        geo_meta = strip_bboxless_covering(geo_meta, verbose)
 
         # For v1.x: Cast to BLOB so DuckDB writes plain binary WKB. EVERY geometry
         # column, not just the primary: validation applies the same per-version

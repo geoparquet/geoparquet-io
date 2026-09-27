@@ -31,7 +31,7 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
-from geoparquet_io.core.geo_metadata import compute_bbox_via_sql
+from geoparquet_io.core.geo_metadata import compute_bbox_via_sql, strip_bboxless_covering
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
@@ -220,6 +220,10 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 geometry_types=geometry_types,
                 geometry_info=geometry_info,
             )
+            # This strategy declares no bbox covering of its own, so a covering
+            # still without a bbox member here would reach the file as one
+            # geopandas cannot read (#954).
+            geo_meta = strip_bboxless_covering(geo_meta, verbose)
 
             # 2.0 and parquet-geo-only require a native Parquet GEOMETRY logical
             # type; 1.0/1.1 require plain BYTE_ARRAY WKB and forbid it. Every

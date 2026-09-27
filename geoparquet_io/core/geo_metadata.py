@@ -648,6 +648,54 @@ def strip_unsupported_covering(geo_meta: dict, version: str | None, verbose: boo
     return result
 
 
+def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
+    """Return ``geo_meta`` without any ``covering`` that has no ``bbox`` member.
+
+    The GeoParquet 1.1.0 spec's ``covering`` section reads: "The keys of the
+    'covering' object MUST be a supported encoding. Currently the only
+    supported encoding is 'bbox'". gpio additionally records its spatial-index
+    entries (h3/s2/a5/quadkey/kdtree) *beside* a bbox member (#694/#738), but a
+    covering carrying only those members is one real readers reject: geopandas
+    indexes ``covering["bbox"]["xmin"][0]`` unguarded, so ``partition quadkey``
+    wrote a dataset ``geopandas.read_parquet`` could not open at all (#954).
+
+    Single gate shared by every write path, applied after metadata assembly and
+    after the bbox-declaring steps (``_add_bbox_covering``,
+    ``declare_carried_bbox_column``) have had their chance to supply the member.
+
+    Never mutates its input, for the same aliasing reason as
+    :func:`strip_unsupported_covering`: partition loops reuse one metadata dict
+    across many writes.
+    """
+
+    def _bboxless(col) -> bool:
+        if not isinstance(col, dict):
+            return False
+        covering = col.get("covering")
+        return isinstance(covering, dict) and "bbox" not in covering
+
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return geo_meta
+    if not any(_bboxless(col) for col in columns.values()):
+        return geo_meta
+
+    stripped = {}
+    for col_name, col_meta in columns.items():
+        if _bboxless(col_meta):
+            col_meta = {k: v for k, v in col_meta.items() if k != "covering"}
+            if verbose:
+                debug(
+                    f"Dropped covering metadata with no bbox member for column "
+                    f"'{col_name}' (spec allows only the bbox encoding)"
+                )
+        stripped[col_name] = col_meta
+
+    result = dict(geo_meta)
+    result["columns"] = stripped
+    return result
+
+
 def _add_custom_covering(
     geo_meta: dict, geom_col: str, custom_metadata: dict | None, verbose: bool
 ) -> None:
@@ -1048,7 +1096,9 @@ def create_geo_metadata(
             if key != "covering":
                 geo_meta[key] = value
 
-    return strip_unsupported_covering(geo_meta, version, verbose)
+    # Applied after _add_bbox_covering, so a covering is only dropped when no
+    # bbox column exists to give it the one member the spec defines (#954).
+    return strip_bboxless_covering(strip_unsupported_covering(geo_meta, version, verbose), verbose)
 
 
 # =============================================================================

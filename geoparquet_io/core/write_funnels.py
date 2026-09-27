@@ -60,6 +60,7 @@ from geoparquet_io.core.geo_metadata import (
     declare_carried_bbox_column,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
+    strip_bboxless_covering,
     strip_derived_stats,
     strip_nonplanar_edges,
 )
@@ -543,6 +544,10 @@ def _geo_block_to_carry_on_fast_path(
             effective_version,
             output_columns=output_columns,
         )
+    # After the declare above: a carried covering still without a bbox member
+    # (e.g. only a spatial-index entry) is one geopandas cannot read (#954),
+    # so it is not carried onto the output either.
+    carried = strip_bboxless_covering(carried, verbose)
     if not _carries_more_than_duckdb_generates(carried):
         return None
     return carried
