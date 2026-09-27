@@ -1141,7 +1141,46 @@ def _validate_wkt_and_check_crs(con, csv_read, wkt_col, skip_invalid, verbose):
     _warn_if_projected_crs(con, csv_read, wkt_col)
 
 
-def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, skip_bbox=False):
+def _free_bbox_name(column_names):
+    """Pick a name for the computed bbox column that no input column already uses.
+
+    A 1.x input can carry a *non-struct* column named ``bbox`` (a string tile
+    id, say). Aliasing the computed struct ``AS bbox`` next to ``SELECT *``
+    made DuckDB silently rename it (``bbox_1``) while the declared covering
+    still pointed at the input's column (#1079). Picking the free name up
+    front keeps the SELECT alias and the covering agreeing by construction:
+    one variable, used in both places. Case-insensitive because DuckDB binds
+    identifiers that way.
+    """
+    taken = {str(name).lower() for name in column_names}
+    candidate = "bbox"
+    suffix = 0
+    while candidate in taken:
+        suffix += 1
+        candidate = f"bbox_{suffix}"
+    return candidate
+
+
+def _source_column_names(con, table_expr):
+    """Column names of ``table_expr`` (already SQL-ready) via a LIMIT 0 bind."""
+    return [col[0] for col in con.execute(f"SELECT * FROM {table_expr} LIMIT 0").description]
+
+
+def _resolve_bbox_name(con, table_expr):
+    """The free bbox name for ``table_expr``'s columns, warning on a collision."""
+    bbox_name = _free_bbox_name(_source_column_names(con, table_expr))
+    if bbox_name != "bbox":
+        warn(
+            f"Input already has a column named 'bbox' that is not a computed bbox; "
+            f"writing the computed bbox column as '{bbox_name}' and declaring the "
+            f"covering over it"
+        )
+    return bbox_name
+
+
+def _build_csv_conversion_query(
+    geom_info, skip_hilbert, bounds, skip_invalid, skip_bbox=False, bbox_name="bbox"
+):
     """Build SQL query for CSV/TSV conversion with geometry construction.
 
     Returns ``(query, order_by)``: the unordered SELECT, and the Hilbert ORDER BY
@@ -1154,6 +1193,8 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
         bounds: Tuple of bounds for Hilbert ordering
         skip_invalid: Skip invalid geometries
         skip_bbox: Skip adding bbox column (for 2.0/parquet-geo-only)
+        bbox_name: Alias for the computed bbox column; the caller picks one no
+            input column uses (#1079) and declares the covering over it
     """
     csv_read = geom_info["csv_read"]
 
@@ -1167,7 +1208,7 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
                     ymin := ST_YMin({geom}),
                     xmax := ST_XMax({geom}),
                     ymax := ST_YMax({geom})
-                ) AS bbox"""
+                ) AS {quote_identifier(bbox_name)}"""
 
     # Build geometry expression and exclusion list
     if geom_info["type"] == "wkt":
@@ -1413,6 +1454,7 @@ def _build_conversion_query(
     preserve_existing_bbox=False,
     encoding="WKB",
     table_expr=None,
+    bbox_name="bbox",
 ):
     """Build SQL query for conversion with optional Hilbert ordering.
 
@@ -1433,6 +1475,8 @@ def _build_conversion_query(
         encoding: GeoParquet geometry encoding (e.g. "WKB", "multipolygon")
         table_expr: Explicit source expression overriding the input_file read
             (used for the linearized-curves view)
+        bbox_name: Alias for the computed bbox column; the caller picks one no
+            input column uses (#1079) and declares the covering over it
     """
     # For parquet files, read directly; for other formats use ST_Read
     if table_expr is None:
@@ -1484,6 +1528,7 @@ def _build_conversion_query(
         """
     else:
         # For 1.x without existing bbox: add bbox column, preserve original geometry name
+        quoted_bbox_name = quote_identifier(bbox_name)
         if existing_bbox_col:
             # Remove old bbox before adding new one
             base_select = f"""
@@ -1493,7 +1538,7 @@ def _build_conversion_query(
                         ymin := {ymin_e},
                         xmax := {xmax_e},
                         ymax := {ymax_e}
-                    ) AS bbox
+                    ) AS {quoted_bbox_name}
                 FROM {table_expr}
             """
         else:
@@ -1504,7 +1549,7 @@ def _build_conversion_query(
                         ymin := {ymin_e},
                         xmax := {xmax_e},
                         ymax := {ymax_e}
-                    ) AS bbox
+                    ) AS {quoted_bbox_name}
                 FROM {table_expr}
             """
 
@@ -1600,8 +1645,18 @@ def _convert_csv_path(
         bounds = _usable_bounds(bounds)
         effective_skip_hilbert = bounds is None
 
+    # The computed bbox column must not collide with an input column named
+    # "bbox" (a string tile id, say) — DuckDB would silently rename the
+    # computed one while the covering pointed at the input's column (#1079).
+    bbox_name = "bbox" if skip_bbox else _resolve_bbox_name(con, geom_info["csv_read"])
+
     query, order_by = _build_csv_conversion_query(
-        geom_info, effective_skip_hilbert or materialize, bounds, skip_invalid, skip_bbox=skip_bbox
+        geom_info,
+        effective_skip_hilbert or materialize,
+        bounds,
+        skip_invalid,
+        skip_bbox=skip_bbox,
+        bbox_name=bbox_name,
     )
 
     # Materialize skip_invalid queries into a temp table to avoid DuckDB <= 1.5.1
@@ -1626,7 +1681,7 @@ def _convert_csv_path(
     # The bbox column, when written, is computed from the geometry right here,
     # so this path can vouch for it. Report it rather than leaving a writer to
     # infer a covering from the column's name (#738).
-    return query, (None if skip_bbox else "bbox"), order_by
+    return query, (None if skip_bbox else bbox_name), order_by
 
 
 def _is_linearizable_curve_error(e, *, is_parquet, linearize_curves):
@@ -1864,6 +1919,20 @@ def _convert_spatial_path(
                 msg = "Pass 1: Reading input, adding bbox, and applying Hilbert ordering..."
         debug(msg)
 
+    # When computing a bbox, its name must not collide with an input column
+    # already named "bbox" that check_bbox_structure rightly rejected (a string
+    # tile id, say). DuckDB would silently rename the computed struct while the
+    # covering pointed at the input's column (#1079).
+    bbox_name = "bbox"
+    if not skip_bbox and not preserve_existing_bbox:
+        source_expr = table_expr
+        if source_expr is None:
+            if is_parquet:
+                source_expr = f"read_parquet({sql_path(input_file)})"
+            else:
+                source_expr = _build_st_read_expr(input_file, layer, open_options=open_options)
+        bbox_name = _resolve_bbox_name(con, source_expr)
+
     query, order_by = _build_conversion_query(
         input_file,
         geom_column,
@@ -1876,6 +1945,7 @@ def _convert_spatial_path(
         preserve_existing_bbox=preserve_existing_bbox,
         encoding=geom_encoding,
         table_expr=table_expr,
+        bbox_name=bbox_name,
     )
 
     # Provenance for the covering. Two things justify declaring one: gpio
@@ -1887,7 +1957,7 @@ def _convert_spatial_path(
     elif preserve_existing_bbox:
         bbox_covering_column = existing_bbox_col if bbox_info["has_bbox_metadata"] else None
     else:
-        bbox_covering_column = "bbox"
+        bbox_covering_column = bbox_name
 
     return query, geom_info, bbox_covering_column, order_by
 
