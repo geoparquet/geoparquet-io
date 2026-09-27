@@ -197,11 +197,12 @@ Leftover spill directories: 1 (250.00 MB)
 
 ### Automatic Detection
 
-Every write DuckDB performs — the `duckdb-kv` strategy, and the plain COPY that writes
-GeoParquet 2.0 and `parquet-geo-only` output when no metadata rewrite is needed — runs under
-a DuckDB memory limit of 50% of the process's memory *ceiling*. `--write-memory` overrides
-it. (The `streaming`, `in-memory` and `disk-rewrite` strategies hold data in Arrow and take
-no DuckDB limit.)
+Every write DuckDB performs — the `duckdb-kv` strategy, the plain COPY that writes
+GeoParquet 2.0 and `parquet-geo-only` output when no metadata rewrite is needed, and the
+direct COPY writes behind `gpio partition`, `gpio pmtiles create --chunks` and the admin
+dataset cache downloads — runs under a DuckDB memory limit of 50% of the process's memory
+*ceiling*. `--write-memory` overrides it. (The `streaming`, `in-memory` and `disk-rewrite`
+strategies hold data in Arrow and take no DuckDB limit.)
 
 Half, not DuckDB's own default of 80%: DuckDB's limit covers only its own buffers. The
 Parquet writer, compression and spatial functions allocate beside it, and a large Hilbert

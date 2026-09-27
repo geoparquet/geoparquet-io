@@ -330,3 +330,179 @@ class TestConvertSortsOnce:
         assert seen, "repair_query_geometry was not called"
         assert all("ORDER BY" not in q.upper() for q in seen)
         assert out.exists()
+
+
+class TestDirectCopyMemoryLimit:
+    """Direct ``COPY ... TO`` sites run inside ``scoped_write_memory_limit`` (#1156).
+
+    The single-pass PARTITION_BY staging COPY (partition string/index drivers,
+    admin hierarchical, pmtiles chunking), the admin dataset cache downloads
+    and the bbox-metadata rewrite fallback bypass ``write_parquet_with_metadata``,
+    so they were the writes still running at DuckDB's own default -- 80% of RAM,
+    and blind to a Slurm job cgroup (#1153).
+    """
+
+    @staticmethod
+    def _spy_scoped_limit(monkeypatch, module, record):
+        """Route ``module``'s scoped_write_memory_limit through a recorder.
+
+        Records ``(memory_limit_arg, displayed_limit, threads)`` as they stand
+        right after the wrapped COPY ran, before the scope restores anything.
+        """
+        from contextlib import contextmanager
+
+        real = module.scoped_write_memory_limit
+
+        @contextmanager
+        def wrapper(con, memory_limit, verbose):
+            with real(con, memory_limit, verbose):
+                try:
+                    yield
+                finally:
+                    record.append(
+                        (
+                            memory_limit,
+                            str(_setting(con, "memory_limit")),
+                            int(str(_setting(con, "threads"))),
+                        )
+                    )
+
+        monkeypatch.setattr(module, "scoped_write_memory_limit", wrapper)
+
+    def test_partition_staging_copy_holds_the_limit_and_restores_settings(
+        self, tmp_path, con, monkeypatch
+    ):
+        """--write-memory bounds the PARTITION_BY COPY; the caller's session survives it."""
+        from geoparquet_io.core.partition import staging
+
+        query = _points_parquet(con, str(tmp_path / "src.parquet"))
+        con.execute("SET threads = 4")
+        keys = ("memory_limit", "threads", "preserve_insertion_order")
+        before = {key: _setting(con, key) for key in keys}
+        seen = []
+        self._spy_scoped_limit(monkeypatch, staging, seen)
+
+        staging.run_partitioned_copy(
+            con,
+            f"SELECT *, id % 3 AS part FROM ({query})",
+            ["part"],
+            str(tmp_path / "staging"),
+            True,  # the verbose COPY echo moved inside the scope with the COPY
+            "700MB",
+        )
+
+        assert seen == [("700MB", "667.5 MiB", 1)]
+        assert {key: _setting(con, key) for key in keys} == before
+        parts = sorted(p.name for p in (tmp_path / "staging").iterdir())
+        assert parts == ["part=0", "part=1", "part=2"]
+
+    def test_pmtiles_split_copy_is_memory_bounded(self, tmp_path, monkeypatch, test_data_dir):
+        """pmtiles chunking has no --write-memory, so the ceiling-based default applies."""
+        from geoparquet_io.core import pmtiles_chunks as pc
+        from geoparquet_io.core.common import get_dataset_bounds
+        from geoparquet_io.core.partition import staging
+
+        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
+        seen = []
+        self._spy_scoped_limit(monkeypatch, staging, seen)
+
+        buildings = str(test_data_dir / "buildings_test.parquet")
+        parts_dir = tmp_path / "out.pmtiles.parts"
+        parts_dir.mkdir()
+        pc._split_input(
+            buildings,
+            str(parts_dir),
+            geometry_column="geometry",
+            key_sql=pc.chunk_key_sql(
+                "geometry", tuple(get_dataset_bounds(buildings, geometry_column="geometry")), 2, 2
+            ),
+            where=None,
+            projection="*",
+            scratch=str(tmp_path),
+            verbose=False,
+        )
+
+        ((memory_limit_arg, during, _threads),) = seen
+        assert memory_limit_arg is None
+        limit_bytes = memory_limits.parse_size(during)
+        assert limit_bytes is not None and limit_bytes <= 5 * 10**9  # half the ceiling
+        assert list(parts_dir.glob("chunk_*.parquet"))
+
+    def test_admin_cache_download_copy_is_memory_bounded(self, tmp_path, monkeypatch, con):
+        """The cache download COPY of a multi-GB admin dataset is bounded too."""
+        from geoparquet_io.core import admin_datasets as ad
+
+        _points_parquet(con, str(tmp_path / "src.parquet"))
+        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
+        dataset = ad.CurrentAdminDataset()
+        monkeypatch.setattr(dataset, "get_default_source", lambda: str(tmp_path / "src.parquet"))
+        monkeypatch.setattr(dataset, "get_s3_config", lambda: {})
+        # No remote read in this test: keep the connection free of httpfs.
+        monkeypatch.setattr(ad, "get_duckdb_connection", lambda **kwargs: get_duckdb_connection())
+        seen = []
+        self._spy_scoped_limit(monkeypatch, ad, seen)
+
+        cache_path = tmp_path / "cache" / "dataset.parquet"
+        assert dataset._download_to_cache(cache_path) == cache_path
+        assert cache_path.exists()
+        ((memory_limit_arg, during, _threads),) = seen
+        assert memory_limit_arg is None
+        limit_bytes = memory_limits.parse_size(during)
+        assert limit_bytes is not None and limit_bytes <= 5 * 10**9
+
+    def test_admin_per_level_cache_copy_is_memory_bounded(self, tmp_path, monkeypatch):
+        """The Overture per-level cache COPY runs inside the scoped limit too.
+
+        Fully offline: the connection is a mock, so this pins that each level's
+        COPY happens inside one ``scoped_write_memory_limit`` scope with no
+        explicit limit (the ceiling-based default), not what DuckDB does with it.
+        """
+        from contextlib import contextmanager
+        from unittest.mock import MagicMock
+
+        from geoparquet_io.core import admin_datasets as ad
+
+        monkeypatch.setattr(ad, "get_cache_dir", lambda: tmp_path)
+        mock_con = MagicMock()
+        monkeypatch.setattr(ad, "get_duckdb_connection", lambda **kwargs: mock_con)
+        dataset = ad.OvertureAdminDataset()
+        monkeypatch.setattr(dataset, "get_version", lambda: "2026-07-22.0")
+        monkeypatch.setattr(dataset, "get_default_source", lambda: "s3://stub/divisions")
+
+        scopes = []
+
+        @contextmanager
+        def fake_scope(con, memory_limit, verbose):
+            before = mock_con.execute.call_count
+            yield
+            during = mock_con.execute.call_args_list[before:]
+            assert any("COPY" in str(call.args[0]) for call in during), (
+                "no COPY ran inside the memory-limit scope"
+            )
+            scopes.append(memory_limit)
+
+        monkeypatch.setattr(ad, "scoped_write_memory_limit", fake_scope)
+
+        dataset._download_per_level_caches()
+
+        assert scopes == [None] * len(dataset.get_available_levels())
+
+    def test_bbox_metadata_rewrite_fallback_is_memory_bounded(self, monkeypatch, places_v11_file):
+        """The full-file rewrite behind an unpatchable footer is bounded too."""
+        from geoparquet_io.core.add import bbox_metadata as bm
+        from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
+
+        def refuse(*args, **kwargs):
+            raise FooterPatchUnsupported("forced for the test")
+
+        monkeypatch.setattr(bm, "patch_footer_kv", refuse)
+        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
+        seen = []
+        self._spy_scoped_limit(monkeypatch, bm, seen)
+
+        bm.add_bbox_metadata(places_v11_file)
+
+        ((memory_limit_arg, during, _threads),) = seen
+        assert memory_limit_arg is None
+        limit_bytes = memory_limits.parse_size(during)
+        assert limit_bytes is not None and limit_bytes <= 5 * 10**9

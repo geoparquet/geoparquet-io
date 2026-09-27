@@ -42,6 +42,7 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success, warn
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
 from geoparquet_io.core.streaming import find_geometry_column_from_table
 
@@ -502,7 +503,10 @@ def _rewrite_with_geo(
         if verbose:
             debug(f"\nDuckDB COPY SQL:\n{copy_sql}")
 
-        conn.execute(copy_sql)
+        # This fallback re-encodes the whole file, so bound it like every
+        # other gpio write (#1156) instead of DuckDB's own 80%-of-RAM default.
+        with scoped_write_memory_limit(conn, None, verbose):
+            conn.execute(copy_sql)
         conn.close()
 
         if temp_file != output_file:
