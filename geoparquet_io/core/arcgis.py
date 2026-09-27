@@ -37,7 +37,10 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     RemoteAccessError,
 )
-from geoparquet_io.core.geo_metadata import _compute_geometry_types
+from geoparquet_io.core.geo_metadata import (
+    _compute_geometry_types,
+    prune_geo_metadata_to_columns,
+)
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_TIMEOUT,
@@ -1085,9 +1088,13 @@ def _tag_output_crs(
         },
     }
     existing_metadata = table.schema.metadata or {}
-    return table.replace_schema_metadata(
-        {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
-    )
+    tagged = {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
+    # --exclude-cols can have dropped the very column this block describes. The
+    # pruner is the one place that decides what geo metadata may say about a
+    # projected schema (the same call `gpio extract geoparquet` makes): a block
+    # whose primary column is absent is dropped whole, so the output is plain
+    # Parquet rather than GeoParquet naming a column it does not contain (#966).
+    return table.replace_schema_metadata(prune_geo_metadata_to_columns(tagged, table.column_names))
 
 
 def _resolve_field_selection(
@@ -1460,7 +1467,7 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
         # wrong thing and give the user nothing to act on.
         warn(
             "The geometry column was excluded, so there is nothing to describe; "
-            "declaring geometry_types as [] (types not known)."
+            "writing plain Parquet with no geo metadata."
         )
         return []
     if geometry.null_count == len(geometry):
@@ -1792,15 +1799,19 @@ def convert_arcgis_to_geoparquet(
         timeout=timeout,
     )
 
+    # --exclude-cols geometry leaves an attribute table: nothing to Hilbert-sort
+    # or bbox, and the write below is plain Parquet with no geo block (#966).
+    has_geometry = "geometry" in table.column_names
+
     # Apply Hilbert ordering if not skipped
-    if not skip_hilbert and table.num_rows > 0:
+    if not skip_hilbert and table.num_rows > 0 and has_geometry:
         progress("Applying Hilbert spatial ordering...")
         from geoparquet_io.core.hilbert_order import hilbert_order_table
 
         table = hilbert_order_table(table)
 
     # Add bbox column for spatial query optimization
-    if not skip_bbox and table.num_rows > 0:
+    if not skip_bbox and table.num_rows > 0 and has_geometry:
         progress("Adding bbox column for spatial query optimization...")
         from geoparquet_io.core.add.bbox import add_bbox_table
 

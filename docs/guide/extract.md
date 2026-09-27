@@ -2005,6 +2005,11 @@ refused with a warning, since GeoParquet output requires the column; on a
 geometry-less (tabular) table there is no such column, so naming it is an
 unknown-column error like any other.
 
+On `arcgis`, excluding `geometry` is allowed and behaves like
+`gpio extract geoparquet`: the output is an attribute table — plain Parquet
+with no `geo` metadata — and the geometry-dependent steps (Hilbert ordering,
+the `bbox` column) are skipped.
+
 Because that check reads the fetched table, it needs no extra request and holds
 whatever else you pass — including `--geometry`/`--no-geometry`, which skip the
 shape probe. It does report after the fetch rather than before it. `--include-cols`

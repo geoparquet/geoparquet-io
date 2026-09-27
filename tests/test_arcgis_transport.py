@@ -1406,7 +1406,14 @@ def test_an_unknown_esri_field_type_falls_back_to_string(monkeypatch, caplog):
     assert table.schema.field("pop").type == pa.string()
 
 
-def test_excluding_the_geometry_column_declares_types_unknown(monkeypatch, caplog):
+def test_excluding_the_geometry_column_drops_the_geo_block(monkeypatch, caplog):
+    """``--exclude-cols geometry`` returns an attribute table, not GeoParquet (#966).
+
+    The block used to survive with ``primary_column: "geometry"`` naming a
+    column the table does not contain, which gpio's own validator rejects.
+    ``extract geoparquet`` documents the correct behaviour: no geometry column,
+    no ``geo`` metadata at all.
+    """
     http = FakeTransport.install(monkeypatch)
     stub_service(http, total=3)
 
@@ -1415,7 +1422,35 @@ def test_excluding_the_geometry_column_declares_types_unknown(monkeypatch, caplo
 
     assert "geometry column was excluded" in caplog.text
     assert "geometry" not in table.column_names
-    assert json.loads(table.schema.metadata[b"geo"])["columns"]["geometry"]["geometry_types"] == []
+    assert b"geo" not in (table.schema.metadata or {})
+
+
+def test_excluding_the_geometry_column_writes_plain_parquet(monkeypatch, tmp_path):
+    """The written file carries no ``geo`` key and passes gpio's validator (#966).
+
+    ``gpio extract arcgis ... --exclude-cols geometry`` used to write a ``geo``
+    block whose ``primary_column`` named the excluded column, so
+    ``validate_geoparquet`` failed the file gpio had just written.
+    """
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=3)
+    out = tmp_path / "plain.parquet"
+
+    convert_arcgis_to_geoparquet(SERVICE, str(out), exclude_cols="geometry")
+
+    metadata = pq.read_schema(str(out)).metadata or {}
+    assert b"geo" not in metadata
+
+    # The bug's signature was schema failures against the written file's own
+    # metadata ('geometry column "geometry" not found in schema', plus binder
+    # errors). Those must be gone. What remains is validate's file-type verdict
+    # that a plain Parquet file is not GeoParquet -- true of this output by
+    # design, exactly as it is of `extract geoparquet --exclude-cols geometry`.
+    failures = [c for c in validate_geoparquet(str(out)).checks if c.status.value == "failed"]
+    assert [c.name for c in failures] == ["file_type"]
+    assert "No GeoParquet metadata" in failures[0].message
 
 
 def test_an_all_null_geometry_column_declares_types_unknown(monkeypatch, caplog):
