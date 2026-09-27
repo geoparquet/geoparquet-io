@@ -30,6 +30,7 @@ from geoparquet_io.core.geo_metadata import (
     bbox_column_to_declare,
     compute_geo_stats_via_sql,
     create_geo_metadata,
+    strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     WKB_EXTENSION_NAMES,
@@ -462,10 +463,11 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         if geoarrow_encoding is not None and geoarrow_encoding != "WKB":
             col_meta["encoding"] = geoarrow_encoding
 
-        # Handle secondary geometry columns from geometry_info
+        # Handle secondary geometry columns from geometry_info. They arrive
+        # after create_geo_metadata's gate, so it runs again over them (#954).
         merge_secondary_geometry_metadata(geo_meta, geometry_info)
 
-        return geo_meta
+        return strip_bboxless_covering(geo_meta, verbose)
 
     def _stream_batches_to_file(
         self,

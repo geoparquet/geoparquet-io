@@ -210,7 +210,163 @@ def test_v2_fast_path_does_not_carry_a_bboxless_covering(tmp_path):
             }
         )
     }
+    # With the bbox-less covering gone the block says nothing DuckDB would not,
+    # so there is nothing to carry.
+    assert _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0") is None
+
+
+def test_v2_fast_path_carries_the_rest_of_the_block_without_the_covering():
+    """A block that still has something to say is carried -- minus the covering."""
+    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
+
+    carried = {
+        "geo": json.dumps(
+            {
+                "version": "2.0.0",
+                "primary_column": "geometry",
+                "columns": {
+                    "geometry": {
+                        "encoding": "WKB",
+                        "geometry_types": ["Point"],
+                        "bbox": [0, 0, 1, 1],
+                        "orientation": "counterclockwise",
+                        "covering": {"h3": {"column": "h3", "resolution": 9}},
+                    }
+                },
+            }
+        )
+    }
     block = _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0")
-    if block is not None:
-        covering = block["columns"]["geometry"].get("covering")
-        assert covering is None or "bbox" in covering, covering
+    assert block is not None
+    column = block["columns"]["geometry"]
+    assert column["orientation"] == "counterclockwise"
+    assert "covering" not in column
+
+
+class TestIndexEntriesBesideABboxColumn:
+    """With a bbox column to declare, index entries are kept -- on every path."""
+
+    def test_a_custom_h3_column_name_reaches_the_covering(self, places_test_file, tmp_path):
+        """The entry names the column actually written, at the resolution asked for."""
+        output = tmp_path / "h3.parquet"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "add",
+                "h3",
+                places_test_file,
+                str(output),
+                "--h3-name",
+                "h3_building",
+                "--resolution",
+                "13",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        covering = _primary_column_meta(output)["covering"]
+        assert covering["h3"] == {"column": "h3_building", "resolution": 13}
+        assert "bbox" in covering
+
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "disk-rewrite"])
+    def test_every_strategy_declares_the_bbox_beside_the_index_entry(
+        self, places_test_file, tmp_path, strategy
+    ):
+        """disk-rewrite used to skip the declare step and drop the index entry."""
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+
+        output = tmp_path / f"{strategy}.parquet"
+        entry = {"column": "quadkey", "resolution": 6}
+        original = dict(pq.ParquetFile(places_test_file).metadata.metadata)
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            write_parquet_with_metadata(
+                con,
+                f"SELECT *, 'q' AS quadkey FROM read_parquet({sql_path(places_test_file)})",
+                str(output),
+                original_metadata=original,
+                custom_metadata={"covering": {"quadkey": entry}},
+                geoparquet_version="1.1",
+                write_strategy=strategy,
+            )
+        finally:
+            con.close()
+
+        covering = _primary_column_meta(output)["covering"]
+        assert covering["quadkey"] == entry
+        assert covering["bbox"]["xmin"] == ["bbox", "xmin"]
+
+
+def test_add_kdtree_writes_no_bboxless_covering(buildings_test_file, tmp_path):
+    """kdtree records its own entry shape; the same gate applies (#954)."""
+    import geopandas as gpd
+
+    from geoparquet_io.core.add.kdtree import add_kdtree_column
+
+    output = tmp_path / "kdtree.parquet"
+    add_kdtree_column(buildings_test_file, str(output), iterations=2)
+
+    assert "covering" not in _primary_column_meta(output)
+    assert len(gpd.read_parquet(str(output))) > 0
+
+
+def test_a_secondary_columns_bboxless_covering_is_gated_on_the_arrow_path():
+    """Secondary entries merge in after create_geo_metadata; the gate runs again."""
+    import pyarrow as pa
+
+    from geoparquet_io.core.arrow_geo_metadata import _build_geo_block
+
+    table = pa.table({"geometry": pa.array([], pa.binary()), "geom2": pa.array([], pa.binary())})
+    geometry_info = {
+        "primary": "geometry",
+        "secondary": ["geom2"],
+        "metadata": {
+            "geom2": {"encoding": "WKB", "covering": {"h3": {"column": "h3", "resolution": 9}}}
+        },
+    }
+    geo = _build_geo_block(table, "geometry", None, None, None, "1.1.0", None, geometry_info, False)
+
+    assert "geom2" in geo["columns"]
+    assert "covering" not in geo["columns"]["geom2"]
+
+
+def test_a_bboxless_covering_does_not_force_the_v2_rewrite(
+    buildings_test_file, tmp_path, monkeypatch
+):
+    """The rewrite it forced only produced a covering the gate then dropped."""
+    from geoparquet_io.core import write_funnels
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+
+    v2 = tmp_path / "v2.parquet"
+    result = CliRunner().invoke(
+        cli, ["convert", buildings_test_file, str(v2), "--geoparquet-version", "2.0"]
+    )
+    assert result.exit_code == 0, result.output
+
+    calls = []
+    real_plain_copy = write_funnels._plain_copy_to
+
+    def spy(*args, **kwargs):
+        calls.append("plain")
+        return real_plain_copy(*args, **kwargs)
+
+    output = tmp_path / "out.parquet"
+    original = dict(pq.ParquetFile(str(v2)).metadata.metadata)
+    monkeypatch.setattr(write_funnels, "_plain_copy_to", spy)
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        write_funnels.write_parquet_with_metadata(
+            con,
+            f"SELECT *, 'q' AS quadkey FROM read_parquet({sql_path(str(v2))})",
+            str(output),
+            original_metadata=original,
+            custom_metadata={"covering": {"quadkey": {"column": "quadkey", "resolution": 6}}},
+            geoparquet_version="2.0",
+            input_file=str(v2),
+        )
+    finally:
+        con.close()
+
+    assert calls == ["plain"]
+    assert "covering" not in _primary_column_meta(output)

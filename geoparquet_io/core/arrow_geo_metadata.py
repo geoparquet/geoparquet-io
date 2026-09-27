@@ -38,6 +38,7 @@ from geoparquet_io.core.geo_metadata import (
     detect_bbox_column_from_schema,
     geoarrow_wkb_codes,
     sanitize_geo_metadata,
+    strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     is_geoarrow_extension_field,
@@ -882,7 +883,8 @@ def _build_geo_block(
     # each one's own `crs` is available to the native-type decision.
 
     merge_secondary_geometry_metadata(geo_meta, geometry_info)
-    return geo_meta
+    # Secondary entries arrive after create_geo_metadata's gate (#954).
+    return strip_bboxless_covering(geo_meta, verbose)
 
 
 # The bytes-per-row estimate is the facade's now (`parquet_writer.estimate_row_size`):

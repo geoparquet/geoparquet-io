@@ -626,7 +626,7 @@ TO {sql_path(output_parquet)}
         progress(display_query)
         info(f"\n-- Note: Using {compression_desc} compression")
         info("-- This query creates a new parquet file with the computed column added")
-        info("-- Metadata would also be updated with proper GeoParquet covering information")
+        info("-- The covering metadata is updated only if the output has a bbox column")
         con.close()
         return
 

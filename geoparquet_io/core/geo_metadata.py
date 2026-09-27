@@ -625,22 +625,33 @@ def strip_unsupported_covering(geo_meta: dict, version: str | None, verbose: boo
     """
     if covering_supported(version):
         return geo_meta
+    return _strip_covering_where(
+        geo_meta,
+        lambda col_meta: "covering" in col_meta,
+        f"1.1-only covering metadata (version {version})",
+        verbose,
+    )
 
+
+def _strip_covering_where(geo_meta: dict, drop, reason: str, verbose: bool) -> dict:
+    """``geo_meta`` without the ``covering`` of every column dict ``drop`` selects.
+
+    The mechanics both covering gates share. Never mutates its input: only the
+    stripped column dicts and the ``columns`` mapping are copied, for the
+    aliasing reason :func:`strip_unsupported_covering` gives.
+    """
     columns = geo_meta.get("columns")
     if not isinstance(columns, dict):
         return geo_meta
-    if not any(isinstance(col, dict) and "covering" in col for col in columns.values()):
+    if not any(isinstance(col, dict) and drop(col) for col in columns.values()):
         return geo_meta
 
     stripped = {}
     for col_name, col_meta in columns.items():
-        if isinstance(col_meta, dict) and "covering" in col_meta:
+        if isinstance(col_meta, dict) and drop(col_meta):
             col_meta = {k: v for k, v in col_meta.items() if k != "covering"}
             if verbose:
-                debug(
-                    f"Dropped 1.1-only covering metadata for column '{col_name}' "
-                    f"(version {version})"
-                )
+                debug(f"Dropped {reason} for column '{col_name}'")
         stripped[col_name] = col_meta
 
     result = dict(geo_meta)
@@ -668,32 +679,16 @@ def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     across many writes.
     """
 
-    def _bboxless(col) -> bool:
-        if not isinstance(col, dict):
-            return False
-        covering = col.get("covering")
+    def _bboxless(col_meta: dict) -> bool:
+        covering = col_meta.get("covering")
         return isinstance(covering, dict) and "bbox" not in covering
 
-    columns = geo_meta.get("columns")
-    if not isinstance(columns, dict):
-        return geo_meta
-    if not any(_bboxless(col) for col in columns.values()):
-        return geo_meta
-
-    stripped = {}
-    for col_name, col_meta in columns.items():
-        if _bboxless(col_meta):
-            col_meta = {k: v for k, v in col_meta.items() if k != "covering"}
-            if verbose:
-                debug(
-                    f"Dropped covering metadata with no bbox member for column "
-                    f"'{col_name}' (spec allows only the bbox encoding)"
-                )
-        stripped[col_name] = col_meta
-
-    result = dict(geo_meta)
-    result["columns"] = stripped
-    return result
+    return _strip_covering_where(
+        geo_meta,
+        _bboxless,
+        "covering metadata with no bbox member (spec allows only the bbox encoding)",
+        verbose,
+    )
 
 
 def _add_custom_covering(

@@ -56,6 +56,7 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import is_partition_path
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
+    SELF_EVIDENT_BBOX_COLUMN,
     carried_geometry_column,
     declare_carried_bbox_column,
     prune_geo_metadata_to_columns,
@@ -337,6 +338,24 @@ def _plain_copy_to(
         # `Could not move file: Access is denied` (#1023, #1032).
         with pq.ParquetFile(output_path) as pf:
             success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
+
+
+def _custom_covering_survives(covering, original_metadata, geometry_column, output_columns) -> bool:
+    """Whether a ``custom_metadata`` covering can outlive the #954 gate.
+
+    Conservative: it survives if it brings its own ``bbox`` member, if the
+    carried block already declares one for the primary, or if the output may
+    carry a conventional ``bbox`` column the rewrite would declare -- including
+    when the output's columns are unknown.
+    """
+    if not isinstance(covering, dict) or "bbox" in covering:
+        return True
+    if output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns:
+        return True
+    carried = sanitized_carried_geo(original_metadata)
+    primary = (carried.get("columns") or {}).get(geometry_column)
+    carried_covering = primary.get("covering") if isinstance(primary, dict) else None
+    return isinstance(carried_covering, dict) and "bbox" in carried_covering
 
 
 def _prune_metadata_to_output_columns(
@@ -740,11 +759,19 @@ def write_parquet_with_metadata(
     rewrite_needed = needs_metadata_rewrite(effective_version, original_metadata)
 
     # Force rewrite if custom_metadata contains covering (e.g., bbox, H3, S2)
-    # This ensures covering metadata is written even for 2.0→2.0 operations
+    # This ensures covering metadata is written even for 2.0→2.0 operations --
+    # unless the covering could only be stripped again (#954): an index entry
+    # with no bbox member to stand beside is dropped by every write path, so
+    # forcing the single-threaded rewrite would only buy the fast path's output.
     if custom_metadata and "covering" in custom_metadata:
-        rewrite_needed = True
-        if verbose:
-            debug("Forcing metadata rewrite for covering metadata")
+        if _custom_covering_survives(
+            custom_metadata["covering"], original_metadata, geometry_column, output_columns
+        ):
+            rewrite_needed = True
+            if verbose:
+                debug("Forcing metadata rewrite for covering metadata")
+        elif verbose:
+            debug("Not forcing a rewrite: the covering has no bbox member to stand beside")
 
     # Preserve non-geo KV metadata from input (e.g., vecorel, fiboa).
     # Build a merged local dict rather than mutating the caller-supplied
