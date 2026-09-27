@@ -742,6 +742,8 @@ def partition_by_admin_hierarchical(
 
         # Setup dataset and get input file info
         dataset, boundary_columns = _setup_admin_dataset(dataset_name, verbose, levels)
+        # --write-memory also bounds the dataset's cache downloads (#1156).
+        dataset.memory_limit = memory_limit
         input_path, input_geom_col, input_bbox_col = _get_input_file_info(actual_input, verbose)
 
         # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input before the

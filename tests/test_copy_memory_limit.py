@@ -335,11 +335,13 @@ class TestConvertSortsOnce:
 class TestDirectCopyMemoryLimit:
     """Direct ``COPY ... TO`` sites run inside ``scoped_write_memory_limit`` (#1156).
 
-    The single-pass PARTITION_BY staging COPY (partition string/index drivers,
-    admin hierarchical, pmtiles chunking), the admin dataset cache downloads
-    and the bbox-metadata rewrite fallback bypass ``write_parquet_with_metadata``,
-    so they were the writes still running at DuckDB's own default -- 80% of RAM,
-    and blind to a Slurm job cgroup (#1153).
+    The admin dataset cache downloads, the bbox-metadata rewrite fallback and
+    duckdb-kv's no-geometry write bypassed every limit -- DuckDB's own default,
+    80% of RAM and blind to a Slurm job cgroup (#1153). The single-pass
+    PARTITION_BY staging COPY (partition string/index drivers, admin
+    hierarchical, pmtiles chunking) already set the ceiling-based limit, but
+    left it -- with ``threads = 1`` -- on the caller's connection and loosened a
+    stricter limit the caller had set; it now restores both.
     """
 
     @staticmethod
@@ -354,8 +356,8 @@ class TestDirectCopyMemoryLimit:
         real = module.scoped_write_memory_limit
 
         @contextmanager
-        def wrapper(con, memory_limit, verbose):
-            with real(con, memory_limit, verbose):
+        def wrapper(con, memory_limit, verbose, **kwargs):
+            with real(con, memory_limit, verbose, **kwargs):
                 try:
                     yield
                 finally:
@@ -428,13 +430,18 @@ class TestDirectCopyMemoryLimit:
         assert limit_bytes is not None and limit_bytes <= 5 * 10**9  # half the ceiling
         assert list(parts_dir.glob("chunk_*.parquet"))
 
-    def test_admin_cache_download_copy_is_memory_bounded(self, tmp_path, monkeypatch, con):
-        """The cache download COPY of a multi-GB admin dataset is bounded too."""
+    @pytest.mark.parametrize("write_memory", [None, "700MB"])
+    def test_admin_cache_download_copy_is_memory_bounded(
+        self, tmp_path, monkeypatch, con, write_memory
+    ):
+        """The cache download COPY of a multi-GB admin dataset is bounded too,
+        by --write-memory when the command was given one."""
         from geoparquet_io.core import admin_datasets as ad
 
         _points_parquet(con, str(tmp_path / "src.parquet"))
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
         dataset = ad.CurrentAdminDataset()
+        dataset.memory_limit = write_memory
         monkeypatch.setattr(dataset, "get_default_source", lambda: str(tmp_path / "src.parquet"))
         monkeypatch.setattr(dataset, "get_s3_config", lambda: {})
         # No remote read in this test: keep the connection free of httpfs.
@@ -446,7 +453,9 @@ class TestDirectCopyMemoryLimit:
         assert dataset._download_to_cache(cache_path) == cache_path
         assert cache_path.exists()
         ((memory_limit_arg, during, _threads),) = seen
-        assert memory_limit_arg is None
+        assert memory_limit_arg == write_memory
+        if write_memory is not None:
+            assert during == "667.5 MiB"
         limit_bytes = memory_limits.parse_size(during)
         assert limit_bytes is not None and limit_bytes <= 5 * 10**9
 
@@ -506,3 +515,127 @@ class TestDirectCopyMemoryLimit:
         assert memory_limit_arg is None
         limit_bytes = memory_limits.parse_size(during)
         assert limit_bytes is not None and limit_bytes <= 5 * 10**9
+
+
+class TestDirectCopyRegressions:
+    """What #1156's restore exposed, and what it must keep doing."""
+
+    def test_a_stricter_caller_limit_survives_the_staging_copy(self, tmp_path, con):
+        """The split must not loosen a limit the caller set (main set the default)."""
+        from geoparquet_io.core.partition import staging
+
+        query = _points_parquet(con, str(tmp_path / "src.parquet"))
+        con.execute("SET memory_limit = '300MB'")
+        before = _setting(con, "memory_limit")
+        during = []
+        real_execute = con.execute
+
+        class Spy:
+            def execute(self, sql, *args, **kwargs):
+                if sql.lstrip().upper().startswith("COPY"):
+                    during.append(
+                        real_execute("SELECT current_setting('memory_limit')").fetchone()[0]
+                    )
+                return real_execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(con, name)
+
+        staging.run_partitioned_copy(
+            Spy(),
+            f"SELECT *, id % 3 AS part FROM ({query})",
+            ["part"],
+            str(tmp_path / "staging"),
+            False,
+        )
+
+        assert during == [before]
+        assert _setting(con, "memory_limit") == before
+
+    def test_the_no_geometry_duckdb_kv_write_honours_write_memory(self, tmp_path, monkeypatch):
+        """Partitioning a table with no geometry: the finalize writes are bounded.
+
+        They used to inherit the staging COPY's leaked settings; once those are
+        restored, duckdb-kv's no-geometry branch must bound its own COPY.
+        """
+        from geoparquet_io.core.partition.common import partition_by_column
+        from geoparquet_io.core.write_strategies import duckdb_kv
+
+        source = tmp_path / "plain.parquet"
+        con = get_duckdb_connection()
+        try:
+            con.execute(
+                f"""COPY (SELECT i AS id, CAST(i % 3 AS VARCHAR) AS cat FROM range(300) t(i))
+                    TO {sql_path(str(source))} (FORMAT PARQUET)"""
+            )
+        finally:
+            con.close()
+        seen = []
+        TestDirectCopyMemoryLimit._spy_scoped_limit(monkeypatch, duckdb_kv, seen)
+
+        partition_by_column(
+            str(source),
+            str(tmp_path / "out"),
+            column_name="cat",
+            skip_analysis=True,
+            memory_limit="700MB",
+        )
+
+        assert seen, "the no-geometry write ran outside scoped_write_memory_limit"
+        assert {(arg, during) for arg, during, _threads in seen} == {("700MB", "667.5 MiB")}
+
+    def test_partition_admin_hands_write_memory_to_the_dataset(
+        self, tmp_path, monkeypatch, places_test_file
+    ):
+        """--write-memory reaches the admin dataset whose downloads it bounds."""
+        from geoparquet_io.core.partition import admin_hierarchical as ah
+
+        class Stop(Exception):
+            pass
+
+        dataset = SimpleNamespace(memory_limit=None)
+        monkeypatch.setattr(ah, "_setup_admin_dataset", lambda *a, **k: (dataset, ["country"]))
+
+        def stop(*args, **kwargs):
+            raise Stop
+
+        monkeypatch.setattr(ah, "_get_input_file_info", stop)
+
+        with pytest.raises(Stop):
+            ah.partition_by_admin_hierarchical(
+                places_test_file,
+                str(tmp_path / "out"),
+                dataset_name="gaul",
+                levels=["country"],
+                memory_limit="700MB",
+            )
+        assert dataset.memory_limit == "700MB"
+
+    def test_add_admin_divisions_hands_write_memory_to_the_dataset(
+        self, monkeypatch, places_test_file
+    ):
+        """The same for `add admin-divisions`, before its first download."""
+        from geoparquet_io.core.add import admin_divisions as ad
+
+        class Stop(Exception):
+            pass
+
+        seen = []
+
+        class FakeDataset:
+            memory_limit = None
+
+            def get_dataset_name(self):
+                return "fake"
+
+            def validate_levels(self, levels):
+                seen.append(self.memory_limit)
+                raise Stop
+
+        monkeypatch.setattr(ad.AdminDatasetFactory, "create", lambda *a, **k: FakeDataset())
+
+        with pytest.raises(Stop):
+            ad._setup_dataset_and_columns(
+                places_test_file, "gaul", None, ["country"], False, memory_limit="700MB"
+            )
+        assert seen == ["700MB"]

@@ -23,7 +23,7 @@ import tempfile
 from dataclasses import dataclass
 from urllib.parse import unquote
 
-from geoparquet_io.core.duckdb_utils import _current_setting, restore_duckdb_settings, sql_path
+from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
@@ -158,24 +158,20 @@ def run_partitioned_copy(con, select_sql, partition_cols, staging_dir, verbose, 
     COPY; the connection belongs to the caller, which goes on finalizing every
     partition on it, so all three settings are restored afterwards.
     """
-    saved = {"preserve_insertion_order": _current_setting(con, "preserve_insertion_order")}
-    try:
-        with scoped_write_memory_limit(con, memory_limit, verbose):
-            con.execute("SET threads = 1")  # one file per partition + bounded memory
-            con.execute("SET preserve_insertion_order = false")
-
-            part_cols = ", ".join(partition_cols)
-            copy_sql = (
-                f"COPY ({select_sql}) TO {sql_path(staging_dir)} "
-                f"(FORMAT PARQUET, PARTITION_BY ({part_cols}), "
-                f"COMPRESSION SNAPPY, GEOPARQUET_VERSION 'NONE', OVERWRITE_OR_IGNORE)"
-            )
-            if verbose:
-                debug("Single-pass partition COPY (one scan of input):")
-                debug(copy_sql)
-            con.execute(copy_sql)
-    finally:
-        restore_duckdb_settings(con, saved, verbose)
+    part_cols = ", ".join(partition_cols)
+    copy_sql = (
+        f"COPY ({select_sql}) TO {sql_path(staging_dir)} "
+        f"(FORMAT PARQUET, PARTITION_BY ({part_cols}), "
+        f"COMPRESSION SNAPPY, GEOPARQUET_VERSION 'NONE', OVERWRITE_OR_IGNORE)"
+    )
+    # threads=1: one file per partition (and bounded memory); insertion order
+    # is not needed for the split.
+    pinned = {"threads": 1, "preserve_insertion_order": False}
+    with scoped_write_memory_limit(con, memory_limit, verbose, pinned=pinned):
+        if verbose:
+            debug("Single-pass partition COPY (one scan of input):")
+            debug(copy_sql)
+        con.execute(copy_sql)
 
 
 def iter_staging_partitions(staging_dir):

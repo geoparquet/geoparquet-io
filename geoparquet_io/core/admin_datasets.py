@@ -435,6 +435,11 @@ class AdminDataset(ABC):
     # Subclasses MUST define this attribute with their release version.
     VERSION: str = "unknown"
 
+    # The --write-memory limit for this dataset's cache downloads (#1156). The
+    # commands that have the flag set it once the dataset exists; everyone
+    # else keeps None, the ceiling-based default.
+    memory_limit: str | None = None
+
     def __init__(self, source_path: str | None = None, verbose: bool = False):
         """
         Initialize the admin dataset.
@@ -497,7 +502,7 @@ class AdminDataset(ABC):
                 # Write to cache, bounded like every other gpio write (#1156):
                 # the source is a multi-GB remote dataset and this COPY used to
                 # run at DuckDB's own 80%-of-RAM default.
-                with scoped_write_memory_limit(con, None, self.verbose):
+                with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
                     con.execute(f"COPY ({query}) TO {sql_path(cache_path)} (FORMAT PARQUET)")
             finally:
                 con.close()
@@ -1124,7 +1129,7 @@ class OvertureAdminDataset(AdminDataset):
                     # Bounded like every other gpio write (#1156): the remote
                     # scan + simplification of the ~4.5GB Overture dataset used
                     # to run at DuckDB's own 80%-of-RAM default.
-                    with scoped_write_memory_limit(con, None, self.verbose):
+                    with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
                         con.execute(
                             f"COPY ({query}) TO {sql_path(cache_path)} "
                             "(FORMAT PARQUET, COMPRESSION ZSTD)"

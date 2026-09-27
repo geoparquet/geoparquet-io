@@ -197,12 +197,20 @@ Leftover spill directories: 1 (250.00 MB)
 
 ### Automatic Detection
 
-Every write DuckDB performs — the `duckdb-kv` strategy, the plain COPY that writes
-GeoParquet 2.0 and `parquet-geo-only` output when no metadata rewrite is needed, and the
-direct COPY writes behind `gpio partition`, `gpio pmtiles create --chunks` and the admin
-dataset cache downloads — runs under a DuckDB memory limit of 50% of the process's memory
-*ceiling*. `--write-memory` overrides it. (The `streaming`, `in-memory` and `disk-rewrite`
-strategies hold data in Arrow and take no DuckDB limit.)
+gpio's DuckDB writes — the `duckdb-kv` strategy (with or without a geometry column), the
+plain COPY that writes GeoParquet 2.0 and `parquet-geo-only` output when no metadata rewrite
+is needed, the single-pass split behind `gpio partition` and `gpio pmtiles create --chunks`,
+the admin dataset cache downloads, and the full rewrite `gpio add bbox-metadata` falls back
+to — run under a DuckDB memory limit of 50% of the process's memory *ceiling*.
+`--write-memory` overrides it on the commands that have the option (`gpio pmtiles create`
+and `gpio add bbox-metadata` do not, so they always use the default).
+
+Not every DuckDB step is covered yet: the `disk-rewrite` strategy's first phase (a DuckDB
+COPY to a temporary file, before its PyArrow row-group rewrite), the format exports behind
+`gpio convert csv`/`flatgeobuf`/`geojson`/`geopackage`/`shapefile`, and work done before a
+write — such as the spatial join `gpio partition admin` materializes — still run at DuckDB's
+own default. The `streaming` and `in-memory` strategies hold data in Arrow and take no
+DuckDB limit.
 
 Half, not DuckDB's own default of 80%: DuckDB's limit covers only its own buffers. The
 Parquet writer, compression and spatial functions allocate beside it, and a large Hilbert

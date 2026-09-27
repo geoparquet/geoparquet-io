@@ -39,7 +39,11 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql, declare_carried_bbox_column
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
-from geoparquet_io.core.memory_limits import get_default_memory_limit, validate_memory_limit
+from geoparquet_io.core.memory_limits import (
+    get_default_memory_limit,
+    scoped_write_memory_limit,
+    validate_memory_limit,
+)
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -191,6 +195,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 row_group_rows,
                 verbose,
                 extra_kv_metadata,
+                memory_limit=memory_limit,
             )
             return
 
@@ -566,11 +571,15 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         row_group_rows: int | None,
         verbose: bool,
         extra_kv_metadata: dict[str, str] | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write plain Parquet (no geo metadata) from a query.
 
         Same contract as the table entry point above: a query with no geometry
-        column still carries the input's sidecar keys (#708).
+        column still carries the input's sidecar keys (#708). The COPY is
+        bounded like every other gpio write (#1156): ``--write-memory`` when
+        given, else the ceiling-based default, instead of DuckDB's own
+        80%-of-RAM default on all threads.
         """
 
         is_remote = is_remote_url(output_path)
@@ -591,7 +600,8 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
             if verbose:
                 debug(f"Writing plain Parquet with {compression} compression...")
-            con.execute(copy_query)
+            with scoped_write_memory_limit(con, memory_limit, verbose):
+                con.execute(copy_query)
 
             if is_remote:
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)

@@ -212,7 +212,10 @@ def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> 
 
 @contextmanager
 def scoped_write_memory_limit(
-    con: duckdb.DuckDBPyConnection, memory_limit: str | None, verbose: bool
+    con: duckdb.DuckDBPyConnection,
+    memory_limit: str | None,
+    verbose: bool,
+    pinned: dict[str, int | bool] | None = None,
 ) -> Iterator[None]:
     """Bound one DuckDB write by a memory limit, then restore the session's settings.
 
@@ -221,8 +224,15 @@ def scoped_write_memory_limit(
     capped so each keeps ``_BYTES_PER_THREAD``: a small limit spread over many
     threads makes DuckDB raise instead of spill. Row order is left alone, so a
     write keeps every thread and its ordering until the limit actually binds.
+
+    ``pinned`` holds settings a particular write needs for its duration (the
+    single-pass partition COPY pins ``threads=1`` for one file per partition);
+    they are set after the limit, replace the thread cap when they pin
+    ``threads``, and are restored with everything else.
     """
-    saved = {key: _current_setting(con, key) for key in ("memory_limit", "threads")}
+    pinned = dict(pinned or {})
+    keys = dict.fromkeys(("memory_limit", "threads", *pinned))
+    saved = {key: _current_setting(con, key) for key in keys}
     try:
         effective = _resolve_limit(con, memory_limit)
         if effective is not None:
@@ -230,12 +240,15 @@ def scoped_write_memory_limit(
             if verbose:
                 debug(f"DuckDB memory limit: {effective}")
         limit_bytes = parse_size(str(_current_setting(con, "memory_limit")))
-        if limit_bytes:
+        if limit_bytes and "threads" not in pinned:
             threads = max(1, limit_bytes // _BYTES_PER_THREAD)
             if threads < int(str(saved["threads"])):
                 con.execute(f"SET threads = {threads}")
                 if verbose:
                     debug(f"DuckDB threads: {threads} (for the memory limit)")
+        for key, value in pinned.items():
+            rendered = str(value).lower() if isinstance(value, bool) else int(value)
+            con.execute(f"SET {key} = {rendered}")
         yield
     finally:
         restore_duckdb_settings(con, saved, verbose)
