@@ -29,6 +29,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 from geoparquet_io.core.duckdb_utils import (
+    _get_query_columns,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     quote_identifier,
@@ -365,6 +366,9 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         declare_carried_bbox_column(
             con, query, col_meta, verbose, geoparquet_version, geo_meta=geo_meta
         )
+        self._compute_missing_secondary_metadata(
+            con, query, geometry_column, geo_meta, geometry_info, verbose
+        )
         # After the declare above, so an undeclared conventional bbox column
         # gets its chance to supply the one member the spec defines; a covering
         # still without a bbox member is one geopandas cannot read (#954).
@@ -412,10 +416,18 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
         Both come out of one scan, so a caller that invalidated both (a row
         filter, a reprojection, a multi-file merge) pays for a single pass.
+
+        An empty ``geometry_types`` is a gap, not a value, mirroring
+        ``backfill_derived_stats``: ``[]`` is the spec's "not known" sentinel a
+        merge/partition write leaves on a column whose stats it could not carry
+        (#934), and gating on key absence made it sticky — no file → file
+        command ever recomputed it (#952). This path holds the rows, so it
+        answers the question once; a genuinely empty result writes ``[]`` back
+        and that is the end of it, with no warning and no second pass.
         """
 
         need_bbox = "bbox" not in col_meta
-        need_types = "geometry_types" not in col_meta
+        need_types = not col_meta.get("geometry_types")
         if not (need_bbox or need_types):
             return
 
@@ -432,6 +444,34 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             col_meta["bbox"] = bbox
         if need_types:
             col_meta["geometry_types"] = geometry_types
+
+    def _compute_missing_secondary_metadata(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        query: str,
+        geometry_column: str,
+        geo_meta: dict,
+        geometry_info: dict | None,
+        verbose: bool,
+    ) -> None:
+        """The same gap-fill for every SECONDARY geometry column (#952/#1000).
+
+        The primary's pass above ran for it alone, so a secondary carried with
+        the ``[]`` sentinel — or freshly derived from the input's logical types
+        with no stats at all — kept its gap forever. Only columns the query
+        actually emits are scanned; each gap column costs one scan, and a
+        column whose stats are already known costs nothing.
+        """
+        secondary = resolve_geometry_columns(geometry_column, geometry_info, geo_meta) - {
+            geometry_column
+        }
+        if not secondary:
+            return
+        output_columns = set(_get_query_columns(con, query))
+        for sec_col in sorted(secondary & output_columns):
+            sec_meta = geo_meta["columns"].get(sec_col)
+            if isinstance(sec_meta, dict):
+                self._compute_missing_metadata(con, query, sec_col, sec_meta, verbose)
 
     def write_from_table(
         self,

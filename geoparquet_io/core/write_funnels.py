@@ -39,6 +39,7 @@ from geoparquet_io.core.crs_utils import _wrap_query_with_crs, apply_output_crs
 from geoparquet_io.core.derive_geo_from_file import (
     _ensure_v2_geo_metadata,
     _rewrite_file_with_geo_metadata,
+    derive_secondary_geometry_info,
 )
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
@@ -753,6 +754,26 @@ def write_parquet_with_metadata(
     input_crs = resolve_input_crs(
         input_crs, input_file=input_file, geometry_column=geometry_column, verbose=verbose
     )
+
+    # The same witness answers one more question: which OTHER geometry columns
+    # does this rewrite carry? Callers that know pass `geometry_info` themselves
+    # (convert); every rewrite that does not — the `add` family, sort, extract —
+    # used to leave a secondary column undescribed in `geo.columns`, which 2.0
+    # requires for every geometry column in the file (#1000). Each secondary's
+    # CRS comes from its own logical type, never the per-file witness's.
+    # Gated on knowing the output's columns, so a projection cannot come out
+    # declaring a geometry column it dropped.
+    if geometry_info is None and input_file and geometry_column:
+        if output_columns is None:
+            try:
+                output_columns = _get_query_columns(con, query)
+            except (duckdb.Error, RuntimeError, ValueError, AttributeError) as e:
+                if verbose:
+                    debug(f"Could not read output schema to derive secondary geometry: {e}")
+        if output_columns is not None:
+            geometry_info = derive_secondary_geometry_info(
+                input_file, geometry_column, output_columns=output_columns, verbose=verbose
+            )
 
     effective_version = geoparquet_version or "1.1"
 

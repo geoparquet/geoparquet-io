@@ -138,6 +138,85 @@ def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str
     return col_meta
 
 
+def _secondary_geometry_names(pf) -> tuple[dict[str, str], dict[str, dict]]:
+    """(native columns by logical type string, declared geo-block columns) of a file."""
+    schema = pf.metadata.schema
+    native: dict[str, str] = {}
+    for i in range(len(schema)):
+        logical = str(schema.column(i).logical_type)
+        if logical.startswith(("Geometry", "Geography")):
+            native[schema.column(i).name] = logical
+    kv = pf.metadata.metadata or {}
+    declared: dict[str, dict] = {}
+    if b"geo" in kv:
+        geo_meta = json.loads(kv[b"geo"].decode("utf-8"))
+        columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+        if isinstance(columns, dict):
+            declared = {name: meta for name, meta in columns.items() if isinstance(name, str)}
+    return native, declared
+
+
+def derive_secondary_geometry_info(
+    input_file: str,
+    primary_column: str,
+    output_columns: list[str] | None = None,
+    verbose: bool = False,
+) -> dict | None:
+    """``geometry_info`` for a rewrite whose caller supplied none, read off the input.
+
+    Every geometry column the input carries beyond ``primary_column`` — native
+    Parquet ``GEOMETRY``/``GEOGRAPHY`` logical types, plus anything the input's
+    own ``geo`` block declares — becomes a secondary, so
+    ``merge_secondary_geometry_metadata`` finally learns it exists (#1000).
+
+    A native column's metadata carries its OWN ``crs`` and ``edges``, read from
+    its logical type — never the primary's or the per-file witness's, which is a
+    per-*file* answer that must not be stamped onto every column (#993/#1000).
+    Derived stats (``geometry_types``, ``bbox``) are deliberately absent: for a
+    declared column they flow through ``original_metadata``, where the caller's
+    invalidation (#934) has already had its say, and re-reading them here would
+    resurrect exactly the stale values that invalidation stripped.
+
+    ``output_columns`` limits the answer to columns the write actually emits, so
+    a projection cannot come out declaring a column it dropped. Best-effort: an
+    unreadable input derives nothing rather than failing the write.
+    """
+    try:
+        pf = pq.ParquetFile(input_file)
+        try:
+            native, declared = _secondary_geometry_names(pf)
+        finally:
+            pf.close()
+    except Exception as e:  # noqa: BLE001 - a probe, never the write's failure
+        debug(f"Could not derive secondary geometry columns from {input_file}: {e}")
+        return None
+
+    secondary: list[str] = []
+    metadata: dict[str, dict] = {}
+    for name in {**dict.fromkeys(native), **dict.fromkeys(declared)}:
+        if name == primary_column:
+            continue
+        if output_columns is not None and name not in output_columns:
+            continue
+        col_meta: dict = {}
+        logical = native.get(name)
+        if logical:
+            crs_present, crs = _crs_from_geo_logical(logical, input_file)
+            if crs_present:
+                col_meta["crs"] = crs
+            edges = _geography_edges_from_logical(logical)
+            if edges:
+                col_meta["edges"] = edges
+        secondary.append(name)
+        metadata[name] = col_meta
+
+    if not secondary:
+        return None
+    if verbose:
+        debug(f"Derived secondary geometry columns from {input_file}: {secondary}")
+    return {"primary": primary_column, "secondary": secondary, "metadata": metadata}
+
+
 def _ensure_v2_geo_metadata(
     output_path: str,
     compression: str = "ZSTD",
