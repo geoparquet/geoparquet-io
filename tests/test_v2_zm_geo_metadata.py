@@ -148,19 +148,48 @@ def test_rewrite_streams_instead_of_reading_whole_file(tmp_path, monkeypatch, ro
         assert json.loads(pf.metadata.metadata[b"geo"]) == {"version": "2.0.0"}
 
 
+#: Measures the rewrite's peak Arrow allocation in a fresh interpreter, where
+#: nothing but the rewrite allocates from pyarrow's (process-wide) pool.
+_MEASURE_REWRITE = """
+import json, sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
+
+path, rows = sys.argv[1], sys.argv[2]
+peaks = []
+real_write_table = pq.ParquetWriter.write_table
+
+def spy(self, table, row_group_size=None):
+    peaks.append(pa.total_allocated_bytes())
+    return real_write_table(self, table, row_group_size=row_group_size)
+
+pq.ParquetWriter.write_table = spy
+baseline = pa.total_allocated_bytes()
+_rewrite_file_with_geo_metadata(
+    path, {"version": "2.0.0"}, "ZSTD", None, None if rows == "none" else int(rows)
+)
+print(json.dumps({"writes": len(peaks), "growth": max(peaks) - baseline if peaks else 0}))
+"""
+
+
 @pytest.mark.parametrize("row_group_rows", [None, 4_000], ids=["mirror", "explicit"])
-def test_rewrite_memory_is_bounded_by_a_row_group(tmp_path, monkeypatch, row_group_rows):
+def test_rewrite_memory_is_bounded_by_a_row_group(tmp_path, row_group_rows):
     """Peak Arrow memory during the rewrite stays near one row group (#1155).
 
     Forbidding ``pq.read_table`` is not enough: with pyarrow's default
     ``pre_buffer=True`` the explicit-``row_group_rows`` branch (``iter_batches``,
     the default convert path) kept every column chunk it had read cached until
     the file closed, so memory grew to the whole compressed file.
+
+    Measured in a subprocess: ``pa.total_allocated_bytes()`` is process-wide, so
+    inside a shared test worker another test's leftover threads made it flaky.
     """
+    import subprocess
+    import sys
+
     import numpy as np
     import pyarrow as pa
-
-    from geoparquet_io.core.derive_geo_from_file import _rewrite_file_with_geo_metadata
 
     groups, rows, width = 16, 4_000, 128  # 16 groups of ~0.5 MB incompressible bytes
     path = str(tmp_path / "big.parquet")
@@ -175,24 +204,18 @@ def test_rewrite_memory_is_bounded_by_a_row_group(tmp_path, monkeypatch, row_gro
             )
             writer.write_table(pa.table({"blob": blob}), row_group_size=rows)
 
-    peaks = []
-    real_write_table = pq.ParquetWriter.write_table
-
-    def spy(self, table, row_group_size=None):
-        peaks.append(pa.total_allocated_bytes())
-        return real_write_table(self, table, row_group_size=row_group_size)
-
-    monkeypatch.setattr(pq.ParquetWriter, "write_table", spy)
-    # Relative to what the process already holds: an earlier test in the same
-    # worker may leave Arrow allocations alive.
-    baseline = pa.total_allocated_bytes()
-    _rewrite_file_with_geo_metadata(path, {"version": "2.0.0"}, "ZSTD", None, row_group_rows)
+    measured = subprocess.run(
+        [sys.executable, "-c", _MEASURE_REWRITE, path, str(row_group_rows or "none")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    result = json.loads(measured.stdout.strip().splitlines()[-1])
 
     one_group = rows * width
-    assert peaks, "the rewrite wrote nothing"
-    growth = max(peaks) - baseline
-    assert growth < (groups // 2) * one_group, (
-        f"rewrite grew Arrow memory by {growth / 1e6:.1f} MB; "
+    assert result["writes"], "the rewrite wrote nothing"
+    assert result["growth"] < (groups // 2) * one_group, (
+        f"rewrite grew Arrow memory by {result['growth'] / 1e6:.1f} MB; "
         f"one row group is {one_group / 1e6:.1f} MB"
     )
 
