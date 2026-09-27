@@ -274,3 +274,73 @@ class TestComputedColumnsKeepTheirProvenance:
         write_geoparquet_table(table, str(output), geometry_column="geometry")
         geo = _geo(output)
         assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bounds"}
+
+
+class TestGateDetails:
+    def test_verbose_says_why_a_claimed_bbox_is_not_the_primarys(self, caplog):
+        import logging
+
+        schema = pa.schema(
+            [
+                pa.field("geometry", pa.binary()),
+                pa.field("boundary", pa.binary()),
+                pa.field("bbox", BBOX_STRUCT),
+            ]
+        )
+        geo = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {"encoding": "WKB"},
+                "boundary": {
+                    "encoding": "WKB",
+                    "covering": {
+                        "bbox": {ax: ["bbox", ax] for ax in ("xmin", "ymin", "xmax", "ymax")}
+                    },
+                },
+            },
+        }
+        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+            assert bbox_column_to_declare(schema, geo, verbose=True) is None
+            assert bbox_column_to_declare(schema, None, verbose=True) == "bbox"
+        assert "another column's covering names it" in caplog.text
+        assert "Found conventional bbox column" in caplog.text
+
+
+class TestDeclareComputedBbox:
+    """add_bbox_table records the covering only where there is a block to record it in."""
+
+    @staticmethod
+    def _geo_kv(columns):
+        geo = {"version": "1.1.0", "primary_column": "geometry", "columns": columns}
+        return {b"geo": json.dumps(geo).encode("utf-8"), b"other": b"kept"}
+
+    def test_records_the_covering_and_keeps_index_entries(self):
+        from geoparquet_io.core.add.bbox import _declare_computed_bbox
+
+        h3 = {"column": "h3", "resolution": 9}
+        kv = self._geo_kv({"geometry": {"encoding": "WKB", "covering": {"h3": h3}}})
+
+        result = _declare_computed_bbox(kv, "geometry", "bounds")
+
+        covering = json.loads(result[b"geo"])["columns"]["geometry"]["covering"]
+        assert covering["h3"] == h3
+        assert covering["bbox"]["xmin"] == ["bounds", "xmin"]
+        assert result[b"other"] == b"kept"
+        assert "covering" in json.loads(kv[b"geo"])["columns"]["geometry"]  # input untouched
+        assert "bbox" not in json.loads(kv[b"geo"])["columns"]["geometry"]["covering"]
+
+    @pytest.mark.parametrize(
+        "kv",
+        [
+            None,
+            {b"other": b"x"},
+            {b"geo": b"{not json"},
+            {b"geo": json.dumps({"version": "1.1.0", "columns": {}}).encode("utf-8")},
+        ],
+        ids=["no-metadata", "no-geo-key", "malformed", "no-entry-for-the-column"],
+    )
+    def test_leaves_metadata_it_cannot_record_into_alone(self, kv):
+        from geoparquet_io.core.add.bbox import _declare_computed_bbox
+
+        assert _declare_computed_bbox(kv, "geometry", "bounds") is kv
