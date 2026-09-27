@@ -29,7 +29,6 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 from geoparquet_io.core.duckdb_utils import (
-    _get_query_columns,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     quote_identifier,
@@ -366,9 +365,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         declare_carried_bbox_column(
             con, query, col_meta, verbose, geoparquet_version, geo_meta=geo_meta
         )
-        self._compute_missing_secondary_metadata(
-            con, query, geometry_column, geo_meta, geometry_info, verbose
-        )
+        self._compute_missing_secondary_metadata(con, query, geometry_column, geo_meta, verbose)
         # After the declare above, so an undeclared conventional bbox column
         # gets its chance to supply the one member the spec defines; a covering
         # still without a bbox member is one geopandas cannot read (#954).
@@ -451,27 +448,36 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         query: str,
         geometry_column: str,
         geo_meta: dict,
-        geometry_info: dict | None,
         verbose: bool,
     ) -> None:
         """The same gap-fill for every SECONDARY geometry column (#952/#1000).
 
         The primary's pass above ran for it alone, so a secondary carried with
-        the ``[]`` sentinel — or freshly derived from the input's logical types
-        with no stats at all — kept its gap forever. Only columns the query
-        actually emits are scanned; each gap column costs one scan, and a
-        column whose stats are already known costs nothing.
+        the ``[]`` sentinel -- or freshly derived from the input's logical types
+        -- kept its gap forever. Only the spec-required ``geometry_types`` makes
+        a gap here: a secondary whose types are known is not rescanned for the
+        optional ``bbox`` (the scan that fills a gap fills the bbox too).
+
+        Only columns the query emits as GEOMETRY (or a GeoArrow struct) can be
+        measured. A secondary that reaches the query as a plain BLOB -- an Arrow
+        stream from a non-gpio producer -- keeps its carried metadata, the same
+        way the 1.x WKB wrap leaves it alone; binding ST_* to it would abort the
+        whole write.
         """
-        secondary = resolve_geometry_columns(geometry_column, geometry_info, geo_meta) - {
-            geometry_column
+        gaps = {
+            name: meta
+            for name, meta in geo_meta["columns"].items()
+            if name != geometry_column and isinstance(meta, dict)
+            if not meta.get("geometry_types")
         }
-        if not secondary:
+        if not gaps:
             return
-        output_columns = set(_get_query_columns(con, query))
-        for sec_col in sorted(secondary & output_columns):
-            sec_meta = geo_meta["columns"].get(sec_col)
-            if isinstance(sec_meta, dict):
-                self._compute_missing_metadata(con, query, sec_col, sec_meta, verbose)
+        column_types = {
+            row[0]: str(row[1]).upper() for row in con.execute(f"DESCRIBE ({query})").fetchall()
+        }
+        for name in sorted(gaps):
+            if column_types.get(name, "").startswith(("GEOMETRY", "STRUCT")):
+                self._compute_missing_metadata(con, query, name, gaps[name], verbose)
 
     def write_from_table(
         self,

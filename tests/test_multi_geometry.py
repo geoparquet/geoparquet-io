@@ -754,12 +754,43 @@ class TestMultiGeometryDerivedStatsInvalidation:
         )
         assert failed == [], f"gpio check spec failed on gpio's own output: {failed}"
 
+    #: The merged boundary extent of :meth:`_glob_input`'s two parts. The first
+    #: part's own stats say ``[-0.5, -0.5, 2.5, 2.5]``: carried, they would
+    #: under-cover the merge.
+    MERGED_BOUNDARY_BBOX = [-0.5, -0.5, 12.5, 12.5]
+
     def _glob_input(self, tmp_path):
-        """Two identical files behind a glob — the multi-file merge shape."""
+        """Two files behind a glob -- the multi-file merge shape.
+
+        The second part is the first shifted by (10, 10) but still carries the
+        first's ``geo`` block, so a write that kept the carried stats instead of
+        recomputing them would be caught by the merged extent.
+        """
+        import duckdb
+
         folder = tmp_path / "parts"
         folder.mkdir()
-        for name in ("a.parquet", "b.parquet"):
-            create_multi_geometry_geoparquet(str(folder / name))
+        create_multi_geometry_geoparquet(str(folder / "a.parquet"))
+        create_multi_geometry_geoparquet(str(folder / "b.parquet"))
+        table = pq.read_table(str(folder / "b.parquet"))
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial; LOAD spatial;")
+            con.register("t", table)
+            shifted = (
+                con.execute(
+                    """SELECT * REPLACE (
+                       ST_AsWKB(ST_Translate(ST_GeomFromWKB(geometry), 10, 10)) AS geometry,
+                       ST_AsWKB(ST_Translate(ST_GeomFromWKB(boundary), 10, 10)) AS boundary
+                   ) FROM t"""
+                )
+                .arrow()
+                .read_all()
+            )
+        finally:
+            con.close()
+        shifted = shifted.cast(table.schema).replace_schema_metadata(table.schema.metadata)
+        pq.write_table(shifted, str(folder / "b.parquet"))
         return str(folder / "*.parquet")
 
     # --- extract: row filter over a single file (scoped) --------------------
@@ -915,7 +946,9 @@ class TestMultiGeometryDerivedStatsInvalidation:
         output_file = tmp_path / "out.parquet"
         extract(self._glob_input(tmp_path), str(output_file))
 
-        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == ["Polygon"]
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        assert boundary["bbox"] == self.MERGED_BOUNDARY_BBOX
         assert len(self._assert_duckdb_reads(output_file)) == 6
         self._assert_spec_valid(output_file)
 
@@ -927,7 +960,9 @@ class TestMultiGeometryDerivedStatsInvalidation:
         output_file = tmp_path / "out.parquet"
         sort_by_column(self._glob_input(tmp_path), str(output_file), columns="id")
 
-        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == ["Polygon"]
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        assert boundary["bbox"] == self.MERGED_BOUNDARY_BBOX
         assert len(self._assert_duckdb_reads(output_file)) == 6
         self._assert_spec_valid(output_file)
 
@@ -937,7 +972,9 @@ class TestMultiGeometryDerivedStatsInvalidation:
         output_file = tmp_path / "out.parquet"
         sort_by_quadkey(self._glob_input(tmp_path), str(output_file))
 
-        assert self._geo(output_file)["columns"]["boundary"]["geometry_types"] == ["Polygon"]
+        boundary = self._geo(output_file)["columns"]["boundary"]
+        assert boundary["geometry_types"] == ["Polygon"]
+        assert boundary["bbox"] == self.MERGED_BOUNDARY_BBOX
         assert len(self._assert_duckdb_reads(output_file)) == 6
         self._assert_spec_valid(output_file)
 
@@ -967,7 +1004,15 @@ class TestMultiGeometryDerivedStatsInvalidation:
 
         written = sorted(output_folder.rglob("*.parquet"))
         assert written, "partitioning produced no files"
+        own_extent = {
+            "A": [-0.5, -0.5, 0.5, 0.5],
+            "B": [0.5, 0.5, 1.5, 1.5],
+            "C": [1.5, 1.5, 2.5, 2.5],
+        }
         for part in written:
-            assert self._geo(part)["columns"]["boundary"]["geometry_types"] == ["Polygon"]
+            boundary = self._geo(part)["columns"]["boundary"]
+            assert boundary["geometry_types"] == ["Polygon"]
+            # Its own rows' extent, not the whole input's [-0.5, -0.5, 2.5, 2.5].
+            assert boundary["bbox"] == own_extent[part.stem], part.name
             self._assert_duckdb_reads(part)
             self._assert_spec_valid(part)

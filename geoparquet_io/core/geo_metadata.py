@@ -797,13 +797,13 @@ def strip_derived_stats(
     transforms only the primary column, so a secondary column's bytes reach the
     output unchanged and its carried stats still describe them (#890). Dropping
     them anyway left the output without the ``geometry_types`` GeoParquet 1.1
-    requires — nothing recomputes a secondary column's — and DuckDB then refuses
-    to open the file at all. ``None`` strips every column, which is right for a
+    requires — only duckdb-kv recomputes a secondary column's (#952) — and
+    DuckDB then refuses to open the file at all. ``None`` strips every column, which is right for a
     merge, whose carried stats UNDER-cover every column of the output.
 
     ``recomputed_columns`` names the stripped columns the caller's write path
-    will fill back in — on every file-write path that is the primary geometry
-    column and nothing else. Removing ``geometry_types`` is a way of *asking*
+    will fill back in — on every file-write path the primary geometry column
+    (duckdb-kv fills a secondary's ``[]`` too, #952). Removing ``geometry_types`` is a way of *asking*
     for a recompute, so for any other stripped column it is not a marker but a
     REQUIRED key silently deleted, and the same unreadable output comes back by
     another route (#934). Those columns therefore keep the key with the spec's

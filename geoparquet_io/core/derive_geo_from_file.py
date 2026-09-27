@@ -139,21 +139,63 @@ def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str
 
 
 def _secondary_geometry_names(pf) -> tuple[dict[str, str], dict[str, dict]]:
-    """(native columns by logical type string, declared geo-block columns) of a file."""
+    """(top-level native columns by logical type string, declared geo-block entries) of a file.
+
+    Only top-level columns count: a GEOMETRY leaf nested in a struct is not a
+    column of the table, and keying it by its leaf name would mistake it for a
+    top-level column that happens to share the name. A ``geo`` key that does
+    not parse leaves the native half standing.
+    """
     schema = pf.metadata.schema
     native: dict[str, str] = {}
     for i in range(len(schema)):
-        logical = str(schema.column(i).logical_type)
+        column = schema.column(i)
+        if column.path != column.name:
+            continue
+        logical = str(column.logical_type)
         if logical.startswith(("Geometry", "Geography")):
-            native[schema.column(i).name] = logical
-    kv = pf.metadata.metadata or {}
+            native[column.name] = logical
     declared: dict[str, dict] = {}
-    if b"geo" in kv:
-        geo_meta = json.loads(kv[b"geo"].decode("utf-8"))
-        columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
-        if isinstance(columns, dict):
-            declared = {name: meta for name, meta in columns.items() if isinstance(name, str)}
+    raw = (pf.metadata.metadata or {}).get(b"geo")
+    try:
+        geo_meta = json.loads(raw) if raw else None
+    except ValueError:
+        geo_meta = None
+    columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+    if isinstance(columns, dict):
+        declared = {name: meta for name, meta in columns.items() if isinstance(meta, dict)}
     return native, declared
+
+
+def _native_secondary_meta(logical: str, declared: dict | None, input_file: str) -> dict:
+    """What a native secondary's own logical type says that its geo entry does not.
+
+    Its OWN ``crs`` and ``edges`` -- never the primary's or the per-file
+    witness's (#993/#1000) -- resolved only when the input's ``geo`` block
+    does not already state them (a declared value wins the merge anyway, and
+    resolving an unresolvable type would warn about a null that is never
+    written). A column the block does not describe at all gets the spec's
+    "not known" ``geometry_types: []``: every strategy writes a 1.x entry
+    without that key into a file DuckDB refuses to open, and duckdb-kv
+    recomputes the real list from the rows it writes.
+    """
+    col_meta: dict = {}
+    if declared is None:
+        col_meta["geometry_types"] = []
+        declared = {}
+    if "crs" not in declared:
+        try:
+            crs_present, crs = _crs_from_geo_logical(logical, input_file)
+        except Exception as e:  # noqa: BLE001 - a malformed CRS is "unknown", not a failed write
+            debug(f"Could not resolve the CRS of a native secondary column ({logical}): {e}")
+            crs_present, crs = True, None
+        if crs_present:
+            col_meta["crs"] = crs
+    if "edges" not in declared:
+        edges = _geography_edges_from_logical(logical)
+        if edges:
+            col_meta["edges"] = edges
+    return col_meta
 
 
 def derive_secondary_geometry_info(
@@ -167,51 +209,39 @@ def derive_secondary_geometry_info(
     Every geometry column the input carries beyond ``primary_column`` — native
     Parquet ``GEOMETRY``/``GEOGRAPHY`` logical types, plus anything the input's
     own ``geo`` block declares — becomes a secondary, so
-    ``merge_secondary_geometry_metadata`` finally learns it exists (#1000).
-
-    A native column's metadata carries its OWN ``crs`` and ``edges``, read from
-    its logical type — never the primary's or the per-file witness's, which is a
-    per-*file* answer that must not be stamped onto every column (#993/#1000).
-    Derived stats (``geometry_types``, ``bbox``) are deliberately absent: for a
-    declared column they flow through ``original_metadata``, where the caller's
-    invalidation (#934) has already had its say, and re-reading them here would
-    resurrect exactly the stale values that invalidation stripped.
+    ``merge_secondary_geometry_metadata`` finally learns it exists (#1000). What
+    a native column's type adds is described in :func:`_native_secondary_meta`.
+    Derived stats are otherwise absent: for a declared column they flow through
+    ``original_metadata``, where the caller's invalidation (#934) has already
+    had its say, and re-reading them here would resurrect exactly the stale
+    values that invalidation stripped.
 
     ``output_columns`` limits the answer to columns the write actually emits, so
     a projection cannot come out declaring a column it dropped. Best-effort: an
-    unreadable input derives nothing rather than failing the write.
+    unreadable input derives nothing rather than failing the write. The input is
+    read with pyarrow, so a remote or multi-file input derives nothing either.
     """
     try:
-        pf = pq.ParquetFile(input_file)
-        try:
+        with pq.ParquetFile(input_file) as pf:
             native, declared = _secondary_geometry_names(pf)
-        finally:
-            pf.close()
     except Exception as e:  # noqa: BLE001 - a probe, never the write's failure
         debug(f"Could not derive secondary geometry columns from {input_file}: {e}")
         return None
 
-    secondary: list[str] = []
     metadata: dict[str, dict] = {}
-    for name in {**dict.fromkeys(native), **dict.fromkeys(declared)}:
+    for name in dict.fromkeys([*native, *declared]):
         if name == primary_column:
             continue
         if output_columns is not None and name not in output_columns:
             continue
-        col_meta: dict = {}
         logical = native.get(name)
-        if logical:
-            crs_present, crs = _crs_from_geo_logical(logical, input_file)
-            if crs_present:
-                col_meta["crs"] = crs
-            edges = _geography_edges_from_logical(logical)
-            if edges:
-                col_meta["edges"] = edges
-        secondary.append(name)
-        metadata[name] = col_meta
+        metadata[name] = (
+            _native_secondary_meta(logical, declared.get(name), input_file) if logical else {}
+        )
 
-    if not secondary:
+    if not metadata:
         return None
+    secondary = list(metadata)
     if verbose:
         debug(f"Derived secondary geometry columns from {input_file}: {secondary}")
     return {"primary": primary_column, "secondary": secondary, "metadata": metadata}
