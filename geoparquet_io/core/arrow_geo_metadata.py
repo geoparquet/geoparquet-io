@@ -38,6 +38,7 @@ from geoparquet_io.core.geo_metadata import (
     detect_bbox_column_from_schema,
     geoarrow_wkb_codes,
     sanitize_geo_metadata,
+    sanitized_carried_geo,
     strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import (
@@ -166,16 +167,23 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
     return detect_bbox_column_from_schema(table.schema, verbose)
 
 
-def _bbox_column_to_declare(table, verbose: bool = False) -> str | None:
+def _bbox_column_to_declare(
+    table, verbose: bool = False, original_metadata: dict | None = None
+) -> str | None:
     """The bbox column this write may put in a ``covering``: the shared gate, on a table.
 
     Stricter than :func:`_detect_bbox_column_from_table`, which is also a
     read-side probe (``process aggregate --bucket-point bbox`` reads ``xmin`` by
     name, which works in any field order).
+
+    Provenance is the input's own block when the caller has one: a table DuckDB
+    built from a query carries no schema metadata at all, so reading only that
+    would forget which column the primary declared (#953).
     """
-    return bbox_column_to_declare(
-        table.schema, parse_geo_metadata_from_schema(table.schema.metadata), verbose=verbose
+    geo_meta = sanitized_carried_geo(original_metadata) or parse_geo_metadata_from_schema(
+        table.schema.metadata
     )
+    return bbox_column_to_declare(table.schema, geo_meta, verbose=verbose)
 
 
 def _strip_geoarrow_to_plain_wkb(table, geometry_column: str, verbose: bool):
@@ -861,7 +869,7 @@ def _build_geo_block(
     The per-column stats that need the data (``geometry_types``, ``bbox``) are
     filled in by the caller afterwards.
     """
-    bbox_column = _bbox_column_to_declare(table, verbose)
+    bbox_column = _bbox_column_to_declare(table, verbose, original_metadata)
     geo_meta = create_geo_metadata(
         original_metadata,
         geometry_column,

@@ -161,3 +161,116 @@ class TestRewriteNeverCrossesColumns:
         # And even with that provenance in the file, it is still not the primary's.
         primary_meta = geo["columns"][geo["primary_column"]]
         assert "boundary_bbox" not in _covering_columns(primary_meta)
+
+
+@pytest.mark.parametrize("strategy", STRATEGIES)
+class TestTheExactNameIsNotExempt:
+    """#953 through the conventional name: `bbox` may be the SECONDARY's envelope."""
+
+    def test_a_bbox_the_secondary_declares_is_not_the_primarys(self, strategy, tmp_path):
+        input_file = tmp_path / "in.parquet"
+        output_file = tmp_path / "out.parquet"
+        create_multi_geometry_with_secondary_bbox(
+            str(input_file), declare_boundary_covering=True, bbox_name="bbox"
+        )
+
+        _rewrite(input_file, output_file, strategy)
+
+        geo = _geo(output_file)
+        assert "bbox" not in _covering_columns(geo["columns"][geo["primary_column"]])
+        assert _covering_columns(geo["columns"]["boundary"]) == {"bbox"}
+
+    def test_an_undeclared_exact_bbox_is_still_declared(self, strategy, tmp_path):
+        """The positive half, on every strategy (disk-rewrite included)."""
+        source = pq.read_table(str(_places_like(tmp_path)))
+        output_file = tmp_path / "out.parquet"
+
+        _rewrite(_places_like(tmp_path), output_file, strategy)
+
+        assert "bbox" in source.column_names
+        geo = _geo(output_file)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bbox"}
+
+
+def _places_like(tmp_path):
+    """A 1.1 copy of the places fixture: an exact `bbox` struct, no covering."""
+    from pathlib import Path
+
+    path = tmp_path / "places_v11.parquet"
+    if not path.exists():
+        source = Path(__file__).parent / "data" / "places_test.parquet"
+        table = pq.read_table(str(source))
+        geo = json.loads(table.schema.metadata[b"geo"])
+        geo["version"] = "1.1.0"
+        for col_meta in geo["columns"].values():
+            col_meta.pop("covering", None)
+        table = table.replace_schema_metadata(
+            {**table.schema.metadata, b"geo": json.dumps(geo).encode("utf-8")}
+        )
+        pq.write_table(table, str(path))
+    return path
+
+
+def test_the_primarys_own_covering_survives_in_memory(tmp_path):
+    """The in-memory gate reads the input's block, not the empty DuckDB table's.
+
+    It used to see no provenance at all, so the secondary's `bbox` replaced the
+    covering the primary itself declared.
+    """
+    input_file = tmp_path / "in.parquet"
+    output_file = tmp_path / "out.parquet"
+    create_multi_geometry_with_secondary_bbox(
+        str(input_file),
+        declare_boundary_covering=True,
+        bbox_name="bbox",
+        primary_covering_column="geometry_bbox",
+    )
+
+    _rewrite(input_file, output_file, "in-memory")
+
+    geo = _geo(output_file)
+    assert _covering_columns(geo["columns"]["geometry"]) == {"geometry_bbox"}
+
+
+class TestComputedColumnsKeepTheirProvenance:
+    """A bbox gpio computed under another name is declared through its provenance."""
+
+    def test_add_bbox_custom_name_on_the_streaming_route(self, buildings_test_file, tmp_path):
+        """1.1-geoarrow auto-routes to the streaming strategy, which dropped custom_metadata."""
+        output = tmp_path / "out.parquet"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "add",
+                "bbox",
+                buildings_test_file,
+                str(output),
+                "--bbox-name",
+                "bounds",
+                "--geoparquet-version",
+                "1.1-geoarrow",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        geo = _geo(output)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bounds"}
+
+    def test_the_python_add_bbox_custom_name(self, buildings_test_file, tmp_path):
+        """Table.add_bbox records the covering for the column it computed."""
+        import geoparquet_io as gpio
+        from geoparquet_io.core.add.bbox import add_bbox_table
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        output = tmp_path / "in_memory.parquet"
+        gpio.read(buildings_test_file).add_bbox(column_name="bounds").write(
+            str(output), write_strategy="in-memory"
+        )
+        geo = _geo(output)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bounds"}
+
+        table = add_bbox_table(pq.read_table(buildings_test_file), bbox_column_name="bounds")
+        output = tmp_path / "table_funnel.parquet"
+        write_geoparquet_table(table, str(output), geometry_column="geometry")
+        geo = _geo(output)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bounds"}

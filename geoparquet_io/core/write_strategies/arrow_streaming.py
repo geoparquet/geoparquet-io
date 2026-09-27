@@ -363,6 +363,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             precomputed_bbox,
             geometry_info,
             geoarrow_encoding=geoarrow_encoding,
+            custom_metadata=custom_metadata,
         )
         native_crs = native_geometry_crs(
             geoparquet_version, geo_meta, geometry_column, geometry_info
@@ -434,6 +435,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         precomputed_bbox: list[float] | None,
         geometry_info: dict | None = None,
         geoarrow_encoding: str | None = None,
+        custom_metadata: dict | None = None,
     ) -> dict:
         """Build geo metadata for query results.
 
@@ -442,11 +444,14 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         """
 
         bbox_info = _detect_bbox_column(schema, original_metadata)
+        # custom_metadata is the covering a caller computed (`add bbox
+        # --bbox-name`, the index commands): its provenance, the only way a
+        # column not named exactly `bbox` gets declared (#738/#953).
         geo_meta = create_geo_metadata(
             original_metadata=original_metadata,
             geom_col=geometry_column,
             bbox_info=bbox_info,
-            custom_metadata=None,
+            custom_metadata=custom_metadata,
             verbose=verbose,
             version=metadata_version,
         )

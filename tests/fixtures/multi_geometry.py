@@ -301,7 +301,10 @@ def create_multi_geometry_with_custom_primary_name(
 
 
 def create_multi_geometry_with_secondary_bbox(
-    output_path: str, declare_boundary_covering: bool = False
+    output_path: str,
+    declare_boundary_covering: bool = False,
+    bbox_name: str = "boundary_bbox",
+    primary_covering_column: str | None = None,
 ) -> str:
     """Create a multi-geometry GeoParquet whose SECONDARY column has a bbox struct.
 
@@ -313,8 +316,13 @@ def create_multi_geometry_with_secondary_bbox(
     Args:
         output_path: Path to write the file
         declare_boundary_covering: When True, the input's ``boundary`` entry
-            declares ``covering.bbox`` over ``boundary_bbox`` (provenance on the
+            declares ``covering.bbox`` over the bbox struct (provenance on the
             secondary, still none on the primary).
+        bbox_name: Name of the boundary's bbox struct column; ``"bbox"`` makes
+            the exact conventional name belong to the secondary.
+        primary_covering_column: When set, a second struct with the POINTS'
+            extents is written under this name and the primary declares its
+            covering over it.
 
     Returns:
         Path to created file.
@@ -343,26 +351,37 @@ def create_multi_geometry_with_secondary_bbox(
             ("ymax", pa.float64()),
         ]
     )
-    table = pa.table(
-        {
-            "id": pa.array([1, 2, 3], type=pa.int32()),
-            "geometry": pa.array(point_wkbs, type=pa.binary()),
-            "boundary": pa.array(polygon_wkbs, type=pa.binary()),
-            "boundary_bbox": pa.array(bbox_structs, type=bbox_type),
+    columns = {
+        "id": pa.array([1, 2, 3], type=pa.int32()),
+        "geometry": pa.array(point_wkbs, type=pa.binary()),
+        "boundary": pa.array(polygon_wkbs, type=pa.binary()),
+        bbox_name: pa.array(bbox_structs, type=bbox_type),
+    }
+    geometry_meta = {"encoding": "WKB", "geometry_types": ["Point"]}
+    if primary_covering_column:
+        point_boxes = [
+            {"xmin": float(x), "ymin": float(y), "xmax": float(x), "ymax": float(y)}
+            for x, y in [(0, 0), (1, 1), (2, 2)]
+        ]
+        columns[primary_covering_column] = pa.array(point_boxes, type=bbox_type)
+        geometry_meta["covering"] = {
+            "bbox": {
+                axis: [primary_covering_column, axis] for axis in ("xmin", "ymin", "xmax", "ymax")
+            }
         }
-    )
+    table = pa.table(columns)
 
     boundary_meta = {"encoding": "WKB", "geometry_types": ["Polygon"]}
     if declare_boundary_covering:
         boundary_meta["covering"] = {
-            "bbox": {axis: ["boundary_bbox", axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
+            "bbox": {axis: [bbox_name, axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
         }
 
     geo_meta = {
         "version": "1.1.0",
         "primary_column": "geometry",
         "columns": {
-            "geometry": {"encoding": "WKB", "geometry_types": ["Point"]},
+            "geometry": geometry_meta,
             "boundary": boundary_meta,
         },
     }

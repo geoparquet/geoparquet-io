@@ -229,7 +229,12 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             # an illegal struct is dropped) before the #954 gate below, so an
             # index entry beside a real bbox column is not thrown away.
             declare_carried_bbox_column(
-                con, query, geo_meta["columns"][geometry_column], verbose, geoparquet_version
+                con,
+                query,
+                geo_meta["columns"][geometry_column],
+                verbose,
+                geoparquet_version,
+                geo_meta=geo_meta,
             )
             # A covering still without a bbox member is one geopandas cannot
             # read (#954).

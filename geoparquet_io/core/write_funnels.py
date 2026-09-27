@@ -562,6 +562,7 @@ def _geo_block_to_carry_on_fast_path(
             verbose,
             effective_version,
             output_columns=output_columns,
+            geo_meta=carried,
         )
     # After the declare above: a carried covering still without a bbox member
     # (e.g. only a spatial-index entry) is one geopandas cannot read (#954),

@@ -362,7 +362,9 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
         col_meta = geo_meta["columns"][geometry_column]
         self._compute_missing_metadata(con, query, geometry_column, col_meta, verbose)
-        declare_carried_bbox_column(con, query, col_meta, verbose, geoparquet_version)
+        declare_carried_bbox_column(
+            con, query, col_meta, verbose, geoparquet_version, geo_meta=geo_meta
+        )
         # After the declare above, so an undeclared conventional bbox column
         # gets its chance to supply the one member the spec defines; a covering
         # still without a bbox member is one geopandas cannot read (#954).
