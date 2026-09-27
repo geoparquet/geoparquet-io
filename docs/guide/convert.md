@@ -910,7 +910,8 @@ geometry. Those rows are kept either way, with NULL geometry, so their
 attributes survive the conversion; they sort after the ordered rows, as they do
 for every other input format.
 
-Skips invalid rows, disables Hilbert ordering. Mixed geometry types supported.
+Skips rows whose geometry does not parse; the output is still Hilbert-ordered
+(add `--skip-hilbert` to keep the input order). Mixed geometry types supported.
 
 ### Delimiters
 

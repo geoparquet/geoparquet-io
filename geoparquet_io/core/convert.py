@@ -1182,25 +1182,23 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
         if skip_invalid:
             # The WKT column rides along inside the CTE so the outer WHERE can
             # tell "no geometry given" from "geometry did not parse"; it is
-            # excluded from the output there instead.
-            query_base = f"""
+            # excluded from the output there instead. The parsed value gets a
+            # private name: a WKT column that is itself called `geometry` would
+            # otherwise be named twice in the EXCLUDE list.
+            parsed = "_gpio_parsed_geom"
+            query = f"""
                 WITH parsed_geoms AS (
                     SELECT
                         *,
-                        {_csv_wkt_geom_expr(wkt_col, geom_info, try_parse=True)} AS geometry
+                        {_csv_wkt_geom_expr(wkt_col, geom_info, try_parse=True)} AS {parsed}
                     FROM {csv_read}
                 )
                 SELECT
-                    * EXCLUDE ({exclude_cols}, geometry),
-                    geometry{bbox_expr("geometry")}
+                    * EXCLUDE ({exclude_cols}, {parsed}),
+                    {parsed} AS geometry{bbox_expr(parsed)}
                 FROM parsed_geoms
-                WHERE {wkt_col} IS NULL OR geometry IS NOT NULL
+                WHERE {wkt_col} IS NULL OR {parsed} IS NOT NULL
             """
-            if skip_hilbert:
-                return query_base, None
-            # Hilbert-order like every other path (#1157); empty geometry
-            # sorts last, same as below (#649).
-            return query_base, _geometry_order_by(quote_identifier("geometry"), bounds)
         else:
             # NULL WKT yields NULL geometry (ST_GeomFromText propagates it), so
             # the row survives with its attributes instead of being filtered.
@@ -1220,7 +1218,8 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
     else:
         raise GeoParquetError("Unknown geometry type in CSV detection")
 
-    query = f"""
+    if not (geom_info["type"] == "wkt" and skip_invalid):
+        query = f"""
             SELECT
                 * EXCLUDE ({exclude_cols}),
                 {geom_expr} AS geometry{bbox_expr(geom_expr)}
@@ -1229,26 +1228,23 @@ def _build_csv_conversion_query(geom_info, skip_hilbert, bounds, skip_invalid, s
         """
     if skip_hilbert:
         return query, None
-    # A WKT column can hold empty geometry, which ST_Hilbert rejects (#649).
+    # Every path Hilbert-orders, --skip-invalid included (#1157). A WKT column
+    # can hold empty geometry, which ST_Hilbert rejects (#649).
     return query, _geometry_order_by(quote_identifier("geometry"), bounds)
 
 
-def _get_geom_expr_and_where(geom_info, skip_invalid):
+def _get_geom_expr_and_where(geom_info):
     """Geometry expression and WHERE clause for the CSV *bounds* pass.
 
     The filters here exclude rows the envelope must not be measured from
-    (missing or unparsable geometry). The conversion query deliberately keeps
-    those rows — see :func:`_build_csv_conversion_query` and issue #655.
+    (missing geometry). The conversion query deliberately keeps those rows —
+    see :func:`_build_csv_conversion_query` and issue #655. ``--skip-invalid``
+    WKT never comes here: it is measured from the parsed temp table instead.
     """
     if geom_info["type"] == "wkt":
         wkt_col = quote_identifier(geom_info["wkt_column"])
-        if skip_invalid:
-            # Use TRY() to silently skip invalid WKT
-            geom_expr = f"TRY(ST_GeomFromText({wkt_col}))"
-            where_clause = f"WHERE {wkt_col} IS NOT NULL AND {geom_expr} IS NOT NULL"
-        else:
-            geom_expr = f"ST_GeomFromText({wkt_col})"
-            where_clause = f"WHERE {wkt_col} IS NOT NULL"
+        geom_expr = f"ST_GeomFromText({wkt_col})"
+        where_clause = f"WHERE {wkt_col} IS NOT NULL"
         return geom_expr, where_clause
 
     # latlon
@@ -1259,7 +1255,7 @@ def _get_geom_expr_and_where(geom_info, skip_invalid):
     return geom_expr, where_clause
 
 
-def _calculate_csv_bounds(con, geom_info, skip_invalid, verbose):
+def _calculate_csv_bounds(con, geom_info, verbose):
     """Calculate dataset bounds from CSV geometry.
 
     Returns None when there is nothing to measure, mirroring
@@ -1270,7 +1266,7 @@ def _calculate_csv_bounds(con, geom_info, skip_invalid, verbose):
         debug("Calculating dataset bounds from CSV...")
 
     csv_read = geom_info["csv_read"]
-    geom_expr, where_clause = _get_geom_expr_and_where(geom_info, skip_invalid)
+    geom_expr, where_clause = _get_geom_expr_and_where(geom_info)
 
     bounds_query = f"""
         SELECT
@@ -1285,12 +1281,7 @@ def _calculate_csv_bounds(con, geom_info, skip_invalid, verbose):
     try:
         bounds_result = con.execute(bounds_query).fetchone()
     except Exception as e:
-        msg = (
-            "Could not calculate bounds - no valid geometries found in CSV"
-            if skip_invalid
-            else str(e)
-        )
-        raise GeoParquetError(msg) from e
+        raise GeoParquetError(str(e)) from e
 
     if not bounds_result or any(v is None for v in bounds_result):
         return None  # nothing to measure: caller writes unordered (#649)
@@ -1582,13 +1573,17 @@ def _convert_csv_path(
 
     progress(f"Assuming CRS: {crs}")
 
+    # --skip-invalid WKT is parsed once, into a temp table (below), and its
+    # bounds are measured from those rows: a second TRY-parse of the raw CSV
+    # would cost a full extra read, and would hide a real error behind a
+    # "no valid geometries" message (#1157).
+    materialize = skip_invalid and geom_info["type"] == "wkt"
+
     # Calculate bounds if needed
     effective_skip_hilbert = skip_hilbert
-    bounds = (
-        None
-        if effective_skip_hilbert
-        else _calculate_csv_bounds(con, geom_info, skip_invalid, verbose)
-    )
+    bounds = None
+    if not skip_hilbert and not materialize:
+        bounds = _calculate_csv_bounds(con, geom_info, verbose)
 
     if verbose:
         if skip_bbox:
@@ -1601,12 +1596,12 @@ def _convert_csv_path(
                 msg = "Reading CSV, creating geometries, and applying Hilbert ordering..."
         debug(msg)
 
-    if not effective_skip_hilbert:
+    if not skip_hilbert and not materialize:
         bounds = _usable_bounds(bounds)
         effective_skip_hilbert = bounds is None
 
     query, order_by = _build_csv_conversion_query(
-        geom_info, effective_skip_hilbert, bounds, skip_invalid, skip_bbox=skip_bbox
+        geom_info, effective_skip_hilbert or materialize, bounds, skip_invalid, skip_bbox=skip_bbox
     )
 
     # Materialize skip_invalid queries into a temp table to avoid DuckDB <= 1.5.1
@@ -1617,9 +1612,16 @@ def _convert_csv_path(
     # pyproject now floors DuckDB at 1.5.5, which does not have that bug, so
     # this full materialization is pure overhead on every supported version.
     # Left in place deliberately: removing it needs its own benchmarking.
-    if skip_invalid and geom_info["type"] == "wkt":
+    if materialize:
         con.execute(f"CREATE OR REPLACE TEMP TABLE _gpio_csv_parsed AS {query}")
         query = "SELECT * FROM _gpio_csv_parsed"
+        if not skip_hilbert:
+            bounds = _usable_bounds(
+                _calculate_bounds(con, None, "geometry", verbose, table_expr="_gpio_csv_parsed")
+            )
+            if bounds is not None:
+                # Empty geometry sorts last, as on every other path (#649).
+                order_by = _geometry_order_by(quote_identifier("geometry"), bounds)
 
     # The bbox column, when written, is computed from the geometry right here,
     # so this path can vouch for it. Report it rather than leaving a writer to

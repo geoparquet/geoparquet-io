@@ -133,6 +133,59 @@ class TestSkipInvalid:
         assert order_by is None
 
 
+class TestSkipInvalidOrdering:
+    """More of #1157: the restored ordering on the paths the first fix missed."""
+
+    def test_a_wkt_column_named_geometry(self, tmp_path):
+        """The parsed value used to be named `geometry` too: a duplicate EXCLUDE entry."""
+        source = _write(
+            tmp_path / "wkt.csv",
+            "id,Geometry\n1,POINT(9 9)\n2,NOT WKT\n3,POINT(1 1)\n4,\n5,POINT(5 5)\n",
+        )
+        output = tmp_path / "out.parquet"
+
+        result = _convert(source, output, "--skip-invalid")
+
+        assert result.exit_code == 0, result.output
+        rows = _rows(output)
+        assert [i for i, is_null in rows if not is_null] == [3, 5, 1]
+        assert [i for i, is_null in rows if is_null] == [4]
+
+    def test_bounds_come_from_the_parsed_rows(self, tmp_path, monkeypatch):
+        """The CSV is TRY-parsed once, into the temp table, not again for bounds."""
+        from geoparquet_io.core import convert as convert_module
+
+        def no_second_parse(*args, **kwargs):
+            raise AssertionError("--skip-invalid WKT must not re-parse the CSV for bounds")
+
+        monkeypatch.setattr(convert_module, "_calculate_csv_bounds", no_second_parse)
+        source = _write(
+            tmp_path / "wkt.csv",
+            "id,geom\n1,POINT(9 9)\n2,NOT WKT\n3,POINT(1 1)\n5,POINT(5 5)\n",
+        )
+        output = tmp_path / "out.parquet"
+
+        result = _convert(source, output, "--wkt-column", "geom", "--skip-invalid")
+
+        assert result.exit_code == 0, result.output
+        assert [i for i, _ in _rows(output)] == [3, 5, 1]
+
+    def test_lat_lon_output_is_hilbert_ordered(self, tmp_path):
+        """--skip-invalid used to switch ordering off for lat/lon CSVs as well."""
+        source = _write(
+            tmp_path / "ll.csv",
+            "id,lat,lon\n1,9,9\n2,1,1\n3,5,5\n4,,\n",
+        )
+        output = tmp_path / "out.parquet"
+
+        result = _convert(source, output, "--skip-invalid")
+
+        assert result.exit_code == 0, result.output
+        rows = _rows(output)
+        assert [i for i, is_null in rows if not is_null] == [2, 3, 1]
+        assert rows[-1] == (4, True)
+
+
 class TestNonFiniteBounds:
     """A non-finite envelope must fall back to an unordered query (#1157).
 
@@ -150,12 +203,13 @@ class TestNonFiniteBounds:
 
         with caplog.at_level(logging.WARNING):
             assert _usable_bounds((1.0, 1.0, float("inf"), 5.0)) is None
-        assert "without Hilbert ordering" in caplog.text
+        # The no-bounds warning ends the same way; name the non-finite one.
+        assert "NaN or infinite" in caplog.text
 
         caplog.clear()
         with caplog.at_level(logging.WARNING):
             assert _usable_bounds((float("nan"), 1.0, 5.0, 5.0)) is None
-        assert "without Hilbert ordering" in caplog.text
+        assert "NaN or infinite" in caplog.text
 
     def test_finite_bounds_pass_through_silently(self, caplog):
         import logging
@@ -184,7 +238,7 @@ class TestNonFiniteBounds:
                     con, str(source), None, "geom", None, None, "EPSG:4326", False, False, False
                 )
             assert order_by is None
-            assert "without Hilbert ordering" in caplog.text
+            assert "NaN or infinite" in caplog.text
             assert len(con.execute(query).fetchall()) == 3
         finally:
             con.close()
