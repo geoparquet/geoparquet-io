@@ -1054,6 +1054,18 @@ def _tag_output_crs(
     verbose: bool,
 ) -> pa.Table:
     """Attach the ``geo`` block: CRS84 on the GeoJSON path, the server's SR on the outSR path."""
+    if "geometry" not in table.column_names:
+        # --exclude-cols dropped the geometry: an attribute table, with no CRS
+        # to resolve (or warn about) and no geo block to attach. Any carried
+        # block goes through the same pruner `gpio extract geoparquet` uses (#966).
+        warn(
+            "The geometry column was excluded, so the result is an attribute "
+            "table with no geo metadata."
+        )
+        existing = dict(table.schema.metadata or {})
+        return table.replace_schema_metadata(
+            prune_geo_metadata_to_columns(existing, table.column_names) or None
+        )
     if output_wkid is None:
         # f=geojson is WGS84 per RFC 7946, whatever the layer advertises.
         crs = parse_crs_string_to_projjson("OGC:CRS84")
@@ -1088,13 +1100,9 @@ def _tag_output_crs(
         },
     }
     existing_metadata = table.schema.metadata or {}
-    tagged = {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
-    # --exclude-cols can have dropped the very column this block describes. The
-    # pruner is the one place that decides what geo metadata may say about a
-    # projected schema (the same call `gpio extract geoparquet` makes): a block
-    # whose primary column is absent is dropped whole, so the output is plain
-    # Parquet rather than GeoParquet naming a column it does not contain (#966).
-    return table.replace_schema_metadata(prune_geo_metadata_to_columns(tagged, table.column_names))
+    return table.replace_schema_metadata(
+        {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
+    )
 
 
 def _resolve_field_selection(
@@ -1468,9 +1476,9 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     Polygon or no geometry at all) named a type the file does not contain.
     ``[]`` -- the spec's way of saying the types are not known -- is the honest
     answer wherever the data does not supply one, and gpio's own
-    geometry_types-vs-statistics check would flag the guess anyway. (For an
-    excluded geometry column the answer is moot since #966: the caller drops
-    the whole geo block, so the result is plain Parquet.)
+    geometry_types-vs-statistics check would flag the guess anyway. (An
+    excluded geometry column no longer reaches this function: since #966 the
+    result is an attribute table with no geo block at all.)
 
     The two ways of arriving at ``[]`` are still worth telling apart for the
     user: unreadable geometry is a data-quality problem worth chasing, an empty
@@ -1478,17 +1486,9 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     ``_compute_geometry_types`` swallows the geoarrow error itself, so the
     non-NULL geometries are counted first.
     """
-    geometry = table.column("geometry") if "geometry" in table.column_names else None
-    if geometry is None:
-        # The user dropped the column with --exclude-cols; the service may well
-        # have returned geometry. Blaming the fetch here would point at the
-        # wrong thing and give the user nothing to act on. The caller then
-        # drops the whole geo block (#966), so the value returned is unused.
-        warn(
-            "The geometry column was excluded, so the result is an attribute "
-            "table with no geo metadata."
-        )
-        return []
+    # Only reached with a geometry column: an excluded one (--exclude-cols) never
+    # gets a geo block at all (#966, see _tag_output_crs).
+    geometry = table.column("geometry")
     if len(geometry) == 0:
         # An empty layer or filter result: already reported, nothing to describe.
         return []

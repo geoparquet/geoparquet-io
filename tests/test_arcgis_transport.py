@@ -1343,6 +1343,39 @@ def test_a_native_crs_request_warns_when_the_server_returns_another(monkeypatch,
     assert http.matching(_is_query)[0].params["outSR"] == "3857"
 
 
+def test_an_attribute_table_is_not_tagged_or_warned_about_a_crs(monkeypatch, caplog):
+    """With geometry excluded there is no CRS to tag, so no CRS mismatch to report (#966)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(
+        lambda r: r.path.endswith("/0") and not r.path.endswith("query"), json_reply(_layer_json())
+    )
+    http.respond(_is_count, json_reply({"count": 1}))
+    http.respond(
+        _is_query,
+        json_reply(
+            {
+                "geometryType": "esriGeometryPoint",
+                "spatialReference": {"wkid": 4326},
+                "fields": FIELDS,
+                "features": [
+                    {
+                        "geometry": {"x": -122.0, "y": 37.5},
+                        "attributes": {"OBJECTID": 1, "name": "a", "pop": 1},
+                    }
+                ],
+            }
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        table = arcgis_to_table(SERVICE, output_crs="EPSG:3857", exclude_cols="geometry")
+
+    assert table.column_names == ["OBJECTID", "name", "pop"]
+    assert b"geo" not in (table.schema.metadata or {})
+    assert "server returned WKID" not in caplog.text
+    assert "geometry column was excluded" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # convert_arcgis_to_geoparquet - the file that gets written
 # ---------------------------------------------------------------------------
