@@ -314,6 +314,14 @@ result = ops.aggregate_a5(
 )
 ```
 
+`metric` also takes `pct_cell:<column>`, where `<column>` holds each feature's
+area in m². It writes `pct_<column>` — the percent of the cell's own area that
+column adds up to — plus the `sum_<column>` an overview rollup recomputes it
+from. A5 cells are equal-area per resolution and H3 cells are measured
+individually; admin regions have no cell area, so `ops.aggregate_admin()`
+refuses it. See
+[Percent of the cell covered](../guide/process-aggregate.md#percent-of-the-cell-covered-pct_cell).
+
 #### ops.aggregate_h3()
 
 Functional API for H3 grid aggregation (resolution 0–15). Returns a PyArrow Table.

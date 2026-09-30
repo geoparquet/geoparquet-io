@@ -62,9 +62,13 @@ A coarser parent cell straddles the antimeridian more readily than its children,
 | `min_*` / `max_*` | min / max | exact |
 | `count_*` breakdowns (incl. `count_other`) | sum | exact |
 | `avg_*` | count-weighted mean over children with a value | exact **when the metric had no NULLs** |
+| `pct_*` | recomputed: `100 × Σ sum_<col>` over the **parent's own** cell area | exact |
 
 !!! note "The `avg_*` caveat"
     A child cell's `avg_x` was computed over its non-NULL values, but the rollup weights it by the cell's full `count` (children whose `avg_x` is entirely NULL are excluded). When some features had NULL `x`, the weighting is approximate. With no NULLs, the count-weighted mean is exactly the mean over all original features.
+
+!!! note "`pct_*` is recomputed, never averaged"
+    A percentage is a ratio against the cell's area, and a parent cell is larger than its children, so the mean of the children's percentages is not the parent's. gpio recomputes it from the total instead: `100 × Σ sum_<col>` divided by the parent level's own cell area (see [Percent of the cell covered](process-aggregate.md#percent-of-the-cell-covered-pct_cell)). This is why `--metric pct_cell:<col>` also writes `sum_<col>` — a `pct_<col>` column with no matching `sum_<col>` beside it cannot be rolled up and is dropped with a warning, as is any `pct_*` column on an admin rollup, where a country has no cell area.
 
 Columns that don't match a rollup role are dropped with a warning. The `unassigned` bucket (features with no assignable cell/region) flows through with a NULL geometry.
 

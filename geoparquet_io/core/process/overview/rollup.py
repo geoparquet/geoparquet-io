@@ -11,7 +11,8 @@ Rollup exactness: ``count``, ``sum_*``, ``min_*``, ``max_*`` and breakdown
 ``count_*`` columns roll up exactly. ``avg_*`` is count-weighted over the
 children that carry a value (``SUM(avg * count) / SUM(count) FILTER (avg IS
 NOT NULL)``), which is exact when the underlying metric had no NULLs --
-documented caveat.
+documented caveat. ``pct_*`` is recomputed exactly, as ``100 * SUM(sum_<col>)``
+over the *parent's* cell area, never as a mean of the children's percentages.
 """
 
 from __future__ import annotations
@@ -25,8 +26,12 @@ from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.partition.admin_hierarchical import _setup_admin_dataset
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME
-from geoparquet_io.core.process.aggregate.common import geometry_to_geom_expr
-from geoparquet_io.core.process.aggregate.grid_common import GridScheme, wrap_grid_geometry
+from geoparquet_io.core.process.aggregate.common import PCT_CELL_FUNC, geometry_to_geom_expr
+from geoparquet_io.core.process.aggregate.grid_common import (
+    GridScheme,
+    cell_area_expr,
+    wrap_grid_geometry,
+)
 from geoparquet_io.core.process.overview.detect import (
     AggregateInfo,
     detect_aggregate_info,
@@ -46,12 +51,28 @@ def admin_parent_expr(cell_column: str) -> str:
     return f"CASE WHEN {qcol} = 'unassigned' THEN 'unassigned' ELSE split_part({qcol}, '-', 1) END"
 
 
-def build_rollup_agg_parts(info: AggregateInfo) -> list[str]:
-    """Aggregate SELECT expressions for count + every rollup column, in order."""
+def build_rollup_agg_parts(info: AggregateInfo, cell_area_expr: str | None = None) -> list[str]:
+    """Aggregate SELECT expressions for count + every rollup column, in order.
+
+    ``cell_area_expr`` is the *parent* cell's area in square metres (see
+    :func:`geoparquet_io.core.process.aggregate.grid_common.cell_area_expr`),
+    which a ``pct_<col>`` column is recomputed against. None drops such columns:
+    without the parent's own area there is no correct value to write, and the
+    children's mean is not it.
+    """
     # SUM(BIGINT) widens to HUGEINT in DuckDB; cast back so count stays BIGINT.
     parts = ["CAST(SUM(count) AS BIGINT) AS count"]
     for col in info.rollup_columns:
         qcol = quote_identifier(col.name)
+        if col.func == PCT_CELL_FUNC:
+            # 100 * (the parent's total) / (the parent's own cell area) -- never
+            # an average of the children's percentages, which would report a
+            # coarse cell as though it were the size of a fine one (#1181).
+            if cell_area_expr is None or not col.source_column:
+                continue
+            qsum = quote_identifier(col.source_column)
+            parts.append(f"100.0 * SUM({qsum}) / NULLIF({cell_area_expr}, 0) AS {qcol}")
+            continue
         if col.func == "sum":
             expr = f"SUM({qcol})"
             if col.cast_to_bigint:
@@ -80,7 +101,10 @@ def build_grid_rollup_sql(info: AggregateInfo, source_sql: str, level: int) -> s
         f"SELECT *, CASE WHEN {qcol} IS NULL THEN NULL ELSE {parent} END AS __parent "
         f"FROM ({source_sql})"
     )
-    agg_parts = [f"__parent AS {qcol}", *build_rollup_agg_parts(info)]
+    # A `pct_*` column is a percentage of the *parent's* cell area, so the
+    # denominator is taken at the level being written, not at the base level.
+    area = cell_area_expr(scheme, level, "__parent")
+    agg_parts = [f"__parent AS {qcol}", *build_rollup_agg_parts(info, cell_area_expr=area)]
     agg_sql = f"SELECT {', '.join(agg_parts)} FROM ({keyed}) GROUP BY __parent"
     return wrap_grid_geometry(agg_sql, scheme, info.cell_column, info.out_geometry)
 

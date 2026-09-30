@@ -30,6 +30,7 @@ from geoparquet_io.core.process.aggregate.common import (
     build_breakdown_pivot,
     build_metric_select,
     parse_breakdown_metric,
+    reject_pct_cell_metrics,
     resolve_metric_column_types,
     validate_agg_columns,
     validate_breakdown_metric,
@@ -234,6 +235,9 @@ def aggregate_by_admin(
     bd_metric = parse_breakdown_metric(breakdown_metric)
     validate_breakdown_metric(breakdown, bd_metric)
     metrics, nodata_values = validate_metric_nodata(metric, metric_nodata, bd_metric)
+    # An admin region is not a grid cell and has no cell area, so `pct_cell`
+    # cannot mean anything here -- say so before the dataset setup (#1181).
+    reject_pct_cell_metrics(metrics)
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == "bbox":
         bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
