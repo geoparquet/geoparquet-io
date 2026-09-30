@@ -255,10 +255,33 @@ class TestWhatIsRead:
             con.execute("DROP TABLE IF EXISTS __agg_keyed")
         assert sorted(columns) == ["__key", "crop", "height"]
 
+    @pytest.mark.parametrize(
+        "kwargs,expected",
+        [
+            pytest.param({"metric": "sum:height"}, '"height", ', id="metric"),
+            pytest.param({"metric": "sum:height,avg:height"}, '"height", ', id="two-metrics"),
+            pytest.param({}, "", id="count-only"),
+        ],
+    )
+    def test_the_command_builds_the_narrowed_scan(self, points_parquet, tmp_path, kwargs, expected):
+        """The entry point, not just the builder, asks for the narrow relation.
 
-# ---------------------------------------------------------------------------
-# Output parity: narrowing changes nothing about the answer
-# ---------------------------------------------------------------------------
+        Parity alone cannot see this -- the two paths agree by construction --
+        so the generated SQL is read back from ``--show-sql``.
+        """
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        args = ["process", "aggregate", "a5", str(points_parquet), str(tmp_path / "o.parquet")]
+        args += ["--resolution", "4", "--verbose", "--show-sql"]
+        for flag, value in kwargs.items():
+            args += [f"--{flag}", value]
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code == 0, result.output
+        assert f"SELECT {expected}ST_Centroid" in result.output
+        assert '"note"' not in result.output and '"id"' not in result.output
+
 
 PARITY_CASES = [
     pytest.param({}, id="plain"),
