@@ -58,6 +58,7 @@ def aggregate_by_a5(
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into A5 cells. Writes the output file."""
     aggregate_grid_file(
@@ -83,6 +84,7 @@ def aggregate_by_a5(
         bucket_point=bucket_point,
         bbox_column=bbox_column,
         breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
 
 
@@ -100,6 +102,7 @@ def aggregate_a5_table(
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table by a5 cell. Returns a new Arrow table."""
     return aggregate_grid_table(
@@ -117,4 +120,5 @@ def aggregate_a5_table(
         bucket_point=bucket_point,
         bbox_column=bbox_column,
         breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )

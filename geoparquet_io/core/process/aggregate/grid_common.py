@@ -38,9 +38,11 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
+from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.common import (
     VALID_OUT_GEOMETRY,
     MetricSpec,
+    _fold,
     aggregate_source_relation,
     antimeridian_aware_bbox,
     build_breakdown_pivot,
@@ -216,12 +218,6 @@ def build_exclude_clause(
     return f" EXCLUDE ({', '.join(quote_identifier(c) for c in drop)})" if drop else ""
 
 
-def _exclude_reserved(con, relation: str, extra: tuple[str, ...] = ()) -> str:
-    """Return an `` EXCLUDE (...)`` clause dropping input columns that would collide
-    with the internal aliases (or names in ``extra``); empty string if none clash."""
-    return build_exclude_clause(con, relation, (*extra, *_RESERVED_INTERNAL))
-
-
 def _validate_bucket_point_args(bucket_point: str, bbox_column: str | None) -> None:
     """Reject option combinations that would silently do the wrong thing."""
     if not bucket_point:
@@ -335,6 +331,83 @@ def bucket_point_expr(
     return f"ST_Centroid({point_expr})", (geom_col,)
 
 
+def needed_source_columns(
+    metrics: list[MetricSpec],
+    breakdown: str | None,
+    breakdown_spec: MetricSpec | None,
+) -> tuple[str, ...]:
+    """The input columns an aggregation actually reads, besides its keying point.
+
+    One aggregated row holds the bucket id, a count, the ``--metric`` rollups
+    and the ``--breakdown`` pivots -- nothing else from the input survives the
+    GROUP BY, so nothing else needs to be read (#1179). ``--where`` columns are
+    deliberately absent: the filter sits on the same SELECT as this projection,
+    and SQL evaluates WHERE before the select list, so a filtered column is
+    still read without being projected.
+
+    Names are returned as the user spelled them; ``source_select_list`` resolves
+    them against the relation. A name that collides with an internal alias is
+    dropped, exactly as the ``SELECT *`` passthrough dropped it.
+    """
+    wanted = [m.column for m in metrics]
+    if breakdown:
+        wanted.append(breakdown)
+    if breakdown_spec:
+        wanted.append(breakdown_spec.column)
+    seen: set[str] = set()
+    kept: list[str] = []
+    for name in wanted:
+        folded = _fold(name)
+        if folded in seen or name in _RESERVED_INTERNAL:
+            continue
+        seen.add(folded)
+        kept.append(name)
+    return tuple(kept)
+
+
+def _resolve_column_names(available: set[str], wanted: tuple[str, ...]) -> list[str]:
+    """``wanted`` as the relation spells them, dropping names it does not have.
+
+    DuckDB folds identifiers case-insensitively over ASCII, so ``sum:HEIGHT``
+    binds to a ``Height`` column; projecting the column's own name keeps the
+    output identical to the ``SELECT *`` passthrough. A name with no match is
+    left out rather than projected: the caller validates against the full
+    column set and reports it as missing, which reads better than a binder error.
+    """
+    resolved: list[str] = []
+    for name in wanted:
+        if name in available:
+            resolved.append(name)
+            continue
+        match = next((c for c in sorted(available) if _fold(c) == _fold(name)), None)
+        if match is not None:
+            resolved.append(match)
+    return resolved
+
+
+def source_select_list(
+    con, relation: str, keep_columns: tuple[str, ...] | None, exclude: tuple[str, ...] = ()
+) -> str:
+    """The passthrough part of an aggregation's source SELECT, ending in ``", "``.
+
+    ``keep_columns`` None keeps every column but ``exclude`` -- the relation as
+    it was before #1179, still what a caller handing the relation on unchanged
+    needs. A sequence projects only those columns, so DuckDB's Parquet reader
+    is asked for nothing else and a ``CREATE TEMP TABLE`` over this relation
+    materializes nothing else. An empty sequence projects nothing at all: an
+    aggregation with no metrics and no breakdown reads only its keying point.
+
+    ``exclude`` is honoured either way, so a column the relation hides stays
+    hidden however it was asked for.
+    """
+    if keep_columns is None:
+        return f"*{build_exclude_clause(con, relation, exclude)}, "
+    available = _relation_columns(con, relation) - set(exclude)
+    return "".join(
+        f"{quote_identifier(c)}, " for c in _resolve_column_names(available, keep_columns)
+    )
+
+
 def read_grid_source_sql(
     con,
     input_url: str,
@@ -343,6 +416,7 @@ def read_grid_source_sql(
     where: str | None = None,
     bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
+    keep_columns: tuple[str, ...] | None = None,
 ) -> str:
     """Source relation exposing the original columns plus a keying POINT ``__pt``.
 
@@ -359,15 +433,16 @@ def read_grid_source_sql(
     ``bucket_point`` selects where ``__pt`` comes from: the geometry centroid
     (default), the center of a bbox covering column, or an existing point column
     (#567) -- the latter two skip reading the geometry column entirely.
+
+    ``keep_columns`` (from :func:`needed_source_columns`) narrows the passthrough
+    to the columns the aggregation reads; None keeps the full-width relation.
     """
     read_rel = aggregate_source_relation(input_url)
     pt_expr, exclude = bucket_point_expr(
         con, read_rel, geom_col, source_crs, bucket_point, bbox_column
     )
-    return (
-        f"SELECT *{_exclude_reserved(con, read_rel, exclude)}, {pt_expr} AS __pt "
-        f"FROM {read_rel}{where_sql_fragment(where)}"
-    )
+    select_list = source_select_list(con, read_rel, keep_columns, (*exclude, *_RESERVED_INTERNAL))
+    return f"SELECT {select_list}{pt_expr} AS __pt FROM {read_rel}{where_sql_fragment(where)}"
 
 
 def build_grid_query(
@@ -383,11 +458,18 @@ def build_grid_query(
     *,
     metric_nodata: str | None = None,
     breakdown_spec: MetricSpec | None = None,
+    source_columns: set[str] | None = None,
 ) -> str:
     """Build the full grid aggregation SQL from a source relation exposing ``__pt``.
 
     ``breakdown_spec`` is the parsed ``--breakdown-metric`` (see
     :func:`parse_breakdown_metric`); None keeps the pivots as counts.
+
+    ``source_columns`` is the *input's* full column set, which a narrowed
+    ``source_sql`` (see :func:`source_select_list`) no longer exposes. It is
+    what a missing metric/breakdown column is reported against, so the error
+    still names every column the user could have asked for; None falls back to
+    describing ``source_sql`` itself.
     """
     bd_metric = breakdown_spec
     validate_breakdown_metric(breakdown, bd_metric)
@@ -398,7 +480,9 @@ def build_grid_query(
         # which is a no-op request since count is always emitted. Runs before the
         # type resolution below so a missing column reports as missing, not as a
         # non-numeric metric.
-        cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM ({source_sql})").fetchall()}
+        cols = source_columns
+        if cols is None:
+            cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM ({source_sql})").fetchall()}
         validate_agg_columns(cols, metrics, breakdown, bd_metric)
     # Resolve metric column types so sentinel literals match the column's actual
     # precision (REAL vs DOUBLE, #613) and non-numeric columns fail up-front.
@@ -410,10 +494,13 @@ def build_grid_query(
 
     # Materialize the keyed relation once when a breakdown is requested so that
     # resolve_breakdown_values and the aggregation both read from the same temp
-    # table rather than re-running the key-assignment expression twice.
+    # table rather than re-running the key-assignment expression twice. The
+    # keying point is spent once the cell id exists, so it is dropped here: the
+    # table is one row per input feature, and a POINT per row is pure weight.
     breakdown_select = ""
     if breakdown:
-        con.execute(f"CREATE TEMP TABLE __agg_keyed AS {keyed_sql}")
+        drop_pt = build_exclude_clause(con, f"({keyed_sql})", ("__pt",))
+        con.execute(f"CREATE TEMP TABLE __agg_keyed AS SELECT *{drop_pt} FROM ({keyed_sql})")
         keyed_ref = "SELECT * FROM __agg_keyed"
         breakdown_select = build_breakdown_pivot(
             con,
@@ -753,6 +840,7 @@ def aggregate_grid_file(
     bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into grid cells. Writes the output file."""
     configure_verbose(verbose)
@@ -764,7 +852,7 @@ def aggregate_grid_file(
     # scanning, CRS reads, connection + community-extension install).
     breakdown_spec = parse_breakdown_metric(breakdown_metric)
     validate_breakdown_metric(breakdown, breakdown_spec)
-    validate_metric_nodata(metric, metric_nodata, breakdown_spec)
+    metrics, _ = validate_metric_nodata(metric, metric_nodata, breakdown_spec)
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_BBOX:
         bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
@@ -777,11 +865,23 @@ def aggregate_grid_file(
     geom_col = find_primary_geometry_column(input_parquet, verbose) or "geometry"
     source_crs = extract_crs_from_parquet(input_parquet, verbose)
 
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
+    con = open_bounded_connection(
+        load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
+    )
     try:
         load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
 
+        # The columns a user may name in --metric/--breakdown: everything the
+        # input has except the ones the source relation hides (the geometry in
+        # bbox/point keying modes, and the internal aliases). The narrowed
+        # source no longer exposes them, so they are collected here -- a
+        # missing column must still be reported against the whole input.
+        read_rel = aggregate_source_relation(input_url)
+        _, hidden = bucket_point_expr(
+            con, read_rel, geom_col, source_crs, bucket_point, bbox_column
+        )
+        input_columns = _relation_columns(con, read_rel) - {*hidden, *_RESERVED_INTERNAL}
         source_sql = read_grid_source_sql(
             con,
             input_url,
@@ -790,6 +890,7 @@ def aggregate_grid_file(
             where=where,
             bucket_point=bucket_point,
             bbox_column=bbox_column,
+            keep_columns=needed_source_columns(metrics, breakdown, breakdown_spec),
         )
         final_sql = build_grid_query(
             con,
@@ -803,6 +904,7 @@ def aggregate_grid_file(
             out_geometry,
             metric_nodata=metric_nodata,
             breakdown_spec=breakdown_spec,
+            source_columns=input_columns,
         )
         if show_sql or verbose:
             debug(final_sql)
@@ -866,6 +968,7 @@ def aggregate_grid_table(
     bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table into grid cells. Returns a new Arrow table."""
     cell_column = cell_column or scheme.default_column
@@ -875,7 +978,7 @@ def aggregate_grid_table(
     # Validate the parameter pairings before connection setup and extension install.
     breakdown_spec = parse_breakdown_metric(breakdown_metric)
     validate_breakdown_metric(breakdown, breakdown_spec)
-    validate_metric_nodata(metric, metric_nodata, breakdown_spec)
+    metrics, _ = validate_metric_nodata(metric, metric_nodata, breakdown_spec)
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_BBOX:
         bbox_column = _resolve_bbox_column_for_table(table, bbox_column)
@@ -887,7 +990,7 @@ def aggregate_grid_table(
         )
 
     geom_col = geometry_column or "geometry"
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    con = open_bounded_connection(load_spatial=True, load_httpfs=False, memory_limit=memory_limit)
     try:
         load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
@@ -896,9 +999,16 @@ def aggregate_grid_table(
         pt_expr, exclude = bucket_point_expr(
             con, "__agg_input", geom_col, source_crs, bucket_point, bbox_column
         )
+        hidden = (geom_col, *exclude, *_RESERVED_INTERNAL)
+        input_columns = _relation_columns(con, "__agg_input") - set(hidden)
+        select_list = source_select_list(
+            con,
+            "__agg_input",
+            needed_source_columns(metrics, breakdown, breakdown_spec),
+            hidden,
+        )
         source_sql = (
-            f"SELECT *{_exclude_reserved(con, '__agg_input', (geom_col, *exclude))}, "
-            f"{pt_expr} AS __pt FROM __agg_input{where_sql_fragment(where)}"
+            f"SELECT {select_list}{pt_expr} AS __pt FROM __agg_input{where_sql_fragment(where)}"
         )
         final_sql = build_grid_query(
             con,
@@ -912,6 +1022,7 @@ def aggregate_grid_table(
             out_geometry,
             metric_nodata=metric_nodata,
             breakdown_spec=breakdown_spec,
+            source_columns=input_columns,
         )
         return con.execute(final_sql).arrow().read_all()
     finally:

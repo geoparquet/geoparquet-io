@@ -487,6 +487,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             metric_nodata="-999",
             bucket_point="bbox",
             bbox_column="bounds",
+            memory_limit="512MB",
         ),
         table_call=lambda t: t.aggregate_h3(
             resolution=6,
@@ -499,6 +500,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             metric_nodata="-999",
             bucket_point="bbox",
             bbox_column="bounds",
+            memory_limit="512MB",
         ),
         expected={
             "resolution": 6,
@@ -512,6 +514,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             "metric_nodata": "-999",
             "bucket_point": "bbox",
             "bbox_column": "bounds",
+            "memory_limit": "512MB",
         },
     ),
     FrontDoorCase(
@@ -532,6 +535,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             metric_nodata="-999",
             bucket_point="bbox",
             bbox_column="bounds",
+            memory_limit="512MB",
         ),
         table_call=lambda t: t.aggregate_a5(
             resolution=8,
@@ -544,6 +548,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             metric_nodata="-999",
             bucket_point="bbox",
             bbox_column="bounds",
+            memory_limit="512MB",
         ),
         expected={
             "resolution": 8,
@@ -557,6 +562,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             "metric_nodata": "-999",
             "bucket_point": "bbox",
             "bbox_column": "bounds",
+            "memory_limit": "512MB",
         },
     ),
     FrontDoorCase(

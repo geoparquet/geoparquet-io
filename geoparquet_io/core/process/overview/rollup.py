@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import gc
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.partition.admin_hierarchical import _setup_admin_dataset
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME
@@ -176,14 +177,19 @@ def build_level_sql(con, info: AggregateInfo, source_sql: str, level: int | str)
 
 
 def rollup_table(
-    table, level: int | str, cell_column: str | None = None, scheme: str | None = None
+    table,
+    level: int | str,
+    cell_column: str | None = None,
+    scheme: str | None = None,
+    memory_limit: str | None = None,
 ):
     """Roll an in-memory aggregate Arrow table up to ``level``.
 
     In-memory counterpart of one `gpio process overview` level, backing
-    ``Table.overview``. Returns a new Arrow table.
+    ``Table.overview``. Returns a new Arrow table. ``memory_limit`` bounds the
+    DuckDB work (default: half the process's memory ceiling, #1179).
     """
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
+    con = open_bounded_connection(load_spatial=True, load_httpfs=True, memory_limit=memory_limit)
     try:
         con.execute("SET geometry_always_xy = true")
         con.register("__overview_input", table)

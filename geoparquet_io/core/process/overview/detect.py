@@ -14,7 +14,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from geoparquet_io.core.duckdb_utils import (
-    get_duckdb_connection,
     load_community_extension,
     quote_identifier,
     sql_path,
@@ -22,6 +21,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME
 from geoparquet_io.core.process.aggregate.common import (
@@ -283,15 +283,23 @@ def detect_aggregate_file(
 
 
 @contextmanager
-def aggregate_connection(input_parquet: str, verbose: bool = False):
+def aggregate_connection(
+    input_parquet: str, verbose: bool = False, memory_limit: str | None = None
+):
     """Yield ``(con, relation)`` for reading an aggregate file.
 
     Shared connection boilerplate for every consumer of an aggregate file
     (overview building, pyramid planning, file detection): spatial + httpfs
     connection, lon/lat axis order, and a ``read_parquet`` relation string.
+
+    The connection is bounded (#1179): a rollup ends in ``.arrow().read_all()``
+    with no COPY to scope, so the memory limit belongs to the connection.
+    ``memory_limit`` None takes the ceiling-based default.
     """
     url = resolve_file_url(input_parquet, verbose)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
+    con = open_bounded_connection(
+        load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
+    )
     try:
         con.execute("SET geometry_always_xy = true")
         yield (

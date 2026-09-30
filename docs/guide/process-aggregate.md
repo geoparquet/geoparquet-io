@@ -595,11 +595,48 @@ Both commands support the standard output options:
 ```text
 --where "confidence >= 50"  # DuckDB WHERE clause filtering input rows
 --metric-nodata "-999"    # NoData sentinel(s) mapped to NULL in --metric columns
+--write-memory 8GB        # Memory limit for the aggregation
 --compression SNAPPY      # Output compression (default: ZSTD)
 --geoparquet-version 1.1  # GeoParquet spec version
 --show-sql                # Print the generated DuckDB SQL
 --verbose                 # Detailed progress output
 ```
+
+### Memory
+
+An aggregation reads only what it aggregates: the keying point, the `--metric`
+columns and the `--breakdown` column. Nothing else in the input is scanned, so a
+wide file with one metric costs about what a narrow one does — and
+`--bucket-point bbox` leaves the geometry unread on top of that.
+
+DuckDB runs inside a memory limit of half the process's memory ceiling: physical
+RAM, or the container or Slurm job cap when that is lower. The cap is what
+matters on a shared node — without it DuckDB sizes itself for the whole machine
+and the job's cgroup kills it first. `--write-memory` overrides the default:
+
+=== "CLI"
+
+    <!-- doctest: skip="aggregates 'area', a column the sample data does not have" -->
+    ```bash
+    gpio process aggregate a5 fields.parquet cells.parquet \
+        --resolution 7 --metric "sum:area" --write-memory 8GB
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="aggregates 'area', a column the sample data does not have" -->
+    ```python
+    import geoparquet_io as gpio
+
+    result = gpio.read('fields.parquet').aggregate_a5(
+        resolution=7,
+        metric="sum:area",
+        memory_limit="8GB",
+    )
+    result.write('cells.parquet')
+    ```
+
+`gpio process overview` takes the same flag.
 
 ## See Also
 

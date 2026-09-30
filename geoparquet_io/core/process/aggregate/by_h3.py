@@ -55,6 +55,7 @@ def aggregate_by_h3(
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into H3 cells. Writes the output file."""
     aggregate_grid_file(
@@ -80,6 +81,7 @@ def aggregate_by_h3(
         bucket_point=bucket_point,
         bbox_column=bbox_column,
         breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
 
 
@@ -97,6 +99,7 @@ def aggregate_h3_table(
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table by h3 cell. Returns a new Arrow table."""
     return aggregate_grid_table(
@@ -114,4 +117,5 @@ def aggregate_h3_table(
         bucket_point=bucket_point,
         bbox_column=bbox_column,
         breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
