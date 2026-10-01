@@ -77,6 +77,8 @@ nav:
     - Sub-Partitioning Large Files: guide/sub-partitioning.md
     - Aggregating Data: guide/process-aggregate.md
     - Overview Levels: guide/process-overview.md
+    - Simplifying Geometries: guide/process-simplify.md
+    - Raster to Vector: guide/process-raster.md
     - Remote Files & Authentication: guide/remote-files.md
     - Unix Piping: guide/piping.md
     - Uploading to Cloud Storage: guide/upload.md

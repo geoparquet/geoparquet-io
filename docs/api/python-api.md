@@ -1163,6 +1163,35 @@ exactly; `avg_*` is count-weighted (exact when the metric had no NULLs). For
 file-based batch building of several levels (with auto level selection), use
 `ops.create_overviews`.
 
+### Simplification and Raster Methods {#simplify-raster}
+
+#### `simplify(tolerance, coverage=False, preserve_topology=True, simplify_boundary=True, threads=None)`
+
+Simplify geometries with [coarsen](https://github.com/isaaccorley/coarsen)
+(requires the `simplify` extra). `coverage=True` keeps shared edges shared
+across a polygonal coverage. See [Simplifying Geometries](../guide/process-simplify.md).
+
+<!-- doctest: skip="requires the optional simplify extra (coarsen)" -->
+```python
+import geoparquet_io as gpio
+
+gpio.read('parcels.parquet').simplify(10).write('simplified.parquet')
+```
+
+#### `Table.polygonize(input_raster, ...)` / `Table.contour(input_raster, ...)`
+
+Classmethod constructors that build a Table from a raster via
+[contourrs](https://github.com/isaaccorley/contourrs) (requires the `raster`
+extra, Python 3.12+). See [Raster to Vector](../guide/process-raster.md).
+
+<!-- doctest: skip="requires the optional raster extra (contourrs, Python 3.12+)" -->
+```python
+import geoparquet_io as gpio
+
+gpio.Table.polygonize('landcover.tif').write('landcover.parquet')
+gpio.Table.contour('dem.tif', interval=100).write('contours.parquet')
+```
+
 ### Sub-Partitioning Utilities
 
 For working with directories of partitioned files, gpio provides utilities to find and sub-partition large files.
@@ -1703,6 +1732,9 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.sub_partition_by_a5(directory, min_size, resolution=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into A5 sub-partitions |
 | `ops.sub_partition_by_quadkey(directory, min_size, resolution=None, partition_resolution=None, use_centroid=False, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into quadkey sub-partitions (pass both resolutions, or `auto=True`) |
 | `ops.sub_partition_by_s2(directory, min_size, level=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into S2 sub-partitions |
+| `ops.simplify(table, tolerance, coverage=False, preserve_topology=True, simplify_boundary=True, threads=None, geometry_column=None)` | Simplify geometries with coarsen (requires the `simplify` extra; `coverage=True` preserves shared edges) |
+| `ops.polygonize(input_raster, band=1, values=None, value_column='value', nodata=None, use_mask=True)` | Polygonize a categorical raster band (requires the `raster` extra, Python 3.12+) |
+| `ops.contour(input_raster, levels=None, interval=None, base=0.0, band=1, nodata=None, min_column='min', max_column='max')` | Extract filled contour bands from a raster band (requires the `raster` extra, Python 3.12+) |
 | `ops.get_row_group_geo_stats(parquet_file)` | Per-row-group geo bbox statistics |
 | `ops.compression_stats(path)` | Per-column compression ratios |
 | `ops.explain_analyze(file_path, query=None)` | DuckDB EXPLAIN ANALYZE query plan |

@@ -74,7 +74,7 @@ geoparquet_io/
 | `gpio inspect` | head, layers, meta, stats, summary, tail | Inspect GeoParquet files and show metadata, previews, or statistics |
 | `gpio partition` | a5, admin, h3, kdtree, quadkey, s2, string | Commands for partitioning GeoParquet files |
 | `gpio pmtiles` | create, pyramid | PMTiles generation commands |
-| `gpio process` | aggregate, overview | Transform or reduce GeoParquet data (aggregate, overview, |
+| `gpio process` | aggregate, contour, overview, polygonize, simplify | Transform or reduce GeoParquet data (aggregate, overview, |
 | `gpio publish` | stac, upload | Commands for publishing GeoParquet data (STAC metadata, cloud uploads) |
 | `gpio skills` |  | List and access LLM skills for gpio |
 | `gpio sort` | column, hilbert, quadkey, str | Commands for sorting GeoParquet files |
