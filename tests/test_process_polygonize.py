@@ -193,6 +193,67 @@ class TestPolygonizeCrossValidation:
         assert np.array_equal(back, arr)
 
 
+class TestCliPolygonize:
+    """CLI surface: option validation is dependency-free."""
+
+    def _invoke(self, args):
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        return CliRunner().invoke(cli, ["process", "polygonize", *args])
+
+    def test_bad_values_option_is_a_clean_error(self, tmp_path):
+        result = self._invoke(
+            ["in.tif", str(tmp_path / "o.parquet"), "--values", "1,x"]
+        )
+        assert result.exit_code != 0
+        assert "x" in result.output
+        assert "Traceback" not in result.output
+
+    def test_missing_raster_extra_gives_install_hint(self, tmp_path, monkeypatch):
+        import sys as _sys
+
+        monkeypatch.setitem(_sys.modules, "rasterio", None)
+        monkeypatch.setitem(_sys.modules, "contourrs", None)
+        result = self._invoke(["in.tif", str(tmp_path / "o.parquet")])
+        assert result.exit_code != 0
+        assert "geoparquet-io[raster]" in result.output
+        assert "Traceback" not in result.output
+
+    @requires_contourrs
+    @requires_rasterio
+    def test_roundtrip_with_values_filter(self, tmp_path):
+        import numpy as np
+        import pyarrow.parquet as pq
+        import rasterio
+        from rasterio.transform import from_origin
+
+        arr = np.zeros((20, 20), dtype=np.uint8)
+        arr[2:8, 2:12] = 1
+        arr[12:18, 5:10] = 3
+        tif = tmp_path / "classes.tif"
+        with rasterio.open(
+            str(tif),
+            "w",
+            driver="GTiff",
+            height=20,
+            width=20,
+            count=1,
+            dtype="uint8",
+            crs="EPSG:32633",
+            transform=from_origin(100000, 200000, 10, 10),
+        ) as dst:
+            dst.write(arr, 1)
+        out = tmp_path / "p.parquet"
+        result = self._invoke(
+            [str(tif), str(out), "--values", "1,3", "--value-column", "class_id"]
+        )
+        assert result.exit_code == 0, result.output
+        table = pq.read_table(str(out))
+        assert set(table.column("class_id").to_pylist()) == {1.0, 3.0}
+
+
 @requires_contourrs
 @requires_rasterio
 class TestPolygonizeFile:

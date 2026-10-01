@@ -109,6 +109,78 @@ class TestContourArray:
         assert not field.metadata or b"ARROW:extension:name" not in field.metadata
 
 
+class TestCliContour:
+    """CLI surface: option validation is dependency-free."""
+
+    def _invoke(self, args):
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        return CliRunner().invoke(cli, ["process", "contour", *args])
+
+    def test_levels_and_interval_are_exclusive(self, tmp_path):
+        result = self._invoke(
+            ["in.tif", str(tmp_path / "o.parquet"), "--levels", "0,100", "--interval", "50"]
+        )
+        assert result.exit_code != 0
+        assert "--levels" in result.output and "--interval" in result.output
+
+    def test_one_of_levels_or_interval_required(self, tmp_path):
+        result = self._invoke(["in.tif", str(tmp_path / "o.parquet")])
+        assert result.exit_code != 0
+        assert "--levels" in result.output and "--interval" in result.output
+
+    def test_bad_levels_value_is_a_clean_error(self, tmp_path):
+        result = self._invoke(
+            ["in.tif", str(tmp_path / "o.parquet"), "--levels", "0,abc"]
+        )
+        assert result.exit_code != 0
+        assert "abc" in result.output
+        assert "Traceback" not in result.output
+
+    def test_missing_raster_extra_gives_install_hint(self, tmp_path, monkeypatch):
+        import sys as _sys
+
+        monkeypatch.setitem(_sys.modules, "rasterio", None)
+        monkeypatch.setitem(_sys.modules, "contourrs", None)
+        result = self._invoke(
+            ["in.tif", str(tmp_path / "o.parquet"), "--interval", "100"]
+        )
+        assert result.exit_code != 0
+        assert "geoparquet-io[raster]" in result.output
+        assert "Traceback" not in result.output
+
+    @requires_contourrs
+    @requires_rasterio
+    def test_roundtrip(self, tmp_path):
+        import numpy as np
+        import pyarrow.parquet as pq
+        import rasterio
+        from rasterio.transform import from_origin
+
+        dem = np.fromfunction(lambda y, x: 10.0 * x, (20, 20)).astype(np.float32)
+        tif = tmp_path / "dem.tif"
+        with rasterio.open(
+            str(tif),
+            "w",
+            driver="GTiff",
+            height=20,
+            width=20,
+            count=1,
+            dtype="float32",
+            crs="EPSG:32633",
+            transform=from_origin(100000, 200000, 10, 10),
+        ) as dst:
+            dst.write(dem, 1)
+        out = tmp_path / "c.parquet"
+        result = self._invoke([str(tif), str(out), "--interval", "50"])
+        assert result.exit_code == 0, result.output
+        table = pq.read_table(str(out))
+        assert table.num_rows >= 2
+        assert {"min", "max"}.issubset(table.column_names)
+
+
 @requires_contourrs
 @requires_rasterio
 class TestContourFile:
