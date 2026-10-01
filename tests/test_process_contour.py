@@ -254,3 +254,49 @@ class TestPythonApi:
         table = Table.contour(str(self._tif(tmp_path)), levels=[0.0, 50.0, 100.0])
         assert isinstance(table, Table)
         assert table.to_arrow().num_rows >= 1
+
+
+class TestContourColumnNameValidation:
+    def test_min_max_must_differ_and_not_shadow_geometry(self):
+        import numpy as np
+
+        from geoparquet_io.core.process.raster.contour import contour_array
+
+        dem = np.zeros((4, 4), dtype=np.float32)
+        with pytest.raises(InvalidParameterError, match="min_column|max_column"):
+            contour_array(dem, [0.0, 1.0], min_column="x", max_column="x")
+        with pytest.raises(InvalidParameterError, match="geometry"):
+            contour_array(dem, [0.0, 1.0], min_column="geometry")
+
+
+@requires_contourrs
+@requires_rasterio
+class TestContourNoMask:
+    def test_cli_exposes_no_mask(self, tmp_path):
+        import numpy as np
+        import rasterio
+        from click.testing import CliRunner
+        from rasterio.transform import from_origin
+
+        from geoparquet_io.cli.main import cli
+
+        dem = np.fromfunction(lambda y, x: 10.0 * x, (10, 10)).astype(np.float32)
+        tif = tmp_path / "dem.tif"
+        with rasterio.open(
+            str(tif),
+            "w",
+            driver="GTiff",
+            height=10,
+            width=10,
+            count=1,
+            dtype="float32",
+            nodata=0.0,
+            transform=from_origin(0, 100, 10, 10),
+        ) as dst:
+            dst.write(dem, 1)
+        out = tmp_path / "c.parquet"
+        result = CliRunner().invoke(
+            cli,
+            ["process", "contour", str(tif), str(out), "--interval", "30", "--no-mask"],
+        )
+        assert result.exit_code == 0, result.output

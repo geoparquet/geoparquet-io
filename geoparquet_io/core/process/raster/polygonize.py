@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import info
 from geoparquet_io.core.optional_deps import require_contourrs
 from geoparquet_io.core.process.raster.output import finalize_raster_table
@@ -31,6 +32,10 @@ def polygonize_array(
     ``values`` keeps only the listed class values (default: every class that
     is not nodata/masked). ``mask`` is True-where-valid.
     """
+    if value_column == "geometry":
+        raise InvalidParameterError(
+            "value_column", "collides with the output's geometry column name"
+        )
     contourrs = require_contourrs()
     table = contourrs.shapes_arrow(
         array, mask=mask, connectivity=connectivity, transform=transform, nodata=nodata

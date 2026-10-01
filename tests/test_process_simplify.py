@@ -56,7 +56,7 @@ class TestStripStaleGeometryStats:
         geo = _geo_block(crs={"id": {"authority": "EPSG", "code": 4326}})
         geo["columns"]["geometry"]["bbox"] = [0, 0, 1, 1]
         geo["columns"]["geometry"]["edges"] = "planar"
-        stripped = strip_stale_geometry_stats(geo)
+        stripped = strip_stale_geometry_stats(geo, "geometry")
         col = stripped["columns"]["geometry"]
         assert "geometry_types" not in col
         assert "bbox" not in col
@@ -65,8 +65,20 @@ class TestStripStaleGeometryStats:
         assert stripped["primary_column"] == "geometry"
 
     def test_tolerates_malformed_columns(self):
-        assert strip_stale_geometry_stats({"columns": None}) == {"columns": None}
-        assert strip_stale_geometry_stats({}) == {}
+        assert strip_stale_geometry_stats({"columns": None}, "geometry") == {"columns": None}
+        assert strip_stale_geometry_stats({}, "geometry") == {}
+
+    def test_only_the_named_column_is_stripped(self):
+        geo = {
+            "columns": {
+                "geometry": {"encoding": "WKB", "geometry_types": ["Polygon"]},
+                "geom2": {"encoding": "WKB", "geometry_types": ["Point"], "bbox": [0, 0, 1, 1]},
+            }
+        }
+        strip_stale_geometry_stats(geo, "geometry")
+        assert "geometry_types" not in geo["columns"]["geometry"]
+        assert geo["columns"]["geom2"]["geometry_types"] == ["Point"]
+        assert geo["columns"]["geom2"]["bbox"] == [0, 0, 1, 1]
 
 
 class TestValidation:
@@ -324,3 +336,99 @@ class TestPythonApi:
         assert isinstance(result, Table)
         out = shapely.from_wkb(result.to_arrow().column("geometry")[0].as_py())
         assert out.is_valid
+
+
+@requires_coarsen
+class TestMultiGeometryColumns:
+    """Simplify must strip/recompute only the simplified column's stats."""
+
+    def _two_geom_file(self, tmp_path):
+        shapely = _shapely()
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        g1 = shapely.Point(0, 0).buffer(1, quad_segs=32)
+        g2 = shapely.Point(5, 5).buffer(1, quad_segs=32)
+        geo = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {"encoding": "WKB"},
+                "geom2": {
+                    "encoding": "WKB",
+                    "geometry_types": ["Polygon"],
+                    "bbox": [4.0, 4.0, 6.0, 6.0],
+                },
+            },
+        }
+        table = pa.table(
+            {
+                "geometry": pa.array([shapely.to_wkb(g1)], pa.binary()),
+                "geom2": pa.array([shapely.to_wkb(g2)], pa.binary()),
+            }
+        ).replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+        src = tmp_path / "two.parquet"
+        write_geoparquet_table(table, str(src))
+        return src
+
+    def _geo_of(self, path):
+        return json.loads(pq.ParquetFile(str(path)).schema_arrow.metadata[b"geo"])
+
+    def test_secondary_stats_survive_simplifying_primary(self, tmp_path):
+        src = self._two_geom_file(tmp_path)
+        in_geo = self._geo_of(src)
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.1)
+        out_geo = self._geo_of(out)
+        assert (
+            out_geo["columns"]["geom2"]["geometry_types"]
+            == (in_geo["columns"]["geom2"]["geometry_types"])
+        )
+        assert out_geo["columns"]["geom2"]["bbox"] == in_geo["columns"]["geom2"]["bbox"]
+        assert "geometry_types" in out_geo["columns"]["geometry"]
+
+    def test_simplifying_secondary_keeps_primary_stats(self, tmp_path):
+        shapely = _shapely()
+        src = self._two_geom_file(tmp_path)
+        in_geo = self._geo_of(src)
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.1, geometry_column="geom2")
+        out_geo = self._geo_of(out)
+        assert out_geo["primary_column"] == "geometry"
+        assert out_geo["columns"]["geometry"]["bbox"] == (in_geo["columns"]["geometry"]["bbox"])
+        # the simplified secondary's stats were recomputed, and from fewer vertices
+        assert "geometry_types" in out_geo["columns"]["geom2"]
+        result = pq.read_table(str(out))
+        geom2 = shapely.from_wkb(result.column("geom2")[0].as_py())
+        assert shapely.get_num_coordinates(geom2) < 33
+
+
+class TestCleanErrors:
+    """The commonest user errors must not print tracebacks."""
+
+    def test_missing_input_file_cli(self, tmp_path):
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "process",
+                "simplify",
+                str(tmp_path / "nope.parquet"),
+                str(tmp_path / "o.parquet"),
+                "--tolerance",
+                "1",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower() or "nope.parquet" in result.output
+        assert "Traceback" not in result.output
+
+    @requires_coarsen
+    def test_corrupt_wkb_is_a_clean_error(self):
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        table = pa.table({"geometry": pa.array([b"\x00\x00not wkb"], pa.binary())})
+        with pytest.raises(GeoParquetError, match="WKB"):
+            simplify_table(table, 0.1)

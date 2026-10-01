@@ -716,6 +716,11 @@ def process_polygonize(
     help="Nodata value to exclude (default: the raster's own nodata tag).",
 )
 @click.option(
+    "--no-mask",
+    is_flag=True,
+    help="Ignore the raster's mask/nodata entirely and contour every pixel.",
+)
+@click.option(
     "--min-column",
     default="min",
     show_default=True,
@@ -742,6 +747,7 @@ def process_contour(
     base,
     band,
     nodata,
+    no_mask,
     min_column,
     max_column,
     row_group_size,
@@ -779,6 +785,7 @@ def process_contour(
                 base=base,
                 band=band,
                 nodata=nodata,
+                use_mask=not no_mask,
                 min_column=min_column,
                 max_column=max_column,
                 compression=compression.upper(),

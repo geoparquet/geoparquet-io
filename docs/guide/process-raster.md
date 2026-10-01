@@ -72,7 +72,7 @@ uv tool install geoparquet-io --with contourrs --with rasterio
 | `--band` | 1 | Raster band to trace |
 | `--values` | all | Comma-separated class values to keep |
 | `--value-column` | `value` | Name of the class attribute column |
-| `--nodata` | file's tag | Nodata value to exclude |
+| `--nodata` | file's tag | Nodata value to exclude. An explicit value *replaces* the tag: pixels equal to a wrong tag become data again |
 | `--no-mask` | off | Ignore the raster's mask/nodata entirely |
 
 The traced polygons come out with counterclockwise exterior rings, as the
@@ -110,7 +110,8 @@ reproduces the input array pixel for pixel.
 | `--levels a,b,c` | — | Explicit break values (mutually exclusive with `--interval`) |
 | `--base` | 0.0 | Offset for `--interval` |
 | `--band` | 1 | Raster band to contour |
-| `--nodata` | file's tag | Nodata value to exclude |
+| `--nodata` | file's tag | Nodata value to exclude. An explicit value *replaces* the tag |
+| `--no-mask` | off | Ignore the raster's mask/nodata entirely |
 | `--min-column` / `--max-column` | `min` / `max` | Names for each band's break attributes |
 
 Each output feature is one band polygon attributed with its `[min, max)`

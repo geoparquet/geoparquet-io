@@ -343,3 +343,64 @@ class TestPythonApi:
         table = Table.polygonize(str(self._tif(tmp_path)))
         assert isinstance(table, Table)
         assert table.to_arrow().num_rows >= 2
+
+
+class TestColumnNameValidation:
+    def test_value_column_may_not_shadow_geometry(self):
+        import numpy as np
+
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.process.raster.polygonize import polygonize_array
+
+        with pytest.raises(InvalidParameterError, match="geometry"):
+            polygonize_array(np.zeros((4, 4), dtype=np.uint8), value_column="geometry")
+
+
+@requires_contourrs
+@requires_rasterio
+class TestNodataOverride:
+    def test_override_releases_the_tags_pixels(self, tmp_path):
+        """--nodata N replaces the file's tag: the tag's pixels are data again."""
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+
+        from geoparquet_io.core.process.raster.polygonize import polygonize_file
+
+        arr = np.zeros((10, 10), dtype=np.uint8)
+        arr[2:6, 2:6] = 7  # real data that HAPPENS to equal the (wrong) tag
+        arr[8:10, 8:10] = 1  # what the user says nodata actually is
+        tif = tmp_path / "c.tif"
+        with rasterio.open(
+            str(tif),
+            "w",
+            driver="GTiff",
+            height=10,
+            width=10,
+            count=1,
+            dtype="uint8",
+            nodata=7,
+            transform=from_origin(0, 100, 10, 10),
+        ) as dst:
+            dst.write(arr, 1)
+
+        out = tmp_path / "out.parquet"
+        polygonize_file(str(tif), str(out), nodata=1)
+        import pyarrow.parquet as pq
+
+        values = set(pq.read_table(str(out)).column("value").to_pylist())
+        assert 7.0 in values  # the tag's pixels are kept under the override
+        assert 1.0 not in values  # the override is excluded
+
+    def test_missing_raster_is_a_clean_error(self, tmp_path):
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        result = CliRunner().invoke(
+            cli,
+            ["process", "polygonize", str(tmp_path / "nope.tif"), str(tmp_path / "o.parquet")],
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "nope.tif" in result.output

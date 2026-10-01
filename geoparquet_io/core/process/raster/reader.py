@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError, InvalidParameterError
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.optional_deps import require_rasterio
 
@@ -36,9 +36,20 @@ def read_band(
     nodata: float | None = None,
     use_mask: bool = True,
 ) -> RasterBand:
-    """Read ``band`` of ``raster_path``; ``nodata`` overrides the file's own."""
+    """Read ``band`` of ``raster_path``; ``nodata`` overrides the file's own.
+
+    An explicit ``nodata`` REPLACES the file's tag: when the raster's mask
+    derives solely from that tag, the mask is dropped too, so the tag's
+    pixels become data again instead of being excluded behind the override's
+    back. A mask with other sources (alpha band, sidecar/internal mask) is
+    kept as-is.
+    """
     rasterio = require_rasterio()
-    with rasterio.open(raster_path) as src:
+    try:
+        src_ctx = rasterio.open(raster_path)
+    except (OSError, rasterio.errors.RasterioIOError) as e:
+        raise FileNotFoundGeoParquetError(raster_path, str(e)) from e
+    with src_ctx as src:
         if band < 1 or band > src.count:
             raise InvalidParameterError(
                 "band", f"raster has {src.count} band(s), asked for band {band}"
@@ -47,9 +58,15 @@ def read_band(
         effective_nodata = nodata if nodata is not None else src.nodata
         mask = None
         if use_mask:
-            valid = src.read_masks(band) != 0
-            if not valid.all():
-                mask = valid
+            flags = src.mask_flag_enums[band - 1]
+            nodata_tag_only = all(
+                flag in (rasterio.enums.MaskFlags.nodata, rasterio.enums.MaskFlags.all_valid)
+                for flag in flags
+            )
+            if not (nodata is not None and nodata_tag_only):
+                valid = src.read_masks(band) != 0
+                if not valid.all():
+                    mask = valid
         crs = None
         if src.crs is not None:
             from pyproj import CRS

@@ -75,6 +75,13 @@ def contour_array(
     Each output row is one band polygon attributed with the band's
     ``[min, max)`` break values.
     """
+    if min_column == max_column:
+        raise InvalidParameterError(
+            "min_column", f"min_column and max_column are both '{min_column}'"
+        )
+    for name, value in (("min_column", min_column), ("max_column", max_column)):
+        if value == "geometry":
+            raise InvalidParameterError(name, "collides with the output's geometry column name")
     levels = resolve_levels(levels, None, 0.0, 0.0, 0.0)  # validates shape
     contourrs = require_contourrs()
     table = contourrs.contours_arrow(

@@ -13,11 +13,16 @@ Docs: docs/guide/process-simplify.md
 from __future__ import annotations
 
 import json
+import os
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import (
+    FileNotFoundGeoParquetError,
+    GeoParquetError,
+    InvalidParameterError,
+)
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
@@ -28,20 +33,23 @@ from geoparquet_io.core.write_funnels import write_geoparquet_table
 _COVERAGE_WARN_ROWS = 1_000_000
 
 
-def strip_stale_geometry_stats(geo_meta: dict) -> dict:
-    """Drop per-column ``geometry_types`` and ``bbox`` from a ``geo`` dict.
+def strip_stale_geometry_stats(geo_meta: dict, geometry_column: str) -> dict:
+    """Drop ``geometry_types`` and ``bbox`` from ONE column of a ``geo`` dict.
 
     A carried block's stats win over recomputation in the write funnel, so a
     transform that changes geometry must remove them or the output lies.
-    Everything else (``crs``, ``edges``, ``covering``, ...) is kept. Mutates
-    and returns ``geo_meta``; tolerates malformed shapes.
+    Only the transformed column is stripped: another geometry column's stats
+    are still true, and the funnel carries (never recomputes) columns other
+    than the one being written. Everything else (``crs``, ``edges``,
+    ``covering``, ...) is kept. Mutates and returns ``geo_meta``; tolerates
+    malformed shapes.
     """
     columns = geo_meta.get("columns")
     if isinstance(columns, dict):
-        for col_meta in columns.values():
-            if isinstance(col_meta, dict):
-                col_meta.pop("geometry_types", None)
-                col_meta.pop("bbox", None)
+        col_meta = columns.get(geometry_column)
+        if isinstance(col_meta, dict):
+            col_meta.pop("geometry_types", None)
+            col_meta.pop("bbox", None)
     return geo_meta
 
 
@@ -86,7 +94,10 @@ def _simplify_values(
     idx = [i for i, v in enumerate(values) if v is not None]
     if not idx:
         return list(values), 0
-    geoms = shapely.from_wkb(np.array([values[i] for i in idx], dtype=object))
+    try:
+        geoms = shapely.from_wkb(np.array([values[i] for i in idx], dtype=object))
+    except Exception as e:
+        raise GeoParquetError(f"could not parse a WKB geometry in the input: {e}") from e
     if coverage:
         out = coarsen.coverage_simplify(
             geoms, tolerance, simplify_boundary=simplify_boundary, threads=threads
@@ -157,13 +168,13 @@ def _refresh_bbox_covering(table: pa.Table, geom_col: str) -> pa.Table:
     )
 
 
-def _with_stripped_geo(table: pa.Table) -> pa.Table:
-    """Strip stale per-column stats from the table's carried ``geo`` block."""
+def _with_stripped_geo(table: pa.Table, geometry_column: str) -> pa.Table:
+    """Strip the simplified column's stale stats from the carried ``geo`` block."""
     metadata = dict(table.schema.metadata or {})
     geo = sanitized_carried_geo(metadata)
     if not geo:
         return table
-    strip_stale_geometry_stats(geo)
+    strip_stale_geometry_stats(geo, geometry_column)
     metadata[b"geo"] = json.dumps(geo).encode("utf-8")
     return table.replace_schema_metadata(metadata)
 
@@ -222,7 +233,7 @@ def simplify_table(
         table.schema.field(geom_col),
         pa.chunked_array(chunks, type=column.type),
     )
-    result = _with_stripped_geo(result)
+    result = _with_stripped_geo(result, geom_col)
     return _refresh_bbox_covering(result, geom_col)
 
 
@@ -244,6 +255,8 @@ def simplify_file(
     verbose: bool = False,
 ) -> None:
     """Simplify a GeoParquet file's geometries and write the result."""
+    if "://" not in input_parquet and not os.path.exists(input_parquet):
+        raise FileNotFoundGeoParquetError(input_parquet)
     table = pq.read_table(input_parquet)
     result = simplify_table(
         table,
