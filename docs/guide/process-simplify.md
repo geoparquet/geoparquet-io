@@ -67,6 +67,11 @@ else in gpio works as before.
 | `--geometry-column` | auto | Defaults to the file's primary geometry column |
 | `--drop-empty` | off | Drop rows whose geometry is empty after simplification |
 
+Native **GeoParquet 2.0 inputs** are supported: the geometry arrives as a
+geoarrow WKB extension column, is simplified on its raw WKB, and the write
+preserves the 2.0 declaration (native geometry types and stats) — via the
+in-memory path, since the streaming writer covers plain-WKB 1.x outputs.
+
 ## What happens to the metadata
 
 Simplification changes the geometry, so the stats that describe it are
