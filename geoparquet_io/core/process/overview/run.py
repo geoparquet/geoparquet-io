@@ -262,6 +262,7 @@ def create_overviews(
     force: bool = False,
     verbose: bool = False,
     show_sql: bool = False,
+    memory_limit: str | None = None,
 ) -> list[tuple[int | str, str]]:
     """Build coarser overview levels from an aggregate GeoParquet file.
 
@@ -282,13 +283,15 @@ def create_overviews(
         force: Overwrite existing overview output files.
         verbose: Enable verbose debug logging.
         show_sql: Log the rollup SQL.
+        memory_limit: DuckDB memory limit for the rollups (e.g. "8GB").
+            Default: half the process's memory ceiling.
 
     Returns:
         List of ``(level, output_path)`` for every overview written,
         coarse to fine.
     """
     configure_verbose(verbose)
-    with aggregate_connection(input_parquet, verbose) as (con, relation):
+    with aggregate_connection(input_parquet, verbose, memory_limit) as (con, relation):
         info = detect_aggregate_info(con, relation, cell_column, scheme)
         target_levels = _plan_levels(
             con, relation, info, levels, max_tile_kb, bytes_per_cell, verbose
@@ -393,6 +396,7 @@ def create_overview_file(
     force: bool = False,
     verbose: bool = False,
     show_sql: bool = False,
+    memory_limit: str | None = None,
 ) -> str:
     """Build the level ladder and assemble it into one overview GeoParquet.
 
@@ -427,7 +431,7 @@ def create_overview_file(
     gsds_wanted = _parse_explicit_gsd(explicit_gsd)
     _refuse_overview_out(input_parquet, overview_out, force)
 
-    with aggregate_connection(input_parquet, verbose) as (con, relation):
+    with aggregate_connection(input_parquet, verbose, memory_limit) as (con, relation):
         info = detect_aggregate_info(con, relation, cell_column, scheme)
         target_levels = _plan_levels(
             con, relation, info, levels, max_tile_kb, bytes_per_cell, verbose
