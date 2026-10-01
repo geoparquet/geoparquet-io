@@ -22,7 +22,7 @@ from geoparquet_io.core.column_selection import (
     reject_blank_column_entries,
     split_column_list,
 )
-from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
 from geoparquet_io.core.crs_utils import get_crs_display_name
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
@@ -44,6 +44,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.file_utils import (
+    get_all_parquet_files,
     get_first_parquet_file,
     handle_output_overwrite,
     is_partition_path,
@@ -61,6 +62,7 @@ from geoparquet_io.core.geometry_detection import (
 )
 from geoparquet_io.core.geometry_repair import repair_query_geometry
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.reader import build_read_parquet_expr, require_parquet_files
 from geoparquet_io.core.remote import (
     _sanitize_url_for_logging,
@@ -1078,6 +1080,57 @@ TO {sql_path(output_parquet)}
     info(f"\n-- Note: Using {compression_desc} compression")
 
 
+def _advise_spatial_stats_on_merge(
+    input_parquet: str,
+    selected_columns: list[str],
+    bbox_col: str | None,
+    geoparquet_version: str | None,
+) -> None:
+    """Tell a merge that will not prune that ``--geoparquet-version 2.0`` would.
+
+    A merged file is the one later reads window into again and again, so it is
+    the write that benefits most from per-row-group spatial statistics -- and
+    the one where their absence costs most. 219 per-country inputs concatenated
+    without them made every downstream ``--bbox`` shard job read 12,764 of
+    12,764 row groups, twelve times over a 90 GB file (#1151). Writing the merge
+    as 2.0 in the first place is one pass; the alternative the reporting
+    pipeline was paying for is a second whole-file ``gpio convert`` afterwards.
+
+    ``sort hilbert`` already names the flag when sorting to 1.1 buys no
+    pushdown, and #1151 asks the merge path to advertise the same way. It is an
+    advisory, not a default: promoting a 1.x merge to 2.0 unasked would hand the
+    caller a file older readers cannot open.
+
+    Scoped to the case that is actually unprunable. A single-file extract is not
+    a merge. The versions :func:`should_skip_bbox` says need no bbox covering are
+    exactly the versions that carry their own per-row-group spatial statistics,
+    so they are already prunable. And a *surviving* bbox covering column carries
+    ordinary Parquet min/max per row group, which prunes too -- #1151 accepts
+    either -- so it only speaks up when neither is there.
+    """
+    if is_remote_url(input_parquet) or not is_partition_path(input_parquet):
+        return
+    if bbox_col and bbox_col in selected_columns:
+        return
+
+    effective_version = (
+        resolve_output_geoparquet_version(geoparquet_version, input_file=input_parquet) or "1.1"
+    )
+    if should_skip_bbox(effective_version):
+        return
+
+    inputs = get_all_parquet_files(input_parquet)
+    if len(inputs) < 2:
+        return
+
+    warn(
+        f"Merging {len(inputs):,} files to GeoParquet {effective_version} with no bbox covering "
+        "column: the merged file carries no per-row-group spatial statistics, so a later --bbox "
+        "read has to scan every row group. Consider --geoparquet-version 2.0 to enable native "
+        "geo_bbox row group statistics."
+    )
+
+
 def _execute_extraction(
     input_parquet: str,
     output_parquet: str,
@@ -1399,6 +1452,9 @@ def _extract_impl(
             compression_level,
         )
     else:
+        _advise_spatial_stats_on_merge(
+            input_parquet, selected_columns, bbox_col, geoparquet_version
+        )
         _execute_extraction(
             input_parquet,
             output_parquet,

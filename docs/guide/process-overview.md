@@ -209,6 +209,7 @@ zooms; tylertoo derives zooms from `gsd` otherwise.
 | `--overview-out` | off | Also assemble the ladder into one levelled GeoParquet at this path |
 | `--cell-detail` | 4 | Cell width in GSD units at the level serving it (with `--overview-out`) |
 | `--gsd` | measured | Explicit GSDs in metres, coarse to fine, one per built level plus the base (with `--overview-out`) |
+| `--write-memory` | half the memory ceiling | DuckDB memory limit for the rollups (e.g. `8GB`). The default follows the container or Slurm job cap when that is lower than RAM |
 
 Compression (`--compression`, `--compression-level`), `--geoparquet-version`, `--verbose`, and `--show-sql` behave as elsewhere in gpio.
 

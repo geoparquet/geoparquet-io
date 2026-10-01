@@ -1023,7 +1023,7 @@ stats = table.partition_by_admin('output/', vecorel=True)
 
 ### Aggregation Methods {#aggregation}
 
-#### `aggregate_a5(resolution, metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None)`
+#### `aggregate_a5(resolution, metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None, memory_limit=None)`
 
 Aggregate features into A5 grid cells with per-cell statistics for low-zoom visualization.
 
@@ -1073,10 +1073,11 @@ result.write('cells_stats.parquet')
 | `metric_nodata` | str | None | NoData sentinel value(s) mapped to NULL in metric columns, e.g. `"-999"` or `"-999,-9999"` (`"nan"` matches NaN) |
 | `bucket_point` | str | `"geometry"` | Keying point source: `"geometry"` (centroid), `"bbox"` (bbox covering column center, skips reading geometry), or a point column name |
 | `bbox_column` | str | None | Bbox covering column for `bucket_point="bbox"` (auto-detected when omitted) |
+| `memory_limit` | str | None | DuckDB memory limit for the aggregation, e.g. `"8GB"`. Default: half the process's memory ceiling (RAM, or the container/Slurm cap when lower) |
 
 Every output row carries `a5_cell` (UBIGINT) as the bucket identifier.
 
-#### `aggregate_h3(resolution, metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None)`
+#### `aggregate_h3(resolution, metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None, memory_limit=None)`
 
 Aggregate features into H3 hexagonal grid cells. Same options as `aggregate_a5`,
 but the resolution range is **0–15** and the bucket id column is `h3_cell` (a
@@ -1095,7 +1096,7 @@ result.write('cells.parquet')
 
 Every output row carries `h3_cell` (string) as the bucket identifier.
 
-#### `aggregate_admin(level='country', metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None)`
+#### `aggregate_admin(level='country', metric=None, breakdown=None, breakdown_limit=20, out_geometry='polygon', where=None, metric_nodata=None, bucket_point='geometry', bbox_column=None, breakdown_metric=None, memory_limit=None)`
 
 Aggregate features into administrative regions (Overture Maps) with per-region statistics.
 
@@ -1126,13 +1127,14 @@ result.write('by_region.parquet')
 | `breakdown_metric` | str | None | What each pivot holds: `None`/`'count'`, or `'sum:col'` / `'min:col'` / `'max:col'` (see `--breakdown-metric`) |
 | `out_geometry` | str | `"polygon"` | Geometry per region: `"polygon"`, `"centroid"`, `"both"`, or `"none"` |
 | `where` | str | None | DuckDB WHERE clause filtering input rows before aggregation |
+| `memory_limit` | str | None | DuckDB memory limit for the aggregation, e.g. `"8GB"`. Default: half the process's memory ceiling (RAM, or the container/Slurm cap when lower) |
 
 Every output row carries `admin_code` and `admin_name` bucket identifiers. Features outside all regions go into an `unassigned` bucket.
 
 !!! note "Known limitation"
     `admin_name` currently equals the ISO code (same as `admin_code`).
 
-#### `overview(level, cell_column=None)`
+#### `overview(level, cell_column=None, scheme=None, memory_limit=None)`
 
 Roll an aggregate table up to a coarser overview level by true cell hierarchy
 (`a5_cell_to_parent` / `h3_cell_to_parent`; admin region codes collapse to
@@ -1157,6 +1159,7 @@ by_country.write('by_region_country.parquet')
 | `level` | int or str | required | Coarser grid resolution, or `"country"` for admin |
 | `cell_column` | str | None | Cell id column when auto-detection fails |
 | `scheme` | str | None | Bucketing scheme (`a5`/`h3`/`admin`) when inference is ambiguous, e.g. H3 ids stored as integers |
+| `memory_limit` | str | None | DuckDB memory limit for the rollup, e.g. `"8GB"`. Default: half the process's memory ceiling (RAM, or the container/Slurm cap when lower) |
 
 `count`, `sum_*`, `min_*`, `max_*`, and breakdown `count_*` columns roll up
 exactly; `avg_*` is count-weighted (exact when the metric had no NULLs). For

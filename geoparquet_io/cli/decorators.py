@@ -817,7 +817,23 @@ def grid_aggregate_options(func):
         help="Target features per cell when using --auto (default: 10000).",
     )(func)
     func = click.option("--auto", is_flag=True, help="Auto-select resolution from data size.")(func)
+    func = aggregate_memory_option(func)
     return func
+
+
+#: ``--write-memory`` for the aggregate/overview commands. The value bounds the
+#: scan, the spatial join and the GROUP BY -- where these commands spend their
+#: memory -- rather than a streaming write, so the wording says so (#1179).
+_AGGREGATE_MEMORY_HELP = (
+    "Memory limit for the aggregation (e.g., '512MB', '2GB'). "
+    "Default: 50% of the memory ceiling -- physical RAM, or the container or "
+    "Slurm job cap when lower."
+)
+
+
+def aggregate_memory_option(func):
+    """Add --write-memory to a command whose DuckDB work is a query, not a write."""
+    return write_memory_option(func, help=_AGGREGATE_MEMORY_HELP)
 
 
 def partition_options(func):

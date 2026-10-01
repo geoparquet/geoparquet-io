@@ -11532,6 +11532,22 @@
          "required": false,
          "secondary_opts": [],
          "type": "text"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "write_memory",
+         "nargs": 1,
+         "opts": [
+          "--write-memory"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
         }
        ]
       },
@@ -11807,6 +11823,22 @@
          "nargs": 1,
          "opts": [
           "--where"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "write_memory",
+         "nargs": 1,
+         "opts": [
+          "--write-memory"
          ],
          "param_type": "Option",
          "required": false,
@@ -12140,6 +12172,22 @@
          "required": false,
          "secondary_opts": [],
          "type": "text"
+        },
+        {
+         "default": "None",
+         "hidden": false,
+         "is_flag": false,
+         "metavar": null,
+         "multiple": false,
+         "name": "write_memory",
+         "nargs": 1,
+         "opts": [
+          "--write-memory"
+         ],
+         "param_type": "Option",
+         "required": false,
+         "secondary_opts": [],
+         "type": "text"
         }
        ]
       }
@@ -12412,6 +12460,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "write_memory",
+       "nargs": 1,
+       "opts": [
+        "--write-memory"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       }
      ]
     }

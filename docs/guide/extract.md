@@ -205,6 +205,70 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
     query — on the order of 30% of a plain copy for a few million rows. Use
     `--verbose` to see when it runs.
 
+## Merging Many Files Into One
+
+A glob or directory input merges every matching file into a single output. That
+merged file is usually the one later reads window into over and over, so it is
+worth writing it with per-row-group spatial statistics — otherwise every later
+`--bbox` read has to scan all of it.
+
+`--geoparquet-version 2.0` does that in the *same* pass as the merge, using
+Parquet's native geo types and their per-row-group `geo_bbox` statistics:
+
+=== "CLI"
+
+    ```bash
+    # Two per-region inputs, standing in for a staging directory
+    mkdir -p staged
+    gpio extract data.parquet staged/west.parquet --bbox -180,-90,0,90
+    gpio extract data.parquet staged/east.parquet --bbox 0,-90,180,90
+
+    # Merge them and write GeoParquet 2.0 with native geo statistics — one pass
+    gpio extract "staged/*.parquet" merged.parquet --geoparquet-version 2.0
+
+    # Every row group now declares its own bounds
+    gpio inspect meta merged.parquet --geo-stats
+    ```
+
+=== "Python"
+
+    ```python
+    import os
+    import geoparquet_io as gpio
+
+    os.makedirs('staged', exist_ok=True)
+    gpio.read('data.parquet').write('staged/west.parquet')
+
+    # read() takes a directory (not a glob) and merges it
+    gpio.read('staged').write('merged.parquet', geoparquet_version='2.0')
+    ```
+
+!!! note "Use the CLI for a large merge"
+    The Table API materializes the whole merge in memory. The CLI streams it
+    through DuckDB under `--write-memory`, which is what a merge measured in
+    tens of gigabytes needs. The CLI also accepts a glob; `gpio.read()` takes a
+    single file or a directory.
+
+Without it, a merge of GeoParquet 1.x inputs writes 1.1, and if the inputs carry
+no `bbox` covering column the merged file has no spatial statistics at all.
+`extract` says so when that happens:
+
+```text
+Merging 219 files to GeoParquet 1.1 with no bbox covering column: the merged
+file carries no per-row-group spatial statistics, so a later --bbox read has to
+scan every row group. Consider --geoparquet-version 2.0 to enable native
+geo_bbox row group statistics.
+```
+
+The alternative — merging first and converting the whole file to 2.0 afterwards
+— reads and rewrites every byte a second time. On a 108 GB merge that second
+pass cost about 30 minutes and a full extra write.
+
+!!! note "The default version is unchanged"
+    A merge of 1.x inputs still writes 1.1 unless you ask for 2.0. GeoParquet
+    2.0 needs a reader that understands Parquet's native geo types, so `extract`
+    points at the flag rather than switching for you.
+
 ### Geometry Filter
 
 Filter features by intersection with any geometry, not just rectangles.
