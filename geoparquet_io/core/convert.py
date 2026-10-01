@@ -822,39 +822,33 @@ def _build_csv_read_expr(input_url: str, delimiter: str | None, encoding: str | 
     return f"read_csv_auto({sql_path(input_url)}, {size_options})"
 
 
-def _get_csv_columns(con, csv_read):
-    """Get column names from CSV, return (columns_list, col_names_lower_dict)."""
-    columns = con.execute(f"SELECT * FROM {csv_read} LIMIT 0").description
-    col_names_lower = {col[0].lower(): col[0] for col in columns}
-    return columns, col_names_lower
+def _require_column(parameter, name, columns):
+    """Raise unless ``name`` is a column, suggesting the nearest names if not."""
+    import difflib
+
+    actual_cols = [col[0] for col in columns]
+    if name in actual_cols:
+        return
+    close = difflib.get_close_matches(name, actual_cols, n=3, cutoff=0.6)
+    close += [c for c in actual_cols if c.lower() == name.lower() and c not in close]
+    hint = f" Did you mean {', '.join(repr(c) for c in close)}?" if close else ""
+    raise InvalidParameterError(
+        parameter,
+        f"column '{name}' not found in input.{hint} Available columns: {', '.join(actual_cols)}",
+    )
 
 
 def _validate_explicit_wkt_column(wkt_column, columns):
     """Validate explicitly specified WKT column exists."""
-    actual_cols = [col[0] for col in columns]
-    if wkt_column not in actual_cols:
-        raise InvalidParameterError(
-            "wkt_column",
-            f"column '{wkt_column}' not found in CSV. Available columns: {', '.join(actual_cols)}",
-        )
+    _require_column("wkt_column", wkt_column, columns)
 
 
 def _validate_explicit_latlon_columns(lat_column, lon_column, columns):
     """Validate explicitly specified lat/lon columns exist."""
     if not (lat_column and lon_column):
         raise InvalidParameterError("lat_column/lon_column", "both must be specified together")
-
-    actual_cols = [col[0] for col in columns]
-    if lat_column not in actual_cols:
-        raise InvalidParameterError(
-            "lat_column",
-            f"column '{lat_column}' not found in CSV. Available columns: {', '.join(actual_cols)}",
-        )
-    if lon_column not in actual_cols:
-        raise InvalidParameterError(
-            "lon_column",
-            f"column '{lon_column}' not found in CSV. Available columns: {', '.join(actual_cols)}",
-        )
+    _require_column("lat_column", lat_column, columns)
+    _require_column("lon_column", lon_column, columns)
 
 
 def _try_detect_wkt_column(con, csv_read, col_names_lower):
@@ -878,19 +872,102 @@ def _try_detect_wkt_column(con, csv_read, col_names_lower):
     return None
 
 
-def _try_detect_latlon_columns(col_names_lower):
-    """Try to auto-detect lat/lon columns. Returns (lat_col, lon_col) or (None, None)."""
-    lat_candidates = ["lat", "latitude", "y"]
-    lon_candidates = ["lon", "lng", "long", "longitude", "x"]
+_LAT_TOKENS = ("lat", "latitude")
+_LON_TOKENS = ("lon", "lng", "long", "longitude")
+_NUMERIC_TYPES = frozenset(
+    {
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+        "UBIGINT",
+        "UHUGEINT",
+        "FLOAT",
+        "DOUBLE",
+        "DECIMAL",
+    }
+)
 
-    found_lat = next(
-        (col_names_lower[name] for name in lat_candidates if name in col_names_lower), None
-    )
-    found_lon = next(
-        (col_names_lower[name] for name in lon_candidates if name in col_names_lower), None
-    )
 
-    return found_lat, found_lon
+def _name_tokens(name):
+    """Lower-cased words of a column name: ``decimalLatitude`` -> decimal, latitude."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
+    return [token for token in re.split(r"[^0-9a-z]+", spaced.lower()) if token]
+
+
+def _axis_affix(name, axis_tokens):
+    """The name's words with its one axis word blanked out, or None.
+
+    ``pickup_latitude`` and ``pickup_longitude`` share the affix
+    ``("pickup", "*")``, which is what pairs them. A name holding no axis word,
+    or more than one (``lat_lon``), has no affix.
+    """
+    tokens = _name_tokens(name)
+    hits = [i for i, token in enumerate(tokens) if token in axis_tokens]
+    if len(hits) != 1:
+        return None
+    tokens[hits[0]] = "*"
+    return tuple(tokens)
+
+
+def _exact_latlon_pair(columns):
+    """A lat/lon pair named exactly (``lat``/``LONGITUDE``/...), else a y/x pair."""
+    by_lower = {}
+    for col in columns:
+        by_lower.setdefault(col[0].lower(), col[0])
+    for lat_names, lon_names in ((_LAT_TOKENS, _LON_TOKENS), (("y",), ("x",))):
+        lat = next((by_lower[n] for n in lat_names if n in by_lower), None)
+        lon = next((by_lower[n] for n in lon_names if n in by_lower), None)
+        if lat and lon:
+            return lat, lon
+    return None, None
+
+
+def _affixed_latlon_pairs(columns):
+    """Numeric lat/lon columns whose names match apart from the axis word."""
+    lats, lons = {}, {}
+    for name, col_type, *_ in columns:
+        if str(col_type).split("(")[0] not in _NUMERIC_TYPES:
+            continue
+        for axis_tokens, found in ((_LAT_TOKENS, lats), (_LON_TOKENS, lons)):
+            affix = _axis_affix(name, axis_tokens)
+            if affix is not None:
+                found.setdefault(affix, name)
+    return [(lat, lons[affix]) for affix, lat in lats.items() if affix in lons]
+
+
+def _try_detect_latlon_columns(columns):
+    """Auto-detect lat/lon columns from a result description.
+
+    Exact names (``lat``, ``Longitude``, ``x``/``y``) are taken as before, at
+    any type. Failing those, a pair of *numeric* columns that carry a latitude
+    and a longitude word and are otherwise named alike -- ``decimalLatitude``/
+    ``decimalLongitude``, ``lat_dd``/``lon_dd``, ``location.lat``/
+    ``location.lon`` -- is taken. Words are matched whole, so ``GCLONG01`` is
+    not a longitude. Several such pairs (pickup and dropoff) take the first
+    and say which others were passed over.
+
+    Returns:
+        (lat_col, lon_col), or (None, None).
+    """
+    lat, lon = _exact_latlon_pair(columns)
+    if lat:
+        return lat, lon
+
+    pairs = _affixed_latlon_pairs(columns)
+    if not pairs:
+        return None, None
+    if len(pairs) > 1:
+        others = ", ".join(f"{a}/{b}" for a, b in pairs[1:])
+        warn(
+            f"Several lat/lon column pairs found; using {pairs[0][0]}/{pairs[0][1]} "
+            f"(also: {others}). Pass --lat-column/--lon-column to choose another."
+        )
+    return pairs[0]
 
 
 def _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, csv_read):
@@ -911,8 +988,9 @@ def _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, csv_re
     return None
 
 
-def _auto_detect_geometry(con, csv_read, col_names_lower, verbose):
+def _auto_detect_geometry(con, csv_read, columns, verbose):
     """Auto-detect geometry columns. Returns geom_info dict or None."""
+    col_names_lower = {col[0].lower(): col[0] for col in columns}
     # Try WKT first
     wkt_col = _try_detect_wkt_column(con, csv_read, col_names_lower)
     if wkt_col:
@@ -921,7 +999,7 @@ def _auto_detect_geometry(con, csv_read, col_names_lower, verbose):
         return {"type": "wkt", "wkt_column": wkt_col, "csv_read": csv_read}
 
     # Try lat/lon
-    found_lat, found_lon = _try_detect_latlon_columns(col_names_lower)
+    found_lat, found_lon = _try_detect_latlon_columns(columns)
     if found_lat and found_lon:
         if verbose:
             debug(f"Auto-detected lat/lon columns: {found_lat}, {found_lon}")
@@ -935,6 +1013,22 @@ def _auto_detect_geometry(con, csv_read, col_names_lower, verbose):
     return None
 
 
+def _detect_tabular_geometry(con, read_expr, wkt_column, lat_column, lon_column, verbose):
+    """Find WKT or lat/lon geometry in any table ``read_expr`` reads.
+
+    Explicit columns win; otherwise a WKT column, then a lat/lon pair, is
+    auto-detected. ``read_expr`` becomes ``geom_info["csv_read"]``, which every
+    later query of the tabular path reads from -- a CSV reader or, for a plain
+    Parquet file with coordinate columns, ``read_parquet``.
+    """
+    columns = con.execute(f"SELECT * FROM {read_expr} LIMIT 0").description
+    if verbose:
+        debug(f"Detected columns: {', '.join([col[0] for col in columns])}")
+
+    geom_info = _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, read_expr)
+    return geom_info or _auto_detect_geometry(con, read_expr, columns, verbose)
+
+
 def _detect_csv_geometry_column(
     con, input_file, delimiter, wkt_column, lat_column, lon_column, verbose, encoding=None
 ):
@@ -946,27 +1040,43 @@ def _detect_csv_geometry_column(
     """
     _prepare_csv_encoding(con, encoding)
     csv_read = _build_csv_read_expr(input_file, delimiter, encoding=encoding)
-    columns, col_names_lower = _get_csv_columns(con, csv_read)
 
     if verbose:
         delim_msg = delimiter if delimiter else "auto-detected"
         debug(f"Reading CSV/TSV with delimiter: {delim_msg}")
-        debug(f"Detected columns: {', '.join([col[0] for col in columns])}")
 
-    # Try explicit columns first
-    geom_info = _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, csv_read)
-    if geom_info:
-        return geom_info
-
-    # Auto-detect
-    geom_info = _auto_detect_geometry(con, csv_read, col_names_lower, verbose)
-    if geom_info:
-        return geom_info
-
-    # No geometry found
-    if verbose:
+    geom_info = _detect_tabular_geometry(con, csv_read, wkt_column, lat_column, lon_column, verbose)
+    if geom_info is None and verbose:
         debug("No geometry columns found in CSV/TSV file")
-    return None
+    return geom_info
+
+
+def _detect_parquet_tabular_geometry(
+    con, input_url, input_file, wkt_column, lat_column, lon_column, verbose
+):
+    """WKT or lat/lon geometry for a Parquet file that has no geometry column.
+
+    A plain Parquet file of observations (``LAT``/``LON`` columns, no ``geo``
+    metadata) converts the way the same data as CSV would. Explicit columns
+    are honoured only when the file has no geometry column of its own -- two
+    geometries would collide on the output's ``geometry`` -- and auto-detection
+    only runs when there is nothing better to use.
+
+    Returns:
+        geom_info for the tabular path, or None to take the spatial path.
+    """
+    explicit = bool(wkt_column or lat_column or lon_column)
+    existing = detect_all_geometry_columns(input_file, verbose=verbose)["primary"]
+    if existing:
+        if explicit:
+            raise InvalidParameterError(
+                "lat_column/lon_column" if (lat_column or lon_column) else "wkt_column",
+                f"input already has a geometry column ('{existing}'); "
+                "--lat-column/--lon-column/--wkt-column only apply to a Parquet file without one",
+            )
+        return None
+    read_expr = f"read_parquet({sql_path(input_url)})"
+    return _detect_tabular_geometry(con, read_expr, wkt_column, lat_column, lon_column, verbose)
 
 
 def _check_coord_range(axis, parameter, low, high, measured_min, measured_max):
@@ -1505,7 +1615,35 @@ def _convert_csv_path(
     encoding=None,
     force_2d=False,
 ):
-    """Handle CSV/TSV conversion path. Returns SQL query.
+    """Handle CSV/TSV conversion path. Returns SQL query."""
+    geom_info = _detect_csv_geometry_column(
+        con, input_file, delimiter, wkt_column, lat_column, lon_column, verbose, encoding=encoding
+    )
+    if geom_info is None:
+        return None, None
+    return _convert_tabular_path(
+        con,
+        geom_info,
+        crs,
+        skip_hilbert,
+        skip_invalid,
+        verbose,
+        geoparquet_version=geoparquet_version,
+        force_2d=force_2d,
+    )
+
+
+def _convert_tabular_path(
+    con,
+    geom_info,
+    crs,
+    skip_hilbert,
+    skip_invalid,
+    verbose,
+    geoparquet_version=None,
+    force_2d=False,
+):
+    """Build the conversion query for WKT or lat/lon columns (CSV or plain Parquet).
 
     When skip_invalid=True, materializes parsed geometries into a temp table
     to avoid re-evaluating TRY(ST_GeomFromText(...)) in downstream metadata
@@ -1516,11 +1654,6 @@ def _convert_csv_path(
     # Determine if bbox should be skipped for this version
     skip_bbox = should_skip_bbox(geoparquet_version)
 
-    geom_info = _detect_csv_geometry_column(
-        con, input_file, delimiter, wkt_column, lat_column, lon_column, verbose, encoding=encoding
-    )
-    if geom_info is None:
-        return None, None
     # A WKT column can carry Z/M; lat/lon points are 2D by construction.
     geom_info["force_2d"] = force_2d
 
@@ -1938,17 +2071,27 @@ def read_spatial_to_arrow(
     detected_crs = None
 
     try:
+        # A plain Parquet file with WKT or lat/lon columns reads like a CSV.
+        parquet_tabular = (
+            _detect_parquet_tabular_geometry(
+                con, input_url, input_file, wkt_column, lat_column, lon_column, verbose
+            )
+            if is_parquet
+            else None
+        )
+        tabular = is_csv or parquet_tabular is not None
+
         if user_specified_crs:
-            if not is_csv:
+            if not tabular:
                 raise InvalidParameterError(
                     "crs",
-                    f"only valid for CSV/TSV files. "
+                    f"only valid for CSV/TSV files and Parquet lat/lon or WKT columns. "
                     f"For {os.path.splitext(input_file)[1]} files, CRS is read from the file metadata.",
                 )
             detected_crs = parse_crs_string_to_projjson(crs, con)
             if verbose:
                 debug(f"Using user-specified CRS: {crs}")
-        elif is_csv:
+        elif tabular:
             # CSV with default CRS - detected_crs stays None
             pass
         elif is_parquet:
@@ -1983,7 +2126,11 @@ def read_spatial_to_arrow(
             detected_crs = horizontal_crs(detected_crs)
 
         # Build and execute query
-        if is_csv:
+        if parquet_tabular is not None:
+            arrow_table = _tabular_geometry_to_arrow(
+                con, parquet_tabular, skip_invalid, verbose, force_2d=force_2d
+            )
+        elif is_csv:
             arrow_table = _read_csv_to_arrow(
                 con,
                 input_url,
@@ -2084,6 +2231,11 @@ def _read_csv_to_arrow(
     if geom_info is None:
         warn("No geometry columns found in CSV/TSV. Reading as plain table.")
         return None
+    return _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=force_2d)
+
+
+def _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=False):
+    """Arrow table with WKB geometry built from WKT or lat/lon columns."""
     geom_info["force_2d"] = force_2d
 
     # Validate geometry
@@ -2435,14 +2587,19 @@ def _determine_effective_crs(
     con,
     verbose: bool,
 ) -> dict | None:
-    """Determine the effective CRS for output based on input file type."""
+    """Determine the effective CRS for output based on input file type.
+
+    ``is_csv`` is true for every tabular source whose geometry gpio builds
+    from WKT or lat/lon columns -- a CSV, or a plain Parquet file routed down
+    the same path -- since only those take a user-supplied ``--crs``.
+    """
     user_specified_crs = crs != "EPSG:4326"
 
     if user_specified_crs:
         if not is_csv:
             raise InvalidParameterError(
                 "crs",
-                f"only valid for CSV/TSV files. "
+                f"only valid for CSV/TSV files and Parquet lat/lon or WKT columns. "
                 f"For {os.path.splitext(input_file)[1]} files, CRS is read from the file metadata.",
             )
         if verbose:
@@ -2646,7 +2803,18 @@ def convert_to_geoparquet(
             else:
                 debug("Could not detect input GeoParquet version; using writer default")
 
-        effective_crs = _determine_effective_crs(input_file, crs, is_csv, is_parquet, con, verbose)
+        # A plain Parquet file with WKT or lat/lon columns converts like a CSV
+        # would: same detection, same query, same user-supplied CRS.
+        parquet_tabular = (
+            _detect_parquet_tabular_geometry(
+                con, input_url, input_file, wkt_column, lat_column, lon_column, verbose
+            )
+            if is_parquet
+            else None
+        )
+        tabular = is_csv or parquet_tabular is not None
+
+        effective_crs = _determine_effective_crs(input_file, crs, tabular, is_parquet, con, verbose)
         if force_2d:
             # Same as the Arrow path: no Z, no vertical CRS component.
             effective_crs = horizontal_crs(effective_crs)
@@ -2664,7 +2832,19 @@ def convert_to_geoparquet(
         def _convert_once(force_linearize):
             output_version = geoparquet_version
             output_crs = effective_crs
-            if is_csv:
+            if parquet_tabular is not None:
+                query, bbox_covering_column = _convert_tabular_path(
+                    con,
+                    parquet_tabular,
+                    crs,
+                    skip_hilbert,
+                    skip_invalid,
+                    verbose,
+                    geoparquet_version=geoparquet_version,
+                    force_2d=force_2d,
+                )
+                geometry_info = None
+            elif is_csv:
                 query, bbox_covering_column = _convert_csv_path(
                     con,
                     input_url,
@@ -2703,8 +2883,11 @@ def convert_to_geoparquet(
                 if not allow_no_geometry:
                     raise GeoParquetError(
                         "No geometry column detected in input file. "
-                        "Expected column named 'geom', 'geometry', 'wkb_geometry', or 'shape'. "
-                        "Use --allow-no-geometry to convert as plain Parquet without GeoParquet metadata."
+                        "Expected a geometry column (e.g. 'geom', 'geometry', 'wkb_geometry', "
+                        "'shape'), a WKT column, or latitude/longitude columns. "
+                        "Name the columns with --lat-column/--lon-column or --wkt-column, "
+                        "or use --allow-no-geometry to convert as plain Parquet without "
+                        "GeoParquet metadata."
                     )
 
                 # Error if Hilbert sorting was requested but no geometry found
@@ -2736,7 +2919,7 @@ def convert_to_geoparquet(
             # ST_MakeValid never expands a geometry's envelope, so any bbox already
             # computed upstream stays correct.
             if has_geometry:
-                geom_col = "geometry" if is_csv else geometry_info["primary"]
+                geom_col = "geometry" if tabular else geometry_info["primary"]
                 query = repair_query_geometry(con, query, geom_col, repair=repair_geometry)
 
                 # This convert rebuilds the output's `geo` block from the converted
@@ -2784,7 +2967,7 @@ def convert_to_geoparquet(
                 geometry_info=geometry_info,
                 # Geography inputs: DuckDB demotes GEOGRAPHY to GEOMETRY and drops
                 # the edges declaration; the shared write path restores it (#588).
-                input_file=input_file if is_parquet and has_geometry else None,
+                input_file=input_file if is_parquet and has_geometry and not tabular else None,
                 memory_limit=memory_limit,
             )
             return has_geometry
@@ -2792,7 +2975,7 @@ def convert_to_geoparquet(
         try:
             has_geometry = _convert_once(force_linearize=False)
         except Exception as e:
-            if is_csv or not _is_linearizable_curve_error(
+            if tabular or not _is_linearizable_curve_error(
                 e, is_parquet=is_parquet, linearize_curves=linearize_curves
             ):
                 raise
