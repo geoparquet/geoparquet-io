@@ -1627,6 +1627,7 @@ class Table:
         preserve_topology: bool = True,
         simplify_boundary: bool = True,
         threads: int | None = None,
+        drop_empty: bool = False,
     ) -> Table:
         """
         Simplify geometries with coarsen (GEOS-identical Rust).
@@ -1642,6 +1643,8 @@ class Table:
             simplify_boundary: Also simplify the coverage's outer boundary
                 (coverage mode)
             threads: Worker threads for coarsen (default: library decides)
+            drop_empty: Drop rows whose geometry is empty after
+                simplification (default: keep and warn)
 
         Returns:
             New Table with simplified geometries and refreshed metadata
@@ -1656,6 +1659,7 @@ class Table:
             simplify_boundary=simplify_boundary,
             threads=threads,
             geometry_column=self._geometry_column,
+            drop_empty=drop_empty,
         )
         return self._wrap(result, self._geometry_column)
 

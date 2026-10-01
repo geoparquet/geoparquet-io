@@ -528,6 +528,11 @@ def process_aggregate_admin(
     default=None,
     help="Geometry column to simplify (default: the file's primary geometry column).",
 )
+@click.option(
+    "--drop-empty",
+    is_flag=True,
+    help="Drop rows whose geometry is empty after simplification (default: keep and warn).",
+)
 @row_group_options
 @compression_options
 @geoparquet_version_option
@@ -544,6 +549,7 @@ def process_simplify(
     simplify_boundary,
     threads,
     geometry_column,
+    drop_empty,
     row_group_size,
     row_group_size_mb,
     compression,
@@ -581,6 +587,7 @@ def process_simplify(
                 simplify_boundary=True if simplify_boundary is None else simplify_boundary,
                 threads=threads,
                 geometry_column=geometry_column,
+                drop_empty=drop_empty,
                 compression=compression.upper(),
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,

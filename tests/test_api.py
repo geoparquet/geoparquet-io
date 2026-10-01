@@ -669,10 +669,16 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             simplify_boundary=False,
             threads=2,
             geometry_column="geometry",
+            drop_empty=True,
             verbose=True,
         ),
         table_call=lambda t: t.simplify(
-            0.5, coverage=True, preserve_topology=False, simplify_boundary=False, threads=2
+            0.5,
+            coverage=True,
+            preserve_topology=False,
+            simplify_boundary=False,
+            threads=2,
+            drop_empty=True,
         ),
         expected={
             "tolerance": 0.5,
@@ -681,6 +687,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             "simplify_boundary": False,
             "threads": 2,
             "geometry_column": "geometry",
+            "drop_empty": True,
         },
         ops_only_expected={"verbose": True},
         ops_module=core_simplify,

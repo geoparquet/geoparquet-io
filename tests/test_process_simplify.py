@@ -556,3 +556,57 @@ print(json.dumps({{"writes": len(peaks), "growth": growth, "one_group": one_grou
         out = tmp_path / "out.parquet"
         simplify_file(str(src), str(out), tolerance=0.0, geoparquet_version="2.0")
         assert pq.ParquetFile(str(out)).metadata.num_rows == 1
+
+
+@requires_coarsen
+class TestDropEmpty:
+    """--drop-empty (#1199): rows whose geometry is empty after
+    simplification are dropped; nulls are kept either way."""
+
+    def _table_with_empty(self):
+        shapely = _shapely()
+        square = shapely.box(0, 0, 1, 1)
+        empty = shapely.Polygon()
+        return _wkb_table([square, empty, None], names=["a", "b", "c"])
+
+    def test_default_keeps_empties(self):
+        result = simplify_table(self._table_with_empty(), 0.1)
+        assert result.num_rows == 3
+
+    def test_drop_empty_removes_only_empties(self):
+        shapely = _shapely()
+        result = simplify_table(self._table_with_empty(), 0.1, drop_empty=True)
+        assert result.column("name").to_pylist() == ["a", "c"]
+        assert result.column("geometry")[1].as_py() is None  # null survives
+        out = shapely.from_wkb(result.column("geometry")[0].as_py())
+        assert not out.is_empty
+
+    def test_streaming_file_honors_drop_empty(self, tmp_path):
+        shapely = _shapely()
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        geoms = [shapely.box(i, 0, i + 1, 1) for i in range(6)]
+        geoms[2] = shapely.Polygon()  # empty in batch 1
+        geoms[5] = shapely.Polygon()  # empty in batch 2
+        src = tmp_path / "src.parquet"
+        write_geoparquet_table(_wkb_table(geoms), str(src), row_group_rows=3)
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.1, drop_empty=True)
+        assert pq.ParquetFile(str(out)).metadata.num_rows == 4
+
+    def test_cli_flag(self, tmp_path):
+        shapely = _shapely()
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        src = tmp_path / "src.parquet"
+        write_geoparquet_table(_wkb_table([shapely.box(0, 0, 1, 1), shapely.Polygon()]), str(src))
+        out = tmp_path / "out.parquet"
+        result = CliRunner().invoke(
+            cli,
+            ["process", "simplify", str(src), str(out), "--tolerance", "0.1", "--drop-empty"],
+        )
+        assert result.exit_code == 0, result.output
+        assert pq.ParquetFile(str(out)).metadata.num_rows == 1
