@@ -33,6 +33,10 @@ A5_SCHEME = GridScheme(
     latlng_template="a5_cell_to_lonlat({cell})",
     # a5_cell_to_lonlat returns [lon, lat].
     centroid_wkb_template="ST_AsWKB(ST_Point({ll}[1], {ll}[2]))",
+    # A5 is equal-area by construction: every cell at a resolution covers the
+    # same number of square metres, so the denominator of `pct_cell` is one
+    # constant and does not need the cell id (#1181).
+    cell_area_template="a5_cell_area({res})",
 )
 
 

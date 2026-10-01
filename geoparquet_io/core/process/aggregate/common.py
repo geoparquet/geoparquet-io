@@ -12,7 +12,21 @@ from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import warn
 
+# Plain SQL aggregates: a metric named this way is `FUNC(column)`, and the
+# output column `<func>_<column>` rolls up to a coarser overview level by the
+# same name (see `overview/detect._classify_columns`).
 VALID_METRIC_FUNCS = {"sum", "avg", "min", "max"}
+
+# Percent of the bucket's own area covered by a per-feature area column (#1181).
+# Not a SQL aggregate: it is `100 * SUM(column) / <cell area>`, so it needs a
+# denominator only a grid scheme can supply, and its output column is
+# `pct_<column>` rather than `pct_cell_<column>`.
+PCT_CELL_FUNC = "pct_cell"
+PCT_CELL_PREFIX = "pct_"
+
+# Everything `--metric` accepts.
+VALID_METRIC_SPECS = VALID_METRIC_FUNCS | {PCT_CELL_FUNC}
+
 VALID_OUT_GEOMETRY = {"polygon", "centroid", "both", "none"}
 
 # Strict SQL-safe numeric literal: ASCII digits only (float() also accepts
@@ -100,6 +114,11 @@ def parse_metrics(metric_str: str | None, param: str = "metric") -> list[MetricS
     Accepts comma-separated ``func:column`` pairs. A bare ``column`` with no
     ``func:`` prefix defaults to ``sum`` (a total is the common viz intent).
     ``param`` names the flag in error messages.
+
+    ``pct_cell`` is the one entry that is not a SQL aggregate: it names a
+    per-feature area column and its output is ``pct_<column>``, the percentage
+    of the bucket's own area that column adds up to (#1181). Only the metric
+    builder knows the denominator, so the spec carries just the column.
     """
     if not metric_str:
         return []
@@ -115,16 +134,62 @@ def parse_metrics(metric_str: str | None, param: str = "metric") -> list[MetricS
         else:
             func = "sum"
             column = entry
-        if func not in VALID_METRIC_FUNCS:
+        if func not in VALID_METRIC_SPECS:
             raise InvalidParameterError(
                 param,
                 f"Unknown metric function '{func}'. "
-                f"Valid functions: {', '.join(sorted(VALID_METRIC_FUNCS))}",
+                f"Valid functions: {', '.join(sorted(VALID_METRIC_SPECS))}",
             )
         if not column:
             raise InvalidParameterError(param, f"Metric '{entry}' is missing a column name")
-        specs.append(MetricSpec(func=func, column=column, output_name=f"{func}_{column}"))
+        specs.append(
+            MetricSpec(func=func, column=column, output_name=metric_output_name(func, column))
+        )
     return specs
+
+
+def metric_output_name(func: str, column: str) -> str:
+    """The output column one metric writes.
+
+    ``<func>_<column>`` for the SQL aggregates, ``pct_<column>`` for
+    ``pct_cell`` -- the name a reader sees is what the number means, and
+    ``pct_cell_area`` would read as a column called ``cell_area``.
+    """
+    if func == PCT_CELL_FUNC:
+        return f"{PCT_CELL_PREFIX}{column}"
+    return f"{func}_{column}"
+
+
+def expand_pct_cell_metrics(metrics: list[MetricSpec]) -> list[MetricSpec]:
+    """Add the ``sum_<column>`` every ``pct_cell:<column>`` needs behind it.
+
+    A percentage cannot be rolled up to a coarser overview level on its own:
+    averaging children's percentages is wrong whenever they hold different
+    totals, and the right answer -- the parent's total over the *parent's* cell
+    area -- needs the total. Rather than reject a ``pct_cell`` request that
+    forgot ``sum:``, the sum is emitted alongside it: it costs one DOUBLE per
+    cell over a column already being read, it is the number a consumer wants
+    anyway, and it makes every gpio aggregate rollable by construction
+    (``overview/detect`` drops a ``pct_`` column that has no sum behind it).
+
+    The sum is inserted immediately before its percentage, so the output reads
+    ``sum_area, pct_area``, and it reuses the percentage's own spelling of the
+    column so the two are one read rather than two.
+    """
+    out: list[MetricSpec] = []
+    have = {(_fold(m.column), m.func) for m in metrics}
+    for spec in metrics:
+        if spec.func == PCT_CELL_FUNC and (_fold(spec.column), "sum") not in have:
+            out.append(
+                MetricSpec(
+                    func="sum",
+                    column=spec.column,
+                    output_name=metric_output_name("sum", spec.column),
+                )
+            )
+            have.add((_fold(spec.column), "sum"))
+        out.append(spec)
+    return out
 
 
 def parse_breakdown_metric(spec_str: str | None) -> MetricSpec | None:
@@ -139,6 +204,14 @@ def parse_breakdown_metric(spec_str: str | None) -> MetricSpec | None:
     """
     if spec_str is None or not spec_str.strip() or spec_str.strip().lower() == "count":
         return None
+    if spec_str.strip().lower().startswith(f"{PCT_CELL_FUNC}:"):
+        raise InvalidParameterError(
+            "breakdown-metric",
+            "'pct_cell' cannot be a breakdown metric: a per-category percentage "
+            "of the cell has no per-category total to roll up from in overviews. "
+            "Use --metric pct_cell:<column> for a per-cell percentage, or sum, min "
+            "or max as the breakdown metric.",
+        )
     specs = parse_metrics(spec_str, param="breakdown-metric")
     if len(specs) != 1:
         raise InvalidParameterError(
@@ -240,8 +313,13 @@ def validate_metric_nodata(
 
     Sentinels also apply to a ``--breakdown-metric`` column, so that counts as a
     metric for the "sentinels need something to affect" check (#1100).
+
+    This is the one choke point both aggregation engines take their metric list
+    from, so it is also where a ``pct_cell`` request grows the ``sum`` behind it
+    (see :func:`expand_pct_cell_metrics`) -- column validation, the narrowed
+    source projection (#1179) and the SELECT builder then all see it.
     """
-    metrics = parse_metrics(metric)
+    metrics = expand_pct_cell_metrics(parse_metrics(metric))
     nodata_values = parse_metric_nodata(metric_nodata)
     if nodata_values and not metrics and breakdown_metric is None:
         raise InvalidParameterError(
@@ -330,10 +408,59 @@ def _aggregated_column_expr(
     return _nodata_wrapped_column(column, nodata_values, col_type)
 
 
+_PCT_CELL_NO_AREA = (
+    "'{func}:{column}' needs a cell area to be a percentage of, which only a "
+    "grid bucketing has. Use it with a5 or h3 aggregation (a5 cells are "
+    "equal-area per resolution, h3 cells are measured individually); for admin "
+    "regions, aggregate the area with 'sum:{column}' and divide by the region's "
+    "own area downstream."
+)
+
+
+def reject_pct_cell_metrics(metrics: list[MetricSpec]) -> None:
+    """Refuse ``pct_cell`` for a bucketing with no cell area, before any setup.
+
+    The SELECT builder refuses it too, but only once the admin boundary dataset
+    has been resolved; this lets the admin engine fail on the flag alone.
+    """
+    for m in metrics:
+        if m.func == PCT_CELL_FUNC:
+            raise InvalidParameterError(
+                "metric", _PCT_CELL_NO_AREA.format(func=PCT_CELL_FUNC, column=m.column)
+            )
+
+
+def _pct_cell_expr(
+    m: MetricSpec,
+    col_expr: str,
+    cell_area_expr: str | None,
+    column_types: dict[str, str] | None,
+) -> str:
+    """``100 * SUM(column) / <cell area>`` for one ``pct_cell`` metric.
+
+    ``cell_area_expr`` is the bucket's area in the same unit the column is in
+    (square metres, by the flag's documented contract) -- a resolution constant
+    for an equal-area grid, the cell's own measured area otherwise. None means
+    the bucketing has no cell area at all, which ``pct_cell`` cannot be defined
+    against; ``NULLIF(..., 0)`` keeps a zero or NULL denominator from raising.
+    """
+    if cell_area_expr is None:
+        reject_pct_cell_metrics([m])
+    col_type = (column_types or {}).get(m.column)
+    if col_type is not None and not _is_numeric_sql_type(col_type):
+        raise InvalidParameterError(
+            "metric",
+            f"'{PCT_CELL_FUNC}:{m.column}' needs a numeric per-feature area column; "
+            f"column '{m.column}' has type {col_type}",
+        )
+    return f"100.0 * SUM({col_expr}) / NULLIF({cell_area_expr}, 0)"
+
+
 def build_metric_select(
     metrics: list[MetricSpec],
     nodata_values: list[str] | None = None,
     column_types: dict[str, str] | None = None,
+    cell_area_expr: str | None = None,
 ) -> str:
     """Build the comma-joined aggregate expressions for the SELECT (no leading comma).
 
@@ -344,11 +471,20 @@ def build_metric_select(
     ``column_types`` (from :func:`resolve_metric_column_types`) lets sentinel
     literals be cast to the column's actual type and rejects sentinel use on
     non-numeric metric columns up-front instead of mid-query.
+
+    ``cell_area_expr`` is what a ``pct_cell`` metric divides by (see
+    :func:`geoparquet_io.core.process.aggregate.grid_common.cell_area_expr`);
+    it may reference the GROUP BY key. Leaving it None refuses ``pct_cell``,
+    which is what the admin engine wants.
     """
     parts = []
     for m in metrics:
         col_expr = _aggregated_column_expr(m.column, nodata_values, column_types)
-        parts.append(f"{m.func.upper()}({col_expr}) AS {quote_identifier(m.output_name)}")
+        if m.func == PCT_CELL_FUNC:
+            expr = _pct_cell_expr(m, col_expr, cell_area_expr, column_types)
+        else:
+            expr = f"{m.func.upper()}({col_expr})"
+        parts.append(f"{expr} AS {quote_identifier(m.output_name)}")
     return ", ".join(parts)
 
 
