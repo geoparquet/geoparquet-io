@@ -957,33 +957,111 @@ def _axis_affix(name, axis_tokens):
     return tuple(tokens)
 
 
-def _exact_latlon_pair(columns):
-    """A lat/lon pair named exactly (``lat``/``LONGITUDE``/...), else a y/x pair."""
+def _coordinate_castable(col_type):
+    """Whether a column's type could hold a coordinate.
+
+    Numeric types obviously can. VARCHAR is kept because a CSV reader hands
+    back text for a column it could not type, and the query CASTs it -- that
+    is how ``lat``/``lon`` in a quoted CSV has always worked. Everything else
+    (BOOLEAN, TIMESTAMP, a list or struct) cannot be a coordinate, and used to
+    be "detected" here only to fail later as a raw DuckDB cast error.
+    """
+    base = str(col_type).split("(")[0]
+    return base in _NUMERIC_TYPES or base == "VARCHAR"
+
+
+def _exact_latlon_pair(columns, allow_xy=True):
+    """A lat/lon pair named exactly (``lat``/``LONGITUDE``/...), else a y/x pair.
+
+    ``allow_xy`` gates the bare ``y``/``x`` fallback. It is a CSV idiom -- a
+    spreadsheet of points often labels its columns that way -- and it stays on
+    for CSV, where it has always applied. It is off for Parquet: there, ``x``
+    and ``y`` are far more often a grid index, a pixel coordinate or a model
+    feature than a position, and reading them as a geometry would silently
+    invent one and consume both columns where the file previously converted as
+    non-spatial.
+    """
     by_lower = {}
     for col in columns:
-        by_lower.setdefault(col[0].lower(), col[0])
-    for lat_names, lon_names in ((_LAT_TOKENS, _LON_TOKENS), (("y",), ("x",))):
+        by_lower.setdefault(col[0].lower(), col)
+    candidates = [(_LAT_TOKENS, _LON_TOKENS)]
+    if allow_xy:
+        candidates.append((("y",), ("x",)))
+    for lat_names, lon_names in candidates:
         lat = next((by_lower[n] for n in lat_names if n in by_lower), None)
         lon = next((by_lower[n] for n in lon_names if n in by_lower), None)
-        if lat and lon:
-            return lat, lon
+        if lat and lon and _coordinate_castable(lat[1]) and _coordinate_castable(lon[1]):
+            return lat[0], lon[0]
     return None, None
 
 
+#: Words that mark a column as describing a coordinate rather than being one:
+#: an uncertainty, a bound, a step. ``latitude_error`` is not a latitude, and
+#: ``lat_min`` is a bbox edge. A pair whose affix carries one of these is never
+#: auto-detected -- see :func:`_affixed_latlon_pairs`.
+_NOT_A_COORDINATE = frozenset(
+    {
+        "err",
+        "error",
+        "sigma",
+        "stddev",
+        "std",
+        "sd",
+        "uncertainty",
+        "unc",
+        "variance",
+        "var",
+        "rms",
+        "precision",
+        "accuracy",
+        "tolerance",
+        "min",
+        "max",
+        "delta",
+        "diff",
+        "offset",
+        "range",
+        "step",
+        "resolution",
+    }
+)
+
+
 def _affixed_latlon_pairs(columns):
-    """Numeric lat/lon columns whose names match apart from the axis word."""
-    lats, lons = {}, {}
-    for name, col_type, *_ in columns:
-        if str(col_type).split("(")[0] not in _NUMERIC_TYPES:
+    """Numeric lat/lon columns whose names match apart from the axis word.
+
+    A pair whose shared affix contains a word from :data:`_NOT_A_COORDINATE` is
+    dropped outright rather than ranked low. Taking the first pair in column
+    order let ``latitude_error``/``longitude_error`` outrank
+    ``decimalLatitude``/``decimalLongitude`` purely because the file declared
+    it first, putting the point off West Africa instead of in Portland; and a
+    bbox table of ``lat_min``/``lat_max``/``lon_min``/``lon_max`` silently
+    became its own corner (review of #1181). Both now either pick the real
+    coordinates or, when every candidate is a descriptor, detect nothing --
+    "no geometry column detected" with ``--lat-column`` to override is a far
+    better answer than a plausible point in the wrong place.
+
+    What remains is ordered plainest affix first, so a bare
+    ``latitude``/``longitude`` beats ``pickup_latitude``/``pickup_longitude``
+    wherever each sits in the file. Two equally plain pairs -- pickup beside
+    dropoff -- are a genuine tie with no better answer, so those keep column
+    order and the warning naming the alternatives.
+    """
+    lats, lons, order = {}, {}, {}
+    for index, (name, col_type, *_) in enumerate(columns):
+        if not _coordinate_castable(col_type) or str(col_type).split("(")[0] == "VARCHAR":
             continue
         for axis_tokens, found in ((_LAT_TOKENS, lats), (_LON_TOKENS, lons)):
             affix = _axis_affix(name, axis_tokens)
-            if affix is not None:
-                found.setdefault(affix, name)
-    return [(lat, lons[affix]) for affix, lat in lats.items() if affix in lons]
+            if affix is not None and affix not in found:
+                found[affix] = name
+                order.setdefault(affix, index)
+    matched = [affix for affix in lats if affix in lons and not (set(affix) & _NOT_A_COORDINATE)]
+    matched.sort(key=lambda affix: (len(affix), order[affix]))
+    return [(lats[affix], lons[affix]) for affix in matched]
 
 
-def _try_detect_latlon_columns(columns):
+def _try_detect_latlon_columns(columns, allow_xy=True):
     """Auto-detect lat/lon columns from a result description.
 
     Exact names (``lat``, ``Longitude``, ``x``/``y``) are taken as before, at
@@ -997,7 +1075,7 @@ def _try_detect_latlon_columns(columns):
     Returns:
         (lat_col, lon_col), or (None, None).
     """
-    lat, lon = _exact_latlon_pair(columns)
+    lat, lon = _exact_latlon_pair(columns, allow_xy=allow_xy)
     if lat:
         return lat, lon
 
@@ -1031,7 +1109,7 @@ def _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, csv_re
     return None
 
 
-def _auto_detect_geometry(con, csv_read, columns, verbose):
+def _auto_detect_geometry(con, csv_read, columns, verbose, allow_xy=True):
     """Auto-detect geometry columns. Returns geom_info dict or None."""
     col_names_lower = {col[0].lower(): col[0] for col in columns}
     # Try WKT first
@@ -1042,7 +1120,7 @@ def _auto_detect_geometry(con, csv_read, columns, verbose):
         return {"type": "wkt", "wkt_column": wkt_col, "csv_read": csv_read}
 
     # Try lat/lon
-    found_lat, found_lon = _try_detect_latlon_columns(columns)
+    found_lat, found_lon = _try_detect_latlon_columns(columns, allow_xy=allow_xy)
     if found_lat and found_lon:
         if verbose:
             debug(f"Auto-detected lat/lon columns: {found_lat}, {found_lon}")
@@ -1056,13 +1134,18 @@ def _auto_detect_geometry(con, csv_read, columns, verbose):
     return None
 
 
-def _detect_tabular_geometry(con, read_expr, wkt_column, lat_column, lon_column, verbose):
+def _detect_tabular_geometry(
+    con, read_expr, wkt_column, lat_column, lon_column, verbose, allow_xy=True
+):
     """Find WKT or lat/lon geometry in any table ``read_expr`` reads.
 
     Explicit columns win; otherwise a WKT column, then a lat/lon pair, is
     auto-detected. ``read_expr`` becomes ``geom_info["csv_read"]``, which every
     later query of the tabular path reads from -- a CSV reader or, for a plain
     Parquet file with coordinate columns, ``read_parquet``.
+
+    ``allow_xy`` is passed down to the bare ``y``/``x`` fallback; see
+    :func:`_exact_latlon_pair` for why Parquet turns it off.
     """
     columns = con.execute(f"SELECT * FROM {read_expr} LIMIT 0").description
     if verbose:
@@ -1073,7 +1156,7 @@ def _detect_tabular_geometry(con, read_expr, wkt_column, lat_column, lon_column,
     # second bind of the source.
     geom_info = _handle_explicit_columns(
         wkt_column, lat_column, lon_column, columns, read_expr
-    ) or _auto_detect_geometry(con, read_expr, columns, verbose)
+    ) or _auto_detect_geometry(con, read_expr, columns, verbose, allow_xy=allow_xy)
     if geom_info:
         geom_info["source_columns"] = [col[0] for col in columns]
     return geom_info
@@ -1099,6 +1182,29 @@ def _detect_csv_geometry_column(
     if geom_info is None and verbose:
         debug("No geometry columns found in CSV/TSV file")
     return geom_info
+
+
+def _carried_geometry_name(parquet_geometry):
+    """The geometry column a Parquet file already carries, by any evidence.
+
+    ``primary`` alone is not enough to answer "does this file have a geometry
+    of its own". A ``geo`` block can list ``columns`` without a usable
+    ``primary_column``, and a file plainly carrying WKB then reads as
+    geometry-less: its real geometry is demoted to a blob while a synthesised
+    lat/lon one takes the ``geometry`` name, and ``--lat-column`` is accepted
+    for a file the contract says should refuse it (review of #1181).
+
+    Returns the name to report in that refusal, or None when the file really
+    has no geometry.
+    """
+    if not parquet_geometry:
+        return None
+    if parquet_geometry.get("primary"):
+        return parquet_geometry["primary"]
+    secondary = parquet_geometry.get("secondary") or []
+    if secondary:
+        return secondary[0]
+    return next(iter(parquet_geometry.get("metadata") or {}), None)
 
 
 def _detect_parquet_tabular_geometry(
@@ -1129,7 +1235,9 @@ def _detect_parquet_tabular_geometry(
             )
         return None
     read_expr = f"read_parquet({sql_path(input_url)})"
-    return _detect_tabular_geometry(con, read_expr, wkt_column, lat_column, lon_column, verbose)
+    return _detect_tabular_geometry(
+        con, read_expr, wkt_column, lat_column, lon_column, verbose, allow_xy=False
+    )
 
 
 def _check_coord_range(axis, parameter, low, high, measured_min, measured_max):
@@ -2269,7 +2377,7 @@ def read_spatial_to_arrow(
         # A plain Parquet file with WKT or lat/lon columns reads like a CSV.
         # Detected once and handed on, so neither path re-reads the footer.
         parquet_geom_column = (
-            _detect_geometry_column(con, input_file, verbose, is_parquet=True)
+            _carried_geometry_name(detect_all_geometry_columns(input_file, verbose))
             if is_parquet
             else None
         )
@@ -3018,7 +3126,7 @@ def convert_to_geoparquet(
             _detect_parquet_tabular_geometry(
                 con,
                 input_url,
-                parquet_geometry["primary"],
+                _carried_geometry_name(parquet_geometry),
                 wkt_column,
                 lat_column,
                 lon_column,

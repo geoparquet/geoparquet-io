@@ -93,6 +93,45 @@ class TestLatLonNameDetection:
         cols = _columns("pos_x", "pos_y")
         assert _try_detect_latlon_columns(cols) == (None, None)
 
+    @pytest.mark.parametrize("reverse", [False, True], ids=["declared", "reversed"])
+    def test_a_descriptor_pair_never_beats_the_real_coordinates(self, reverse):
+        """``latitude_error`` is not a latitude, whichever order the file lists it in.
+
+        Picking by column order put the point at (0.002, 0.001) -- off West
+        Africa rather than in Portland -- purely because the uncertainty
+        columns were declared first.
+        """
+        cols = _columns("latitude_error", "longitude_error", "decimalLatitude", "decimalLongitude")
+        if reverse:
+            cols = list(reversed(cols))
+        assert _try_detect_latlon_columns(cols) == ("decimalLatitude", "decimalLongitude")
+
+    def test_a_bbox_table_detects_nothing_rather_than_a_corner(self):
+        """Every candidate is an edge, so there is no coordinate pair to find."""
+        cols = _columns("lat_min", "lat_max", "lon_min", "lon_max")
+        assert _try_detect_latlon_columns(cols) == (None, None)
+
+    def test_the_plainest_pair_wins_wherever_it_sits(self):
+        cols = _columns("pickup_latitude", "pickup_longitude", "latitude", "longitude")
+        assert _try_detect_latlon_columns(cols) == ("latitude", "longitude")
+
+    @pytest.mark.parametrize("col_type", ["BOOLEAN", "TIMESTAMP", "DOUBLE[]"])
+    def test_an_exact_name_of_an_impossible_type_is_not_a_coordinate(self, col_type):
+        """These used to "detect" and then fail as a raw DuckDB cast error."""
+        cols = _columns(("lat", col_type), ("lon", col_type))
+        assert _try_detect_latlon_columns(cols) == (None, None)
+
+    def test_an_exact_name_held_as_text_still_counts(self):
+        """A CSV reader hands back VARCHAR for a column it could not type."""
+        cols = _columns(("lat", "VARCHAR"), ("lon", "VARCHAR"))
+        assert _try_detect_latlon_columns(cols) == ("lat", "lon")
+
+    def test_bare_x_y_is_a_csv_idiom_only(self):
+        """Parquet turns the y/x fallback off; see ``_exact_latlon_pair``."""
+        cols = _columns("x", "y")
+        assert _try_detect_latlon_columns(cols, allow_xy=True) == ("y", "x")
+        assert _try_detect_latlon_columns(cols, allow_xy=False) == (None, None)
+
 
 @pytest.fixture
 def latlon_parquet(tmp_path):
@@ -150,6 +189,52 @@ class TestParquetLatLonConvert:
         convert_to_geoparquet(latlon_parquet, out)
         assert _geo(out)["primary_column"] == "geometry"
         assert len(_points(out)) == 4
+
+    def test_a_plain_table_with_x_y_columns_is_still_not_spatial(self, tmp_path):
+        """``x``/``y`` on Parquet is a grid index or a model feature far more
+        often than a position, and inventing a geometry from it would also
+        consume both columns. Auto-detection must leave this file alone, as it
+        did before the tabular path existed.
+        """
+        src = str(tmp_path / "xy.parquet")
+        pq.write_table(
+            pa.table(
+                {
+                    "id": [1, 2, 3],
+                    "x": [1.0, 2.0, 3.0],
+                    "y": [3.0, 4.0, 5.0],
+                    "v": ["a", "b", "c"],
+                }
+            ),
+            src,
+        )
+        with pytest.raises(GeoParquetError, match="No geometry column detected"):
+            convert_to_geoparquet(src, str(tmp_path / "out.parquet"))
+
+    def test_a_geo_block_without_a_primary_column_still_counts_as_geometry(self, tmp_path):
+        """Guarding on ``primary`` alone demoted a real WKB column to a blob
+        and made a synthesised lat/lon geometry primary, while accepting the
+        flags the contract says to refuse.
+        """
+        src = str(tmp_path / "noprimary.parquet")
+        table = pa.table(
+            {
+                "mygeom": [shapely.Point(1, 2).wkb, shapely.Point(3, 4).wkb],
+                "lat": [10.0, 20.0],
+                "lon": [-100.0, -90.0],
+            }
+        )
+        geo = {
+            "version": "1.1.0",
+            "columns": {"mygeom": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        }
+        meta = {**(table.schema.metadata or {}), b"geo": json.dumps(geo).encode()}
+        pq.write_table(table.replace_schema_metadata(meta), src)
+
+        with pytest.raises(InvalidParameterError, match="already has a geometry column"):
+            convert_to_geoparquet(
+                src, str(tmp_path / "out.parquet"), lat_column="lat", lon_column="lon"
+            )
 
     def test_skip_hilbert_and_v2(self, latlon_parquet, tmp_path):
         out = str(tmp_path / "out.parquet")
