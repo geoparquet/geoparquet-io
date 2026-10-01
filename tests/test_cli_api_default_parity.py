@@ -272,7 +272,40 @@ _ENCODING_IS_TWO_KNOBS = (
     "never uses, so `convert geoparquet` has no output-encoding knob at all."
 )
 
+_SIMPLIFY_TRISTATE = (
+    "The CLI declares None so it can reject --preserve-topology/--simplify-boundary "
+    "in the mode they do not apply to; it maps None to the API's True before core."
+)
+
 KNOWN_DIVERGENCES: dict[tuple[str, str, str, str, str], str] = {
+    (
+        "process simplify",
+        "ops.simplify",
+        "preserve_topology",
+        "'<unset>'",
+        "True",
+    ): _SIMPLIFY_TRISTATE,
+    (
+        "process simplify",
+        "ops.simplify",
+        "simplify_boundary",
+        "'<unset>'",
+        "True",
+    ): _SIMPLIFY_TRISTATE,
+    (
+        "process simplify",
+        "Table.simplify",
+        "preserve_topology",
+        "'<unset>'",
+        "True",
+    ): _SIMPLIFY_TRISTATE,
+    (
+        "process simplify",
+        "Table.simplify",
+        "simplify_boundary",
+        "'<unset>'",
+        "True",
+    ): _SIMPLIFY_TRISTATE,
     (
         "convert geoparquet",
         "Table.write",

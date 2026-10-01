@@ -48,6 +48,32 @@ def polygonize_array(
     return table
 
 
+def polygonize_raster(
+    input_raster: str,
+    *,
+    band: int = 1,
+    values: list[float] | None = None,
+    value_column: str = "value",
+    nodata: float | None = None,
+    use_mask: bool = True,
+    connectivity: int = 4,
+    verbose: bool = False,
+) -> pa.Table:
+    """Polygonize one raster band into a GeoParquet-ready table."""
+    src = read_band(input_raster, band=band, nodata=nodata, use_mask=use_mask)
+    return polygonize_array(
+        src.array,
+        mask=src.mask,
+        nodata=src.nodata,
+        transform=src.transform,
+        crs=src.crs,
+        values=values,
+        value_column=value_column,
+        connectivity=connectivity,
+        verbose=verbose,
+    )
+
+
 def polygonize_file(
     input_raster: str,
     output_parquet: str,
@@ -66,15 +92,13 @@ def polygonize_file(
     verbose: bool = False,
 ) -> None:
     """Polygonize one raster band into a GeoParquet file."""
-    src = read_band(input_raster, band=band, nodata=nodata, use_mask=use_mask)
-    table = polygonize_array(
-        src.array,
-        mask=src.mask,
-        nodata=src.nodata,
-        transform=src.transform,
-        crs=src.crs,
+    table = polygonize_raster(
+        input_raster,
+        band=band,
         values=values,
         value_column=value_column,
+        nodata=nodata,
+        use_mask=use_mask,
         connectivity=connectivity,
         verbose=verbose,
     )

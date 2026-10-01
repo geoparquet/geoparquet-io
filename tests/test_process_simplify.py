@@ -302,3 +302,26 @@ class TestSimplifyFileCrs:
         out_crs = out_geo["columns"]["geometry"].get("crs")
         assert out_crs == in_crs
         assert pq.ParquetFile(str(out)).metadata.num_rows == 30
+
+
+@requires_coarsen
+class TestPythonApi:
+    def test_ops_simplify(self):
+        shapely = _shapely()
+        from geoparquet_io.api import ops
+
+        circle = shapely.Point(0, 0).buffer(1, quad_segs=64)
+        result = ops.simplify(_wkb_table([circle]), 0.1)
+        assert isinstance(result, pa.Table)
+        out = shapely.from_wkb(result.column("geometry")[0].as_py())
+        assert shapely.get_num_coordinates(out) < shapely.get_num_coordinates(circle)
+
+    def test_table_simplify_chains(self):
+        shapely = _shapely()
+        from geoparquet_io.api.table import Table
+
+        circle = shapely.Point(0, 0).buffer(1, quad_segs=64)
+        result = Table(_wkb_table([circle])).simplify(0.1)
+        assert isinstance(result, Table)
+        out = shapely.from_wkb(result.to_arrow().column("geometry")[0].as_py())
+        assert out.is_valid

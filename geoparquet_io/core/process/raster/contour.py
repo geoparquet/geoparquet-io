@@ -111,6 +111,39 @@ def _valid_range(array, mask, nodata) -> tuple[float, float]:
     return float(valid.min()), float(valid.max())
 
 
+def contour_raster(
+    input_raster: str,
+    *,
+    levels: list[float] | None = None,
+    interval: float | None = None,
+    base: float = 0.0,
+    band: int = 1,
+    nodata: float | None = None,
+    use_mask: bool = True,
+    min_column: str = "min",
+    max_column: str = "max",
+    verbose: bool = False,
+) -> pa.Table:
+    """Extract contour bands from one raster band into a GeoParquet-ready table."""
+    src = read_band(input_raster, band=band, nodata=nodata, use_mask=use_mask)
+    if levels is None:
+        band_min, band_max = _valid_range(src.array, src.mask, src.nodata)
+        resolved = resolve_levels(None, interval, base, band_min, band_max)
+    else:
+        resolved = resolve_levels(levels, interval, base, 0.0, 0.0)
+    return contour_array(
+        src.array,
+        resolved,
+        mask=src.mask,
+        nodata=src.nodata,
+        transform=src.transform,
+        crs=src.crs,
+        min_column=min_column,
+        max_column=max_column,
+        verbose=verbose,
+    )
+
+
 def contour_file(
     input_raster: str,
     output_parquet: str,
@@ -131,19 +164,14 @@ def contour_file(
     verbose: bool = False,
 ) -> None:
     """Extract contour bands from one raster band into a GeoParquet file."""
-    src = read_band(input_raster, band=band, nodata=nodata, use_mask=use_mask)
-    if levels is None:
-        band_min, band_max = _valid_range(src.array, src.mask, src.nodata)
-        resolved = resolve_levels(None, interval, base, band_min, band_max)
-    else:
-        resolved = resolve_levels(levels, interval, base, 0.0, 0.0)
-    table = contour_array(
-        src.array,
-        resolved,
-        mask=src.mask,
-        nodata=src.nodata,
-        transform=src.transform,
-        crs=src.crs,
+    table = contour_raster(
+        input_raster,
+        levels=levels,
+        interval=interval,
+        base=base,
+        band=band,
+        nodata=nodata,
+        use_mask=use_mask,
         min_column=min_column,
         max_column=max_column,
         verbose=verbose,

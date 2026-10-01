@@ -307,3 +307,36 @@ class TestPolygonizeFile:
         ]
         bounds = shapely.unary_union(class1).bounds
         assert bounds == pytest.approx((100020, 199920, 100120, 199980))
+
+
+@requires_contourrs
+@requires_rasterio
+class TestPythonApi:
+    def _tif(self, tmp_path):
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+
+        arr = np.zeros((10, 10), dtype=np.uint8)
+        arr[2:6, 2:6] = 1
+        tif = tmp_path / "c.tif"
+        with rasterio.open(
+            str(tif), "w", driver="GTiff", height=10, width=10, count=1,
+            dtype="uint8", crs="EPSG:32633", transform=from_origin(0, 100, 10, 10),
+        ) as dst:
+            dst.write(arr, 1)
+        return tif
+
+    def test_ops_polygonize(self, tmp_path):
+        from geoparquet_io.api import ops
+
+        table = ops.polygonize(str(self._tif(tmp_path)), values=[1.0])
+        assert isinstance(table, pa.Table)
+        assert set(table.column("value").to_pylist()) == {1.0}
+
+    def test_table_polygonize_constructor(self, tmp_path):
+        from geoparquet_io.api.table import Table
+
+        table = Table.polygonize(str(self._tif(tmp_path)))
+        assert isinstance(table, Table)
+        assert table.to_arrow().num_rows >= 2

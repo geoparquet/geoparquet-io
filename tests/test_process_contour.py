@@ -221,3 +221,35 @@ class TestContourFile:
         # Grid nodes 0..19 map through the transform: bands span the node
         # lattice, not the outer pixel edges.
         assert union_bounds == pytest.approx((100000, 199810, 100190, 200000))
+
+
+@requires_contourrs
+@requires_rasterio
+class TestPythonApi:
+    def _tif(self, tmp_path):
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+
+        dem = np.fromfunction(lambda y, x: 10.0 * x, (10, 10)).astype(np.float32)
+        tif = tmp_path / "dem.tif"
+        with rasterio.open(
+            str(tif), "w", driver="GTiff", height=10, width=10, count=1,
+            dtype="float32", crs="EPSG:32633", transform=from_origin(0, 100, 10, 10),
+        ) as dst:
+            dst.write(dem, 1)
+        return tif
+
+    def test_ops_contour(self, tmp_path):
+        from geoparquet_io.api import ops
+
+        table = ops.contour(str(self._tif(tmp_path)), interval=30.0)
+        assert isinstance(table, pa.Table)
+        assert {"min", "max"}.issubset(table.column_names)
+
+    def test_table_contour_constructor(self, tmp_path):
+        from geoparquet_io.api.table import Table
+
+        table = Table.contour(str(self._tif(tmp_path)), levels=[0.0, 50.0, 100.0])
+        assert isinstance(table, Table)
+        assert table.to_arrow().num_rows >= 1
