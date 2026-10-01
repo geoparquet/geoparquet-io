@@ -493,6 +493,7 @@ def _simplify_file_streaming(
     drop_empty: bool,
     simplify_crs: str | None,
     verbose: bool,
+    drop_columns: list[str] | None = None,
 ) -> None:
     """Stream-simplify batch by batch: memory is bounded by one row group."""
     from geoparquet_io.core.derive_geo_from_file import _rewrite_writer_kwargs
@@ -501,6 +502,10 @@ def _simplify_file_streaming(
     shapely = load_module("shapely")
     np = load_module("numpy")
     schema = pf.schema_arrow
+    if drop_columns:
+        schema = pa.schema(
+            [f for f in schema if f.name not in drop_columns], metadata=schema.metadata
+        )
     rows = resolve_row_group_rows(row_group_rows, None)
     writer_schema = schema.with_metadata(None)
     types: set = set()
@@ -533,7 +538,10 @@ def _simplify_file_streaming(
             actual_output, writer_schema, store_schema=False, **writer_kwargs
         ) as writer:
             for batch in batches:
-                table = pa.Table.from_batches([batch], schema=schema)
+                table = pa.Table.from_batches([batch])
+                if drop_columns:
+                    table = table.drop_columns(drop_columns)
+                table = table.replace_schema_metadata(schema.metadata)
                 values, n, empty_flags = _simplify_values(
                     table.column(geom_col).to_pylist(),
                     tolerance,
@@ -582,9 +590,12 @@ def _simplify_file_in_memory(
     input_parquet: str,
     output_parquet: str,
     tolerance: float,
+    drop_columns: list[str] | None = None,
     **kwargs,
 ) -> None:
     table = pq.read_table(input_parquet)
+    if drop_columns:
+        table = table.drop_columns(drop_columns)
     write_args = {
         k: kwargs[k]
         for k in (
@@ -624,14 +635,22 @@ def simplify_file(
     geometry_column: str | None = None,
     drop_empty: bool = False,
     simplify_crs: str | None = None,
+    refresh_metrics: bool = False,
     compression: str = "ZSTD",
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
     geoparquet_version: str | None = None,
     verbose: bool = False,
+    _drop_columns: list[str] | None = None,
 ) -> None:
     """Simplify a GeoParquet file's geometries and write the result.
+
+    ``refresh_metrics`` recomputes the vecorel ``metrics:area`` /
+    ``metrics:perimeter`` columns from the simplified geometry (#1200) by
+    routing the output through the ``add geometry-metrics`` core — one
+    owner for the geodesic math. It refreshes, never adds: inputs without
+    the columns get a warning and a plain simplify.
 
     Plain mode streams batch by batch, so peak memory is bounded by one row
     group regardless of file size (a planet-scale file simplifies on a
@@ -644,6 +663,26 @@ def simplify_file(
     """
     if "://" not in input_parquet and not os.path.exists(input_parquet):
         raise FileNotFoundGeoParquetError(input_parquet)
+    if refresh_metrics:
+        _simplify_then_refresh_metrics(
+            input_parquet,
+            output_parquet,
+            tolerance,
+            coverage=coverage,
+            preserve_topology=preserve_topology,
+            simplify_boundary=simplify_boundary,
+            threads=threads,
+            geometry_column=geometry_column,
+            drop_empty=drop_empty,
+            simplify_crs=simplify_crs,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            geoparquet_version=geoparquet_version,
+            verbose=verbose,
+        )
+        return
     kwargs = {
         "coverage": coverage,
         "preserve_topology": preserve_topology,
@@ -660,7 +699,9 @@ def simplify_file(
         "verbose": verbose,
     }
     if coverage or row_group_size_mb is not None:
-        _simplify_file_in_memory(input_parquet, output_parquet, tolerance, **kwargs)
+        _simplify_file_in_memory(
+            input_parquet, output_parquet, tolerance, drop_columns=_drop_columns, **kwargs
+        )
         return
     with pq.ParquetFile(input_parquet, pre_buffer=False) as pf:
         resolved = resolve_output_geoparquet_version(
@@ -672,7 +713,9 @@ def simplify_file(
         geom_col = _geometry_column_of(pf.schema_arrow.empty_table(), geometry_column)
         if not _can_stream(pf, geom_col, resolved):
             pf.close()
-            _simplify_file_in_memory(input_parquet, output_parquet, tolerance, **kwargs)
+            _simplify_file_in_memory(
+                input_parquet, output_parquet, tolerance, drop_columns=_drop_columns, **kwargs
+            )
             return
         _simplify_file_streaming(
             pf,
@@ -688,4 +731,83 @@ def simplify_file(
             drop_empty=drop_empty,
             simplify_crs=simplify_crs,
             verbose=verbose,
+            drop_columns=_drop_columns,
         )
+
+
+def _simplify_then_refresh_metrics(
+    input_parquet: str,
+    output_parquet: str,
+    tolerance: float,
+    *,
+    geoparquet_version: str | None,
+    verbose: bool,
+    compression: str,
+    compression_level: int | None,
+    row_group_size_mb: float | None,
+    row_group_rows: int | None,
+    **simplify_kwargs,
+) -> None:
+    """Simplify, then recompute vecorel metric columns from the result.
+
+    The stale columns are dropped during the simplify pass (streamed or
+    in-memory) into a pid-scoped temp sibling of the output — never a
+    cwd-relative path, which collides across concurrent jobs — and the
+    ``add geometry-metrics`` core computes them fresh while writing the
+    final file. Inherits that core's WGS84 geodesic assumption.
+    """
+    from geoparquet_io.core.add.geometry_metrics import (
+        AREA_COLUMN,
+        PERIMETER_COLUMN,
+        add_geometry_metrics,
+    )
+
+    with pq.ParquetFile(input_parquet, pre_buffer=False) as pf:
+        present = [c for c in (AREA_COLUMN, PERIMETER_COLUMN) if c in pf.schema_arrow.names]
+    if not present:
+        warn(
+            "--refresh-metrics: input has no metrics:area/metrics:perimeter "
+            "columns; nothing to refresh (use 'gpio add geometry-metrics' to add them)"
+        )
+        simplify_file(
+            input_parquet,
+            output_parquet,
+            tolerance,
+            geoparquet_version=geoparquet_version,
+            verbose=verbose,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            **simplify_kwargs,
+        )
+        return
+    tmp_path = f"{output_parquet}.refresh-{os.getpid()}.tmp.parquet"
+    try:
+        simplify_file(
+            input_parquet,
+            tmp_path,
+            tolerance,
+            geoparquet_version=geoparquet_version,
+            verbose=verbose,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            _drop_columns=present,
+            **simplify_kwargs,
+        )
+        add_geometry_metrics(
+            tmp_path,
+            output_parquet,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            geoparquet_version=geoparquet_version,
+            overwrite=True,
+            verbose=verbose,
+        )
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)

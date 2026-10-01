@@ -759,3 +759,91 @@ class TestSimplifyCrs:
         )
         assert result.exit_code == 0, result.output
         assert pq.ParquetFile(str(out)).metadata.num_rows == 1
+
+
+@requires_coarsen
+class TestRefreshMetrics:
+    """#1200: --refresh-metrics recomputes vecorel metrics:area/perimeter
+    from the simplified geometry via the add geometry-metrics core."""
+
+    def _file_with_metrics(self, tmp_path):
+        shapely = _shapely()
+        from geoparquet_io.core.add.geometry_metrics import add_geometry_metrics
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        # ~1 km-scale polygons in degrees near (105, 15)
+        geoms = [shapely.Point(105.0 + i * 0.05, 15.0).buffer(0.01, quad_segs=48) for i in range(3)]
+        plain = tmp_path / "plain.parquet"
+        write_geoparquet_table(_wkb_table(geoms), str(plain))
+        src = tmp_path / "with_metrics.parquet"
+        add_geometry_metrics(str(plain), str(src))
+        return src
+
+    def test_without_flag_metrics_pass_through_stale(self, tmp_path):
+        src = self._file_with_metrics(tmp_path)
+        before = pq.read_table(str(src)).column("metrics:area").to_pylist()
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=50.0, simplify_crs="auto-utm")
+        after = pq.read_table(str(out)).column("metrics:area").to_pylist()
+        assert after == before  # stale by design without the flag
+
+    def test_refresh_recomputes_from_simplified_geometry(self, tmp_path):
+        shapely = _shapely()
+        from pyproj import Geod
+
+        src = self._file_with_metrics(tmp_path)
+        before = pq.read_table(str(src)).column("metrics:area").to_pylist()
+        out = tmp_path / "out.parquet"
+        simplify_file(
+            str(src),
+            str(out),
+            tolerance=100.0,
+            simplify_crs="auto-utm",
+            refresh_metrics=True,
+        )
+        table = pq.read_table(str(out))
+        after = table.column("metrics:area").to_pylist()
+        assert after != before
+        geod = Geod(ellps="WGS84")
+        for area, wkb in zip(after, table.column("geometry").to_pylist(), strict=True):
+            geom = shapely.from_wkb(wkb)
+            reference = abs(geod.geometry_area_perimeter(geom)[0])
+            assert area == pytest.approx(reference, rel=0.005)
+        assert "metrics:perimeter" in table.column_names
+        assert table.num_rows == 3
+
+    def test_refresh_without_metric_columns_warns_and_succeeds(self, tmp_path):
+        shapely = _shapely()
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        src = tmp_path / "src.parquet"
+        write_geoparquet_table(_wkb_table([shapely.box(0, 0, 1, 1)]), str(src))
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.1, refresh_metrics=True)
+        table = pq.read_table(str(out))
+        assert table.num_rows == 1
+        assert "metrics:area" not in table.column_names  # refresh, not add
+
+    def test_cli_flag(self, tmp_path):
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        src = self._file_with_metrics(tmp_path)
+        out = tmp_path / "out.parquet"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "process",
+                "simplify",
+                str(src),
+                str(out),
+                "--tolerance",
+                "100",
+                "--simplify-crs",
+                "auto-utm",
+                "--refresh-metrics",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "metrics:area" in pq.read_table(str(out)).column_names
