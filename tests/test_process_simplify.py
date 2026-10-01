@@ -144,6 +144,7 @@ class TestSimplifyTable:
         shapely = _shapely()
         circle = shapely.Point(0, 0).buffer(1, quad_segs=64)
         table = _wkb_table([circle])
+        geo = json.loads(table.schema.metadata[b"geo"])
         geo["columns"]["geometry"]["bbox"] = [-1, -1, 1, 1]
         table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
         result = simplify_table(table, 0.1)
