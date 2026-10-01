@@ -395,9 +395,12 @@ def convert(
     Args:
         path: Path to input file (local or S3 URL)
         geometry_column: Name for geometry column in output (default: 'geometry')
-        wkt_column: For CSV: column containing WKT geometry
-        lat_column: For CSV: latitude column
-        lon_column: For CSV: longitude column
+        wkt_column: For CSV or a Parquet file with no geometry column:
+               column containing WKT geometry
+        lat_column: For CSV or a Parquet file with no geometry column:
+               latitude column (auto-detected if not specified)
+        lon_column: For CSV or a Parquet file with no geometry column:
+               longitude column (auto-detected if not specified)
         delimiter: For CSV: field delimiter (auto-detected if not specified)
         skip_invalid: Skip invalid geometries instead of erroring
         profile: AWS profile name for S3 authentication (default: None)
@@ -1842,13 +1845,16 @@ class Table:
         bucket_point: str = "geometry",
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
+        memory_limit: str | None = None,
     ) -> Table:
         """
         Aggregate features into A5 grid cells with per-cell statistics.
 
         Args:
             resolution: A5 resolution level 0-30
-            metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+            metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+                ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the
+                percent of the cell covered by a per-feature area in m2.
             breakdown: Column name to pivot into per-category count columns
             breakdown_limit: Max number of breakdown categories (default: 20)
             out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -1860,6 +1866,8 @@ class Table:
             breakdown_metric: What each breakdown column holds: None/'count'
                 (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
                 pivot named <func>_<col>_<value>
+            memory_limit: DuckDB memory limit for the aggregation (e.g. "8GB").
+                Default: half the process's memory ceiling
 
         Returns:
             New Table with one row per A5 cell
@@ -1879,6 +1887,7 @@ class Table:
             bucket_point=bucket_point,
             bbox_column=bbox_column,
             breakdown_metric=breakdown_metric,
+            memory_limit=memory_limit,
         )
         return self._wrap(result, "geometry" if out_geometry != "none" else None)
 
@@ -1894,13 +1903,16 @@ class Table:
         bucket_point: str = "geometry",
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
+        memory_limit: str | None = None,
     ) -> Table:
         """
         Aggregate features into H3 grid cells with per-cell statistics.
 
         Args:
             resolution: H3 resolution level 0-15
-            metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+            metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+                ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the
+                percent of the cell covered by a per-feature area in m2.
             breakdown: Column name to pivot into per-category count columns
             breakdown_limit: Max number of breakdown categories (default: 20)
             out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -1912,6 +1924,8 @@ class Table:
             breakdown_metric: What each breakdown column holds: None/'count'
                 (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
                 pivot named <func>_<col>_<value>
+            memory_limit: DuckDB memory limit for the aggregation (e.g. "8GB").
+                Default: half the process's memory ceiling
 
         Returns:
             New Table with one row per H3 cell
@@ -1931,6 +1945,7 @@ class Table:
             bucket_point=bucket_point,
             bbox_column=bbox_column,
             breakdown_metric=breakdown_metric,
+            memory_limit=memory_limit,
         )
         return self._wrap(result, "geometry" if out_geometry != "none" else None)
 
@@ -1946,13 +1961,16 @@ class Table:
         bucket_point: str = "geometry",
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
+        memory_limit: str | None = None,
     ) -> Table:
         """
         Aggregate features into administrative regions with per-region statistics.
 
         Args:
             level: Admin level to aggregate by ("country", "region", "subregion")
-            metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+            metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+                ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the
+                percent of the cell covered by a per-feature area in m2.
             breakdown: Column name to pivot into per-category count columns
             breakdown_limit: Max number of breakdown categories (default: 20)
             out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -1964,6 +1982,8 @@ class Table:
             breakdown_metric: What each breakdown column holds: None/'count'
                 (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
                 pivot named <func>_<col>_<value>
+            memory_limit: DuckDB memory limit for the aggregation (e.g. "8GB").
+                Default: half the process's memory ceiling
 
         Returns:
             New Table with one row per admin region
@@ -1982,6 +2002,7 @@ class Table:
             bucket_point=bucket_point,
             bbox_column=bbox_column,
             breakdown_metric=breakdown_metric,
+            memory_limit=memory_limit,
         )
         return self._wrap(result, "geometry" if out_geometry != "none" else None)
 
@@ -1990,6 +2011,7 @@ class Table:
         level: int | str,
         cell_column: str | None = None,
         scheme: str | None = None,
+        memory_limit: str | None = None,
     ) -> Table:
         """
         Roll an aggregate table up to a coarser overview level.
@@ -2005,13 +2027,21 @@ class Table:
             cell_column: Cell id column when auto-detection fails
             scheme: Bucketing scheme (``a5``/``h3``/``admin``) when inference
                 is ambiguous, e.g. H3 ids stored as integers
+            memory_limit: DuckDB memory limit for the rollup (e.g. "8GB").
+                Default: half the process's memory ceiling
 
         Returns:
             New Table with one row per parent cell
         """
         from geoparquet_io.core.process.overview import rollup_table
 
-        result = rollup_table(self._table, level, cell_column=cell_column, scheme=scheme)
+        result = rollup_table(
+            self._table,
+            level,
+            cell_column=cell_column,
+            scheme=scheme,
+            memory_limit=memory_limit,
+        )
         has_geometry = "geometry" in result.column_names
         return self._wrap(result, "geometry" if has_geometry else None)
 

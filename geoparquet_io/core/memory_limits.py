@@ -1,4 +1,4 @@
-"""DuckDB memory limits for a write: the process's memory ceiling and the default drawn from it.
+"""DuckDB memory limits: the process's memory ceiling and the default drawn from it.
 
 Every gpio write that runs through DuckDB -- the plain-COPY fast path, the
 duckdb-kv strategy, partition staging -- takes its default ``memory_limit``
@@ -7,6 +7,12 @@ memory this process may ever hold (its cgroup cap, or physical RAM when that
 is lower). Not a share of what is free at the moment: a cgroup's usage counts
 its page cache, so after a job has read a large input "free" sits near zero
 and the limit collapsed to the 128MB floor (#1153).
+
+The same rule bounds work that is not a write. :func:`scoped_write_memory_limit`
+wraps one statement on a connection the caller owns, which suits a COPY; the
+aggregate and overview queries instead end in ``.arrow().read_all()``, with no
+statement to wrap, so :func:`open_bounded_connection` applies the rule when the
+connection is *opened* (#1179). Both draw the number from the same place.
 """
 
 from __future__ import annotations
@@ -19,7 +25,11 @@ from contextlib import contextmanager
 import duckdb
 import psutil
 
-from geoparquet_io.core.duckdb_utils import _current_setting, restore_duckdb_settings
+from geoparquet_io.core.duckdb_utils import (
+    _current_setting,
+    get_duckdb_connection,
+    restore_duckdb_settings,
+)
 from geoparquet_io.core.logging_config import debug
 
 # DuckDB's memory_limit is a SET value, which cannot be parameterised, so the
@@ -190,6 +200,69 @@ def get_default_memory_limit() -> str:
 #: Measured on a 4M-polygon Hilbert COPY: ~250MB per thread spilled reliably,
 #: under ~170MB raised OutOfMemoryException with a temp_directory set.
 _BYTES_PER_THREAD = 512 * 1024**2
+
+
+def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]:
+    """The ``memory_limit`` and thread cap a freshly opened connection should carry.
+
+    ``_resolve_limit``'s rule, minus the part that reads the session: a new
+    connection has no caller-chosen limit to leave alone, only DuckDB's own
+    default of ~80% of host RAM, which is the very thing being replaced. An
+    explicit value is used as given; otherwise the ceiling-based default
+    applies, and ``(None, None)`` leaves DuckDB alone when no ceiling is known.
+
+    Threads are capped so each keeps ``_BYTES_PER_THREAD`` -- a small limit
+    spread over many threads makes DuckDB raise instead of spill -- and only
+    when that is fewer threads than DuckDB would otherwise take.
+    """
+    limit = validate_memory_limit(memory_limit) if memory_limit else default_memory_limit()
+    if limit is None:
+        return None, None
+    limit_bytes = parse_size(limit)
+    if not limit_bytes:  # pragma: no cover - validate_memory_limit accepts only sizes
+        return limit, None
+    threads = max(1, limit_bytes // _BYTES_PER_THREAD)
+    default_threads = os.cpu_count() or threads
+    return limit, (threads if threads < default_threads else None)
+
+
+def open_bounded_connection(
+    *,
+    memory_limit: str | None = None,
+    load_spatial: bool = True,
+    load_httpfs: bool | None = None,
+    verbose: bool = False,
+    preserve_insertion_order: bool = False,
+) -> duckdb.DuckDBPyConnection:
+    """A DuckDB connection for one analysis query, opened inside a memory limit.
+
+    For work the funnel cannot wrap: `gpio process aggregate` and `gpio process
+    overview` materialize their result client-side with ``.arrow().read_all()``,
+    so there is no COPY for :func:`scoped_write_memory_limit` to scope and the
+    cap has to be part of the connection (#1179). Left uncapped, DuckDB sized
+    itself for the host and a 42 GB aggregate peaked at 115 GiB RSS.
+
+    ``preserve_insertion_order`` defaults off: every caller today takes its
+    output order from a GROUP BY, so buffering the scan to keep the input's
+    order buys nothing and costs the whole scan's width in memory. It is a
+    parameter rather than a constant because the setting is about ordering, not
+    memory, and a future caller that does need the input's order would
+    otherwise be silently reordered by a function whose name promises only a
+    memory bound.
+    """
+    limit, threads = _connection_limit(memory_limit)
+    con: duckdb.DuckDBPyConnection = get_duckdb_connection(
+        load_spatial=load_spatial,
+        load_httpfs=load_httpfs,
+        threads=threads,
+        memory_limit=limit,
+    )
+    con.execute(f"SET preserve_insertion_order = {str(preserve_insertion_order).lower()}")
+    if verbose and limit:
+        debug(f"DuckDB memory limit: {limit}")
+    if verbose and threads:
+        debug(f"DuckDB threads: {threads} (for the memory limit)")
+    return con
 
 
 def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> str | None:

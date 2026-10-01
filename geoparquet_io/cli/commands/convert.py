@@ -131,15 +131,18 @@ def convert(ctx):
 )
 @click.option(
     "--wkt-column",
-    help="CSV/TSV: Column name containing WKT geometry (auto-detected if not specified)",
+    help="CSV/TSV or geometry-less Parquet: Column name containing WKT geometry "
+    "(auto-detected if not specified)",
 )
 @click.option(
     "--lat-column",
-    help="CSV/TSV: Column name containing latitude values (requires --lon-column)",
+    help="CSV/TSV or geometry-less Parquet: Column name containing latitude values "
+    "(requires --lon-column; auto-detected if not specified)",
 )
 @click.option(
     "--lon-column",
-    help="CSV/TSV: Column name containing longitude values (requires --lat-column)",
+    help="CSV/TSV or geometry-less Parquet: Column name containing longitude values "
+    "(requires --lat-column; auto-detected if not specified)",
 )
 @click.option(
     "--delimiter",
@@ -153,7 +156,8 @@ def convert(ctx):
     "--crs",
     default="EPSG:4326",
     show_default=True,
-    help="CSV/TSV: CRS for geometry data (WGS84 assumed for lat/lon)",
+    help="CSV/TSV, or Parquet lat/lon or WKT columns: CRS for geometry data "
+    "(WGS84 assumed for lat/lon)",
 )
 @click.option(
     "--skip-invalid",
