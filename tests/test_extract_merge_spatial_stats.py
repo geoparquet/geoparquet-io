@@ -224,6 +224,33 @@ class TestAnUnprunableMergeSaysSo:
             extract(merge_inputs_with_bbox, merged, exclude_cols="bbox")
         assert self.ADVICE in caplog.text
 
+    def test_a_merge_with_no_geometry_at_all_is_not_advised(self, tmp_path):
+        """2.0 is a verified no-op for plain Parquet, so advising it misleads.
+
+        Merging non-spatial files writes no ``geo`` key, and there is nothing
+        for ``geo_bbox`` statistics to describe. The advice used to fire anyway,
+        sending the reader after a flag that cannot help them.
+        """
+        src = tmp_path / "plain"
+        src.mkdir()
+        for name in ("part0", "part1"):
+            pq.write_table(
+                pa.table({"id": [1, 2, 3], "v": ["a", "b", "c"]}), str(src / f"{name}.parquet")
+            )
+        merged = str(tmp_path / "merged.parquet")
+        with caplog_warnings() as caplog:
+            extract(str(src), merged)
+        assert self.ADVICE not in caplog.text
+
+    def test_a_merge_that_excludes_its_geometry_is_not_advised(
+        self, merge_inputs_with_bbox, tmp_path
+    ):
+        """Dropping the geometry leaves a plain Parquet output (#1163)."""
+        merged = str(tmp_path / "merged.parquet")
+        with caplog_warnings() as caplog:
+            extract(merge_inputs_with_bbox, merged, exclude_cols="geometry,bbox")
+        assert self.ADVICE not in caplog.text
+
     def test_a_single_file_extract_is_not_advised(self, tmp_path, merge_inputs_no_bbox):
         """The advice is about merges; a one-file extract is left alone."""
         single = merge_inputs_no_bbox.replace("part*.parquet", "part0.parquet")
