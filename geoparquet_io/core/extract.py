@@ -1085,6 +1085,7 @@ def _advise_spatial_stats_on_merge(
     selected_columns: list[str],
     bbox_col: str | None,
     geoparquet_version: str | None,
+    geometry_col: str | None = None,
 ) -> None:
     """Tell a merge that will not prune that ``--geoparquet-version 2.0`` would.
 
@@ -1109,6 +1110,12 @@ def _advise_spatial_stats_on_merge(
     either -- so it only speaks up when neither is there.
     """
     if is_remote_url(input_parquet) or not is_partition_path(input_parquet):
+        return
+    # Nothing spatial to collect statistics over: merging plain Parquet writes
+    # no geo key at all, and 2.0 is a verified no-op for it. Advising the flag
+    # there sends the reader after a setting that cannot help (review of #1151).
+    # A geometry column dropped by --exclude-cols is the same case (#1163).
+    if not geometry_col or geometry_col not in selected_columns:
         return
     if bbox_col and bbox_col in selected_columns:
         return
@@ -1453,7 +1460,7 @@ def _extract_impl(
         )
     else:
         _advise_spatial_stats_on_merge(
-            input_parquet, selected_columns, bbox_col, geoparquet_version
+            input_parquet, selected_columns, bbox_col, geoparquet_version, geometry_col
         )
         _execute_extraction(
             input_parquet,
