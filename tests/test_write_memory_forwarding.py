@@ -43,6 +43,7 @@ from click.testing import CliRunner
 # everywhere. Do not "simplify" this back to a dotted patch target. The same
 # holds for the group modules below: import the module object, patch on it.
 from geoparquet_io.cli.commands import add as cli_add
+from geoparquet_io.cli.commands import process as cli_process
 from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.cli.main import cli
 from tests.conftest import skip_if_geography_unavailable
@@ -161,6 +162,55 @@ CLI_FORWARDING_CASES = [
         "sort_by_quadkey_impl",
         lambda in_f, out_f, col: ["sort", "quadkey", in_f, out_f],
         id="sort-quadkey",
+    ),
+    # `gpio process` spends its memory on a scan + GROUP BY rather than a
+    # streaming write, but the flag is the same one and must arrive the same
+    # way -- as memory_limit=<value>, on the connection the query runs on (#1179).
+    pytest.param(
+        cli_process,
+        "aggregate_by_a5_impl",
+        lambda in_f, out_f, col: [
+            "process",
+            "aggregate",
+            "a5",
+            in_f,
+            out_f,
+            "--resolution",
+            "5",
+        ],
+        id="process-aggregate-a5",
+    ),
+    pytest.param(
+        cli_process,
+        "aggregate_by_h3_impl",
+        lambda in_f, out_f, col: [
+            "process",
+            "aggregate",
+            "h3",
+            in_f,
+            out_f,
+            "--resolution",
+            "5",
+        ],
+        id="process-aggregate-h3",
+    ),
+    pytest.param(
+        cli_process,
+        "aggregate_by_admin_impl",
+        lambda in_f, out_f, col: ["process", "aggregate", "admin", in_f, out_f],
+        id="process-aggregate-admin",
+    ),
+    pytest.param(
+        cli_process,
+        "create_overviews_impl",
+        lambda in_f, out_f, col: ["process", "overview", in_f],
+        id="process-overview",
+    ),
+    pytest.param(
+        cli_process,
+        "create_overview_file",
+        lambda in_f, out_f, col: ["process", "overview", in_f, "--overview-out", out_f],
+        id="process-overview-file",
     ),
 ]
 

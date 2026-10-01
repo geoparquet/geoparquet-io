@@ -408,18 +408,18 @@ class TestOutGeometryInference:
 
 class TestGridRollupStubbed:
     def test_create_overviews_explicit_level(self, tmp_path, monkeypatch):
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.memory_limits import open_bounded_connection
         from geoparquet_io.core.process.overview import detect as detect_mod
 
         _no_extension(monkeypatch)
-        real_factory = get_duckdb_connection
+        real_factory = open_bounded_connection
 
         def stubbed_connection(**kwargs):
             con = real_factory(**kwargs)
             _register_a5_stubs(con)
             return con
 
-        monkeypatch.setattr(detect_mod, "get_duckdb_connection", stubbed_connection)
+        monkeypatch.setattr(detect_mod, "open_bounded_connection", stubbed_connection)
 
         src = tmp_path / "cells.parquet"
         # Parents at level 5: 7000,7001 -> 5000; 7004,7005 -> 5001.
@@ -449,18 +449,18 @@ class TestGridRollupStubbed:
         assert col("avg_v", 5001) == pytest.approx(25.0 / 7.0)
 
     def test_create_overviews_auto_levels(self, tmp_path, monkeypatch):
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.memory_limits import open_bounded_connection
         from geoparquet_io.core.process.overview import detect as detect_mod
 
         _no_extension(monkeypatch)
-        real_factory = get_duckdb_connection
+        real_factory = open_bounded_connection
 
         def stubbed_connection(**kwargs):
             con = real_factory(**kwargs)
             _register_a5_stubs(con)
             return con
 
-        monkeypatch.setattr(detect_mod, "get_duckdb_connection", stubbed_connection)
+        monkeypatch.setattr(detect_mod, "open_bounded_connection", stubbed_connection)
 
         src = tmp_path / "cells.parquet"
         pq.write_table(
@@ -476,18 +476,18 @@ class TestGridRollupStubbed:
         assert (tmp_path / "cells_r0.parquet").exists()
 
     def test_create_overviews_base_fits_builds_nothing(self, tmp_path, monkeypatch):
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.memory_limits import open_bounded_connection
         from geoparquet_io.core.process.overview import detect as detect_mod
 
         _no_extension(monkeypatch)
-        real_factory = get_duckdb_connection
+        real_factory = open_bounded_connection
 
         def stubbed_connection(**kwargs):
             con = real_factory(**kwargs)
             _register_a5_stubs(con)
             return con
 
-        monkeypatch.setattr(detect_mod, "get_duckdb_connection", stubbed_connection)
+        monkeypatch.setattr(detect_mod, "open_bounded_connection", stubbed_connection)
 
         src = tmp_path / "cells.parquet"
         pq.write_table(_stub_grid_aggregate_table([7000, 7001], [1, 2], [1.0, 2.0]), src)
@@ -514,19 +514,19 @@ class TestGridRollupStubbed:
         con.close()
 
     def test_rollup_table_grid_stubbed(self, monkeypatch):
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.memory_limits import open_bounded_connection
         from geoparquet_io.core.process.overview import rollup as rollup_mod
         from geoparquet_io.core.process.overview import rollup_table
 
         _no_extension(monkeypatch)
-        real_factory = get_duckdb_connection
+        real_factory = open_bounded_connection
 
         def stubbed_connection(**kwargs):
             con = real_factory(**kwargs)
             _register_a5_stubs(con)
             return con
 
-        monkeypatch.setattr(rollup_mod, "get_duckdb_connection", stubbed_connection)
+        monkeypatch.setattr(rollup_mod, "open_bounded_connection", stubbed_connection)
 
         result = rollup_table(
             _stub_grid_aggregate_table([7000, 7001, 7004], [1, 2, 3], [1.0, 2.0, 3.0]), 5

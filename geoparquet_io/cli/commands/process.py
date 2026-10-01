@@ -10,6 +10,7 @@ import duckdb
 
 from geoparquet_io.cli._shared import _activate_s3
 from geoparquet_io.cli.decorators import (
+    aggregate_memory_option,
     breakdown_metric_option,
     bucket_point_options,
     compression_options,
@@ -136,6 +137,7 @@ def process(ctx):
     "level plus the base (e.g. 2000,800,300,120 for --levels 5,6,7). Overrides "
     "--cell-detail. Only with --overview-out.",
 )
+@aggregate_memory_option
 @compression_options
 @verbose_option
 @geoparquet_version_option
@@ -159,6 +161,7 @@ def process_overview(
     overview_out,
     cell_detail,
     explicit_gsd,
+    write_memory,
 ):
     """Build coarser overview levels from an aggregate output.
 
@@ -205,10 +208,11 @@ def process_overview(
                     overview_out,
                     cell_detail=cell_detail,
                     explicit_gsd=explicit_gsd,
+                    memory_limit=write_memory,
                     **kwargs,
                 )
             else:
-                create_overviews_impl(input_parquet, **kwargs)
+                create_overviews_impl(input_parquet, memory_limit=write_memory, **kwargs)
         except (InvalidParameterError, ValueError, duckdb.Error) as exc:
             raise click.ClickException(str(exc)) from exc
 
@@ -257,6 +261,7 @@ def process_aggregate_a5(
     where,
     bucket_point,
     bbox_column,
+    write_memory,
     compression,
     compression_level,
     verbose,
@@ -302,6 +307,7 @@ def process_aggregate_a5(
                 metric_nodata=metric_nodata,
                 bucket_point=bucket_point,
                 bbox_column=bbox_column,
+                memory_limit=write_memory,
             )
         except (InvalidParameterError, ValidationError, ValueError, duckdb.Error) as exc:
             raise _aggregate_error(exc, where) from exc
@@ -339,6 +345,7 @@ def process_aggregate_h3(
     where,
     bucket_point,
     bbox_column,
+    write_memory,
     compression,
     compression_level,
     verbose,
@@ -384,6 +391,7 @@ def process_aggregate_h3(
                 metric_nodata=metric_nodata,
                 bucket_point=bucket_point,
                 bbox_column=bbox_column,
+                memory_limit=write_memory,
             )
         except (InvalidParameterError, ValidationError, ValueError, duckdb.Error) as exc:
             raise _aggregate_error(exc, where) from exc
@@ -424,6 +432,7 @@ def process_aggregate_h3(
 )
 @where_option
 @bucket_point_options
+@aggregate_memory_option
 @compression_options
 @verbose_option
 @geoparquet_version_option
@@ -443,6 +452,7 @@ def process_aggregate_admin(
     where,
     bucket_point,
     bbox_column,
+    write_memory,
     compression,
     compression_level,
     verbose,
@@ -483,6 +493,7 @@ def process_aggregate_admin(
                 metric_nodata=metric_nodata,
                 bucket_point=bucket_point,
                 bbox_column=bbox_column,
+                memory_limit=write_memory,
             )
         except (InvalidParameterError, ValidationError, ValueError, duckdb.Error) as exc:
             raise _aggregate_error(exc, where) from exc
