@@ -35,6 +35,7 @@ from geoparquet_io.core.add import h3 as core_h3
 from geoparquet_io.core.add import kdtree as core_kdtree
 from geoparquet_io.core.add import quadkey as core_quadkey
 from geoparquet_io.core.add import s2 as core_s2
+from geoparquet_io.core.process import simplify as core_simplify
 from geoparquet_io.core.process.aggregate import by_a5 as core_aggregate_a5
 from geoparquet_io.core.process.aggregate import by_h3 as core_aggregate_h3
 from tests.conftest import (
@@ -656,6 +657,34 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             "assume_crs84": True,
         },
     ),
+    FrontDoorCase(
+        id="simplify",
+        core_module=core_simplify,
+        core_name="simplify_table",
+        ops_call=lambda t: ops.simplify(
+            t,
+            0.5,
+            coverage=True,
+            preserve_topology=False,
+            simplify_boundary=False,
+            threads=2,
+            geometry_column="geometry",
+            verbose=True,
+        ),
+        table_call=lambda t: t.simplify(
+            0.5, coverage=True, preserve_topology=False, simplify_boundary=False, threads=2
+        ),
+        expected={
+            "tolerance": 0.5,
+            "coverage": True,
+            "preserve_topology": False,
+            "simplify_boundary": False,
+            "threads": 2,
+            "geometry_column": "geometry",
+        },
+        ops_only_expected={"verbose": True},
+        ops_module=core_simplify,
+    ),
 ]
 
 FRONT_DOOR_IDS = [case.id for case in FRONT_DOOR_CASES]
@@ -675,6 +704,10 @@ NOT_TABLE_IN_TABLE_OUT: dict[str, str] = {
     # Not a transform of a table at all.
     "explain_analyze": "file path in, dict out; Table's is a classmethod, not an operation",
     "from_wfs": "constructor: fetches a service over the network, no input table",
+    "polygonize": "constructor: reads a raster from disk, no input table; doors "
+    "compared behaviourally in tests/test_process_polygonize.py",
+    "contour": "constructor: reads a raster from disk, no input table; doors "
+    "compared behaviourally in tests/test_process_contour.py",
     # Table in, partition tree out. Both doors are run for real, and asserted to
     # write the same tree, by TestOpsPartition.
     "partition_by_a5": "writes a partition tree; covered by TestOpsPartition",

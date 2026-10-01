@@ -335,6 +335,18 @@ module = [
 ]
 disable_error_code = ["arg-type", "index", "misc", "union-attr"]
 
+# contourrs pins numpy>=2.5.3, whose stubs use PEP 695 `type` statements that
+# mypy's python_version = "3.10" target refuses to parse — and duckdb's stubs
+# import numpy, so on a Python >= 3.12 venv every mypy run loads them and dies
+# on numpy's own files (the 3.11 CI meta leg resolves numpy 2.4.6 and never
+# saw this). Skipping types numpy as Any, the same footing as any unstubbed
+# dependency; `follow_imports` alone is not enough because mypy always follows
+# .pyi stubs unless follow_imports_for_stubs is set too.
+[[tool.mypy.overrides]]
+module = ["numpy"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
 [tool.mutmut]
 source_paths = ["geoparquet_io/"]
 # Fast tests only: slow/network tests are nondeterministic (live third-party

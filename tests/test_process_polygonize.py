@@ -54,9 +54,7 @@ def _contourrs_shaped_table():
             ).encode()
         },
     )
-    return pa.table(
-        {"geometry": [_WKB_SQUARE], "value": [7.0]}, schema=schema
-    )
+    return pa.table({"geometry": [_WKB_SQUARE], "value": [7.0]}, schema=schema)
 
 
 class TestFinalizeRasterTable:
@@ -106,7 +104,7 @@ class TestPolygonizeArray:
         table = polygonize_array(self._classes())
         areas = {}
         for value, wkb in zip(
-            table.column("value").to_pylist(), table.column("geometry").to_pylist()
+            table.column("value").to_pylist(), table.column("geometry").to_pylist(), strict=True
         ):
             areas[value] = areas.get(value, 0) + shapely.from_wkb(wkb).area
         assert areas[1.0] == pytest.approx(60.0)
@@ -158,7 +156,7 @@ class TestPolygonizeCrossValidation:
         ours = {}
         table = polygonize_array(arr)
         for value, wkb in zip(
-            table.column("value").to_pylist(), table.column("geometry").to_pylist()
+            table.column("value").to_pylist(), table.column("geometry").to_pylist(), strict=True
         ):
             ours[value] = ours.get(value, 0) + shapely.from_wkb(wkb).area
 
@@ -186,7 +184,9 @@ class TestPolygonizeCrossValidation:
         pairs = [
             (shapely.from_wkb(wkb), int(value))
             for value, wkb in zip(
-                table.column("value").to_pylist(), table.column("geometry").to_pylist()
+                table.column("value").to_pylist(),
+                table.column("geometry").to_pylist(),
+                strict=True,
             )
         ]
         back = rasterio.features.rasterize(pairs, out_shape=(20, 20), dtype="uint8")
@@ -204,9 +204,7 @@ class TestCliPolygonize:
         return CliRunner().invoke(cli, ["process", "polygonize", *args])
 
     def test_bad_values_option_is_a_clean_error(self, tmp_path):
-        result = self._invoke(
-            ["in.tif", str(tmp_path / "o.parquet"), "--values", "1,x"]
-        )
+        result = self._invoke(["in.tif", str(tmp_path / "o.parquet"), "--values", "1,x"])
         assert result.exit_code != 0
         assert "x" in result.output
         assert "Traceback" not in result.output
@@ -246,9 +244,7 @@ class TestCliPolygonize:
         ) as dst:
             dst.write(arr, 1)
         out = tmp_path / "p.parquet"
-        result = self._invoke(
-            [str(tif), str(out), "--values", "1,3", "--value-column", "class_id"]
-        )
+        result = self._invoke([str(tif), str(out), "--values", "1,3", "--value-column", "class_id"])
         assert result.exit_code == 0, result.output
         table = pq.read_table(str(out))
         assert set(table.column("class_id").to_pylist()) == {1.0, 3.0}
@@ -292,16 +288,16 @@ class TestPolygonizeFile:
         assert geo["columns"]["geometry"]["crs"]["id"]["code"] in (32633, "32633")
         values = set(table.column("value").to_pylist())
         assert 255.0 not in values  # nodata polygonized away
-        total = sum(
-            shapely.from_wkb(w).area for w in table.column("geometry").to_pylist()
-        )
+        total = sum(shapely.from_wkb(w).area for w in table.column("geometry").to_pylist())
         # 400 pixels minus the 4 nodata pixels, at 10m resolution
         assert total == pytest.approx((400 - 4) * 100.0)
         # world coordinates, not pixel coordinates
         class1 = [
             shapely.from_wkb(w)
             for v, w in zip(
-                table.column("value").to_pylist(), table.column("geometry").to_pylist()
+                table.column("value").to_pylist(),
+                table.column("geometry").to_pylist(),
+                strict=True,
             )
             if v == 1.0
         ]
@@ -321,8 +317,15 @@ class TestPythonApi:
         arr[2:6, 2:6] = 1
         tif = tmp_path / "c.tif"
         with rasterio.open(
-            str(tif), "w", driver="GTiff", height=10, width=10, count=1,
-            dtype="uint8", crs="EPSG:32633", transform=from_origin(0, 100, 10, 10),
+            str(tif),
+            "w",
+            driver="GTiff",
+            height=10,
+            width=10,
+            count=1,
+            dtype="uint8",
+            crs="EPSG:32633",
+            transform=from_origin(0, 100, 10, 10),
         ) as dst:
             dst.write(arr, 1)
         return tif

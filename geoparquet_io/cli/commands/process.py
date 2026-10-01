@@ -23,7 +23,6 @@ from geoparquet_io.cli.decorators import (
     where_option,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, ValidationError
-from geoparquet_io.core.process.simplify import simplify_file as simplify_file_impl
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5 as aggregate_by_a5_impl
 from geoparquet_io.core.process.aggregate.by_admin import (
     aggregate_by_admin as aggregate_by_admin_impl,
@@ -31,6 +30,7 @@ from geoparquet_io.core.process.aggregate.by_admin import (
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3 as aggregate_by_h3_impl
 from geoparquet_io.core.process.overview import create_overviews as create_overviews_impl
 from geoparquet_io.core.process.overview.run import create_overview_file
+from geoparquet_io.core.process.simplify import simplify_file as simplify_file_impl
 
 # =============================================================================
 # Process Commands (aggregate, ...)

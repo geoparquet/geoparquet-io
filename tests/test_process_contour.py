@@ -31,7 +31,7 @@ class TestResolveLevels:
         ]
 
     def test_explicit_levels_must_increase(self):
-        with pytest.raises(InvalidParameterError, match="increas"):
+        with pytest.raises(InvalidParameterError, match="increasing"):
             resolve_levels([0.0, 100.0, 100.0], None, 0.0, 0.0, 1.0)
 
     def test_explicit_levels_need_at_least_two(self):
@@ -87,14 +87,12 @@ class TestContourArray:
     def test_min_max_columns_pair_adjacent_levels(self):
         table = contour_array(self._dem(), [0.0, 50.0, 100.0, 200.0])
         rows = sorted(
-            zip(table.column("min").to_pylist(), table.column("max").to_pylist())
+            zip(table.column("min").to_pylist(), table.column("max").to_pylist(), strict=True)
         )
         assert rows == [(0.0, 50.0), (50.0, 100.0), (100.0, 200.0)]
 
     def test_custom_column_names(self):
-        table = contour_array(
-            self._dem(), [0.0, 100.0, 200.0], min_column="lo", max_column="hi"
-        )
+        table = contour_array(self._dem(), [0.0, 100.0, 200.0], min_column="lo", max_column="hi")
         assert "lo" in table.column_names and "hi" in table.column_names
 
     def test_output_metadata_is_gpio_shaped(self):
@@ -132,9 +130,7 @@ class TestCliContour:
         assert "--levels" in result.output and "--interval" in result.output
 
     def test_bad_levels_value_is_a_clean_error(self, tmp_path):
-        result = self._invoke(
-            ["in.tif", str(tmp_path / "o.parquet"), "--levels", "0,abc"]
-        )
+        result = self._invoke(["in.tif", str(tmp_path / "o.parquet"), "--levels", "0,abc"])
         assert result.exit_code != 0
         assert "abc" in result.output
         assert "Traceback" not in result.output
@@ -144,9 +140,7 @@ class TestCliContour:
 
         monkeypatch.setitem(_sys.modules, "rasterio", None)
         monkeypatch.setitem(_sys.modules, "contourrs", None)
-        result = self._invoke(
-            ["in.tif", str(tmp_path / "o.parquet"), "--interval", "100"]
-        )
+        result = self._invoke(["in.tif", str(tmp_path / "o.parquet"), "--interval", "100"])
         assert result.exit_code != 0
         assert "geoparquet-io[raster]" in result.output
         assert "Traceback" not in result.output
@@ -234,8 +228,15 @@ class TestPythonApi:
         dem = np.fromfunction(lambda y, x: 10.0 * x, (10, 10)).astype(np.float32)
         tif = tmp_path / "dem.tif"
         with rasterio.open(
-            str(tif), "w", driver="GTiff", height=10, width=10, count=1,
-            dtype="float32", crs="EPSG:32633", transform=from_origin(0, 100, 10, 10),
+            str(tif),
+            "w",
+            driver="GTiff",
+            height=10,
+            width=10,
+            count=1,
+            dtype="float32",
+            crs="EPSG:32633",
+            transform=from_origin(0, 100, 10, 10),
         ) as dst:
             dst.write(dem, 1)
         return tif

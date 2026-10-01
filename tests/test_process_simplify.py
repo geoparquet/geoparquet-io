@@ -48,9 +48,7 @@ def _wkb_table(geometries, names=None):
     wkb = [None if g is None else shapely.to_wkb(g) for g in geometries]
     names = names or [f"f{i}" for i in range(len(geometries))]
     table = pa.table({"name": names, "geometry": pa.array(wkb, type=pa.binary())})
-    return table.replace_schema_metadata(
-        {b"geo": json.dumps(_geo_block()).encode("utf-8")}
-    )
+    return table.replace_schema_metadata({b"geo": json.dumps(_geo_block()).encode("utf-8")})
 
 
 class TestStripStaleGeometryStats:
@@ -202,7 +200,7 @@ class TestSimplifyFile:
         assert covering["xmin"] == ["geometry_bbox", "xmin"]
         bboxes = result.column("geometry_bbox").to_pylist()
         geoms = [shapely.from_wkb(v) for v in result.column("geometry").to_pylist()]
-        for row, geom in zip(bboxes, geoms):
+        for row, geom in zip(bboxes, geoms, strict=True):
             xmin, ymin, xmax, ymax = geom.bounds
             # The stored box must CONTAIN the geometry (float32 rounds outward)
             # and still sit tight against it.
@@ -212,6 +210,7 @@ class TestSimplifyFile:
             assert row["ymin"] == pytest.approx(ymin, abs=0.1)
             assert row["xmax"] == pytest.approx(xmax, abs=0.1)
             assert row["ymax"] == pytest.approx(ymax, abs=0.1)
+
 
 class TestCliSimplify:
     """CLI surface: option validation is dependency-free."""

@@ -12,6 +12,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import info
+from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.optional_deps import require_contourrs
 from geoparquet_io.core.process.raster.output import finalize_raster_table
 from geoparquet_io.core.process.raster.reader import read_band
@@ -33,10 +34,8 @@ def resolve_levels(
         )
     if levels is not None:
         if len(levels) < 2:
-            raise InvalidParameterError(
-                "levels", "at least two values are needed to form a band"
-            )
-        if any(b <= a for a, b in zip(levels, levels[1:])):
+            raise InvalidParameterError("levels", "at least two values are needed to form a band")
+        if any(b <= a for a, b in zip(levels, levels[1:], strict=False)):
             raise InvalidParameterError("levels", "values must be strictly increasing")
         return [float(v) for v in levels]
     if interval is None:
@@ -56,9 +55,7 @@ def _band_max_for(levels: list[float], lower: float) -> float:
     idx = bisect_left(levels, lower)
     if idx >= len(levels) - 1 or levels[idx] != lower:
         # contourrs returned a lower bound we did not ask for; nearest wins.
-        idx = min(
-            range(len(levels) - 1), key=lambda k: abs(levels[k] - lower)
-        )
+        idx = min(range(len(levels) - 1), key=lambda k: abs(levels[k] - lower))
     return levels[idx + 1]
 
 
@@ -97,7 +94,7 @@ def contour_array(
 
 def _valid_range(array, mask, nodata) -> tuple[float, float]:
     """Min/max of the band's valid pixels, for interval-mode level resolution."""
-    import numpy as np
+    np = load_module("numpy")
 
     values = np.asarray(array, dtype=np.float64)
     keep = np.isfinite(values)

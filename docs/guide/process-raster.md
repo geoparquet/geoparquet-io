@@ -25,6 +25,7 @@ with the lazy dependency shims in
 
 Raster support is an optional extra (gpio's first and only raster surface):
 
+<!-- doctest: skip="install command; never run by the docs harness" -->
 ```bash
 pip install 'geoparquet-io[raster]'
 # or, for a uv tool install:

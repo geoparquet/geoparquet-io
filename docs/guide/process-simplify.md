@@ -15,6 +15,7 @@ The implementation lives in
 
 Simplification is an optional extra (the core install stays lean):
 
+<!-- doctest: skip="install command; never run by the docs harness" -->
 ```bash
 pip install 'geoparquet-io[simplify]'
 # or, for a uv tool install:

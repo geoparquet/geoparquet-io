@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.logging_config import debug, warn
-from geoparquet_io.core.optional_deps import require_coarsen
+from geoparquet_io.core.optional_deps import load_module, require_coarsen
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 #: Above this row count, coverage mode's whole-column materialization gets a
@@ -79,8 +79,9 @@ def _simplify_values(
     collapsed to empty.
     """
     coarsen = require_coarsen()
-    import numpy as np
-    import shapely
+    shapely = load_module("shapely")
+
+    np = load_module("numpy")
 
     idx = [i for i, v in enumerate(values) if v is not None]
     if not idx:
@@ -94,7 +95,7 @@ def _simplify_values(
         out = coarsen.simplify(geoms, tolerance, preserve_topology, threads=threads)
     collapsed = int(np.sum(shapely.is_empty(out))) - int(np.sum(shapely.is_empty(geoms)))
     result: list = [None] * len(values)
-    for i, wkb in zip(idx, shapely.to_wkb(out)):
+    for i, wkb in zip(idx, shapely.to_wkb(out), strict=True):
         result[i] = wkb
     return result, max(collapsed, 0)
 
@@ -111,9 +112,9 @@ def _covering_bbox_column(geo_meta: dict, geom_col: str) -> str | None:
 
 def _refresh_bbox_covering(table: pa.Table, geom_col: str) -> pa.Table:
     """Recompute a declared bbox covering column from ``geom_col``'s data."""
-    import numpy as np
-    import shapely
+    shapely = load_module("shapely")
 
+    np = load_module("numpy")
     geo = sanitized_carried_geo(table.schema.metadata)
     bbox_col = _covering_bbox_column(geo, geom_col)
     if bbox_col is None or bbox_col not in table.column_names:
@@ -188,12 +189,17 @@ def simplify_table(
         raise InvalidParameterError("tolerance", "must be >= 0")
     geom_col = _geometry_column_of(table, geometry_column)
     column = table.column(geom_col)
-    kwargs = {
-        "coverage": coverage,
-        "preserve_topology": preserve_topology,
-        "simplify_boundary": simplify_boundary,
-        "threads": threads,
-    }
+
+    def run(values: list) -> tuple[list, int]:
+        return _simplify_values(
+            values,
+            tolerance,
+            coverage=coverage,
+            preserve_topology=preserve_topology,
+            simplify_boundary=simplify_boundary,
+            threads=threads,
+        )
+
     collapsed = 0
     if coverage:
         if table.num_rows > _COVERAGE_WARN_ROWS:
@@ -201,12 +207,12 @@ def simplify_table(
                 f"coverage simplification holds all {table.num_rows:,} geometries "
                 "in memory at once to preserve shared edges"
             )
-        new_values, collapsed = _simplify_values(column.to_pylist(), tolerance, **kwargs)
+        new_values, collapsed = run(column.to_pylist())
         chunks = [pa.array(new_values, type=column.type)]
     else:
         chunks = []
         for chunk in column.chunks:
-            values, n = _simplify_values(chunk.to_pylist(), tolerance, **kwargs)
+            values, n = run(chunk.to_pylist())
             collapsed += n
             chunks.append(pa.array(values, type=column.type))
     if collapsed:

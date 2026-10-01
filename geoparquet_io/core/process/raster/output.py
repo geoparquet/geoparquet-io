@@ -29,9 +29,7 @@ def finalize_raster_table(
     the ``geo`` block then omits the key rather than guessing).
     """
     rename = rename or {}
-    table = table.rename_columns(
-        [rename.get(name, name) for name in table.column_names]
-    )
+    table = table.rename_columns([rename.get(name, name) for name in table.column_names])
     geo_column: dict = {"encoding": "WKB"}
     if crs is not None:
         geo_column["crs"] = crs
