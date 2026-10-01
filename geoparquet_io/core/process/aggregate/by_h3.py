@@ -30,6 +30,10 @@ H3_SCHEME = GridScheme(
     latlng_template="h3_cell_to_latlng({cell})",
     # h3_cell_to_latlng returns [lat, lng]; ST_Point wants (lng, lat).
     centroid_wkb_template="ST_AsWKB(ST_Point({ll}[2], {ll}[1]))",
+    # H3 is *not* equal-area -- a cell near a pole is about a quarter smaller
+    # than one at the equator -- so `pct_cell` divides each cell by its own
+    # measured area rather than a per-resolution average (#1181).
+    cell_area_template="h3_cell_area({cell}, 'm^2')",
 )
 
 

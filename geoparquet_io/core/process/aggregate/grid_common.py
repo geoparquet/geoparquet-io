@@ -40,6 +40,7 @@ from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.common import (
+    PCT_CELL_FUNC,
     VALID_OUT_GEOMETRY,
     MetricSpec,
     _fold,
@@ -70,6 +71,11 @@ class GridScheme:
       :data:`_NEEDS_SEAM_REPAIR`); the shared builder owns everything after that
     - ``latlng_template``: ``{cell}`` -> per-row centroid intermediate
     - ``centroid_wkb_template``: ``{ll}`` (centroid intermediate alias) -> WKB point
+    - ``cell_area_template``: ``{cell}``, ``{res}`` -> the cell's area in square
+      metres, which ``--metric pct_cell:<column>`` divides by (#1181). An
+      equal-area grid uses only ``{res}``; one whose cells vary in size must use
+      ``{cell}`` so each cell is divided by its own area. Empty means the grid
+      exposes no area function and ``pct_cell`` is refused for it.
 
     ``name`` doubles as the ``calculate_auto_resolution`` index type and the noun
     used in log messages.
@@ -84,6 +90,7 @@ class GridScheme:
     boundary_template: str
     latlng_template: str
     centroid_wkb_template: str
+    cell_area_template: str = ""
 
 
 # Cell rings and the antimeridian
@@ -331,6 +338,28 @@ def bucket_point_expr(
     return f"ST_Centroid({point_expr})", (geom_col,)
 
 
+def cell_area_expr(scheme: GridScheme, resolution: int, cell_expr: str) -> str | None:
+    """The grid's own area for a cell, in square metres, or None if it has none.
+
+    ``cell_expr`` names the cell id where the expression will sit -- the GROUP
+    BY key of an aggregation (``__key``) or of a rollup (``__parent``). The
+    NULL-cell bucket that collects features with no keying point is not a cell
+    and has no area, so it is excluded here rather than left to divide by an
+    unrelated constant.
+
+    The two grids answer this differently, and the difference matters: a5 is
+    equal-area by construction, so ``a5_cell_area(resolution)`` is one constant
+    per resolution (r7 = 2,075.46 km², matching geodesic measurement to better
+    than 0.1%), while h3 cells vary by roughly a quarter with latitude, so each
+    one is divided by its own measured area. Neither goes through
+    ``ST_Area_Spheroid``, which returns NaN on these cell polygons (#1181).
+    """
+    if not scheme.cell_area_template:
+        return None
+    area = scheme.cell_area_template.format(cell=cell_expr, res=resolution)
+    return f"CASE WHEN {cell_expr} IS NULL THEN NULL ELSE {area} END"
+
+
 def needed_source_columns(
     metrics: list[MetricSpec],
     breakdown: str | None,
@@ -486,8 +515,11 @@ def build_grid_query(
         validate_agg_columns(cols, metrics, breakdown, bd_metric)
     # Resolve metric column types so sentinel literals match the column's actual
     # precision (REAL vs DOUBLE, #613) and non-numeric columns fail up-front.
+    # A pct_cell metric divides by an area, so its column's type is needed too
+    # even without sentinels (#1181).
     typed = metrics + ([bd_metric] if bd_metric else [])
-    column_types = resolve_metric_column_types(con, source_sql, typed) if nodata_values else None
+    needs_types = bool(nodata_values) or any(m.func == PCT_CELL_FUNC for m in metrics)
+    column_types = resolve_metric_column_types(con, source_sql, typed) if needs_types else None
 
     key_expr = scheme.key_template.format(pt="__pt", res=resolution)
     keyed_sql = f"SELECT *, {key_expr} AS __key FROM ({source_sql})"
@@ -517,7 +549,10 @@ def build_grid_query(
 
     agg_parts = [f"__key AS {quote_identifier(cell_column)}", "COUNT(*) AS count"]
     metric_select = build_metric_select(
-        metrics, nodata_values=nodata_values, column_types=column_types
+        metrics,
+        nodata_values=nodata_values,
+        column_types=column_types,
+        cell_area_expr=cell_area_expr(scheme, resolution, "__key"),
     )
     if metric_select:
         agg_parts.append(metric_select)
