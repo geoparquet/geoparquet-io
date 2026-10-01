@@ -432,3 +432,128 @@ class TestCleanErrors:
         table = pa.table({"geometry": pa.array([b"\x00\x00not wkb"], pa.binary())})
         with pytest.raises(GeoParquetError, match="WKB"):
             simplify_table(table, 0.1)
+
+
+@requires_coarsen
+class TestStreamingPlainMode:
+    """Plain mode must stream: memory bounded by a row group, not the file.
+
+    Coverage mode inherently needs the whole column (shared edges) and keeps
+    the in-memory path; its behavior is pinned by TestCoverageMode above.
+    """
+
+    def _many_group_file(self, tmp_path, groups=5, rows_per=200, name="src.parquet"):
+        shapely = _shapely()
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        geoms, names = [], []
+        for i in range(groups * rows_per):
+            geoms.append(shapely.Point(i % 360 - 180, (i * 7) % 140 - 70).buffer(0.4, quad_segs=48))
+            names.append(f"f{i}")
+        table = _wkb_table(geoms, names=names)
+        src = tmp_path / name
+        write_geoparquet_table(table, str(src), row_group_rows=rows_per)
+        assert pq.ParquetFile(str(src)).metadata.num_row_groups == groups
+        return src
+
+    def test_streaming_matches_in_memory_reference(self, tmp_path):
+        """The streamed file is byte-equivalent in data and geo metadata to
+        simplify_table + the write funnel on the same input."""
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        src = self._many_group_file(tmp_path)
+        streamed = tmp_path / "streamed.parquet"
+        simplify_file(str(src), str(streamed), tolerance=0.05, row_group_rows=200)
+
+        reference = tmp_path / "reference.parquet"
+        ref_table = simplify_table(pq.read_table(str(src)), 0.05)
+        write_geoparquet_table(ref_table, str(reference), row_group_rows=200)
+
+        out_a, out_b = pq.read_table(str(streamed)), pq.read_table(str(reference))
+        assert out_a.column("geometry").to_pylist() == out_b.column("geometry").to_pylist()
+        assert out_a.column("name").to_pylist() == out_b.column("name").to_pylist()
+        geo_a = json.loads(out_a.schema.metadata[b"geo"])
+        geo_b = json.loads(out_b.schema.metadata[b"geo"])
+        assert geo_a == geo_b
+        assert pq.ParquetFile(str(streamed)).metadata.num_row_groups == 5
+
+    def test_covering_column_refreshed_while_streaming(self, tmp_path):
+        shapely = _shapely()
+        src = TEST_DATA / "austria_bbox_covering.parquet"
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=50.0)
+        result = pq.read_table(str(out))
+        geoms = [shapely.from_wkb(v) for v in result.column("geometry").to_pylist()]
+        for row, geom in zip(result.column("geometry_bbox").to_pylist(), geoms, strict=True):
+            xmin, ymin, xmax, ymax = geom.bounds
+            assert row["xmin"] <= xmin and row["ymax"] >= ymax
+
+    def test_memory_bounded_by_a_row_group(self, tmp_path):
+        """Measured in a subprocess (pa.total_allocated_bytes is process-wide,
+        following tests/test_v2_zm_geo_metadata.py's #1178 pattern): growth
+        while simplifying a 10-group file stays under half the file."""
+        import subprocess
+        import sys as _sys
+
+        src = self._many_group_file(tmp_path, groups=10, rows_per=400)
+        out = tmp_path / "out.parquet"
+        probe = f"""
+import json
+import pyarrow as pa
+import pyarrow.parquet as pq
+from unittest.mock import patch
+import geoparquet_io.core.process.simplify as simp
+
+peaks = []
+real = simp._simplify_batch_values if hasattr(simp, "_simplify_batch_values") else None
+orig_write = pq.ParquetWriter.write_table
+def spy(self, table, **kw):
+    peaks.append(pa.total_allocated_bytes())
+    return orig_write(self, table, **kw)
+pq.ParquetWriter.write_table = spy
+baseline = pa.total_allocated_bytes()
+simp.simplify_file({str(src)!r}, {str(out)!r}, tolerance=0.05, row_group_rows=400)
+growth = max(peaks) - baseline if peaks else -1
+one_group = pq.ParquetFile({str(src)!r}).metadata.row_group(0).total_byte_size
+print(json.dumps({{"writes": len(peaks), "growth": growth, "one_group": one_group}}))
+"""
+        measured = subprocess.run(
+            [_sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        )
+        result = json.loads(measured.stdout.strip().splitlines()[-1])
+        assert result["writes"] >= 10, "the streaming path never wrote per batch"
+        file_bytes = sum(
+            pq.ParquetFile(str(src)).metadata.row_group(g).total_byte_size for g in range(10)
+        )
+        assert result["growth"] < file_bytes // 2, (
+            f"growth {result['growth']:,} suggests the whole file was materialized "
+            f"(file holds {file_bytes:,} bytes uncompressed)"
+        )
+
+    def test_zero_row_file_streams(self, tmp_path):
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        empty = _wkb_table([]).slice(0, 0)
+        src = tmp_path / "empty.parquet"
+        write_geoparquet_table(empty, str(src))
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.1)
+        assert pq.ParquetFile(str(out)).metadata.num_rows == 0
+
+    def test_native_2_0_input_falls_back_to_in_memory(self, tmp_path):
+        """An explicit 2.0 output request means native types,
+        which the streaming writer does not produce; the in-memory funnel
+        path must be taken and still yield a valid file. (A native-2.0
+        INPUT reads back as a geoarrow extension column, which simplify
+        rejects today — a separate, pre-existing limitation.)"""
+        shapely = _shapely()
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        circle = shapely.Point(1, 2).buffer(1, quad_segs=16)
+        table = _wkb_table([circle])
+        geo = json.loads(table.schema.metadata[b"geo"])
+        src = tmp_path / "v11.parquet"
+        write_geoparquet_table(table, str(src))
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.0, geoparquet_version="2.0")
+        assert pq.ParquetFile(str(out)).metadata.num_rows == 1

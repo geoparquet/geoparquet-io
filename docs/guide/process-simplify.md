@@ -81,7 +81,32 @@ recomputed rather than carried through stale:
 Geometries that collapse to empty at the given tolerance are kept (and
 counted in a warning) rather than dropped.
 
-!!! note "Memory in coverage mode"
-    `--coverage` has to see every geometry at once to preserve shared edges,
-    so the whole geometry column is held in memory. Plain mode processes the
-    file chunk by chunk.
+## Scaling to planet-sized files
+
+Plain mode **streams**: batches are read, simplified and written one row
+group at a time, so peak memory is bounded by a single row group no matter
+how large the file — a 40 GB, 100M+-row GeoParquet simplifies within a
+laptop's RAM. (The streaming writer covers plain-WKB 1.x outputs; a 2.0
+native output or a `--row-group-size-mb` byte target takes the in-memory
+path.)
+
+`--coverage` is different in kind: preserving shared edges requires seeing
+**every geometry in one pass** — splitting a coverage into chunks measurably
+introduces slivers of gap and overlap along the seam, small enough to slip
+past downstream repair thresholds. So coverage mode holds the whole
+geometry column in memory, and for global-scale coverages the right recipe
+is to partition on a boundary where parcels do not share edges and
+coverage-simplify each part:
+
+<!-- doctest: skip="requires the optional simplify extra (coarsen)" -->
+```bash
+gpio partition admin world_parcels.parquet parts/   # or h3 / kdtree / string
+for f in parts/*.parquet; do
+    gpio process simplify "$f" "simplified/$(basename "$f")"         --tolerance 5 --coverage
+done
+```
+
+!!! note "Tolerance units"
+    `--tolerance` is in the data's CRS units. Global data in EPSG:4326 means
+    *degrees* — for a metre tolerance, reproject to a metric CRS first
+    (`gpio convert reproject`), simplify there, and reproject back.
