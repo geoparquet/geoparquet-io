@@ -365,6 +365,7 @@ def aggregate_a5(
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into A5 grid cells with per-cell statistics.
@@ -372,7 +373,9 @@ def aggregate_a5(
     Args:
         table: Input PyArrow Table with geometry column
         resolution: A5 resolution level 0-30
-        metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+        metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+            ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the percent
+            of the cell covered by a per-feature area in m2.
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -387,6 +390,8 @@ def aggregate_a5(
         breakdown_metric: What each breakdown column holds: None/'count'
             (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
             pivot named <func>_<col>_<value>
+        memory_limit: DuckDB memory limit for the aggregation (e.g. "8GB").
+            Default: half the process's memory ceiling
 
     Returns:
         New PyArrow Table with one row per A5 cell
@@ -406,6 +411,7 @@ def aggregate_a5(
         bucket_point=bucket_point,
         bbox_column=bbox_column,
         breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
 
 
@@ -422,6 +428,7 @@ def aggregate_h3(
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into H3 grid cells with per-cell statistics.
@@ -429,7 +436,9 @@ def aggregate_h3(
     Args:
         table: Input PyArrow Table with geometry column
         resolution: H3 resolution level 0-15
-        metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+        metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+            ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the percent
+            of the cell covered by a per-feature area in m2.
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -444,6 +453,8 @@ def aggregate_h3(
         breakdown_metric: What each breakdown column holds: None/'count'
             (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
             pivot named <func>_<col>_<value>
+        memory_limit: DuckDB memory limit for the aggregation (e.g. "8GB").
+            Default: half the process's memory ceiling
 
     Returns:
         New PyArrow Table with one row per H3 cell
@@ -463,6 +474,7 @@ def aggregate_h3(
         bucket_point=bucket_point,
         bbox_column=bbox_column,
         breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
 
 
@@ -478,6 +490,7 @@ def aggregate_admin(
     bucket_point: str = "geometry",
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
+    memory_limit: str | None = None,
 ) -> pa.Table:
     """
     Aggregate an Arrow table into administrative regions with per-region statistics.
@@ -485,7 +498,9 @@ def aggregate_admin(
     Args:
         table: Input PyArrow Table with geometry column
         level: Admin level to aggregate by ("country", "region", "subregion")
-        metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+        metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+            ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the percent
+            of the cell covered by a per-feature area in m2.
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -499,6 +514,8 @@ def aggregate_admin(
         breakdown_metric: What each breakdown column holds: None/'count'
             (default), or 'sum:col' / 'min:col' / 'max:col' for a weighted
             pivot named <func>_<col>_<value>
+        memory_limit: DuckDB memory limit for the aggregation (e.g. "8GB").
+            Default: half the process's memory ceiling
 
     Returns:
         New PyArrow Table with one row per admin region
@@ -523,6 +540,7 @@ def aggregate_admin(
         bucket_point=bucket_point,
         bbox_column=bbox_column,
         breakdown_metric=breakdown_metric,
+        memory_limit=memory_limit,
     )
 
 
@@ -544,6 +562,7 @@ def create_overview_file(
     force: bool = False,
     verbose: bool = False,
     show_sql: bool = False,
+    memory_limit: str | None = None,
 ) -> str:
     """
     Assemble an aggregate's level ladder into ONE levelled overview GeoParquet.
@@ -580,6 +599,8 @@ def create_overview_file(
         compression_level: Optional compression level.
         geoparquet_version: GeoParquet spec version to write.
         force: Overwrite an existing ``overview_out`` or sibling file.
+        memory_limit: DuckDB memory limit for the rollups (e.g. "8GB").
+            Default: half the process's memory ceiling.
         verbose: Enable verbose debug logging.
         show_sql: Log the rollup SQL.
 
@@ -613,6 +634,7 @@ def create_overview_file(
         force=force,
         verbose=verbose,
         show_sql=show_sql,
+        memory_limit=memory_limit,
     )
 
 
@@ -631,6 +653,7 @@ def create_overviews(
     force: bool = False,
     verbose: bool = False,
     show_sql: bool = False,
+    memory_limit: str | None = None,
 ) -> list[tuple[int | str, str]]:
     """
     Build coarser overview levels from an aggregate GeoParquet file.
@@ -658,6 +681,8 @@ def create_overviews(
         force: Overwrite existing overview output files
         verbose: Enable verbose output
         show_sql: Log the rollup SQL
+        memory_limit: DuckDB memory limit for the rollups (e.g. "8GB").
+            Default: half the process's memory ceiling
 
     Returns:
         List of (level, output_path) tuples, coarse to fine
@@ -683,6 +708,7 @@ def create_overviews(
         force=force,
         verbose=verbose,
         show_sql=show_sql,
+        memory_limit=memory_limit,
     )
 
 

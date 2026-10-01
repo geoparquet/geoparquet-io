@@ -14,7 +14,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from geoparquet_io.core.duckdb_utils import (
-    get_duckdb_connection,
     load_community_extension,
     quote_identifier,
     sql_path,
@@ -22,9 +21,12 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
 from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME
 from geoparquet_io.core.process.aggregate.common import (
+    PCT_CELL_FUNC,
+    PCT_CELL_PREFIX,
     VALID_METRIC_FUNCS,
     geometry_to_geom_expr,
 )
@@ -60,8 +62,12 @@ class RollupColumn:
     """How one attribute column rolls up to a parent cell."""
 
     name: str
-    func: str  # "sum" | "avg" | "min" | "max"
+    func: str  # "sum" | "avg" | "min" | "max" | "pct_cell"
     cast_to_bigint: bool = False  # SUM(BIGINT) widens to HUGEINT; cast back
+    # For "pct_cell": the sum column the parent's percentage is recomputed from.
+    # A percentage is not an average of its children's percentages, so it needs
+    # the total behind it (#1181).
+    source_column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,7 +169,11 @@ def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: 
     # (see aggregate.common.breakdown_prefix for the contract and its limits).
     prefix_to_func = {f"{func}_": func for func in sorted(VALID_METRIC_FUNCS)}
     prefix_to_func["count_"] = "sum"
+    # A `pct_<col>` column (--metric pct_cell:<col>) is recomputed at the parent
+    # resolution from `sum_<col>`, which the aggregate emits alongside it.
+    prefix_to_func[PCT_CELL_PREFIX] = PCT_CELL_FUNC
 
+    names = {name for name, _ in columns}
     rollups: list[RollupColumn] = []
     dropped: list[str] = []
     for name, dtype in columns:
@@ -173,10 +183,33 @@ def _classify_columns(columns: list[tuple[str, str]], cell_column: str, scheme: 
         if func is None:
             dropped.append(name)
             continue
+        if func == PCT_CELL_FUNC:
+            source = _pct_cell_source(name, names, scheme)
+            if source is None:
+                dropped.append(name)
+                continue
+            rollups.append(RollupColumn(name, func, source_column=source))
+            continue
         rollups.append(
             RollupColumn(name, func, cast_to_bigint=(func == "sum" and dtype in _INTEGER_TYPES))
         )
     return tuple(rollups), tuple(dropped)
+
+
+def _pct_cell_source(name: str, names: set[str], scheme: str) -> str | None:
+    """The ``sum_<col>`` a ``pct_<col>`` column is recomputed from, or None.
+
+    None means the column cannot be rolled up and is dropped rather than
+    averaged: averaging children's percentages gives the wrong answer whenever
+    they hold different totals, and a parent needs its *own* cell area as the
+    denominator. That happens when the aggregate carries no matching sum (a
+    hand-built or pre-#1181 file), and for admin rollups, where a country is
+    not a cell and has no cell area at all.
+    """
+    if scheme == "admin":
+        return None
+    source = f"sum_{name[len(PCT_CELL_PREFIX) :]}"
+    return source if source in names else None
 
 
 def _infer_out_geometry(con, relation: str, columns: dict[str, str]) -> str:
@@ -283,15 +316,23 @@ def detect_aggregate_file(
 
 
 @contextmanager
-def aggregate_connection(input_parquet: str, verbose: bool = False):
+def aggregate_connection(
+    input_parquet: str, verbose: bool = False, memory_limit: str | None = None
+):
     """Yield ``(con, relation)`` for reading an aggregate file.
 
     Shared connection boilerplate for every consumer of an aggregate file
     (overview building, pyramid planning, file detection): spatial + httpfs
     connection, lon/lat axis order, and a ``read_parquet`` relation string.
+
+    The connection is bounded (#1179): a rollup ends in ``.arrow().read_all()``
+    with no COPY to scope, so the memory limit belongs to the connection.
+    ``memory_limit`` None takes the ceiling-based default.
     """
     url = resolve_file_url(input_parquet, verbose)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
+    con = open_bounded_connection(
+        load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
+    )
     try:
         con.execute("SET geometry_always_xy = true")
         yield (

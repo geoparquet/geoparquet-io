@@ -227,7 +227,7 @@ def test_table_bbox_mode_autodetects_from_schema():
         _resolve_bbox_column_for_table(tbl, "custom")
 
 
-def test_admin_joined_sql_uses_point_expr_and_exclude():
+def test_admin_joined_sql_uses_point_expr_and_select_list():
     from geoparquet_io.core.process.aggregate.by_admin import _build_joined_sql
 
     sql = _build_joined_sql(
@@ -237,11 +237,14 @@ def test_admin_joined_sql_uses_point_expr_and_exclude():
         "country",
         "country",
         "geometry",
-        exclude_sql=' EXCLUDE ("geometry")',
+        select_list='"height", "bbox", ',
     )
-    inner = sql.split(") s")[0]
+    inner = sql.split("FROM (")[1].split(") s")[0]
     assert "ST_Point((bbox.xmin" in inner
-    assert 'EXCLUDE ("geometry")' in inner
+    assert '"height", "bbox", ' in inner
+    # The narrowed list is the whole projection: no passthrough star, so the
+    # geometry column is never scanned.
+    assert "*" not in inner and '"geometry"' not in inner
 
 
 # ---------------------------------------------------------------------------
