@@ -395,9 +395,12 @@ def convert(
     Args:
         path: Path to input file (local or S3 URL)
         geometry_column: Name for geometry column in output (default: 'geometry')
-        wkt_column: For CSV: column containing WKT geometry
-        lat_column: For CSV: latitude column
-        lon_column: For CSV: longitude column
+        wkt_column: For CSV or a Parquet file with no geometry column:
+               column containing WKT geometry
+        lat_column: For CSV or a Parquet file with no geometry column:
+               latitude column (auto-detected if not specified)
+        lon_column: For CSV or a Parquet file with no geometry column:
+               longitude column (auto-detected if not specified)
         delimiter: For CSV: field delimiter (auto-detected if not specified)
         skip_invalid: Skip invalid geometries instead of erroring
         profile: AWS profile name for S3 authentication (default: None)

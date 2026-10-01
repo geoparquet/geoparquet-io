@@ -822,19 +822,38 @@ def _build_csv_read_expr(input_url: str, delimiter: str | None, encoding: str | 
     return f"read_csv_auto({sql_path(input_url)}, {size_options})"
 
 
-def _require_column(parameter, name, columns):
-    """Raise unless ``name`` is a column, suggesting the nearest names if not."""
+#: How many column names an error message lists before it stops. A wide
+#: scientific table runs to hundreds of columns (the NOAA sounding files that
+#: prompted this have ~190), and a message that prints them all buries the
+#: suggestion that would have fixed the typo.
+_MAX_LISTED_COLUMNS = 20
+
+
+def _column_suggestions(name, actual_cols):
+    """Column names a mistyped ``name`` most likely meant."""
     import difflib
 
+    # 0.7 rather than difflib's 0.6: at 0.6, "LONG" also drags in "GCLONG02".
+    close = difflib.get_close_matches(name, actual_cols, n=3, cutoff=0.7)
+    # difflib compares case-sensitively, so a pure case slip scores 0 and has
+    # to be looked for separately -- it is the likeliest intent of all.
+    exact_fold = [c for c in actual_cols if c.lower() == name.lower()]
+    return exact_fold + [c for c in close if c not in exact_fold]
+
+
+def _require_column(parameter, name, columns):
+    """Raise unless ``name`` is a column, suggesting the nearest names if not."""
     actual_cols = [col[0] for col in columns]
     if name in actual_cols:
         return
-    close = difflib.get_close_matches(name, actual_cols, n=3, cutoff=0.6)
-    close += [c for c in actual_cols if c.lower() == name.lower() and c not in close]
-    hint = f" Did you mean {', '.join(repr(c) for c in close)}?" if close else ""
+    suggestions = _column_suggestions(name, actual_cols)
+    hint = f" Did you mean {', '.join(repr(c) for c in suggestions)}?" if suggestions else ""
+    listed = ", ".join(actual_cols[:_MAX_LISTED_COLUMNS])
+    if len(actual_cols) > _MAX_LISTED_COLUMNS:
+        listed += f", ... (+{len(actual_cols) - _MAX_LISTED_COLUMNS} more)"
     raise InvalidParameterError(
         parameter,
-        f"column '{name}' not found in input.{hint} Available columns: {', '.join(actual_cols)}",
+        f"column '{name}' not found in input.{hint} Available columns: {listed}",
     )
 
 
@@ -1052,7 +1071,7 @@ def _detect_csv_geometry_column(
 
 
 def _detect_parquet_tabular_geometry(
-    con, input_url, input_file, wkt_column, lat_column, lon_column, verbose
+    con, input_url, existing_geom_column, wkt_column, lat_column, lon_column, verbose
 ):
     """WKT or lat/lon geometry for a Parquet file that has no geometry column.
 
@@ -1062,16 +1081,19 @@ def _detect_parquet_tabular_geometry(
     geometries would collide on the output's ``geometry`` -- and auto-detection
     only runs when there is nothing better to use.
 
+    ``existing_geom_column`` is the file's own geometry column, already
+    detected by the caller: reading the footer again to answer the same
+    question would cost a second round trip on a remote file.
+
     Returns:
         geom_info for the tabular path, or None to take the spatial path.
     """
     explicit = bool(wkt_column or lat_column or lon_column)
-    existing = detect_all_geometry_columns(input_file, verbose=verbose)["primary"]
-    if existing:
+    if existing_geom_column:
         if explicit:
             raise InvalidParameterError(
                 "lat_column/lon_column" if (lat_column or lon_column) else "wkt_column",
-                f"input already has a geometry column ('{existing}'); "
+                f"input already has a geometry column ('{existing_geom_column}'); "
                 "--lat-column/--lon-column/--wkt-column only apply to a Parquet file without one",
             )
         return None
@@ -1799,6 +1821,7 @@ def _convert_spatial_path(
     skip_hilbert,
     verbose,
     is_parquet=False,
+    parquet_geometry=None,
     layer=None,
     geoparquet_version=None,
     linearize_curves=True,
@@ -1824,6 +1847,10 @@ def _convert_spatial_path(
     pre-scan. ``convert_to_geoparquet`` sets it when a first write failed on
     curved geometry that nothing parsed early enough to see (#985).
 
+    ``parquet_geometry`` is the Parquet source's already-detected geometry
+    columns. The caller reads them to decide between this path and the tabular
+    one, and passes them on so the footer is read once, not once per attempt.
+
     Returns:
         tuple: (query, geometry_info) where geometry_info contains primary/secondary columns
                and their metadata. Returns (None, None) if no geometry found.
@@ -1836,7 +1863,11 @@ def _convert_spatial_path(
     # Use multi-geometry detection for parquet files
     column_aliases = None
     if is_parquet:
-        geom_info = detect_all_geometry_columns(input_file, verbose=verbose)
+        geom_info = (
+            parquet_geometry
+            if parquet_geometry is not None
+            else detect_all_geometry_columns(input_file, verbose=verbose)
+        )
         geom_column = geom_info["primary"]
         secondary_columns = geom_info["secondary"]
     else:
@@ -2010,9 +2041,12 @@ def read_spatial_to_arrow(
     Args:
         input_file: Path to input file (GeoPackage, GeoJSON, Shapefile, CSV/TSV, etc.)
         verbose: Print detailed progress
-        wkt_column: CSV/TSV only - WKT column name (auto-detected if not specified)
-        lat_column: CSV/TSV only - Latitude column name (requires lon_column)
-        lon_column: CSV/TSV only - Longitude column name (requires lat_column)
+        wkt_column: CSV/TSV, or a Parquet file with no geometry column - WKT
+            column name (auto-detected if not specified)
+        lat_column: CSV/TSV, or a Parquet file with no geometry column -
+            latitude column name (requires lon_column, auto-detected if not given)
+        lon_column: CSV/TSV, or a Parquet file with no geometry column -
+            longitude column name (requires lat_column, auto-detected if not given)
         delimiter: CSV/TSV only - Delimiter character (auto-detected if not specified)
         crs: CRS for CSV geometry data (default: EPSG:4326/WGS84)
         skip_invalid: Skip rows with invalid geometries instead of failing
@@ -2072,9 +2106,15 @@ def read_spatial_to_arrow(
 
     try:
         # A plain Parquet file with WKT or lat/lon columns reads like a CSV.
+        # Detected once and handed on, so neither path re-reads the footer.
+        parquet_geom_column = (
+            _detect_geometry_column(con, input_file, verbose, is_parquet=True)
+            if is_parquet
+            else None
+        )
         parquet_tabular = (
             _detect_parquet_tabular_geometry(
-                con, input_url, input_file, wkt_column, lat_column, lon_column, verbose
+                con, input_url, parquet_geom_column, wkt_column, lat_column, lon_column, verbose
             )
             if is_parquet
             else None
@@ -2149,6 +2189,7 @@ def read_spatial_to_arrow(
                 input_file,
                 verbose,
                 is_parquet=is_parquet,
+                parquet_geom_column=parquet_geom_column,
                 layer=layer,
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
@@ -2297,6 +2338,7 @@ def _read_spatial_to_arrow(
     input_file,
     verbose,
     is_parquet=False,
+    parquet_geom_column=None,
     layer=None,
     linearize_curves=True,
     max_angle_deg=None,
@@ -2313,9 +2355,9 @@ def _read_spatial_to_arrow(
     open_options = source_open_options(encoding)
     column_aliases = None
     if is_parquet:
-        geom_column = _detect_geometry_column(
-            con, input_file, verbose, is_parquet=True, layer=layer, open_options=open_options
-        )
+        # Already detected by the caller for a Parquet source (see
+        # read_spatial_to_arrow); detecting again costs a second footer read.
+        geom_column = parquet_geom_column
     else:
         geom_column, column_aliases = _detect_spatial_geometry(
             con, input_file, verbose, layer, open_options
@@ -2737,9 +2779,12 @@ def convert_to_geoparquet(
         row_group_rows: Rows per group (default: None, meaning the shared
             write default of 49,152; see parquet_writer.resolve_row_group_rows)
         row_group_size_mb: Target row group size in MB (alternative to row_group_rows)
-        wkt_column: CSV/TSV only - WKT column name (auto-detected if not specified)
-        lat_column: CSV/TSV only - Latitude column name (requires lon_column)
-        lon_column: CSV/TSV only - Longitude column name (requires lat_column)
+        wkt_column: CSV/TSV, or a Parquet file with no geometry column - WKT
+            column name (auto-detected if not specified)
+        lat_column: CSV/TSV, or a Parquet file with no geometry column -
+            latitude column name (requires lon_column, auto-detected if not given)
+        lon_column: CSV/TSV, or a Parquet file with no geometry column -
+            longitude column name (requires lat_column, auto-detected if not given)
         delimiter: CSV/TSV only - Delimiter character (auto-detected if not specified)
         layer: GeoPackage/FileGDB only - Layer name (reads first layer if not specified)
         crs: CRS for geometry data (default: EPSG:4326/WGS84)
@@ -2804,10 +2849,19 @@ def convert_to_geoparquet(
                 debug("Could not detect input GeoParquet version; using writer default")
 
         # A plain Parquet file with WKT or lat/lon columns converts like a CSV
-        # would: same detection, same query, same user-supplied CRS.
+        # would: same detection, same query, same user-supplied CRS. The
+        # file's own geometry columns are read once here and handed to
+        # whichever path runs, rather than each reading the footer again.
+        parquet_geometry = detect_all_geometry_columns(input_file, verbose) if is_parquet else None
         parquet_tabular = (
             _detect_parquet_tabular_geometry(
-                con, input_url, input_file, wkt_column, lat_column, lon_column, verbose
+                con,
+                input_url,
+                parquet_geometry["primary"],
+                wkt_column,
+                lat_column,
+                lon_column,
+                verbose,
             )
             if is_parquet
             else None
@@ -2868,6 +2922,7 @@ def convert_to_geoparquet(
                     skip_hilbert,
                     verbose,
                     is_parquet=is_parquet,
+                    parquet_geometry=parquet_geometry,
                     layer=layer,
                     geoparquet_version=geoparquet_version,
                     linearize_curves=linearize_curves,
@@ -3010,6 +3065,14 @@ def convert_to_geoparquet(
         if e.errno == 28:  # ENOSPC
             raise GeoParquetError("Not enough disk space for output file") from e
         raise GeoParquetError(f"File system error: {str(e)}") from e
+
+    except InvalidParameterError:
+        # Already names the parameter and what is wrong with it, the way
+        # read_spatial_to_arrow passes its actionable errors through. Wrapping
+        # would only prefix "Conversion failed:" to a message about a flag the
+        # user typed, which is not a failure of the conversion.
+        con.close()
+        raise
 
     except Exception as e:
         con.close()

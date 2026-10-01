@@ -6,6 +6,8 @@ detected". It now goes through the same tabular path CSV does, and both
 formats auto-detect a wider range of coordinate column names.
 """
 
+import json
+
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,6 +25,18 @@ from geoparquet_io.core.convert import (
 )
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.geo_metadata import parse_geo_metadata
+
+
+def _write_geoparquet(path, table, geom_column="geometry"):
+    """Write ``table`` as GeoParquet so DuckDB reads its WKB column as GEOMETRY."""
+    geo = {
+        "version": "1.1.0",
+        "primary_column": geom_column,
+        "columns": {geom_column: {"encoding": "WKB", "geometry_types": ["Point"]}},
+    }
+    meta = {**(table.schema.metadata or {}), b"geo": json.dumps(geo).encode()}
+    pq.write_table(table.replace_schema_metadata(meta), path)
+    return str(path)
 
 
 def _columns(*specs):
@@ -162,11 +176,10 @@ class TestParquetLatLonConvert:
                 "lon": [1.0],
             }
         )
-        path = tmp_path / "geo.parquet"
-        pq.write_table(table, path)
+        path = _write_geoparquet(tmp_path / "geo.parquet", table)
         with pytest.raises(InvalidParameterError, match="already has a geometry column"):
             convert_to_geoparquet(
-                str(path), str(tmp_path / "out.parquet"), lat_column="lat", lon_column="lon"
+                path, str(tmp_path / "out.parquet"), lat_column="lat", lon_column="lon"
             )
 
     def test_existing_geometry_ignores_latlon_names(self, tmp_path):
@@ -178,10 +191,9 @@ class TestParquetLatLonConvert:
                 "lon": [60.0],
             }
         )
-        path = tmp_path / "geo.parquet"
-        pq.write_table(table, path)
+        path = _write_geoparquet(tmp_path / "geo.parquet", table)
         out = str(tmp_path / "out.parquet")
-        convert_to_geoparquet(str(path), out)
+        convert_to_geoparquet(path, out)
         assert _points_from(out, "geometry") == [(1.0, 2.0)]
         assert {"lat", "lon"} <= set(pq.read_schema(out).names)
 

@@ -847,34 +847,93 @@ gpio inspect output.parquet
 gpio check all output.parquet
 ```
 
-## CSV/TSV Support
+## Tabular Sources: CSV, TSV and Parquet Without Geometry
 
-Auto-detects geometry columns. WKT columns (wkt, geometry, geom) checked first, then lat/lon pairs (lat/lon, latitude/longitude).
+A source whose coordinates sit in ordinary columns — a CSV, or a **Parquet file
+that carries no geometry column at all** — gets its geometry built from those
+columns. Scientific archives are full of the second kind: a table of
+observations with `LAT` and `LON` columns and no `geo` metadata, which used to
+fail with "No geometry column detected"
+([#1183](https://github.com/geoparquet/geoparquet-io/issues/1183)).
 
-```bash
-# Auto-detect WKT or lat/lon
-gpio convert points.csv points.parquet
+=== "CLI"
+
+    ```bash
+    # Auto-detect WKT or lat/lon, CSV or Parquet alike
+    gpio convert points.csv points.parquet
+    ```
+
+    <!-- doctest: skip="needs a CSV with a 'geom_wkt' column, and a Parquet file with no geometry" -->
+    ```bash
+    # Name the columns when auto-detection cannot
+    gpio convert data.csv out.parquet --wkt-column geom_wkt
+    gpio convert data.csv out.parquet --lat-column lat --lon-column lng
+
+    # Same flags, Parquet input
+    gpio convert observations.parquet out.parquet --lat-column LAT --lon-column LON
+
+    # Custom delimiter (CSV/TSV only)
+    gpio convert data.txt out.parquet --delimiter "|"
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.convert("points.csv").sort_hilbert().write("points.parquet")
+    ```
+
+    <!-- doctest: skip="needs a CSV with a 'geom_wkt' column, and a Parquet file with no geometry" -->
+    ```python
+    gpio.convert("data.csv", wkt_column="geom_wkt").write("out.parquet")
+    gpio.convert("data.csv", lat_column="lat", lon_column="lng").write("out.parquet")
+    gpio.convert(
+        "observations.parquet", lat_column="LAT", lon_column="LON"
+    ).write("out.parquet")
+    ```
+
+The lat/lon columns are replaced by a single `geometry` column; every other
+column is carried through. A row missing a coordinate keeps its attributes and
+gets NULL geometry.
+
+### What Auto-Detection Looks For
+
+WKT first, then a lat/lon pair:
+
+| Step | Matches |
+|------|---------|
+| WKT column | `wkt`, `geometry`, `geom`, `the_geom`, `shape` — the value is parsed before it is believed |
+| Exact lat/lon names | `lat`/`lon`, `latitude`/`longitude`, `lng`, `long`, and `y`/`x` |
+| Matching numeric pair | Two numeric columns alike but for the axis word: `decimalLatitude`/`decimalLongitude`, `lat_dd`/`lon_dd`, `LATITUDE_WGS84`/`LONGITUDE_WGS84`, `location.lat`/`location.lon` |
+
+Words are matched whole, so a column like `GCLONG01` is not mistaken for a
+longitude. When several matching pairs exist — `pickup_latitude`/
+`pickup_longitude` beside `dropoff_latitude`/`dropoff_longitude` — the first is
+used and the others are named in a warning; pass `--lat-column`/`--lon-column`
+to choose. A Parquet file that already has a geometry column is never
+reinterpreted: those flags are refused for it, and auto-detection does not run.
+
+A mistyped name is answered with the nearest column names rather than a bare
+failure:
+
 ```
-
-<!-- doctest: skip="needs a CSV with a 'geom_wkt' column" -->
-```bash
-# Explicit columns
-gpio convert data.csv out.parquet --wkt-column geom_wkt
-
-gpio convert data.csv out.parquet --lat-column lat --lon-column lng
-
-# Custom delimiter
-gpio convert data.txt out.parquet --delimiter "|"
+Error: column 'LONG' not found in input. Did you mean 'LON'?
+Available columns: OBS_TIMESTAMP, MSG_TYPE, ... (+161 more)
 ```
 
 ### CRS and Validation
 
-Default: WGS84 (EPSG:4326). Override with `--crs` for WKT data:
+Default: WGS84 (EPSG:4326). Override with `--crs` for WKT data — in a CSV or
+in a Parquet file whose geometry gpio is building from its columns:
 
 <!-- doctest: skip="needs projected.csv, which the harness does not seed" -->
 ```bash
 gpio convert projected.csv out.parquet --crs EPSG:3857
 ```
+
+`--crs` is still refused for a source that states its own CRS (a GeoPackage,
+a shapefile, a Parquet file with a `geo` block).
 
 Validates lat/lon ranges (-90 to 90, -180 to 180). Warns on large coordinates suggesting projected CRS.
 
