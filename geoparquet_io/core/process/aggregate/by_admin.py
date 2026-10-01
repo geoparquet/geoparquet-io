@@ -36,6 +36,7 @@ from geoparquet_io.core.process.aggregate.common import (
     validate_metric_nodata,
 )
 from geoparquet_io.core.process.aggregate.grid_common import (
+    _RESERVED_INTERNAL,
     _resolve_bbox_column_for_file,
     _validate_bucket_point_args,
     _validate_keying_columns_for_file,
@@ -267,7 +268,13 @@ def aggregate_by_admin(
             # is always emitted. Checked before _get_admin_ref so a typo fails now
             # rather than after downloading the admin boundary cache, and before
             # the type resolution below so a missing column reports as missing.
-            cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {read_rel}").fetchall()}
+            # The internal aliases are subtracted for the same reason the grid
+            # path subtracts them: the narrowed projection drops a requested name
+            # that collides with one, so validating against it would pass a column
+            # the query then cannot bind.
+            cols = {
+                r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {read_rel}").fetchall()
+            } - set(_RESERVED_INTERNAL)
             validate_agg_columns(cols, metrics, breakdown, bd_metric)
 
         admin_ref = _get_admin_ref(admin_dataset, con, level)
@@ -301,7 +308,7 @@ def aggregate_by_admin(
                 con,
                 read_rel,
                 needed_source_columns(metrics, breakdown, bd_metric),
-                exclude_cols,
+                (*exclude_cols, *_RESERVED_INTERNAL),
             ),
         )
 

@@ -494,3 +494,50 @@ def test_admin_join_materialization_holds_only_the_aggregated_columns(
     finally:
         con.execute("DROP TABLE IF EXISTS __agg_joined")
     assert columns == ["__admin_code", "__admin_geom", "__admin_name", "crop", "height"]
+
+
+# ---------------------------------------------------------------------------
+# A requested column that collides with an internal alias
+# ---------------------------------------------------------------------------
+
+
+def _write_points_with_reserved_name(path: str) -> None:
+    """An input carrying a real column named like one of the internal aliases."""
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
+    con.execute(
+        f"""COPY (
+            SELECT ST_Point((i % 13) * 0.5, (i % 11) * 0.5) AS geometry,
+                   (i % 7) * 1.5 AS __key,
+                   'crop' || (i % 4) AS crop
+            FROM range(200) t(i)
+        ) TO '{path}' (FORMAT PARQUET)"""
+    )
+    con.close()
+
+
+@pytest.mark.parametrize("engine", ["grid", "admin"])
+def test_a_metric_named_like_an_internal_alias_reports_cleanly(tmp_path, engine):
+    """``--metric sum:__key`` must not reach DuckDB as an unbindable column.
+
+    ``needed_source_columns`` drops a requested name that collides with an
+    internal alias, so validating against the raw column set would wave the
+    request through and the narrowed query would then fail to bind it. Both
+    engines must refuse it up front instead (#1179 review).
+    """
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    src = tmp_path / "reserved.parquet"
+    _write_points_with_reserved_name(str(src))
+
+    with pytest.raises(InvalidParameterError, match="__key"):
+        if engine == "grid":
+            aggregate_by_a5(
+                str(src), str(tmp_path / "out.parquet"), resolution=4, metric="sum:__key"
+            )
+        else:
+            from geoparquet_io.core.process.aggregate.by_admin import aggregate_by_admin
+
+            aggregate_by_admin(
+                str(src), str(tmp_path / "out.parquet"), level="country", metric="sum:__key"
+            )
