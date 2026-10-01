@@ -12,8 +12,7 @@ import pyarrow as pa
 
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import info
-from geoparquet_io.core.optional_deps import load_module
-from geoparquet_io.core.optional_deps import require_contourrs
+from geoparquet_io.core.optional_deps import load_module, require_contourrs
 from geoparquet_io.core.process.raster.output import finalize_raster_table
 from geoparquet_io.core.process.raster.reader import read_band
 from geoparquet_io.core.write_funnels import write_geoparquet_table
