@@ -1708,7 +1708,9 @@ class Table:
 
         Args:
             resolution: A5 resolution level 0-30
-            metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+            metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+                ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the
+                percent of the cell covered by a per-feature area in m2.
             breakdown: Column name to pivot into per-category count columns
             breakdown_limit: Max number of breakdown categories (default: 20)
             out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -1764,7 +1766,9 @@ class Table:
 
         Args:
             resolution: H3 resolution level 0-15
-            metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+            metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+                ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the
+                percent of the cell covered by a per-feature area in m2.
             breakdown: Column name to pivot into per-category count columns
             breakdown_limit: Max number of breakdown categories (default: 20)
             out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
@@ -1820,7 +1824,9 @@ class Table:
 
         Args:
             level: Admin level to aggregate by ("country", "region", "subregion")
-            metric: Aggregation metric, e.g. "sum:area" or "mean:value"
+            metric: Aggregation metric, e.g. "sum:area" or "avg:value". Also
+                ``pct_cell:<column>`` (grids only) -> ``pct_<column>``, the
+                percent of the cell covered by a per-feature area in m2.
             breakdown: Column name to pivot into per-category count columns
             breakdown_limit: Max number of breakdown categories (default: 20)
             out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"

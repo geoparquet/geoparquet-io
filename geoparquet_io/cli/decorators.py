@@ -802,7 +802,9 @@ def grid_aggregate_options(func):
     func = click.option(
         "--metric",
         default=None,
-        help='Numeric rollups, e.g. "sum:area_ha,avg:yield". Bare column = sum.',
+        help='Numeric rollups, e.g. "sum:area_ha,avg:yield". Bare column = sum. '
+        '"pct_cell:<column>" writes pct_<column>: the percent of the cell covered '
+        "by a per-feature area in m2 (emits sum_<column> with it).",
     )(func)
     func = click.option(
         "--max-cells",
