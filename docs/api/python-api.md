@@ -1159,6 +1159,7 @@ by_country.write('by_region_country.parquet')
 | `level` | int or str | required | Coarser grid resolution, or `"country"` for admin |
 | `cell_column` | str | None | Cell id column when auto-detection fails |
 | `scheme` | str | None | Bucketing scheme (`a5`/`h3`/`admin`) when inference is ambiguous, e.g. H3 ids stored as integers |
+| `memory_limit` | str | None | DuckDB memory limit for the rollup, e.g. `"8GB"`. Default: half the process's memory ceiling (RAM, or the container/Slurm cap when lower) |
 
 `count`, `sum_*`, `min_*`, `max_*`, and breakdown `count_*` columns roll up
 exactly; `avg_*` is count-weighted (exact when the metric had no NULLs). For

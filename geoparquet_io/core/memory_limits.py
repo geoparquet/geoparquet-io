@@ -232,6 +232,7 @@ def open_bounded_connection(
     load_spatial: bool = True,
     load_httpfs: bool | None = None,
     verbose: bool = False,
+    preserve_insertion_order: bool = False,
 ) -> duckdb.DuckDBPyConnection:
     """A DuckDB connection for one analysis query, opened inside a memory limit.
 
@@ -241,9 +242,13 @@ def open_bounded_connection(
     cap has to be part of the connection (#1179). Left uncapped, DuckDB sized
     itself for the host and a 42 GB aggregate peaked at 115 GiB RSS.
 
-    ``preserve_insertion_order`` is off: every caller's output order comes from
-    a GROUP BY, so buffering the scan to keep the input's order buys nothing and
-    costs the whole scan's width in memory.
+    ``preserve_insertion_order`` defaults off: every caller today takes its
+    output order from a GROUP BY, so buffering the scan to keep the input's
+    order buys nothing and costs the whole scan's width in memory. It is a
+    parameter rather than a constant because the setting is about ordering, not
+    memory, and a future caller that does need the input's order would
+    otherwise be silently reordered by a function whose name promises only a
+    memory bound.
     """
     limit, threads = _connection_limit(memory_limit)
     con: duckdb.DuckDBPyConnection = get_duckdb_connection(
@@ -252,7 +257,7 @@ def open_bounded_connection(
         threads=threads,
         memory_limit=limit,
     )
-    con.execute("SET preserve_insertion_order = false")
+    con.execute(f"SET preserve_insertion_order = {str(preserve_insertion_order).lower()}")
     if verbose and limit:
         debug(f"DuckDB memory limit: {limit}")
     if verbose and threads:
