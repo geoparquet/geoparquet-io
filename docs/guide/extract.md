@@ -223,8 +223,10 @@ Parquet's native geo types and their per-row-group `geo_bbox` statistics:
     gpio extract data.parquet staged/west.parquet --bbox -180,-90,0,90
     gpio extract data.parquet staged/east.parquet --bbox 0,-90,180,90
 
-    # Merge them and write GeoParquet 2.0 with native geo statistics — one pass
-    gpio extract "staged/*.parquet" merged.parquet --geoparquet-version 2.0
+    # Merge them and write GeoParquet 2.0 with native geo statistics — one pass.
+    # A quoted glob works too ("staged/*.parquet"), but a directory needs no
+    # quoting and so behaves the same in every shell.
+    gpio extract staged merged.parquet --geoparquet-version 2.0
 
     # Every row group now declares its own bounds
     gpio inspect meta merged.parquet --geo-stats
