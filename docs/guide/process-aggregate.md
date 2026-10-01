@@ -121,7 +121,12 @@ Where the denominator comes from:
 - **H3 is not equal-area** — a cell near a pole is about a quarter smaller than
   one at the equator — so each cell is divided by *its own* measured area
   (`h3_cell_area`). Two cells with the same total area therefore report
-  different percentages, which is the correct answer.
+  different percentages, which is the correct answer. Note that `h3_cell_area`
+  measures on H3's sphere while `gpio add geometry-metrics` measures features on
+  the WGS84 ellipsoid, so h3 percentages carry a latitude-dependent error of up
+  to about one percentage point ([#1192](https://github.com/geoparquet/geoparquet-io/issues/1192));
+  a5 is unaffected, because its cell area and the feature areas share an earth
+  model.
 - **Admin regions have no cell area**, so `pct_cell` is refused for
   `gpio process aggregate admin`. Use `sum:<column>` and divide by the region's
   own area downstream.
@@ -133,12 +138,16 @@ Two things to know about the numbers:
   [`gpio process overview`](process-overview.md) recomputes a coarser cell's
   percentage from; without it a percentage cannot be rolled up at all, because
   averaging fine cells' percentages is not the coarse cell's percentage.
-- **A value can exceed 100.** Every feature is assigned wholly to the cell its
-  keying point falls in, so a field straddling a cell boundary contributes its
-  *full* area to one cell and none to the other. Where features are large
-  relative to the cell, a cell can therefore total slightly more than its own
-  area. Use a resolution whose cells are comfortably larger than the features,
-  and read a value just over 100 as "fully covered".
+- **A value can exceed 100, and by a lot if the resolution is wrong.** Every
+  feature is assigned wholly to the cell its keying point falls in, so a field
+  straddling a cell boundary contributes its *full* area to one cell and none
+  to the other, and two overlapping features each contribute their full area.
+  Pick a resolution whose cells are comfortably larger than the features and
+  the overshoot stays small — read a value just over 100 as "fully covered".
+  Pick one whose cells are *smaller* than the features and the number stops
+  meaning anything: a 1,100 km² polygon keyed into a 3.8 km² h3 r7 cell reports
+  about 57,000. A result far above 100 is the signal that the resolution is too
+  fine for the data, not that the cell is very full.
 
 ### Which breakdown to use
 
@@ -618,7 +627,7 @@ Regardless of the chosen bucket scheme, every output file contains:
 | `admin_name` | VARCHAR | Human-readable name (admin only; currently equals `admin_code`) |
 | `count` | BIGINT | Number of input features in the bucket |
 | `sum_<col>`, `avg_<col>`, etc. | the column's type (a `sum` of integers is HUGEINT, written as DECIMAL(38,0)) | Numeric rollups from `--metric` |
-| `pct_<col>` | DOUBLE | Percent of the cell's area covered, from `--metric pct_cell:<col>`; `sum_<col>` is written with it. Can slightly exceed 100 — see [Percent of the cell covered](#percent-of-the-cell-covered-pct_cell) |
+| `pct_<col>` | DOUBLE | Percent of the cell's area covered, from `--metric pct_cell:<col>`; `sum_<col>` is written with it. Can exceed 100 — see [Percent of the cell covered](#percent-of-the-cell-covered-pct_cell) |
 | `count_<value>` | BIGINT | Per-category counts from `--breakdown` |
 | `count_other` | BIGINT | Count for categories beyond `--breakdown-limit` |
 | `sum_<col>_<value>`, `min_`/`max_` likewise | as for `--metric` | Per-category rollups when `--breakdown-metric` is set, replacing the `count_<value>` columns; NULL for a category with no rows or no values in the cell |
