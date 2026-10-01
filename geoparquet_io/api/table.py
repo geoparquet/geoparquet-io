@@ -1628,6 +1628,7 @@ class Table:
         simplify_boundary: bool = True,
         threads: int | None = None,
         drop_empty: bool = False,
+        simplify_crs: str | None = None,
     ) -> Table:
         """
         Simplify geometries with coarsen (GEOS-identical Rust).
@@ -1645,6 +1646,9 @@ class Table:
             threads: Worker threads for coarsen (default: library decides)
             drop_empty: Drop rows whose geometry is empty after
                 simplification (default: keep and warn)
+            simplify_crs: Project to this CRS for the simplification
+                (tolerance in its units), then back; 'auto-utm' picks the
+                UTM zone from the data
 
         Returns:
             New Table with simplified geometries and refreshed metadata
@@ -1660,6 +1664,7 @@ class Table:
             threads=threads,
             geometry_column=self._geometry_column,
             drop_empty=drop_empty,
+            simplify_crs=simplify_crs,
         )
         return self._wrap(result, self._geometry_column)
 

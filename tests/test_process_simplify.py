@@ -655,3 +655,107 @@ class TestNative20Input:
         out_geom = shapely.from_wkb(wkb)
         assert shapely.get_num_coordinates(out_geom) < shapely.get_num_coordinates(circle)
         assert geo["columns"]["geometry"]["geometry_types"] == ["Polygon"]
+
+
+class TestUtmEpsg:
+    """Dependency-free: the auto-utm zone math (#1197)."""
+
+    def test_northern_zone(self):
+        from geoparquet_io.core.process.simplify import _utm_epsg
+
+        assert _utm_epsg(105.0, 15.0) == 32648  # Vietnam, zone 48N
+
+    def test_southern_zone(self):
+        from geoparquet_io.core.process.simplify import _utm_epsg
+
+        assert _utm_epsg(-58.4, -34.6) == 32721  # Buenos Aires, zone 21S
+
+    def test_edges_clamp(self):
+        from geoparquet_io.core.process.simplify import _utm_epsg
+
+        assert _utm_epsg(-180.0, 10.0) == 32601
+        assert _utm_epsg(180.0, 10.0) == 32660
+
+
+@requires_coarsen
+class TestSimplifyCrs:
+    """#1197: --simplify-crs projects to a metric CRS, simplifies with the
+    tolerance in that CRS's units, and projects back."""
+
+    def _degree_circle(self):
+        shapely = _shapely()
+        # ~1.1 km circle at lon 105 / lat 15 (UTM zone 48N), in degrees
+        return shapely.Point(105.0, 15.0).buffer(0.01, quad_segs=64)
+
+    def test_metric_tolerance_via_explicit_crs(self):
+        shapely = _shapely()
+        circle = self._degree_circle()
+        result = simplify_table(_wkb_table([circle]), 50.0, simplify_crs="EPSG:32648")
+        out = shapely.from_wkb(result.column("geometry")[0].as_py())
+        assert out.is_valid and not out.is_empty
+        # 50 m on a ~1.1 km circle: real reduction, but nowhere near collapse
+        assert 4 < shapely.get_num_coordinates(out) < shapely.get_num_coordinates(circle)
+        # ...and the output is still in degrees at the original location
+        xmin, ymin, xmax, ymax = out.bounds
+        assert 104.98 < xmin < 105.02 and 14.98 < ymin < 15.02
+
+    def test_zero_tolerance_round_trip_is_noise_only(self):
+        shapely = _shapely()
+        circle = self._degree_circle()
+        result = simplify_table(_wkb_table([circle]), 0.0, simplify_crs="EPSG:32648")
+        out = shapely.from_wkb(result.column("geometry")[0].as_py())
+        assert shapely.equals_exact(out, circle, tolerance=1e-8)
+
+    def test_auto_utm_matches_explicit_zone(self):
+        circle = self._degree_circle()
+        explicit = simplify_table(_wkb_table([circle]), 50.0, simplify_crs="EPSG:32648")
+        auto = simplify_table(_wkb_table([circle]), 50.0, simplify_crs="auto-utm")
+        assert auto.column("geometry").to_pylist() == explicit.column("geometry").to_pylist()
+
+    def test_invalid_crs_is_a_clean_error(self):
+        with pytest.raises(InvalidParameterError, match="simplify_crs"):
+            simplify_table(_wkb_table([self._degree_circle()]), 1.0, simplify_crs="EPSG:999999")
+
+    def test_streaming_file_with_simplify_crs(self, tmp_path):
+        shapely = _shapely()
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        circles = [
+            shapely.Point(105.0 + i * 0.05, 15.0).buffer(0.01, quad_segs=48) for i in range(6)
+        ]
+        src = tmp_path / "src.parquet"
+        write_geoparquet_table(_wkb_table(circles), str(src), row_group_rows=3)
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=50.0, simplify_crs="auto-utm")
+        back = pq.read_table(str(out))
+        assert back.num_rows == 6
+        for i, wkb in enumerate(back.column("geometry").to_pylist()):
+            geom = shapely.from_wkb(wkb)
+            assert geom.is_valid
+            assert shapely.get_num_coordinates(geom) < 49
+            assert abs(geom.centroid.x - (105.0 + i * 0.05)) < 0.001
+
+    def test_cli_flag(self, tmp_path):
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        src = tmp_path / "src.parquet"
+        write_geoparquet_table(_wkb_table([self._degree_circle()]), str(src))
+        out = tmp_path / "out.parquet"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "process",
+                "simplify",
+                str(src),
+                str(out),
+                "--tolerance",
+                "50",
+                "--simplify-crs",
+                "auto-utm",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert pq.ParquetFile(str(out)).metadata.num_rows == 1

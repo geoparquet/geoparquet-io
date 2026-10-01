@@ -670,6 +670,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             threads=2,
             geometry_column="geometry",
             drop_empty=True,
+            simplify_crs="EPSG:3857",
             verbose=True,
         ),
         table_call=lambda t: t.simplify(
@@ -679,6 +680,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             simplify_boundary=False,
             threads=2,
             drop_empty=True,
+            simplify_crs="EPSG:3857",
         ),
         expected={
             "tolerance": 0.5,
@@ -688,6 +690,7 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
             "threads": 2,
             "geometry_column": "geometry",
             "drop_empty": True,
+            "simplify_crs": "EPSG:3857",
         },
         ops_only_expected={"verbose": True},
         ops_module=core_simplify,

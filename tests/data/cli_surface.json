@@ -13104,6 +13104,22 @@
        "is_flag": false,
        "metavar": null,
        "multiple": false,
+       "name": "simplify_crs",
+       "nargs": 1,
+       "opts": [
+        "--simplify-crs"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
        "name": "threads",
        "nargs": 1,
        "opts": [
