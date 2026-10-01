@@ -12414,6 +12414,244 @@
        "type": "boolean"
       }
      ]
+    },
+    "simplify": {
+     "class": "Command",
+     "hidden": false,
+     "kind": "command",
+     "params": [
+      {
+       "default": "'ZSTD'",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "compression",
+       "nargs": 1,
+       "opts": [
+        "--compression"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "compression_level",
+       "nargs": 1,
+       "opts": [
+        "--compression-level"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer range[min=1,max=22,min_open=False,max_open=False,clamp=False]"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "coverage",
+       "nargs": 1,
+       "opts": [
+        "--coverage"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [
+        "--no-coverage"
+       ],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geometry_column",
+       "nargs": 1,
+       "opts": [
+        "--geometry-column"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "geoparquet_version",
+       "nargs": 1,
+       "opts": [
+        "--geoparquet-version"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[1.0|1.1|1.1-geoarrow|2.0|parquet-geo-only,case_sensitive=True]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "input_parquet",
+       "nargs": 1,
+       "opts": [
+        "input_parquet"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "output_parquet",
+       "nargs": 1,
+       "opts": [
+        "output_parquet"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "preserve_topology",
+       "nargs": 1,
+       "opts": [
+        "--preserve-topology"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [
+        "--no-preserve-topology"
+       ],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "row_group_size",
+       "nargs": 1,
+       "opts": [
+        "--row-group-size"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "row_group_size_mb",
+       "nargs": 1,
+       "opts": [
+        "--row-group-size-mb"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "simplify_boundary",
+       "nargs": 1,
+       "opts": [
+        "--simplify-boundary"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [
+        "--no-simplify-boundary"
+       ],
+       "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "threads",
+       "nargs": 1,
+       "opts": [
+        "--threads"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "tolerance",
+       "nargs": 1,
+       "opts": [
+        "--tolerance"
+       ],
+       "param_type": "Option",
+       "required": true,
+       "secondary_opts": [],
+       "type": "float"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "verbose",
+       "nargs": 1,
+       "opts": [
+        "--verbose",
+        "-v"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      }
+     ]
     }
    },
    "default_subcommand": null,

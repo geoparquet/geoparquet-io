@@ -15,12 +15,15 @@ from geoparquet_io.cli.decorators import (
     compression_options,
     geoparquet_version_option,
     grid_aggregate_options,
+    handle_geoparquet_errors,
     metric_nodata_option,
+    row_group_options,
     show_sql_option,
     verbose_option,
     where_option,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, ValidationError
+from geoparquet_io.core.process.simplify import simplify_file as simplify_file_impl
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5 as aggregate_by_a5_impl
 from geoparquet_io.core.process.aggregate.by_admin import (
     aggregate_by_admin as aggregate_by_admin_impl,
@@ -483,3 +486,107 @@ def process_aggregate_admin(
             )
         except (InvalidParameterError, ValidationError, ValueError, duckdb.Error) as exc:
             raise _aggregate_error(exc, where) from exc
+
+
+@process.command(name="simplify")
+@click.argument("input_parquet")
+@click.argument("output_parquet")
+@click.option(
+    "--tolerance",
+    type=float,
+    required=True,
+    help="Simplification tolerance, in the geometry's CRS units.",
+)
+@click.option(
+    "--coverage/--no-coverage",
+    default=False,
+    help=(
+        "Treat the input as a polygonal coverage: shared edges stay shared "
+        "and no gaps or overlaps are introduced (coarsen coverage_simplify)."
+    ),
+)
+@click.option(
+    "--preserve-topology/--no-preserve-topology",
+    "preserve_topology",
+    default=None,
+    help="Keep geometries valid while simplifying (default: on; plain mode only).",
+)
+@click.option(
+    "--simplify-boundary/--no-simplify-boundary",
+    "simplify_boundary",
+    default=None,
+    help="Also simplify the coverage's outer boundary (default: on; --coverage only).",
+)
+@click.option(
+    "--threads",
+    type=int,
+    default=None,
+    help="Worker threads for coarsen (default: let the library decide).",
+)
+@click.option(
+    "--geometry-column",
+    default=None,
+    help="Geometry column to simplify (default: the file's primary geometry column).",
+)
+@row_group_options
+@compression_options
+@geoparquet_version_option
+@verbose_option
+@handle_geoparquet_errors
+@click.pass_context
+def process_simplify(
+    ctx,
+    input_parquet,
+    output_parquet,
+    tolerance,
+    coverage,
+    preserve_topology,
+    simplify_boundary,
+    threads,
+    geometry_column,
+    row_group_size,
+    row_group_size_mb,
+    compression,
+    compression_level,
+    geoparquet_version,
+    verbose,
+):
+    """Simplify geometries with coarsen (GEOS-identical, multithreaded Rust).
+
+    Examples:
+
+        gpio process simplify parcels.parquet simplified.parquet --tolerance 10
+
+        gpio process simplify admin.parquet simplified.parquet \\
+            --tolerance 0.001 --coverage
+    """
+    if coverage and preserve_topology is not None:
+        raise click.UsageError(
+            "--preserve-topology/--no-preserve-topology applies to plain mode "
+            "and cannot be combined with --coverage (coverage simplification "
+            "always preserves the coverage's topology)."
+        )
+    if not coverage and simplify_boundary is not None:
+        raise click.UsageError(
+            "--simplify-boundary/--no-simplify-boundary only applies with --coverage."
+        )
+    with _activate_s3(ctx):
+        try:
+            simplify_file_impl(
+                input_parquet,
+                output_parquet,
+                tolerance,
+                coverage=coverage,
+                preserve_topology=True if preserve_topology is None else preserve_topology,
+                simplify_boundary=True if simplify_boundary is None else simplify_boundary,
+                threads=threads,
+                geometry_column=geometry_column,
+                compression=compression.upper(),
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_size,
+                geoparquet_version=geoparquet_version,
+                verbose=verbose,
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc

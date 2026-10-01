@@ -213,6 +213,85 @@ class TestSimplifyFile:
             assert row["xmax"] == pytest.approx(xmax, abs=0.1)
             assert row["ymax"] == pytest.approx(ymax, abs=0.1)
 
+class TestCliSimplify:
+    """CLI surface: option validation is dependency-free."""
+
+    def _invoke(self, args):
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        return CliRunner().invoke(cli, ["process", "simplify", *args])
+
+    def test_requires_tolerance(self, tmp_path):
+        result = self._invoke(
+            [str(TEST_DATA / "buildings_test.parquet"), str(tmp_path / "o.parquet")]
+        )
+        assert result.exit_code != 0
+        assert "tolerance" in result.output.lower()
+
+    def test_coverage_rejects_preserve_topology_flags(self, tmp_path):
+        result = self._invoke(
+            [
+                str(TEST_DATA / "buildings_test.parquet"),
+                str(tmp_path / "o.parquet"),
+                "--tolerance",
+                "0.1",
+                "--coverage",
+                "--no-preserve-topology",
+            ]
+        )
+        assert result.exit_code != 0
+        assert "preserve-topology" in result.output
+        assert "coverage" in result.output
+
+    def test_simplify_boundary_requires_coverage(self, tmp_path):
+        result = self._invoke(
+            [
+                str(TEST_DATA / "buildings_test.parquet"),
+                str(tmp_path / "o.parquet"),
+                "--tolerance",
+                "0.1",
+                "--no-simplify-boundary",
+            ]
+        )
+        assert result.exit_code != 0
+        assert "simplify-boundary" in result.output
+        assert "coverage" in result.output
+
+    def test_missing_coarsen_gives_install_hint(self, tmp_path, monkeypatch):
+        import sys as _sys
+
+        monkeypatch.setitem(_sys.modules, "coarsen", None)
+        result = self._invoke(
+            [
+                str(TEST_DATA / "buildings_test.parquet"),
+                str(tmp_path / "o.parquet"),
+                "--tolerance",
+                "0.1",
+            ]
+        )
+        assert result.exit_code != 0
+        assert "pip install 'geoparquet-io[simplify]'" in result.output
+        assert "Traceback" not in result.output
+
+    @requires_coarsen
+    def test_roundtrip(self, tmp_path):
+        out = tmp_path / "o.parquet"
+        result = self._invoke(
+            [
+                str(TEST_DATA / "buildings_test.parquet"),
+                str(out),
+                "--tolerance",
+                "0.00001",
+            ]
+        )
+        assert result.exit_code == 0, result.output
+        assert pq.ParquetFile(str(out)).metadata.num_rows > 0
+
+
+@requires_coarsen
+class TestSimplifyFileCrs:
     def test_crs_preserved(self, tmp_path):
         src = TEST_DATA / "austria_bbox_covering.parquet"
         in_geo = json.loads(pq.ParquetFile(str(src)).schema_arrow.metadata[b"geo"])
