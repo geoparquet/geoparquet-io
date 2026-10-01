@@ -454,7 +454,12 @@ def resolve_input_crs(
 
     try:
         # RAW path: extract_crs_from_parquet escapes its own argument (#718).
-        return extract_crs_from_parquet(input_file, verbose=verbose)
+        # The geometry column says which native column's CRS a block-less
+        # (native-geo-only) input means: in schema order the first CRS can be
+        # a secondary's.
+        return extract_crs_from_parquet(
+            input_file, verbose=verbose, geometry_column=geometry_column
+        )
     except Exception as exc:  # pragma: no cover - defensive, see docstring
         debug(f"CRS auto-detect failed for {input_file}: {exc}; leaving the CRS unstated")
         return None

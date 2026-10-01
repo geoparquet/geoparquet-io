@@ -787,14 +787,19 @@ def _crs_from_geo_block(parquet_file) -> tuple[dict | str | None, str | None]:
     return (crs if crs and not is_default_crs(crs) else None), primary_col
 
 
-def _crs_from_native_geo_type(parquet_file, column: str | None = None) -> dict | str | None:
+def _crs_from_native_geo_type(
+    parquet_file, column: str | None = None, prefer: str | None = None
+) -> dict | str | None:
     """The CRS inside a Parquet GEOMETRY/GEOGRAPHY logical type, or ``None``.
 
     With ``column`` it reads that one column -- the second opinion on a file
     whose ``geo`` block has already named its primary. Without it, the first
     geometry column that names a non-default CRS: the only place a
     *native-geo-only* file records its CRS, where no block says which column is
-    primary.
+    primary. ``prefer`` names the geometry column the caller is writing: when
+    the file has a native geometry column of that name, that column answers
+    (its default CRS included), because in a multi-geometry file the first
+    non-default CRS in schema order can be a SECONDARY's.
     """
     from geoparquet_io.core.duckdb_metadata import (
         get_schema_info,
@@ -802,12 +807,18 @@ def _crs_from_native_geo_type(parquet_file, column: str | None = None) -> dict |
         resolve_crs_reference,
     )
 
-    for col in get_schema_info(parquet_file):
+    geo_columns = [
+        col
+        for col in get_schema_info(parquet_file)
+        if (col.get("logical_type") or "").startswith(("GeometryType(", "GeographyType("))
+    ]
+    if column is None and prefer is not None:
+        if any(col.get("name") == prefer for col in geo_columns):
+            column = prefer
+    for col in geo_columns:
         if column is not None and col.get("name") != column:
             continue
         logical_type = col.get("logical_type") or ""
-        if not logical_type.startswith(("GeometryType(", "GeographyType(")):
-            continue
         parsed = parse_geometry_logical_type(logical_type)
         if not (parsed and "crs" in parsed):
             continue
@@ -857,7 +868,7 @@ def reset_crs_disagreement_warnings() -> None:
     _emit_crs_disagreement_warning.cache_clear()
 
 
-def extract_crs_from_parquet(parquet_file, verbose=False):
+def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None):
     """
     Extract CRS (as PROJJSON dict) from a Parquet file.
 
@@ -896,8 +907,13 @@ def extract_crs_from_parquet(parquet_file, verbose=False):
     # file with a second geometry column in another CRS ahead of the primary in
     # schema order is otherwise accused of contradicting itself, and a primary
     # that really does disagree is masked by a non-primary that happens to agree.
+    # With no block to name the primary, the caller's geometry column is the
+    # one to read (``geometry_column``): the first non-default CRS in schema
+    # order can belong to a secondary column.
     native_crs = _crs_from_native_geo_type(
-        parquet_file, column=primary_col if geo_block_crs is not None else None
+        parquet_file,
+        column=primary_col if geo_block_crs is not None else None,
+        prefer=None if geo_block_crs is not None else geometry_column,
     )
 
     if geo_block_crs is not None:

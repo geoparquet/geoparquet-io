@@ -39,6 +39,7 @@ from geoparquet_io.core.crs_utils import _wrap_query_with_crs, apply_output_crs
 from geoparquet_io.core.derive_geo_from_file import (
     _ensure_v2_geo_metadata,
     _rewrite_file_with_geo_metadata,
+    derive_secondary_geometry_info,
 )
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
@@ -56,10 +57,12 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import is_partition_path
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
+    SELF_EVIDENT_BBOX_COLUMN,
     carried_geometry_column,
     declare_carried_bbox_column,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
+    strip_bboxless_covering,
     strip_derived_stats,
     strip_nonplanar_edges,
 )
@@ -72,6 +75,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
     note_duckdb_copy_rounding,
     resolve_input_crs,
@@ -221,6 +225,7 @@ def _plain_copy_to(
     geometry_column: str | None = None,
     carry_geo_metadata: dict | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """
     Execute a plain DuckDB COPY TO without geo metadata manipulation.
@@ -252,6 +257,10 @@ def _plain_copy_to(
             to carry into the output. DuckDB accepts KV_METADATA alongside
             GEOPARQUET_VERSION, so these ride along on the fast path instead of
             forcing a full metadata rewrite for an unrelated key (#709).
+        memory_limit: DuckDB memory limit for the COPY (``--write-memory``).
+            None means a default with headroom under the machine's memory
+            ceiling -- never DuckDB's own 80%, which the allocations DuckDB
+            makes outside its limit carry past a cgroup cap (#1153).
     """
     compression_map = {
         "zstd": "ZSTD",
@@ -305,7 +314,8 @@ def _plain_copy_to(
     if verbose:
         debug(f"Executing plain COPY TO with {duckdb_compression} compression...")
 
-    con.execute(copy_query)
+    with scoped_write_memory_limit(con, memory_limit, verbose):
+        con.execute(copy_query)
 
     # DuckDB 1.5.4's V2 writer omits the geo KV metadata for geometries with
     # an M dimension (XY/XYZ are written correctly). Without it the output
@@ -331,6 +341,38 @@ def _plain_copy_to(
             success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
 
 
+def _custom_covering_survives(covering, original_metadata, geometry_column, output_columns) -> bool:
+    """Whether a ``custom_metadata`` covering can outlive the #954 gate.
+
+    Conservative: it survives if it brings its own ``bbox`` member, if the
+    carried block already declares one for the primary, or if the output may
+    carry a conventional ``bbox`` column the rewrite would declare -- including
+    when the output's columns are unknown.
+    """
+    if not isinstance(covering, dict) or "bbox" in covering:
+        return True
+    if output_columns is None or SELF_EVIDENT_BBOX_COLUMN in output_columns:
+        return True
+    carried = sanitized_carried_geo(original_metadata)
+    primary = (carried.get("columns") or {}).get(geometry_column)
+    carried_covering = primary.get("covering") if isinstance(primary, dict) else None
+    return isinstance(carried_covering, dict) and "bbox" in carried_covering
+
+
+def _probe_output_columns(con, query: str, verbose: bool, purpose: str) -> list[str] | None:
+    """The output query's column names, or ``None`` when the probe fails.
+
+    Best-effort by design: every caller treats an unreadable schema as "unknown"
+    rather than aborting the write.
+    """
+    try:
+        return _get_query_columns(con, query)
+    except (duckdb.Error, RuntimeError, ValueError, AttributeError) as e:
+        if verbose:
+            debug(f"Could not read output schema to {purpose}: {e}")
+        return None
+
+
 def _prune_metadata_to_output_columns(
     con,
     query: str,
@@ -350,11 +392,8 @@ def _prune_metadata_to_output_columns(
     if not original_metadata:
         return original_metadata, None
 
-    try:
-        output_columns = _get_query_columns(con, query)
-    except (duckdb.Error, RuntimeError, ValueError, AttributeError) as e:
-        if verbose:
-            debug(f"Could not read output schema to prune geo metadata: {e}")
+    output_columns = _probe_output_columns(con, query, verbose, "prune geo metadata")
+    if output_columns is None:
         return original_metadata, None
 
     pruned = prune_geo_metadata_to_columns(original_metadata, output_columns)
@@ -535,7 +574,12 @@ def _geo_block_to_carry_on_fast_path(
             verbose,
             effective_version,
             output_columns=output_columns,
+            geo_meta=carried,
         )
+    # After the declare above: a carried covering still without a bbox member
+    # (e.g. only a spatial-index entry) is one geopandas cannot read (#954),
+    # so it is not carried onto the output either.
+    carried = strip_bboxless_covering(carried, verbose)
     if not _carries_more_than_duckdb_generates(carried):
         return None
     return carried
@@ -603,8 +647,9 @@ def write_parquet_with_metadata(
             - "in-memory": Load entire dataset into memory
             - "streaming": Stream Arrow RecordBatches
             - "disk-rewrite": Write with DuckDB, then rewrite with PyArrow
-        memory_limit: DuckDB memory limit for streaming writes (e.g., '2GB', '512MB').
-            If None, auto-detects based on available system/container memory.
+        memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB').
+            Honoured on the plain-COPY fast path and by the duckdb-kv strategy.
+            If None, each picks a default from the system/container memory.
         geometry_info: Dict containing multi-geometry column info with keys:
             - "primary": primary geometry column name
             - "secondary": list of secondary geometry column names
@@ -636,8 +681,9 @@ def write_parquet_with_metadata(
             invalidates every column, which is right for a merge: its carried
             stats under-cover every column of the output. An invalidated column
             other than the primary keeps ``geometry_types`` as the spec's empty
-            "not known" list rather than losing the key, since nothing here
-            recomputes it (#934).
+            "not known" list rather than losing the key (#934); the duckdb-kv
+            strategy then recomputes it from the rows it writes (#952), the
+            others write the sentinel.
         drop_nonplanar_edges_columns: Geometry columns whose non-planar
             ``edges`` declaration must neither be carried through nor
             re-attached to the output. Set by writes that invalidate the edge
@@ -669,10 +715,11 @@ def write_parquet_with_metadata(
     # caller that transforms only some geometry columns names them, so an
     # untouched secondary column keeps the stats that still describe it (#890).
     #
-    # Every strategy recomputes `geometry_column` and only that, so a stripped
-    # SECONDARY column would be left with no `geometry_types` at all -- a key
-    # GeoParquet 1.1 requires and DuckDB refuses to open a file without. Naming
-    # the recomputed column leaves the others the "not known" sentinel (#934).
+    # Every strategy recomputes `geometry_column`; only duckdb-kv also fills a
+    # SECONDARY column's gap (#952), so a stripped secondary would otherwise be
+    # left with no `geometry_types` at all -- a key GeoParquet 1.1 requires and
+    # DuckDB refuses to open a file without. Naming the recomputed column leaves
+    # the others the "not known" sentinel (#934), which duckdb-kv treats as a gap.
     if invalidate_derived_stats:
         original_metadata = strip_derived_stats(
             original_metadata,
@@ -727,11 +774,19 @@ def write_parquet_with_metadata(
     rewrite_needed = needs_metadata_rewrite(effective_version, original_metadata)
 
     # Force rewrite if custom_metadata contains covering (e.g., bbox, H3, S2)
-    # This ensures covering metadata is written even for 2.0→2.0 operations
+    # This ensures covering metadata is written even for 2.0→2.0 operations --
+    # unless the covering could only be stripped again (#954): an index entry
+    # with no bbox member to stand beside is dropped by every write path, so
+    # forcing the single-threaded rewrite would only buy the fast path's output.
     if custom_metadata and "covering" in custom_metadata:
-        rewrite_needed = True
-        if verbose:
-            debug("Forcing metadata rewrite for covering metadata")
+        if _custom_covering_survives(
+            custom_metadata["covering"], original_metadata, geometry_column, output_columns
+        ):
+            rewrite_needed = True
+            if verbose:
+                debug("Forcing metadata rewrite for covering metadata")
+        elif verbose:
+            debug("Not forcing a rewrite: the covering has no bbox member to stand beside")
 
     # Preserve non-geo KV metadata from input (e.g., vecorel, fiboa).
     # Build a merged local dict rather than mutating the caller-supplied
@@ -804,6 +859,7 @@ def write_parquet_with_metadata(
                     output_columns=output_columns,
                 ),
                 extra_kv_metadata=extra_kv_metadata,
+                memory_limit=memory_limit,
             )
         else:
             # Metadata rewrite needed - use strategy pattern
@@ -830,7 +886,7 @@ def write_parquet_with_metadata(
             strategy_enum = WriteStrategy(write_strategy)
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
-            # Only duckdb-kv can honour a memory limit. If *we* rerouted the
+            # Of the rewrite strategies only duckdb-kv honours a memory limit. If *we* rerouted the
             # strategy (1.1-geoarrow above), the user did nothing wrong: warn and
             # drop the limit rather than aborting a command that worked before
             # --write-memory was plumbed through (#663). A strategy the user
@@ -854,6 +910,25 @@ def write_parquet_with_metadata(
             if verbose:
                 debug(f"Writing GeoParquet version: {effective_version}")
                 debug(f"Using write strategy: {strategy.name}")
+
+            # The input-file witness answers one more question here: which OTHER
+            # geometry columns does this rewrite carry? Callers that know pass
+            # `geometry_info` themselves (convert); every rewrite that does not --
+            # the `add` family, sort, extract -- used to leave a secondary column
+            # undescribed in `geo.columns`, which 2.0 requires for every geometry
+            # column in the file (#1000). Each secondary's CRS comes from its own
+            # logical type, never the per-file witness's. Gated on knowing the
+            # output's columns, so a projection cannot come out declaring a
+            # geometry column it dropped.
+            if geometry_info is None and input_file and geometry_column:
+                if output_columns is None:
+                    output_columns = _probe_output_columns(
+                        con, query, verbose, "derive secondary geometry"
+                    )
+                if output_columns is not None:
+                    geometry_info = derive_secondary_geometry_info(
+                        input_file, geometry_column, output_columns=output_columns, verbose=verbose
+                    )
 
             # Build kwargs - only pass memory_limit for duckdb-kv
             write_kwargs = {

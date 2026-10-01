@@ -198,6 +198,14 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
     so projected data (e.g. national grids in metres) keys correctly with no
     manual reprojection. Input already in OGC:CRS84 / EPSG:4326 is untouched.
 
+!!! note "Index entries in the `covering` metadata"
+    The index commands (`h3`, `s2`, `a5`, `quadkey`, `kdtree`) record their
+    column in the geometry's `covering` metadata only beside a `bbox` entry —
+    the one covering encoding the GeoParquet spec defines, and the one readers
+    such as geopandas require. An input with no bbox column gets no covering at
+    all, and adding the bbox column later does not bring the index entry back;
+    run `gpio add bbox` first if you want it recorded.
+
 Add [H3](https://h3geo.org/) hexagonal cell IDs based on geometry centroids:
 
 === "CLI"

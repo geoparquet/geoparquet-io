@@ -30,6 +30,7 @@ from geoparquet_io.core.geo_metadata import (
     bbox_column_to_declare,
     compute_geo_stats_via_sql,
     create_geo_metadata,
+    strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     WKB_EXTENSION_NAMES,
@@ -362,6 +363,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             precomputed_bbox,
             geometry_info,
             geoarrow_encoding=geoarrow_encoding,
+            custom_metadata=custom_metadata,
         )
         native_crs = native_geometry_crs(
             geoparquet_version, geo_meta, geometry_column, geometry_info
@@ -433,6 +435,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         precomputed_bbox: list[float] | None,
         geometry_info: dict | None = None,
         geoarrow_encoding: str | None = None,
+        custom_metadata: dict | None = None,
     ) -> dict:
         """Build geo metadata for query results.
 
@@ -441,11 +444,14 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         """
 
         bbox_info = _detect_bbox_column(schema, original_metadata)
+        # custom_metadata is the covering a caller computed (`add bbox
+        # --bbox-name`, the index commands): its provenance, the only way a
+        # column not named exactly `bbox` gets declared (#738/#953).
         geo_meta = create_geo_metadata(
             original_metadata=original_metadata,
             geom_col=geometry_column,
             bbox_info=bbox_info,
-            custom_metadata=None,
+            custom_metadata=custom_metadata,
             verbose=verbose,
             version=metadata_version,
         )
@@ -462,10 +468,11 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         if geoarrow_encoding is not None and geoarrow_encoding != "WKB":
             col_meta["encoding"] = geoarrow_encoding
 
-        # Handle secondary geometry columns from geometry_info
+        # Handle secondary geometry columns from geometry_info. They arrive
+        # after create_geo_metadata's gate, so it runs again over them (#954).
         merge_secondary_geometry_metadata(geo_meta, geometry_info)
 
-        return geo_meta
+        return strip_bboxless_covering(geo_meta, verbose)
 
     def _stream_batches_to_file(
         self,

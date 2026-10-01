@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
@@ -10,7 +12,7 @@ from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
-from geoparquet_io.core.geo_metadata import covering_supported
+from geoparquet_io.core.geo_metadata import build_bbox_covering, covering_supported
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -145,13 +147,41 @@ def add_bbox_table(
             """
         result = con.execute(query).arrow().read_all()
 
-        # Preserve metadata
-        if table.schema.metadata:
-            result = result.replace_schema_metadata(table.schema.metadata)
+        # Preserve metadata, recording the column just computed as the
+        # geometry's covering bbox (see _declare_computed_bbox).
+        metadata = _declare_computed_bbox(table.schema.metadata, geom_col, bbox_column_name)
+        if metadata:
+            result = result.replace_schema_metadata(metadata)
 
         return result
     finally:
         con.close()
+
+
+def _declare_computed_bbox(metadata, geometry_column: str, bbox_column_name: str):
+    """``metadata`` whose geo block declares ``bbox_column_name`` as ``geometry_column``'s bbox.
+
+    The column was computed from that geometry right here, which is the
+    provenance a ``covering`` needs (#738). Recording it on the table's own
+    block is what lets a writer declare a column not named exactly ``bbox``;
+    none will on name alone (#953). A 1.0 output drops it again at write time.
+    No geo block (or no entry for the column) means nothing to record.
+    """
+    if not metadata or b"geo" not in metadata:
+        return metadata
+    try:
+        geo = json.loads(metadata[b"geo"])
+    except ValueError:
+        return metadata
+    columns = geo.get("columns") if isinstance(geo, dict) else None
+    col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
+    if not isinstance(col_meta, dict):
+        return metadata
+    covering = col_meta.get("covering")
+    covering = dict(covering) if isinstance(covering, dict) else {}
+    covering["bbox"] = build_bbox_covering(bbox_column_name)
+    columns = {**columns, geometry_column: {**col_meta, "covering": covering}}
+    return {**metadata, b"geo": json.dumps({**geo, "columns": columns}).encode("utf-8")}
 
 
 def _bbox_covering_metadata(bbox_column_name: str) -> dict:

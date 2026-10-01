@@ -18,7 +18,8 @@ which put the guess straight back on three reachable paths (#962): one malformed
 row makes the all-or-nothing compute return nothing for the whole column, an
 all-NULL geometry column has nothing to describe, and ``--exclude-cols geometry``
 leaves no geometry column at all. The fallback is gone: when the data does not
-say, the file says ``[]``.
+say, the file says ``[]`` -- except for an excluded geometry column, where there
+is no geo block left to say anything (#966): the output is plain Parquet.
 """
 
 import json
@@ -86,7 +87,11 @@ def run_extract(tmp_path, monkeypatch):
         )
         table = arcgis_to_table("https://example.com/FeatureServer/0", **kwargs)
         _run.table = table
-        return json.loads(table.schema.metadata[b"geo"])["columns"]["geometry"]
+        metadata = table.schema.metadata or {}
+        if b"geo" not in metadata:
+            # --exclude-cols geometry drops the whole block (#966).
+            return None
+        return json.loads(metadata[b"geo"])["columns"]["geometry"]
 
     return _run
 
@@ -227,20 +232,20 @@ def test_all_null_geometry_column_declares_nothing(run_extract):
 
 
 def test_excluding_the_geometry_column_declares_nothing(run_extract):
-    """``--exclude-cols geometry`` leaves nothing to read, so nothing is declared.
+    """``--exclude-cols geometry`` leaves nothing to describe, so no geo block.
 
     The repair helper passes a table with no geometry column straight through,
-    so this reaches the geo block, where the fallback used to describe a column
-    that is not in the file.
-
-    Only the declaration is asserted here. The block still names ``geometry`` as
-    the primary_column when that column was excluded, which ``gpio check spec``
-    fails -- a separate bug from this one, left for its own change.
+    so this used to reach the geo block, which then named ``geometry`` as the
+    primary_column of a file that does not contain it -- a file ``gpio check
+    spec`` fails (#966). The output is an attribute table: plain Parquet with
+    no ``geo`` metadata at all, matching ``extract geoparquet``'s documented
+    ``--exclude-cols`` behaviour.
     """
     column = run_extract("esriGeometryPolygon", [VALID_POLYGON], exclude_cols="geometry")
 
     assert "geometry" not in run_extract.table.column_names
-    assert column["geometry_types"] == []
+    assert column is None
+    assert b"geo" not in (run_extract.table.schema.metadata or {})
 
 
 def test_an_excluded_column_is_not_blamed_on_the_fetch(run_extract, caplog):

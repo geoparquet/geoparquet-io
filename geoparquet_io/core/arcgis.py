@@ -37,7 +37,10 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
     RemoteAccessError,
 )
-from geoparquet_io.core.geo_metadata import _compute_geometry_types
+from geoparquet_io.core.geo_metadata import (
+    _compute_geometry_types,
+    prune_geo_metadata_to_columns,
+)
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_TIMEOUT,
@@ -1051,6 +1054,18 @@ def _tag_output_crs(
     verbose: bool,
 ) -> pa.Table:
     """Attach the ``geo`` block: CRS84 on the GeoJSON path, the server's SR on the outSR path."""
+    if "geometry" not in table.column_names:
+        # --exclude-cols dropped the geometry: an attribute table, with no CRS
+        # to resolve (or warn about) and no geo block to attach. Any carried
+        # block goes through the same pruner `gpio extract geoparquet` uses (#966).
+        warn(
+            "The geometry column was excluded, so the result is an attribute "
+            "table with no geo metadata."
+        )
+        existing = dict(table.schema.metadata or {})
+        return table.replace_schema_metadata(
+            prune_geo_metadata_to_columns(existing, table.column_names) or None
+        )
     if output_wkid is None:
         # f=geojson is WGS84 per RFC 7946, whatever the layer advertises.
         crs = parse_crs_string_to_projjson("OGC:CRS84")
@@ -1176,6 +1191,33 @@ def _build_schema_from_layer_info(layer_info: ArcGISLayerInfo) -> pa.Schema:
         fields.append(pa.field(field_name, pa_type, nullable=nullable))
 
     return pa.schema(fields)
+
+
+def _target_schema(layer_info: ArcGISLayerInfo, out_fields: str) -> pa.Schema:
+    """The downloaded table's schema: ``geometry`` plus the ``outFields`` requested.
+
+    ``out_fields`` is ``*`` or a comma-separated field list; geometry is always
+    kept, and field names match case-insensitively, as the server does.
+    """
+    schema = _build_schema_from_layer_info(layer_info)
+    if out_fields == "*":
+        return schema
+    requested = {f.strip().lower() for f in out_fields.split(",")}
+    return pa.schema(
+        [field for field in schema if field.name == "geometry" or field.name.lower() in requested]
+    )
+
+
+def _exclude_columns(table: pa.Table, exclude_list: list[str] | None) -> pa.Table:
+    """Drop the ``--exclude-cols`` names from a fetched table (client-side)."""
+    if not exclude_list:
+        return table
+    cols_to_exclude = set(exclude_list)
+    cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
+    if not cols_to_keep:
+        return table
+    debug(f"Excluded columns: {cols_to_exclude}")
+    return table.select(cols_to_keep)
 
 
 def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Table:
@@ -1312,18 +1354,7 @@ def _stream_features_to_parquet(
     """
     # Build fixed schema from layer metadata upfront to prevent type mismatches
     # between batches (issue #290)
-    target_schema = _build_schema_from_layer_info(layer_info)
-
-    # Filter schema to match requested fields (if out_fields specified)
-    if out_fields != "*":
-        requested_fields = {f.strip().lower() for f in out_fields.split(",")}
-        # Always include geometry
-        filtered_fields = [target_schema.field("geometry")]
-        # Add only requested attribute fields (case-insensitive match)
-        for field in target_schema:
-            if field.name != "geometry" and field.name.lower() in requested_fields:
-                filtered_fields.append(field)
-        target_schema = pa.schema(filtered_fields)
+    target_schema = _target_schema(layer_info, out_fields)
 
     debug(f"Built schema from layer metadata: {len(target_schema)} fields")
 
@@ -1445,7 +1476,9 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     Polygon or no geometry at all) named a type the file does not contain.
     ``[]`` -- the spec's way of saying the types are not known -- is the honest
     answer wherever the data does not supply one, and gpio's own
-    geometry_types-vs-statistics check would flag the guess anyway.
+    geometry_types-vs-statistics check would flag the guess anyway. (An
+    excluded geometry column no longer reaches this function: since #966 the
+    result is an attribute table with no geo block at all.)
 
     The two ways of arriving at ``[]`` are still worth telling apart for the
     user: unreadable geometry is a data-quality problem worth chasing, an empty
@@ -1453,15 +1486,11 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     ``_compute_geometry_types`` swallows the geoarrow error itself, so the
     non-NULL geometries are counted first.
     """
-    geometry = table.column("geometry") if "geometry" in table.column_names else None
-    if geometry is None:
-        # The user dropped the column with --exclude-cols; the service may well
-        # have returned geometry. Blaming the fetch here would point at the
-        # wrong thing and give the user nothing to act on.
-        warn(
-            "The geometry column was excluded, so there is nothing to describe; "
-            "declaring geometry_types as [] (types not known)."
-        )
+    # Only reached with a geometry column: an excluded one (--exclude-cols) never
+    # gets a geo block at all (#966, see _tag_output_crs).
+    geometry = table.column("geometry")
+    if len(geometry) == 0:
+        # An empty layer or filter result: already reported, nothing to describe.
         return []
     if geometry.null_count == len(geometry):
         warn("Fetched data holds no geometries; declaring geometry_types as [] (types not known).")
@@ -1599,6 +1628,9 @@ def arcgis_to_table(
     if output_crs == "native":
         output_wkid = _resolve_native_wkid(layer_info.spatial_reference)
 
+    # Determine outFields for server-side column selection
+    out_fields = ",".join(include_list) if include_list else "*"
+
     if layer_info.total_count == 0:
         filters_applied = where != "1=1" or bbox is not None
         if filters_applied:
@@ -1610,11 +1642,20 @@ def arcgis_to_table(
             warn(f"No features match filter: {', '.join(filter_desc)}")
         else:
             warn("Layer has no features")
-        # Return empty table with geometry column
-        return pa.table({"geometry": pa.array([], type=pa.binary())})
+        # The same columns and geo block a non-empty fetch returns, so a filter
+        # that matches nothing neither changes the output's schema nor writes a
+        # geometry column --exclude-cols dropped (#966). from_pydict, not
+        # from_batches([]): each column keeps one (empty) chunk.
+        schema = _target_schema(layer_info, out_fields)
+        empty = pa.Table.from_pydict({name: [] for name in schema.names}, schema=schema)
+        return _tag_output_crs(
+            _exclude_columns(empty, exclude_list),
+            None,
+            output_wkid,
+            layer_info.geometry_type,
+            verbose,
+        )
 
-    # Determine outFields for server-side column selection
-    out_fields = ",".join(include_list) if include_list else "*"
     if include_list:
         debug(f"Requesting fields: {out_fields}")
 
@@ -1648,13 +1689,7 @@ def arcgis_to_table(
         table = pq.read_table(temp_parquet)
 
         # Apply client-side column exclusion if specified
-        if exclude_list:
-            cols_to_exclude = set(exclude_list)
-            # Keep geometry column unless explicitly excluded
-            cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
-            if cols_to_keep:
-                table = table.select(cols_to_keep)
-                debug(f"Excluded columns: {cols_to_exclude}")
+        table = _exclude_columns(table, exclude_list)
 
         # Repair invalid geometry (issue #506) before the geo block is built:
         # ST_MakeValid can change a geometry's type (a bowtie Polygon comes back
@@ -1792,15 +1827,19 @@ def convert_arcgis_to_geoparquet(
         timeout=timeout,
     )
 
+    # --exclude-cols geometry leaves an attribute table: nothing to Hilbert-sort
+    # or bbox, and the write below is plain Parquet with no geo block (#966).
+    has_geometry = "geometry" in table.column_names
+
     # Apply Hilbert ordering if not skipped
-    if not skip_hilbert and table.num_rows > 0:
+    if not skip_hilbert and table.num_rows > 0 and has_geometry:
         progress("Applying Hilbert spatial ordering...")
         from geoparquet_io.core.hilbert_order import hilbert_order_table
 
         table = hilbert_order_table(table)
 
     # Add bbox column for spatial query optimization
-    if not skip_bbox and table.num_rows > 0:
+    if not skip_bbox and table.num_rows > 0 and has_geometry:
         progress("Adding bbox column for spatial query optimization...")
         from geoparquet_io.core.add.bbox import add_bbox_table
 

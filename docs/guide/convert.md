@@ -335,6 +335,11 @@ GeoParquet files can have multiple geometry columns (e.g., `geometry` for point 
     that genuinely match. Declare such a column deliberately with
     [`gpio add bbox-metadata`](add.md); `gpio check bbox` will point this out.
 
+    If the input already has a column named `bbox` that is not a bbox struct
+    (a string tile id, say), it is kept as it is, and the computed bbox is
+    written under the next free name (`bbox_1`, `bbox_2`, …) with the covering
+    declared over that column; a warning names both.
+
 !!! note "When the input's CRS is not valid PROJJSON"
     GeoParquet requires a column's `crs` to be a PROJJSON object, which means it
     must carry a `type` member such as `"GeographicCRS"` or `"ProjectedCRS"`.
@@ -636,6 +641,23 @@ gpio convert large.gpkg output.parquet --skip-hilbert
 ```
 
 Trade-off: Faster conversion but less optimal for spatial queries.
+
+### Memory on Very Large Inputs
+
+Hilbert ordering sorts the whole input, so a conversion larger than memory
+spills the sort to disk under `TMPDIR`. gpio caps DuckDB's write at half the
+memory ceiling it detects — physical RAM, or the container or batch-job (Slurm)
+cgroup limit when that is lower — leaving room for the memory DuckDB allocates
+outside its limit. Set the cap yourself with `--write-memory`:
+
+<!-- doctest: setup="gpio convert geopackage input.parquet large.gpkg" -->
+```bash
+gpio convert large.gpkg output.parquet --geoparquet-version 2.0 --write-memory 8GB
+```
+
+If DuckDB reports `Out of Memory Error` rather than spilling, raise the limit
+or point `TMPDIR` at a volume with room for the spill. See
+[Write Strategies](write-strategies.md#memory-configuration).
 
 ### Custom Compression
 
@@ -952,7 +974,8 @@ geometry. Those rows are kept either way, with NULL geometry, so their
 attributes survive the conversion; they sort after the ordered rows, as they do
 for every other input format.
 
-Skips invalid rows, disables Hilbert ordering. Mixed geometry types supported.
+Skips rows whose geometry does not parse; the output is still Hilbert-ordered
+(add `--skip-hilbert` to keep the input order). Mixed geometry types supported.
 
 ### Delimiters
 

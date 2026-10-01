@@ -26,13 +26,8 @@ from urllib.parse import unquote
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
-from geoparquet_io.core.write_strategies.duckdb_kv import (
-    get_default_memory_limit,
-)
-from geoparquet_io.core.write_strategies.duckdb_kv import (
-    validate_memory_limit as _validate_memory_limit,
-)
 
 # Internal alias used to drive the single-pass PARTITION_BY split. DuckDB drops
 # the PARTITION_BY column from the written files, so using a dedicated alias lets
@@ -155,22 +150,28 @@ def run_partitioned_copy(con, select_sql, partition_cols, staging_dir, verbose, 
     writer (issue #478). Staging files use native geometry + SNAPPY (fast,
     transient); the final files are rewritten with the requested settings and
     correct per-partition metadata by the caller.
-    """
-    con.execute("SET threads = 1")  # one file per partition + bounded memory
-    con.execute("SET preserve_insertion_order = false")
-    effective_limit = _validate_memory_limit(memory_limit or get_default_memory_limit())
-    con.execute(f"SET memory_limit = '{effective_limit}'")
 
+    The COPY runs inside ``scoped_write_memory_limit`` (#1156): ``memory_limit``
+    is the user's ``--write-memory``, and without one the ceiling-based default
+    applies, so a large partition inside a batch job spills instead of being
+    OOM-killed. ``threads = 1`` (one file per partition) holds only for the
+    COPY; the connection belongs to the caller, which goes on finalizing every
+    partition on it, so all three settings are restored afterwards.
+    """
     part_cols = ", ".join(partition_cols)
     copy_sql = (
         f"COPY ({select_sql}) TO {sql_path(staging_dir)} "
         f"(FORMAT PARQUET, PARTITION_BY ({part_cols}), "
         f"COMPRESSION SNAPPY, GEOPARQUET_VERSION 'NONE', OVERWRITE_OR_IGNORE)"
     )
-    if verbose:
-        debug("Single-pass partition COPY (one scan of input):")
-        debug(copy_sql)
-    con.execute(copy_sql)
+    # threads=1: one file per partition (and bounded memory); insertion order
+    # is not needed for the split.
+    pinned = {"threads": 1, "preserve_insertion_order": False}
+    with scoped_write_memory_limit(con, memory_limit, verbose, pinned=pinned):
+        if verbose:
+            debug("Single-pass partition COPY (one scan of input):")
+            debug(copy_sql)
+        con.execute(copy_sql)
 
 
 def iter_staging_partitions(staging_dir):

@@ -31,7 +31,11 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     sql_path,
 )
-from geoparquet_io.core.geo_metadata import compute_bbox_via_sql
+from geoparquet_io.core.geo_metadata import (
+    compute_bbox_via_sql,
+    declare_carried_bbox_column,
+    strip_bboxless_covering,
+)
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
@@ -220,6 +224,21 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 geometry_types=geometry_types,
                 geometry_info=geometry_info,
             )
+            # The same declare step duckdb-kv runs: a conventional bbox column
+            # the output carries gets its covering (and a carried covering over
+            # an illegal struct is dropped) before the #954 gate below, so an
+            # index entry beside a real bbox column is not thrown away.
+            declare_carried_bbox_column(
+                con,
+                query,
+                geo_meta["columns"][geometry_column],
+                verbose,
+                geoparquet_version,
+                geo_meta=geo_meta,
+            )
+            # A covering still without a bbox member is one geopandas cannot
+            # read (#954).
+            geo_meta = strip_bboxless_covering(geo_meta, verbose)
 
             # 2.0 and parquet-geo-only require a native Parquet GEOMETRY logical
             # type; 1.0/1.1 require plain BYTE_ARRAY WKB and forbid it. Every

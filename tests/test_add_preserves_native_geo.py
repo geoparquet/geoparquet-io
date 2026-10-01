@@ -351,26 +351,16 @@ def test_add_attaches_the_witness_crs_to_the_primary_column_only(
     assert logical_geo_types(out)["centroid"][1] != EPSG_5070
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A secondary native geometry column survives the rewrite with its logical "
-        "type but loses its own CRS, and nothing adds it to `geo.columns`, which "
-        "GeoParquet 2.0 requires for every geometry column in the file: "
-        "`✗ geometry columns not described in geo metadata: ['centroid']`. The "
-        "caller is what is missing -- `add *` passes no `geometry_info`, so "
-        "`build_geo_metadata` is never told there is a secondary column and no "
-        "witness is read for it. That is a per-column change affecting every write "
-        "path, not the per-file witness #993 adds, and it is filed as #1000 next to "
-        "#952/#953. Main is worse here (a 1.1 file still carrying a native "
-        "`centroid` type, two failures); this narrows it to one. Delete this "
-        "marker then."
-    ),
-)
 def test_add_describes_and_keeps_every_native_geometry_column(
     two_native_geometry_columns, tmp_path
 ):
-    """Measured, not assumed: 2.0 requires every geometry column to be described."""
+    """Measured, not assumed: 2.0 requires every geometry column to be described.
+
+    Closed by #1000: the write funnel now derives ``geometry_info`` from the
+    ``input_file`` witness when the caller passes none, so ``centroid`` gets its
+    own ``geo.columns`` entry with its own EPSG:3857 CRS read from its logical
+    type — never the primary's (see the sibling test above).
+    """
     out = tmp_path / "bbox.parquet"
 
     _run_cli("add", "bbox", two_native_geometry_columns, out)

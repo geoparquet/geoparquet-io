@@ -608,9 +608,16 @@ class TestAddH3CLI:
         ).fetchall()
         assert resolutions == [(9,)]
 
-    def test_default_run_records_covering_metadata(self, h3_default_run):
-        covering = _read_geo_metadata(h3_default_run)["columns"]["geometry"]["covering"]
-        assert covering["h3"] == {"column": "h3_cell", "resolution": 9}
+    def test_default_run_writes_no_bboxless_covering(self, h3_default_run):
+        """The buildings input has no bbox column, so no covering is written (#954).
+
+        A covering whose only member is the h3 entry has no ``bbox`` key, which
+        the spec defines as the only covering encoding and which geopandas
+        indexes unguarded. The h3 entry is recorded only beside a bbox member
+        (see tests/test_spatial_index_covering.py).
+        """
+        col_meta = _read_geo_metadata(h3_default_run)["columns"]["geometry"]
+        assert "covering" not in col_meta, col_meta.get("covering")
 
     def test_resolution_option_reaches_core(self, h3_optioned_run):
         conn = self._h3_connection()
@@ -627,10 +634,10 @@ class TestAddH3CLI:
         assert "h3_building" in column_names
         assert "h3_cell" not in column_names
 
-        # The covering must name the column that was actually written, at the
-        # resolution that was actually asked for.
-        covering = _read_geo_metadata(h3_optioned_run)["columns"]["geometry"]["covering"]
-        assert covering["h3"] == {"column": "h3_building", "resolution": 13}
+        # The bbox-less input gets no covering at all (#954); the "covering
+        # names the written column" contract lives in
+        # tests/test_spatial_index_covering.py against a bbox-bearing input.
+        assert "covering" not in _read_geo_metadata(h3_optioned_run)["columns"]["geometry"]
 
     def test_verbose_option_reaches_the_extension_loader(self, h3_optioned_verbose_output):
         assert "Loading DuckDB extension: h3" in h3_optioned_verbose_output

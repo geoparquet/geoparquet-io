@@ -98,6 +98,151 @@ class TestSkipInvalid:
         assert sorted(i for i, _ in rows) == [1, 2, 4]  # 3 dropped, 2 retained
         assert [(i, is_null) for i, is_null in rows if is_null] == [(2, True)]
 
+    def test_skip_invalid_output_is_hilbert_ordered(self, tmp_path):
+        """--skip-invalid must not silently disable Hilbert ordering (#1157)."""
+        source = _write(
+            tmp_path / "wkt.csv",
+            "id,geom\n1,POINT(9 9)\n2,NOT WKT\n3,POINT(1 1)\n4,\n5,POINT(5 5)\n",
+        )
+        output = tmp_path / "out.parquet"
+
+        result = _convert(source, output, "--wkt-column", "geom", "--skip-invalid")
+
+        assert result.exit_code == 0, result.output
+        rows = _rows(output)
+        assert sorted(i for i, _ in rows) == [1, 3, 4, 5]  # 2 dropped, NULL kept
+        assert [i for i, is_null in rows if not is_null] == [3, 5, 1]  # Hilbert order
+        nulls = [is_null for _, is_null in rows]
+        assert nulls == sorted(nulls), f"NULL rows are not last: {rows}"
+
+    def test_skip_invalid_builder_emits_hilbert_order_by(self):
+        """The skip_invalid branch returns ORDER BY terms like every other path."""
+        from geoparquet_io.core.convert import _build_csv_conversion_query
+
+        geom_info = {"type": "wkt", "wkt_column": "geom", "csv_read": "read_csv_auto('x.csv')"}
+        _, order_by = _build_csv_conversion_query(geom_info, False, (0.0, 0.0, 10.0, 10.0), True)
+        assert order_by is not None
+        assert "ST_Hilbert" in order_by
+
+    def test_skip_invalid_with_skip_hilbert_emits_no_order_by(self):
+        """--skip-hilbert still wins over the restored ordering."""
+        from geoparquet_io.core.convert import _build_csv_conversion_query
+
+        geom_info = {"type": "wkt", "wkt_column": "geom", "csv_read": "read_csv_auto('x.csv')"}
+        _, order_by = _build_csv_conversion_query(geom_info, True, None, True)
+        assert order_by is None
+
+
+class TestSkipInvalidOrdering:
+    """More of #1157: the restored ordering on the paths the first fix missed."""
+
+    def test_a_wkt_column_named_geometry(self, tmp_path):
+        """The parsed value used to be named `geometry` too: a duplicate EXCLUDE entry."""
+        source = _write(
+            tmp_path / "wkt.csv",
+            "id,Geometry\n1,POINT(9 9)\n2,NOT WKT\n3,POINT(1 1)\n4,\n5,POINT(5 5)\n",
+        )
+        output = tmp_path / "out.parquet"
+
+        result = _convert(source, output, "--skip-invalid")
+
+        assert result.exit_code == 0, result.output
+        rows = _rows(output)
+        assert [i for i, is_null in rows if not is_null] == [3, 5, 1]
+        assert [i for i, is_null in rows if is_null] == [4]
+
+    def test_bounds_come_from_the_parsed_rows(self, tmp_path, monkeypatch):
+        """The CSV is TRY-parsed once, into the temp table, not again for bounds."""
+        from geoparquet_io.core import convert as convert_module
+
+        def no_second_parse(*args, **kwargs):
+            raise AssertionError("--skip-invalid WKT must not re-parse the CSV for bounds")
+
+        monkeypatch.setattr(convert_module, "_calculate_csv_bounds", no_second_parse)
+        source = _write(
+            tmp_path / "wkt.csv",
+            "id,geom\n1,POINT(9 9)\n2,NOT WKT\n3,POINT(1 1)\n5,POINT(5 5)\n",
+        )
+        output = tmp_path / "out.parquet"
+
+        result = _convert(source, output, "--wkt-column", "geom", "--skip-invalid")
+
+        assert result.exit_code == 0, result.output
+        assert [i for i, _ in _rows(output)] == [3, 5, 1]
+
+    def test_lat_lon_output_is_hilbert_ordered(self, tmp_path):
+        """--skip-invalid used to switch ordering off for lat/lon CSVs as well."""
+        source = _write(
+            tmp_path / "ll.csv",
+            "id,lat,lon\n1,9,9\n2,1,1\n3,5,5\n4,,\n",
+        )
+        output = tmp_path / "out.parquet"
+
+        result = _convert(source, output, "--skip-invalid")
+
+        assert result.exit_code == 0, result.output
+        rows = _rows(output)
+        assert [i for i, is_null in rows if not is_null] == [2, 3, 1]
+        assert rows[-1] == (4, True)
+
+
+class TestNonFiniteBounds:
+    """A non-finite envelope must fall back to an unordered query (#1157).
+
+    ``POINT(1e400 1)`` parses to an infinite coordinate, so the dataset bounds
+    come back as ``inf``; interpolated as a Python float that renders as the
+    bare token ``inf`` inside ``ST_MakeEnvelope`` and fails binding. (The
+    later geo-stats pass still cannot digest such a geometry — a separate,
+    pre-existing failure — so the guard is tested at the query level.)
+    """
+
+    def test_nonfinite_bounds_warn_and_are_discarded(self, caplog):
+        import logging
+
+        from geoparquet_io.core.convert import _usable_bounds
+
+        with caplog.at_level(logging.WARNING):
+            assert _usable_bounds((1.0, 1.0, float("inf"), 5.0)) is None
+        # The no-bounds warning ends the same way; name the non-finite one.
+        assert "NaN or infinite" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert _usable_bounds((float("nan"), 1.0, 5.0, 5.0)) is None
+        assert "NaN or infinite" in caplog.text
+
+    def test_finite_bounds_pass_through_silently(self, caplog):
+        import logging
+
+        from geoparquet_io.core.convert import _usable_bounds
+
+        with caplog.at_level(logging.WARNING):
+            assert _usable_bounds((1.0, 1.0, 5.0, 5.0)) == (1.0, 1.0, 5.0, 5.0)
+        assert caplog.text == ""
+
+    def test_wkt_inf_coordinate_builds_an_unordered_query(self, tmp_path, caplog):
+        """End to end through _convert_csv_path: no ORDER BY, no binder error."""
+        import logging
+
+        from geoparquet_io.core.convert import _convert_csv_path
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+        source = _write(
+            tmp_path / "wkt.csv",
+            "id,geom\n1,POINT(1 1)\n2,POINT(1e400 1)\n3,POINT(5 5)\n",
+        )
+        con = get_duckdb_connection()
+        try:
+            with caplog.at_level(logging.WARNING):
+                query, _, order_by = _convert_csv_path(
+                    con, str(source), None, "geom", None, None, "EPSG:4326", False, False, False
+                )
+            assert order_by is None
+            assert "NaN or infinite" in caplog.text
+            assert len(con.execute(query).fetchall()) == 3
+        finally:
+            con.close()
+
 
 class TestNullLatLon:
     def test_null_lat_lon_row_is_kept(self, tmp_path):

@@ -625,27 +625,70 @@ def strip_unsupported_covering(geo_meta: dict, version: str | None, verbose: boo
     """
     if covering_supported(version):
         return geo_meta
+    return _strip_covering_where(
+        geo_meta,
+        lambda col_meta: "covering" in col_meta,
+        f"1.1-only covering metadata (version {version})",
+        verbose,
+    )
 
+
+def _strip_covering_where(geo_meta: dict, drop, reason: str, verbose: bool) -> dict:
+    """``geo_meta`` without the ``covering`` of every column dict ``drop`` selects.
+
+    The mechanics both covering gates share. Never mutates its input: only the
+    stripped column dicts and the ``columns`` mapping are copied, for the
+    aliasing reason :func:`strip_unsupported_covering` gives.
+    """
     columns = geo_meta.get("columns")
     if not isinstance(columns, dict):
         return geo_meta
-    if not any(isinstance(col, dict) and "covering" in col for col in columns.values()):
+    if not any(isinstance(col, dict) and drop(col) for col in columns.values()):
         return geo_meta
 
     stripped = {}
     for col_name, col_meta in columns.items():
-        if isinstance(col_meta, dict) and "covering" in col_meta:
+        if isinstance(col_meta, dict) and drop(col_meta):
             col_meta = {k: v for k, v in col_meta.items() if k != "covering"}
             if verbose:
-                debug(
-                    f"Dropped 1.1-only covering metadata for column '{col_name}' "
-                    f"(version {version})"
-                )
+                debug(f"Dropped {reason} for column '{col_name}'")
         stripped[col_name] = col_meta
 
     result = dict(geo_meta)
     result["columns"] = stripped
     return result
+
+
+def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
+    """Return ``geo_meta`` without any ``covering`` that has no ``bbox`` member.
+
+    The GeoParquet 1.1.0 spec's ``covering`` section reads: "The keys of the
+    'covering' object MUST be a supported encoding. Currently the only
+    supported encoding is 'bbox'". gpio additionally records its spatial-index
+    entries (h3/s2/a5/quadkey/kdtree) *beside* a bbox member (#694/#738), but a
+    covering carrying only those members is one real readers reject: geopandas
+    indexes ``covering["bbox"]["xmin"][0]`` unguarded, so ``partition quadkey``
+    wrote a dataset ``geopandas.read_parquet`` could not open at all (#954).
+
+    Single gate shared by every write path, applied after metadata assembly and
+    after the bbox-declaring steps (``_add_bbox_covering``,
+    ``declare_carried_bbox_column``) have had their chance to supply the member.
+
+    Never mutates its input, for the same aliasing reason as
+    :func:`strip_unsupported_covering`: partition loops reuse one metadata dict
+    across many writes.
+    """
+
+    def _bboxless(col_meta: dict) -> bool:
+        covering = col_meta.get("covering")
+        return isinstance(covering, dict) and "bbox" not in covering
+
+    return _strip_covering_where(
+        geo_meta,
+        _bboxless,
+        "covering metadata with no bbox member (spec allows only the bbox encoding)",
+        verbose,
+    )
 
 
 def _add_custom_covering(
@@ -754,13 +797,13 @@ def strip_derived_stats(
     transforms only the primary column, so a secondary column's bytes reach the
     output unchanged and its carried stats still describe them (#890). Dropping
     them anyway left the output without the ``geometry_types`` GeoParquet 1.1
-    requires — nothing recomputes a secondary column's — and DuckDB then refuses
-    to open the file at all. ``None`` strips every column, which is right for a
+    requires — only duckdb-kv recomputes a secondary column's (#952) — and
+    DuckDB then refuses to open the file at all. ``None`` strips every column, which is right for a
     merge, whose carried stats UNDER-cover every column of the output.
 
     ``recomputed_columns`` names the stripped columns the caller's write path
-    will fill back in — on every file-write path that is the primary geometry
-    column and nothing else. Removing ``geometry_types`` is a way of *asking*
+    will fill back in — on every file-write path the primary geometry column
+    (duckdb-kv fills a secondary's ``[]`` too, #952). Removing ``geometry_types`` is a way of *asking*
     for a recompute, so for any other stripped column it is not a marker but a
     REQUIRED key silently deleted, and the same unreadable output comes back by
     another route (#934). Those columns therefore keep the key with the spec's
@@ -1048,7 +1091,9 @@ def create_geo_metadata(
             if key != "covering":
                 geo_meta[key] = value
 
-    return strip_unsupported_covering(geo_meta, version, verbose)
+    # Applied after _add_bbox_covering, so a covering is only dropped when no
+    # bbox column exists to give it the one member the spec defines (#954).
+    return strip_bboxless_covering(strip_unsupported_covering(geo_meta, version, verbose), verbose)
 
 
 # =============================================================================
@@ -1380,10 +1425,24 @@ def bbox_column_to_declare(
 
     Reordering the struct during a rewrite was also rejected: that is a data
     change, and the rewrite fixes promise not to make one.
+
+    Provenance comes only from the PRIMARY column's own ``covering``. With
+    none, only the exact conventional name (:data:`SELF_EVIDENT_BBOX_COLUMN`)
+    may be declared -- the #738 policy. The broader read-side matching
+    (``bounds``, ``extent``, ``*_bbox``) used to leak in here, so a
+    multi-geometry file whose secondary ``boundary`` travelled with a
+    ``boundary_bbox`` struct got that struct declared as the *primary*'s
+    covering: a Point column advertising a Polygon column's extents (#953).
+    The exact name is no exception when another column's own covering already
+    claims it.
     """
     declared = _declared_bbox_column(geo_meta)
-    name = declared if declared in schema.names else detect_bbox_column_from_schema(schema, verbose)
+    name = declared if declared in schema.names else _self_evident_bbox_column(schema, verbose)
     if name is None:
+        return None
+    if name != declared and _bbox_claimed_by_another_column(geo_meta, name):
+        if verbose:
+            debug(f"Not declaring '{name}' for the primary: another column's covering names it")
         return None
     problem = arrow_bbox_covering_problem(name, schema.field(name))
     if problem is None:
@@ -1415,6 +1474,49 @@ def build_bbox_covering(column: str) -> dict:
 SELF_EVIDENT_BBOX_COLUMN = "bbox"
 
 
+def _bbox_claimed_by_another_column(geo_meta: object, column: str) -> bool:
+    """Whether a non-primary column's ``covering.bbox`` names ``column`` (#953).
+
+    That column is the secondary geometry's envelope, whatever its name, so the
+    primary must not claim it on name alone.
+    """
+    if not isinstance(geo_meta, dict) or not isinstance(geo_meta.get("columns"), dict):
+        return False
+    primary = geo_meta.get("primary_column")
+    for name, col_meta in geo_meta["columns"].items():
+        if name == primary or not isinstance(col_meta, dict):
+            continue
+        covering = col_meta.get("covering")
+        if isinstance(covering, dict) and _covering_column(covering.get("bbox")) == column:
+            return True
+    return False
+
+
+def _self_evident_bbox_column(schema: pa.Schema, verbose: bool = False) -> str | None:
+    """The one column a writer may declare with no provenance, if the schema has it.
+
+    The declare-side twin of :func:`detect_bbox_column_from_schema`, which
+    matches the broader read-side names (``bounds``, ``extent``, ``*_bbox``)
+    and must never decide *whether* a covering is declared: a ``boundary_bbox``
+    that name-matches is the *secondary* ``boundary`` column's envelope, not
+    the primary's (#953). Only the exact :data:`SELF_EVIDENT_BBOX_COLUMN`
+    qualifies here (#738); the struct-shape gate stays with the caller.
+    """
+    import pyarrow as pa
+
+    if SELF_EVIDENT_BBOX_COLUMN not in schema.names:
+        return None
+    field = schema.field(SELF_EVIDENT_BBOX_COLUMN)
+    if not (
+        pa.types.is_struct(field.type)
+        and _BBOX_STRUCT_FIELDS.issubset({f.name for f in field.type})
+    ):
+        return None
+    if verbose:
+        debug(f"Found conventional bbox column in table: {SELF_EVIDENT_BBOX_COLUMN}")
+    return SELF_EVIDENT_BBOX_COLUMN
+
+
 def declare_carried_bbox_column(
     con: duckdb.DuckDBPyConnection,
     query: str,
@@ -1422,6 +1524,7 @@ def declare_carried_bbox_column(
     verbose: bool,
     geoparquet_version: str,
     output_columns: list[str] | None = None,
+    geo_meta: dict | None = None,
 ) -> bool:
     """Declare a conventional ``bbox`` column the output carries but nothing declared.
 
@@ -1437,7 +1540,9 @@ def declare_carried_bbox_column(
 
     ``output_columns``, when the caller already knows the output's column names,
     settles the common "no bbox column at all" case without paying for the
-    schema probe below.
+    schema probe below. ``geo_meta``, the whole block ``col_meta`` belongs to,
+    lets a ``bbox`` that another column's covering already names stay that
+    column's (#953).
 
     The struct's field *order* decides, not just its field names: see
     :data:`BBOX_COVERING_FIELD_ORDERS`.
@@ -1452,6 +1557,8 @@ def declare_carried_bbox_column(
     declared = _covering_column(covering.get("bbox")) if covering else None
     name = declared or SELF_EVIDENT_BBOX_COLUMN
     if output_columns is not None and name not in output_columns:
+        return False
+    if declared is None and _bbox_claimed_by_another_column(geo_meta, name):
         return False
     schema = con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
     if name not in schema.names:

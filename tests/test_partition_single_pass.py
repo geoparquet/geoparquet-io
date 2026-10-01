@@ -265,13 +265,6 @@ class TestMemoryLimitValidation:
                 memory_limit="1GB'; ATTACH 'evil.db' AS evil; --",
             )
 
-    def test_accepts_valid_sizes(self):
-        from geoparquet_io.core.partition.staging import _validate_memory_limit
-
-        assert _validate_memory_limit("512MB") == "512MB"
-        assert _validate_memory_limit("2gb") == "2GB"
-        assert _validate_memory_limit("4.5 GB") == "4.5GB"
-
 
 class TestCollision:
     """Distinct values that sanitize to the same filename must NOT lose rows."""

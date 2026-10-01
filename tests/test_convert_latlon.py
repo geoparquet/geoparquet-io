@@ -259,3 +259,54 @@ class TestCsvAffixedNames:
         out = str(tmp_path / "out.parquet")
         convert_to_geoparquet(str(path), out)
         assert _points(out) == [(1, 20.5, 10.5), (2, 7.25, -5.0)]
+
+
+def _rows(path, column):
+    con = duckdb.connect()
+    try:
+        return con.execute(f"SELECT {column} FROM read_parquet('{path}')").fetchall()
+    finally:
+        con.close()
+
+
+class TestParquetLatLonMeetsTheRestOfConvert:
+    """The tabular Parquet path and the conversion rules it inherits."""
+
+    def test_bbox_name_collision_resolves(self, tmp_path):
+        """A source column named 'bbox' is not overwritten by the computed one (#1079)."""
+        table = pa.table({"bbox": ["tile-a", "tile-b"], "lat": [1.0, 2.0], "lon": [3.0, 4.0]})
+        path = tmp_path / "collide.parquet"
+        pq.write_table(table, path)
+        out = str(tmp_path / "out.parquet")
+        convert_to_geoparquet(str(path), out)
+
+        names = pq.read_schema(out).names
+        assert "bbox" in names  # the source's own string column, untouched
+        computed = _geo(out)["columns"]["geometry"]["covering"]["bbox"]["xmin"][0]
+        assert computed != "bbox"
+        assert computed in names
+        assert _rows(out, "bbox")[0] == ("tile-a",)
+
+    def test_hilbert_ordering_is_applied(self, tmp_path):
+        """The rows come out spatially ordered, as for every other input."""
+        lats = [10.0, -40.0, 11.0, -41.0, 10.5]
+        lons = [20.0, -80.0, 21.0, -81.0, 20.5]
+        path = tmp_path / "order.parquet"
+        pq.write_table(pa.table({"id": list(range(5)), "lat": lats, "lon": lons}), path)
+        out = str(tmp_path / "out.parquet")
+        convert_to_geoparquet(str(path), out)
+
+        order = [row[0] for row in _rows(out, "id")]
+        assert order != list(range(5)), "rows were not reordered"
+        assert sorted(order) == list(range(5)), "rows were lost or duplicated"
+
+    def test_rows_without_a_coordinate_sort_last(self, tmp_path):
+        """A row with no coordinate keeps its attributes and sorts last (#649)."""
+        path = tmp_path / "gaps.parquet"
+        pq.write_table(
+            pa.table({"id": [1, 2, 3], "lat": [10.0, None, 12.0], "lon": [20.0, 30.0, 22.0]}),
+            path,
+        )
+        out = str(tmp_path / "out.parquet")
+        convert_to_geoparquet(str(path), out)
+        assert [row[0] for row in _rows(out, "id")][-1] == 2

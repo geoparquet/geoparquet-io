@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import duckdb
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
@@ -29,16 +29,25 @@ from geoparquet_io.core.arrow_geo_metadata import (
 )
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     quote_identifier,
+    restore_duckdb_settings,
     sql_path,
     validate_compression_level,
 )
-from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql, declare_carried_bbox_column
+from geoparquet_io.core.geo_metadata import (
+    compute_geo_stats_via_sql,
+    declare_carried_bbox_column,
+    strip_bboxless_covering,
+)
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.memory_limits import (
+    get_default_memory_limit,
+    scoped_write_memory_limit,
+    validate_memory_limit,
+)
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -48,120 +57,10 @@ from geoparquet_io.core.write_strategies.base import (
 from geoparquet_io.core.write_strategies.row_group_sizing import _resolve_row_group_rows
 
 if TYPE_CHECKING:
-    import duckdb
     import pyarrow as pa
 
 # Valid compression values whitelist (prevents injection via compression param)
 VALID_COMPRESSIONS = frozenset({"ZSTD", "SNAPPY", "GZIP", "LZ4", "UNCOMPRESSED", "BROTLI"})
-
-# DuckDB's memory_limit is a SET value, which cannot be parameterised, so the
-# value has to be interpolated into SQL. Only accept a plain size literal: a
-# decimal number with an optional decimal (KB/MB/GB/TB) or binary (KiB/…) unit.
-_MEMORY_LIMIT_RE = re.compile(r"^\d+(\.\d+)?\s*(K|M|G|T)?i?B$", re.IGNORECASE)
-
-
-def validate_memory_limit(value: str) -> str:
-    """Validate/normalize a DuckDB memory limit before interpolating it into SQL.
-
-    ``memory_limit`` originates from ``--write-memory`` (or from a library
-    caller's config) and ends up inside ``SET memory_limit = '…'``. DuckDB's
-    ``execute`` runs multi-statement strings, so an unvalidated value can close
-    the string literal and append arbitrary SQL. Reject anything that is not a
-    plain size.
-
-    Args:
-        value: Candidate memory limit, e.g. "512MB", "2GB", "4.5 GB", "1GiB"
-
-    Returns:
-        The normalized value (whitespace removed, unit upper-cased).
-
-    Raises:
-        ValueError: If the value is not a plain size literal.
-    """
-    text = str(value).strip()
-    if not _MEMORY_LIMIT_RE.match(text):
-        raise ValueError(
-            f"Invalid memory_limit {value!r}; expected a size like "
-            f"'512MB', '2GB', '4.5GB', or '1GiB'."
-        )
-    return text.upper().replace(" ", "")
-
-
-def _get_available_memory() -> int | None:
-    """
-    Get available memory in bytes, accounting for container limits.
-
-    Checks cgroup v2 and v1 limits first (Docker, Kubernetes, etc.),
-    then falls back to psutil for bare-metal systems.
-
-    Returns:
-        Available memory in bytes, or None if detection fails
-    """
-    # Check cgroup v2 memory limit (Docker, Kubernetes)
-    try:
-        with open("/sys/fs/cgroup/memory.max") as f:
-            limit = f.read().strip()
-            if limit != "max":
-                cgroup_limit = int(limit)
-                # Try to get current usage to calculate available
-                try:
-                    with open("/sys/fs/cgroup/memory.current") as f2:
-                        current = int(f2.read().strip())
-                        return cgroup_limit - current
-                except (FileNotFoundError, ValueError):
-                    # Return 80% of limit if we can't get current usage
-                    return int(cgroup_limit * 0.8)
-    except (FileNotFoundError, ValueError):
-        pass
-
-    # Check cgroup v1 memory limit
-    try:
-        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
-            limit = int(f.read().strip())
-            # Values near 2^63 indicate no limit
-            if limit < 2**60:
-                try:
-                    with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as f2:
-                        usage = int(f2.read().strip())
-                        return limit - usage
-                except (FileNotFoundError, ValueError):
-                    return int(limit * 0.8)
-    except (FileNotFoundError, ValueError):
-        pass
-
-    # Fall back to psutil for non-containerized environments
-    try:
-        import psutil
-
-        return psutil.virtual_memory().available
-    except ImportError:
-        return None
-
-
-def get_default_memory_limit() -> str:
-    """
-    Get default memory limit for DuckDB streaming (50% of available RAM).
-
-    Container-aware: detects Docker/Kubernetes memory limits via cgroups
-    before falling back to psutil for bare-metal systems.
-
-    Returns:
-        Memory limit string for DuckDB (e.g., '2GB', '512MB')
-    """
-    available = _get_available_memory()
-
-    if available is None:
-        return "2GB"  # Conservative fallback
-
-    # Use 50% of available memory
-    limit_bytes = int(available * 0.5)
-    limit_gb = limit_bytes / (1024**3)
-
-    if limit_gb >= 1:
-        return f"{limit_gb:.1f}GB"
-
-    limit_mb = limit_bytes / (1024**2)
-    return f"{max(128, int(limit_mb))}MB"  # Minimum 128MB
 
 
 def _wrap_query_with_crs(
@@ -300,6 +199,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 row_group_rows,
                 verbose,
                 extra_kv_metadata,
+                memory_limit=memory_limit,
             )
             return
 
@@ -346,43 +246,12 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 
         finally:
-            self._restore_duckdb_settings(con, saved_settings, verbose)
+            restore_duckdb_settings(con, saved_settings, verbose)
             if is_remote and Path(local_path).exists():
                 Path(local_path).unlink()
 
     #: Session settings this strategy overrides for the duration of one write.
     _MANAGED_SETTINGS = ("threads", "preserve_insertion_order", "memory_limit")
-
-    def _restore_duckdb_settings(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        saved: dict[str, object],
-        verbose: bool,
-    ) -> None:
-        """Put back the session settings this strategy clamped.
-
-        The connection belongs to the caller, not to this write. Leaving
-        threads=1 and a halved memory_limit behind meant one write pinned every
-        later query on that connection -- partition loops finalize N files on a
-        shared connection, so the first partition throttled the whole run, and
-        the Python API holds a connection across operations.
-        """
-        for key, value in saved.items():
-            try:
-                if isinstance(value, str):
-                    con.execute(f"SET {key} = '{_escape_sql_string(value)}'")
-                else:
-                    con.execute(f"SET {key} = {value}")
-                # DuckDB reports sizes as rounded display strings ("14.3 GiB"),
-                # so writing one back can land a hair off and drift further on
-                # every write in a partition loop. A value that will not
-                # round-trip was the engine's own default, so ask for that
-                # instead of an approximation of it.
-                if con.execute(f"SELECT current_setting('{key}')").fetchone()[0] != value:
-                    con.execute(f"RESET {key}")
-            except duckdb.Error as e:  # pragma: no cover - defensive
-                if verbose:
-                    debug(f"Could not restore DuckDB setting {key}: {e}")
 
     def _configure_duckdb_memory(
         self,
@@ -393,7 +262,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         """Configure DuckDB memory settings for streaming.
 
         Returns the prior values so the caller can restore them; see
-        ``_restore_duckdb_settings``.
+        ``restore_duckdb_settings``.
         """
         saved: dict[str, object] = {}
         for key in self._MANAGED_SETTINGS:
@@ -493,7 +362,14 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
         col_meta = geo_meta["columns"][geometry_column]
         self._compute_missing_metadata(con, query, geometry_column, col_meta, verbose)
-        declare_carried_bbox_column(con, query, col_meta, verbose, geoparquet_version)
+        declare_carried_bbox_column(
+            con, query, col_meta, verbose, geoparquet_version, geo_meta=geo_meta
+        )
+        self._compute_missing_secondary_metadata(con, query, geometry_column, geo_meta, verbose)
+        # After the declare above, so an undeclared conventional bbox column
+        # gets its chance to supply the one member the spec defines; a covering
+        # still without a bbox member is one geopandas cannot read (#954).
+        geo_meta = strip_bboxless_covering(geo_meta, verbose)
 
         # For v1.x: Cast to BLOB so DuckDB writes plain binary WKB. EVERY geometry
         # column, not just the primary: validation applies the same per-version
@@ -537,10 +413,18 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
         Both come out of one scan, so a caller that invalidated both (a row
         filter, a reprojection, a multi-file merge) pays for a single pass.
+
+        An empty ``geometry_types`` is a gap, not a value, mirroring
+        ``backfill_derived_stats``: ``[]`` is the spec's "not known" sentinel a
+        merge/partition write leaves on a column whose stats it could not carry
+        (#934), and gating on key absence made it sticky — no file → file
+        command ever recomputed it (#952). This path holds the rows, so it
+        answers the question once; a genuinely empty result writes ``[]`` back
+        and that is the end of it, with no warning and no second pass.
         """
 
         need_bbox = "bbox" not in col_meta
-        need_types = "geometry_types" not in col_meta
+        need_types = not col_meta.get("geometry_types")
         if not (need_bbox or need_types):
             return
 
@@ -557,6 +441,43 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             col_meta["bbox"] = bbox
         if need_types:
             col_meta["geometry_types"] = geometry_types
+
+    def _compute_missing_secondary_metadata(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        query: str,
+        geometry_column: str,
+        geo_meta: dict,
+        verbose: bool,
+    ) -> None:
+        """The same gap-fill for every SECONDARY geometry column (#952/#1000).
+
+        The primary's pass above ran for it alone, so a secondary carried with
+        the ``[]`` sentinel -- or freshly derived from the input's logical types
+        -- kept its gap forever. Only the spec-required ``geometry_types`` makes
+        a gap here: a secondary whose types are known is not rescanned for the
+        optional ``bbox`` (the scan that fills a gap fills the bbox too).
+
+        Only columns the query emits as GEOMETRY (or a GeoArrow struct) can be
+        measured. A secondary that reaches the query as a plain BLOB -- an Arrow
+        stream from a non-gpio producer -- keeps its carried metadata, the same
+        way the 1.x WKB wrap leaves it alone; binding ST_* to it would abort the
+        whole write.
+        """
+        gaps = {
+            name: meta
+            for name, meta in geo_meta["columns"].items()
+            if name != geometry_column and isinstance(meta, dict)
+            if not meta.get("geometry_types")
+        }
+        if not gaps:
+            return
+        column_types = {
+            row[0]: str(row[1]).upper() for row in con.execute(f"DESCRIBE ({query})").fetchall()
+        }
+        for name in sorted(gaps):
+            if column_types.get(name, "").startswith(("GEOMETRY", "STRUCT")):
+                self._compute_missing_metadata(con, query, name, gaps[name], verbose)
 
     def write_from_table(
         self,
@@ -706,11 +627,15 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         row_group_rows: int | None,
         verbose: bool,
         extra_kv_metadata: dict[str, str] | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write plain Parquet (no geo metadata) from a query.
 
         Same contract as the table entry point above: a query with no geometry
-        column still carries the input's sidecar keys (#708).
+        column still carries the input's sidecar keys (#708). The COPY is
+        bounded like every other gpio write (#1156): ``--write-memory`` when
+        given, else the ceiling-based default, instead of DuckDB's own
+        80%-of-RAM default on all threads.
         """
 
         is_remote = is_remote_url(output_path)
@@ -731,7 +656,8 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
             if verbose:
                 debug(f"Writing plain Parquet with {compression} compression...")
-            con.execute(copy_query)
+            with scoped_write_memory_limit(con, memory_limit, verbose):
+                con.execute(copy_query)
 
             if is_remote:
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)

@@ -532,7 +532,7 @@ def _validate_write_memory(ctx, param, value):
     if value is None:
         return None
 
-    from geoparquet_io.core.write_strategies.duckdb_kv import validate_memory_limit
+    from geoparquet_io.core.memory_limits import validate_memory_limit
 
     try:
         validate_memory_limit(value)
@@ -545,7 +545,8 @@ def _validate_write_memory(ctx, param, value):
 # verbatim.
 _WRITE_MEMORY_HELP = (
     "Memory limit for streaming writes (e.g., '512MB', '2GB'). "
-    "Default: 50% of available RAM (container-aware)."
+    "Default: 50% of the memory ceiling -- physical RAM, or the container or "
+    "Slurm job cap when lower."
 )
 
 

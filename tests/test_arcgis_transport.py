@@ -1173,7 +1173,8 @@ def test_the_page_pressure_classifier_wants_exactly_code_500(code):
 # ---------------------------------------------------------------------------
 
 
-def test_an_empty_filtered_layer_returns_an_empty_geometry_table(monkeypatch, caplog):
+def test_an_empty_filtered_layer_returns_the_layers_schema(monkeypatch, caplog):
+    """Zero features keep the columns and geo block a non-empty fetch has (#966)."""
     http = FakeTransport.install(monkeypatch)
     stub_service(http, total=0)
 
@@ -1181,9 +1182,51 @@ def test_an_empty_filtered_layer_returns_an_empty_geometry_table(monkeypatch, ca
         table = arcgis_to_table(SERVICE, where="pop > 1e9", bbox=(-1, -1, 1, 1))
 
     assert table.num_rows == 0
-    assert table.column_names == ["geometry"]
+    assert table.column_names == ["geometry", "OBJECTID", "name", "pop"]
+    geo = json.loads(table.schema.metadata[b"geo"])
+    assert geo["primary_column"] == "geometry"
+    assert geo["columns"]["geometry"]["geometry_types"] == []
     assert "No features match filter" in caplog.text
     assert "where='pop > 1e9'" in caplog.text
+    # An empty result is reported once, not also blamed on the geometry.
+    assert "holds no geometries" not in caplog.text
+
+
+def test_an_empty_layer_honours_include_and_exclude_cols(monkeypatch):
+    """A filter matching nothing must not undo the column selection (#966)."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=0)
+
+    included = arcgis_to_table(SERVICE, where="1=0", include_cols="name")
+    assert included.column_names == ["geometry", "name"]
+
+    excluded = arcgis_to_table(SERVICE, where="1=0", exclude_cols="geometry")
+    assert excluded.column_names == ["OBJECTID", "name", "pop"]
+    assert b"geo" not in (excluded.schema.metadata or {})
+
+
+def test_an_empty_layer_with_geometry_excluded_writes_plain_parquet(monkeypatch, tmp_path):
+    """The written file for a zero-feature result carries no geometry and no geo key."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=0)
+    out = tmp_path / "empty.parquet"
+
+    convert_arcgis_to_geoparquet(SERVICE, str(out), where="1=0", exclude_cols="geometry")
+
+    schema = pq.read_schema(str(out))
+    assert schema.names == ["OBJECTID", "name", "pop"]
+    assert b"geo" not in (schema.metadata or {})
+
+
+def test_an_empty_layer_is_tagged_with_the_requested_output_crs(monkeypatch):
+    """A zero-feature result on the outSR path still names the CRS it asked for."""
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=0)
+
+    table = arcgis_to_table(SERVICE, where="1=0", output_crs="EPSG:3857")
+
+    crs = json.loads(table.schema.metadata[b"geo"])["columns"]["geometry"]["crs"]
+    assert crs["id"] == {"authority": "EPSG", "code": 3857}
 
 
 def test_an_empty_unfiltered_layer_says_so_differently(monkeypatch, caplog):
@@ -1300,6 +1343,39 @@ def test_a_native_crs_request_warns_when_the_server_returns_another(monkeypatch,
     assert http.matching(_is_query)[0].params["outSR"] == "3857"
 
 
+def test_an_attribute_table_is_not_tagged_or_warned_about_a_crs(monkeypatch, caplog):
+    """With geometry excluded there is no CRS to tag, so no CRS mismatch to report (#966)."""
+    http = FakeTransport.install(monkeypatch)
+    http.respond(
+        lambda r: r.path.endswith("/0") and not r.path.endswith("query"), json_reply(_layer_json())
+    )
+    http.respond(_is_count, json_reply({"count": 1}))
+    http.respond(
+        _is_query,
+        json_reply(
+            {
+                "geometryType": "esriGeometryPoint",
+                "spatialReference": {"wkid": 4326},
+                "fields": FIELDS,
+                "features": [
+                    {
+                        "geometry": {"x": -122.0, "y": 37.5},
+                        "attributes": {"OBJECTID": 1, "name": "a", "pop": 1},
+                    }
+                ],
+            }
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        table = arcgis_to_table(SERVICE, output_crs="EPSG:3857", exclude_cols="geometry")
+
+    assert table.column_names == ["OBJECTID", "name", "pop"]
+    assert b"geo" not in (table.schema.metadata or {})
+    assert "server returned WKID" not in caplog.text
+    assert "geometry column was excluded" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # convert_arcgis_to_geoparquet - the file that gets written
 # ---------------------------------------------------------------------------
@@ -1406,7 +1482,14 @@ def test_an_unknown_esri_field_type_falls_back_to_string(monkeypatch, caplog):
     assert table.schema.field("pop").type == pa.string()
 
 
-def test_excluding_the_geometry_column_declares_types_unknown(monkeypatch, caplog):
+def test_excluding_the_geometry_column_drops_the_geo_block(monkeypatch, caplog):
+    """``--exclude-cols geometry`` returns an attribute table, not GeoParquet (#966).
+
+    The block used to survive with ``primary_column: "geometry"`` naming a
+    column the table does not contain, which gpio's own validator rejects.
+    ``extract geoparquet`` documents the correct behaviour: no geometry column,
+    no ``geo`` metadata at all.
+    """
     http = FakeTransport.install(monkeypatch)
     stub_service(http, total=3)
 
@@ -1415,7 +1498,64 @@ def test_excluding_the_geometry_column_declares_types_unknown(monkeypatch, caplo
 
     assert "geometry column was excluded" in caplog.text
     assert "geometry" not in table.column_names
-    assert json.loads(table.schema.metadata[b"geo"])["columns"]["geometry"]["geometry_types"] == []
+    assert b"geo" not in (table.schema.metadata or {})
+
+
+def test_excluding_the_geometry_column_writes_plain_parquet(monkeypatch, tmp_path):
+    """The written file carries no ``geo`` key; validate sees plain Parquet (#966).
+
+    ``gpio extract arcgis ... --exclude-cols geometry`` used to write a ``geo``
+    block whose ``primary_column`` named the excluded column, so
+    ``validate_geoparquet`` failed the file gpio had just written.
+    """
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=3)
+    out = tmp_path / "plain.parquet"
+
+    convert_arcgis_to_geoparquet(SERVICE, str(out), exclude_cols="geometry")
+
+    metadata = pq.read_schema(str(out)).metadata or {}
+    assert b"geo" not in metadata
+    written = pq.read_table(str(out))
+    assert written.column_names == ["OBJECTID", "name", "pop"]
+    assert written.num_rows == 3
+
+    # The bug's signature was schema failures against the written file's own
+    # metadata ('geometry column "geometry" not found in schema', plus binder
+    # errors). Those must be gone. What remains is validate's file-type verdict
+    # that a plain Parquet file is not GeoParquet -- true of this output by
+    # design, exactly as it is of `extract geoparquet --exclude-cols geometry`.
+    failures = [c for c in validate_geoparquet(str(out)).checks if c.status.value == "failed"]
+    assert [c.name for c in failures] == ["file_type"]
+    assert "No GeoParquet metadata" in failures[0].message
+
+
+@pytest.mark.parametrize("write_strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+def test_the_api_extract_with_geometry_excluded_writes_plain_parquet(
+    monkeypatch, tmp_path, write_strategy
+):
+    """``gpio.extract_arcgis(..., exclude_cols="geometry").write()`` matches the CLI (#966).
+
+    The Table used to keep ``geometry_column="geometry"`` for a table without that
+    column, so the default write raised KeyError and ``streaming`` wrote the very
+    geo block #966 is about.
+    """
+    from geoparquet_io.api.table import extract_arcgis
+
+    http = FakeTransport.install(monkeypatch)
+    stub_service(http, total=3)
+
+    table = extract_arcgis(SERVICE, exclude_cols="geometry")
+    assert table.geometry_column is None
+
+    out = tmp_path / "api.parquet"
+    table.write(str(out), write_strategy=write_strategy)
+
+    schema = pq.read_schema(str(out))
+    assert schema.names == ["OBJECTID", "name", "pop"]
+    assert b"geo" not in (schema.metadata or {})
 
 
 def test_an_all_null_geometry_column_declares_types_unknown(monkeypatch, caplog):

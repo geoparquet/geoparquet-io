@@ -381,11 +381,14 @@ def _count_rows(con, source, is_table_ref=False):
 
 
 def _setup_dataset_and_columns(
-    input_parquet, dataset_name, dataset_source, levels, verbose, no_cache=False
+    input_parquet, dataset_name, dataset_source, levels, verbose, no_cache=False, memory_limit=None
 ):
     """Setup dataset and get column information."""
 
     dataset = AdminDatasetFactory.create(dataset_name, dataset_source, verbose)
+    # --write-memory also bounds the dataset's cache downloads (#1156), the
+    # first of which may run right here.
+    dataset.memory_limit = memory_limit
 
     if verbose:
         debug(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
@@ -858,7 +861,13 @@ def add_admin_divisions_multi(
         input_bbox_col,
         admin_bbox_col,
     ) = _setup_dataset_and_columns(
-        input_parquet, dataset_name, dataset_source, levels, verbose, no_cache=no_cache
+        input_parquet,
+        dataset_name,
+        dataset_source,
+        levels,
+        verbose,
+        no_cache=no_cache,
+        memory_limit=memory_limit,
     )
 
     # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input before the join

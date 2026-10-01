@@ -30,6 +30,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.logging_config import debug, info, warn
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.overture import OVERTURE_FALLBACK_RELEASE, get_latest_overture_release
 
 # =============================================================================
@@ -434,6 +435,11 @@ class AdminDataset(ABC):
     # Subclasses MUST define this attribute with their release version.
     VERSION: str = "unknown"
 
+    # The --write-memory limit for this dataset's cache downloads (#1156). The
+    # commands that have the flag set it once the dataset exists; everyone
+    # else keeps None, the ceiling-based default.
+    memory_limit: str | None = None
+
     def __init__(self, source_path: str | None = None, verbose: bool = False):
         """
         Initialize the admin dataset.
@@ -493,8 +499,11 @@ class AdminDataset(ABC):
                 else:
                     query = f"SELECT * FROM read_parquet({sql_path(source)})"
 
-                # Write to cache
-                con.execute(f"COPY ({query}) TO {sql_path(cache_path)} (FORMAT PARQUET)")
+                # Write to cache, bounded like every other gpio write (#1156):
+                # the source is a multi-GB remote dataset and this COPY used to
+                # run at DuckDB's own 80%-of-RAM default.
+                with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
+                    con.execute(f"COPY ({query}) TO {sql_path(cache_path)} (FORMAT PARQUET)")
             finally:
                 con.close()
 
@@ -1117,10 +1126,14 @@ class OvertureAdminDataset(AdminDataset):
                         continue
 
                     query = self._build_level_cache_query(level, source)
-                    con.execute(
-                        f"COPY ({query}) TO {sql_path(cache_path)} "
-                        "(FORMAT PARQUET, COMPRESSION ZSTD)"
-                    )
+                    # Bounded like every other gpio write (#1156): the remote
+                    # scan + simplification of the ~4.5GB Overture dataset used
+                    # to run at DuckDB's own 80%-of-RAM default.
+                    with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
+                        con.execute(
+                            f"COPY ({query}) TO {sql_path(cache_path)} "
+                            "(FORMAT PARQUET, COMPRESSION ZSTD)"
+                        )
                     info(f"Cached {level} dataset at: {cache_path}")
             finally:
                 con.close()
