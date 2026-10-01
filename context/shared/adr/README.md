@@ -28,6 +28,7 @@ An ADR captures an architecturally significant decision along with its context a
 | [0004](0004-python-api-mirrors-cli.md) | Python API Mirrors CLI | Accepted |
 | [0005](0005-test-fixture-strategy.md) | Test Fixture Strategy | Accepted |
 | [0006](0006-coverage-floor-is-a-trailing-ratchet.md) | The Coverage Floor Is a Trailing Ratchet on the Combined Figure | Accepted |
+| [0007](0007-rust-array-ops-for-geometry-transforms.md) | Rust Array Libraries for Geometry Transforms That DuckDB Cannot Do | Accepted |
 
 ## References
 

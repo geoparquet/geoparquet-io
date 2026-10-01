@@ -123,6 +123,16 @@ benchmark = [
     "pyogrio>=0.7.0",
     "fiona>=1.9.0",
 ]
+simplify = [
+    "coarsen>=0.2.0",  # Rust simplify/coverage_simplify (ADR-0007); abi3 wheels cp310+; LGPL-2.1; brings shapely>=2.1
+]
+raster = [
+    # contourrs ships wheels only for CPython 3.12-3.14; the marker keeps
+    # `uv sync --all-extras` and `pip install 'geoparquet-io[raster]'` working on
+    # 3.10/3.11 (core/optional_deps.py explains the floor at runtime there).
+    "contourrs>=0.8.0; python_version >= '3.12'",  # raster polygonize/contour (ADR-0007)
+    "rasterio>=1.3",  # GeoTIFF input for gpio process polygonize/contour
+]
 
 [tool.uv]
 # Keep transitive msgpack (pulled via pip-audit -> cachecontrol) above the
