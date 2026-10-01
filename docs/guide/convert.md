@@ -875,8 +875,7 @@ A source whose coordinates sit in ordinary columns — a CSV, or a **Parquet fil
 that carries no geometry column at all** — gets its geometry built from those
 columns. Scientific archives are full of the second kind: a table of
 observations with `LAT` and `LON` columns and no `geo` metadata, which used to
-fail with "No geometry column detected"
-([#1183](https://github.com/geoparquet/geoparquet-io/issues/1183)).
+fail with "No geometry column detected".
 
 === "CLI"
 
