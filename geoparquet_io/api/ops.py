@@ -2613,11 +2613,11 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
         List of dicts with per-row-group bbox statistics.
         Empty list if no geo stats are available.
     """
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
     from geoparquet_io.core.duckdb_metadata import (
         get_file_metadata,
         get_per_row_group_bbox_stats,
         get_per_row_group_native_geo_stats,
-        has_bbox_column,
     )
     from geoparquet_io.core.metadata_utils import (
         _get_num_rows_per_row_group,
@@ -2629,8 +2629,8 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
 
     # Fall back to bbox column if no native stats
     if not rg_stats:
-        has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-        if has_bbox and bbox_col_name:
+        bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
+        if bbox_col_name:
             rg_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
 
     if not rg_stats:

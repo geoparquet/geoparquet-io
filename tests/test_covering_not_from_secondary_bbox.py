@@ -407,6 +407,55 @@ class TestCheckBboxStructureAnswersForThePrimary:
         assert info["status"] == "optimal"
 
 
+class TestEveryConsumerGetsThePrimarysAnswer:
+    """`check spatial` and `inspect` read the primary's bbox column, not any name.
+
+    `duckdb_metadata.has_bbox_column` matched any column whose name *ends* in
+    `bbox`/`bounds`/`extent`, so these consumers still took a SECONDARY
+    geometry's `boundary_bbox` as the primary's: `check spatial` measured row
+    group overlap on the Polygon column's extents while `check bbox` reported
+    no bbox column at all, and `inspect meta` printed those extents as the
+    primary's bounds (#1171).
+    """
+
+    def test_check_spatial_refuses_what_check_bbox_does_not_see(self, tmp_path):
+        from geoparquet_io.core.check_spatial_order import check_spatial_order_bbox_stats
+
+        path = _secondary_bbox_file(tmp_path, "in")
+        assert _check_bbox_structure(path)["bbox_column_name"] is None
+
+        with pytest.raises(ValueError, match="does not have a bbox column"):
+            check_spatial_order_bbox_stats(str(path))
+
+    def test_pushdown_readiness_reports_no_bbox_column(self, tmp_path):
+        from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness
+
+        result = check_spatial_pushdown_readiness(str(_secondary_bbox_file(tmp_path, "in")))
+
+        assert result["has_geo_bbox"] is False
+
+    def test_row_group_bounds_are_not_the_secondarys_extents(self, tmp_path):
+        """The boundary polygons reach (-0.5, -0.5)-(2.5, 2.5); the points do not."""
+        from geoparquet_io.core.metadata_utils import extract_bbox_from_row_group_stats
+
+        path = _secondary_bbox_file(tmp_path, "in")
+
+        assert extract_bbox_from_row_group_stats(str(path), "geometry") is None
+
+    def test_the_primarys_own_covering_is_still_read(self, tmp_path):
+        """The positive half: declared provenance gives the POINTS' extents."""
+        from geoparquet_io.core.metadata_utils import extract_bbox_from_row_group_stats
+
+        path = _secondary_bbox_file(
+            tmp_path,
+            "primary_declares",
+            declare_boundary_covering=True,
+            primary_covering_column="geometry_bbox",
+        )
+
+        assert extract_bbox_from_row_group_stats(str(path), "geometry") == [0.0, 0.0, 2.0, 2.0]
+
+
 class TestAMalformedPrimaryColumnIsNotALookupKey:
     """`primary_column` can be any JSON value in someone else's file (#947/#1171).
 

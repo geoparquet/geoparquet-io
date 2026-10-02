@@ -4,6 +4,7 @@ import tempfile
 
 import pytest
 
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
     GeoParquetError,
     detect_geometry_columns,
@@ -16,7 +17,6 @@ from geoparquet_io.core.duckdb_metadata import (
     get_row_count,
     get_row_group_stats_summary,
     get_schema_info,
-    has_bbox_column,
     is_geometry_column,
     parse_geometry_logical_type,
     resolve_crs_reference,
@@ -147,21 +147,25 @@ class TestDetectGeometryColumns:
         assert isinstance(result, dict)
 
 
-class TestHasBboxColumn:
-    """Tests for has_bbox_column function."""
+class TestTheBboxColumnName:
+    """`bbox_structure.check_bbox_structure` names the bbox column.
+
+    It replaced `duckdb_metadata.has_bbox_column`, whose conventional-name
+    match (any name ending in bbox/bounds/extent) could name a SECONDARY
+    geometry column's envelope (#1171).
+    """
 
     def test_places_has_bbox(self, places_test_file):
         """Test that places file has bbox column."""
-        has_bbox, bbox_name = has_bbox_column(places_test_file)
-        assert has_bbox is True
-        assert bbox_name is not None
-        assert isinstance(bbox_name, str)
+        info = check_bbox_structure(places_test_file)
+        assert info["has_bbox_column"] is True
+        assert isinstance(info["bbox_column_name"], str)
 
     def test_buildings_no_bbox(self, buildings_test_file):
         """Test that buildings file doesn't have bbox column."""
-        has_bbox, bbox_name = has_bbox_column(buildings_test_file)
-        assert has_bbox is False
-        assert bbox_name is None
+        info = check_bbox_structure(buildings_test_file)
+        assert info["has_bbox_column"] is False
+        assert info["bbox_column_name"] is None
 
 
 class TestGetPerRowGroupBboxStats:
@@ -169,8 +173,8 @@ class TestGetPerRowGroupBboxStats:
 
     def test_with_bbox_column(self, places_test_file):
         """Test getting bbox stats for file with bbox."""
-        has_bbox, bbox_name = has_bbox_column(places_test_file)
-        if has_bbox and bbox_name:
+        bbox_name = check_bbox_structure(places_test_file)["bbox_column_name"]
+        if bbox_name:
             result = get_per_row_group_bbox_stats(places_test_file, bbox_name)
             assert isinstance(result, list)
 
@@ -180,8 +184,8 @@ class TestGetBboxFromRowGroupStats:
 
     def test_with_bbox_column(self, places_test_file):
         """Test getting overall bbox for file with bbox."""
-        has_bbox, bbox_name = has_bbox_column(places_test_file)
-        if has_bbox and bbox_name:
+        bbox_name = check_bbox_structure(places_test_file)["bbox_column_name"]
+        if bbox_name:
             result = get_bbox_from_row_group_stats(places_test_file, bbox_name)
             if result is not None:
                 assert len(result) == 4

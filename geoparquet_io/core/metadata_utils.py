@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     get_bbox_from_row_group_stats,
@@ -19,7 +20,6 @@ from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
     get_schema_info,
-    has_bbox_column,
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import sql_path
@@ -77,10 +77,10 @@ def has_parquet_geo_row_group_stats(parquet_file: str, geometry_column: str | No
     if not geometry_column:
         return result
 
-    # Check for bbox column using DuckDB
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
+    # The PRIMARY geometry's bbox covering column, or none (#1171).
+    bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
 
-    if not has_bbox or not bbox_col_name:
+    if not bbox_col_name:
         return result
 
     # Get row group stats for first row group
@@ -118,10 +118,12 @@ def extract_bbox_from_row_group_stats(
         list: [xmin, ymin, xmax, ymax] or None if bbox cannot be calculated
     """
 
-    # Check for bbox column using DuckDB
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
+    # The PRIMARY geometry's bbox covering column, or none. Name-matching any
+    # column ending in bbox/bounds/extent handed back a SECONDARY geometry
+    # column's envelope as the primary's bounds (#1171).
+    bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
 
-    if not has_bbox or not bbox_col_name:
+    if not bbox_col_name:
         return None
 
     # Get overall bbox from row group stats using DuckDB
@@ -564,12 +566,12 @@ def format_parquet_geo_metadata(
     num_row_groups = file_meta.get("num_row_groups", 0)
 
     geo_columns = detect_geometry_columns(parquet_file)
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
+    bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
 
     geo_columns_info = _build_geo_columns_info(schema_info, geo_columns)
 
     # Add row group stats: try bbox column first, then native geo_bbox
-    if has_bbox and bbox_col_name:
+    if bbox_col_name:
         rg_bbox_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
         for col_name in geo_columns_info:
             for rg_stat in rg_bbox_stats:
@@ -841,8 +843,8 @@ def format_row_group_geo_stats(
 
     # Fall back to bbox column if no native stats
     if not rg_stats:
-        has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-        if has_bbox and bbox_col_name:
+        bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
+        if bbox_col_name:
             rg_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
 
     if not rg_stats:
