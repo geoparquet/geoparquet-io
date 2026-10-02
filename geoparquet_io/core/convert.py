@@ -678,9 +678,22 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
 
 
 def _calculate_bounds(
-    con, input_file, geom_column, verbose, is_parquet=False, encoding="WKB", table_expr=None
+    con,
+    input_file,
+    geom_column,
+    verbose,
+    is_parquet=False,
+    encoding="WKB",
+    table_expr=None,
+    layer=None,
 ):
     """Calculate dataset bounds from input file (or an explicit table_expr).
+
+    ``layer`` selects the layer of a multi-layer source, and must be the layer
+    the conversion itself reads: measuring a bare ``ST_Read`` picked the file's
+    *first* layer, which is a binder error when the layers' geometry columns are
+    named differently and a silently wrong Hilbert extent when they are not
+    (#1176).
 
     Returns None for a dataset with nothing to measure — no rows, or every
     geometry empty or NULL — leaving the caller to convert without spatial
@@ -694,7 +707,7 @@ def _calculate_bounds(
         if is_parquet:
             table_expr = f"read_parquet({sql_path(input_file)})"
         else:
-            table_expr = f"ST_Read({sql_path(input_file)})"
+            table_expr = _build_st_read_expr(input_file, layer)
 
     # Quote column name to handle special characters, spaces, and reserved words
     quoted_geom = quote_identifier(geom_column)
@@ -2046,7 +2059,9 @@ def _bounds_with_curve_fallback(
         tuple: (bounds, table_expr) — table_expr is the linearized view when
         the fallback fired, otherwise the caller's value unchanged.
     """
-    kwargs = {"is_parquet": is_parquet, "encoding": encoding}
+    # `layer` only reaches the read when table_expr is None -- a ready-made
+    # expression already names its own layer -- but it must reach it then.
+    kwargs = {"is_parquet": is_parquet, "encoding": encoding, "layer": layer}
     try:
         bounds = _calculate_bounds(
             con, input_file, geom_column, verbose, table_expr=table_expr, **kwargs
