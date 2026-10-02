@@ -32,7 +32,6 @@ from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     quote_identifier,
-    restore_duckdb_settings,
     sql_path,
     validate_compression_level,
 )
@@ -43,11 +42,7 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
-from geoparquet_io.core.memory_limits import (
-    get_default_memory_limit,
-    scoped_write_memory_limit,
-    validate_memory_limit,
-)
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
@@ -203,89 +198,67 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             )
             return
 
-        saved_settings = self._configure_duckdb_memory(con, memory_limit, verbose)
-
         is_remote = is_remote_url(output_path)
         local_path = self._get_local_path(output_path, is_remote)
 
         try:
-            if geoparquet_version == "parquet-geo-only":
-                self._write_parquet_geo_only(
-                    con,
-                    query,
-                    local_path,
-                    geometry_column,
-                    compression_upper,
-                    compression_level,
-                    row_group_rows,
-                    input_crs,
-                    output_path,
-                    verbose,
-                    extra_kv_metadata=extra_kv_metadata,
-                )
-            else:
-                self._write_with_geo_metadata(
-                    con,
-                    query,
-                    local_path,
-                    geometry_column,
-                    geoparquet_version,
-                    compression_upper,
-                    compression_level,
-                    row_group_rows,
-                    original_metadata,
-                    input_crs,
-                    custom_metadata,
-                    output_path,
-                    verbose,
-                    geometry_info,
-                    extra_kv_metadata=extra_kv_metadata,
-                )
+            with scoped_write_memory_limit(
+                con, memory_limit, verbose, pinned=self._PINNED_SETTINGS
+            ):
+                if geoparquet_version == "parquet-geo-only":
+                    self._write_parquet_geo_only(
+                        con,
+                        query,
+                        local_path,
+                        geometry_column,
+                        compression_upper,
+                        compression_level,
+                        row_group_rows,
+                        input_crs,
+                        output_path,
+                        verbose,
+                        extra_kv_metadata=extra_kv_metadata,
+                    )
+                else:
+                    self._write_with_geo_metadata(
+                        con,
+                        query,
+                        local_path,
+                        geometry_column,
+                        geoparquet_version,
+                        compression_upper,
+                        compression_level,
+                        row_group_rows,
+                        original_metadata,
+                        input_crs,
+                        custom_metadata,
+                        output_path,
+                        verbose,
+                        geometry_info,
+                        extra_kv_metadata=extra_kv_metadata,
+                    )
 
-            if is_remote:
-                upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
+                if is_remote:
+                    upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 
         finally:
-            restore_duckdb_settings(con, saved_settings, verbose)
             if is_remote and Path(local_path).exists():
                 Path(local_path).unlink()
 
-    #: Session settings this strategy overrides for the duration of one write.
-    _MANAGED_SETTINGS = ("threads", "preserve_insertion_order", "memory_limit")
-
-    def _configure_duckdb_memory(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        memory_limit: str | None,
-        verbose: bool,
-    ) -> dict[str, object]:
-        """Configure DuckDB memory settings for streaming.
-
-        Returns the prior values so the caller can restore them; see
-        ``restore_duckdb_settings``.
-        """
-        saved: dict[str, object] = {}
-        for key in self._MANAGED_SETTINGS:
-            try:
-                saved[key] = con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
-            except duckdb.Error as e:  # pragma: no cover - defensive
-                if verbose:
-                    debug(f"Could not read DuckDB setting {key}: {e}")
-
-        con.execute("SET threads = 1")  # Required for memory control (DuckDB #8270)
-        # Let COPY TO parquet flush row groups to disk instead of buffering the
-        # entire result to preserve order. Without this the writer holds the whole
-        # output in RAM and a large COPY runs out of memory even with a memory_limit
-        # + temp_directory set (the constant-memory design from #185 relied on this
-        # spilling). Safe because threads=1 already makes the single pipeline emit
-        # rows in order, so output ordering (e.g. sorted files) is preserved.
-        con.execute("SET preserve_insertion_order = false")
-        # Validate before interpolation: a SET value cannot be parameterised.
-        effective_limit = validate_memory_limit(memory_limit or get_default_memory_limit())
-        con.execute(f"SET memory_limit = '{effective_limit}'")
-        if verbose:
-            debug(f"DuckDB memory limit: {effective_limit}")
-        return saved
+    #: Settings this strategy pins for the duration of one write, on top of the
+    #: shared memory policy in ``scoped_write_memory_limit`` (#1174: one policy,
+    #: so a stricter limit the caller set on their own connection is respected
+    #: here too instead of being raised to the percentage default).
+    #:
+    #: ``threads = 1`` is required for memory control (DuckDB #8270) and replaces
+    #: the scope's own thread cap. ``preserve_insertion_order = false`` lets COPY
+    #: TO parquet flush row groups to disk instead of buffering the entire result
+    #: to preserve order: without it the writer holds the whole output in RAM and
+    #: a large COPY runs out of memory even with a memory_limit + temp_directory
+    #: set (the constant-memory design from #185 relied on that spilling). Safe
+    #: because threads=1 already makes the single pipeline emit rows in order, so
+    #: output ordering (e.g. sorted files) is preserved.
+    _PINNED_SETTINGS = {"threads": 1, "preserve_insertion_order": False}
 
     def _get_local_path(self, output_path: str, is_remote: bool) -> str:
         """Get local path for writing (temp file if remote)."""
