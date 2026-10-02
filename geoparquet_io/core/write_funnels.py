@@ -645,6 +645,50 @@ def _fast_path_geo_decision(
     return carried, False
 
 
+def _memory_limit_for_strategy(
+    memory_limit: str | None,
+    strategy_enum,
+    write_strategy: str,
+    *,
+    auto_routed_strategy: bool,
+    funnel_forced_rewrite: bool,
+) -> str | None:
+    """The memory limit a rewrite strategy may be given, or None.
+
+    Of the rewrite strategies only duckdb-kv honours a memory limit. If *we* put
+    the write here, the user did nothing wrong: warn and drop the limit rather
+    than aborting a command that worked before ``--write-memory`` was plumbed
+    through (#663). Two routings are ours, not theirs -- the 1.1-geoarrow reroute
+    and the rewrite this funnel takes to keep a 2.0 input's own covering, which
+    no flag asked for and which turned a working ``extract --limit N
+    --write-strategy streaming --write-memory 2GB`` into exit 2 (#1172). A
+    strategy the user explicitly asked for is a real error -- raised as a core
+    exception so the CLI shows a clean message instead of a traceback.
+    """
+    if memory_limit is None or strategy_enum == WriteStrategy.DUCKDB_KV:
+        return memory_limit
+    if auto_routed_strategy:
+        warn(
+            "--write-memory is ignored for GeoParquet 1.1-geoarrow output: "
+            "GeoArrow encoding requires the arrow-streaming write strategy, "
+            "which does not support a memory limit."
+        )
+        return None
+    if funnel_forced_rewrite:
+        warn(
+            f"--write-memory is ignored for this write: keeping the input's "
+            f"geo metadata (its covering) needs the metadata rewrite, and the "
+            f"'{write_strategy}' write strategy does not support a memory "
+            f"limit. Use --write-strategy duckdb-kv to apply it."
+        )
+        return None
+    raise InvalidParameterError(
+        "--write-memory",
+        f"a memory limit is only supported with the 'duckdb-kv' "
+        f"write strategy, not '{write_strategy}'",
+    )
+
+
 def write_parquet_with_metadata(
     con,
     query,
@@ -962,38 +1006,13 @@ def write_parquet_with_metadata(
             strategy_enum = WriteStrategy(write_strategy)
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
-            # Of the rewrite strategies only duckdb-kv honours a memory limit. If *we* put the
-            # write here, the user did nothing wrong: warn and drop the limit
-            # rather than aborting a command that worked before --write-memory
-            # was plumbed through (#663). Two routings are ours, not theirs --
-            # the 1.1-geoarrow reroute just above, and the rewrite this funnel
-            # takes to keep a 2.0 input's own covering, which no flag asked for
-            # and which turned a working `extract --limit N --write-strategy
-            # streaming --write-memory 2GB` into exit 2 (#1172). A strategy the
-            # user explicitly asked for is a real error — raised as a core
-            # exception so the CLI shows a clean message instead of a traceback.
-            if memory_limit is not None and strategy_enum != WriteStrategy.DUCKDB_KV:
-                if auto_routed_strategy:
-                    warn(
-                        "--write-memory is ignored for GeoParquet 1.1-geoarrow output: "
-                        "GeoArrow encoding requires the arrow-streaming write strategy, "
-                        "which does not support a memory limit."
-                    )
-                    memory_limit = None
-                elif carried_geo_needs_rewrite:
-                    warn(
-                        f"--write-memory is ignored for this write: keeping the input's "
-                        f"geo metadata (its covering) needs the metadata rewrite, and the "
-                        f"'{write_strategy}' write strategy does not support a memory "
-                        f"limit. Use --write-strategy duckdb-kv to apply it."
-                    )
-                    memory_limit = None
-                else:
-                    raise InvalidParameterError(
-                        "--write-memory",
-                        f"a memory limit is only supported with the 'duckdb-kv' "
-                        f"write strategy, not '{write_strategy}'",
-                    )
+            memory_limit = _memory_limit_for_strategy(
+                memory_limit,
+                strategy_enum,
+                write_strategy,
+                auto_routed_strategy=auto_routed_strategy,
+                funnel_forced_rewrite=carried_geo_needs_rewrite,
+            )
 
             if verbose:
                 debug(f"Writing GeoParquet version: {effective_version}")
