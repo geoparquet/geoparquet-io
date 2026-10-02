@@ -90,6 +90,13 @@ class TestFastPathMemoryLimit:
         self, tmp_path, monkeypatch, caplog, con
     ):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
+        # The connection is bounded from the REAL ceiling when it is opened
+        # (#1174), and a session limit stricter than the default is deliberately
+        # never loosened -- so on a host whose own 50% share is below the 5.0GB
+        # this stub implies, nothing would be set and the assertion would read as
+        # a regression. Start from a session limit looser than the stub so the
+        # default is what binds, on any host.
+        con.execute(f"SET memory_limit = '{20 * GIB}B'")
         query = _points_parquet(con, str(tmp_path / "src.parquet"))
         write_parquet_with_metadata(
             con, query, str(tmp_path / "out.parquet"), geoparquet_version="2.0", verbose=True
