@@ -502,13 +502,24 @@ def add_bbox(
 
 @add.command(name="bbox-metadata", cls=SingleFileCommand)
 @click.argument("parquet_file")
+@column_name_option(
+    "--bbox-name",
+    default=None,
+    help="Declare the covering over this existing bbox struct column instead of auto-detecting",
+)
 @verbose_option
 @click.pass_context
-def add_bbox_metadata_cmd(ctx, parquet_file, verbose):
+def add_bbox_metadata_cmd(ctx, parquet_file, bbox_name, verbose):
     """Add bbox covering metadata for an existing bbox column.
 
     Use this when you have a file with a bbox column but no covering metadata.
     This modifies the file in-place, preserving all data and file properties.
+
+    Auto-detection vouches for two columns only: the one the primary geometry
+    column's own covering already names, and a struct called exactly 'bbox'.
+    Pass --bbox-name to declare any other existing struct column (a GDAL
+    'geometry_bbox', a 'bounds'), which asserts that its values bound the
+    primary geometry.
 
     If you need to add both the bbox column and metadata, use 'add bbox' instead.
     """
@@ -521,7 +532,7 @@ def add_bbox_metadata_cmd(ctx, parquet_file, verbose):
         # Setup AWS profile if needed
         setup_aws_profile_if_needed(None, parquet_file)
 
-        add_bbox_metadata_impl(parquet_file, verbose)
+        add_bbox_metadata_impl(parquet_file, verbose, bbox_column=bbox_name)
 
 
 @add.command(name="h3", cls=SingleFileCommand)

@@ -338,7 +338,10 @@ GeoParquet files can have multiple geometry columns (e.g., `geometry` for point 
     not evidence that its values bound the primary geometry, and a wrong
     covering makes readers skip rows that genuinely match. Declare such a column
     deliberately with
-    [`gpio add bbox-metadata`](add.md); `gpio check bbox` will point this out.
+    [`gpio add bbox-metadata --bbox-name <column>`](add.md), which is you
+    supplying the evidence gpio cannot read off a schema. Note that
+    `gpio check bbox` does *not* point this out: it reports on the primary's bbox
+    column, so an undeclared `bounds` reads there as no bbox column at all.
 
     If the input already has a column named `bbox` that is not a bbox struct
     (a string tile id, say), it is kept as it is, and the computed bbox is

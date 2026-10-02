@@ -597,6 +597,81 @@ class TestAddBboxMetadataDoesNotCrossColumns:
         assert result.exit_code == 0, result.output
         assert _covering_columns(_geo(target)["columns"]["geometry"]) == {"bbox"}
 
+    # --- the escape hatch: --bbox-name asserts a column the policy will not ---
+
+    def _add(self, target, *args):
+        return CliRunner().invoke(cli, ["add", "bbox-metadata", str(target), *args])
+
+    def test_bbox_name_declares_the_column_the_user_vouches_for(self, tmp_path):
+        """The GDAL shape: a `geometry_bbox` struct no metadata declares."""
+        target = _unclaimed_bbox_struct_file(tmp_path, "geometry_bbox")
+
+        result = self._add(target, "--bbox-name", "geometry_bbox")
+
+        assert result.exit_code == 0, result.output
+        assert _covering_columns(_geo(target)["columns"]["geometry"]) == {"geometry_bbox"}
+
+    def test_bbox_name_cannot_claim_a_secondarys_declared_bbox(self, tmp_path):
+        """The flag is an escape hatch from the naming policy, not from #1171."""
+        target = _secondary_bbox_file(tmp_path, "in", declare_boundary_covering=True)
+
+        result = self._add(target, "--bbox-name", "boundary_bbox")
+
+        assert result.exit_code != 0, result.output
+        assert "boundary_bbox" in result.output
+        assert _covering_columns(_geo(target)["columns"]["geometry"]) == set()
+
+    def test_bbox_name_over_an_overture_order_struct_is_refused(self, tmp_path):
+        """`xmin, xmax, ymin, ymax` is a struct no 1.1 covering may point at."""
+        target = _unclaimed_bbox_struct_file(
+            tmp_path, "bounds", field_order=("xmin", "xmax", "ymin", "ymax")
+        )
+
+        result = self._add(target, "--bbox-name", "bounds")
+
+        assert result.exit_code != 0, result.output
+        assert "Cannot add bbox covering metadata" in result.output
+        assert _covering_columns(_geo(target)["columns"]["geometry"]) == set()
+
+    def test_bbox_name_for_a_column_that_is_not_there_is_refused(self, tmp_path):
+        target = _unclaimed_bbox_struct_file(tmp_path, "geometry_bbox")
+
+        result = self._add(target, "--bbox-name", "nosuch")
+
+        assert result.exit_code != 0, result.output
+        assert "nosuch" in result.output
+        assert _covering_columns(_geo(target)["columns"]["geometry"]) == set()
+
+
+def _unclaimed_bbox_struct_file(tmp_path, column, field_order=("xmin", "ymin", "xmax", "ymax")):
+    """A 1.1 file whose only bbox struct is called ``column`` and is undeclared.
+
+    What OGR and friends write: the struct is named after the geometry column
+    (``geometry_bbox``) or something descriptive (``bounds``), which the
+    #738/#1171 policy will not vouch for on its own. ``--bbox-name`` is how the
+    user vouches for it.
+    """
+    import struct
+
+    bbox_type = pa.struct([(axis, pa.float64()) for axis in field_order])
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+    }
+    table = pa.table(
+        {
+            "id": pa.array([1], type=pa.int32()),
+            "geometry": pa.array([struct.pack("<BIdd", 1, 1, 1.0, 1.0)], type=pa.binary()),
+            column: pa.array([dict.fromkeys(field_order, 1.0)], type=bbox_type),
+        }
+    )
+    path = tmp_path / f"{column}_{'_'.join(field_order)}.parquet"
+    pq.write_table(
+        table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")}), str(path)
+    )
+    return path
+
 
 class TestExtractBboxFiltersOnThePrimary:
     """`gpio extract geoparquet --bbox` pre-filtered on the SECONDARY's extents (#1171)."""
