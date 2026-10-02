@@ -2,7 +2,7 @@
 stricter caller limit (#1174).
 
 #1156 (fixed by #1166) bounded the direct ``COPY ... TO`` sites. The DuckDB work
-*around* those COPYs still ran at DuckDB's own default of 80% of host RAM, blind
+*around* those statements still ran at DuckDB's own default of 80% of host RAM, blind
 to a Slurm job cgroup: ``gpio partition admin``'s enrichment join (measured at
 14.3 GiB / 12 threads under ``--write-memory 700MB``), the same join behind
 ``gpio add admin-divisions``, ``disk-rewrite``'s first-phase COPY and the format
@@ -222,9 +222,7 @@ def _points_input(tmp_path, name="input.parquet"):
 class TestAdminJoinIsBounded:
     """The full-input spatial join ran before the bounded split and ignored it."""
 
-    def test_partition_admin_single_source_join_honours_write_memory(
-        self, tmp_path, monkeypatch
-    ):
+    def test_partition_admin_single_source_join_honours_write_memory(self, tmp_path, monkeypatch):
         from geoparquet_io.core.admin_datasets import CurrentAdminDataset
         from geoparquet_io.core.partition import admin_hierarchical as ah
 
@@ -314,9 +312,7 @@ class TestAdminJoinIsBounded:
         def fake_scope(con, memory_limit, verbose):
             before = mock_con.execute.call_count
             yield
-            inside.append(
-                [str(call.args[0]) for call in mock_con.execute.call_args_list[before:]]
-            )
+            inside.append([str(call.args[0]) for call in mock_con.execute.call_args_list[before:]])
 
         monkeypatch.setattr(ah, "scoped_write_memory_limit", fake_scope)
         ah._perform_enrichment_join(
