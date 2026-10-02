@@ -1,0 +1,256 @@
+"""``check spec`` fails a ``covering`` with no ``bbox`` member; ``--fix`` drops it.
+
+Regression tests for #1173. gpio stopped *writing* such a covering in #954, but
+the files gpio 1.6 and earlier wrote with ``gpio add h3/s2/a5/quadkey/kdtree``
+or ``gpio partition <index> --keep-*-column`` over a bbox-less input are still
+out there, and until now ``gpio check spec`` passed them (24 passed, 0 failed)
+while ``geopandas.read_parquet`` raised ``KeyError: 'bbox'`` on the same file.
+
+The spec text (GeoParquet 1.1, ``covering``) is explicit: "The keys of the
+'covering' object MUST be a supported encoding. Currently the only supported
+encoding is 'bbox'." An index entry *beside* a bbox member is gpio's own
+deliberate extension (#694/#738) and stays valid; a covering with no bbox member
+at all is the broken shape.
+"""
+
+import json
+
+import pyarrow.parquet as pq
+import pytest
+from click.testing import CliRunner
+
+from geoparquet_io.cli.main import cli
+from geoparquet_io.core.check_fixes import fix_bboxless_covering
+from geoparquet_io.core.parquet_footer import patch_footer_kv
+from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
+
+H3_ENTRY = {"column": "h3", "resolution": 9}
+BBOX_PATHS = {
+    "xmin": ["bbox", "xmin"],
+    "ymin": ["bbox", "ymin"],
+    "xmax": ["bbox", "xmax"],
+    "ymax": ["bbox", "ymax"],
+}
+
+
+def _kv(path):
+    return pq.ParquetFile(str(path)).metadata.metadata or {}
+
+
+def _geo(path):
+    kv = _kv(path)
+    assert b"geo" in kv, f"{path} carries no 'geo' key; keys: {sorted(kv)}"
+    return json.loads(kv[b"geo"].decode("utf-8"))
+
+
+def _covering(path):
+    geo = _geo(path)
+    return geo["columns"][geo["primary_column"]].get("covering")
+
+
+def _refooter(src, dest, covering, version="1.1.0"):
+    """*src* with *covering* on its primary column, data pages copied verbatim."""
+    geo = _geo(src)
+    geo["version"] = version
+    column = geo["columns"][geo["primary_column"]]
+    if covering is None:
+        column.pop("covering", None)
+    else:
+        column["covering"] = covering
+    patch_footer_kv(str(src), {"geo": json.dumps(geo)}, output_file=str(dest))
+    return str(dest)
+
+
+def _failed(result):
+    return [c for c in result.checks if c.status == CheckStatus.FAILED]
+
+
+def _named(result, name):
+    matches = [c for c in result.checks if c.name == name]
+    assert matches, f"no check named {name}; got {sorted(c.name for c in result.checks)}"
+    return matches[0]
+
+
+@pytest.fixture
+def bboxless(buildings_test_file, tmp_path):
+    """The #954 shape: a 1.1 file whose only covering member is an h3 entry."""
+    return _refooter(buildings_test_file, tmp_path / "bboxless.parquet", {"h3": H3_ENTRY})
+
+
+@pytest.fixture
+def with_bbox_column(buildings_test_file, tmp_path):
+    """A legal 1.1 file: real bbox column, covering with a bbox member."""
+    out = tmp_path / "with_bbox.parquet"
+    result = CliRunner().invoke(cli, ["add", "bbox", buildings_test_file, str(out)])
+    assert result.exit_code == 0, result.output
+    assert "bbox" in (_covering(out) or {}), _covering(out)
+    return str(out)
+
+
+class TestCheckSpec:
+    def test_a_covering_with_no_bbox_member_fails(self, bboxless):
+        result = validate_geoparquet(bboxless, validate_data=False)
+
+        assert [c.name for c in _failed(result)] == ["covering_has_bbox_geometry"]
+        assert "bbox" in _failed(result)[0].message
+
+    def test_geopandas_is_why_it_fails_rather_than_warns(self, bboxless):
+        """The premise of the verdict: a reader cannot open the file at all."""
+        gpd = pytest.importorskip("geopandas")
+
+        with pytest.raises(KeyError, match="bbox"):
+            gpd.read_parquet(bboxless)
+
+    def test_the_cli_exits_1(self, bboxless):
+        result = CliRunner().invoke(cli, ["check", "spec", bboxless])
+
+        assert result.exit_code == 1, result.output
+        assert "covering" in result.output
+
+    def test_an_index_entry_beside_a_bbox_member_still_passes(self, with_bbox_column, tmp_path):
+        """gpio writes h3/s2/quadkey entries deliberately; only a missing bbox is wrong."""
+        both = _refooter(
+            with_bbox_column, tmp_path / "both.parquet", {"bbox": BBOX_PATHS, "h3": H3_ENTRY}
+        )
+
+        result = validate_geoparquet(both, validate_data=False)
+
+        assert _failed(result) == []
+        assert _named(result, "covering_has_bbox_geometry").status == CheckStatus.PASSED
+
+    def test_a_file_with_no_covering_is_not_judged(self, buildings_test_file, tmp_path):
+        none = _refooter(buildings_test_file, tmp_path / "none.parquet", None)
+
+        result = validate_geoparquet(none, validate_data=False)
+
+        assert _failed(result) == []
+        assert _named(result, "covering_has_bbox_geometry").status == CheckStatus.SKIPPED
+
+    def test_a_covering_that_is_not_an_object_is_reported_once(self, buildings_test_file, tmp_path):
+        """``covering_is_object`` owns that verdict; this check declines to repeat it."""
+        wrong = _refooter(buildings_test_file, tmp_path / "wrong.parquet", "bbox")
+
+        result = validate_geoparquet(wrong, validate_data=False)
+
+        assert [c.name for c in _failed(result)] == ["covering_is_object_geometry"]
+        assert _named(result, "covering_has_bbox_geometry").status == CheckStatus.SKIPPED
+
+    def test_a_1_0_file_is_not_judged_on_a_1_1_key(self, buildings_test_file, tmp_path):
+        """``covering`` is a 1.1 concept; a 1.0 file is told its version is wrong instead."""
+        old = _refooter(
+            buildings_test_file, tmp_path / "old.parquet", {"h3": H3_ENTRY}, version="1.0.0"
+        )
+
+        result = validate_geoparquet(old, validate_data=False)
+
+        assert "covering_has_bbox_geometry" not in [c.name for c in result.checks]
+
+
+class TestFixDropsIt:
+    def test_the_covering_is_gone_and_the_rest_of_the_block_survives(self, bboxless, tmp_path):
+        out = tmp_path / "fixed.parquet"
+
+        summary = fix_bboxless_covering(bboxless, str(out))
+
+        assert summary["success"] is True
+        assert summary["fix_applied"] is not None
+        geo = _geo(out)
+        column = geo["columns"]["geometry"]
+        assert "covering" not in column
+        assert column["encoding"] == "WKB"
+        assert column["bbox"] == _geo(bboxless)["columns"]["geometry"]["bbox"]
+        assert geo["version"] == "1.1.0"
+        assert pq.read_table(str(out)).num_rows == pq.read_table(bboxless).num_rows
+
+    def test_the_fixed_file_validates_clean_and_opens_in_geopandas(self, bboxless, tmp_path):
+        gpd = pytest.importorskip("geopandas")
+        out = tmp_path / "fixed.parquet"
+
+        fix_bboxless_covering(bboxless, str(out))
+
+        assert _failed(validate_geoparquet(str(out), validate_data=False)) == []
+        assert len(gpd.read_parquet(str(out))) > 0
+
+    def test_a_legal_covering_is_left_exactly_as_it_was(self, with_bbox_column, tmp_path):
+        legal = _refooter(
+            with_bbox_column, tmp_path / "legal.parquet", {"bbox": BBOX_PATHS, "h3": H3_ENTRY}
+        )
+        before = _covering(legal)
+        out = tmp_path / "untouched.parquet"
+
+        summary = fix_bboxless_covering(legal, str(out))
+
+        assert summary["fix_applied"] is None
+        assert _covering(legal) == before
+        assert not out.exists(), "a file with nothing to repair was rewritten anyway"
+
+    def test_other_footer_keys_are_kept(self, buildings_test_file, tmp_path):
+        """A metadata-only repair must not drop the keys beside ``geo``."""
+        with_extra = tmp_path / "extra.parquet"
+        patch_footer_kv(
+            buildings_test_file, {"stac:collection": "mine"}, output_file=str(with_extra)
+        )
+        bad = _refooter(with_extra, tmp_path / "bad.parquet", {"h3": H3_ENTRY})
+        out = tmp_path / "fixed.parquet"
+
+        fix_bboxless_covering(bad, str(out))
+
+        assert _kv(out)[b"stac:collection"] == b"mine"
+
+    def test_a_footer_that_cannot_be_patched_falls_back_to_a_rewrite(
+        self, bboxless, tmp_path, monkeypatch
+    ):
+        """The write funnels apply the same gate, so the fallback drops it too."""
+        from geoparquet_io.core import check_fixes
+        from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
+
+        def refuse(*args, **kwargs):
+            raise FooterPatchUnsupported("pretend this footer is unreadable")
+
+        monkeypatch.setattr(check_fixes, "patch_footer_kv", refuse)
+        out = tmp_path / "rewritten.parquet"
+
+        fix_bboxless_covering(bboxless, str(out))
+
+        assert "covering" not in _geo(out)["columns"]["geometry"]
+        assert pq.read_table(str(out)).num_rows == pq.read_table(bboxless).num_rows
+
+
+class TestCheckAllFix:
+    def test_check_all_reports_it(self, bboxless):
+        result = CliRunner().invoke(cli, ["check", "all", bboxless])
+
+        assert "covering" in result.output
+        assert "bbox" in result.output
+
+    def test_check_all_fix_leaves_a_file_geopandas_can_open(self, bboxless, tmp_path):
+        gpd = pytest.importorskip("geopandas")
+        out = tmp_path / "fixed.parquet"
+
+        result = CliRunner().invoke(
+            cli, ["check", "all", bboxless, "--fix", "--fix-output", str(out)]
+        )
+
+        assert result.exit_code == 0, result.output
+        covering = _covering(out)
+        assert covering is None or "bbox" in covering, covering
+        assert _failed(validate_geoparquet(str(out), validate_data=False)) == []
+        assert len(gpd.read_parquet(str(out))) > 0
+
+    def test_check_all_fix_repairs_a_2_0_file_that_needs_nothing_else(
+        self, buildings_test_file, tmp_path
+    ):
+        """The case no other fix reaches: 2.0 wants no bbox column, so nothing else runs."""
+        v2 = tmp_path / "v2.parquet"
+        converted = CliRunner().invoke(
+            cli, ["convert", buildings_test_file, str(v2), "--geoparquet-version", "2.0"]
+        )
+        assert converted.exit_code == 0, converted.output
+        bad = _refooter(v2, tmp_path / "v2_bad.parquet", {"h3": H3_ENTRY}, version="2.0.0")
+        out = tmp_path / "v2_fixed.parquet"
+
+        result = CliRunner().invoke(cli, ["check", "all", bad, "--fix", "--fix-output", str(out)])
+
+        assert result.exit_code == 0, result.output
+        assert _covering(out) is None
+        assert _failed(validate_geoparquet(str(out), validate_data=False)) == []

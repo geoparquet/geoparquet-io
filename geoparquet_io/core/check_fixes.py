@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import contextlib
+import json
 import os
 import shutil
 import tempfile
@@ -20,8 +21,14 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
+from geoparquet_io.core.geo_metadata import (
+    bboxless_covering_columns,
+    parse_geo_metadata,
+    strip_bboxless_covering,
+)
 from geoparquet_io.core.hilbert_order import hilbert_order
-from geoparquet_io.core.logging_config import debug, info, progress
+from geoparquet_io.core.logging_config import debug, info, progress, warn
+from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -221,6 +228,80 @@ def fix_compression(
     )
 
     return {"fix_applied": "Re-compressed with ZSTD", "success": True}
+
+
+def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None):
+    """Drop a ``covering`` that carries no ``bbox`` member.
+
+    The repair for the #954 shape in a file already published: a ``covering``
+    whose only members are gpio's own index entries (h3/s2/a5/quadkey/kdtree).
+    The spec defines no encoding but ``bbox``, and geopandas indexes
+    ``covering["bbox"]`` unguarded, so such a file does not open at all -- which
+    is why ``check spec`` fails it (``_check_covering_has_bbox``) and why there
+    has to be something for ``--fix`` to do about it (#1173).
+
+    Metadata only: the `geo` key is rewritten in the footer and every page below
+    it is copied verbatim (#1141), so the compression codec *and level*, the
+    encodings, the bloom filters, the page index, the row-group boundaries and
+    the row order all survive a repair that was never about the data. A footer
+    that cannot be patched -- or a remote file, which the patcher does not read
+    -- falls back to a full rewrite; the write funnels apply the same gate
+    (``strip_bboxless_covering``), so the covering is dropped either way.
+
+    Args:
+        parquet_file: Path to input file
+        output_file: Path to output file
+        verbose: Print additional information
+        profile: AWS profile name for S3 operations
+
+    Returns:
+        dict with fix summary; ``fix_applied`` is None when the file carries no
+        such covering, and nothing is then written -- a legal covering is never
+        touched, and the caller keeps using its input.
+    """
+    original_metadata, _ = get_parquet_metadata(parquet_file, verbose)
+    geo_meta = parse_geo_metadata(original_metadata, verbose)
+    columns = bboxless_covering_columns(geo_meta)
+    if geo_meta is None or not columns:
+        if verbose:
+            debug("No covering without a bbox member; nothing to drop.")
+        return {"fix_applied": None, "success": True}
+
+    info(
+        "Dropping 'covering' with no bbox member from "
+        + ", ".join(f"column '{column}'" for column in columns)
+    )
+
+    stripped = strip_bboxless_covering(geo_meta, verbose)
+
+    if not is_remote_url(parquet_file) and not is_remote_url(output_file):
+        try:
+            patch_footer_kv(
+                parquet_file,
+                {"geo": json.dumps(stripped)},
+                output_file=output_file,
+                verbose=verbose,
+            )
+            return {"fix_applied": "Dropped covering with no bbox member", "success": True}
+        except FooterPatchUnsupported as exc:
+            warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
+
+    setup_aws_profile_if_needed(profile, parquet_file, output_file)
+    raw_url = resolve_file_url(parquet_file, verbose)
+    # `original_metadata` rather than the stripped block: the funnels own what
+    # reaches the `geo` key, and they run the same gate over whatever is handed
+    # to them. The version is left to the facade, which answers it from
+    # `input_file` -- the file whose rows this reads (#1001).
+    _rewrite_through_staging(
+        parquet_file,
+        output_file,
+        f"SELECT * FROM read_parquet({sql_path(raw_url)}, hive_partitioning=false)",
+        verbose=verbose,
+        profile=profile,
+        original_metadata=original_metadata,
+    )
+
+    return {"fix_applied": "Dropped covering with no bbox member", "success": True}
 
 
 def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
@@ -495,6 +576,33 @@ def get_geoparquet_version_from_check_results(check_results):
         return None
 
 
+def _apply_covering_fix(check_results, current_file, temp_files, verbose, profile):
+    """Drop a covering with no bbox member, before anything else reads the block.
+
+    First, so the rest of the chain works from a file whose `geo` block is one
+    the spec allows -- and so the repair happens even when it is the only thing
+    wrong, which is the 2.0 case: a 2.0 file wants no bbox column, so no other
+    step here has anything to do and the illegal covering used to survive the
+    whole run (#1173).
+
+    Returns:
+        tuple: (new_current_file, fixes_applied_list)
+    """
+    if not (check_results.get("covering") or {}).get("fix_available", False):
+        return current_file, []
+
+    fd, temp_file = tempfile.mkstemp(suffix=".parquet")
+    os.close(fd)
+    os.unlink(temp_file)
+    temp_files.append(temp_file)
+
+    summary = fix_bboxless_covering(current_file, temp_file, verbose, profile)
+    if summary["fix_applied"] is None:
+        # The check and the repair disagree about this file; keep the input.
+        return current_file, []
+    return temp_file, [summary["fix_applied"]]
+
+
 def _apply_bbox_column_fix(bbox_result, current_file, temp_files, verbose, profile):
     """Handle bbox column addition or removal.
 
@@ -679,6 +787,12 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
 
     try:
         bbox_result = check_results.get("bbox", {})
+
+        # Step 0: Drop a covering the spec does not allow (#1173)
+        current_file, fixes = _apply_covering_fix(
+            check_results, current_file, temp_files, verbose, profile
+        )
+        fixes_applied.extend(fixes)
 
         # Step 1: Handle bbox column (add or remove)
         current_file, fixes = _apply_bbox_column_fix(

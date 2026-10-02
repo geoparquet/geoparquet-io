@@ -122,6 +122,7 @@ def verify_fixes(
     check_names = {
         "row_groups": "Row Groups",
         "bbox": "Bbox/Metadata",
+        "covering": "Covering",
         "compression": "Compression",
     }
 

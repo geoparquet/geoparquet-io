@@ -7,9 +7,14 @@ from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import get_compression_info as duckdb_get_compression_info
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_row_group_stats_summary
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
-from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT, carried_version, covering_supported
+from geoparquet_io.core.geo_metadata import (
+    BBOX_REWRITE_HINT,
+    bboxless_covering_columns,
+    carried_version,
+    covering_supported,
+)
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
-from geoparquet_io.core.logging_config import error, info, progress, success, warn
+from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from geoparquet_io.core.sizing import format_size
@@ -742,6 +747,59 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False, q
         }
 
 
+def check_covering_encoding(parquet_file, verbose=False, return_results=False, quiet=False):
+    """A declared ``covering`` must carry the ``bbox`` encoding, the only one defined.
+
+    Separate from :func:`check_metadata_and_bbox` because it is not a question
+    about the bbox *column*: the broken files (#954, written by gpio 1.6 and
+    earlier) carry a ``covering`` whose only members are gpio's own index
+    entries, and most of them have no bbox column at all. ``check bbox --fix``
+    adds or removes a column; the repair here is the metadata-only
+    :func:`geoparquet_io.core.check_fixes.fix_bboxless_covering`, so the two
+    verdicts stay separate rather than one answering for the other.
+
+    Version-agnostic, like the write gate it mirrors: ``covering`` is a 1.1 key,
+    and a file at any version is better off without one no reader can use.
+    ``check spec`` is the gated half -- it judges coverings at 1.1+ only.
+
+    Args:
+        parquet_file: Path to parquet file
+        verbose: Print additional information
+        return_results: If True, return structured results dict
+        quiet: If True, suppress all output (for multi-file batch mode)
+
+    Returns:
+        dict if return_results=True, with ``passed``, ``issues``,
+        ``recommendations``, ``bboxless_covering_columns`` and ``fix_available``
+    """
+    columns = bboxless_covering_columns(get_geo_metadata(parquet_file))
+
+    issues = []
+    recommendations = []
+    if columns:
+        named = ", ".join(f"'{column}'" for column in columns)
+        issues.append(
+            f"Covering on {named} has no 'bbox' member, the only encoding the spec defines"
+        )
+        recommendations.append("Drop the unusable covering: gpio check all --fix")
+        if not quiet:
+            error(
+                f"\n❌ Covering on {named} declares no 'bbox' — readers that use the covering "
+                "(geopandas among them) cannot open this file at all"
+            )
+    elif verbose and not quiet:
+        debug("Covering encoding: nothing declared that a reader cannot use")
+
+    if return_results:
+        return {
+            "passed": not columns,
+            "issues": issues,
+            "recommendations": recommendations,
+            "bboxless_covering_columns": columns,
+            "fix_available": bool(columns),
+        }
+
+
 def check_compression(parquet_file, verbose=False, return_results=False, quiet=False):
     """Check compression settings for geometry column.
 
@@ -918,6 +976,9 @@ def check_all(
         parquet_file, verbose, return_results=True, quiet=quiet, profile=profile
     )
     bbox_result = check_metadata_and_bbox(parquet_file, verbose, return_results=True, quiet=quiet)
+    covering_result = check_covering_encoding(
+        parquet_file, verbose, return_results=True, quiet=quiet
+    )
     compression_result = check_compression(parquet_file, verbose, return_results=True, quiet=quiet)
     bloom_filter_result = check_bloom_filters(
         parquet_file, verbose, return_results=True, quiet=quiet
@@ -927,6 +988,7 @@ def check_all(
         return {
             "row_groups": row_groups_result,
             "bbox": bbox_result,
+            "covering": covering_result,
             "compression": compression_result,
             "bloom_filters": bloom_filter_result,
         }

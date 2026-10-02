@@ -197,6 +197,17 @@ def make_without_covering(source: Path, target: Path, geometry_column: str = "ge
     return target
 
 
+def make_bboxless_covering(source: Path, target: Path, geometry_column: str = "geometry") -> Path:
+    """A covering whose only member is an index entry: the #954 shape, #1173's fix."""
+    table = _read(source)
+    metadata = dict(table.schema.metadata or {})
+    block = json.loads(metadata[b"geo"])
+    block["columns"][geometry_column]["covering"] = {"h3": {"column": "h3", "resolution": 9}}
+    metadata[b"geo"] = json.dumps(block).encode("utf-8")
+    pq.write_table(table.replace_schema_metadata(metadata), str(target), compression="ZSTD")
+    return target
+
+
 def make_with_geometry_column_named(source: Path, target: Path, name: str) -> Path:
     """``buildings`` with its geometry column renamed, ``geo`` block to match."""
     table = _read(source)
@@ -414,6 +425,38 @@ class TestBboxFixOutput:
 
 
 # ---------------------------------------------------------------------------
+# fix_bboxless_covering
+# ---------------------------------------------------------------------------
+
+
+class TestBboxlessCoveringFixOutput:
+    """``check all --fix`` -> ``check_fixes.fix_bboxless_covering`` (#1173).
+
+    The 2.0 shape is the one no other fix reaches: a 2.0 file wants no bbox
+    column, so nothing else in the chain has work and the illegal covering used
+    to survive the whole run.
+    """
+
+    @pytest.mark.parametrize("shape_name", ["v1_1_epsg31287", "v2_0_crs84"], ids=["v1_1", "v2_0"])
+    def test_output_is_sound(self, shape_name, tmp_path, request):
+        spec = SHAPE_BY_NAME[shape_name]
+        source = Path(str(request.getfixturevalue(spec.fixture)))
+        broken = make_bboxless_covering(source, tmp_path / "bboxless.parquet")
+        # Non-vacuity, inverted: this input is broken in exactly one way, and
+        # the output oracle below requires that failure to be gone.
+        assert set(spec_failures(broken)) == {"covering_has_bbox_geometry"}, spec_failures(broken)
+        fixed = tmp_path / "fixed.parquet"
+
+        output = run_cli(
+            "check", "all", broken, "--fix", "--fix-output", fixed, "--random-sample-size", 20
+        )
+
+        assert "Dropped covering with no bbox member" in output, output
+        assert_no_unexpected_residue(spec, output)
+        assert_shape_output(spec, fixed, rewrite=False)
+
+
+# ---------------------------------------------------------------------------
 # apply_all_fixes
 # ---------------------------------------------------------------------------
 
@@ -529,6 +572,7 @@ COVERED_ENTRY_POINTS = {
     ),
     # Both bbox paths route through it.
     "fix_bbox_all": "tests.test_check_fix_output_is_valid:TestBboxFixOutput",
+    "fix_bboxless_covering": ("tests.test_check_fix_output_is_valid:TestBboxlessCoveringFixOutput"),
     "fix_bbox_removal": (
         "tests.test_check_fix_preserves_native_geo:"
         "test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from"

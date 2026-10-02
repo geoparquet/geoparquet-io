@@ -659,6 +659,41 @@ def _strip_covering_where(geo_meta: dict, drop, reason: str, verbose: bool) -> d
     return result
 
 
+def covering_lacks_bbox(col_meta: object) -> bool:
+    """Is this column's ``covering`` an object with no ``bbox`` member?
+
+    The one definition of the illegal shape, shared by the write gate
+    (:func:`strip_bboxless_covering`), the read-side verdict
+    (``validate._check_covering_has_bbox``) and the ``check --fix`` repair, so
+    what gpio refuses to write, what it fails, and what it drops cannot drift
+    apart (#954, #1173).
+
+    A ``covering`` that is not an object at all is somebody else's verdict
+    (``covering_is_object``) and not this one: a string satisfies
+    ``"bbox" in covering`` character-wise, so judging it here would report the
+    wrong defect (#1062).
+    """
+    if not isinstance(col_meta, dict):
+        return False
+    covering = col_meta.get("covering")
+    return isinstance(covering, dict) and "bbox" not in covering
+
+
+def bboxless_covering_columns(geo_meta: object) -> list[str]:
+    """Names of the columns whose ``covering`` carries no ``bbox`` member.
+
+    Reads a block exactly as a file holds it: a ``geo`` key or a ``columns``
+    value that is not an object declares no columns, so it declares no illegal
+    covering either.
+    """
+    if not isinstance(geo_meta, dict):
+        return []
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return []
+    return [str(name) for name, col_meta in columns.items() if covering_lacks_bbox(col_meta)]
+
+
 def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     """Return ``geo_meta`` without any ``covering`` that has no ``bbox`` member.
 
@@ -679,13 +714,9 @@ def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     across many writes.
     """
 
-    def _bboxless(col_meta: dict) -> bool:
-        covering = col_meta.get("covering")
-        return isinstance(covering, dict) and "bbox" not in covering
-
     return _strip_covering_where(
         geo_meta,
-        _bboxless,
+        covering_lacks_bbox,
         "covering metadata with no bbox member (spec allows only the bbox encoding)",
         verbose,
     )
