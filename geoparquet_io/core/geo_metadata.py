@@ -55,6 +55,42 @@ GEOPARQUET_VERSIONS = {
 
 DEFAULT_GEOPARQUET_VERSION = "1.1"
 
+#: The spec's single-geometry-type GeoArrow encodings. GeoParquet 1.1 permits
+#: these alongside "WKB" ("Supported values: "WKB"; one of "point",
+#: "linestring", "polygon", "multipoint", "multilinestring", "multipolygon"");
+#: 1.0 and the 2.0 draft are both WKB-only. The spec spells them lowercase and,
+#: unlike "WKB"/"wkb", there is no established lenient casing to honour.
+GEOARROW_ENCODINGS = (
+    "point",
+    "linestring",
+    "polygon",
+    "multipoint",
+    "multilinestring",
+    "multipolygon",
+)
+
+
+def geoarrow_primary_encoding(geo_meta) -> str | None:
+    """The GeoArrow encoding a block declares for its primary column, if any.
+
+    None for a WKB (or unreadable, or absent) block. What it answers is "is this
+    file's geometry *natively* encoded", which the version alone cannot say: a
+    native file declares version 1.1.0 exactly as a WKB one does, so auto mode
+    resolved it to plain "1.1" and the write relabelled nested-list geometry as
+    ``encoding: WKB`` -- metadata contradicting the schema beside it (#1176).
+    """
+    if not isinstance(geo_meta, dict):
+        return None
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return None
+    primary = geo_meta.get("primary_column")
+    entry = columns.get(primary) if isinstance(primary, str) else None
+    if not isinstance(entry, dict):
+        return None
+    encoding = entry.get("encoding")
+    return encoding if encoding in GEOARROW_ENCODINGS else None
+
 # =============================================================================
 # Levelled overview files (tylertoo OVERVIEWS_SPEC)
 # =============================================================================

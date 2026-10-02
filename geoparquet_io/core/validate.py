@@ -44,7 +44,11 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import BBOX_COVERING_FIELD_ORDERS, is_covering_path
+from geoparquet_io.core.geo_metadata import (
+    BBOX_COVERING_FIELD_ORDERS,
+    GEOARROW_ENCODINGS,
+    is_covering_path,
+)
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
@@ -107,18 +111,6 @@ class ValidationResult:
 # Valid values according to GeoParquet specification
 VALID_ENCODINGS = ["WKB", "wkb"]
 
-# The single-geometry-type GeoArrow encodings. GeoParquet 1.1 permits these
-# alongside "WKB" ("Supported values: "WKB"; one of "point", "linestring",
-# "polygon", "multipoint", "multilinestring", "multipolygon""). 1.0 and the
-# 2.0 draft are both WKB-only, so they stay rejected there.
-GEOARROW_ENCODINGS = [
-    "point",
-    "linestring",
-    "polygon",
-    "multipoint",
-    "multilinestring",
-    "multipolygon",
-]
 
 # GeoArrow encoding -> the spec geometry_types name it can hold. The encoding
 # fixes the geometry type of every value in the column, so a data scan does not
