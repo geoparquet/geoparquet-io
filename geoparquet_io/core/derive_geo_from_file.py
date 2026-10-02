@@ -247,27 +247,31 @@ def derive_secondary_geometry_info(
     return {"primary": primary_column, "secondary": secondary, "metadata": metadata}
 
 
-def _ensure_v2_geo_metadata(
+def derive_v2_geo_metadata(
     output_path: str,
-    compression: str = "ZSTD",
-    compression_level: int | None = None,
-    row_group_rows: int | None = None,
-    verbose: bool = False,
     primary_column: str | None = None,
-) -> None:
-    """Attach GeoParquet 2.0 geo metadata if the writer omitted it (#589).
+) -> dict | None:
+    """The GeoParquet 2.0 ``geo`` block a written file implies, when it has none.
 
-    DuckDB 1.5.4's V2 writer skips the geo KV metadata for M/ZM geometries.
-    Rebuild it from the file's native geospatial statistics and logical types,
-    mirroring the shape DuckDB writes for XY/XYZ data, and rewrite the file in
-    place. ``primary_column`` names the real geometry column for multi-geometry
-    files; without it the fallback is "geometry", then alphabetical.
+    DuckDB 1.5.4's V2 writer skips the geo KV metadata for M/ZM geometries, so
+    the block has to be rebuilt from the file's native geospatial statistics and
+    logical types, mirroring the shape DuckDB writes for XY/XYZ data (#589).
+    ``primary_column`` names the real geometry column for multi-geometry files;
+    without it the fallback is "geometry", then alphabetical.
+
+    Returns ``None`` when there is nothing to attach: the file already carries a
+    ``geo`` key, or it has no native geometry column to describe.
+
+    Read-only by design. *Attaching* the block is the caller's job, because the
+    cheap way to do it is a footer patch and ``core/parquet_footer`` sits above
+    this module in the import layering -- see ``write_funnels``, which owns the
+    only caller (#1177).
     """
     pf = pq.ParquetFile(output_path)
     try:
         kv = pf.metadata.metadata or {}
         if b"geo" in kv:
-            return
+            return None
         schema = pf.metadata.schema
         geo_cols: dict[int, tuple[str, str]] = {}
         for i in range(len(schema)):
@@ -275,7 +279,7 @@ def _ensure_v2_geo_metadata(
             if logical.startswith(("Geometry", "Geography")):
                 geo_cols[i] = (schema.column(i).name, logical)
         if not geo_cols:
-            return
+            return None
 
         columns = {
             name: _geo_col_meta_from_stats(pf, i, logical, output_path)
@@ -288,16 +292,11 @@ def _ensure_v2_geo_metadata(
             primary = "geometry"
         else:
             primary = sorted(columns)[0]
-        geo_meta = {"version": "2.0.0", "primary_column": primary, "columns": columns}
+        return {"version": "2.0.0", "primary_column": primary, "columns": columns}
     finally:
-        # Release the read handle before rewriting (Windows requires it).
+        # Release the read handle before the caller writes to the file (Windows
+        # refuses to replace a file that is still open).
         pf.close()
-
-    _rewrite_file_with_geo_metadata(
-        output_path, geo_meta, compression, compression_level, row_group_rows
-    )
-    if verbose:
-        debug("Re-attached geo metadata (writer omitted it for M/ZM geometries)")
 
 
 def _rewrite_writer_kwargs(compression: str, compression_level: int | None) -> dict:
