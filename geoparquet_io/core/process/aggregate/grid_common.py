@@ -710,8 +710,11 @@ def _resolve_bbox_column_for_file(
 ) -> str:
     """Return the bbox covering column to key from, auto-detecting when not given.
 
-    Detection consults the file's GeoParquet ``covering.bbox`` metadata first,
-    falling back to naming conventions (see ``check_bbox_structure``).
+    Detection answers for the PRIMARY geometry column only: its own
+    ``covering.bbox`` metadata first, then the one self-evident conventional
+    name ``bbox`` as the no-provenance fallback (see ``check_bbox_structure``).
+    A secondary geometry column's bbox struct is the *secondary*'s envelope, so
+    neither its name nor its own covering may be keyed from here (#1171).
     """
     if bbox_column:
         return bbox_column
@@ -745,7 +748,13 @@ def _validate_bbox_column_in_table(table, bbox_column: str) -> None:
 
 
 def _resolve_bbox_column_for_table(table, bbox_column: str | None) -> str:
-    """Table-path variant of bbox column resolution (Arrow schema detection)."""
+    """Table-path variant of bbox column resolution (Arrow schema detection).
+
+    Same rule as :func:`_resolve_bbox_column_for_file`, read off the table's own
+    schema metadata: the PRIMARY column's ``covering.bbox`` first, then the one
+    self-evident conventional name ``bbox``, and a secondary geometry column's
+    bbox struct never (#1171).
+    """
 
     if bbox_column:
         _validate_bbox_column_in_table(table, bbox_column)

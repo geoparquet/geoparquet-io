@@ -599,6 +599,87 @@ def test_resolve_bbox_column_autodetects_covering_name(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Both paths key from the PRIMARY geometry's bbox column, or from none (#1171)
+# ---------------------------------------------------------------------------
+
+
+_SECONDARY_BBOX_CASES = [
+    ("undeclared", {}),
+    ("declared-by-the-secondary", {"declare_boundary_covering": True}),
+    (
+        "declared-under-the-exact-name",
+        {"declare_boundary_covering": True, "bbox_name": "bbox"},
+    ),
+]
+
+
+def _secondary_bbox_file(tmp_path, name, **kwargs):
+    from tests.fixtures.multi_geometry import create_multi_geometry_with_secondary_bbox
+
+    path = tmp_path / f"{name}.parquet"
+    create_multi_geometry_with_secondary_bbox(str(path), **kwargs)
+    return path
+
+
+class TestBothPathsAgreeOnTheSecondarysBbox:
+    """``--bucket-point bbox`` never keys from a SECONDARY column's bbox (#1171).
+
+    The file path asks ``check_bbox_structure``, narrowed to the primary's own
+    ``covering`` plus the one self-evident conventional name. The table path's
+    ``_detect_bbox_column_from_table`` still name-matched any ``bbox``/
+    ``bounds``/``extent``/``*_bbox`` struct, so the same multi-geometry file
+    keyed a Point column's cells from the Polygon column's extents in memory
+    while refusing outright on disk.
+    """
+
+    @pytest.mark.parametrize(
+        ("case", "kwargs"),
+        _SECONDARY_BBOX_CASES,
+        ids=[case for case, _ in _SECONDARY_BBOX_CASES],
+    )
+    def test_the_file_path_refuses(self, case, kwargs, tmp_path):
+        src = _secondary_bbox_file(tmp_path, case, **kwargs)
+
+        with pytest.raises(InvalidParameterError, match="bbox"):
+            aggregate_by_a5(
+                str(src), str(tmp_path / "out.parquet"), resolution=5, bucket_point="bbox"
+            )
+
+    @pytest.mark.parametrize(
+        ("case", "kwargs"),
+        _SECONDARY_BBOX_CASES,
+        ids=[case for case, _ in _SECONDARY_BBOX_CASES],
+    )
+    def test_the_table_path_refuses_too(self, case, kwargs, tmp_path):
+        from geoparquet_io.core.process.aggregate.by_a5 import aggregate_a5_table
+
+        src = _secondary_bbox_file(tmp_path, case, **kwargs)
+
+        with pytest.raises(InvalidParameterError, match="bbox"):
+            aggregate_a5_table(pq.read_table(str(src)), resolution=5, bucket_point="bbox")
+
+    def test_both_paths_still_find_the_primarys_own_covering(self, tmp_path):
+        """The positive half: provenance on the primary is honoured either way."""
+        from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
+        from geoparquet_io.core.bbox_structure import check_bbox_structure
+        from geoparquet_io.core.process.aggregate.grid_common import (
+            _resolve_bbox_column_for_table,
+        )
+
+        src = _secondary_bbox_file(
+            tmp_path,
+            "primary_declares",
+            declare_boundary_covering=True,
+            primary_covering_column="geometry_bbox",
+        )
+
+        assert check_bbox_structure(str(src))["bbox_column_name"] == "geometry_bbox"
+        table = pq.read_table(str(src))
+        assert _detect_bbox_column_from_table(table) == "geometry_bbox"
+        assert _resolve_bbox_column_for_table(table, None) == "geometry_bbox"
+
+
+# ---------------------------------------------------------------------------
 # Geometry-less (attribute + bbox only) inputs — the input this feature enables
 # ---------------------------------------------------------------------------
 

@@ -1303,18 +1303,14 @@ def compute_geometry_types_via_sql(
     return _impl(con, query, geometry_column)
 
 
-# What makes a column a bbox covering column: a conventional name, and the
-# struct fields GeoParquet's "Bounding Box Columns" requires.
-#
-# The name rule is deliberately conservative — exact `bbox`/`bounds`/`extent`,
-# or an explicit `_bbox` suffix. A bare `endswith(("bbox","bounds","extent"))`
-# also swallows unrelated columns like `tile_bounds` or `parcel_extent`, and a
-# `covering` is an assertion that those values bound the geometry. gpio cannot
-# verify that from a name, and a covering pointing at unrelated values makes
-# readers prune away rows that genuinely match — strictly worse than declaring
-# nothing (#738).
-_BBOX_COLUMN_NAMES = frozenset({"bbox", "bounds", "extent"})
-_BBOX_COLUMN_SUFFIXES = ("_bbox",)
+# The struct fields GeoParquet's "Bounding Box Columns" requires. The *name*
+# rule that used to live beside it is gone: conventional-name matching over
+# `bbox`/`bounds`/`extent`/`*_bbox` is no longer anybody's answer, on either the
+# declare side or the read side. Both now go through
+# `_self_evident_bbox_column`, which takes only the exact
+# `SELF_EVIDENT_BBOX_COLUMN` — a `covering` asserts that a column's values bound
+# the geometry, and a broader name made an unrelated `tile_bounds`, or a
+# secondary geometry's `boundary_bbox`, the primary's answer (#738/#953/#1171).
 _BBOX_STRUCT_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
 
 #: The struct shapes a GeoParquet 1.1 ``covering.bbox`` may point at, as ordered
@@ -1502,14 +1498,18 @@ def _bbox_claimed_by_another_column(geo_meta: object, column: str) -> bool:
 
 
 def _self_evident_bbox_column(schema: pa.Schema, verbose: bool = False) -> str | None:
-    """The one column a writer may declare with no provenance, if the schema has it.
+    """The one column a writer may declare, or a reader may read, with no provenance.
 
-    The declare-side twin of :func:`detect_bbox_column_from_schema`, which
-    matches the broader read-side names (``bounds``, ``extent``, ``*_bbox``)
-    and must never decide *whether* a covering is declared: a ``boundary_bbox``
-    that name-matches is the *secondary* ``boundary`` column's envelope, not
-    the primary's (#953). Only the exact :data:`SELF_EVIDENT_BBOX_COLUMN`
-    qualifies here (#738); the struct-shape gate stays with the caller.
+    Only the exact :data:`SELF_EVIDENT_BBOX_COLUMN` qualifies (#738); the
+    struct-shape gate, and the "another column's covering claims it" check,
+    stay with the caller. The broader conventional names (``bounds``,
+    ``extent``, any ``*_bbox`` suffix) matched in a sibling detector until
+    #1171: a ``boundary_bbox`` that name-matches is the *secondary*
+    ``boundary`` column's envelope, not the primary's (#953), so both the
+    declare side (:func:`bbox_column_to_declare`) and the read side
+    (:func:`~geoparquet_io.core.bbox_structure.check_bbox_structure`,
+    :func:`~geoparquet_io.core.arrow_geo_metadata._detect_bbox_column_from_table`)
+    now come here.
     """
     import pyarrow as pa
 
@@ -1591,57 +1591,6 @@ def declare_carried_bbox_column(
     if verbose:
         debug(f"Declared the carried conventional bbox column '{name}'")
     return True
-
-
-def _is_bbox_column_name(name: str) -> bool:
-    """Whether ``name`` conventionally denotes a bbox covering column."""
-    return name in _BBOX_COLUMN_NAMES or name.endswith(_BBOX_COLUMN_SUFFIXES)
-
-
-def detect_bbox_column_from_schema(schema: pa.Schema, verbose: bool = False) -> str | None:
-    """
-    Detect a bbox covering column in an Arrow schema.
-
-    Looks for a column with a conventional name (see ``_is_bbox_column_name``)
-    that is a struct carrying the required xmin/ymin/xmax/ymax fields.
-
-    Shared by every writer so that where a covering *is* written, the entry and
-    the column it names cannot disagree. It is deliberately not used to decide
-    *whether* to declare a covering: that requires knowing the values bound the
-    geometry, which only the input's own metadata or a gpio-computed column can
-    establish.
-
-    Distinct from ``common._detect_bbox_column_from_table``, which consults the
-    table's ``covering`` metadata first and only falls back to the naming
-    convention. The two answer different questions and used to share a name.
-
-    When several columns qualify, an exact ``bbox`` wins — it is the name gpio
-    itself writes, so preferring it avoids picking some other file's
-    ``centroid_bbox`` over the geometry's real envelope.
-
-    Args:
-        schema: PyArrow Schema to check
-        verbose: Whether to print verbose output
-
-    Returns:
-        Name of bbox column if found, None otherwise
-    """
-    import pyarrow as pa
-
-    matches = [
-        field.name
-        for field in schema
-        if _is_bbox_column_name(field.name)
-        and pa.types.is_struct(field.type)
-        and _BBOX_STRUCT_FIELDS.issubset({f.name for f in field.type})
-    ]
-    if not matches:
-        return None
-
-    name = "bbox" if "bbox" in matches else matches[0]
-    if verbose:
-        debug(f"Found bbox column in table: {name}")
-    return name
 
 
 # =============================================================================
