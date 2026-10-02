@@ -769,6 +769,15 @@ table.write('output.parquet', compression='GZIP', compression_level=6)
 table.write('output.parquet', row_group_size_mb=128)
 ```
 
+A geometry column name the table does not carry — `Table(arrow_table,
+geometry_column='geom')` on a table whose column is `geometry` — raises
+`InvalidParameterError` naming the columns the table does have. Every write
+strategy refuses it the same way, instead of one crashing with a `KeyError`,
+one writing a `geo` block that names a column the file lacks, and one quietly
+writing plain Parquet ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)).
+A table with *no* geometry column is not the same thing, and still writes plain
+Parquet deliberately.
+
 **Row group size**
 
 `row_group_rows` is resolved by the same write facade the CLI uses, so a number

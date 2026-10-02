@@ -1222,6 +1222,13 @@ class Table:
         Returns:
             Path to written file (local temp path if uploaded to cloud)
 
+        Raises:
+            InvalidParameterError: If this table's geometry column name is not a
+                column of the table -- a stale or mistyped name. Every write
+                strategy refuses it the same way, rather than one crashing, one
+                writing a `geo` block naming a column the file does not have and
+                one silently writing plain Parquet (#1176).
+
         Examples:
             >>> table.write('output.parquet')              # GeoParquet (auto-detect)
             >>> table.write('output.gpkg')                 # GeoPackage (auto-detect)
@@ -1282,6 +1289,35 @@ class Table:
         }
         return EXTENSION_MAP.get(ext, "parquet")  # Default to parquet
 
+    def _require_geometry_column_present(self) -> None:
+        """Refuse a write whose named geometry column is not in the table (#1176).
+
+        Each of the four write strategies failed differently on a name the table
+        does not carry -- duckdb-kv and disk-rewrite with a bare ``KeyError``,
+        streaming with a ``geo`` block naming the missing column, in-memory by
+        writing plain Parquet and saying nothing -- so the same mistake produced
+        a crash, an invalid file or a silently geometry-less one depending on a
+        parameter unrelated to it. The check is here, above the dispatch, so all
+        four agree, and it names the columns the table does have because the
+        cause is almost always a stale or mistyped name.
+
+        ``None`` is not a wrong name: a table with no geometry writes plain
+        Parquet deliberately.
+        """
+        if self._geometry_column is None:
+            return
+        if self._geometry_column in self._table.column_names:
+            return
+
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        available = ", ".join(repr(name) for name in self._table.column_names) or "none"
+        raise InvalidParameterError(
+            "geometry_column",
+            f"the table has no column named {self._geometry_column!r}; "
+            f"its columns are: {available}",
+        )
+
     def _write_geoparquet(
         self,
         path: str | Path,
@@ -1308,6 +1344,8 @@ class Table:
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
         from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
+
+        self._require_geometry_column_present()
 
         # The facade's row-group decision, so the Python API and the CLI agree
         # about what a number means. This path called the write strategy
