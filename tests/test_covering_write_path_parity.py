@@ -52,6 +52,22 @@ def bbox_covering_column(path: Path) -> str | None:
     return bbox["xmin"][0] if isinstance(bbox, dict) and "xmin" in bbox else None
 
 
+def bbox_covering_columns(path: Path) -> set[str]:
+    """Every column named by a ``covering.bbox`` anywhere in the output's block.
+
+    ``covering_of`` reads one column, and the primary by default; a defect on a
+    SECONDARY column's entry is invisible to it (#953/#1035). Nothing in
+    ``geo["columns"]`` may name a struct the spec forbids, so the assertion is
+    over all of them.
+    """
+    found = set()
+    for col_meta in (geo_block_of(path).get("columns") or {}).values():
+        bbox = ((col_meta or {}).get("covering") or {}).get("bbox")
+        if isinstance(bbox, dict) and "xmin" in bbox:
+            found.add(bbox["xmin"][0])
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Table.write
 # ---------------------------------------------------------------------------
@@ -256,6 +272,53 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
 
 
 # ---------------------------------------------------------------------------
+# A secondary column's illegal covering
+# ---------------------------------------------------------------------------
+
+
+class TestASecondaryColumnsIllegalCoveringIsGatedEverywhere:
+    """The struct-shape gate is per *column*, and every path has to run it.
+
+    Each DuckDB path's declare step (``declare_carried_bbox_column``) is scoped
+    to the primary, so a SECONDARY column's ``covering`` over an Overture-order
+    struct was never judged at all: the fast path and the two DuckDB rewrite
+    strategies wrote it verbatim and ``gpio check spec`` then failed the file
+    gpio had just written (#1035/#1172). The Arrow builders ran the gate over
+    every column already, which is the parity the four cases below pin.
+    """
+
+    ILLEGAL_STRUCT = "boundary_extent"
+
+    def test_the_fast_path_drops_it(self, v2_with_illegal_secondary_covering, tmp_path):
+        """A 2.0 unfiltered extract: DuckDB's block is replaced by the input's."""
+        out = tmp_path / "fast.parquet"
+        run_cli("extract", "geoparquet", v2_with_illegal_secondary_covering, out)
+
+        assert self.ILLEGAL_STRUCT not in bbox_covering_columns(out)
+        assert spec_failures(out) == {}
+
+    @pytest.mark.parametrize("strategy", STRATEGIES)
+    def test_every_rewrite_strategy_drops_it(
+        self, v2_with_illegal_secondary_covering, strategy, tmp_path
+    ):
+        """1.1 output, so every strategy rebuilds the block from the input's."""
+        out = tmp_path / f"{strategy}.parquet"
+        run_cli(
+            "extract",
+            "geoparquet",
+            v2_with_illegal_secondary_covering,
+            out,
+            "--geoparquet-version",
+            "1.1",
+            "--write-strategy",
+            strategy,
+        )
+
+        assert self.ILLEGAL_STRUCT not in bbox_covering_columns(out)
+        assert spec_failures(out) == {}
+
+
+# ---------------------------------------------------------------------------
 # The stdout Arrow IPC stream
 # ---------------------------------------------------------------------------
 
@@ -384,6 +447,58 @@ def overture_order_covering(tmp_path) -> Path:
     table = pq.read_table("tests/data/country_partition/Honduras.parquet")
     pq.write_table(table, str(target))
     assert "covering_bbox_structure_geometry" in spec_failures(target)
+    return target
+
+
+@pytest.fixture
+def v2_with_illegal_secondary_covering(tmp_path) -> Path:
+    """2.0, a SECONDARY geometry column, and its covering over an illegal struct.
+
+    The #953 shape carrying #1035's defect on the secondary: primary Point
+    ``geometry``, secondary Polygon ``boundary``, and a ``boundary_extent``
+    struct whose fields run ``xmin, xmax, ymin, ymax`` -- Overture's order, which
+    a 1.1 ``covering`` may not point at. The primary declares nothing, so every
+    primary-scoped step leaves the secondary's entry untouched.
+
+    The entry is footer-patched on at the end, after gpio has written the 2.0
+    file: declaring it on the 1.1 source instead would let the conversion strip
+    it, and the fixture would then prove nothing.
+    """
+    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from tests.fixtures.multi_geometry import create_multi_geometry_with_secondary_bbox
+
+    source = tmp_path / "multi_11.parquet"
+    create_multi_geometry_with_secondary_bbox(str(source), bbox_name="boundary_extent")
+
+    # The helper writes the spec's order; Overture's is what gpio must refuse.
+    table = pq.read_table(str(source))
+    index = table.schema.get_field_index("boundary_extent")
+    struct = pa.concat_arrays(table.column(index).chunks)
+    overture_order = ["xmin", "xmax", "ymin", "ymax"]
+    table = table.set_column(
+        index,
+        "boundary_extent",
+        pa.StructArray.from_arrays(
+            [struct.field(name) for name in overture_order], names=overture_order
+        ),
+    )
+    pq.write_table(table, str(source))
+    assert spec_failures(source) == {}, "nothing declares the struct yet, so the source is clean"
+
+    v2 = tmp_path / "multi_20.parquet"
+    run_cli("extract", "geoparquet", source, v2, "--geoparquet-version", "2.0")
+    assert "boundary_extent" in pq.read_schema(str(v2)).names
+
+    geo = geo_block_of(v2)
+    geo["columns"]["boundary"]["covering"] = {
+        "bbox": {axis: ["boundary_extent", axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
+    }
+    target = tmp_path / "multi_20_declared.parquet"
+    patch_footer_kv(str(v2), {"geo": json.dumps(geo)}, output_file=str(target))
+
+    assert set(spec_failures(target)) == {"covering_bbox_structure_boundary"}, (
+        "the fixture must carry exactly the defect under test"
+    )
     return target
 
 

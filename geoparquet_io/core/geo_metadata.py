@@ -745,6 +745,33 @@ def strip_illegal_bbox_covering(geo_meta: dict, schema: pa.Schema) -> dict:
     return result
 
 
+def gate_illegal_bbox_covering(geo_meta: dict, con: duckdb.DuckDBPyConnection, query: str) -> dict:
+    """:func:`strip_illegal_bbox_covering` for the three DuckDB write paths.
+
+    The 2.0 fast path, duckdb-kv and disk-rewrite build their block from the
+    input's and then run :func:`declare_carried_bbox_column`, which is scoped to
+    the PRIMARY column. A secondary column's ``covering`` over an illegal struct
+    was therefore never judged by any of them, and shipped verbatim into a file
+    ``gpio check spec`` rejects (#1035/#1172). This is the same gate the Arrow
+    builders run, asked of every column, over the schema the write's own query
+    produces.
+
+    Probes only when some column actually declares a ``covering.bbox``: with
+    nothing to judge the answer cannot differ, and ``declare_carried_bbox_column``
+    settles the common "the output has no bbox column" case from
+    ``output_columns`` without a probe, which a gate that always probed would
+    undo.
+    """
+    if not any(
+        isinstance(col_meta, dict)
+        and isinstance(col_meta.get("covering"), dict)
+        and "bbox" in col_meta["covering"]
+        for col_meta in (geo_meta.get("columns") or {}).values()
+    ):
+        return geo_meta
+    return strip_illegal_bbox_covering(geo_meta, output_query_schema(con, query))
+
+
 def _add_custom_covering(
     geo_meta: dict, geom_col: str, custom_metadata: dict | None, verbose: bool
 ) -> None:
@@ -1635,6 +1662,18 @@ def _self_evident_bbox_column(schema: pa.Schema, verbose: bool = False) -> str |
     return SELF_EVIDENT_BBOX_COLUMN
 
 
+def output_query_schema(con: duckdb.DuckDBPyConnection, query: str) -> pa.Schema:
+    """The Arrow schema a write's own query produces, without reading a row.
+
+    One shape for the sanctioned probe, shared by the steps that have to judge
+    what the *output* carries: ``declare_carried_bbox_column`` below, and the
+    three DuckDB write paths' :func:`strip_illegal_bbox_covering` gate (the 2.0
+    fast path, duckdb-kv, disk-rewrite), which each need the same schema to ask
+    the same question of a secondary column's covering.
+    """
+    return con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
+
+
 def declare_carried_bbox_column(
     con: duckdb.DuckDBPyConnection,
     query: str,
@@ -1678,7 +1717,7 @@ def declare_carried_bbox_column(
         return False
     if declared is None and _bbox_claimed_by_another_column(geo_meta, name):
         return False
-    schema = con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
+    schema = output_query_schema(con, query)
     if name not in schema.names:
         return False
 

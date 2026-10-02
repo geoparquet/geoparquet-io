@@ -60,6 +60,7 @@ from geoparquet_io.core.geo_metadata import (
     SELF_EVIDENT_BBOX_COLUMN,
     carried_geometry_column,
     declare_carried_bbox_column,
+    gate_illegal_bbox_covering,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
     strip_bboxless_covering,
@@ -617,6 +618,11 @@ def _fast_path_geo_decision(
             output_columns=output_columns,
             geo_meta=carried,
         )
+        # The declare above is primary-scoped, so a SECONDARY column's covering
+        # over an illegal struct reached the output verbatim and `gpio check
+        # spec` failed the file gpio had just written (#1172/#1035). Same gate
+        # the Arrow builders run, over every column.
+        carried = gate_illegal_bbox_covering(carried, con, query)
     # After the declare above: a carried covering still without a bbox member
     # (e.g. only a spatial-index entry) is one geopandas cannot read (#954),
     # so it is not carried onto the output either.
