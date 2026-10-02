@@ -67,6 +67,7 @@ else in gpio works as before.
 | `--geometry-column` | auto | Defaults to the file's primary geometry column |
 | `--drop-empty` | off | Drop rows whose geometry is empty after simplification |
 | `--simplify-crs` | — | Project to this CRS for the simplification (tolerance in its units), then back; `auto-utm` picks the UTM zone from the data |
+| `--refresh-metrics` | off | Recompute vecorel `metrics:area`/`metrics:perimeter` from the simplified geometry |
 
 Native **GeoParquet 2.0 inputs** are supported: the geometry arrives as a
 geoarrow WKB extension column, is simplified on its raw WKB, and the write
@@ -83,7 +84,12 @@ recomputed rather than carried through stale:
 - a declared **bbox covering column** is recomputed from the simplified
   geometries (float32 covering values are rounded *outward*, so the stored
   box always contains its geometry);
-- CRS, edges and everything else carry through unchanged.
+- CRS, edges and everything else carry through unchanged;
+- columns *derived from* geometry are not touched by default — they would go
+  stale. `--refresh-metrics` recomputes the vecorel
+  `gpio add geometry-metrics` columns from the
+  simplified shapes (Python API users compose:
+  `table.simplify(...)` then `.add_geometry_metrics()`).
 
 Geometries that collapse to empty at the given tolerance are kept (and
 counted in a warning) by default; `--drop-empty` removes those rows instead
