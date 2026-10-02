@@ -829,6 +829,30 @@ def _rewrite_geo_metadata(metadata: dict | None, rewrite) -> dict | None:
     return result
 
 
+def gate_carried_covering(
+    metadata: dict | None, schema: pa.Schema, verbose: bool = False
+) -> dict | None:
+    """Both covering gates, on a Parquet KV ``metadata`` dict and an output schema.
+
+    :func:`strip_illegal_bbox_covering` then :func:`strip_bboxless_covering`, in
+    the order every write path runs them, for a path that carries the input's
+    whole block forward instead of rebuilding it: the Arrow IPC stream
+    ``gpio ... -`` writes to stdout.
+
+    A stream is read and persisted exactly like the file a gpio write makes, and
+    ``pq.write_table`` of one is how it becomes that file -- but it reached
+    neither gate, so ``gpio extract geoparquet f.parquet - --exclude-cols bbox``
+    streamed a covering whose only remaining member was a spatial-index entry,
+    the shape ``geopandas.read_parquet`` cannot open (#954/#1172).
+
+    Returns a copy; the input is never mutated.
+    """
+    return _rewrite_geo_metadata(
+        metadata,
+        lambda geo: strip_bboxless_covering(strip_illegal_bbox_covering(geo, schema), verbose),
+    )
+
+
 def strip_derived_stats(
     metadata: dict | None,
     columns: Collection[str] | None = None,
