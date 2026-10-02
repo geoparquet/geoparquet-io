@@ -16,7 +16,9 @@ from geoparquet_io.cli.decorators import (
     compression_options,
     geoparquet_version_option,
     grid_aggregate_options,
+    handle_geoparquet_errors,
     metric_nodata_option,
+    row_group_options,
     show_sql_option,
     verbose_option,
     where_option,
@@ -29,6 +31,7 @@ from geoparquet_io.core.process.aggregate.by_admin import (
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3 as aggregate_by_h3_impl
 from geoparquet_io.core.process.overview import create_overviews as create_overviews_impl
 from geoparquet_io.core.process.overview.run import create_overview_file
+from geoparquet_io.core.process.simplify import simplify_file as simplify_file_impl
 
 # =============================================================================
 # Process Commands (aggregate, ...)
@@ -494,3 +497,314 @@ def process_aggregate_admin(
             )
         except (InvalidParameterError, ValidationError, ValueError, duckdb.Error) as exc:
             raise _aggregate_error(exc, where) from exc
+
+
+@process.command(name="simplify")
+@click.argument("input_parquet")
+@click.argument("output_parquet")
+@click.option(
+    "--tolerance",
+    type=float,
+    required=True,
+    help="Simplification tolerance, in the geometry's CRS units.",
+)
+@click.option(
+    "--coverage/--no-coverage",
+    default=False,
+    help=(
+        "Treat the input as a polygonal coverage: shared edges stay shared "
+        "and no gaps or overlaps are introduced (coarsen coverage_simplify)."
+    ),
+)
+@click.option(
+    "--preserve-topology/--no-preserve-topology",
+    "preserve_topology",
+    default=None,
+    help="Keep geometries valid while simplifying (default: on; plain mode only).",
+)
+@click.option(
+    "--simplify-boundary/--no-simplify-boundary",
+    "simplify_boundary",
+    default=None,
+    help="Also simplify the coverage's outer boundary (default: on; --coverage only).",
+)
+@click.option(
+    "--threads",
+    type=int,
+    default=None,
+    help="Worker threads for coarsen (default: let the library decide).",
+)
+@click.option(
+    "--geometry-column",
+    default=None,
+    help="Geometry column to simplify (default: the file's primary geometry column).",
+)
+@row_group_options
+@compression_options
+@geoparquet_version_option
+@verbose_option
+@handle_geoparquet_errors
+@click.pass_context
+def process_simplify(
+    ctx,
+    input_parquet,
+    output_parquet,
+    tolerance,
+    coverage,
+    preserve_topology,
+    simplify_boundary,
+    threads,
+    geometry_column,
+    row_group_size,
+    row_group_size_mb,
+    compression,
+    compression_level,
+    geoparquet_version,
+    verbose,
+):
+    """Simplify geometries with coarsen (GEOS-identical, multithreaded Rust).
+
+    Examples:
+
+        gpio process simplify parcels.parquet simplified.parquet --tolerance 10
+
+        gpio process simplify admin.parquet simplified.parquet \\
+            --tolerance 0.001 --coverage
+    """
+    if coverage and preserve_topology is not None:
+        raise click.UsageError(
+            "--preserve-topology/--no-preserve-topology applies to plain mode "
+            "and cannot be combined with --coverage (coverage simplification "
+            "always preserves the coverage's topology)."
+        )
+    if not coverage and simplify_boundary is not None:
+        raise click.UsageError(
+            "--simplify-boundary/--no-simplify-boundary only applies with --coverage."
+        )
+    with _activate_s3(ctx):
+        try:
+            simplify_file_impl(
+                input_parquet,
+                output_parquet,
+                tolerance,
+                coverage=coverage,
+                preserve_topology=True if preserve_topology is None else preserve_topology,
+                simplify_boundary=True if simplify_boundary is None else simplify_boundary,
+                threads=threads,
+                geometry_column=geometry_column,
+                compression=compression.upper(),
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_size,
+                geoparquet_version=geoparquet_version,
+                verbose=verbose,
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+
+def _parse_float_csv(value: str | None, option_name: str) -> list[float] | None:
+    """Parse a comma-separated float option; None passes through."""
+    if value is None:
+        return None
+    try:
+        return [float(part) for part in value.split(",")]
+    except ValueError as exc:
+        raise click.BadParameter(
+            f"expected comma-separated numbers, got '{value}'", param_hint=option_name
+        ) from exc
+
+
+@process.command(name="polygonize")
+@click.argument("input_raster")
+@click.argument("output_parquet")
+@click.option("--band", type=int, default=1, show_default=True, help="Raster band to polygonize.")
+@click.option(
+    "--values",
+    default=None,
+    help="Comma-separated pixel values to keep (e.g. '1,3'). Default: every class.",
+)
+@click.option(
+    "--value-column",
+    default="value",
+    show_default=True,
+    help="Name of the class attribute column in the output.",
+)
+@click.option(
+    "--nodata",
+    type=float,
+    default=None,
+    help="Nodata value to exclude (default: the raster's own nodata tag).",
+)
+@click.option(
+    "--no-mask",
+    is_flag=True,
+    help="Ignore the raster's mask/nodata and polygonize every pixel.",
+)
+@row_group_options
+@compression_options
+@geoparquet_version_option
+@verbose_option
+@handle_geoparquet_errors
+@click.pass_context
+def process_polygonize(
+    ctx,
+    input_raster,
+    output_parquet,
+    band,
+    values,
+    value_column,
+    nodata,
+    no_mask,
+    row_group_size,
+    row_group_size_mb,
+    compression,
+    compression_level,
+    geoparquet_version,
+    verbose,
+):
+    """Polygonize a categorical raster into GeoParquet (contourrs).
+
+    Traces land-cover classes, segmentation masks and other categorical
+    rasters into polygons, one feature per contiguous region.
+
+    Examples:
+
+        gpio process polygonize landcover.tif landcover.parquet
+
+        gpio process polygonize mask.tif buildings.parquet --values 1
+    """
+    from geoparquet_io.core.process.raster.polygonize import polygonize_file
+
+    value_list = _parse_float_csv(values, "--values")
+    with _activate_s3(ctx):
+        try:
+            polygonize_file(
+                input_raster,
+                output_parquet,
+                band=band,
+                values=value_list,
+                value_column=value_column,
+                nodata=nodata,
+                use_mask=not no_mask,
+                compression=compression.upper(),
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_size,
+                geoparquet_version=geoparquet_version,
+                verbose=verbose,
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+
+@process.command(name="contour")
+@click.argument("input_raster")
+@click.argument("output_parquet")
+@click.option(
+    "--levels",
+    default=None,
+    help="Explicit comma-separated break values (e.g. '0,100,250,500').",
+)
+@click.option(
+    "--interval",
+    type=float,
+    default=None,
+    help="Generate breaks every N units from --base, spanning the band's range.",
+)
+@click.option(
+    "--base",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Offset for --interval breaks.",
+)
+@click.option("--band", type=int, default=1, show_default=True, help="Raster band to contour.")
+@click.option(
+    "--nodata",
+    type=float,
+    default=None,
+    help="Nodata value to exclude (default: the raster's own nodata tag).",
+)
+@click.option(
+    "--no-mask",
+    is_flag=True,
+    help="Ignore the raster's mask/nodata entirely and contour every pixel.",
+)
+@click.option(
+    "--min-column",
+    default="min",
+    show_default=True,
+    help="Name of the band's lower-break attribute column.",
+)
+@click.option(
+    "--max-column",
+    default="max",
+    show_default=True,
+    help="Name of the band's upper-break attribute column.",
+)
+@row_group_options
+@compression_options
+@geoparquet_version_option
+@verbose_option
+@handle_geoparquet_errors
+@click.pass_context
+def process_contour(
+    ctx,
+    input_raster,
+    output_parquet,
+    levels,
+    interval,
+    base,
+    band,
+    nodata,
+    no_mask,
+    min_column,
+    max_column,
+    row_group_size,
+    row_group_size_mb,
+    compression,
+    compression_level,
+    geoparquet_version,
+    verbose,
+):
+    """Extract filled contour bands from an elevation raster (contourrs).
+
+    Each output feature is one band polygon attributed with its [min, max)
+    break values.
+
+    Examples:
+
+        gpio process contour dem.tif contours.parquet --interval 100
+
+        gpio process contour dem.tif contours.parquet --levels 0,250,500,1000
+    """
+    from geoparquet_io.core.process.raster.contour import contour_file
+
+    if levels is not None and interval is not None:
+        raise click.UsageError("--levels and --interval are mutually exclusive.")
+    if levels is None and interval is None:
+        raise click.UsageError("one of --levels or --interval is required.")
+    level_list = _parse_float_csv(levels, "--levels")
+    with _activate_s3(ctx):
+        try:
+            contour_file(
+                input_raster,
+                output_parquet,
+                levels=level_list,
+                interval=interval,
+                base=base,
+                band=band,
+                nodata=nodata,
+                use_mask=not no_mask,
+                min_column=min_column,
+                max_column=max_column,
+                compression=compression.upper(),
+                compression_level=compression_level,
+                row_group_size_mb=row_group_size_mb,
+                row_group_rows=row_group_size,
+                geoparquet_version=geoparquet_version,
+                verbose=verbose,
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc

@@ -123,6 +123,16 @@ benchmark = [
     "pyogrio>=0.7.0",
     "fiona>=1.9.0",
 ]
+simplify = [
+    "coarsen>=0.2.0",  # Rust simplify/coverage_simplify (ADR-0007); abi3 wheels cp310+; LGPL-2.1; brings shapely>=2.1
+]
+raster = [
+    # contourrs ships wheels only for CPython 3.12-3.14; the marker keeps
+    # `uv sync --all-extras` and `pip install 'geoparquet-io[raster]'` working on
+    # 3.10/3.11 (core/optional_deps.py explains the floor at runtime there).
+    "contourrs>=0.8.0; python_version >= '3.12'",  # raster polygonize/contour (ADR-0007)
+    "rasterio>=1.3",  # GeoTIFF input for gpio process polygonize/contour
+]
 
 [tool.uv]
 # Keep transitive msgpack (pulled via pip-audit -> cachecontrol) above the
@@ -324,6 +334,18 @@ module = [
     "geoparquet_io.cli.commands.check",
 ]
 disable_error_code = ["arg-type", "index", "misc", "union-attr"]
+
+# contourrs pins numpy>=2.5.3, whose stubs use PEP 695 `type` statements that
+# mypy's python_version = "3.10" target refuses to parse — and duckdb's stubs
+# import numpy, so on a Python >= 3.12 venv every mypy run loads them and dies
+# on numpy's own files (the 3.11 CI meta leg resolves numpy 2.4.6 and never
+# saw this). Skipping types numpy as Any, the same footing as any unstubbed
+# dependency; `follow_imports` alone is not enough because mypy always follows
+# .pyi stubs unless follow_imports_for_stubs is set too.
+[[tool.mypy.overrides]]
+module = ["numpy"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
 
 [tool.mutmut]
 source_paths = ["geoparquet_io/"]

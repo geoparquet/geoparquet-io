@@ -765,6 +765,104 @@ class Table:
         return cls(arrow_table)
 
     @classmethod
+    def polygonize(
+        cls,
+        input_raster: str,
+        band: int = 1,
+        values: list[float] | None = None,
+        value_column: str = "value",
+        nodata: float | None = None,
+        use_mask: bool = True,
+    ) -> Table:
+        """
+        Create a Table by polygonizing a categorical raster band (contourrs).
+
+        Requires the ``raster`` extra (``pip install 'geoparquet-io[raster]'``;
+        contourrs needs Python >= 3.12).
+
+        Args:
+            input_raster: Path to the raster (anything rasterio can open)
+            band: Raster band to polygonize (default: 1)
+            values: Pixel values to keep (default: every class)
+            value_column: Name of the class attribute column (default: 'value')
+            nodata: Nodata value to exclude (default: the raster's own tag)
+            use_mask: Honor the raster's mask/nodata (default: True)
+
+        Returns:
+            Table with one feature per contiguous class region
+
+        Example:
+            >>> import geoparquet_io as gpio
+            >>> gpio.Table.polygonize('landcover.tif').write('landcover.parquet')
+        """
+        from geoparquet_io.core.process.raster.polygonize import polygonize_raster
+
+        return cls(
+            polygonize_raster(
+                input_raster,
+                band=band,
+                values=values,
+                value_column=value_column,
+                nodata=nodata,
+                use_mask=use_mask,
+            )
+        )
+
+    @classmethod
+    def contour(
+        cls,
+        input_raster: str,
+        levels: list[float] | None = None,
+        interval: float | None = None,
+        base: float = 0.0,
+        band: int = 1,
+        nodata: float | None = None,
+        use_mask: bool = True,
+        min_column: str = "min",
+        max_column: str = "max",
+    ) -> Table:
+        """
+        Create a Table of filled contour bands from an elevation raster.
+
+        Requires the ``raster`` extra (``pip install 'geoparquet-io[raster]'``;
+        contourrs needs Python >= 3.12).
+
+        Args:
+            input_raster: Path to the raster (anything rasterio can open)
+            levels: Explicit break values; or use interval
+            interval: Generate breaks every N units from ``base``
+                (mutually exclusive with levels)
+            base: Offset for interval breaks (default: 0.0)
+            band: Raster band to contour (default: 1)
+            nodata: Nodata value to exclude (default: the raster's own tag)
+            use_mask: Honor the raster's mask/nodata (default: True)
+            min_column: Column name for each band's lower break
+            max_column: Column name for each band's upper break
+
+        Returns:
+            Table with one feature per contour band polygon
+
+        Example:
+            >>> import geoparquet_io as gpio
+            >>> gpio.Table.contour('dem.tif', interval=100).write('contours.parquet')
+        """
+        from geoparquet_io.core.process.raster.contour import contour_raster
+
+        return cls(
+            contour_raster(
+                input_raster,
+                levels=levels,
+                interval=interval,
+                base=base,
+                band=band,
+                nodata=nodata,
+                use_mask=use_mask,
+                min_column=min_column,
+                max_column=max_column,
+            )
+        )
+
+    @classmethod
     def from_wfs(
         cls,
         service_url: str,
@@ -1521,6 +1619,45 @@ class Table:
         result = add_bbox_table(
             self._table,
             bbox_column_name=column_name,
+            geometry_column=self._geometry_column,
+        )
+        return self._wrap(result, self._geometry_column)
+
+    def simplify(
+        self,
+        tolerance: float,
+        coverage: bool = False,
+        preserve_topology: bool = True,
+        simplify_boundary: bool = True,
+        threads: int | None = None,
+    ) -> Table:
+        """
+        Simplify geometries with coarsen (GEOS-identical Rust).
+
+        Requires the ``simplify`` extra (``pip install 'geoparquet-io[simplify]'``).
+
+        Args:
+            tolerance: Simplification tolerance, in the geometry's CRS units
+            coverage: Treat the input as a polygonal coverage: shared edges
+                stay shared and no gaps or overlaps are introduced
+            preserve_topology: Keep geometries valid while simplifying
+                (plain mode)
+            simplify_boundary: Also simplify the coverage's outer boundary
+                (coverage mode)
+            threads: Worker threads for coarsen (default: library decides)
+
+        Returns:
+            New Table with simplified geometries and refreshed metadata
+        """
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        result = simplify_table(
+            self._table,
+            tolerance,
+            coverage=coverage,
+            preserve_topology=preserve_topology,
+            simplify_boundary=simplify_boundary,
+            threads=threads,
             geometry_column=self._geometry_column,
         )
         return self._wrap(result, self._geometry_column)

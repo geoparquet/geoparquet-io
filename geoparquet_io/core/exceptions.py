@@ -312,6 +312,17 @@ class ExtensionUnavailableError(GeoParquetError):
         super().__init__(msg)
 
 
+class OptionalDependencyError(GeoParquetError):
+    """Raised when an optional Python package a command needs is not installed.
+
+    The commands backed by optional extras (``simplify``, ``raster`` — see
+    ADR-0007) import their packages lazily through
+    :mod:`geoparquet_io.core.optional_deps`, so ``import geoparquet_io`` and
+    every other command keep working without them. The message carries the
+    exact install commands for the missing package.
+    """
+
+
 class BatchTooLargeError(GeoParquetError):
     """Raised when a server refused a page of features because of its size.
 

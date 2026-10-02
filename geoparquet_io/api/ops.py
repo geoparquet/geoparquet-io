@@ -2912,3 +2912,137 @@ def create_pmtiles_pyramid(
         verbose=verbose,
         temporary_directory=temporary_directory,
     )
+
+
+def simplify(
+    table: pa.Table,
+    tolerance: float,
+    coverage: bool = False,
+    preserve_topology: bool = True,
+    simplify_boundary: bool = True,
+    threads: int | None = None,
+    geometry_column: str | None = None,
+    verbose: bool = False,
+) -> pa.Table:
+    """
+    Simplify a table's geometries with coarsen (GEOS-identical Rust).
+
+    Requires the ``simplify`` extra (``pip install 'geoparquet-io[simplify]'``).
+
+    Args:
+        table: Input PyArrow Table with a WKB geometry column
+        tolerance: Simplification tolerance, in the geometry's CRS units
+        coverage: Treat the input as a polygonal coverage: shared edges stay
+            shared and no gaps or overlaps are introduced
+        preserve_topology: Keep geometries valid while simplifying (plain mode)
+        simplify_boundary: Also simplify the coverage's outer boundary
+            (coverage mode)
+        threads: Worker threads for coarsen (default: let the library decide)
+        geometry_column: Geometry column (defaults to the carried primary)
+        verbose: Whether to print verbose output
+
+    Returns:
+        New PyArrow Table with simplified geometries and refreshed metadata
+    """
+    from geoparquet_io.core.process.simplify import simplify_table
+
+    return simplify_table(
+        table,
+        tolerance,
+        coverage=coverage,
+        preserve_topology=preserve_topology,
+        simplify_boundary=simplify_boundary,
+        threads=threads,
+        geometry_column=geometry_column,
+        verbose=verbose,
+    )
+
+
+def polygonize(
+    input_raster: str,
+    band: int = 1,
+    values: list[float] | None = None,
+    value_column: str = "value",
+    nodata: float | None = None,
+    use_mask: bool = True,
+    verbose: bool = False,
+) -> pa.Table:
+    """
+    Polygonize a categorical raster band into a GeoParquet-ready table.
+
+    Requires the ``raster`` extra (``pip install 'geoparquet-io[raster]'``;
+    contourrs needs Python >= 3.12).
+
+    Args:
+        input_raster: Path to the raster (anything rasterio can open)
+        band: Raster band to polygonize (default: 1)
+        values: Pixel values to keep (default: every class)
+        value_column: Name of the class attribute column (default: 'value')
+        nodata: Nodata value to exclude (default: the raster's own tag)
+        use_mask: Honor the raster's mask/nodata (default: True)
+        verbose: Whether to print verbose output
+
+    Returns:
+        PyArrow Table with one feature per contiguous class region
+    """
+    from geoparquet_io.core.process.raster.polygonize import polygonize_raster
+
+    return polygonize_raster(
+        input_raster,
+        band=band,
+        values=values,
+        value_column=value_column,
+        nodata=nodata,
+        use_mask=use_mask,
+        verbose=verbose,
+    )
+
+
+def contour(
+    input_raster: str,
+    levels: list[float] | None = None,
+    interval: float | None = None,
+    base: float = 0.0,
+    band: int = 1,
+    nodata: float | None = None,
+    use_mask: bool = True,
+    min_column: str = "min",
+    max_column: str = "max",
+    verbose: bool = False,
+) -> pa.Table:
+    """
+    Extract filled contour bands from an elevation raster band.
+
+    Requires the ``raster`` extra (``pip install 'geoparquet-io[raster]'``;
+    contourrs needs Python >= 3.12).
+
+    Args:
+        input_raster: Path to the raster (anything rasterio can open)
+        levels: Explicit break values (e.g. [0, 100, 250]); or use interval
+        interval: Generate breaks every N units from ``base``, spanning the
+            band's range (mutually exclusive with levels)
+        base: Offset for interval breaks (default: 0.0)
+        band: Raster band to contour (default: 1)
+        nodata: Nodata value to exclude (default: the raster's own tag)
+        use_mask: Honor the raster's mask/nodata (default: True)
+        min_column: Column name for each band's lower break (default: 'min')
+        max_column: Column name for each band's upper break (default: 'max')
+        verbose: Whether to print verbose output
+
+    Returns:
+        PyArrow Table with one feature per contour band polygon
+    """
+    from geoparquet_io.core.process.raster.contour import contour_raster
+
+    return contour_raster(
+        input_raster,
+        levels=levels,
+        interval=interval,
+        base=base,
+        band=band,
+        nodata=nodata,
+        use_mask=use_mask,
+        min_column=min_column,
+        max_column=max_column,
+        verbose=verbose,
+    )
