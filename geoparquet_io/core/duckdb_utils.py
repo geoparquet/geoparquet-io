@@ -129,6 +129,25 @@ def _nudged_size(displayed: str) -> str | None:
     return f"{whole}.{frac}5{unit}"
 
 
+def _displayed_size_max(displayed: str) -> str | None:
+    """The largest size DuckDB would display as ``displayed``; None if it is not a size.
+
+    The same truncation seen from the other side: "7.4 GiB" is any size from
+    7.4 GiB up to 7.5 GiB, so a *comparison* against a number gpio itself set has
+    to use the top of that range. Against the bottom, the 8.0GB limit gpio puts
+    on a connection reads back as 7.4 GiB = 7.95e9 bytes and looks like a
+    stricter limit somebody else chose. :func:`_nudged_size` takes the middle of
+    the range instead, because a restore has to read back unchanged rather than
+    err high.
+    """
+    match = _DISPLAYED_SIZE_RE.match(displayed)
+    if not match:
+        return None
+    whole, frac, unit = match.groups()
+    step = 10 ** -len(frac)
+    return f"{float(f'{whole}.{frac}') + step:.{len(frac)}f}{unit}"
+
+
 def restore_duckdb_settings(
     con: duckdb.DuckDBPyConnection, saved: Mapping[str, object], verbose: bool = False
 ) -> None:

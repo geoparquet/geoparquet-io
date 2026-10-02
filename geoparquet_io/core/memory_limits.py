@@ -27,6 +27,7 @@ import psutil
 
 from geoparquet_io.core.duckdb_utils import (
     _current_setting,
+    _displayed_size_max,
     get_duckdb_connection,
     restore_duckdb_settings,
 )
@@ -270,13 +271,23 @@ def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> 
 
     An explicit ``memory_limit`` always wins. Otherwise the default applies,
     unless the caller already set a stricter limit on their own connection.
+
+    The session is read through ``_displayed_size_max`` because
+    ``current_setting`` truncates a size to one decimal: the default this very
+    module SET when the connection was opened ("5.0GB") reads back as "4.6 GiB",
+    4.94e9 bytes against the 5e9 asked for, and comparing that directly made
+    every gpio-opened connection look like a caller who had chosen something
+    stricter -- so the default was never re-SET and the ``--verbose`` limit line
+    never appeared. A limit stricter by more than the display rounds away is
+    still left alone.
     """
     if memory_limit:
         return validate_memory_limit(memory_limit)
     default = default_memory_limit()
     if default is None:
         return None
-    session = parse_size(str(_current_setting(con, "memory_limit")))
+    display = str(_current_setting(con, "memory_limit"))
+    session = parse_size(_displayed_size_max(display) or display)
     default_bytes = parse_size(default)
     if session is not None and default_bytes is not None and session < default_bytes:
         return None

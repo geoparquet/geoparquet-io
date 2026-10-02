@@ -12,7 +12,9 @@ every write defaults to a limit that leaves headroom under the machine's memory
 ceiling (never a share of "free" memory, which in a job cgroup counts page
 cache), that ceiling follows the process's own cgroup (Slurm puts a job in a
 nested cgroup; the root cgroup has no limit), threads shrink with the limit so
-DuckDB spills instead of raising, the caller's own session settings survive the
+DuckDB spills instead of raising, a session limit read back through DuckDB's
+truncated display of it is still recognised as that default rather than as a
+stricter limit the caller chose, the caller's own session settings survive the
 write, and convert sorts the input once, inside that limit, instead of also
 sorting it to count invalid geometries.
 """
@@ -27,7 +29,12 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import memory_limits
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, restore_duckdb_settings, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    _displayed_size_max,
+    get_duckdb_connection,
+    restore_duckdb_settings,
+    sql_path,
+)
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 GIB = 1024**3
@@ -87,20 +94,28 @@ class TestFastPathMemoryLimit:
             )
 
     def test_fast_path_default_leaves_headroom_under_the_ceiling(
-        self, tmp_path, monkeypatch, caplog, con
+        self, tmp_path, monkeypatch, caplog
     ):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
-        # The connection is bounded from the REAL ceiling when it is opened
-        # (#1174), and a session limit stricter than the default is deliberately
-        # never loosened -- so on a host whose own 50% share is below the 5.0GB
-        # this stub implies, nothing would be set and the assertion would read as
-        # a regression. Start from a session limit looser than the stub so the
-        # default is what binds, on any host.
-        con.execute(f"SET memory_limit = '{20 * GIB}B'")
-        query = _points_parquet(con, str(tmp_path / "src.parquet"))
-        write_parquet_with_metadata(
-            con, query, str(tmp_path / "out.parquet"), geoparquet_version="2.0", verbose=True
-        )
+        # Opened under the same stub, so the session limit *is* the 5.0GB default
+        # the write then applies -- which is the case DuckDB's truncated display
+        # of a size used to hide (it reads "5.0GB" back as "4.6 GiB", a stricter
+        # limit gpio must not loosen, so nothing was ever set and nothing logged).
+        # A connection opened before the stub would carry the host's own share
+        # instead, and on a small host that really is stricter than 5.0GB, so the
+        # default would not bind and the assertion would read as a regression.
+        connection = get_duckdb_connection()
+        try:
+            query = _points_parquet(connection, str(tmp_path / "src.parquet"))
+            write_parquet_with_metadata(
+                connection,
+                query,
+                str(tmp_path / "out.parquet"),
+                geoparquet_version="2.0",
+                verbose=True,
+            )
+        finally:
+            connection.close()
         assert "DuckDB memory limit: 5.0GB" in caplog.text
 
     def test_small_ceiling_formats_in_megabytes(self, monkeypatch):
@@ -172,6 +187,43 @@ class TestFastPathMemoryLimit:
         assert (_setting(con, "memory_limit"), _setting(con, "threads")) == (before, 8)
 
 
+class TestResolveLimitReadsTheSessionThroughTheDisplay:
+    """``current_setting`` truncates a size, so the session reads back smaller.
+
+    gpio SETs "5.0GB" when it opens the connection and reads it back as
+    "4.6 GiB" -- 4.94e9 bytes against the 5e9 it asked for. Compared against the
+    bottom of that display step, gpio's own default looked like a stricter limit
+    the caller had chosen: no write ever re-SET it, and the ``--verbose``
+    "DuckDB memory limit:" line never fired on a gpio-opened connection. The
+    comparison has to allow the step the display rounds away, while still
+    leaving a genuinely stricter limit alone.
+    """
+
+    @pytest.fixture
+    def bounded(self, monkeypatch):
+        """A connection carrying gpio's own default for a 10 GiB ceiling: 5.0GB."""
+        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
+        connection = get_duckdb_connection(load_spatial=False)
+        yield connection
+        connection.close()
+
+    def test_the_connections_own_default_is_recognised_and_re_set(self, bounded):
+        assert _setting(bounded, "memory_limit") == "4.6 GiB"  # 5.0GB, truncated
+        assert memory_limits._resolve_limit(bounded, None) == "5.0GB"
+
+    def test_a_stricter_caller_limit_is_still_left_alone(self, bounded):
+        bounded.execute("SET memory_limit = '300MB'")
+        assert memory_limits._resolve_limit(bounded, None) is None
+
+    def test_a_looser_caller_limit_is_tightened_to_the_default(self, bounded):
+        bounded.execute("SET memory_limit = '100GB'")
+        assert memory_limits._resolve_limit(bounded, None) == "5.0GB"
+
+    def test_an_explicit_limit_wins_whatever_the_session_says(self, bounded):
+        bounded.execute("SET memory_limit = '300MB'")
+        assert memory_limits._resolve_limit(bounded, "700MB") == "700MB"
+
+
 class TestRestoreSettings:
     def test_engine_default_comes_back(self, con):
         before = _setting(con, "memory_limit")
@@ -199,6 +251,23 @@ class TestParseSize:
     )
     def test_units(self, text, expected):
         assert memory_limits.parse_size(text) == expected
+
+
+class TestDisplayedSizeMax:
+    """One display step up: what a truncated size could be hiding."""
+
+    @pytest.mark.parametrize(
+        "displayed, expected",
+        [
+            ("7.4 GiB", "7.5GiB"),
+            ("7.9 GiB", "8.0GiB"),  # the tenth carries into the whole number
+            ("286.1 MiB", "286.2MiB"),
+            ("0 bytes", None),  # not a truncated size: nothing to allow for
+            ("lots", None),
+        ],
+    )
+    def test_one_step_up_from_the_display(self, displayed, expected):
+        assert _displayed_size_max(displayed) == expected
 
 
 def _fake_cgroups(tmp_path, proc_lines: list[str], files: dict[str, str]):
