@@ -43,7 +43,10 @@ DOCS_ROOT = GUIDE_DIR.parent
 #: environment). The headroom keeps ordinary doc edits from tripping them while
 #: still catching a drift of any size; moving either number is a deliberate act
 #: that shows up in a diff and needs a justification in the pull request.
-MAX_SKIPPED_BLOCKS = 243
+# 243 -> 248: merging main (new convert/extract guide examples,
+# #1189/#1182) makes both sides' skipped blocks count together with the new
+# process-simplify/raster guide pages; neither side alone passed its ceiling.
+MAX_SKIPPED_BLOCKS = 248
 MIN_EXECUTED_BLOCKS = 217
 
 #: Looks like a command rather than prose or sample output.
