@@ -2063,6 +2063,13 @@ matched case-insensitively and resolved to that list's own spelling, so
 `--exclude-cols OWNER` drops a column named `Owner` rather than silently
 dropping nothing.
 
+An `--exclude-cols` that names *every* column is refused rather than ignored. On
+`arcgis` the whole option used to be dropped on the floor in that case, so
+`--exclude-cols geometry` on a geometry-only layer wrote full GeoParquet
+including the column you asked to drop ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)).
+The layer's advertised fields are enough to see it, so the refusal comes before
+any feature is downloaded.
+
 `--exclude-cols` names columns of the table you get back, not of the source. On
 `carto` it is therefore checked against that table once it is fetched, so the
 name to use is `geometry` — the post-fetch name of the geometry column — and not
