@@ -66,7 +66,10 @@ from geoparquet_io.core.geo_metadata import (
     strip_derived_stats,
     strip_nonplanar_edges,
 )
-from geoparquet_io.core.geometry_detection import _detect_geometry_from_query
+from geoparquet_io.core.geometry_detection import (
+    _detect_geometry_from_query,
+    native_geometry_types_from_query,
+)
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -88,6 +91,7 @@ from geoparquet_io.core.write_strategies import (
     WriteStrategyFactory,
     needs_metadata_rewrite,
 )
+from geoparquet_io.core.write_strategies.base import merge_secondary_geometry_metadata
 
 
 def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
@@ -373,6 +377,92 @@ def _probe_output_columns(con, query: str, verbose: bool, purpose: str) -> list[
         return None
 
 
+def _merge_derived_geometry_info(caller: dict | None, derived: dict | None) -> dict | None:
+    """The caller's own ``geometry_info``, extended with secondaries it did not name.
+
+    ``convert`` builds its ``geometry_info`` from the input's ``geo`` block alone
+    (``detect_all_geometry_columns``), which for a native-geo-only input names no
+    secondary at all -- and a caller-supplied value used to suppress the
+    derivation outright, so ``convert --geoparquet-version 1.1`` wrote the
+    secondary as a native Parquet GEOMETRY inside a 1.1 file while ``extract`` of
+    the same input was already correct (#1175).
+
+    The caller still wins: every column it names, and every key it states for a
+    column it shares with the derivation, is left exactly as it was. The
+    derivation only *adds* -- a column, or a key the caller left blank.
+    """
+    if not derived:
+        return caller
+    if not caller:
+        return derived
+    merged = copy.deepcopy(caller)
+    secondary = list(merged.get("secondary") or ())
+    metadata = dict(merged.get("metadata") or {})
+    for name in derived.get("secondary") or ():
+        if name == merged.get("primary"):
+            continue
+        if name not in secondary:
+            secondary.append(name)
+        entry = dict((derived.get("metadata") or {}).get(name) or {})
+        entry.update(metadata.get(name) or {})
+        metadata[name] = entry
+    merged["secondary"] = secondary
+    merged["metadata"] = metadata
+    return merged
+
+
+def _resolve_geometry_info(
+    con,
+    query: str,
+    geometry_info: dict | None,
+    geometry_column: str | None,
+    input_file: str | None,
+    output_columns: list[str] | None,
+    verbose: bool,
+) -> tuple[dict | None, list[str] | None]:
+    """``geometry_info`` with every OTHER geometry column of this write described.
+
+    Which other geometry columns does this write carry? Callers that know say so
+    (``convert``); the rest -- the ``add`` family, sort, extract, partition -- used
+    to leave a secondary column undescribed in ``geo.columns``, which 2.0 requires
+    for every geometry column in the file (#1000). Each secondary's CRS comes from
+    its own logical type, never the per-file witness's.
+
+    Two sources, in this order of preference:
+
+    * the ``input_file`` witness, read through ``get_schema_info`` /
+      ``get_geo_metadata`` -- the richer one, since a logical type carries inline
+      PROJJSON and a GEOGRAPHY's edges, and the input's ``geo`` block also names
+      the secondaries that are *not* native there;
+    * failing that, the output query's own ``DESCRIBE``, which names every
+      ``GEOMETRY`` column the write emits and the CRS each one carries. It is the
+      only source a caller with no witness at all has (``partition`` staging), and
+      it is asked only of those callers: where a witness exists it has already
+      answered, more completely, for the same columns (#1175).
+
+    Gated on knowing the output's columns, so a projection cannot come out
+    declaring a geometry column it dropped. Returns the resolved ``geometry_info``
+    and the output columns, so a later step does not probe the query again.
+    """
+    if not geometry_column:
+        return geometry_info, output_columns
+    if output_columns is None:
+        output_columns = _probe_output_columns(con, query, verbose, "derive secondary geometry")
+    if output_columns is None:
+        return geometry_info, output_columns
+    native_types = (
+        None if input_file else native_geometry_types_from_query(con, query, verbose=verbose)
+    )
+    derived = derive_secondary_geometry_info(
+        input_file,
+        geometry_column,
+        output_columns=output_columns,
+        verbose=verbose,
+        native_types=native_types,
+    )
+    return _merge_derived_geometry_info(geometry_info, derived), output_columns
+
+
 def _prune_metadata_to_output_columns(
     con,
     query: str,
@@ -500,6 +590,7 @@ def _geo_block_to_carry_on_fast_path(
     input_crs=None,
     input_file: str | None = None,
     output_columns: list[str] | None = None,
+    geometry_info: dict | None = None,
 ) -> dict | None:
     """The `geo` block the 2.0 fast path must write instead of DuckDB's generated one.
 
@@ -526,6 +617,10 @@ def _geo_block_to_carry_on_fast_path(
     between the two paths (`tests/test_covering_v2.py::
     test_a_conventional_bbox_column_is_declared_at_v2`). `output_columns` lets it
     skip its schema probe when the output has no bbox column to declare at all.
+
+    `geometry_info` names the write's other geometry columns, so a secondary the
+    carried block omits is still described rather than un-described by carrying
+    (see the merge below, #1175).
 
     Returns None when the version is not 2.0 (1.x already rewrites), when the
     input resolves to more than one file (see below), when the carried block is
@@ -576,6 +671,17 @@ def _geo_block_to_carry_on_fast_path(
             output_columns=output_columns,
             geo_meta=carried,
         )
+    # Whatever comes back REPLACES DuckDB's generated block, and DuckDB's does
+    # describe every geometry column in the file -- so a carried block that omits
+    # one (a native secondary the input never declared) would un-describe it,
+    # which 2.0 requires for every geometry column (#1175). The shared merge adds
+    # the entry: the secondary's OWN crs/edges, and the spec's "not known"
+    # `geometry_types: []` where the input said nothing. `[]` rather than the real
+    # list is the price of keeping the carried block at all -- only the rewrite
+    # path can compute one, and the keys that make this block worth carrying
+    # (`epoch`, `orientation`, a `covering`) would be lost by handing the write
+    # back to DuckDB instead.
+    merge_secondary_geometry_metadata(carried, geometry_info)
     # After the declare above: a carried covering still without a bbox member
     # (e.g. only a spatial-index entry) is one geopandas cannot read (#954),
     # so it is not carried onto the output either.
@@ -788,6 +894,18 @@ def write_parquet_with_metadata(
         elif verbose:
             debug("Not forcing a rewrite: the covering has no bbox member to stand beside")
 
+    # Which OTHER geometry columns does this write carry? Resolved here, ahead of
+    # the fast/rewrite branch, because BOTH need the answer: the 2.0 fast path
+    # writes the input's own `geo` block verbatim, so a 2.0 input whose block omits
+    # a native secondary kept it undescribed through `sort`/`extract` (#1175).
+    # Skipped where neither path can use it -- a fast path with no block to carry
+    # lets DuckDB generate its own, and DuckDB's V2 block already describes every
+    # geometry column in the file.
+    if rewrite_needed or (effective_version == "2.0" and original_metadata):
+        geometry_info, output_columns = _resolve_geometry_info(
+            con, query, geometry_info, geometry_column, input_file, output_columns, verbose
+        )
+
     # Preserve non-geo KV metadata from input (e.g., vecorel, fiboa).
     # Build a merged local dict rather than mutating the caller-supplied
     # extra_kv_metadata: partition loops reuse one dict across writes, and
@@ -857,6 +975,7 @@ def write_parquet_with_metadata(
                     input_crs=input_crs,
                     input_file=input_file,
                     output_columns=output_columns,
+                    geometry_info=geometry_info,
                 ),
                 extra_kv_metadata=extra_kv_metadata,
                 memory_limit=memory_limit,
@@ -910,25 +1029,6 @@ def write_parquet_with_metadata(
             if verbose:
                 debug(f"Writing GeoParquet version: {effective_version}")
                 debug(f"Using write strategy: {strategy.name}")
-
-            # The input-file witness answers one more question here: which OTHER
-            # geometry columns does this rewrite carry? Callers that know pass
-            # `geometry_info` themselves (convert); every rewrite that does not --
-            # the `add` family, sort, extract -- used to leave a secondary column
-            # undescribed in `geo.columns`, which 2.0 requires for every geometry
-            # column in the file (#1000). Each secondary's CRS comes from its own
-            # logical type, never the per-file witness's. Gated on knowing the
-            # output's columns, so a projection cannot come out declaring a
-            # geometry column it dropped.
-            if geometry_info is None and input_file and geometry_column:
-                if output_columns is None:
-                    output_columns = _probe_output_columns(
-                        con, query, verbose, "derive secondary geometry"
-                    )
-                if output_columns is not None:
-                    geometry_info = derive_secondary_geometry_info(
-                        input_file, geometry_column, output_columns=output_columns, verbose=verbose
-                    )
 
             # Build kwargs - only pass memory_limit for duckdb-kv
             write_kwargs = {
