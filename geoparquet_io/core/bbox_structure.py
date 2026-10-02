@@ -27,6 +27,25 @@ from geoparquet_io.core.parquet_schema import schema_direct_children
 _BBOX_REQUIRED_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
 
 
+def _covering_bbox_refs(col_info) -> dict | None:
+    """One column's validated ``covering.bbox`` refs, or ``None``.
+
+    All four bounds must be present and every ref must be a well-formed
+    covering path; a partial or dangling covering is not a declaration (#738).
+    """
+    if not isinstance(col_info, dict):
+        return None
+    covering = col_info.get("covering")
+    bbox_refs = covering.get("bbox") if isinstance(covering, dict) else None
+    if (
+        isinstance(bbox_refs, dict)
+        and _BBOX_REQUIRED_FIELDS.issubset(bbox_refs)
+        and all(is_covering_path(ref) for ref in bbox_refs.values())
+    ):
+        return bbox_refs
+    return None
+
+
 def _bbox_column_from_covering(geo_meta) -> str | None:
     """Return the bbox column name referenced by GeoParquet ``covering.bbox``.
 
@@ -40,17 +59,26 @@ def _bbox_column_from_covering(geo_meta) -> str | None:
     if not isinstance(columns, dict):
         return None
     for col_info in columns.values():
-        if not isinstance(col_info, dict):
-            continue
-        covering = col_info.get("covering")
-        bbox_refs = covering.get("bbox") if isinstance(covering, dict) else None
-        if (
-            isinstance(bbox_refs, dict)
-            and _BBOX_REQUIRED_FIELDS.issubset(bbox_refs)
-            and all(is_covering_path(ref) for ref in bbox_refs.values())
-        ):
-            return cast("str", bbox_refs["xmin"][0])
+        refs = _covering_bbox_refs(col_info)
+        if refs is not None:
+            return cast("str", refs["xmin"][0])
     return None
+
+
+def bbox_covering_column_for(geo_meta, geometry_column: str) -> str | None:
+    """The bbox column ``geometry_column``'s ``covering.bbox`` declares, or ``None``.
+
+    The column-scoped counterpart of :func:`_bbox_column_from_covering`, with
+    the same validation, for callers that rewrite one geometry column and must
+    only touch a covering that column actually declares.
+    """
+    if not isinstance(geo_meta, dict):
+        return None
+    columns = geo_meta.get("columns", {})
+    if not isinstance(columns, dict):
+        return None
+    refs = _covering_bbox_refs(columns.get(geometry_column))
+    return cast("str", refs["xmin"][0]) if refs is not None else None
 
 
 def _schema_struct_children(

@@ -2923,6 +2923,7 @@ def simplify(
     threads: int | None = None,
     geometry_column: str | None = None,
     drop_empty: bool = False,
+    simplify_crs: str | None = None,
     verbose: bool = False,
 ) -> pa.Table:
     """
@@ -2942,6 +2943,9 @@ def simplify(
         geometry_column: Geometry column (defaults to the carried primary)
         drop_empty: Drop rows whose geometry is empty after simplification
             (default: keep and warn)
+        simplify_crs: Project to this CRS for the simplification (tolerance
+            in its units), then back; 'auto-utm' picks the UTM zone from
+            the data
         verbose: Whether to print verbose output
 
     Returns:
@@ -2958,6 +2962,7 @@ def simplify(
         threads=threads,
         geometry_column=geometry_column,
         drop_empty=drop_empty,
+        simplify_crs=simplify_crs,
         verbose=verbose,
     )
 
