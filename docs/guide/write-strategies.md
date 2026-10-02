@@ -208,7 +208,9 @@ equally the DuckDB work that is not a write: the full-input spatial join
 anything is written, the format exports behind
 `gpio convert csv`/`flatgeobuf`/`geojson`/`geopackage`/`shapefile`, and the queries behind
 `gpio process aggregate` and `gpio process overview`. The `streaming` and `in-memory`
-strategies hold data in Arrow, outside DuckDB's accounting, so no DuckDB limit bounds them.
+strategies read through a bounded connection like everything else, but the rows they have
+read sit in Arrow, outside DuckDB's accounting: the limit bounds the query feeding them, not
+the buffers they build from it.
 
 `--write-memory` overrides the default on the commands that have the option, including the
 admin joins; `gpio pmtiles create`, `gpio add bbox-metadata` and the format exports do not
@@ -229,8 +231,10 @@ Parquet writer, compression and spatial functions allocate beside it, and a larg
 sort was measured running 30–70% past the limit, so 80% can reach a container or job cap
 before DuckDB spills, and the process is killed. For the same reason gpio lowers DuckDB's
 thread count while a small limit is in force (about 512 MB per thread): spread too thin,
-DuckDB raises `Out of Memory Error` instead of spilling. The thread cap applies around a
-bounded statement — a write, an export, an admin join — not to the connection as a whole.
+DuckDB raises `Out of Memory Error` instead of spilling. The cap applies around a bounded
+statement — a write, an export, an admin join — and again when a connection is opened under
+the default, so work that no such statement wraps is not left spreading a small limit across
+every core. It only ever lowers the thread count, and a thread count you ask for is yours.
 
 The ceiling, not the memory currently free: a cgroup counts its page cache as used, so
 after a job has read a large input, "free" memory can read near zero.

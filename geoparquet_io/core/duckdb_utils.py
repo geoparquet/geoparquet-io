@@ -847,17 +847,44 @@ def spill_space_hint(exc: BaseException | str | None) -> str | None:
     )
 
 
-def _ceiling_based_memory_limit() -> str | None:
-    """The default ``memory_limit`` for a connection that names none, or None.
+def _ceiling_based_limits() -> tuple[str | None, int | None]:
+    """The default ``memory_limit`` and thread cap for a connection that names neither.
 
     Deferred import: :mod:`geoparquet_io.core.memory_limits` owns the ceiling and
     the share of it gpio takes (one detector, one number -- #1156), and it imports
     this module for its connections and setting helpers. Importing it at module
     scope here would close that cycle.
     """
-    from geoparquet_io.core.memory_limits import default_memory_limit
+    from geoparquet_io.core.memory_limits import _connection_limit
 
-    return default_memory_limit()
+    return _connection_limit(None)
+
+
+def _apply_connection_limits(
+    con: duckdb.DuckDBPyConnection, memory_limit: str | None, threads: int | None
+) -> None:
+    """Bound a freshly opened connection: the memory limit, and the threads it affords.
+
+    An explicit value wins; otherwise the ceiling-based default, so that DuckDB
+    work with no write to wrap -- a spatial join into a temp table, a format
+    export, a disk-rewrite COPY -- is bounded too (#1174). The limit alone is not
+    enough: spread over every core it leaves each thread too little to spill with,
+    and DuckDB raises ``OutOfMemoryException`` instead (measured at a 244MB limit:
+    a 24M-row Hilbert scan failed on 64 threads and spilled on one). So the
+    default comes with the cap it affords, as a bounded statement's does.
+
+    The cap only ever comes *down* from what DuckDB already has, and only when
+    gpio chose both numbers: a caller who named the limit or the thread count
+    owns them, and that keeps the cap idempotent for
+    :func:`memory_limits.open_bounded_connection`, which passes both.
+    """
+    limit, cap = (memory_limit, None) if memory_limit is not None else _ceiling_based_limits()
+    if limit is not None:
+        con.execute(f"SET memory_limit = '{_escape_sql_string(str(limit))}';")
+    if cap is None or threads is not None:
+        return
+    if cap < int(str(_current_setting(con, "threads"))):
+        con.execute(f"SET threads = {cap}")
 
 
 def get_duckdb_connection(
@@ -886,9 +913,11 @@ def get_duckdb_connection(
                     If None (default), auto-detects based on usage.
         use_s3_auth: Whether to configure AWS credential chain for S3 (default: False).
                     Only needed for private buckets.
-        threads: Number of threads for DuckDB to use (default: None = all cores).
-                Limiting threads is useful for parallel test execution to prevent
-                CPU saturation when multiple pytest workers create connections.
+        threads: Number of threads for DuckDB to use (default: None = all cores,
+                less the cap the default memory limit affords). Limiting threads
+                is useful for parallel test execution to prevent CPU saturation
+                when multiple pytest workers create connections. A value given
+                here is used as given: naming it opts out of that cap.
         temp_directory: Volume for DuckDB to spill intermediate results onto.
                     Defaults to a private directory under the OS temp directory
                     (see :func:`spill_directory`); pass a path to put the spill on
@@ -904,7 +933,9 @@ def get_duckdb_connection(
                     so the cap is reached before DuckDB ever spills (#1156,
                     #1174). Either way DuckDB spills to temp_directory rather
                     than crashing. A ceiling that cannot be read leaves DuckDB's
-                    own default in place.
+                    own default in place. The ceiling-based default also caps
+                    ``threads`` to what it affords (``_apply_connection_limits``);
+                    a value given here is used as given.
 
     Returns:
         duckdb.DuckDBPyConnection: Configured connection with extensions loaded
@@ -932,15 +963,7 @@ def get_duckdb_connection(
     effective_temp_dir = temp_directory if temp_directory is not None else spill_directory()
     safe_temp_dir = _escape_sql_string(str(effective_temp_dir))
     con.execute(f"SET temp_directory = '{safe_temp_dir}';")
-    # An explicit value wins; otherwise the ceiling-based default, so that DuckDB
-    # work with no write to wrap -- a spatial join into a temp table, a format
-    # export, a disk-rewrite COPY -- is bounded too (#1174).
-    effective_memory_limit = (
-        memory_limit if memory_limit is not None else _ceiling_based_memory_limit()
-    )
-    if effective_memory_limit is not None:
-        safe_memory_limit = _escape_sql_string(str(effective_memory_limit))
-        con.execute(f"SET memory_limit = '{safe_memory_limit}';")
+    _apply_connection_limits(con, memory_limit, threads)
 
     # Always load spatial extension by default (core use case)
     if load_spatial:

@@ -14,9 +14,11 @@ percentage default unconditionally, so a Python API caller who had set
 duration of the write.
 
 These tests pin: the ceiling-based default on every connection
-``get_duckdb_connection`` opens, an explicit value still winning, the admin
-joins honouring ``--write-memory``, the remaining COPY sites running inside the
-shared scope, and a stricter caller limit surviving a duckdb-kv write.
+``get_duckdb_connection`` opens, with the thread cap that default affords (a
+limit spread over every core makes DuckDB raise instead of spill), an explicit
+value still winning, the admin joins honouring ``--write-memory``, the remaining
+COPY sites running inside the shared scope, and a stricter caller limit
+surviving a duckdb-kv write.
 """
 
 from __future__ import annotations
@@ -127,6 +129,46 @@ class TestConnectionDefault:
         connection = get_duckdb_connection(load_spatial=False)
         try:
             assert _setting(connection, "memory_limit") == _setting(bare, "memory_limit")
+        finally:
+            connection.close()
+            bare.close()
+
+    def test_threads_come_down_with_the_default_limit(self, monkeypatch):
+        """The limit comes with the thread cap it affords, or DuckDB raises.
+
+        A limit spread over every core leaves each thread too little to spill
+        with: measured on a 24M-row ``ST_Hilbert`` scan, a 244MB limit raised
+        ``OutOfMemoryException`` on 64 threads and spilled successfully on one.
+        The bounded statements cap threads for exactly that reason (#1153); the
+        connection default, which is the only bound on work no statement wraps,
+        has to carry the same cap or it turns a spill into a failure.
+        """
+        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: GIB)
+        _limit, cap = memory_limits._connection_limit(None)
+        if cap is None:  # a host with so few cores that 512MB affords them all
+            pytest.skip("the default limit affords every thread this host has")
+        connection = get_duckdb_connection(load_spatial=False)
+        try:
+            assert int(str(_setting(connection, "threads"))) == cap
+        finally:
+            connection.close()
+
+    def test_an_explicit_thread_count_is_left_alone(self, monkeypatch):
+        """A caller who names the threads owns them: the cap is for the default."""
+        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: GIB)
+        connection = get_duckdb_connection(load_spatial=False, threads=3)
+        try:
+            assert int(str(_setting(connection, "threads"))) == 3
+        finally:
+            connection.close()
+
+    def test_a_generous_limit_keeps_every_thread(self, monkeypatch):
+        """The cap only ever comes down, so a tighter pinning (pytest's own) holds."""
+        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 4096 * GIB)
+        bare = duckdb.connect()
+        connection = get_duckdb_connection(load_spatial=False)
+        try:
+            assert _setting(connection, "threads") == _setting(bare, "threads")
         finally:
             connection.close()
             bare.close()
