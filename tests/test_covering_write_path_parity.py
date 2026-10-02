@@ -108,6 +108,28 @@ class TestTableWriteKeepsADeclaredCovering:
         assert spec_failures(out) == {}
 
     @pytest.mark.parametrize("strategy", STRATEGIES)
+    def test_a_table_with_no_block_at_all_still_declares_its_bbox(self, strategy, tmp_path):
+        """``convert`` of a CSV builds the table from a query, so it carries no block.
+
+        ``add_bbox`` then has nothing to record its computed column into and the
+        table's schema is the only evidence left -- which the shared gate reads,
+        and three of the four strategies asked it. ``write_from_table`` hard-coded
+        "no bbox column" instead and wrote the struct undeclared.
+        """
+        import geoparquet_io as gpio
+
+        csv = tmp_path / "plain.csv"
+        csv.write_text("name,lat,lon\na,1.0,2.0\nb,3.0,4.0\n")
+        out = tmp_path / f"csv_{strategy}.parquet"
+
+        table = gpio.convert(str(csv), lat_column="lat", lon_column="lon").add_bbox()
+        assert table._table.schema.metadata is None, "the fixture must carry no block of its own"
+        table.write(str(out), write_strategy=strategy)
+
+        assert bbox_covering_column(out) == "bbox"
+        assert spec_failures(out) == {}
+
+    @pytest.mark.parametrize("strategy", STRATEGIES)
     def test_a_gdal_style_covering_survives(self, gdal_style_covering, strategy, tmp_path):
         """GDAL writes ``geometry_bbox``; nothing but the input's block vouches for it."""
         import geoparquet_io as gpio
