@@ -2345,10 +2345,13 @@ def read_spatial_to_arrow(
         crs: CRS for CSV geometry data (default: EPSG:4326/WGS84)
         skip_invalid: Skip rows with invalid geometries instead of failing
         profile: AWS profile name for S3 operations
-        geometry_column: Name for output geometry column (default: 'geometry').
-            A tabular source (WKT or lat/lon columns) reports back the name it
-            could actually use: a carried source column of that name takes it,
-            and the built geometry moves aside (#1176).
+        geometry_column: Requested name for the output geometry column
+            (default: 'geometry'). Every source reports back the name it could
+            actually use, which is the third return value: a tabular source
+            (WKT or lat/lon columns) moves the built geometry aside when a
+            carried source column already has that name, and a spatial source
+            always emits ``geometry`` because both of its reads alias
+            ``ST_AsWKB(...) AS geometry`` (#1176).
         layer: Layer name for multi-layer formats (GeoPackage, FileGDB). If not specified,
                reads the first/default layer.
         repair_geometry: Repair invalid geometry with ST_MakeValid (default: True).
@@ -2494,6 +2497,10 @@ def read_spatial_to_arrow(
                 encoding=encoding,
                 force_2d=force_2d,
             )
+            # Both spatial reads emit `ST_AsWKB(...) AS geometry` (here and in the
+            # linearized retry), so report that rather than the requested name: the
+            # repair below and the Table the API hands back both key off it (#1176).
+            geometry_column = "geometry"
 
         # No geometry found — read as plain table
         if arrow_table is None:

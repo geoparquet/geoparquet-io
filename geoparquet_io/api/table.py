@@ -394,7 +394,11 @@ def convert(
 
     Args:
         path: Path to input file (local or S3 URL)
-        geometry_column: Name for geometry column in output (default: 'geometry')
+        geometry_column: Requested name for the geometry column (default:
+               'geometry'). It is a request: the returned Table carries the
+               name the read could actually use, which is ``geometry`` for a
+               spatial source and, for a tabular one, a free name when a
+               carried source column already took the requested one (#1176).
         wkt_column: For CSV or a Parquet file with no geometry column:
                column containing WKT geometry
         lat_column: For CSV or a Parquet file with no geometry column:
