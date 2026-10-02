@@ -21,6 +21,7 @@ from geoparquet_io.core import parquet_footer
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.parquet_footer import (
     _LIST,
+    FooterPatchRaced,
     FooterPatchUnsupported,
     _copy_below_footer,
     _decode_kv_list,
@@ -296,7 +297,27 @@ class TestAnInputThatChangesUnderTheCall:
     that, before the replace, would be overwritten by a staged file that is
     already stale. gpio takes no locks, so the call checks and refuses at both
     points, and the second check is the last thing it does.
+
+    Both refusals raise ``FooterPatchRaced``, not the bare
+    ``FooterPatchUnsupported`` a structural refusal raises: "this footer cannot
+    be patched" invites a caller to rewrite the file instead, and "the input
+    changed under us" must not, because the rewrite would read the bytes that
+    arrived and describe them with metadata derived from the bytes that left.
     """
+
+    def test_the_race_is_a_footer_patch_unsupported(self):
+        """A caller that does not distinguish them keeps today's behaviour."""
+        assert issubclass(FooterPatchRaced, FooterPatchUnsupported)
+
+    def test_a_structural_refusal_is_not_a_race(self, tmp_path):
+        """Nothing was read, so nothing changed: a rewrite is still the answer."""
+        not_parquet = tmp_path / "plain.txt"
+        not_parquet.write_bytes(b"not a parquet file at all")
+
+        with pytest.raises(FooterPatchUnsupported) as caught:
+            patch_footer_kv(str(not_parquet), {"note": "x"})
+
+        assert not isinstance(caught.value, FooterPatchRaced)
 
     def test_a_file_replaced_mid_copy_is_refused(self, geo_file, tmp_path, monkeypatch):
         other = _write_geoparquet(tmp_path / "other.parquet", rows=2500, label="other")
@@ -308,7 +329,7 @@ class TestAnInputThatChangesUnderTheCall:
 
         monkeypatch.setattr(parquet_footer, "_copy_below_footer", copy_then_let_another_writer_land)
 
-        with pytest.raises(FooterPatchUnsupported, match="changed while it was being copied"):
+        with pytest.raises(FooterPatchRaced, match="changed while it was being copied"):
             patch_footer_kv(str(geo_file), {"note": "x"})
 
         assert geo_file.read_bytes() == other.read_bytes(), "the other writer's file was clobbered"
@@ -329,7 +350,7 @@ class TestAnInputThatChangesUnderTheCall:
 
         monkeypatch.setattr(parquet_footer, "_inherit_mode", inherit_then_let_another_writer_land)
 
-        with pytest.raises(FooterPatchUnsupported, match="changed while it was being copied"):
+        with pytest.raises(FooterPatchRaced, match="changed while it was being copied"):
             patch_footer_kv(str(geo_file), {"note": "x"})
 
         assert geo_file.read_bytes() == other.read_bytes(), "the other writer's file was clobbered"

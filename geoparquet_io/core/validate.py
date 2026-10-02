@@ -44,7 +44,11 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import BBOX_COVERING_FIELD_ORDERS, is_covering_path
+from geoparquet_io.core.geo_metadata import (
+    BBOX_COVERING_FIELD_ORDERS,
+    covering_lacks_bbox,
+    is_covering_path,
+)
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
@@ -1884,6 +1888,53 @@ def _check_covering_is_object(col_meta: dict, col_name: str) -> ValidationCheck:
         if is_valid
         else f'column "{col_name}" covering must be an object (found: {_short(covering)})',
         category="geoparquet_1_1",
+    )
+
+
+def _check_covering_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
+    """Check 1.1-1b: a 'covering' object must carry the 'bbox' encoding.
+
+    GeoParquet 1.1, ``covering``: "The keys of the 'covering' object MUST be a
+    supported encoding. Currently the only supported encoding is 'bbox'."
+
+    FAILED rather than WARNING, because the file does not open: geopandas
+    indexes ``covering["bbox"]["xmin"][0]`` unguarded, so every such file dies
+    with ``KeyError: 'bbox'`` in ``geopandas.read_parquet``. gpio wrote this
+    shape itself until #954 (``gpio add h3/s2/a5/quadkey/kdtree`` and
+    ``gpio partition <index> --keep-*-column`` over a bbox-less input), and the
+    write gate alone does not help the files already published -- which scored
+    "24 passed, 0 warnings, 0 failed" here (#1173).
+
+    An index entry *beside* a bbox member is not judged: gpio records
+    h3/s2/a5/quadkey/kdtree entries there deliberately (#694/#738), and every
+    reader that matters keys off ``bbox``.
+
+    The test itself is ``geo_metadata.covering_lacks_bbox``, the one definition
+    of the illegal shape, shared with the write gate
+    (``strip_bboxless_covering``) and the ``--fix`` repair
+    (``check_fixes.fix_bboxless_covering``) so that what gpio refuses to write,
+    what it fails here, and what it repairs cannot drift apart.
+    """
+    check_name = f"covering_has_bbox_{col_name}"
+    covering = col_meta.get("covering")
+
+    if covering is None:
+        return _covering_verdict(check_name, CheckStatus.SKIPPED, "no covering defined")
+    if not isinstance(covering, dict):
+        # covering_is_object reports a covering of the wrong type; one defect
+        # gets one verdict.
+        return _covering_verdict(check_name, CheckStatus.SKIPPED, "covering is not an object")
+    if not covering_lacks_bbox(col_meta):
+        return _covering_verdict(
+            check_name, CheckStatus.PASSED, 'covering declares the "bbox" encoding'
+        )
+
+    return _covering_verdict(
+        check_name,
+        CheckStatus.FAILED,
+        f'column "{col_name}" covering has no "bbox" member, the only encoding the spec '
+        f"defines (found: {sorted(covering)}); readers that use the covering cannot open "
+        f"the file. Drop it: gpio check all --fix",
     )
 
 
@@ -4007,6 +4058,11 @@ def _run_geoparquet_checks(
     if covering_checks_apply:
         for col_name, col_meta in columns.items():
             checks.append(_check_covering_is_object(col_meta, col_name))
+            # A covering that is an object but has no `bbox` member is the one
+            # defect the four path/column/struct/type checks below cannot see:
+            # they skip a column that declares no bbox covering, so the file
+            # passed clean while geopandas could not open it (#1173).
+            checks.append(_check_covering_has_bbox(col_meta, col_name))
 
             # Only run bbox covering checks if covering is defined
             if _declares_bbox_covering(col_meta):

@@ -68,6 +68,21 @@ class FooterPatchUnsupported(GeoParquetError):
     for a footer whose thrift structure does not read cleanly. It never means
     the file was modified: the patch is staged beside the destination and only
     replaces it once it has been read back.
+
+    ``FooterPatchRaced`` below is the one refusal a caller must not answer with
+    a rewrite; it subclasses this so a caller that does not distinguish them
+    keeps its fallback.
+    """
+
+
+class FooterPatchRaced(FooterPatchUnsupported):
+    """The input changed while it was being copied; nothing was written.
+
+    Not a property of the footer, so a caller must *not* fall back to rewriting
+    the file: the rewrite would read the bytes that have arrived and describe
+    them with metadata derived from the bytes that have gone -- another writer's
+    rows stamped with our stats. The call made no change, so propagating is
+    safe, and the right answer is to look at the file again.
     """
 
 
@@ -414,8 +429,8 @@ def _file_stamp(parquet_file: str) -> tuple[int, int, int]:
     return info.st_ino, info.st_size, info.st_mtime_ns
 
 
-def _changed(parquet_file: str) -> FooterPatchUnsupported:
-    return FooterPatchUnsupported(
+def _changed(parquet_file: str) -> FooterPatchRaced:
+    return FooterPatchRaced(
         f"{parquet_file} changed while it was being copied; nothing was written"
     )
 
