@@ -706,6 +706,7 @@ FAILED_ARMS = {
     "validate_geoparquet": ELSEWHERE,
     "_run_parquet_geo_only_checks": ELSEWHERE,
     "_check_covering_is_object": HERE,
+    "_check_covering_has_bbox": "tests/test_check_covering_requires_bbox.py",
     "_check_native_geo_types_match": (
         "FAILS when the data holds a type the Parquet GeospatialStatistics do not "
         "declare. pyarrow computes those statistics from the data, so no writer in "

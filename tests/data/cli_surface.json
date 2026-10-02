@@ -13129,6 +13129,22 @@
        "type": "boolean"
       },
       {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "refresh_metrics",
+       "nargs": 1,
+       "opts": [
+        "--refresh-metrics"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
        "default": "None",
        "hidden": false,
        "is_flag": false,
@@ -13177,6 +13193,22 @@
         "--no-simplify-boundary"
        ],
        "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "simplify_crs",
+       "nargs": 1,
+       "opts": [
+        "--simplify-crs"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       },
       {
        "default": "None",

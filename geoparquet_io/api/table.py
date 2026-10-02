@@ -394,7 +394,14 @@ def convert(
 
     Args:
         path: Path to input file (local or S3 URL)
-        geometry_column: Name for geometry column in output (default: 'geometry')
+        geometry_column: Requested name for the geometry column (default:
+               'geometry'). It is a *request*, and the returned Table carries
+               the name actually used. A tabular source (WKT or lat/lon columns)
+               honours it, because it aliases the geometry it builds -- unless a
+               carried source column already has that name, in which case the
+               built one moves aside to ``<name>_1``. A spatial source cannot
+               honour it: both of its reads alias ``ST_AsWKB(...) AS geometry``,
+               so the Table comes back with ``geometry`` (#1176).
         wkt_column: For CSV or a Parquet file with no geometry column:
                column containing WKT geometry
         lat_column: For CSV or a Parquet file with no geometry column:
@@ -1222,6 +1229,14 @@ class Table:
         Returns:
             Path to written file (local temp path if uploaded to cloud)
 
+        Raises:
+            InvalidParameterError: If this table's geometry column name is not a
+                column of the table -- a stale or mistyped name. Every output
+                format and every write strategy refuses it the same way, rather
+                than one crashing, one writing a `geo` block naming a column the
+                file does not have, one silently writing plain Parquet and the
+                GDAL formats ignoring the name altogether (#1176).
+
         Examples:
             >>> table.write('output.parquet')              # GeoParquet (auto-detect)
             >>> table.write('output.gpkg')                 # GeoPackage (auto-detect)
@@ -1229,6 +1244,12 @@ class Table:
             >>> table.write('s3://bucket/output.fgb')      # FlatGeobuf to S3
             >>> table.write('output.dat', format='csv')    # Explicit format
         """
+
+        # Above the format dispatch, so every format refuses a stale geometry
+        # name alike. Below it, only `.parquet` did: the GDAL writers re-detect
+        # the geometry themselves, so `.gpkg`/`.geojson`/`.fgb`/`.csv` ignored the
+        # typo and wrote a file (#1176).
+        self._require_geometry_column_present()
 
         # Detect format from extension if not explicitly provided
         # Normalize to lowercase for case-insensitive comparison
@@ -1282,6 +1303,40 @@ class Table:
         }
         return EXTENSION_MAP.get(ext, "parquet")  # Default to parquet
 
+    def _require_geometry_column_present(self) -> None:
+        """Refuse a write whose named geometry column is not in the table (#1176).
+
+        Each of the four write strategies failed differently on a name the table
+        does not carry -- duckdb-kv and disk-rewrite with a bare ``KeyError``,
+        streaming with a ``geo`` block naming the missing column, in-memory by
+        writing plain Parquet and saying nothing -- so the same mistake produced
+        a crash, an invalid file or a silently geometry-less one depending on a
+        parameter unrelated to it. The check is here, above the dispatch, so all
+        four agree, and it names the columns the table does have because the
+        cause is almost always a stale or mistyped name.
+
+        Called from :meth:`write` above the format dispatch -- the GDAL writers
+        re-detect the geometry themselves, so they ignored the stale name while
+        ``.parquet`` raised (#1176) -- and again from :meth:`_write_geoparquet`,
+        which the prospective-check path calls without going through ``write``.
+
+        ``None`` is not a wrong name: a table with no geometry writes plain
+        Parquet deliberately.
+        """
+        if self._geometry_column is None:
+            return
+        if self._geometry_column in self._table.column_names:
+            return
+
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        available = ", ".join(repr(name) for name in self._table.column_names) or "none"
+        raise InvalidParameterError(
+            "geometry_column",
+            f"the table has no column named {self._geometry_column!r}; "
+            f"its columns are: {available}",
+        )
+
     def _write_geoparquet(
         self,
         path: str | Path,
@@ -1308,6 +1363,8 @@ class Table:
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
         from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
+
+        self._require_geometry_column_present()
 
         # The facade's row-group decision, so the Python API and the CLI agree
         # about what a number means. This path called the write strategy
@@ -1631,6 +1688,7 @@ class Table:
         simplify_boundary: bool = True,
         threads: int | None = None,
         drop_empty: bool = False,
+        simplify_crs: str | None = None,
     ) -> Table:
         """
         Simplify geometries with coarsen (GEOS-identical Rust).
@@ -1648,6 +1706,9 @@ class Table:
             threads: Worker threads for coarsen (default: library decides)
             drop_empty: Drop rows whose geometry is empty after
                 simplification (default: keep and warn)
+            simplify_crs: Project to this CRS for the simplification
+                (tolerance in its units), then back; 'auto-utm' picks the
+                UTM zone from the data
 
         Returns:
             New Table with simplified geometries and refreshed metadata
@@ -1663,6 +1724,7 @@ class Table:
             threads=threads,
             geometry_column=self._geometry_column,
             drop_empty=drop_empty,
+            simplify_crs=simplify_crs,
         )
         return self._wrap(result, self._geometry_column)
 

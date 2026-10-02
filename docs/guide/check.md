@@ -129,10 +129,38 @@ declaration must be true:
   undeclared rather than accepted. Such a covering makes readers prune away rows
   that genuinely match, so it is worse than none at all.
 
-`check spec` runs its four `covering` checks — paths well-formed, column
-present, struct shape, field types — at GeoParquet 1.1 **and** 2.0. They were
-previously gated to 1.1 only, so an identical broken covering failed at 1.1 and
-passed at 2.0.
+`check spec` runs its `covering` checks — the `bbox` member present, paths
+well-formed, column present, struct shape, field types — at GeoParquet 1.1
+**and** 2.0. The last four were previously gated to 1.1 only, so an identical
+broken covering failed at 1.1 and passed at 2.0.
+
+#### A covering with no `bbox` member
+
+The spec defines one covering encoding: "The keys of the 'covering' object MUST
+be a supported encoding. Currently the only supported encoding is 'bbox'". gpio
+records its own spatial-index entries (`h3`, `s2`, `a5`, `quadkey`, `kdtree`)
+*beside* a `bbox` member, which stays valid — but a covering carrying only those
+entries, with no `bbox` member at all, is a file no reader can use:
+`geopandas.read_parquet` indexes `covering["bbox"]` unguarded and raises
+`KeyError: 'bbox'`.
+
+`gpio add h3/s2/a5/quadkey/kdtree` and `gpio partition <index> --keep-*-column`
+wrote that shape over a bbox-less input up to gpio 1.6. They no longer do, but
+the files are published, so both halves of `check` now say so:
+
+- `check spec` **fails** such a file at 1.1+ (`covering_has_bbox_<column>`). It
+  is a failure, not a warning, because the file does not open.
+- `check all --fix` drops the covering, before any other repair, and says it
+  did. The repair patches the footer only — compression codec and level,
+  encodings, bloom filters, row-group boundaries and row order are all kept —
+  and a covering that *does* carry a `bbox` member is never touched, index
+  entries and all. At GeoParquet 1.x the same run then adds a bbox column and a
+  legal covering, as it always has.
+
+So `gpio check spec published.parquet` reports
+`covering_has_bbox_geometry: FAILED` and exits 1, and
+`gpio check all published.parquet --fix` repairs the file in place, keeping a
+`.bak`.
 
 #### Bbox struct field order
 

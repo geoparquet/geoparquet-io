@@ -234,7 +234,7 @@ class TestNonFiniteBounds:
         con = get_duckdb_connection()
         try:
             with caplog.at_level(logging.WARNING):
-                query, _, order_by = _convert_csv_path(
+                query, _, order_by, _geom = _convert_csv_path(
                     con, str(source), None, "geom", None, None, "EPSG:4326", False, False, False
                 )
             assert order_by is None

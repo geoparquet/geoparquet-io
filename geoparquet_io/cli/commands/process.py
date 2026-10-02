@@ -544,6 +544,23 @@ def process_aggregate_admin(
     is_flag=True,
     help="Drop rows whose geometry is empty after simplification (default: keep and warn).",
 )
+@click.option(
+    "--simplify-crs",
+    default=None,
+    help=(
+        "Project to this CRS for the simplification (tolerance in its units, "
+        "e.g. meters for EPSG:32648), then project back. 'auto-utm' picks the "
+        "UTM zone from the data."
+    ),
+)
+@click.option(
+    "--refresh-metrics",
+    is_flag=True,
+    help=(
+        "Recompute vecorel metrics:area/metrics:perimeter columns from the "
+        "simplified geometry (they go stale otherwise)."
+    ),
+)
 @row_group_options
 @compression_options
 @geoparquet_version_option
@@ -561,6 +578,8 @@ def process_simplify(
     threads,
     geometry_column,
     drop_empty,
+    simplify_crs,
+    refresh_metrics,
     row_group_size,
     row_group_size_mb,
     compression,
@@ -599,6 +618,8 @@ def process_simplify(
                 threads=threads,
                 geometry_column=geometry_column,
                 drop_empty=drop_empty,
+                simplify_crs=simplify_crs,
+                refresh_metrics=refresh_metrics,
                 compression=compression.upper(),
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,

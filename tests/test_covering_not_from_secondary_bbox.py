@@ -755,8 +755,13 @@ class TestAddBboxHonoursAnExplicitlyNamedStruct:
         geo = _geo(output_file)
         assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bounds"}
 
-    def test_a_struct_another_column_claims_is_not_treated_as_existing(self, tmp_path):
-        """#1171 still holds: the secondary's envelope is not the primary's to reuse."""
+    def test_a_struct_another_column_claims_is_not_adopted_by_the_primary(self, tmp_path):
+        """#1171 still holds: the secondary's envelope is not the primary's to reuse.
+
+        #1176 moves the computed column aside rather than refusing, so the run
+        succeeds -- but the primary's covering must name the column gpio
+        computed, never the `boundary_bbox` the SECONDARY declares.
+        """
         source = _secondary_bbox_file(tmp_path, "in", declare_boundary_covering=True)
         output_file = tmp_path / "out.parquet"
 
@@ -765,12 +770,20 @@ class TestAddBboxHonoursAnExplicitlyNamedStruct:
             ["add", "bbox", str(source), str(output_file), "--bbox-name", "boundary_bbox"],
         )
 
-        assert result.exit_code != 0, result.output
-        assert "already exists" in result.output
-        assert not output_file.exists()
+        assert result.exit_code == 0, result.output
+        assert "boundary_bbox_1" in result.output
+        geo = _geo(output_file)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"boundary_bbox_1"}
+        # The secondary keeps its own covering, over its own column.
+        assert _covering_columns(geo["columns"]["boundary"]) == {"boundary_bbox"}
+        # The user's column is the input's own data and keeps its values.
+        assert (
+            pq.read_table(str(output_file)).column("boundary_bbox").to_pylist()
+            == pq.read_table(str(source)).column("boundary_bbox").to_pylist()
+        )
 
-    def test_a_same_named_column_that_is_not_a_bbox_struct_is_unchanged(self, tmp_path):
-        """A string column called `bounds` is still just a name collision."""
+    def test_a_same_named_column_that_is_not_a_bbox_struct_is_left_alone(self, tmp_path):
+        """A string column called `bounds` is the input's own data (#1176)."""
         import struct as _struct
 
         geo = {
@@ -792,8 +805,11 @@ class TestAddBboxHonoursAnExplicitlyNamedStruct:
 
         result = self._add(source, output_file)
 
-        assert result.exit_code != 0, result.output
-        assert "already exists" in result.output
+        assert result.exit_code == 0, result.output
+        table = pq.read_table(str(output_file))
+        assert table.column("bounds").to_pylist() == ["tile-1"]
+        geo = _geo(output_file)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bounds_1"}
 
 
 class TestExtractBboxFiltersOnThePrimary:

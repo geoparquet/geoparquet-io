@@ -66,6 +66,13 @@ else in gpio works as before.
 | `--threads N` | auto | coarsen worker threads |
 | `--geometry-column` | auto | Defaults to the file's primary geometry column |
 | `--drop-empty` | off | Drop rows whose geometry is empty after simplification |
+| `--simplify-crs` | — | Project to this CRS for the simplification (tolerance in its units), then back; `auto-utm` picks the UTM zone from the data |
+| `--refresh-metrics` | off | Recompute vecorel `metrics:area`/`metrics:perimeter` from the simplified geometry |
+
+Native **GeoParquet 2.0 inputs** are supported: the geometry arrives as a
+geoarrow WKB extension column, is simplified on its raw WKB, and the write
+preserves the 2.0 declaration (native geometry types and stats) — via the
+in-memory path, since the streaming writer covers plain-WKB 1.x outputs.
 
 ## What happens to the metadata
 
@@ -77,7 +84,12 @@ recomputed rather than carried through stale:
 - a declared **bbox covering column** is recomputed from the simplified
   geometries (float32 covering values are rounded *outward*, so the stored
   box always contains its geometry);
-- CRS, edges and everything else carry through unchanged.
+- CRS, edges and everything else carry through unchanged;
+- columns *derived from* geometry are not touched by default — they would go
+  stale. `--refresh-metrics` recomputes the vecorel
+  `gpio add geometry-metrics` columns from the
+  simplified shapes (Python API users compose:
+  `table.simplify(...)` then `.add_geometry_metrics()`).
 
 Geometries that collapse to empty at the given tolerance are kept (and
 counted in a warning) by default; `--drop-empty` removes those rows instead
@@ -110,6 +122,14 @@ done
 ```
 
 !!! note "Tolerance units"
-    `--tolerance` is in the data's CRS units. Global data in EPSG:4326 means
-    *degrees* — for a metre tolerance, reproject to a metric CRS first
-    (`gpio convert reproject`), simplify there, and reproject back.
+    `--tolerance` is in the data's CRS units, and global data in EPSG:4326
+    means *degrees*. For a metre tolerance pass `--simplify-crs`: the
+    geometries are projected to that CRS (or to the data's own UTM zone
+    with `auto-utm`), simplified there, and projected back — one pass, only
+    the geometry round-trips, attributes and the file's CRS stay untouched.
+
+<!-- doctest: skip="requires the optional simplify extra (coarsen)" -->
+```bash
+# 5 meter tolerance on lon/lat data, per-UTM-zone partitioned
+gpio process simplify zone48.parquet out.parquet --tolerance 5 --simplify-crs auto-utm
+```

@@ -126,6 +126,16 @@ geoparquet_io/
    `geo` key is written at all (`apply_output_kv_metadata`). A new write path
    calls those; it must not re-derive a row-group number, re-implement auto
    version detection, or copy a table's schema metadata through verbatim.
+6. **One memory policy**: `core/memory_limits.py` owns the cgroup-aware memory
+   ceiling and the share of it DuckDB gets (`default_memory_limit`, 50%).
+   `get_duckdb_connection` applies that default to every connection, so work
+   with no statement to wrap is bounded; a statement that is a write wraps
+   itself in `scoped_write_memory_limit` (`pinned=` for settings it must force,
+   such as duckdb-kv's `threads=1`), and an analysis query that materializes
+   client-side opens through `open_bounded_connection`. Precedence: explicit
+   `--write-memory` > a stricter limit the caller set on their connection >
+   gpio's default > DuckDB's own. Never add a second ceiling detector or
+   default (#1156, #1174, #1179).
 
 ### Critical Rules
 

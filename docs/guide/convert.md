@@ -376,7 +376,7 @@ GeoParquet files can have multiple geometry columns (e.g., `geometry` for point 
 
 ### Custom Geometry Column Names
 
-GeoParquet files can use non-standard geometry column names (e.g., `the_geom`, `my_geometry`). These names are preserved during conversion:
+GeoParquet files can use non-standard geometry column names (e.g., `the_geom`, `my_geometry`). The CLI preserves them during conversion:
 
 === "CLI"
 
@@ -386,19 +386,31 @@ GeoParquet files can use non-standard geometry column names (e.g., `the_geom`, `
     gpio convert input.parquet output.parquet
     ```
 
+`gpio.convert()`'s `geometry_column` is a **request for the output name**, not a
+way to point at a source column — the source's geometry column is always
+detected. The returned `Table` carries the name actually used, so read it off
+`table.geometry_column` rather than assuming the request was granted
+([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)):
+
+| Source | `geometry_column='geom'` gives |
+|--------|-------------------------------|
+| CSV, or Parquet with WKT / lat-lon columns | `geom` — the geometry is *built* here, so it can take the name. A column the source carries through that already has that name keeps it, and the built one moves aside to `geom_1` with a warning. |
+| GeoPackage, Shapefile, GeoJSON, FlatGeobuf, FileGDB, GeoParquet | `geometry` — the read aliases `ST_AsWKB(...) AS geometry`, so the request cannot be honoured and the actual name is reported instead. This is also why `gpio.convert()` on a `the_geom` GeoParquet hands back `geometry`, where the CLI above keeps the name. |
+
 === "Python"
 
-    <!-- doctest: skip="names 'the_geom', a geometry column the sample data does not use" -->
+    <!-- doctest: skip="names 'geom', a geometry column the sample data does not use" -->
     ```python
     import geoparquet_io as gpio
 
-    # Input has primary_column: "the_geom"
-    # Output preserves "the_geom" (not renamed to "geometry")
-    gpio.convert('input.parquet').write('output.parquet')
+    # Honoured: the geometry is built from lat/lon, so it can take the name
+    table = gpio.convert('pts.csv', lat_column='lat', lon_column='lon',
+                         geometry_column='geom')
+    table.geometry_column   # 'geom'
 
-    # Custom geometry column names are automatically detected
-    # For files without GeoParquet metadata, specify the column:
-    gpio.convert('input.parquet', geometry_column='the_geom').write('output.parquet')
+    # Not honoured: a GeoPackage's geometry is read, and reports back 'geometry'
+    table = gpio.convert('data.gpkg', geometry_column='geom')
+    table.geometry_column   # 'geometry'
     ```
 
 ### Edges Metadata Preservation

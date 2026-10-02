@@ -30,7 +30,7 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_version_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.duckdb_metadata import get_column_names
+from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata
 from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
     _get_query_column_type,
@@ -50,7 +50,7 @@ from geoparquet_io.core.file_utils import (
     is_partition_path,
     resolve_file_url,
 )
-from geoparquet_io.core.geo_metadata import build_bbox_covering
+from geoparquet_io.core.geo_metadata import build_bbox_covering, geoarrow_primary_encoding
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -361,7 +361,23 @@ def resolve_geoparquet_version_from_file(parquet_file: str, verbose: bool = Fals
         "parquet_geo_only": "parquet-geo-only",
         "geoparquet_v1": "1.1",
     }.get(info.get("file_type"))
+    if detected == "1.1" and _declares_geoarrow_encoding(parquet_file):
+        # A GeoArrow-native 1.1 file declares version 1.1.0 just as a WKB one
+        # does, so "1.1" is the version but not the *encoding*: writing it meant
+        # passing the nested-list geometry through under `encoding: WKB`, a block
+        # contradicting the schema beside it (#1176). "1.1-geoarrow" is the one
+        # version that preserves what the input actually is.
+        return "1.1-geoarrow"
     return _resolve_auto_version(detected)
+
+
+def _declares_geoarrow_encoding(parquet_file: str) -> bool:
+    """Whether the file's ``geo`` block declares native GeoArrow for its primary column."""
+    try:
+        return geoarrow_primary_encoding(get_geo_metadata(parquet_file)) is not None
+    except Exception as e:  # unreadable footer: the version decision stands as made
+        debug(f"GeoArrow encoding check failed for {parquet_file}: {e}")
+        return False
 
 
 def resolve_geoparquet_version_from_table(table, verbose: bool = False) -> str | None:

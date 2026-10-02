@@ -82,6 +82,13 @@ def contour_array(
     for name, value in (("min_column", min_column), ("max_column", max_column)):
         if value == "geometry":
             raise InvalidParameterError(name, "collides with the output's geometry column name")
+    if max_column == "value" and min_column != "value":
+        # contourrs' own output column is named 'value'; appending the max
+        # column under that name would make the rename below hit both and
+        # write two identically named columns.
+        raise InvalidParameterError(
+            "max_column", "collides with the contour band's own 'value' column"
+        )
     levels = resolve_levels(levels, None, 0.0, 0.0, 0.0)  # validates shape
     contourrs = require_contourrs()
     table = contourrs.contours_arrow(

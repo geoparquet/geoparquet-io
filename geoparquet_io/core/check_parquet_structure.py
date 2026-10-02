@@ -7,9 +7,14 @@ from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import get_compression_info as duckdb_get_compression_info
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_row_group_stats_summary
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
-from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT, carried_version, covering_supported
+from geoparquet_io.core.geo_metadata import (
+    BBOX_REWRITE_HINT,
+    bboxless_covering_columns,
+    carried_version,
+    covering_supported,
+)
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
-from geoparquet_io.core.logging_config import error, info, progress, success, warn
+from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from geoparquet_io.core.sizing import format_size
@@ -539,10 +544,23 @@ def _check_geoparquet_v2(parquet_file, file_type_info, verbose, return_results, 
         }
 
 
-def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, quiet=False):
+def _geo_block(parquet_file, geo_meta):
+    """The file's ``geo`` block: the caller's, when it already read it.
+
+    ``check all`` runs several checks over one file and two of them want the
+    same block, so it reads once and hands the answer down. A file with no
+    ``geo`` key reads as None either way, which is why None can double as "not
+    supplied" without changing any verdict.
+    """
+    return get_geo_metadata(parquet_file) if geo_meta is None else geo_meta
+
+
+def _check_geoparquet_v1(
+    parquet_file, file_type_info, verbose, return_results, quiet=False, geo_meta=None
+):
     """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
 
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = _geo_block(parquet_file, geo_meta)
     # `get_geo_metadata` is a read-only reader: it hands the block back exactly
     # as the file holds it, so a block that is not a JSON object arrives here
     # verbatim and used to crash with `'list' object has no attribute 'get'`
@@ -686,7 +704,9 @@ def _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, 
         }
 
 
-def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False, quiet=False):
+def check_metadata_and_bbox(
+    parquet_file, verbose=False, return_results=False, quiet=False, geo_meta=None
+):
     """Check GeoParquet metadata version and bbox structure (version-aware).
 
     Handles three file types differently:
@@ -699,6 +719,8 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False, q
         verbose: Print additional information
         return_results: If True, return structured results dict
         quiet: If True, suppress all output (for multi-file batch mode)
+        geo_meta: The file's parsed ``geo`` block, when the caller already read
+            it; read here when not supplied (see :func:`_geo_block`)
 
     Returns:
         dict if return_results=True, containing:
@@ -726,7 +748,9 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False, q
 
     # Handle GeoParquet 1.x case
     if file_type_info["file_type"] == "geoparquet_v1":
-        return _check_geoparquet_v1(parquet_file, file_type_info, verbose, return_results, quiet)
+        return _check_geoparquet_v1(
+            parquet_file, file_type_info, verbose, return_results, quiet, geo_meta=geo_meta
+        )
 
     # Unknown file type - no geo indicators found
     if not quiet:
@@ -739,6 +763,63 @@ def check_metadata_and_bbox(parquet_file, verbose=False, return_results=False, q
             "issues": ["No GeoParquet metadata or native Parquet geo types found"],
             "recommendations": [],
             "fix_available": False,
+        }
+
+
+def check_covering_encoding(
+    parquet_file, verbose=False, return_results=False, quiet=False, geo_meta=None
+):
+    """A declared ``covering`` must carry the ``bbox`` encoding, the only one defined.
+
+    Separate from :func:`check_metadata_and_bbox` because it is not a question
+    about the bbox *column*: the broken files (#954, written by gpio 1.6 and
+    earlier) carry a ``covering`` whose only members are gpio's own index
+    entries, and most of them have no bbox column at all. ``check bbox --fix``
+    adds or removes a column; the repair here is the metadata-only
+    :func:`geoparquet_io.core.check_fixes.fix_bboxless_covering`, so the two
+    verdicts stay separate rather than one answering for the other.
+
+    Version-agnostic, like the write gate it mirrors: ``covering`` is a 1.1 key,
+    and a file at any version is better off without one no reader can use.
+    ``check spec`` is the gated half -- it judges coverings at 1.1+ only.
+
+    Args:
+        parquet_file: Path to parquet file
+        verbose: Print additional information
+        return_results: If True, return structured results dict
+        quiet: If True, suppress all output (for multi-file batch mode)
+        geo_meta: The file's parsed ``geo`` block, when the caller already read
+            it; read here when not supplied (see :func:`_geo_block`)
+
+    Returns:
+        dict if return_results=True, with ``passed``, ``issues``,
+        ``recommendations``, ``bboxless_covering_columns`` and ``fix_available``
+    """
+    columns = bboxless_covering_columns(_geo_block(parquet_file, geo_meta))
+
+    issues = []
+    recommendations = []
+    if columns:
+        named = ", ".join(f"'{column}'" for column in columns)
+        issues.append(
+            f"Covering on {named} has no 'bbox' member, the only encoding the spec defines"
+        )
+        recommendations.append("Drop the unusable covering: gpio check all --fix")
+        if not quiet:
+            error(
+                f"\n❌ Covering on {named} declares no 'bbox' — readers that use the covering "
+                "(geopandas among them) cannot open this file at all"
+            )
+    elif verbose and not quiet:
+        debug("Covering encoding: nothing declared that a reader cannot use")
+
+    if return_results:
+        return {
+            "passed": not columns,
+            "issues": issues,
+            "recommendations": recommendations,
+            "bboxless_covering_columns": columns,
+            "fix_available": bool(columns),
         }
 
 
@@ -917,7 +998,17 @@ def check_all(
     row_groups_result = check_row_groups(
         parquet_file, verbose, return_results=True, quiet=quiet, profile=profile
     )
-    bbox_result = check_metadata_and_bbox(parquet_file, verbose, return_results=True, quiet=quiet)
+    # Read once, judge twice: both checks below ask the same file for the same
+    # `geo` block. Not cached on `get_geo_metadata` itself -- `check all --fix`
+    # rewrites files in place, so a path-keyed cache would answer from the
+    # version before the repair.
+    geo_meta = get_geo_metadata(parquet_file)
+    bbox_result = check_metadata_and_bbox(
+        parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
+    )
+    covering_result = check_covering_encoding(
+        parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
+    )
     compression_result = check_compression(parquet_file, verbose, return_results=True, quiet=quiet)
     bloom_filter_result = check_bloom_filters(
         parquet_file, verbose, return_results=True, quiet=quiet
@@ -927,6 +1018,7 @@ def check_all(
         return {
             "row_groups": row_groups_result,
             "bbox": bbox_result,
+            "covering": covering_result,
             "compression": compression_result,
             "bloom_filters": bloom_filter_result,
         }

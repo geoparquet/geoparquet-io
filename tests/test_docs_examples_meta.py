@@ -43,15 +43,17 @@ DOCS_ROOT = GUIDE_DIR.parent
 #: environment). The headroom keeps ordinary doc edits from tripping them while
 #: still catching a drift of any size; moving either number is a deliberate act
 #: that shows up in a diff and needs a justification in the pull request.
-# 243 -> 248: merging main (new convert/extract guide examples,
+# 243 -> 244: the --simplify-crs guide example (#1197) needs the optional
+# simplify extra AND an unseeded per-UTM-zone input file, so it cannot run.
+# 244 -> 249: merging main (new convert/extract guide examples,
 # #1189/#1182) makes both sides' skipped blocks count together with the new
 # process-simplify/raster guide pages; neither side alone passed its ceiling.
-# 248 -> 250: the `add bbox-metadata --bbox-name` pair in add.md. Its whole
+# 249 -> 251: the `add bbox-metadata --bbox-name` pair in add.md. Its whole
 # premise is a bbox struct ANOTHER tool wrote under a name gpio will not vouch
 # for, so the input cannot be seeded with gpio commands: every gpio write that
 # produces such a column also declares it, which is the case the example is not
 # about. Same reason as the `file_with_bbox.parquet` block above it.
-MAX_SKIPPED_BLOCKS = 250
+MAX_SKIPPED_BLOCKS = 251
 MIN_EXECUTED_BLOCKS = 217
 
 #: Looks like a command rather than prose or sample output.

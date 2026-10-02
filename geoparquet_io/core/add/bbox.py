@@ -6,14 +6,19 @@ import json
 
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import bbox_shaped_struct_columns, check_bbox_structure
+from geoparquet_io.core.bbox_structure import (
+    bbox_shaped_struct_columns,
+    check_bbox_structure,
+    resolve_bbox_name,
+)
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
+from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
     _bbox_claimed_by_another_column,
+    bbox_struct_child_names_match,
     build_bbox_covering,
     covering_supported,
 )
@@ -108,15 +113,17 @@ def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
     Mirrors what :func:`check_bbox_structure` decides for files, but from a live
     DuckDB relation, so the streaming path can take the same "already has a bbox"
     decision as the file-based one.
+
+    Reads the relation's Arrow schema (zero rows) rather than DuckDB's rendered
+    type string: that string was upper-cased and substring-tested, so a ``bbox``
+    struct spelled ``XMIN/YMIN/XMAX/YMAX`` -- the user's own data, which no
+    ``covering`` may point at -- passed as gpio's own and the stream wrote
+    nothing at all (#1176).
     """
-    for name, col_type, *_ in con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall():
-        if name != bbox_column_name:
-            continue
-        upper = col_type.upper()
-        return upper.startswith("STRUCT") and all(
-            field in upper for field in ("XMIN", "YMIN", "XMAX", "YMAX")
-        )
-    return False
+    schema = con.execute(f"SELECT * FROM {source} LIMIT 0").arrow().read_all().schema
+    if bbox_column_name not in schema.names:
+        return False
+    return _is_bbox_struct_field(schema.field(bbox_column_name))
 
 
 def add_bbox_table(
@@ -142,11 +149,7 @@ def add_bbox_table(
     if not geom_col:
         geom_col = "geometry"
 
-    # Check if bbox column already exists
-    if bbox_column_name in table.column_names:
-        # Drop existing column (replace behavior)
-        idx = table.column_names.index(bbox_column_name)
-        table = table.remove_column(idx)
+    table, bbox_column_name = _prepare_table_bbox_column(table, bbox_column_name)
 
     # Register table and execute query
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
@@ -211,6 +214,37 @@ def add_bbox_table(
         return result
     finally:
         con.close()
+
+
+def _is_bbox_struct_field(field) -> bool:
+    """Whether an Arrow field is a bbox covering struct rather than a column of that name.
+
+    Child names are matched as spelled, which is what the file-based detector
+    (``bbox_structure``) does: a ``bbox`` struct whose children are
+    ``XMIN/YMIN/XMAX/YMAX`` is the user's own data -- the folded-case test read
+    it as gpio's own and *destroyed* it (#1176).
+    """
+    if not pa.types.is_struct(field.type):
+        return False
+    return bbox_struct_child_names_match({child.name for child in field.type})
+
+
+def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[pa.Table, str]:
+    """``(table, name)``: drop the bbox struct being replaced, or move aside.
+
+    A column of the requested name that really is a bbox struct is the column
+    this call recomputes, so it goes -- the documented replace behaviour. One
+    that is *not* a bbox struct is the user's own data (a label, a tile id), and
+    replacing it silently is what #1176 reports: the computed column takes a free
+    name instead, the same answer ``gpio convert`` and ``gpio add bbox`` give.
+    Resolution is case-insensitive because the computed column is aliased in SQL,
+    where ``BBOX`` and ``bbox`` are one name.
+    """
+    if bbox_column_name in table.column_names and _is_bbox_struct_field(
+        table.schema.field(bbox_column_name)
+    ):
+        return table.remove_column(table.column_names.index(bbox_column_name)), bbox_column_name
+    return table, resolve_bbox_name(table.column_names, None, requested=bbox_column_name)
 
 
 def _declare_computed_bbox(metadata, geometry_column: str, bbox_column_name: str):
@@ -466,8 +500,8 @@ def _add_bbox_streaming(
     # rather than through execute_transform, which fixes both before the query is
     # built. (add_bbox's query builder takes no source CRS, so nothing is lost.)
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
-        query, passed_through = _make_streaming_bbox_query(
-            source, con, bbox_column_name, force=force
+        query, passed_through, bbox_column_name = _make_streaming_bbox_query(
+            source, con, bbox_column_name, force=force, geoparquet_version=geoparquet_version
         )
 
         write_output(
@@ -505,24 +539,28 @@ def _add_bbox_streaming(
 
 
 def _make_streaming_bbox_query(
-    source: str, con, bbox_column_name: str, force: bool
-) -> tuple[str, bool]:
+    source: str, con, bbox_column_name: str, force: bool, geoparquet_version: str | None = None
+) -> tuple[str, bool, str]:
     """Build the add-bbox query for a streaming source.
 
-    Returns ``(query, passed_through)``. ``passed_through`` means the source
-    already carries a usable bbox struct, so the query is a plain copy and the
-    caller must not claim anything about a column gpio did not compute.
+    Returns ``(query, passed_through, bbox_column_name)``. ``passed_through``
+    means the source already carries a usable bbox struct, so the query is a
+    plain copy and the caller must not claim anything about a column gpio did not
+    compute. The name comes back because a source column of the requested name
+    that is *not* a bbox struct moves the computed one aside (#1176), and the
+    caller declares the covering over the name actually written.
     """
     # Same guard as the file-based path (#728): a source that already carries a
     # bbox struct is passed through untouched rather than silently gaining a
     # second column named 'bbox_1'.
-    if not force and _has_bbox_struct_column(con, source, bbox_column_name):
+    has_bbox_struct = _has_bbox_struct_column(con, source, bbox_column_name)
+    if not force and has_bbox_struct:
         progress(
             f"Input already has bbox column '{bbox_column_name}'; "
             "passed it through unchanged - the existing bbox column was not recomputed."
         )
         progress("Use --force to recompute and replace the existing bbox column.")
-        return f"SELECT * FROM {source}", True
+        return f"SELECT * FROM {source}", True, bbox_column_name
 
     # Get column names from query result (works with both table names and read_parquet)
     sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
@@ -537,9 +575,16 @@ def _make_streaming_bbox_query(
     if not geom_col:
         geom_col = "geometry"
 
+    # --force over a real bbox struct replaces it in place; anything else of that
+    # name is the user's own column and the computed one moves aside instead.
+    if not has_bbox_struct:
+        bbox_column_name = resolve_bbox_name(
+            col_names, geoparquet_version, requested=bbox_column_name
+        )
     return (
-        _make_add_bbox_query(source, geom_col, bbox_column_name, replace_existing=force),
+        _make_add_bbox_query(source, geom_col, bbox_column_name, replace_existing=has_bbox_struct),
         False,
+        bbox_column_name,
     )
 
 
@@ -594,6 +639,16 @@ def _add_bbox_file_based(
     )
     if done:
         return
+
+    # Not replacing a bbox column the input already has, so the computed one has
+    # to find a free name: a column of that name which `check_bbox_structure`
+    # rejected (a string tile id, a label) is the user's own data. Without this
+    # `add_computed_column` refused the whole run, while `gpio convert` on the
+    # same file wrote `bbox_1` (#1176).
+    if replace_column is None:
+        bbox_column_name = resolve_bbox_name(
+            get_column_names(input_parquet), geoparquet_version, requested=bbox_column_name
+        )
 
     # A column is being computed. Say which bbox-shaped structs it will sit
     # beside, undeclared, so the duplication is visible rather than silent.

@@ -28,6 +28,7 @@ from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, progress, success, warn
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.common import raise_if_no_rows, sanitize_filename
 from geoparquet_io.core.partition.staging import (
@@ -359,8 +360,18 @@ def _perform_enrichment_join(
     input_geom_col,
     input_bbox_col,
     source_crs=None,
+    memory_limit=None,
+    verbose=False,
 ):
-    """Perform spatial join enrichment."""
+    """Perform spatial join enrichment.
+
+    The join materializes the whole input into a temp table, so it is the
+    largest piece of DuckDB work in the command -- bigger than the split that
+    follows it. It runs under the same memory policy as every gpio write
+    (``--write-memory`` when given, else the ceiling-based default): left
+    unbounded it sized itself for the host and was measured at 14.3 GiB on 12
+    threads while ``--write-memory 700MB`` was in force (#1174).
+    """
     enrichment_query = _build_enrichment_query(
         input_path,
         admin_table_ref,
@@ -374,7 +385,8 @@ def _perform_enrichment_join(
         enriched_table,
         source_crs=source_crs,
     )
-    con.execute(enrichment_query)
+    with scoped_write_memory_limit(con, memory_limit, verbose):
+        con.execute(enrichment_query)
 
 
 def _perform_per_level_enrichment_join(
@@ -391,6 +403,7 @@ def _perform_per_level_enrichment_join(
     vecorel,
     verbose,
     source_crs=None,
+    memory_limit=None,
 ):
     """Enrich by chaining one LEFT JOIN per level against its own land cache.
 
@@ -403,6 +416,8 @@ def _perform_per_level_enrichment_join(
     ≈ the input and bounds memory. Each level reads the previous level's temp
     table so a feature carries all admin columns forward; the final join
     produces ``enriched_table``.
+
+    Every level's join is bounded like the single-source one above (#1174).
 
     Returns the list of output admin column names.
     """
@@ -432,22 +447,22 @@ def _perform_per_level_enrichment_join(
         if verbose:
             debug(f"  → Level {i + 1}/{len(levels)}: joining {level} from {level_source}")
 
-        con.execute(
-            _build_enrichment_query(
-                current_source,
-                admin_table_ref,
-                admin_where_clause,
-                select_clause,
-                admin_geom_col,
-                admin_bbox_col,
-                [col],
-                input_geom_col,
-                input_bbox_col,
-                target,
-                input_is_table_ref=current_is_table_ref,
-                source_crs=source_crs,
-            )
+        level_query = _build_enrichment_query(
+            current_source,
+            admin_table_ref,
+            admin_where_clause,
+            select_clause,
+            admin_geom_col,
+            admin_bbox_col,
+            [col],
+            input_geom_col,
+            input_bbox_col,
+            target,
+            input_is_table_ref=current_is_table_ref,
+            source_crs=source_crs,
         )
+        with scoped_write_memory_limit(con, memory_limit, verbose):
+            con.execute(level_query)
         if not is_last:
             intermediate_tables.append(target)
         current_source = target
@@ -788,6 +803,7 @@ def partition_by_admin_hierarchical(
                     vecorel,
                     verbose,
                     source_crs=source_crs,
+                    memory_limit=memory_limit,
                 )
             else:
                 admin_source = dataset.prepare_data_source(con)
@@ -819,6 +835,8 @@ def partition_by_admin_hierarchical(
                     input_geom_col,
                     input_bbox_col,
                     source_crs=source_crs,
+                    memory_limit=memory_limit,
+                    verbose=verbose,
                 )
 
             # Verify enrichment results

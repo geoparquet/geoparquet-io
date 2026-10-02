@@ -55,6 +55,43 @@ GEOPARQUET_VERSIONS = {
 
 DEFAULT_GEOPARQUET_VERSION = "1.1"
 
+#: The spec's single-geometry-type GeoArrow encodings. GeoParquet 1.1 permits
+#: these alongside "WKB" ("Supported values: "WKB"; one of "point",
+#: "linestring", "polygon", "multipoint", "multilinestring", "multipolygon"");
+#: 1.0 and the 2.0 draft are both WKB-only. The spec spells them lowercase and,
+#: unlike "WKB"/"wkb", there is no established lenient casing to honour.
+GEOARROW_ENCODINGS = (
+    "point",
+    "linestring",
+    "polygon",
+    "multipoint",
+    "multilinestring",
+    "multipolygon",
+)
+
+
+def geoarrow_primary_encoding(geo_meta) -> str | None:
+    """The GeoArrow encoding a block declares for its primary column, if any.
+
+    None for a WKB (or unreadable, or absent) block. What it answers is "is this
+    file's geometry *natively* encoded", which the version alone cannot say: a
+    native file declares version 1.1.0 exactly as a WKB one does, so auto mode
+    resolved it to plain "1.1" and the write relabelled nested-list geometry as
+    ``encoding: WKB`` -- metadata contradicting the schema beside it (#1176).
+    """
+    if not isinstance(geo_meta, dict):
+        return None
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return None
+    primary = geo_meta.get("primary_column")
+    entry = columns.get(primary) if isinstance(primary, str) else None
+    if not isinstance(entry, dict):
+        return None
+    encoding = entry.get("encoding")
+    return encoding if encoding in GEOARROW_ENCODINGS else None
+
+
 # =============================================================================
 # Levelled overview files (tylertoo OVERVIEWS_SPEC)
 # =============================================================================
@@ -659,6 +696,41 @@ def _strip_covering_where(geo_meta: dict, drop, reason: str, verbose: bool) -> d
     return result
 
 
+def covering_lacks_bbox(col_meta: object) -> bool:
+    """Is this column's ``covering`` an object with no ``bbox`` member?
+
+    The one definition of the illegal shape, shared by the write gate
+    (:func:`strip_bboxless_covering`), the read-side verdict
+    (``validate._check_covering_has_bbox``) and the ``check --fix`` repair, so
+    what gpio refuses to write, what it fails, and what it drops cannot drift
+    apart (#954, #1173).
+
+    A ``covering`` that is not an object at all is somebody else's verdict
+    (``covering_is_object``) and not this one: a string satisfies
+    ``"bbox" in covering`` character-wise, so judging it here would report the
+    wrong defect (#1062).
+    """
+    if not isinstance(col_meta, dict):
+        return False
+    covering = col_meta.get("covering")
+    return isinstance(covering, dict) and "bbox" not in covering
+
+
+def bboxless_covering_columns(geo_meta: object) -> list[str]:
+    """Names of the columns whose ``covering`` carries no ``bbox`` member.
+
+    Reads a block exactly as a file holds it: a ``geo`` key or a ``columns``
+    value that is not an object declares no columns, so it declares no illegal
+    covering either.
+    """
+    if not isinstance(geo_meta, dict):
+        return []
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return []
+    return [str(name) for name, col_meta in columns.items() if covering_lacks_bbox(col_meta)]
+
+
 def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     """Return ``geo_meta`` without any ``covering`` that has no ``bbox`` member.
 
@@ -679,13 +751,9 @@ def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     across many writes.
     """
 
-    def _bboxless(col_meta: dict) -> bool:
-        covering = col_meta.get("covering")
-        return isinstance(covering, dict) and "bbox" not in covering
-
     return _strip_covering_where(
         geo_meta,
-        _bboxless,
+        covering_lacks_bbox,
         "covering metadata with no bbox member (spec allows only the bbox encoding)",
         verbose,
     )
@@ -1328,6 +1396,22 @@ BBOX_REWRITE_HINT = "Rewrite it in the spec's order: gpio add bbox --force IN.pa
 def bbox_field_order_is_covering_legal(field_names: Sequence[str]) -> bool:
     """Whether a bbox struct's field names, in this order, may carry a covering."""
     return tuple(field_names) in BBOX_COVERING_FIELD_ORDERS
+
+
+def bbox_struct_child_names_match(names: Collection[str]) -> bool:
+    """Whether a struct's children, **as spelled**, are a bbox column's four corners.
+
+    The one predicate every "is this really a bbox column?" detector shares, so
+    the answer cannot differ between the file path, the Arrow path and the
+    streaming one (#1176). Case-sensitive on purpose: Parquet child names are
+    matched as spelled, and no 1.1 ``covering`` may point at ``XMIN, YMIN, XMAX,
+    YMAX`` (see :func:`bbox_covering_problem`). A struct spelled that way is
+    therefore the user's own data -- a computed bbox moves aside rather than
+    replacing it. Order is not checked here: ``add bbox --force`` must still
+    replace an Overture-order ``xmin, xmax, ymin, ymax`` column in place, which
+    is the repair :data:`BBOX_REWRITE_HINT` points at.
+    """
+    return _BBOX_STRUCT_FIELDS <= set(names)
 
 
 def bbox_covering_problem(
