@@ -573,7 +573,9 @@ def _apply_column_exclusions(
         The table without the excluded columns.
 
     Raises:
-        InvalidParameterError: If a name is absent from the fetched table.
+        InvalidParameterError: If a name is absent from the fetched table, or if
+            the exclusion would leave no columns at all -- the tabular path used
+            to write a 0-column file silently (#1176).
     """
     exclude_list = resolve_columns_against_schema(
         exclude_list, table.column_names, "--exclude-cols"
@@ -585,7 +587,17 @@ def _apply_column_exclusions(
         return table
 
     exclude_set = set(exclude_list)
-    table = table.select([col for col in table.column_names if col not in exclude_set])
+    keep = [col for col in table.column_names if col not in exclude_set]
+    if not keep:
+        # A 0-column file was written without a word (#1176). The request is a
+        # typo, and the only useful answer is to name it -- the same refusal
+        # `extract arcgis` and `build_column_selection` make.
+        raise InvalidParameterError(
+            "--exclude-cols",
+            f"excluding {', '.join(sorted(exclude_set))} would leave no columns at all "
+            f"(the fetched table has: {', '.join(table.column_names)})",
+        )
+    table = table.select(keep)
     debug(f"Excluded columns: {exclude_set}")
     return table
 

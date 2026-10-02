@@ -2070,6 +2070,12 @@ including the column you asked to drop ([#1176](https://github.com/geoparquet/ge
 The layer's advertised fields are enough to see it, so the refusal comes before
 any feature is downloaded.
 
+Every other extract path refuses the same selection, and names the columns that
+are available. `gpio extract geoparquet` (file or stream) and `ops.extract()`
+used to hand the empty selection to DuckDB and come back with
+`Parser Error: SELECT clause without selection list`; `carto`'s tabular path
+wrote a file with no columns at all and said nothing.
+
 `--exclude-cols` names columns of the table you get back, not of the source. On
 `carto` it is therefore checked against that table once it is fetched, so the
 name to use is `geometry` — the post-fetch name of the geometry column — and not
