@@ -16,6 +16,11 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 
 STRATEGIES = ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"]
 
+#: The other formats ``write()`` dispatches to. The GDAL writers re-detect the
+#: geometry themselves, so they ignored the stale name entirely while
+#: ``.parquet`` raised -- the per-path inconsistency the guard exists to remove.
+OTHER_FORMATS = ["gpkg", "geojson", "fgb", "csv", "shp"]
+
 
 class TestMissingGeometryColumnIsRefused:
     @pytest.mark.parametrize("strategy", STRATEGIES)
@@ -47,6 +52,18 @@ class TestMissingGeometryColumnIsRefused:
         with pytest.raises(InvalidParameterError):
             table.write(tmp_path / "out.parquet")
 
+    @pytest.mark.parametrize("extension", OTHER_FORMATS)
+    def test_every_other_format_raises_too(self, extension, buildings_test_file, tmp_path):
+        """The guard sat below the format dispatch, so only ``.parquet`` refused."""
+        output = tmp_path / f"out.{extension}"
+        table = Table(pq.read_table(buildings_test_file), geometry_column="geom")
+
+        with pytest.raises(InvalidParameterError) as excinfo:
+            table.write(output)
+
+        assert "geom" in str(excinfo.value)
+        assert not output.exists()
+
 
 class TestValidNamesStillWrite:
     @pytest.mark.parametrize("strategy", STRATEGIES)
@@ -57,6 +74,14 @@ class TestValidNamesStillWrite:
         table.write(output, write_strategy=strategy)
 
         assert pq.read_table(str(output)).num_rows > 0
+
+    def test_the_correct_name_still_writes_another_format(self, buildings_test_file, tmp_path):
+        output = tmp_path / "out.gpkg"
+        table = Table(pq.read_table(buildings_test_file), geometry_column="geometry")
+
+        table.write(output)
+
+        assert output.exists()
 
     def test_a_table_with_no_geometry_at_all_still_writes(self, tmp_path):
         """No geometry column is not a wrong geometry column: plain Parquet is fine."""

@@ -1228,10 +1228,11 @@ class Table:
 
         Raises:
             InvalidParameterError: If this table's geometry column name is not a
-                column of the table -- a stale or mistyped name. Every write
-                strategy refuses it the same way, rather than one crashing, one
-                writing a `geo` block naming a column the file does not have and
-                one silently writing plain Parquet (#1176).
+                column of the table -- a stale or mistyped name. Every output
+                format and every write strategy refuses it the same way, rather
+                than one crashing, one writing a `geo` block naming a column the
+                file does not have, one silently writing plain Parquet and the
+                GDAL formats ignoring the name altogether (#1176).
 
         Examples:
             >>> table.write('output.parquet')              # GeoParquet (auto-detect)
@@ -1240,6 +1241,12 @@ class Table:
             >>> table.write('s3://bucket/output.fgb')      # FlatGeobuf to S3
             >>> table.write('output.dat', format='csv')    # Explicit format
         """
+
+        # Above the format dispatch, so every format refuses a stale geometry
+        # name alike. Below it, only `.parquet` did: the GDAL writers re-detect
+        # the geometry themselves, so `.gpkg`/`.geojson`/`.fgb`/`.csv` ignored the
+        # typo and wrote a file (#1176).
+        self._require_geometry_column_present()
 
         # Detect format from extension if not explicitly provided
         # Normalize to lowercase for case-insensitive comparison
@@ -1304,6 +1311,11 @@ class Table:
         parameter unrelated to it. The check is here, above the dispatch, so all
         four agree, and it names the columns the table does have because the
         cause is almost always a stale or mistyped name.
+
+        Called from :meth:`write` above the format dispatch -- the GDAL writers
+        re-detect the geometry themselves, so they ignored the stale name while
+        ``.parquet`` raised (#1176) -- and again from :meth:`_write_geoparquet`,
+        which the prospective-check path calls without going through ``write``.
 
         ``None`` is not a wrong name: a table with no geometry writes plain
         Parquet deliberately.
