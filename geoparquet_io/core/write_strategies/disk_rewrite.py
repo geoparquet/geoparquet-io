@@ -22,6 +22,8 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.arrow_geo_metadata import (
     _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
     _detect_version_from_table,
+    _parse_geo_metadata_quietly,
+    table_geometry_info,
 )
 from geoparquet_io.core.common import compute_geometry_types_via_sql
 from geoparquet_io.core.compression import validate_compression_settings
@@ -354,6 +356,13 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 verbose=verbose,
                 custom_metadata=custom_metadata,
                 extra_kv_metadata=extra_kv_metadata,
+                # This entry point gets no `geometry_info`, so the table's own
+                # schema is what names a block-less table's secondaries (#1175).
+                geometry_info=table_geometry_info(
+                    table,
+                    geometry_column,
+                    _parse_geo_metadata_quietly(table.schema.metadata),
+                ),
             )
         finally:
             con.close()

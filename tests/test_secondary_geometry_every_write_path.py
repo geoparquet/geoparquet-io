@@ -340,3 +340,45 @@ class TestTheTwoPointZeroFastPath:
         assert "centroid" in geo["columns"], "the fast path leaves the secondary undescribed"
         assert geo["columns"]["centroid"]["crs"]["id"] == EPSG_3857
 
+
+# ---------------------------------------------------------------------------
+# The Table API: no query, no input file -- the table's own schema
+# ---------------------------------------------------------------------------
+
+
+class TestTheTableApi:
+    @pytest.mark.parametrize("version", [None, "1.1", "2.0"])
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+    def test_read_then_write_describes_the_native_secondary(
+        self, native_pair, tmp_path, version, strategy
+    ):
+        """``gpio.read(f).write(out)`` derived nothing: the table carries no ``geo`` key."""
+        import geoparquet_io as gpio
+        from tests.native_geo_probes import logical_geo_types
+
+        output = tmp_path / "out.parquet"
+
+        gpio.read(str(native_pair)).write(
+            output, geoparquet_version=version, write_strategy=strategy
+        )
+
+        columns = _geo(output)["columns"]
+        assert "centroid" in columns, "the Table API leaves the secondary undescribed"
+        assert columns["centroid"]["crs"]["id"] == EPSG_3857
+        assert isinstance(columns["centroid"]["geometry_types"], list)
+        if version == "1.1":
+            assert "centroid" not in logical_geo_types(output), (
+                "a 1.1 file must not carry a native Parquet geo type"
+            )
+
+    def test_the_tables_schema_names_its_secondaries(self, native_pair):
+        import pyarrow.parquet as pq_
+
+        from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
+
+        info = table_geometry_info(pq_.read_table(str(native_pair)), "geometry")
+
+        assert info is not None
+        assert info["secondary"] == ["centroid"]
+        assert info["metadata"]["centroid"]["crs"]["id"] == EPSG_3857
+        assert info["metadata"]["centroid"]["geometry_types"] == []
