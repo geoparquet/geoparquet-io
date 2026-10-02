@@ -57,6 +57,17 @@ def strip_stale_geometry_stats(geo_meta: dict, geometry_column: str) -> dict:
     return geo_meta
 
 
+def _is_wkb_extension(col_type) -> bool:
+    """A geoarrow.wkb extension column — what a native GeoParquet 2.0 file's
+    geometry reads back as when geoarrow is registered (#1198). Its storage
+    is plain WKB bytes."""
+    return (
+        isinstance(col_type, pa.ExtensionType)
+        and getattr(col_type, "extension_name", "") == "geoarrow.wkb"
+        and col_type.storage_type in (pa.binary(), pa.large_binary())
+    )
+
+
 def _geometry_column_of(table: pa.Table, override: str | None) -> str:
     """Resolve the geometry column: override, carried primary, or 'geometry'."""
     name = override
@@ -68,12 +79,32 @@ def _geometry_column_of(table: pa.Table, override: str | None) -> str:
             "geometry_column", f"geometry column '{name}' not found in table"
         )
     col_type = table.schema.field(name).type
-    if col_type not in (pa.binary(), pa.large_binary()):
+    if col_type not in (pa.binary(), pa.large_binary()) and not _is_wkb_extension(col_type):
         raise InvalidParameterError(
             "geometry_column",
             f"column '{name}' is {col_type}, not a WKB binary column",
         )
     return name
+
+
+def _with_wkb_storage(table: pa.Table, geom_col: str) -> pa.Table:
+    """Unwrap a geoarrow.wkb extension column to its plain-WKB storage.
+
+    The simplification works on raw WKB; the output's native 2.0 shape is
+    the write funnel's job (auto version resolution preserves the carried
+    2.0 declaration and converts the column back on write).
+    """
+    column = table.column(geom_col)
+    if not _is_wkb_extension(column.type):
+        return table
+    storage = pa.chunked_array(
+        [chunk.storage for chunk in column.chunks], type=column.type.storage_type
+    )
+    return table.set_column(
+        table.column_names.index(geom_col),
+        pa.field(geom_col, column.type.storage_type, nullable=True),
+        storage,
+    )
 
 
 def _simplify_values(
@@ -212,6 +243,7 @@ def simplify_table(
     if tolerance < 0:
         raise InvalidParameterError("tolerance", "must be >= 0")
     geom_col = _geometry_column_of(table, geometry_column)
+    table = _with_wkb_storage(table, geom_col)
     column = table.column(geom_col)
 
     def run(values: list) -> tuple[list, int, list]:

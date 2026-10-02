@@ -612,6 +612,51 @@ class TestDropEmpty:
         assert pq.ParquetFile(str(out)).metadata.num_rows == 1
 
 
+@requires_coarsen
+class TestNative20Input:
+    """#1198: native GeoParquet 2.0 inputs read back as geoarrow.wkb
+    extension columns; simplify must accept them and write 2.0 back."""
+
+    def _v2_file(self, tmp_path):
+        shapely = _shapely()
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        circle = shapely.Point(10, 20).buffer(1, quad_segs=64)
+        src = tmp_path / "v2.parquet"
+        write_geoparquet_table(_wkb_table([circle]), str(src), geoparquet_version="2.0")
+        return src, circle
+
+    def test_simplify_table_accepts_extension_column(self, tmp_path):
+        shapely = _shapely()
+        src, circle = self._v2_file(tmp_path)
+        table = pq.read_table(str(src))
+        assert isinstance(table.schema.field("geometry").type, pa.ExtensionType)
+        result = simplify_table(table, 0.1)
+        out_field = result.schema.field("geometry")
+        assert not isinstance(out_field.type, pa.ExtensionType)
+        out = shapely.from_wkb(result.column("geometry")[0].as_py())
+        assert out.is_valid
+        assert shapely.get_num_coordinates(out) < shapely.get_num_coordinates(circle)
+
+    def test_file_roundtrip_stays_native_2_0(self, tmp_path):
+        shapely = _shapely()
+        src, circle = self._v2_file(tmp_path)
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.1)
+        back = pq.read_table(str(out))
+        geo = json.loads(back.schema.metadata[b"geo"])
+        assert geo["version"].startswith("2.")
+        column = back.column("geometry")
+        wkb = (
+            column.chunk(0).storage[0].as_py()
+            if isinstance(column.type, pa.ExtensionType)
+            else column[0].as_py()
+        )
+        out_geom = shapely.from_wkb(wkb)
+        assert shapely.get_num_coordinates(out_geom) < shapely.get_num_coordinates(circle)
+        assert geo["columns"]["geometry"]["geometry_types"] == ["Polygon"]
+
+
 class TestGeometryColumnResolution:
     """Dependency-free: these must fail before coarsen is imported."""
 
