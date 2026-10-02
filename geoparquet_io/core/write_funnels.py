@@ -539,8 +539,11 @@ def _fast_path_geo_decision(
     `bbox`. Everything else the input declared — a `covering` (#738), `epoch`,
     `orientation` (#772) — is silently dropped. Returning the carried block here
     lets `_plain_copy_to` write it verbatim, keeping the fast path's write
-    configuration intact: forcing the rewrite instead would clamp threads and
-    memory, drop `--compression-level`, and can add a full stats rescan.
+    configuration intact: forcing the rewrite instead clamps the write to one
+    thread and caps its memory (`duckdb_kv._configure_duckdb_memory`, which needs
+    `threads = 1` for the cap to hold at all), and can add a full stats rescan.
+    `--compression-level` is *not* among the costs: duckdb-kv passes
+    COMPRESSION_LEVEL through to its own COPY.
 
     The carried block goes through `apply_output_crs`, the single source of truth
     for the null-vs-default CRS rule, so the fast path cannot write a `crs: null`
