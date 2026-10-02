@@ -26,6 +26,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _canonicalize_wkb_columns,
     _detect_version_from_table,
     _parse_geo_metadata_quietly,
+    table_geometry_info,
 )
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 from geoparquet_io.core.duckdb_utils import (
@@ -73,11 +74,14 @@ def _wrap_query_with_crs(
     return _common_wrap_query_with_crs(query, geometry_column, input_crs)
 
 
-def _plain_wkb_for_secondary_columns(table, geometry_column: str, verbose: bool):
+def _plain_wkb_for_secondary_columns(
+    table, geometry_column: str, verbose: bool, geometry_info: dict | None = None
+):
     """Give every NON-primary geometry column the canonical plain-WKB carrier.
 
-    Named from the table's own carried ``geo`` key, which is the only place a
-    table entry point learns about secondaries. The primary is left alone (it is
+    Named from the table's own carried ``geo`` key *and* its schema (a GeoArrow
+    extension field is a geometry column whether or not a ``geo`` key says so,
+    #1175), which is all a table entry point has. The primary is left alone (it is
     passed as ``native_columns``): the caller converts it explicitly, and casting
     it here would both copy the whole geometry column and undo the
     field-metadata detection the query wrapper depends on (#727).
@@ -93,7 +97,9 @@ def _plain_wkb_for_secondary_columns(table, geometry_column: str, verbose: bool)
     """
 
     carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
-    secondaries = resolve_geometry_columns(geometry_column, None, carried_geo) - {geometry_column}
+    secondaries = resolve_geometry_columns(geometry_column, geometry_info, carried_geo) - {
+        geometry_column
+    }
     if not secondaries:
         return table
     return _canonicalize_wkb_columns(
@@ -518,8 +524,18 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         # blob conversion further down, which is keyed on names this entry point
         # does not have for the secondaries -- so strip them here, named by the
         # table's own carried geo key (#706).
+        # This entry point gets no `geometry_info`, so the table's own schema is
+        # what names the secondaries a block-less table carries (#1175). Resolved
+        # before the 1.x strip below, which needs their names, and threaded into
+        # `write_from_query` so the output's `geo` block describes them too.
+        geometry_info = table_geometry_info(
+            table, geometry_column, _parse_geo_metadata_quietly(table.schema.metadata)
+        )
+
         if effective_version in ("1.0", "1.1"):
-            table = _plain_wkb_for_secondary_columns(table, geometry_column, verbose)
+            table = _plain_wkb_for_secondary_columns(
+                table, geometry_column, verbose, geometry_info=geometry_info
+            )
 
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
@@ -556,6 +572,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 verbose=verbose,
                 custom_metadata=custom_metadata,
                 extra_kv_metadata=extra_kv_metadata,
+                geometry_info=geometry_info,
             )
         finally:
             con.close()

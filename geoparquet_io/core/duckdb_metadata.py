@@ -127,11 +127,19 @@ def _pyarrow_get_schema_info(parquet_file: str) -> list[dict] | None:
             parquet_schema = pf.schema  # Physical Parquet schema
         result = []
 
-        # Build a map from column name to Parquet physical schema for logical type lookup
+        # Build a map from TOP-LEVEL column name to Parquet physical schema for
+        # logical type lookup. `parquet_schema.column(i)` walks *leaves*, whose
+        # `name` is the leaf's own, so a `GEOMETRY` leaf nested in a struct
+        # (`meta.label`) was keyed as "label" and overwrote the real top-level
+        # column of that name -- which is how a VARCHAR column came to be
+        # reported with a Geometry logical type, and read back as a secondary
+        # geometry column by anything deriving geometry columns from this listing
+        # (#1175). A leaf whose `path` is its `name` is top-level by definition.
         parquet_col_map = {}
         for i in range(len(parquet_schema)):
             col = parquet_schema.column(i)
-            parquet_col_map[col.name] = col
+            if col.path == col.name:
+                parquet_col_map[col.name] = col
 
         # Get schema info with proper type mapping
         for field in schema:
