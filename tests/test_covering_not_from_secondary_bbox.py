@@ -714,6 +714,88 @@ class TestAddBboxSaysWhatItIsComputingBeside:
         assert "looks like a bbox struct" not in result.output
 
 
+class TestAddBboxHonoursAnExplicitlyNamedStruct:
+    """``--bbox-name bounds`` over a legal, unclaimed ``bounds`` struct is honoured.
+
+    Naming the column is the user supplying the provenance detection cannot
+    infer -- the same reasoning as ``add bbox-metadata --bbox-name``. Detection
+    reports no bbox column for it, so ``_handle_existing_bbox`` returned on its
+    status guard and ``add_computed_column`` then refused the duplicate name
+    outright; the streaming path, which tests the REQUESTED name by shape, passed
+    the same input through. The two must agree.
+    """
+
+    def _add(self, source, output_file, *args):
+        return CliRunner().invoke(
+            cli, ["add", "bbox", str(source), str(output_file), "--bbox-name", "bounds", *args]
+        )
+
+    def test_it_is_passed_through_rather_than_duplicated(self, tmp_path):
+        source = _unclaimed_bbox_struct_file(tmp_path, "bounds")
+        output_file = tmp_path / "out.parquet"
+
+        result = self._add(source, output_file)
+
+        assert result.exit_code == 0, result.output
+        columns = pq.ParquetFile(str(output_file)).schema_arrow.names
+        assert columns.count("bounds") == 1, columns
+        assert "bbox" not in columns, columns
+        # The advice must name the flag that can actually declare this column.
+        assert "--bbox-name" in result.output
+
+    def test_force_replaces_it_in_place_and_declares_it(self, tmp_path):
+        source = _unclaimed_bbox_struct_file(tmp_path, "bounds")
+        output_file = tmp_path / "out.parquet"
+
+        result = self._add(source, output_file, "--force")
+
+        assert result.exit_code == 0, result.output
+        columns = pq.ParquetFile(str(output_file)).schema_arrow.names
+        assert columns.count("bounds") == 1, columns
+        geo = _geo(output_file)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bounds"}
+
+    def test_a_struct_another_column_claims_is_not_treated_as_existing(self, tmp_path):
+        """#1171 still holds: the secondary's envelope is not the primary's to reuse."""
+        source = _secondary_bbox_file(tmp_path, "in", declare_boundary_covering=True)
+        output_file = tmp_path / "out.parquet"
+
+        result = CliRunner().invoke(
+            cli,
+            ["add", "bbox", str(source), str(output_file), "--bbox-name", "boundary_bbox"],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "already exists" in result.output
+        assert not output_file.exists()
+
+    def test_a_same_named_column_that_is_not_a_bbox_struct_is_unchanged(self, tmp_path):
+        """A string column called `bounds` is still just a name collision."""
+        import struct as _struct
+
+        geo = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        }
+        table = pa.table(
+            {
+                "geometry": pa.array([_struct.pack("<BIdd", 1, 1, 1.0, 1.0)], type=pa.binary()),
+                "bounds": pa.array(["tile-1"], type=pa.string()),
+            }
+        )
+        source = tmp_path / "string_bounds.parquet"
+        pq.write_table(
+            table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")}), str(source)
+        )
+        output_file = tmp_path / "out.parquet"
+
+        result = self._add(source, output_file)
+
+        assert result.exit_code != 0, result.output
+        assert "already exists" in result.output
+
+
 class TestExtractBboxFiltersOnThePrimary:
     """`gpio extract geoparquet --bbox` pre-filtered on the SECONDARY's extents (#1171)."""
 
