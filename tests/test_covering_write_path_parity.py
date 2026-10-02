@@ -188,6 +188,72 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
 
         assert bbox_covering_column(out) == "bbox"
 
+    @pytest.mark.parametrize("strategy", ["streaming", "in-memory", "disk-rewrite"])
+    def test_write_memory_is_warned_not_refused(
+        self, v2_with_declared_covering, strategy, tmp_path
+    ):
+        """Keeping the covering routes the write; the user's flags did not change.
+
+        Taking the rewrite to keep the input's covering is a decision the funnel
+        makes, so the memory-limit guard it lands in must behave as it does for
+        the other funnel-made reroute (1.1-geoarrow): warn and drop the limit.
+        Raising instead turned `extract --limit N --write-strategy streaming
+        --write-memory 2GB` of a 2.0 input -- exit 0 before the carry existed --
+        into exit 2.
+        """
+        out = tmp_path / f"wm_{strategy}.parquet"
+
+        output = run_cli(
+            "extract",
+            "geoparquet",
+            v2_with_declared_covering,
+            out,
+            "--limit",
+            "10",
+            "--write-strategy",
+            strategy,
+            "--write-memory",
+            "2GB",
+        )
+
+        assert "--write-memory is ignored" in output, output
+        assert bbox_covering_column(out) == "bbox"
+        assert spec_failures(out) == {}
+
+    def test_a_rewrite_the_user_asked_for_still_refuses_it(
+        self, v2_with_declared_covering, tmp_path
+    ):
+        """The control: `--geoparquet-version 1.1` is the user's own rewrite.
+
+        Nothing the funnel decided put this write on the streaming strategy, so
+        the flag combination is a real error and stays one.
+        """
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        out = tmp_path / "asked.parquet"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "extract",
+                "geoparquet",
+                str(v2_with_declared_covering),
+                str(out),
+                "--limit",
+                "10",
+                "--geoparquet-version",
+                "1.1",
+                "--write-strategy",
+                "streaming",
+                "--write-memory",
+                "2GB",
+            ],
+        )
+
+        assert result.exit_code == 2, result.output
+        assert "only supported with the 'duckdb-kv' write strategy" in result.output
+
 
 # ---------------------------------------------------------------------------
 # The stdout Arrow IPC stream

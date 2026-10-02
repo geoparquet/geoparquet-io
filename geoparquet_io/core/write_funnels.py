@@ -945,18 +945,30 @@ def write_parquet_with_metadata(
             strategy_enum = WriteStrategy(write_strategy)
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
-            # Of the rewrite strategies only duckdb-kv honours a memory limit. If *we* rerouted the
-            # strategy (1.1-geoarrow above), the user did nothing wrong: warn and
-            # drop the limit rather than aborting a command that worked before
-            # --write-memory was plumbed through (#663). A strategy the user
-            # explicitly asked for is a real error — raised as a core exception so
-            # the CLI shows a clean message instead of a traceback.
+            # Of the rewrite strategies only duckdb-kv honours a memory limit. If *we* put the
+            # write here, the user did nothing wrong: warn and drop the limit
+            # rather than aborting a command that worked before --write-memory
+            # was plumbed through (#663). Two routings are ours, not theirs --
+            # the 1.1-geoarrow reroute just above, and the rewrite this funnel
+            # takes to keep a 2.0 input's own covering, which no flag asked for
+            # and which turned a working `extract --limit N --write-strategy
+            # streaming --write-memory 2GB` into exit 2 (#1172). A strategy the
+            # user explicitly asked for is a real error — raised as a core
+            # exception so the CLI shows a clean message instead of a traceback.
             if memory_limit is not None and strategy_enum != WriteStrategy.DUCKDB_KV:
                 if auto_routed_strategy:
                     warn(
                         "--write-memory is ignored for GeoParquet 1.1-geoarrow output: "
                         "GeoArrow encoding requires the arrow-streaming write strategy, "
                         "which does not support a memory limit."
+                    )
+                    memory_limit = None
+                elif carried_geo_needs_rewrite:
+                    warn(
+                        f"--write-memory is ignored for this write: keeping the input's "
+                        f"geo metadata (its covering) needs the metadata rewrite, and the "
+                        f"'{write_strategy}' write strategy does not support a memory "
+                        f"limit. Use --write-strategy duckdb-kv to apply it."
                     )
                     memory_limit = None
                 else:
