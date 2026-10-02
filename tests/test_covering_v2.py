@@ -534,11 +534,15 @@ def test_convert_to_1_1_declares_the_bbox_column_it_computes(tmp_path):
     assert _geometry_column_meta(out)["covering"]["bbox"] == BBOX_COVERING
 
 
-def test_convert_to_1_1_leaves_a_preserved_undeclared_bbox_column_undeclared(tmp_path):
-    """A preserved bbox column gpio did not compute gains no covering.
+def test_convert_to_1_1_leaves_a_carried_undeclared_bbox_column_undeclared(tmp_path):
+    """A carried bbox column gpio did not compute gains no covering.
 
     Convert passes it through untouched; nothing established that its values
-    bound the geometry, so gpio does not assert that they do.
+    bound the geometry, so gpio does not assert that they do. It is also not
+    taken for *the* bbox column, so convert computes its own `bbox` beside it
+    and declares that one -- the column it can vouch for (#1171). Before that,
+    the name alone made `bounds` "the" bbox column, which both suppressed the
+    computed one and left a 1.1 output with no covering at all.
     """
     src = _write_v2_wkb(
         tmp_path / "in.parquet", with_bbox_column=True, with_covering=False, bbox_name="bounds"
@@ -547,7 +551,9 @@ def test_convert_to_1_1_leaves_a_preserved_undeclared_bbox_column_undeclared(tmp
 
     _run("convert", "geoparquet", src, out, "--geoparquet-version", "1.1")
 
-    assert "covering" not in _geometry_column_meta(out)
+    names = pq.ParquetFile(str(out)).schema_arrow.names
+    assert "bounds" in names, names
+    assert _geometry_column_meta(out)["covering"]["bbox"] == BBOX_COVERING
 
 
 @pytest.mark.parametrize("bbox_name", ["tile_bounds", "parcel_extent", "mybbox", "geom_bbox"])

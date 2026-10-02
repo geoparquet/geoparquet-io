@@ -765,15 +765,26 @@ def test_bbox_column_from_covering_edge_cases():
     from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 
     refs = {k: ["my_box", k] for k in ("xmin", "ymin", "xmax", "ymax")}
-    good = {"columns": {"geometry": {"covering": {"bbox": refs}}}}
-    assert _bbox_column_from_covering(good) == "my_box"
+
+    def block(columns, primary="geometry"):
+        return {"primary_column": primary, "columns": columns}
+
+    assert _bbox_column_from_covering(block({"geometry": {"covering": {"bbox": refs}}})) == "my_box"
     assert _bbox_column_from_covering(None) is None
-    assert _bbox_column_from_covering({"columns": ["not-a-dict"]}) is None
-    assert _bbox_column_from_covering({"columns": {"geometry": "not-a-dict"}}) is None
-    assert _bbox_column_from_covering({"columns": {"geometry": {"covering": {}}}}) is None
+    assert _bbox_column_from_covering(block(["not-a-dict"])) is None
+    assert _bbox_column_from_covering(block({"geometry": "not-a-dict"})) is None
+    assert _bbox_column_from_covering(block({"geometry": {"covering": {}}})) is None
     # Malformed refs (not [column, field] pairs) are ignored.
     bad_refs = dict.fromkeys(("xmin", "ymin", "xmax", "ymax"), "my_box.xmin")
-    assert _bbox_column_from_covering({"columns": {"g": {"covering": {"bbox": bad_refs}}}}) is None
+    assert _bbox_column_from_covering(block({"geometry": {"covering": {"bbox": bad_refs}}})) is None
+    # Only the PRIMARY column's own covering speaks for the primary (#1171): a
+    # secondary's names the secondary's envelope, and a block with no
+    # `primary_column` -- which the spec requires at every version -- names no
+    # entry that could.
+    secondary = {"geometry": {}, "boundary": {"covering": {"bbox": refs}}}
+    assert _bbox_column_from_covering(block(secondary)) is None
+    no_primary = {"columns": {"geometry": {"covering": {"bbox": refs}}}}
+    assert _bbox_column_from_covering(no_primary) is None
 
 
 def test_covering_reference_to_bad_column_falls_back(tmp_path):

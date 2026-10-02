@@ -73,6 +73,15 @@ Creates a struct column with `{xmin, ymin, xmax, ymax}` for each feature, plus t
 
 ### Existing Bbox Detection
 
+An "existing bbox column" means the same two things everywhere in gpio: the
+column the **primary** geometry column's own `covering.bbox` names, or a struct
+column called exactly `bbox` that no other column's covering claims. A
+`bounds`, `tile_extent` or `boundary_bbox` struct nothing declared is ordinary
+data — `gpio add bbox` computes its own column beside it, `gpio add
+bbox-metadata` reports that there is no bbox column to declare, and
+`gpio extract --bbox` filters on the geometry rather than pre-filtering on
+values nothing vouched for.
+
 The command automatically checks for existing bbox columns:
 
 - **If bbox exists with metadata**: Nothing is recomputed, and the input is copied to the output file unchanged

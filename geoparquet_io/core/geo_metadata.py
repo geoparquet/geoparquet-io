@@ -1390,11 +1390,20 @@ def _note_undeclarable_bbox_column(column: str, problem: str, declared: bool) ->
 
 
 def _declared_bbox_column(geo_meta: object) -> str | None:
-    """The column the primary column's ``covering.bbox`` names, if the block is well-formed."""
+    """The column the primary column's ``covering.bbox`` names, if the block is well-formed.
+
+    ``primary_column`` is whatever someone else's file put there, and it is the
+    key this indexes ``columns`` by, so a list or an object value raised
+    ``unhashable type`` rather than reporting the truth: a block that names no
+    primary entry declares no covering (#947).
+    """
     if not isinstance(geo_meta, dict):
         return None
+    primary = geo_meta.get("primary_column")
+    if not isinstance(primary, str):
+        return None
     columns = geo_meta.get("columns")
-    col_meta = columns.get(geo_meta.get("primary_column")) if isinstance(columns, dict) else None
+    col_meta = columns.get(primary) if isinstance(columns, dict) else None
     covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
     return _covering_column(covering.get("bbox")) if isinstance(covering, dict) else None
 
