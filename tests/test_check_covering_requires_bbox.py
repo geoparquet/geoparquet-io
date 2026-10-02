@@ -87,6 +87,24 @@ def with_bbox_column(buildings_test_file, tmp_path):
     return str(out)
 
 
+@pytest.fixture
+def declarable(with_bbox_column, tmp_path):
+    """The repairable shape: a spec-order ``bbox`` struct the covering forgot.
+
+    The file carries a real, legal, conventionally named bbox column *and* a
+    real quadkey column, and its ``covering`` declares only the quadkey entry --
+    the bbox member is missing, but it is supplyable from the file itself
+    rather than lost. This is what ``gpio 1.6 add quadkey`` wrote over an input
+    whose bbox column was undeclared.
+    """
+    indexed = tmp_path / "indexed.parquet"
+    result = CliRunner().invoke(cli, ["add", "quadkey", with_bbox_column, str(indexed)])
+    assert result.exit_code == 0, result.output
+    entry = (_covering(indexed) or {}).get("quadkey")
+    assert entry, _covering(indexed)
+    return _refooter(indexed, tmp_path / "declarable.parquet", {"quadkey": entry})
+
+
 class TestCheckSpec:
     def test_a_covering_with_no_bbox_member_fails(self, bboxless):
         result = validate_geoparquet(bboxless, validate_data=False)
@@ -214,6 +232,66 @@ class TestFixDropsIt:
 
         assert "covering" not in _geo(out)["columns"]["geometry"]
         assert pq.read_table(str(out)).num_rows == pq.read_table(bboxless).num_rows
+
+
+class TestFixSuppliesTheMissingMember:
+    """When the file carries a declarable bbox column, the member is supplied.
+
+    Dropping the covering is the repair for a file that has nothing to declare.
+    A file whose ``bbox`` struct is right there, in the spec's field order and
+    under the conventional name, loses a usable covering *and* its index entry
+    if the repair just strips -- and the write funnels, asked the same question
+    by ``bbox_column_to_declare``, would have supplied it. Both arms of the fix
+    now ask that one gate, so the footer patch and the funnel rewrite cannot
+    answer differently for the same bytes.
+    """
+
+    def test_the_member_is_supplied_and_the_index_entry_survives(self, declarable, tmp_path):
+        out = tmp_path / "fixed.parquet"
+
+        summary = fix_bboxless_covering(declarable, str(out))
+
+        assert summary["success"] is True
+        covering = _covering(out)
+        assert set(covering) == {"quadkey", "bbox"}, covering
+        assert covering["bbox"] == BBOX_PATHS
+        assert covering["quadkey"] == _covering(declarable)["quadkey"]
+
+    def test_the_fix_summary_names_the_column_it_declared(self, declarable, tmp_path):
+        out = tmp_path / "fixed.parquet"
+
+        summary = fix_bboxless_covering(declarable, str(out))
+
+        assert "bbox" in summary["fix_applied"], summary
+        assert "'bbox'" in summary["fix_applied"], summary
+        assert "Dropped" not in summary["fix_applied"], summary
+
+    def test_the_rewrite_fallback_writes_the_identical_covering(
+        self, declarable, tmp_path, monkeypatch
+    ):
+        """The divergence this fix closes: same bytes, same covering, either arm."""
+        from geoparquet_io.core import check_fixes
+        from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
+
+        def refuse(*args, **kwargs):
+            raise FooterPatchUnsupported("pretend this footer is unreadable")
+
+        patched = tmp_path / "patched.parquet"
+        fix_bboxless_covering(declarable, str(patched))
+        monkeypatch.setattr(check_fixes, "patch_footer_kv", refuse)
+        rewritten = tmp_path / "rewritten.parquet"
+
+        fix_bboxless_covering(declarable, str(rewritten))
+
+        assert _covering(rewritten) == _covering(patched)
+        assert pq.read_table(str(rewritten)).num_rows == pq.read_table(declarable).num_rows
+
+    def test_the_repaired_file_validates_clean(self, declarable, tmp_path):
+        out = tmp_path / "fixed.parquet"
+
+        fix_bboxless_covering(declarable, str(out))
+
+        assert _failed(validate_geoparquet(str(out), validate_data=False)) == []
 
 
 class TestCheckAllFix:

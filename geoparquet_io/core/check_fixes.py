@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import contextlib
+import copy
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 import duckdb
+import pyarrow.parquet as pq
 
 from geoparquet_io.core.add.bbox import add_bbox_column
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
@@ -22,7 +24,10 @@ from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import is_same_file_path, resolve_file_url
 from geoparquet_io.core.geo_metadata import (
+    bbox_column_to_declare,
     bboxless_covering_columns,
+    build_bbox_covering,
+    covering_lacks_bbox,
     parse_geo_metadata,
     strip_bboxless_covering,
 )
@@ -230,8 +235,35 @@ def fix_compression(
     return {"fix_applied": "Re-compressed with ZSTD", "success": True}
 
 
+def _supply_or_strip_bbox_member(parquet_file, geo_meta, verbose):
+    """Add the missing ``bbox`` member when the file carries a declarable
+    bbox column, else drop the covering.
+
+    Asks ``bbox_column_to_declare`` -- the gate ``_build_geo_block``
+    (``arrow_geo_metadata``) and ``declare_carried_bbox_column``
+    (``write_funnels``) ask -- so the footer patch and the funnel rewrite
+    cannot answer differently for one file, and an h3/s2/a5/quadkey/kdtree
+    entry beside the supplied member is kept rather than thrown away.
+
+    Returns the repaired block and the column it declared, or None when it
+    declared nothing and the covering was stripped instead.
+    """
+    primary = geo_meta.get("primary_column")
+    columns = geo_meta.get("columns") or {}
+    if primary and covering_lacks_bbox(columns.get(primary)) and not is_remote_url(parquet_file):
+        name = bbox_column_to_declare(pq.read_schema(parquet_file), geo_meta, verbose=verbose)
+        if name:
+            repaired = copy.deepcopy(geo_meta)
+            repaired["columns"][primary].setdefault("covering", {})["bbox"] = build_bbox_covering(
+                name
+            )
+            # Any OTHER column's bbox-less covering is still illegal.
+            return strip_bboxless_covering(repaired, verbose), name
+    return strip_bboxless_covering(geo_meta, verbose), None
+
+
 def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None):
-    """Drop a ``covering`` that carries no ``bbox`` member.
+    """Repair a ``covering`` that carries no ``bbox`` member.
 
     The repair for the #954 shape in a file already published: a ``covering``
     whose only members are gpio's own index entries (h3/s2/a5/quadkey/kdtree).
@@ -240,13 +272,32 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
     is why ``check spec`` fails it (``_check_covering_has_bbox``) and why there
     has to be something for ``--fix`` to do about it (#1173).
 
+    Dropping is the repair for a file with nothing to declare. A file whose
+    ``bbox`` struct is right there -- conventionally named, in the spec's field
+    order -- gets the member *supplied* instead, by
+    :func:`_supply_or_strip_bbox_member`: the covering becomes usable and the
+    index entry beside it survives. That is not this function's own policy but
+    the write funnels': they do not simply drop, they run
+    ``declare_carried_bbox_column`` *before* ``strip_bboxless_covering``, so a
+    declarable column gets its chance first. Both arms below now ask that one
+    gate (``bbox_column_to_declare``), which is what keeps them in step -- the
+    footer patch used to hand down the stripped block while the fallback handed
+    the funnel the original, and the same bytes came out with ``covering: None``
+    one way and ``{quadkey, bbox}`` the other.
+
     Metadata only: the `geo` key is rewritten in the footer and every page below
     it is copied verbatim (#1141), so the compression codec *and level*, the
     encodings, the bloom filters, the page index, the row-group boundaries and
     the row order all survive a repair that was never about the data. A footer
     that cannot be patched -- or a remote file, which the patcher does not read
-    -- falls back to a full rewrite; the write funnels apply the same gate
-    (``strip_bboxless_covering``), so the covering is dropped either way.
+    -- falls back to a full rewrite.
+
+    Recorded decision, not done here: in the NO-bbox-column shape at 1.x the
+    ``check all --fix`` chain still drops the index entries in this step,
+    *before* ``_apply_bbox_column_fix`` adds the column that would have made
+    them declarable. ``add_bbox_column`` already carries other covering entries
+    through, so making that shape lossless is a chain-ordering change, and it
+    is deliberately left to a follow-up.
 
     Args:
         parquet_file: Path to input file
@@ -267,30 +318,40 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
             debug("No covering without a bbox member; nothing to drop.")
         return {"fix_applied": None, "success": True}
 
-    info(
-        "Dropping 'covering' with no bbox member from "
-        + ", ".join(f"column '{column}'" for column in columns)
-    )
-
-    stripped = strip_bboxless_covering(geo_meta, verbose)
+    repaired, declared = _supply_or_strip_bbox_member(parquet_file, geo_meta, verbose)
+    if declared:
+        info(
+            f"Declaring bbox column '{declared}' in the covering that had none "
+            "(the entries beside it are kept)"
+        )
+        fix_applied = f"Added the missing bbox member to covering (column '{declared}')"
+    else:
+        info(
+            "Dropping 'covering' with no bbox member from "
+            + ", ".join(f"column '{column}'" for column in columns)
+        )
+        fix_applied = "Dropped covering with no bbox member"
 
     if not is_remote_url(parquet_file) and not is_remote_url(output_file):
         try:
             patch_footer_kv(
                 parquet_file,
-                {"geo": json.dumps(stripped)},
+                {"geo": json.dumps(repaired)},
                 output_file=output_file,
                 verbose=verbose,
             )
-            return {"fix_applied": "Dropped covering with no bbox member", "success": True}
+            return {"fix_applied": fix_applied, "success": True}
         except FooterPatchUnsupported as exc:
             warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
 
     setup_aws_profile_if_needed(profile, parquet_file, output_file)
     raw_url = resolve_file_url(parquet_file, verbose)
-    # `original_metadata` rather than the stripped block: the funnels own what
-    # reaches the `geo` key, and they run the same gate over whatever is handed
-    # to them. The version is left to the facade, which answers it from
+    # `original_metadata` rather than the repaired block: the funnels own what
+    # reaches the `geo` key, and they re-derive the identical answer from the
+    # same gate -- declare, then strip. Handing them a block already repaired
+    # here would re-open the divergence on a remote input, where
+    # `_supply_or_strip_bbox_member` cannot read the schema and so always
+    # strips. The version is left to the facade, which answers it from
     # `input_file` -- the file whose rows this reads (#1001).
     _rewrite_through_staging(
         parquet_file,
@@ -301,7 +362,7 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
         original_metadata=original_metadata,
     )
 
-    return {"fix_applied": "Dropped covering with no bbox member", "success": True}
+    return {"fix_applied": fix_applied, "success": True}
 
 
 def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
