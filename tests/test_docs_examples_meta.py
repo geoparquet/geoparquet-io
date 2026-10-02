@@ -46,7 +46,12 @@ DOCS_ROOT = GUIDE_DIR.parent
 # 243 -> 248: merging main (new convert/extract guide examples,
 # #1189/#1182) makes both sides' skipped blocks count together with the new
 # process-simplify/raster guide pages; neither side alone passed its ceiling.
-MAX_SKIPPED_BLOCKS = 248
+# 248 -> 250: the `add bbox-metadata --bbox-name` pair in add.md. Its whole
+# premise is a bbox struct ANOTHER tool wrote under a name gpio will not vouch
+# for, so the input cannot be seeded with gpio commands: every gpio write that
+# produces such a column also declares it, which is the case the example is not
+# about. Same reason as the `file_with_bbox.parquet` block above it.
+MAX_SKIPPED_BLOCKS = 250
 MIN_EXECUTED_BLOCKS = 217
 
 #: Looks like a command rather than prose or sample output.
