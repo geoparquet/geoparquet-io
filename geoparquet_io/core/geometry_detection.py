@@ -5,6 +5,8 @@ This module provides functions to detect geometry columns in Parquet files
 by examining GeoParquet metadata and column names.
 """
 
+import re
+
 import duckdb
 
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -14,6 +16,11 @@ from geoparquet_io.core.remote import needs_httpfs
 
 # Standard geometry column names for fallback detection
 STANDARD_GEOMETRY_NAMES = ["geometry", "geom", "wkb_geometry", "shape", "the_geom"]
+
+# How DuckDB's DESCRIBE renders a geometry type: `GEOMETRY`, or
+# `GEOMETRY('EPSG:3857')` once it carries a CRS. Anchored at both ends so a
+# struct or list type that merely mentions GEOMETRY is not matched.
+_DESCRIBE_GEO_TYPE = re.compile(r"^(GEOMETRY|GEOGRAPHY)(?:\(\s*'([^']*)'\s*\))?$", re.IGNORECASE)
 
 
 def detect_geometry_column_from_names(column_names) -> str | None:
@@ -166,6 +173,47 @@ def find_primary_geometry_column(parquet_file: str, verbose: bool = False) -> st
     # No geo metadata or no primary_column specified - use schema-based detection
     detected = detect_parquet_geometry_column(parquet_file, verbose=verbose)
     return detected if detected else "geometry"
+
+
+def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> dict[str, str]:
+    """``{column: logical type string}`` for every geometry column the query emits.
+
+    The output query's own ``DESCRIBE`` already names them and the CRS each one
+    carries -- ``GEOMETRY``, ``GEOMETRY('EPSG:3857')`` -- so it answers "which
+    geometry columns does this write emit, and in which CRS" with **no input-file
+    witness at all**. That is what lets ``partition`` staging, whose per-partition
+    write passes none, describe a secondary native geometry column (#1175).
+
+    Rendered in the ``GeometryType(crs=EPSG:3857)`` spelling
+    :func:`~geoparquet_io.core.duckdb_metadata.parse_geometry_logical_type` reads,
+    so one derivation (``derive_secondary_geometry_info``) serves both this and an
+    input's own footer. The CRS arrives as a bare authority reference rather than
+    the inline PROJJSON a logical type carries, which is why a caller that *has* a
+    witness prefers it.
+
+    DuckDB has no ``GEOGRAPHY`` type, so this source can never report ``edges``;
+    those travel separately, through ``write_funnels._preserve_edges_after_write``.
+
+    Best-effort: a ``DESCRIBE`` that fails answers ``{}`` rather than failing the
+    write.
+    """
+    try:
+        described = con.execute(f"DESCRIBE ({query})").fetchall()
+    except Exception as e:  # noqa: BLE001 - a probe, never the write's failure
+        if verbose:
+            debug(f"Could not read geometry types off the output query: {e}")
+        return {}
+
+    native: dict[str, str] = {}
+    for row in described:
+        name, col_type = row[0], str(row[1] if len(row) > 1 else "")
+        match = _DESCRIBE_GEO_TYPE.match(col_type.strip())
+        if not name or not match:
+            continue
+        family = "Geography" if match.group(1).upper() == "GEOGRAPHY" else "Geometry"
+        crs = match.group(2)
+        native[name] = f"{family}Type(crs={crs})" if crs else f"{family}Type()"
+    return native
 
 
 def _detect_geometry_from_query(

@@ -178,3 +178,165 @@ class TestMultiFileAndRemoteInputs:
 
         info = derive_secondary_geometry_info(str(source), "geometry")
         assert info is None or "label" not in info["secondary"]
+
+
+# ---------------------------------------------------------------------------
+# `partition` staging: no input-file witness at all
+# ---------------------------------------------------------------------------
+
+
+class TestPartitionStaging:
+    def test_a_1_1_partition_describes_and_converts_the_native_secondary(
+        self, native_pair, tmp_path
+    ):
+        """``finalize_partition_file`` passes no ``input_file``; the query's DESCRIBE answers.
+
+        Before: every partition held ``centroid`` as a native Parquet GEOMETRY
+        inside a file declaring 1.1 -- which ``check spec`` rejects -- and left it
+        out of ``geo.columns`` entirely.
+        """
+        from tests.native_geo_probes import logical_geo_types
+
+        output = tmp_path / "parts"
+
+        _run_cli(
+            "partition",
+            "string",
+            native_pair,
+            output,
+            "--column",
+            "grp",
+            "--geoparquet-version",
+            "1.1",
+            "--force",
+        )
+
+        files = sorted(output.rglob("*.parquet"))
+        assert files, "partition wrote nothing"
+        for part in files:
+            columns = _geo(part)["columns"]
+            assert "centroid" in columns, f"{part.name} leaves the secondary undescribed"
+            assert isinstance(columns["centroid"]["geometry_types"], list)
+            assert columns["centroid"]["crs"]["id"] == EPSG_3857
+            assert logical_geo_types(part) == {}, (
+                f"{part.name} declares 1.1 but still carries native geo types"
+            )
+
+    def test_native_geometry_types_come_off_the_output_query(self, native_pair):
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+        from geoparquet_io.core.geometry_detection import native_geometry_types_from_query
+
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            types = native_geometry_types_from_query(
+                con, f"SELECT * FROM read_parquet({sql_path(str(native_pair))})"
+            )
+        finally:
+            con.close()
+
+        assert sorted(types) == ["centroid", "geometry"]
+        assert types["centroid"] == "GeometryType(crs=EPSG:3857)"
+        assert types["geometry"] == "GeometryType(crs=EPSG:5070)"
+
+
+# ---------------------------------------------------------------------------
+# `gpio convert`: a caller-supplied geometry_info no longer suppresses the rest
+# ---------------------------------------------------------------------------
+
+
+class TestConvert:
+    def test_convert_to_1_1_describes_and_converts_the_native_secondary(
+        self, native_pair, tmp_path
+    ):
+        """``convert`` named its secondaries from the ``geo`` block, which here is absent.
+
+        Before: ``centroid`` stayed a native Parquet GEOMETRY inside a file
+        declaring 1.1, undescribed, while ``extract`` of the same input was
+        already correct.
+        """
+        from tests.native_geo_probes import logical_geo_types
+
+        output = tmp_path / "out.parquet"
+
+        _run_cli("convert", "geoparquet", native_pair, output, "--geoparquet-version", "1.1")
+
+        columns = _geo(output)["columns"]
+        assert "centroid" in columns, "convert leaves the secondary undescribed"
+        assert columns["centroid"]["crs"]["id"] == EPSG_3857
+        assert isinstance(columns["centroid"]["geometry_types"], list)
+        assert logical_geo_types(output) == {}, (
+            "convert declares 1.1 but still carries native geo types"
+        )
+
+    def test_the_callers_own_primary_entry_still_wins(self, native_pair, tmp_path):
+        """The derivation adds columns; it never overrules what the caller resolved."""
+        from geoparquet_io.core.write_funnels import _merge_derived_geometry_info
+
+        caller = {
+            "primary": "geometry",
+            "secondary": [],
+            "metadata": {"geometry": {"encoding": "geoarrow.wkb"}, "centroid": {"crs": None}},
+        }
+        derived = {
+            "primary": "geometry",
+            "secondary": ["centroid", "extra"],
+            "metadata": {
+                "centroid": {"crs": {"id": EPSG_3857}, "geometry_types": []},
+                "extra": {"geometry_types": []},
+            },
+        }
+
+        merged = _merge_derived_geometry_info(caller, derived)
+
+        assert merged["secondary"] == ["centroid", "extra"]
+        assert merged["metadata"]["geometry"] == {"encoding": "geoarrow.wkb"}
+        # the caller's explicit `crs: null` is not replaced, but the key it left
+        # blank is filled in
+        assert merged["metadata"]["centroid"] == {"crs": None, "geometry_types": []}
+        assert merged["metadata"]["extra"] == {"geometry_types": []}
+
+
+# ---------------------------------------------------------------------------
+# The 2.0 fast path: the carried block is written verbatim
+# ---------------------------------------------------------------------------
+
+
+def _v2_block_omitting_the_secondary(source, path):
+    """A 2.0 file whose ``geo`` block describes ``geometry`` only, plus an ``epoch``.
+
+    The ``epoch`` is what makes the block worth carrying at all: without a key
+    DuckDB would not generate itself, ``_geo_block_to_carry_on_fast_path`` hands
+    the write back to DuckDB's own (complete) block and there is nothing to fix.
+    """
+    table = pq.read_table(str(source))
+    geo = {
+        "version": "2.0.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Polygon"],
+                "epoch": 2020.5,
+            }
+        },
+    }
+    pq.write_table(
+        table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")}), str(path)
+    )
+    return path
+
+
+class TestTheTwoPointZeroFastPath:
+    def test_extract_describes_a_secondary_the_carried_block_omits(self, native_pair, tmp_path):
+        source = _v2_block_omitting_the_secondary(native_pair, tmp_path / "carried.parquet")
+        output = tmp_path / "out.parquet"
+
+        _run_cli("extract", "geoparquet", source, output, "--geoparquet-version", "2.0")
+
+        geo = _geo(output)
+        assert geo["columns"]["geometry"]["epoch"] == 2020.5, (
+            "the carried block is no longer carried at all"
+        )
+        assert "centroid" in geo["columns"], "the fast path leaves the secondary undescribed"
+        assert geo["columns"]["centroid"]["crs"]["id"] == EPSG_3857
+
