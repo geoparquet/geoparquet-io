@@ -334,6 +334,43 @@ class TestCheckAllFix:
         assert _failed(validate_geoparquet(str(out), validate_data=False)) == []
 
 
+class TestOnePredicateBehindAllThreeVerdicts:
+    """``covering_lacks_bbox`` says what the illegal shape is -- once.
+
+    Its docstring promises the write gate, the read-side verdict and the
+    ``--fix`` repair all ask it, which is what keeps "what gpio refuses to
+    write", "what it fails" and "what it repairs" from drifting apart.
+    ``validate`` used to re-spell the test as ``"bbox" in covering`` instead,
+    so the promise was documentation rather than structure.
+    """
+
+    def test_validate_asks_the_shared_predicate(self):
+        from geoparquet_io.core import validate
+        from geoparquet_io.core.geo_metadata import covering_lacks_bbox
+
+        assert validate.covering_lacks_bbox is covering_lacks_bbox
+
+    @pytest.mark.parametrize(
+        "covering",
+        [
+            {"bbox": BBOX_PATHS},
+            {"bbox": BBOX_PATHS, "h3": H3_ENTRY},
+            {"h3": H3_ENTRY},
+            {},
+        ],
+        ids=["bbox-only", "bbox-and-index", "index-only", "empty"],
+    )
+    def test_the_verdict_fails_exactly_what_the_predicate_selects(self, covering):
+        from geoparquet_io.core.geo_metadata import covering_lacks_bbox
+        from geoparquet_io.core.validate import _check_covering_has_bbox
+
+        col_meta = {"encoding": "WKB", "covering": covering}
+
+        verdict = _check_covering_has_bbox(col_meta, "geometry")
+
+        assert (verdict.status == CheckStatus.FAILED) is covering_lacks_bbox(col_meta)
+
+
 class TestTheGuardsOnMalformedInput:
     """The shared predicates read a block exactly as a file may hold it, so a
     malformed one is answered rather than crashed on (#947/#1062)."""

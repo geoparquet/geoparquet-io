@@ -44,7 +44,11 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import BBOX_COVERING_FIELD_ORDERS, is_covering_path
+from geoparquet_io.core.geo_metadata import (
+    BBOX_COVERING_FIELD_ORDERS,
+    covering_lacks_bbox,
+    is_covering_path,
+)
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
@@ -1904,6 +1908,12 @@ def _check_covering_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
     An index entry *beside* a bbox member is not judged: gpio records
     h3/s2/a5/quadkey/kdtree entries there deliberately (#694/#738), and every
     reader that matters keys off ``bbox``.
+
+    The test itself is ``geo_metadata.covering_lacks_bbox``, the one definition
+    of the illegal shape, shared with the write gate
+    (``strip_bboxless_covering``) and the ``--fix`` repair
+    (``check_fixes.fix_bboxless_covering``) so that what gpio refuses to write,
+    what it fails here, and what it repairs cannot drift apart.
     """
     check_name = f"covering_has_bbox_{col_name}"
     covering = col_meta.get("covering")
@@ -1914,7 +1924,7 @@ def _check_covering_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
         # covering_is_object reports a covering of the wrong type; one defect
         # gets one verdict.
         return _covering_verdict(check_name, CheckStatus.SKIPPED, "covering is not an object")
-    if "bbox" in covering:
+    if not covering_lacks_bbox(col_meta):
         return _covering_verdict(
             check_name, CheckStatus.PASSED, 'covering declares the "bbox" encoding'
         )
