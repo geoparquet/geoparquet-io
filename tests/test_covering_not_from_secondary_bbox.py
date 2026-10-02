@@ -673,6 +673,47 @@ def _unclaimed_bbox_struct_file(tmp_path, column, field_order=("xmin", "ymin", "
     return path
 
 
+class TestAddBboxSaysWhatItIsComputingBeside:
+    """`gpio add bbox` names the bbox-shaped struct it is adding a column next to.
+
+    The duplication is the documented intent -- gpio cannot vouch for a column
+    it did not compute -- but it used to be announced ("File will have 2 bbox
+    columns"), because the old suffix match made a `bounds` struct the
+    "existing" bbox column. After #1171 `check_bbox_structure` reports none, so
+    `_handle_existing_bbox` returns on its first guard and the second struct
+    appeared with no notice at all.
+    """
+
+    def test_it_names_the_struct_it_is_computing_beside(self, tmp_path):
+        source = _unclaimed_bbox_struct_file(tmp_path, "bounds")
+        output_file = tmp_path / "out.parquet"
+
+        result = CliRunner().invoke(cli, ["add", "bbox", str(source), str(output_file)])
+
+        assert result.exit_code == 0, result.output
+        assert "bounds" in result.output
+        columns = pq.ParquetFile(str(output_file)).schema_arrow.names
+        assert {"bounds", "bbox"} <= set(columns), columns
+
+    def test_the_note_does_not_make_it_the_detected_column(self, tmp_path):
+        """Mentioning the struct must not feed back into detection (#1171)."""
+        source = _unclaimed_bbox_struct_file(tmp_path, "bounds")
+        output_file = tmp_path / "out.parquet"
+
+        CliRunner().invoke(cli, ["add", "bbox", str(source), str(output_file)])
+
+        geo = _geo(output_file)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bbox"}
+
+    def test_a_file_with_no_other_bbox_struct_says_nothing(self, buildings_test_file, tmp_path):
+        output_file = tmp_path / "out.parquet"
+
+        result = CliRunner().invoke(cli, ["add", "bbox", buildings_test_file, str(output_file)])
+
+        assert result.exit_code == 0, result.output
+        assert "looks like a bbox struct" not in result.output
+
+
 class TestExtractBboxFiltersOnThePrimary:
     """`gpio extract geoparquet --bbox` pre-filtered on the SECONDARY's extents (#1171)."""
 

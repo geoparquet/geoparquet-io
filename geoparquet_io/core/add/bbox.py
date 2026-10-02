@@ -6,9 +6,9 @@ import json
 
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.bbox_structure import bbox_shaped_struct_columns, check_bbox_structure
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
@@ -17,7 +17,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.logging_config import progress, success, warn
+from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
@@ -45,6 +45,30 @@ def _bbox_metadata_advice(parquet_file: str) -> str:
         "rewrite the bbox column at 1.1 with covering, or convert first: "
         "gpio convert geoparquet IN.parquet OUT.parquet --geoparquet-version 1.1"
     )
+
+
+def _note_bbox_structs_computed_beside(
+    input_parquet: str, bbox_column_name: str, verbose: bool
+) -> None:
+    """Name the bbox-shaped structs this run is about to compute a column next to.
+
+    Purely informational, and deliberately NOT part of detection: declaring a
+    column gpio did not compute asserts a relationship only its name suggests,
+    which is exactly what #738/#1171 removed. The duplication is the documented
+    intent; the silence was not. Before the narrowing a ``bounds`` struct
+    name-matched, so this ran into ``_handle_existing_bbox``'s "File will have 2
+    bbox columns" warning; afterwards ``check_bbox_structure`` reports no bbox
+    column at all and that branch is never reached.
+    """
+    for name in bbox_shaped_struct_columns(get_schema_info(input_parquet)):
+        if name == bbox_column_name:
+            continue
+        warn(
+            f"Note: '{name}' looks like a bbox struct but nothing declares it as this "
+            f"file's covering; computing '{bbox_column_name}' beside it."
+        )
+        if verbose:
+            debug(f"'{name}' is carried through as ordinary data, undeclared")
 
 
 def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
@@ -539,6 +563,10 @@ def _add_bbox_file_based(
     )
     if done:
         return
+
+    # A column is being computed. Say which bbox-shaped structs it will sit
+    # beside, undeclared, so the duplication is visible rather than silent.
+    _note_bbox_structs_computed_beside(input_parquet, bbox_column_name, verbose)
 
     # Get geometry column for the SQL expression
     geom_col = find_primary_geometry_column(input_parquet, verbose)
