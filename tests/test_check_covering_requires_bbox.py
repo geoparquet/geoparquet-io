@@ -294,6 +294,35 @@ class TestFixSuppliesTheMissingMember:
         assert _failed(validate_geoparquet(str(out), validate_data=False)) == []
 
 
+class TestARacedPatchIsNotAnsweredByARewrite:
+    """A file that changed under the call is not an invitation to rewrite it.
+
+    ``patch_footer_kv`` refuses both a footer it cannot read and an input
+    another writer replaced mid-copy. Falling back to a rewrite is right for the
+    first and wrong for the second: the rewrite re-reads whatever is on disk
+    *now* and stamps those rows with a ``geo`` block derived from the bytes that
+    have already gone -- another writer's data described by our metadata.
+    ``FooterPatchRaced`` is the refusal that must travel.
+    """
+
+    def test_the_repair_propagates_the_race_and_writes_nothing(
+        self, bboxless, tmp_path, monkeypatch
+    ):
+        from geoparquet_io.core import check_fixes
+        from geoparquet_io.core.parquet_footer import FooterPatchRaced
+
+        def raced(*args, **kwargs):
+            raise FooterPatchRaced("pretend another writer landed mid-copy")
+
+        monkeypatch.setattr(check_fixes, "patch_footer_kv", raced)
+        out = tmp_path / "never_written.parquet"
+
+        with pytest.raises(FooterPatchRaced):
+            fix_bboxless_covering(bboxless, str(out))
+
+        assert not out.exists(), "a raced repair rewrote the file anyway"
+
+
 class TestCheckAllFix:
     def test_check_all_reports_it(self, bboxless):
         result = CliRunner().invoke(cli, ["check", "all", bboxless])

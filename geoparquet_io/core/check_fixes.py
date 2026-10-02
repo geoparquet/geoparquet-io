@@ -33,7 +33,11 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.hilbert_order import hilbert_order
 from geoparquet_io.core.logging_config import debug, info, progress, warn
-from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
+from geoparquet_io.core.parquet_footer import (
+    FooterPatchRaced,
+    FooterPatchUnsupported,
+    patch_footer_kv,
+)
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -341,6 +345,13 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
                 verbose=verbose,
             )
             return {"fix_applied": fix_applied, "success": True}
+        except FooterPatchRaced:
+            # Before the general refusal below, and deliberately not handled:
+            # the patch refused because the input changed while it was being
+            # copied, and nothing was written. Falling back would read the bytes
+            # that arrived and stamp them with a `geo` block derived from the
+            # bytes that left -- another writer's rows described by our stats.
+            raise
         except FooterPatchUnsupported as exc:
             warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
 
