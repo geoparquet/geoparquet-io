@@ -759,6 +759,8 @@ class TestSimplifyCrs:
         )
         assert result.exit_code == 0, result.output
         assert pq.ParquetFile(str(out)).metadata.num_rows == 1
+
+
 class TestGeometryColumnResolution:
     """Dependency-free: these must fail before coarsen is imported."""
 
