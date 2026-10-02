@@ -2922,6 +2922,7 @@ def simplify(
     simplify_boundary: bool = True,
     threads: int | None = None,
     geometry_column: str | None = None,
+    drop_empty: bool = False,
     verbose: bool = False,
 ) -> pa.Table:
     """
@@ -2939,6 +2940,8 @@ def simplify(
             (coverage mode)
         threads: Worker threads for coarsen (default: let the library decide)
         geometry_column: Geometry column (defaults to the carried primary)
+        drop_empty: Drop rows whose geometry is empty after simplification
+            (default: keep and warn)
         verbose: Whether to print verbose output
 
     Returns:
@@ -2954,6 +2957,7 @@ def simplify(
         simplify_boundary=simplify_boundary,
         threads=threads,
         geometry_column=geometry_column,
+        drop_empty=drop_empty,
         verbose=verbose,
     )
 

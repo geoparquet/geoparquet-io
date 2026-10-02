@@ -65,6 +65,7 @@ else in gpio works as before.
 | `--simplify-boundary` | on | Also simplify the coverage's outer boundary (`--coverage` only) |
 | `--threads N` | auto | coarsen worker threads |
 | `--geometry-column` | auto | Defaults to the file's primary geometry column |
+| `--drop-empty` | off | Drop rows whose geometry is empty after simplification |
 
 ## What happens to the metadata
 
@@ -79,7 +80,9 @@ recomputed rather than carried through stale:
 - CRS, edges and everything else carry through unchanged.
 
 Geometries that collapse to empty at the given tolerance are kept (and
-counted in a warning) rather than dropped.
+counted in a warning) by default; `--drop-empty` removes those rows instead
+— empty geometries otherwise become NaN covering values and zero-area
+features downstream. Null geometries are kept either way.
 
 ## Scaling to planet-sized files
 

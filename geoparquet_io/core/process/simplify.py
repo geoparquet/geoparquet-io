@@ -24,7 +24,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
-from geoparquet_io.core.logging_config import debug, warn
+from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
 from geoparquet_io.core.parquet_writer import (
     resolve_output_geoparquet_version,
@@ -84,11 +84,12 @@ def _simplify_values(
     preserve_topology: bool,
     simplify_boundary: bool,
     threads: int | None,
-) -> tuple[list, int]:
+) -> tuple[list, int, list]:
     """Simplify a list of WKB values (``None`` passes through).
 
-    Returns the new WKB list and the count of geometries the operation
-    collapsed to empty.
+    Returns the new WKB list, the count of geometries the operation
+    collapsed to empty, and a per-row mask that is True where the output
+    geometry is empty (nulls are never marked).
     """
     coarsen = require_coarsen()
     shapely = load_module("shapely")
@@ -97,7 +98,7 @@ def _simplify_values(
 
     idx = [i for i, v in enumerate(values) if v is not None]
     if not idx:
-        return list(values), 0
+        return list(values), 0, [False] * len(values)
     try:
         geoms = shapely.from_wkb(np.array([values[i] for i in idx], dtype=object))
     except Exception as e:
@@ -108,11 +109,14 @@ def _simplify_values(
         )
     else:
         out = coarsen.simplify(geoms, tolerance, preserve_topology, threads=threads)
-    collapsed = int(np.sum(shapely.is_empty(out))) - int(np.sum(shapely.is_empty(geoms)))
+    out_empty = shapely.is_empty(out)
+    collapsed = int(np.sum(out_empty)) - int(np.sum(shapely.is_empty(geoms)))
     result: list = [None] * len(values)
-    for i, wkb in zip(idx, shapely.to_wkb(out), strict=True):
+    empty_mask = [False] * len(values)
+    for i, wkb, is_empty in zip(idx, shapely.to_wkb(out), out_empty, strict=True):
         result[i] = wkb
-    return result, max(collapsed, 0)
+        empty_mask[i] = bool(is_empty)
+    return result, max(collapsed, 0), empty_mask
 
 
 def _covering_bbox_column(geo_meta: dict, geom_col: str) -> str | None:
@@ -192,9 +196,14 @@ def simplify_table(
     simplify_boundary: bool = True,
     threads: int | None = None,
     geometry_column: str | None = None,
+    drop_empty: bool = False,
     verbose: bool = False,
 ) -> pa.Table:
     """Simplify a table's geometry column; metadata stats are refreshed.
+
+    ``drop_empty=True`` drops rows whose geometry is empty after
+    simplification (#1199); nulls are kept either way — null is "unknown",
+    empty is "nothing", and only the latter is a simplification artifact.
 
     Plain mode runs coarsen chunk by chunk; coverage mode hands the whole
     column to ``coverage_simplify`` in one call, which is what preserves
@@ -205,7 +214,7 @@ def simplify_table(
     geom_col = _geometry_column_of(table, geometry_column)
     column = table.column(geom_col)
 
-    def run(values: list) -> tuple[list, int]:
+    def run(values: list) -> tuple[list, int, list]:
         return _simplify_values(
             values,
             tolerance,
@@ -216,19 +225,21 @@ def simplify_table(
         )
 
     collapsed = 0
+    empty_flags: list[bool] = []
     if coverage:
         if table.num_rows > _COVERAGE_WARN_ROWS:
             warn(
                 f"coverage simplification holds all {table.num_rows:,} geometries "
                 "in memory at once to preserve shared edges"
             )
-        new_values, collapsed = run(column.to_pylist())
+        new_values, collapsed, empty_flags = run(column.to_pylist())
         chunks = [pa.array(new_values, type=column.type)]
     else:
         chunks = []
         for chunk in column.chunks:
-            values, n = run(chunk.to_pylist())
+            values, n, flags = run(chunk.to_pylist())
             collapsed += n
+            empty_flags.extend(flags)
             chunks.append(pa.array(values, type=column.type))
     if collapsed:
         warn(f"{collapsed} geometries collapsed to empty at tolerance {tolerance}")
@@ -237,6 +248,9 @@ def simplify_table(
         table.schema.field(geom_col),
         pa.chunked_array(chunks, type=column.type),
     )
+    if drop_empty and any(empty_flags):
+        result = result.filter(pa.array([not flag for flag in empty_flags]))
+        info(f"dropped {sum(empty_flags)} empty geometries")
     result = _with_stripped_geo(result, geom_col)
     return _refresh_bbox_covering(result, geom_col)
 
@@ -360,6 +374,7 @@ def _simplify_file_streaming(
     compression_level: int | None,
     row_group_rows: int | None,
     geoparquet_version: str | None,
+    drop_empty: bool,
     verbose: bool,
 ) -> None:
     """Stream-simplify batch by batch: memory is bounded by one row group."""
@@ -374,6 +389,7 @@ def _simplify_file_streaming(
     types: set = set()
     bbox = [float("inf"), float("inf"), float("-inf"), float("-inf")]
     collapsed = 0
+    dropped = 0
     with remote_write_context(output_parquet, is_directory=False, verbose=verbose) as (
         actual_output,
         is_remote,
@@ -388,7 +404,7 @@ def _simplify_file_streaming(
         ) as writer:
             for batch in pf.iter_batches(batch_size=rows):
                 table = pa.Table.from_batches([batch], schema=schema)
-                values, n = _simplify_values(
+                values, n, empty_flags = _simplify_values(
                     table.column(geom_col).to_pylist(),
                     tolerance,
                     coverage=False,
@@ -402,6 +418,11 @@ def _simplify_file_streaming(
                     table.schema.field(geom_col),
                     pa.chunked_array([pa.array(values, type=pa.binary())]),
                 )
+                if drop_empty and any(empty_flags):
+                    keep = [not flag for flag in empty_flags]
+                    table = table.filter(pa.array(keep))
+                    dropped += sum(empty_flags)
+                    values = [v for v, k in zip(values, keep, strict=True) if k]
                 table = _refresh_bbox_covering(table, geom_col)
                 _accumulate_stats(shapely, np, values, types, bbox)
                 writer.write_table(table, row_group_size=rows)
@@ -420,6 +441,8 @@ def _simplify_file_streaming(
             upload_if_remote(actual_output, output_parquet, is_directory=False, verbose=verbose)
     if collapsed:
         warn(f"{collapsed} geometries collapsed to empty at tolerance {tolerance}")
+    if dropped:
+        info(f"dropped {dropped} empty geometries")
     debug(f"streamed simplify in {rows}-row batches to {output_parquet}")
 
 
@@ -450,6 +473,7 @@ def _simplify_file_in_memory(
         simplify_boundary=kwargs["simplify_boundary"],
         threads=kwargs["threads"],
         geometry_column=kwargs["geometry_column"],
+        drop_empty=kwargs["drop_empty"],
         verbose=kwargs["verbose"],
     )
     write_geoparquet_table(result, output_parquet, **write_args)
@@ -465,6 +489,7 @@ def simplify_file(
     simplify_boundary: bool = True,
     threads: int | None = None,
     geometry_column: str | None = None,
+    drop_empty: bool = False,
     compression: str = "ZSTD",
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
@@ -491,6 +516,7 @@ def simplify_file(
         "simplify_boundary": simplify_boundary,
         "threads": threads,
         "geometry_column": geometry_column,
+        "drop_empty": drop_empty,
         "compression": compression,
         "compression_level": compression_level,
         "row_group_size_mb": row_group_size_mb,
@@ -524,5 +550,6 @@ def simplify_file(
             compression_level=compression_level,
             row_group_rows=row_group_rows,
             geoparquet_version=geoparquet_version,
+            drop_empty=drop_empty,
             verbose=verbose,
         )
