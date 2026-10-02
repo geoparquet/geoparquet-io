@@ -501,7 +501,37 @@ def _geo_block_to_carry_on_fast_path(
     input_file: str | None = None,
     output_columns: list[str] | None = None,
 ) -> dict | None:
-    """The `geo` block the 2.0 fast path must write instead of DuckDB's generated one.
+    """The block the 2.0 fast path writes, dropping the must-rewrite half.
+
+    See :func:`_fast_path_geo_decision`, which answers both halves at once. Kept
+    as the name the write path and its tests ask by.
+    """
+    carried, _ = _fast_path_geo_decision(
+        original_metadata,
+        geometry_column,
+        effective_version,
+        con=con,
+        query=query,
+        verbose=verbose,
+        input_crs=input_crs,
+        input_file=input_file,
+        output_columns=output_columns,
+    )
+    return carried
+
+
+def _fast_path_geo_decision(
+    original_metadata: dict | None,
+    geometry_column: str | None,
+    effective_version: str,
+    con=None,
+    query: str | None = None,
+    verbose: bool = False,
+    input_crs=None,
+    input_file: str | None = None,
+    output_columns: list[str] | None = None,
+) -> tuple[dict | None, bool]:
+    """``(block to write instead of DuckDB's, whether to take the rewrite instead)``.
 
     DuckDB regenerates the `geo` key on the fast path, and its generated block
     carries only `version`, `primary_column`, `encoding`, `geometry_types` and
@@ -527,14 +557,27 @@ def _geo_block_to_carry_on_fast_path(
     test_a_conventional_bbox_column_is_declared_at_v2`). `output_columns` lets it
     skip its schema probe when the output has no bbox column to declare at all.
 
-    Returns None when the version is not 2.0 (1.x already rewrites), when the
-    input resolves to more than one file (see below), when the carried block is
-    too thin to stand in for DuckDB's (a caller invalidated the derived stats and
-    only the rewrite path can recompute them), or when it says nothing DuckDB
-    would not write itself — the caller then keeps its existing behaviour.
+    Both answers are ``(None, False)`` — "let DuckDB write its own block on the
+    fast path" — when the version is not 2.0 (1.x already rewrites), when the
+    input resolves to more than one file (see below), or when the carried block
+    says nothing DuckDB would not write itself.
+
+    The second answer is ``True`` only when the block IS worth keeping and still
+    cannot be written verbatim, because a caller invalidated the derived stats and
+    nothing here can recompute them. The fast path cannot merge: it replaces
+    DuckDB's whole ``geo`` key with what this returns, so a block missing
+    ``geometry_types`` would ship *without* the key GeoParquet requires. Taking
+    the rewrite is what ``_REQUIRED_CARRIED_GEO_FIELDS`` always said the answer
+    was; what actually happened was the fast path running with DuckDB's bare
+    block, so ``gpio partition quadkey|kdtree`` and ``extract --where/--limit
+    /--bbox`` of a 2.0 input lost the covering it declared and ``gpio check bbox``
+    then called its bbox column undeclared (#1172). The thinness test is asked
+    *after* the declare step for the same reason the "says more than DuckDB"
+    gate is: until that step has run, there is no telling whether the block has
+    anything the fast path would lose.
     """
     if effective_version != "2.0" or not geometry_column or not original_metadata:
-        return None
+        return None, False
 
     # A glob/directory input merges several files, but `original_metadata` was
     # read from the FIRST file's footer only. Carrying its bbox/geometry_types
@@ -547,7 +590,7 @@ def _geo_block_to_carry_on_fast_path(
                 "Not carrying the input's geo block: a multi-file input's merged "
                 "stats cannot come from the first file's footer"
             )
-        return None
+        return None, False
 
     # A write-path reader in the strongest sense: whatever comes back is written
     # to the output file verbatim, so the block goes through the shared shape
@@ -555,12 +598,10 @@ def _geo_block_to_carry_on_fast_path(
     # `'list' object has no attribute 'get'` on the next line (#947).
     geo_dict = sanitized_carried_geo(original_metadata)
     if not geo_dict:
-        return None
+        return None, False
     col_meta = (geo_dict.get("columns") or {}).get(geometry_column)
     if not isinstance(col_meta, dict):
-        return None
-    if any(field not in col_meta for field in _REQUIRED_CARRIED_GEO_FIELDS):
-        return None
+        return None, False
     carried = copy.deepcopy(geo_dict)
     carried["version"] = "2.0.0"
     # Before the gate: a block whose only extra key was a default or null
@@ -581,8 +622,16 @@ def _geo_block_to_carry_on_fast_path(
     # so it is not carried onto the output either.
     carried = strip_bboxless_covering(carried, verbose)
     if not _carries_more_than_duckdb_generates(carried):
-        return None
-    return carried
+        return None, False
+    if any(field not in carried["columns"][geometry_column] for field in _REQUIRED_CARRIED_GEO_FIELDS):
+        if verbose:
+            debug(
+                "Taking the metadata rewrite: the carried geo block says more than "
+                "DuckDB's would but has had its derived stats invalidated, so the "
+                "fast path cannot write it verbatim"
+            )
+        return None, True
+    return carried, False
 
 
 def write_parquet_with_metadata(
@@ -773,6 +822,24 @@ def write_parquet_with_metadata(
     # Check if we need to add/rewrite geo metadata
     rewrite_needed = needs_metadata_rewrite(effective_version, original_metadata)
 
+    # The 2.0 fast path's own answer, asked here rather than at the call site so
+    # it can still send the write down the rewrite path. It replaces DuckDB's
+    # whole `geo` key, so a block it cannot write verbatim is not a block the
+    # fast path can keep half of (#1172).
+    carried_geo_block, carried_geo_needs_rewrite = _fast_path_geo_decision(
+        original_metadata,
+        geometry_column,
+        effective_version,
+        con=con,
+        query=query,
+        verbose=verbose,
+        input_crs=input_crs,
+        input_file=input_file,
+        output_columns=output_columns,
+    )
+    if carried_geo_needs_rewrite:
+        rewrite_needed = True
+
     # Force rewrite if custom_metadata contains covering (e.g., bbox, H3, S2)
     # This ensures covering metadata is written even for 2.0→2.0 operations --
     # unless the covering could only be stripped again (#954): an index entry
@@ -847,17 +914,7 @@ def write_parquet_with_metadata(
                 geoparquet_version=effective_version,
                 input_crs=input_crs,
                 geometry_column=geometry_column,
-                carry_geo_metadata=_geo_block_to_carry_on_fast_path(
-                    original_metadata,
-                    geometry_column,
-                    effective_version,
-                    con=con,
-                    query=query,
-                    verbose=verbose,
-                    input_crs=input_crs,
-                    input_file=input_file,
-                    output_columns=output_columns,
-                ),
+                carry_geo_metadata=carried_geo_block,
                 extra_kv_metadata=extra_kv_metadata,
                 memory_limit=memory_limit,
             )

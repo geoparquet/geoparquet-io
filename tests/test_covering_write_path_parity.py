@@ -144,7 +144,7 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
 
     @pytest.mark.parametrize(
         ("flag", "value"),
-        [("--limit", "10"), ("--where", "id IS NOT NULL"), ("--bbox", "-180,-90,180,90")],
+        [("--limit", "10"), ("--where", "name IS NOT NULL"), ("--bbox", "-180,-90,180,90")],
         ids=["limit", "where", "bbox"],
     )
     def test_extract_keeps_it(self, v2_with_declared_covering, flag, value, tmp_path):
@@ -167,10 +167,13 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
 
         assert "not declared in 'covering'" not in output, output
 
-    @pytest.mark.parametrize("command", ["quadkey", "kdtree"])
-    def test_partition_keeps_it(self, v2_with_declared_covering, command, tmp_path):
+    @pytest.mark.parametrize(
+        ("command", "extra"),
+        [("quadkey", ["--auto"]), ("kdtree", ["--partitions", "2"])],
+    )
+    def test_partition_keeps_it(self, v2_with_declared_covering, command, extra, tmp_path):
         destination = tmp_path / command
-        run_cli("partition", command, v2_with_declared_covering, destination)
+        run_cli("partition", command, v2_with_declared_covering, destination, *extra)
 
         written = sorted(destination.rglob("*.parquet"))
         assert written, "the partition wrote nothing, so nothing is measured"
