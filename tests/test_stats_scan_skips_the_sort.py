@@ -18,7 +18,10 @@ import json
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.common import compute_geometry_types_via_sql
+from geoparquet_io.core.common import (
+    compute_geometry_dimensions_via_sql,
+    compute_geometry_types_via_sql,
+)
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.geo_metadata import compute_geo_stats_via_sql
 
@@ -225,6 +228,59 @@ def test_geometry_types_scan_keeps_an_order_that_a_limit_depends_on(spatial_con,
     # ids 1 and 2 only: both points. Keeping the whole file's rows would also
     # report the LineString.
     assert compute_geometry_types_via_sql(spatial_con, limited, "geometry") == ["Point"]
+
+
+@pytest.fixture
+def mixed_dimension_points(tmp_path):
+    """Two XY points, then an XYZ one -- so an ``id`` prefix of two is XY-only."""
+    path = tmp_path / "dims.parquet"
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        con.execute(f"""
+            COPY (
+              SELECT * FROM (VALUES
+                (1, ST_Point(10, 10)), (2, ST_Point(-50, -20)),
+                (3, ST_GeomFromText('POINT Z (170 80 5)'))
+              ) t(id, geometry)
+            ) TO '{path.as_posix()}' (FORMAT PARQUET, GEOPARQUET_VERSION 'V1')
+        """)
+    finally:
+        con.close()
+    return path
+
+
+def test_dimensions_scan_answers_the_same_with_and_without_the_order(
+    spatial_con, mixed_dimension_points
+):
+    """The 1.1-geoarrow dimension probe is the same DISTINCT shape (#1177).
+
+    ``arrow-streaming`` takes its bbox and types through
+    ``compute_geo_stats_via_sql``, which strips, but calls this one itself with
+    the caller's ordered query -- the last sorted extra scan on that path.
+    """
+    base = f"SELECT * FROM '{mixed_dimension_points.as_posix()}'"
+    recorder = _RecordingConnection(spatial_con)
+
+    unordered = compute_geometry_dimensions_via_sql(spatial_con, base, "geometry")
+    ordered = compute_geometry_dimensions_via_sql(recorder, f"{base} {_HILBERT_ORDER}", "geometry")
+
+    # geoarrow dimension codes: 1=XY, 2=XYZ.
+    assert ordered == unordered == {1, 2}
+    assert recorder.statements, "the dimension scan executed nothing"
+    assert not recorder.sorting_statements(), (
+        "the dimension scan still sorts the input: " + "\n".join(recorder.sorting_statements())
+    )
+
+
+def test_dimensions_scan_keeps_an_order_that_a_limit_depends_on(
+    spatial_con, mixed_dimension_points
+):
+    """``ORDER BY ... LIMIT n`` decides *which* rows exist, so it must survive."""
+    limited = f"SELECT * FROM '{mixed_dimension_points.as_posix()}' ORDER BY id LIMIT 2"
+
+    # ids 1 and 2 only: both XY. Keeping the whole file's rows would also report
+    # XYZ (2), which would pick a Z-aware native type for a 2D output.
+    assert compute_geometry_dimensions_via_sql(spatial_con, limited, "geometry") == {1}
 
 
 def test_hilbert_output_row_order_is_unchanged(scrambled_points, tmp_path):

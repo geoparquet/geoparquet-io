@@ -305,6 +305,13 @@ def compute_geometry_dimensions_via_sql(
         Set of geoarrow dimension codes (1=XY, 2=XYZ, 3=XYM, 4=XYZM). Empty set when
         the column is absent, native nested (STRUCT), or the dimension is undetectable.
     """
+    # Same DISTINCT shape, same reason as the type scan above: the set of
+    # dimensions present cannot change with the order the rows arrive in, and
+    # `arrow-streaming` calls this itself -- its bbox and types go through
+    # `compute_geo_stats_via_sql`, which strips, so this was the last sorted
+    # extra scan on the 1.1-geoarrow path (#1177).
+    query = _strip_trailing_order_by(query)
+
     try:
         columns = _get_query_columns(con, query)
         if geometry_column not in columns:
