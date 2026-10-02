@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.bbox_structure import bbox_shaped_struct_columns, check_bbox_structure
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import (
@@ -26,6 +26,7 @@ from geoparquet_io.core.crs_utils import (
     parse_crs_string_to_projjson,
     resolve_crs_to_string,
 )
+from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     get_duckdb_connection,
@@ -34,6 +35,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
+    _bbox_claimed_by_another_column,
     carried_geometry_column,
     sanitized_carried_geo,
     strip_derived_stats,
@@ -357,6 +359,40 @@ def _get_bbox_column_name(input_path: str, verbose: bool) -> str | None:
     return None
 
 
+def _warn_carried_bbox_structs(input_path: str, bbox_col: str | None) -> None:
+    """Say which bbox-shaped structs this reprojection will carry through as-is.
+
+    Only the primary geometry's bbox column -- ``bbox_col``, the one
+    :func:`_get_bbox_column_name` found -- is recomputed from the reprojected
+    coordinates. Any OTHER bbox-shaped struct is copied verbatim, so its
+    xmin/ymin/xmax/ymax stay in the source CRS beside geometry in the target
+    one. Recomputing it would be a guess that those values bound the geometry,
+    which is exactly the inference #738/#1171 removed; the fix is to say so.
+
+    A struct a NON-primary geometry column declares as *its* covering is left
+    out: those values describe the secondary geometry, which this reprojection
+    does not touch either, so they are not stale.
+
+    Not gated on ``verbose``: a user who does not pass it is the one most likely
+    to ship the file. ``input_path`` is RAW -- the metadata readers escape their
+    own argument (#718).
+    """
+    schema_info = get_schema_info(input_path)
+    candidates = [name for name in bbox_shaped_struct_columns(schema_info) if name != bbox_col]
+    if not candidates:
+        return
+    geo_meta = get_geo_metadata(input_path)
+    for name in candidates:
+        if _bbox_claimed_by_another_column(geo_meta, name):
+            continue
+        warn(
+            f"Carrying '{name}' through unchanged: nothing declares it as the primary "
+            f"geometry's covering, so its xmin/ymin/xmax/ymax stay in the source CRS. "
+            f"To fix it before reprojecting, declare it with 'gpio add bbox-metadata' "
+            f"or recompute it with 'gpio add bbox --force'."
+        )
+
+
 def _row_group_compression(parquet_file: pq.ParquetFile) -> str:
     """Return the file's first-column compression codec for ParquetWriter.
 
@@ -542,6 +578,7 @@ def reproject_impl(
 
         # Check for existing bbox column to exclude (will be regenerated)
         bbox_col = _get_bbox_column_name(read_source, verbose)
+        _warn_carried_bbox_structs(read_source, bbox_col)
         exclude_cols = [geom_col]
         if bbox_col:
             exclude_cols.append(bbox_col)
@@ -775,6 +812,7 @@ def _reproject_streaming(
 
             # Check for existing bbox column to exclude (will be regenerated)
             bbox_col = _get_bbox_column_name(working_file, verbose=False)
+            _warn_carried_bbox_structs(working_file, bbox_col)
             exclude_cols = [geom_col]
             if bbox_col:
                 exclude_cols.append(bbox_col)

@@ -30,7 +30,7 @@ from geoparquet_io.core.geo_metadata import (
     is_covering_path,
 )
 from geoparquet_io.core.logging_config import debug
-from geoparquet_io.core.parquet_schema import schema_direct_children
+from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
 
 #: Struct fields a bbox covering column must expose.
 _BBOX_REQUIRED_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
@@ -85,6 +85,27 @@ def _schema_struct_child_field_names(schema_info, column_name) -> list[str] | No
     """Child field names of struct column ``column_name``, in schema order, or None."""
     children = _schema_struct_children(schema_info, column_name)
     return children[0] if children else None
+
+
+def bbox_shaped_struct_columns(schema_info: list[dict]) -> list[str]:
+    """Every root-level struct column that *looks* like a bbox covering column.
+
+    Shape alone: a root column whose direct children cover
+    :data:`_BBOX_REQUIRED_FIELDS`, whatever it is called and whatever the ``geo``
+    block says about it. It is deliberately NOT a detector -- answering "which
+    column is the primary geometry's bbox" from shape would reopen #1171 the way
+    name matching did. It exists so a command can *mention* a struct it is about
+    to leave alone: ``convert reproject`` regenerates only the primary's
+    declared (or self-evidently named) column, so any other bbox-shaped struct
+    comes out of a reprojection still holding source-CRS numbers.
+    """
+    names = []
+    for column in root_schema_columns(schema_info):
+        name = column.get("name") or ""
+        children = _schema_struct_child_field_names(schema_info, name)
+        if children and _BBOX_REQUIRED_FIELDS.issubset(children):
+            names.append(name)
+    return names
 
 
 def _find_bbox_column_in_schema(schema_info, verbose, geo_meta=None):
