@@ -45,7 +45,10 @@ DOCS_ROOT = GUIDE_DIR.parent
 #: that shows up in a diff and needs a justification in the pull request.
 # 243 -> 244: the --simplify-crs guide example (#1197) needs the optional
 # simplify extra AND an unseeded per-UTM-zone input file, so it cannot run.
-MAX_SKIPPED_BLOCKS = 244
+# 244 -> 249: merging main (new convert/extract guide examples,
+# #1189/#1182) makes both sides' skipped blocks count together with the new
+# process-simplify/raster guide pages; neither side alone passed its ceiling.
+MAX_SKIPPED_BLOCKS = 249
 MIN_EXECUTED_BLOCKS = 217
 
 #: Looks like a command rather than prose or sample output.
