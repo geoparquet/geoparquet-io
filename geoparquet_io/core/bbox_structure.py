@@ -12,9 +12,15 @@ import json
 from typing import Literal, TypedDict, cast
 
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
+from geoparquet_io.core.duckdb_utils import free_column_name
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
-from geoparquet_io.core.geo_metadata import bbox_covering_problem, is_covering_path
-from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.geo_metadata import (
+    DEFAULT_GEOPARQUET_VERSION,
+    bbox_covering_problem,
+    covering_supported,
+    is_covering_path,
+)
+from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import schema_direct_children
 
 #: Struct fields a bbox covering column must expose.
@@ -282,6 +288,46 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
         "status": status,
         "message": message,
     }
+
+
+def resolve_bbox_name(column_names, geoparquet_version, requested="bbox", announce=True) -> str:
+    """The name a computed bbox column may take beside ``column_names``.
+
+    ``requested`` when it is free, otherwise the first free ``bbox_<n>`` -- with
+    a warning naming the column that took it, as spelled. This is the other half
+    of :func:`check_bbox_structure`: when the file has no bbox column gpio can
+    use but does have a column of that *name* (a string tile id, a label), the
+    computed struct has to move aside or DuckDB renames it silently and the
+    ``covering`` ends up pointing at the wrong column (#1079). Every path that
+    computes one shares this decision so a collision means one thing across
+    ``gpio convert``, ``gpio add bbox`` and ``Table.add_bbox`` (#1176).
+
+    Args:
+        column_names: The names the computed column is emitted beside (what the
+            query emits, not the raw source's: a CSV's WKT or lat/lon columns
+            are consumed and cannot collide)
+        geoparquet_version: Output version, which decides whether the warning may
+            promise a ``covering``; None reads as the writer's 1.1 default
+        requested: The name asked for, ``--bbox-name``'s value where there is one
+        announce: False to stay quiet, for a retry that resolves the name again
+
+    Returns:
+        The free name, which the caller must use for both the SQL alias and the
+        covering it declares
+    """
+    bbox_name = free_column_name(requested, column_names)
+    if bbox_name == requested or not announce:
+        return bbox_name
+    taken = next(str(name) for name in column_names if str(name).lower() == requested.lower())
+    if covering_supported(geoparquet_version or DEFAULT_GEOPARQUET_VERSION):
+        outcome = "and declaring the covering over it"
+    else:
+        outcome = f"(GeoParquet {geoparquet_version} has no covering metadata to declare it)"
+    warn(
+        f"Input already has a column named '{taken}' that gpio does not recognize "
+        f"as a bbox column; writing the computed bbox column as '{bbox_name}' {outcome}"
+    )
+    return bbox_name
 
 
 def get_bbox_advice(

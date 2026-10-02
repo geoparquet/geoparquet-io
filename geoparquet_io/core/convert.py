@@ -10,7 +10,7 @@ from pathlib import Path
 
 import duckdb
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.bbox_structure import check_bbox_structure, resolve_bbox_name
 from geoparquet_io.core.common import should_skip_bbox
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
@@ -28,6 +28,7 @@ from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _get_query_columns,
     _install_and_load_extension,
+    free_column_name,
     get_duckdb_connection,
     quote_identifier,
     sql_path,
@@ -45,7 +46,6 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     build_bbox_covering,
-    covering_supported,
     sanitize_geo_metadata,
 )
 from geoparquet_io.core.geometry_detection import (
@@ -1411,63 +1411,50 @@ def _validate_wkt_and_check_crs(con, csv_read, wkt_col, skip_invalid, verbose):
     _warn_if_projected_crs(con, csv_read, wkt_col)
 
 
-def _free_bbox_name(column_names):
-    """Pick a name for the computed bbox column that no input column already uses.
+def _csv_carried_columns(geom_info):
+    """The source columns the CSV conversion query carries through unchanged.
 
-    A 1.x input can carry a *non-struct* column named ``bbox`` (a string tile
-    id, say). Aliasing the computed struct ``AS bbox`` next to ``SELECT *``
-    made DuckDB silently rename it (``bbox_1``) while the declared covering
-    still pointed at the input's column (#1079). Picking the free name up
-    front keeps the SELECT alias and the covering agreeing by construction:
-    one variable, used in both places. Case-insensitive because DuckDB binds
-    identifiers that way.
+    The WKT or lat/lon columns it builds the geometry from are consumed, so they
+    are not among them and cannot collide with a name gpio computes.
     """
-    taken = {str(name).lower() for name in column_names}
-    candidate = "bbox"
-    suffix = 0
-    while candidate in taken:
-        suffix += 1
-        candidate = f"bbox_{suffix}"
-    return candidate
-
-
-def _resolve_bbox_name(column_names, geoparquet_version, announce=True):
-    """The free bbox name beside ``column_names``, warning on a collision.
-
-    ``column_names`` are the columns the query emits next to the computed bbox
-    (not the raw source's: a CSV's WKT or lat/lon columns are excluded from the
-    output, so they cannot collide). ``announce=False`` keeps the warning to
-    one per conversion when a curve retry resolves the name again.
-    """
-    bbox_name = _free_bbox_name(column_names)
-    if bbox_name != "bbox" and announce:
-        taken = next(str(name) for name in column_names if str(name).lower() == "bbox")
-        if covering_supported(geoparquet_version):
-            outcome = "and declaring the covering over it"
-        else:
-            outcome = f"(GeoParquet {geoparquet_version} has no covering metadata to declare it)"
-        warn(
-            f"Input already has a column named '{taken}' that gpio does not recognize "
-            f"as a bbox column; writing the computed bbox column as '{bbox_name}' {outcome}"
-        )
-    return bbox_name
-
-
-def _csv_output_columns(geom_info):
-    """The columns the CSV conversion query emits besides the bbox."""
     source = [geom_info.get(key) for key in ("wkt_column", "lat_column", "lon_column")]
     excluded = {str(name).lower() for name in source if name}
-    kept = [name for name in geom_info["source_columns"] if str(name).lower() not in excluded]
-    return [*kept, "geometry"]
+    return [name for name in geom_info["source_columns"] if str(name).lower() not in excluded]
+
+
+def _resolve_tabular_geometry_name(carried_columns):
+    """The name the geometry built from WKT or lat/lon columns is written under.
+
+    Normally ``geometry``. A source column of that name which is *not* the one
+    the geometry is built from -- a label, a tile id -- takes it, and aliasing
+    the parsed geometry ``AS geometry`` beside it made DuckDB rename one of the
+    two: the Hilbert key, the repair pass and the ``geo`` block then all bound
+    to the source's VARCHAR column ("ST_IsEmpty(VARCHAR)", #1176). The computed
+    column moves aside instead, as the computed bbox does (#1079).
+    """
+    geometry_name = free_column_name("geometry", carried_columns)
+    if geometry_name != "geometry":
+        taken = next(str(name) for name in carried_columns if str(name).lower() == "geometry")
+        warn(
+            f"Input already has a column named '{taken}' that is not geometry; "
+            f"writing the geometry built from the source columns as '{geometry_name}'"
+        )
+    return geometry_name
 
 
 def _build_csv_conversion_query(
-    geom_info, skip_hilbert, bounds, skip_invalid, skip_bbox=False, bbox_name="bbox"
+    geom_info,
+    skip_hilbert,
+    bounds,
+    skip_invalid,
+    skip_bbox=False,
+    bbox_name="bbox",
+    geometry_name="geometry",
 ):
     """Build SQL query for CSV/TSV conversion with geometry construction.
 
     Returns ``(query, order_by)``: the unordered SELECT, and the Hilbert ORDER BY
-    terms over its ``geometry`` column (None when not ordering). The caller
+    terms over its geometry column (None when not ordering). The caller
     applies the ordering last, so a pass that only counts rows does not sort.
 
     Args:
@@ -1478,8 +1465,11 @@ def _build_csv_conversion_query(
         skip_bbox: Skip adding bbox column (for 2.0/parquet-geo-only)
         bbox_name: Alias for the computed bbox column; the caller picks one no
             input column uses (#1079) and declares the covering over it
+        geometry_name: Alias for the constructed geometry column, likewise picked
+            clear of the carried columns (#1176)
     """
     csv_read = geom_info["csv_read"]
+    quoted_geometry = quote_identifier(geometry_name)
 
     # Build bbox expression (empty string if skipping)
     def bbox_expr(geom):
@@ -1519,7 +1509,7 @@ def _build_csv_conversion_query(
                 )
                 SELECT
                     * EXCLUDE ({exclude_cols}, {parsed}),
-                    {parsed} AS geometry{bbox_expr(parsed)}
+                    {parsed} AS {quoted_geometry}{bbox_expr(parsed)}
                 FROM parsed_geoms
                 WHERE {wkt_col} IS NULL OR {parsed} IS NOT NULL
             """
@@ -1546,7 +1536,7 @@ def _build_csv_conversion_query(
         query = f"""
             SELECT
                 * EXCLUDE ({exclude_cols}),
-                {geom_expr} AS geometry{bbox_expr(geom_expr)}
+                {geom_expr} AS {quoted_geometry}{bbox_expr(geom_expr)}
             FROM {csv_read}
             {where_clause}
         """
@@ -1554,7 +1544,7 @@ def _build_csv_conversion_query(
         return query, None
     # Every path Hilbert-orders, --skip-invalid included (#1157). A WKT column
     # can hold empty geometry, which ST_Hilbert rejects (#649).
-    return query, _geometry_order_by(quote_identifier("geometry"), bounds)
+    return query, _geometry_order_by(quoted_geometry, bounds)
 
 
 def _get_geom_expr_and_where(geom_info):
@@ -1838,6 +1828,20 @@ def _build_conversion_query(
     )
 
 
+def _tabular_geometry_info(geometry_column):
+    """The ``geometry_info`` a tabular conversion hands the write funnel.
+
+    The funnel otherwise detects the geometry column from the query by standard
+    name, and ``geometry`` may be the source's own VARCHAR column rather than the
+    one gpio built (#1176). Naming it leaves nothing to guess. Empty
+    ``secondary``/``metadata``: a CSV has one geometry column and no carried
+    per-column metadata, which is exactly what passing None meant before.
+    """
+    if geometry_column is None:
+        return None
+    return {"primary": geometry_column, "secondary": [], "metadata": {}}
+
+
 def _convert_csv_path(
     con,
     input_file,
@@ -1855,14 +1859,14 @@ def _convert_csv_path(
 ):
     """Handle CSV/TSV conversion path.
 
-    Returns ``(query, bbox_covering_column, order_by)``, all None when no
-    geometry is found; ``order_by`` is for the caller to apply last.
+    Returns ``(query, bbox_covering_column, order_by, geometry_column)``, all
+    None when no geometry is found; ``order_by`` is for the caller to apply last.
     """
     geom_info = _detect_csv_geometry_column(
         con, input_file, delimiter, wkt_column, lat_column, lon_column, verbose, encoding=encoding
     )
     if geom_info is None:
-        return None, None, None
+        return None, None, None, None
     return _convert_tabular_path(
         con,
         geom_info,
@@ -1888,8 +1892,10 @@ def _convert_tabular_path(
     """Build the conversion query for WKT or lat/lon columns.
 
     The source is a CSV, or a Parquet file with no geometry column of its own;
-    ``geom_info`` already names the columns and carries the read expression
-    they come from. Returns ``(query, bbox_covering_column, order_by)``.
+    ``geom_info`` already names the columns and carries the read expression they
+    come from. Returns ``(query, bbox_covering_column, order_by,
+    geometry_column)`` -- the last because the geometry gpio builds is not always
+    called ``geometry``: a carried source column of that name takes it (#1176).
 
     When skip_invalid=True, materializes parsed geometries into a temp table
     to avoid re-evaluating TRY(ST_GeomFromText(...)) in downstream metadata
@@ -1944,13 +1950,16 @@ def _convert_tabular_path(
         bounds = _usable_bounds(bounds)
         effective_skip_hilbert = bounds is None
 
-    # The computed bbox column must not collide with an output column named
-    # "bbox" (a string tile id, say) — DuckDB would silently rename the
-    # computed one while the covering pointed at the input's column (#1079).
+    # Neither computed column may collide with a column the query carries
+    # through: DuckDB renames one of the pair silently, so the covering would
+    # point at the input's own "bbox" (#1079) and every later reference to
+    # "geometry" would bind to the input's own column of that name (#1176).
+    carried_columns = _csv_carried_columns(geom_info)
+    geometry_name = _resolve_tabular_geometry_name(carried_columns)
     bbox_name = (
         "bbox"
         if skip_bbox
-        else _resolve_bbox_name(_csv_output_columns(geom_info), geoparquet_version)
+        else resolve_bbox_name([*carried_columns, geometry_name], geoparquet_version)
     )
 
     query, order_by = _build_csv_conversion_query(
@@ -1960,6 +1969,7 @@ def _convert_tabular_path(
         skip_invalid,
         skip_bbox=skip_bbox,
         bbox_name=bbox_name,
+        geometry_name=geometry_name,
     )
 
     # Materialize skip_invalid queries into a temp table to avoid DuckDB <= 1.5.1
@@ -1975,16 +1985,16 @@ def _convert_tabular_path(
         query = "SELECT * FROM _gpio_csv_parsed"
         if not skip_hilbert:
             bounds = _usable_bounds(
-                _calculate_bounds(con, None, "geometry", verbose, table_expr="_gpio_csv_parsed")
+                _calculate_bounds(con, None, geometry_name, verbose, table_expr="_gpio_csv_parsed")
             )
             if bounds is not None:
                 # Empty geometry sorts last, as on every other path (#649).
-                order_by = _geometry_order_by(quote_identifier("geometry"), bounds)
+                order_by = _geometry_order_by(quote_identifier(geometry_name), bounds)
 
     # The bbox column, when written, is computed from the geometry right here,
     # so this path can vouch for it. Report it rather than leaving a writer to
     # infer a covering from the column's name (#738).
-    return query, (None if skip_bbox else bbox_name), order_by
+    return query, (None if skip_bbox else bbox_name), order_by, geometry_name
 
 
 def _is_linearizable_curve_error(e, *, is_parquet, linearize_curves):
@@ -2249,7 +2259,7 @@ def _convert_spatial_path(
             source_expr = table_expr or f"read_parquet({sql_path(input_file)})"
             source_columns = _get_query_columns(con, f"SELECT * FROM {source_expr}")
         # A curve retry resolves the name again; it was announced the first time.
-        bbox_name = _resolve_bbox_name(
+        bbox_name = resolve_bbox_name(
             source_columns, geoparquet_version, announce=not force_linearize
         )
 
@@ -2320,7 +2330,10 @@ def read_spatial_to_arrow(
         crs: CRS for CSV geometry data (default: EPSG:4326/WGS84)
         skip_invalid: Skip rows with invalid geometries instead of failing
         profile: AWS profile name for S3 operations
-        geometry_column: Name for output geometry column (default: 'geometry')
+        geometry_column: Name for output geometry column (default: 'geometry').
+            A tabular source (WKT or lat/lon columns) reports back the name it
+            could actually use: a carried source column of that name takes it,
+            and the built geometry moves aside (#1176).
         layer: Layer name for multi-layer formats (GeoPackage, FileGDB). If not specified,
                reads the first/default layer.
         repair_geometry: Repair invalid geometry with ST_MakeValid (default: True).
@@ -2434,13 +2447,14 @@ def read_spatial_to_arrow(
             # describe the output; keep only its horizontal component.
             detected_crs = horizontal_crs(detected_crs)
 
-        # Build and execute query
+        # Build and execute query. A tabular source reports the name it built
+        # the geometry under: it is not always `geometry` (#1176).
         if parquet_tabular is not None:
-            arrow_table = _tabular_geometry_to_arrow(
+            arrow_table, geometry_column = _tabular_geometry_to_arrow(
                 con, parquet_tabular, skip_invalid, verbose, force_2d=force_2d
             )
         elif is_csv:
-            arrow_table = _read_csv_to_arrow(
+            arrow_table, geometry_column = _read_csv_to_arrow(
                 con,
                 input_url,
                 delimiter,
@@ -2481,10 +2495,10 @@ def read_spatial_to_arrow(
             return arrow_table, None, None
 
         # Repair invalid geometry (issue #506). The geometry column is WKB-encoded
-        # ("geometry") at this point; the helper preserves schema metadata.
+        # at this point; the helper preserves schema metadata.
         if arrow_table.num_rows > 0:
             arrow_table, _ = repair_arrow_table_geometry(
-                arrow_table, "geometry", repair=repair_geometry
+                arrow_table, geometry_column, repair=repair_geometry
             )
 
         return arrow_table, detected_crs, geometry_column
@@ -2534,18 +2548,24 @@ def _read_csv_to_arrow(
     encoding=None,
     force_2d=False,
 ):
-    """Read CSV/TSV to Arrow table with geometry as WKB. Returns None if no geometry."""
+    """``(table, geometry column)`` with geometry as WKB; ``(None, None)`` if none."""
     geom_info = _detect_csv_geometry_column(
         con, input_url, delimiter, wkt_column, lat_column, lon_column, verbose, encoding=encoding
     )
     if geom_info is None:
         warn("No geometry columns found in CSV/TSV. Reading as plain table.")
-        return None
+        return None, None
     return _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=force_2d)
 
 
 def _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=False):
-    """Arrow table with WKB geometry built from WKT or lat/lon columns."""
+    """``(table, geometry column)``: WKB geometry built from WKT or lat/lon columns.
+
+    The column is ``geometry`` unless a carried source column already takes that
+    name, in which case the built one moves aside exactly as it does on the SQL
+    conversion path (#1176) -- two columns of one name is not an Arrow table
+    anything downstream can use.
+    """
     geom_info["force_2d"] = force_2d
 
     # Validate geometry
@@ -2563,6 +2583,8 @@ def _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=F
         )
 
     csv_read = geom_info["csv_read"]
+    geometry_name = _resolve_tabular_geometry_name(_csv_carried_columns(geom_info))
+    quoted_geometry = quote_identifier(geometry_name)
 
     # Build query based on geometry type
     if geom_info["type"] == "wkt":
@@ -2577,14 +2599,14 @@ def _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=F
                     FROM {csv_read}
                 )
                 SELECT * EXCLUDE (_geom),
-                       ST_AsWKB(_geom) AS geometry
+                       ST_AsWKB(_geom) AS {quoted_geometry}
                 FROM _parsed
                 WHERE _geom IS NOT NULL
             """
         else:
             query = f"""
                 SELECT * EXCLUDE ({wkt_col}),
-                       ST_AsWKB({_csv_wkt_geom_expr(wkt_col, geom_info)}) AS geometry
+                       ST_AsWKB({_csv_wkt_geom_expr(wkt_col, geom_info)}) AS {quoted_geometry}
                 FROM {csv_read}
                 WHERE {wkt_col} IS NOT NULL
             """
@@ -2593,13 +2615,14 @@ def _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=F
         lon_col = quote_identifier(geom_info["lon_column"])
         query = f"""
             SELECT * EXCLUDE ({lat_col}, {lon_col}),
-                   ST_AsWKB(ST_Point(CAST({lon_col} AS DOUBLE), CAST({lat_col} AS DOUBLE))) AS geometry
+                   ST_AsWKB(ST_Point(CAST({lon_col} AS DOUBLE), CAST({lat_col} AS DOUBLE)))
+                       AS {quoted_geometry}
             FROM {csv_read}
             WHERE {lat_col} IS NOT NULL AND {lon_col} IS NOT NULL
         """
 
     result = con.execute(query)
-    return result.arrow().read_all()
+    return result.arrow().read_all(), geometry_name
 
 
 def _read_spatial_to_arrow(
@@ -3156,7 +3179,7 @@ def convert_to_geoparquet(
             output_version = geoparquet_version
             output_crs = effective_crs
             if parquet_tabular is not None:
-                query, bbox_covering_column, order_by = _convert_tabular_path(
+                query, bbox_covering_column, order_by, geometry_column = _convert_tabular_path(
                     con,
                     parquet_tabular,
                     crs,
@@ -3166,9 +3189,9 @@ def convert_to_geoparquet(
                     geoparquet_version=geoparquet_version,
                     force_2d=force_2d,
                 )
-                geometry_info = None
+                geometry_info = _tabular_geometry_info(geometry_column)
             elif is_csv:
-                query, bbox_covering_column, order_by = _convert_csv_path(
+                query, bbox_covering_column, order_by, geometry_column = _convert_csv_path(
                     con,
                     input_url,
                     delimiter,
@@ -3183,7 +3206,7 @@ def convert_to_geoparquet(
                     encoding=encoding,
                     force_2d=force_2d,
                 )
-                geometry_info = None
+                geometry_info = _tabular_geometry_info(geometry_column)
             else:
                 query, geometry_info, bbox_covering_column, order_by = _convert_spatial_path(
                     con,
@@ -3243,7 +3266,7 @@ def convert_to_geoparquet(
             # ST_MakeValid never expands a geometry's envelope, so any bbox already
             # computed upstream stays correct.
             if has_geometry:
-                geom_col = "geometry" if tabular else geometry_info["primary"]
+                geom_col = geometry_info["primary"]
                 query = repair_query_geometry(con, query, geom_col, repair=repair_geometry)
                 # Sort last. The repair count above is a full pass over the
                 # rows, and DuckDB keeps an ORDER BY inside a COUNT subquery:
