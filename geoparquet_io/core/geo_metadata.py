@@ -707,8 +707,11 @@ def strip_illegal_bbox_covering(geo_meta: dict, schema: pa.Schema) -> dict:
     Only the ``bbox`` member goes: an ``h3``/``quadkey`` entry beside it is not
     what the validator rejected, and :func:`strip_bboxless_covering` -- the gate
     every path runs after this one -- decides whether what is left may stand
-    alone (#954). A covering naming a column the schema does not have is left to
-    :func:`prune_geo_metadata_to_columns`, whose question it is.
+    alone (#954). A covering naming a column the schema does not have is somebody
+    else's question: :func:`prune_geo_metadata_to_columns` on the DuckDB funnel,
+    which prunes the carried block before any strategy sees it, and
+    :func:`strip_absent_covering` immediately before this gate on the Arrow table
+    funnel, which that prune never reached.
 
     Never mutates its input, for the aliasing reason
     :func:`strip_unsupported_covering` gives.
@@ -729,6 +732,51 @@ def strip_illegal_bbox_covering(geo_meta: dict, schema: pa.Schema) -> dict:
             continue
         _note_undeclarable_bbox_column(bbox_column, problem, True)
         remaining = {k: v for k, v in covering.items() if k != "bbox"}
+        pruned = {k: v for k, v in col_meta.items() if k != "covering"}
+        if remaining:
+            pruned["covering"] = remaining
+        stripped[col_name] = pruned
+        changed = True
+
+    if not changed:
+        return geo_meta
+    result = dict(geo_meta)
+    result["columns"] = stripped
+    return result
+
+
+def strip_absent_covering(geo_meta: dict, columns: Collection[str]) -> dict:
+    """Return ``geo_meta`` without any ``covering`` entry naming a column not in ``columns``.
+
+    The per-entry half of what :func:`prune_geo_metadata_to_columns` does to a
+    carried KV block, for a gate handed a ``geo`` block and the output's column
+    names instead. ``write_parquet_with_metadata`` prunes the carried block
+    against the output's columns before any strategy sees it; the Arrow *table*
+    funnel had no equivalent, so ``write_geoparquet_table`` of a table whose own
+    block declared a covering over a column the table does not have wrote the
+    entry verbatim and ``gpio check spec`` failed the result three ways -- the
+    column is absent, so its structure and its field types cannot be read either.
+
+    Only the entries naming an absent column go, for the reason
+    :func:`strip_illegal_bbox_covering` gives, and the ``covering`` key itself
+    goes when nothing is left. Never mutates its input.
+    """
+    col_entries = geo_meta.get("columns")
+    if not isinstance(col_entries, dict):
+        return geo_meta
+
+    present = set(columns)
+    stripped: dict = {}
+    changed = False
+    for col_name, col_meta in col_entries.items():
+        covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
+        if not isinstance(covering, dict):
+            stripped[col_name] = col_meta
+            continue
+        remaining = {k: v for k, v in covering.items() if _covering_column(v) in present}
+        if len(remaining) == len(covering):
+            stripped[col_name] = col_meta
+            continue
         pruned = {k: v for k, v in col_meta.items() if k != "covering"}
         if remaining:
             pruned["covering"] = remaining

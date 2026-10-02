@@ -319,6 +319,82 @@ class TestASecondaryColumnsIllegalCoveringIsGatedEverywhere:
 
 
 # ---------------------------------------------------------------------------
+# A covering naming a column that is not there
+# ---------------------------------------------------------------------------
+
+
+class TestACoveringNamingAnAbsentColumnIsPrunedOnEveryPath:
+    """``write_geoparquet_table`` deferred to a prune that never ran on its path.
+
+    ``write_parquet_with_metadata`` prunes the carried block against the output's
+    own columns before any strategy sees it, which is why all four agree. The
+    Arrow table funnel had no equivalent: it wrote the entry verbatim and
+    ``gpio check spec`` then failed the file gpio had just written three ways --
+    the column does not exist, so its structure and its field types cannot be
+    read either.
+    """
+
+    ABSENT = "missing_bbox_col"
+
+    @pytest.fixture
+    def table_declaring_an_absent_bbox_column(self) -> pa.Table:
+        # POINT(0 0) as little-endian WKB: byte order, type 1, two zero doubles.
+        point = pa.array([bytes.fromhex("01" + "01000000" + "00" * 16)], type=pa.binary())
+        table = pa.table([point, pa.array([1], type=pa.int32())], names=["geometry", "id"])
+        geo = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": ["Point"],
+                    "covering": {
+                        "bbox": {
+                            axis: [self.ABSENT, axis] for axis in ("xmin", "ymin", "xmax", "ymax")
+                        }
+                    },
+                }
+            },
+        }
+        return table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
+
+    def test_the_arrow_table_funnel_prunes_it(
+        self, table_declaring_an_absent_bbox_column, tmp_path
+    ):
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        out = tmp_path / "funnel.parquet"
+        write_geoparquet_table(
+            table_declaring_an_absent_bbox_column, str(out), geometry_column="geometry"
+        )
+
+        assert self.ABSENT not in bbox_covering_columns(out)
+        assert spec_failures(out) == {}
+
+    @pytest.mark.parametrize("strategy", STRATEGIES)
+    def test_the_duckdb_funnel_already_pruned_it(
+        self, table_declaring_an_absent_bbox_column, strategy, tmp_path
+    ):
+        """The parity the table funnel now matches."""
+        source = tmp_path / "src.parquet"
+        pq.write_table(table_declaring_an_absent_bbox_column, str(source))
+        out = tmp_path / f"{strategy}.parquet"
+        run_cli(
+            "extract",
+            "geoparquet",
+            source,
+            out,
+            "--geoparquet-version",
+            "1.1",
+            "--write-strategy",
+            strategy,
+        )
+
+        assert self.ABSENT not in bbox_covering_columns(out)
+        assert spec_failures(out) == {}
+
+
+# ---------------------------------------------------------------------------
 # The stdout Arrow IPC stream
 # ---------------------------------------------------------------------------
 
