@@ -68,6 +68,67 @@ def _is_wkb_extension(col_type) -> bool:
     )
 
 
+def _utm_epsg(lon: float, lat: float) -> int:
+    """EPSG code of the UTM zone containing (lon, lat), hemisphere-aware."""
+    zone = min(60, max(1, int((lon + 180.0) // 6) + 1))
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+def _coord_func(transformer):
+    """A shapely.transform callback over an (n, 2) coordinate array."""
+
+    def apply(coords):
+        np = load_module("numpy")
+        x, y = transformer.transform(coords[:, 0], coords[:, 1])
+        return np.column_stack([x, y])
+
+    return apply
+
+
+def _simplify_crs_transformers(
+    simplify_crs: str,
+    src_crs_json: dict | None,
+    sample_wkb: bytes | None,
+):
+    """(forward, inverse) shapely-transform callbacks for ``simplify_crs``.
+
+    ``auto-utm`` derives the UTM zone from a sample geometry's centroid —
+    the right answer for per-zone partitioned global data. The source CRS
+    comes from the carried geo block, defaulting to OGC:CRS84 like the rest
+    of gpio.
+    """
+    from pyproj import CRS, Transformer
+    from pyproj.exceptions import CRSError
+
+    shapely = load_module("shapely")
+    try:
+        src = CRS.from_json_dict(src_crs_json) if src_crs_json else CRS.from_user_input("OGC:CRS84")
+    except CRSError as e:
+        raise InvalidParameterError("simplify_crs", f"input CRS unusable: {e}") from e
+    if simplify_crs.lower() in ("auto-utm", "utm"):
+        if not src.is_geographic:
+            raise InvalidParameterError(
+                "simplify_crs",
+                "'auto-utm' needs geographic (lon/lat) input; give an explicit CRS",
+            )
+        if sample_wkb is None:
+            return None, None  # nothing to transform
+        centroid = shapely.from_wkb(sample_wkb).centroid
+        target = CRS.from_epsg(_utm_epsg(centroid.x, centroid.y))
+    else:
+        try:
+            target = CRS.from_user_input(simplify_crs)
+        except CRSError as e:
+            raise InvalidParameterError("simplify_crs", str(e)) from e
+    forward = Transformer.from_crs(src, target, always_xy=True)
+    inverse = Transformer.from_crs(target, src, always_xy=True)
+    return _coord_func(forward), _coord_func(inverse)
+
+
+def _first_wkb(values_iter) -> bytes | None:
+    return next((v for v in values_iter if v is not None), None)
+
+
 def _geometry_column_of(table: pa.Table, override: str | None) -> str:
     """Resolve the geometry column: override, carried primary, or 'geometry'."""
     name = override
@@ -115,6 +176,8 @@ def _simplify_values(
     preserve_topology: bool,
     simplify_boundary: bool,
     threads: int | None,
+    forward=None,
+    inverse=None,
 ) -> tuple[list, int, list]:
     """Simplify a list of WKB values (``None`` passes through).
 
@@ -134,12 +197,16 @@ def _simplify_values(
         geoms = shapely.from_wkb(np.array([values[i] for i in idx], dtype=object))
     except Exception as e:
         raise GeoParquetError(f"could not parse a WKB geometry in the input: {e}") from e
+    if forward is not None:
+        geoms = shapely.transform(geoms, forward)
     if coverage:
         out = coarsen.coverage_simplify(
             geoms, tolerance, simplify_boundary=simplify_boundary, threads=threads
         )
     else:
         out = coarsen.simplify(geoms, tolerance, preserve_topology, threads=threads)
+    if inverse is not None:
+        out = shapely.transform(out, inverse)
     out_empty = shapely.is_empty(out)
     collapsed = int(np.sum(out_empty)) - int(np.sum(shapely.is_empty(geoms)))
     result: list = [None] * len(values)
@@ -228,9 +295,14 @@ def simplify_table(
     threads: int | None = None,
     geometry_column: str | None = None,
     drop_empty: bool = False,
+    simplify_crs: str | None = None,
     verbose: bool = False,
 ) -> pa.Table:
     """Simplify a table's geometry column; metadata stats are refreshed.
+
+    ``simplify_crs`` projects to that CRS for the simplification (tolerance
+    in its units — meters for UTM) and projects the result back (#1197);
+    ``"auto-utm"`` picks the UTM zone from the data.
 
     ``drop_empty=True`` drops rows whose geometry is empty after
     simplification (#1199); nulls are kept either way — null is "unknown",
@@ -245,6 +317,16 @@ def simplify_table(
     geom_col = _geometry_column_of(table, geometry_column)
     table = _with_wkb_storage(table, geom_col)
     column = table.column(geom_col)
+    forward = inverse = None
+    if simplify_crs:
+        src_crs = (
+            sanitized_carried_geo(table.schema.metadata)
+            .get("columns", {})
+            .get(geom_col, {})
+            .get("crs")
+        )
+        sample = _first_wkb(v for chunk in column.chunks for v in chunk.to_pylist())
+        forward, inverse = _simplify_crs_transformers(simplify_crs, src_crs, sample)
 
     def run(values: list) -> tuple[list, int, list]:
         return _simplify_values(
@@ -254,6 +336,8 @@ def simplify_table(
             preserve_topology=preserve_topology,
             simplify_boundary=simplify_boundary,
             threads=threads,
+            forward=forward,
+            inverse=inverse,
         )
 
     collapsed = 0
@@ -407,6 +491,7 @@ def _simplify_file_streaming(
     row_group_rows: int | None,
     geoparquet_version: str | None,
     drop_empty: bool,
+    simplify_crs: str | None,
     verbose: bool,
 ) -> None:
     """Stream-simplify batch by batch: memory is bounded by one row group."""
@@ -422,6 +507,19 @@ def _simplify_file_streaming(
     bbox = [float("inf"), float("inf"), float("-inf"), float("-inf")]
     collapsed = 0
     dropped = 0
+    from itertools import chain
+
+    batches = pf.iter_batches(batch_size=rows)
+    forward = inverse = None
+    if simplify_crs:
+        first = next(batches, None)
+        if first is not None:
+            batches = chain([first], batches)
+        src_crs = (
+            sanitized_carried_geo(schema.metadata).get("columns", {}).get(geom_col, {}).get("crs")
+        )
+        sample = _first_wkb(iter(first.column(geom_col).to_pylist())) if first is not None else None
+        forward, inverse = _simplify_crs_transformers(simplify_crs, src_crs, sample)
     with remote_write_context(output_parquet, is_directory=False, verbose=verbose) as (
         actual_output,
         is_remote,
@@ -434,7 +532,7 @@ def _simplify_file_streaming(
         with pq.ParquetWriter(
             actual_output, writer_schema, store_schema=False, **writer_kwargs
         ) as writer:
-            for batch in pf.iter_batches(batch_size=rows):
+            for batch in batches:
                 table = pa.Table.from_batches([batch], schema=schema)
                 values, n, empty_flags = _simplify_values(
                     table.column(geom_col).to_pylist(),
@@ -443,6 +541,8 @@ def _simplify_file_streaming(
                     preserve_topology=preserve_topology,
                     simplify_boundary=True,
                     threads=threads,
+                    forward=forward,
+                    inverse=inverse,
                 )
                 collapsed += n
                 table = table.set_column(
@@ -506,6 +606,7 @@ def _simplify_file_in_memory(
         threads=kwargs["threads"],
         geometry_column=kwargs["geometry_column"],
         drop_empty=kwargs["drop_empty"],
+        simplify_crs=kwargs["simplify_crs"],
         verbose=kwargs["verbose"],
     )
     write_geoparquet_table(result, output_parquet, **write_args)
@@ -522,6 +623,7 @@ def simplify_file(
     threads: int | None = None,
     geometry_column: str | None = None,
     drop_empty: bool = False,
+    simplify_crs: str | None = None,
     compression: str = "ZSTD",
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
@@ -549,6 +651,7 @@ def simplify_file(
         "threads": threads,
         "geometry_column": geometry_column,
         "drop_empty": drop_empty,
+        "simplify_crs": simplify_crs,
         "compression": compression,
         "compression_level": compression_level,
         "row_group_size_mb": row_group_size_mb,
@@ -583,5 +686,6 @@ def simplify_file(
             row_group_rows=row_group_rows,
             geoparquet_version=geoparquet_version,
             drop_empty=drop_empty,
+            simplify_crs=simplify_crs,
             verbose=verbose,
         )
