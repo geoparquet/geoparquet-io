@@ -34,6 +34,7 @@ import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 import pytest
 
+from tests.conftest import COUNTRY_PARTITION_DIR, PLACES_TEST_FILE
 from tests.fix_output_oracle import covering_of, run_cli, spec_failures
 
 #: Every strategy ``Table.write`` accepts, default first.
@@ -86,7 +87,12 @@ class TestTableWriteKeepsADeclaredCovering:
     def test_the_documented_add_bbox_call_keeps_its_column(
         self, buildings_test_file, strategy, tmp_path
     ):
-        """``docs/guide/add.md``: ``add_bbox(column_name='bounds').write(...)``."""
+        """``docs/guide/add.md``: ``add_bbox(column_name='bounds').write(...)``.
+
+        The shared ``buildings_test_file`` is 1.0, CRS84, 42 rows and -- the point
+        here -- carries no bbox column of its own, so ``bounds`` is the only one
+        the output has and no self-evident name can stand in for it.
+        """
         import geoparquet_io as gpio
 
         out = tmp_path / f"{strategy}.parquet"
@@ -484,12 +490,6 @@ class TestTheStdoutStreamIsGatedLikeAFileWrite:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def buildings_test_file() -> Path:
-    """1.0, CRS84, 42 rows, and -- the point here -- no bbox column of its own."""
-    return Path("tests/data/buildings_test.parquet")
-
-
 def _rewrite_covering(source: Path, target: Path, covering: dict | None, **columns) -> Path:
     """``source`` with the primary column's ``covering`` replaced."""
     table = pq.read_table(str(source))
@@ -513,7 +513,7 @@ def gdal_style_covering(tmp_path) -> Path:
     Nothing but the input's own block vouches for that name: it is not the one
     self-evident ``bbox``, so a write that cannot see the block cannot declare it.
     """
-    table = pq.read_table("tests/data/places_test.parquet")
+    table = pq.read_table(str(PLACES_TEST_FILE))
     index = table.schema.get_field_index("bbox")
     table = table.set_column(index, "geometry_bbox", table.column("bbox"))
     metadata = dict(table.schema.metadata or {})
@@ -533,7 +533,7 @@ def gdal_style_covering(tmp_path) -> Path:
 def quadkey_file(tmp_path) -> Path:
     """A bbox covering with a ``quadkey`` index entry beside it."""
     target = tmp_path / "quadkey.parquet"
-    run_cli("add", "quadkey", "tests/data/places_test.parquet", target)
+    run_cli("add", "quadkey", PLACES_TEST_FILE, target)
     assert set(covering_of(target) or {}) == {"bbox", "quadkey"}
     return target
 
@@ -542,7 +542,7 @@ def quadkey_file(tmp_path) -> Path:
 def overture_order_covering(tmp_path) -> Path:
     """1.1, a covering declared over Overture's ``xmin, xmax, ymin, ymax`` struct."""
     target = tmp_path / "overture_declared.parquet"
-    table = pq.read_table("tests/data/country_partition/Honduras.parquet")
+    table = pq.read_table(str(COUNTRY_PARTITION_DIR / "Honduras.parquet"))
     pq.write_table(table, str(target))
     assert "covering_bbox_structure_geometry" in spec_failures(target)
     return target
@@ -607,7 +607,7 @@ def v2_with_declared_covering(tmp_path) -> Path:
     run_cli(
         "convert",
         "geoparquet",
-        "tests/data/places_test.parquet",
+        PLACES_TEST_FILE,
         v2,
         "--geoparquet-version",
         "2.0",
