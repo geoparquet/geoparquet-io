@@ -254,3 +254,86 @@ class TestCheckAllFix:
         assert result.exit_code == 0, result.output
         assert _covering(out) is None
         assert _failed(validate_geoparquet(str(out), validate_data=False)) == []
+
+
+class TestTheGuardsOnMalformedInput:
+    """The shared predicates read a block exactly as a file may hold it, so a
+    malformed one is answered rather than crashed on (#947/#1062)."""
+
+    @pytest.mark.parametrize("col_meta", ["not-a-dict", None, 42, ["bbox"]])
+    def test_a_column_entry_that_is_not_an_object_declares_no_covering(self, col_meta):
+        from geoparquet_io.core.geo_metadata import covering_lacks_bbox
+
+        assert covering_lacks_bbox(col_meta) is False
+
+    @pytest.mark.parametrize("geo_meta", [None, "not-a-dict", 42, []])
+    def test_a_block_that_is_not_an_object_declares_no_columns(self, geo_meta):
+        from geoparquet_io.core.geo_metadata import bboxless_covering_columns
+
+        assert bboxless_covering_columns(geo_meta) == []
+
+    @pytest.mark.parametrize("columns", ["not-a-dict", ["geometry"], 42, None])
+    def test_a_columns_value_that_is_not_an_object_declares_no_columns(self, columns):
+        from geoparquet_io.core.geo_metadata import bboxless_covering_columns
+
+        assert bboxless_covering_columns({"columns": columns}) == []
+
+
+class TestTheRepairOnAFileThatDoesNotNeedIt:
+    def test_a_legal_file_reports_nothing_to_drop_and_writes_nothing(self, tmp_path, caplog):
+        """The verbose 'nothing to drop' arm: no covering, no output file."""
+        import logging
+
+        src = tmp_path / "plain.parquet"
+        CliRunner().invoke(cli, ["convert", "tests/data/buildings_test.parquet", str(src)])
+        out = tmp_path / "never_written.parquet"
+
+        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+            summary = fix_bboxless_covering(str(src), str(out), verbose=True)
+
+        assert summary == {"fix_applied": None, "success": True}
+        assert not out.exists()
+        assert "nothing to drop" in caplog.text.lower()
+
+    def test_the_fix_step_keeps_the_input_when_the_repair_finds_nothing(self, tmp_path):
+        """`_apply_covering_fix`'s disagreement arm: the check said yes, the
+        repair says no, so the pipeline keeps using the file it had."""
+        from geoparquet_io.core.check_fixes import _apply_covering_fix
+
+        src = tmp_path / "plain.parquet"
+        CliRunner().invoke(cli, ["convert", "tests/data/buildings_test.parquet", str(src)])
+        temp_files: list[str] = []
+        # The check offers the repair, but the file carries no illegal covering:
+        # the two disagree, so the pipeline must keep the file it had.
+        check_results = {"covering": {"fix_available": True}}
+
+        current, applied = _apply_covering_fix(
+            check_results, str(src), temp_files, verbose=False, profile=None
+        )
+
+        assert current == str(src)
+        assert applied == []
+
+
+class TestTheRemoteRepairPath:
+    def test_a_remote_output_takes_the_funnel_rewrite_not_the_footer_patch(
+        self, bboxless, monkeypatch
+    ):
+        """A remote URL cannot be footer-patched in place, so the repair falls
+        through to the funnel rewrite (which applies the same gate)."""
+        import geoparquet_io.core.check_fixes as cf
+
+        src = bboxless
+        patched: list[str] = []
+        monkeypatch.setattr(cf, "patch_footer_kv", lambda *a, **k: patched.append("patched"))
+        monkeypatch.setattr(cf, "is_remote_url", lambda p: str(p).startswith("s3://"))
+        rewrote: list[str] = []
+        monkeypatch.setattr(
+            cf, "write_parquet_with_metadata", lambda *a, **k: rewrote.append("rewrote")
+        )
+
+        summary = cf.fix_bboxless_covering(str(src), "s3://bucket/out.parquet", verbose=False)
+
+        assert patched == [], "a remote output must not be footer-patched"
+        assert rewrote == ["rewrote"]
+        assert summary["success"] is True
