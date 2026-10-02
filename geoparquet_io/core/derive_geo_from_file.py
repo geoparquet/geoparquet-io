@@ -23,9 +23,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs
-from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type, resolve_crs_reference
+from geoparquet_io.core.duckdb_metadata import (
+    get_geo_metadata,
+    get_schema_info,
+    parse_geometry_logical_type,
+    resolve_crs_reference,
+)
 from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES, _GEOMETRY_TYPE_CODES
 from geoparquet_io.core.logging_config import debug, warn
+from geoparquet_io.core.parquet_schema import root_schema_columns
 
 
 def _geo_code_to_type_name(code: int) -> str | None:
@@ -138,28 +144,33 @@ def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str
     return col_meta
 
 
-def _secondary_geometry_names(pf) -> tuple[dict[str, str], dict[str, dict]]:
-    """(top-level native columns by logical type string, declared geo-block entries) of a file.
+def _secondary_geometry_names(input_file: str) -> tuple[dict[str, str], dict[str, dict]]:
+    """(top-level native columns by logical type string, declared geo-block entries) of an input.
+
+    Read through ``get_schema_info`` and ``get_geo_metadata`` -- the pair
+    ``write_funnels.collect_nonplanar_edges`` already asks this same question of,
+    and the pair that resolves a remote URL, a ``dir/*.parquet`` glob and a hive
+    directory (taking the first file's footer for a multi-file input, as every
+    other metadata reader here does). Reading the input with ``pq.ParquetFile``
+    instead meant ``https://``, ``s3://``, globs and directories derived nothing
+    at all (#1175).
 
     Only top-level columns count: a GEOMETRY leaf nested in a struct is not a
     column of the table, and keying it by its leaf name would mistake it for a
-    top-level column that happens to share the name. A ``geo`` key that does
-    not parse leaves the native half standing.
+    top-level column that happens to share the name -- which ``root_schema_columns``
+    (and the top-level-only lookup inside ``get_schema_info``) is what keeps apart.
+    A ``geo`` key that does not parse leaves the native half standing.
     """
-    schema = pf.metadata.schema
     native: dict[str, str] = {}
-    for i in range(len(schema)):
-        column = schema.column(i)
-        if column.path != column.name:
-            continue
-        logical = str(column.logical_type)
+    for column in root_schema_columns(get_schema_info(input_file)):
+        logical = column.get("logical_type") or ""
         if logical.startswith(("Geometry", "Geography")):
-            native[column.name] = logical
+            native[column["name"]] = logical
     declared: dict[str, dict] = {}
-    raw = (pf.metadata.metadata or {}).get(b"geo")
     try:
-        geo_meta = json.loads(raw) if raw else None
-    except ValueError:
+        geo_meta = get_geo_metadata(input_file)
+    except Exception as e:  # noqa: BLE001 - an unreadable `geo` key leaves the native half
+        debug(f"Could not read the geo block of {input_file}: {e}")
         geo_meta = None
     columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
     if isinstance(columns, dict):
@@ -199,10 +210,11 @@ def _native_secondary_meta(logical: str, declared: dict | None, input_file: str)
 
 
 def derive_secondary_geometry_info(
-    input_file: str,
+    input_file: str | None,
     primary_column: str,
     output_columns: list[str] | None = None,
     verbose: bool = False,
+    native_types: dict[str, str] | None = None,
 ) -> dict | None:
     """``geometry_info`` for a rewrite whose caller supplied none, read off the input.
 
@@ -219,14 +231,28 @@ def derive_secondary_geometry_info(
     ``output_columns`` limits the answer to columns the write actually emits, so
     a projection cannot come out declaring a column it dropped. Best-effort: an
     unreadable input derives nothing rather than failing the write. The input is
-    read with pyarrow, so a remote or multi-file input derives nothing either.
+    read through ``get_schema_info``/``get_geo_metadata``, so a remote URL, a
+    glob and a hive directory all answer (#1175).
+
+    ``native_types`` is the same ``{column: logical type string}`` map read from
+    somewhere other than the input's footer -- in practice the output query's own
+    ``DESCRIBE`` (:func:`geoparquet_io.core.geometry_detection.native_geometry_types_from_query`),
+    which is what lets a caller with **no** input witness at all (``partition``
+    staging) derive its secondaries. The input's own types win where both speak:
+    a logical type carries inline PROJJSON, while ``DESCRIBE`` renders the CRS as
+    a bare ``EPSG:3857`` reference. ``input_file`` may be None when only
+    ``native_types`` is available.
     """
-    try:
-        with pq.ParquetFile(input_file) as pf:
-            native, declared = _secondary_geometry_names(pf)
-    except Exception as e:  # noqa: BLE001 - a probe, never the write's failure
-        debug(f"Could not derive secondary geometry columns from {input_file}: {e}")
-        return None
+    native: dict[str, str] = {}
+    declared: dict[str, dict] = {}
+    if input_file:
+        try:
+            native, declared = _secondary_geometry_names(input_file)
+        except Exception as e:  # noqa: BLE001 - a probe, never the write's failure
+            debug(f"Could not derive secondary geometry columns from {input_file}: {e}")
+            return None
+    for name, logical in (native_types or {}).items():
+        native.setdefault(name, logical)
 
     metadata: dict[str, dict] = {}
     for name in dict.fromkeys([*native, *declared]):
@@ -236,14 +262,16 @@ def derive_secondary_geometry_info(
             continue
         logical = native.get(name)
         metadata[name] = (
-            _native_secondary_meta(logical, declared.get(name), input_file) if logical else {}
+            _native_secondary_meta(logical, declared.get(name), input_file or "") if logical else {}
         )
 
     if not metadata:
         return None
     secondary = list(metadata)
     if verbose:
-        debug(f"Derived secondary geometry columns from {input_file}: {secondary}")
+        debug(
+            f"Derived secondary geometry columns from {input_file or 'the output query'}: {secondary}"
+        )
     return {"primary": primary_column, "secondary": secondary, "metadata": metadata}
 
 
