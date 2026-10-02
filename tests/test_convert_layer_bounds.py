@@ -37,9 +37,7 @@ def con():
 class TestCalculateBoundsHonoursLayer:
     def test_bounds_of_a_non_first_layer(self, con, multilayer_gpkg):
         """The second layer's geometry column only exists in that layer."""
-        geom_column, _aliases = _detect_spatial_geometry(
-            con, multilayer_gpkg, False, "roads", None
-        )
+        geom_column, _aliases = _detect_spatial_geometry(con, multilayer_gpkg, False, "roads", None)
         assert geom_column == "geom"
 
         bounds = _calculate_bounds(con, multilayer_gpkg, geom_column, False, layer="roads")

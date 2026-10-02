@@ -91,6 +91,7 @@ def geoarrow_primary_encoding(geo_meta) -> str | None:
     encoding = entry.get("encoding")
     return encoding if encoding in GEOARROW_ENCODINGS else None
 
+
 # =============================================================================
 # Levelled overview files (tylertoo OVERVIEWS_SPEC)
 # =============================================================================

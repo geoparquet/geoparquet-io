@@ -26,7 +26,6 @@ from geoparquet_io.core.streaming import (
     should_stream_output,
 )
 
-
 #: Struct fields a bbox covering column must expose, lowercased.
 _BBOX_STRUCT_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
 
@@ -518,9 +517,7 @@ def _make_streaming_bbox_query(
             col_names, geoparquet_version, requested=bbox_column_name
         )
     return (
-        _make_add_bbox_query(
-            source, geom_col, bbox_column_name, replace_existing=has_bbox_struct
-        ),
+        _make_add_bbox_query(source, geom_col, bbox_column_name, replace_existing=has_bbox_struct),
         False,
         bbox_column_name,
     )

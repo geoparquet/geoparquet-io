@@ -67,9 +67,7 @@ class TestCsvGeometryColumnCollision:
         source.write_text("geometry,lat,lon\nfirst,1.0,2.0\nsecond,3.0,4.0\n")
         output = tmp_path / "out.parquet"
 
-        convert_to_geoparquet(
-            str(source), str(output), lat_column="lat", lon_column="lon"
-        )
+        convert_to_geoparquet(str(source), str(output), lat_column="lat", lon_column="lon")
 
         table, _ = _assert_wkb_geometry(output)
         assert table.num_rows == 2

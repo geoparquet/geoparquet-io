@@ -1311,9 +1311,7 @@ class TestStreamingGeometryColumnFallback:
         con = duckdb.connect()
         con.execute("CREATE TABLE t AS SELECT 1 AS id, 'x' AS label")
 
-        query, passed_through, bbox_name = _make_streaming_bbox_query(
-            "t", con, "bbox", force=False
-        )
+        query, passed_through, bbox_name = _make_streaming_bbox_query("t", con, "bbox", force=False)
 
         assert passed_through is False
         assert bbox_name == "bbox"
