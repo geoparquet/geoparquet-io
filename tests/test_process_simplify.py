@@ -1022,3 +1022,195 @@ class TestRefreshMetrics:
         )
         assert result.exit_code == 0, result.output
         assert "metrics:area" in pq.read_table(str(out)).column_names
+
+
+class TestGeometryColumnResolution:
+    """Dependency-free: these must fail before coarsen is imported."""
+
+    def test_non_binary_column_is_rejected(self):
+        table = pa.table({"geometry": pa.array(["POINT (0 0)"])})
+        with pytest.raises(InvalidParameterError, match="WKB binary"):
+            simplify_table(table, 0.1)
+
+    def test_malformed_covering_declaration_is_tolerated(self):
+        from geoparquet_io.core.bbox_structure import bbox_covering_column_for
+
+        assert bbox_covering_column_for({}, "geometry") is None
+        assert bbox_covering_column_for({"columns": {"geometry": {}}}, "geometry") is None
+        partial = {"columns": {"geometry": {"covering": {"bbox": {"ymin": ["b", "ymin"]}}}}}
+        assert bbox_covering_column_for(partial, "geometry") is None
+        not_a_list = {"columns": {"geometry": {"covering": {"bbox": {"xmin": "b.xmin"}}}}}
+        assert bbox_covering_column_for(not_a_list, "geometry") is None
+
+    def test_non_dict_column_metadata_is_tolerated(self):
+        geo = {"columns": {"geometry": "not a dict"}}
+        assert strip_stale_geometry_stats(geo, "geometry") == geo
+
+
+def _covering_table(geometries, *, bbox_type=pa.float64(), bbox_column="bbox"):
+    """A table declaring a bbox covering column, for the refresh path."""
+    shapely = _shapely()
+    wkb = [shapely.to_wkb(g) for g in geometries]
+    bounds = [g.bounds for g in geometries]
+    struct = pa.array(
+        [dict(zip(("xmin", "ymin", "xmax", "ymax"), b, strict=True)) for b in bounds],
+        type=pa.struct([(name, bbox_type) for name in ("xmin", "ymin", "xmax", "ymax")]),
+    )
+    table = pa.table({"geometry": pa.array(wkb, type=pa.binary()), bbox_column: struct})
+    geo = _geo_block()
+    geo["columns"]["geometry"]["covering"] = {
+        "bbox": {name: [bbox_column, name] for name in ("xmin", "ymin", "xmax", "ymax")}
+    }
+    return table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
+
+
+@requires_coarsen
+class TestSimplifyTableEdges:
+    def test_all_null_geometry_column_passes_through(self):
+        """No geometry to hand coarsen, and no carried geo block to strip."""
+        table = pa.table({"geometry": pa.array([None, None], type=pa.binary())})
+        result = simplify_table(table, 0.1)
+        assert result.column("geometry").to_pylist() == [None, None]
+        assert not result.schema.metadata
+
+    def test_float64_covering_column_is_refreshed_exactly(self):
+        """A float64 covering needs no outward rounding: the box is exact."""
+        shapely = _shapely()
+        circle = shapely.Point(10, 20).buffer(1, quad_segs=64)
+        result = simplify_table(_covering_table([circle]), 0.2)
+        geom = shapely.from_wkb(result.column("geometry")[0].as_py())
+        row = result.column("bbox")[0].as_py()
+        assert (row["xmin"], row["ymin"], row["xmax"], row["ymax"]) == pytest.approx(geom.bounds)
+
+    def test_coverage_mode_warns_about_whole_column_memory(self, monkeypatch, caplog):
+        import geoparquet_io.core.process.simplify as simplify_module
+
+        shapely = _shapely()
+        monkeypatch.setattr(simplify_module, "_COVERAGE_WARN_ROWS", 0)
+        table = _wkb_table([shapely.box(0, 0, 1, 1), shapely.box(1, 0, 2, 1)])
+        with caplog.at_level("WARNING"):
+            result = simplify_table(table, 0.01, coverage=True)
+        assert result.num_rows == 2
+        assert "in memory at once" in caplog.text
+
+    def test_collapsed_geometries_are_reported(self, caplog):
+        shapely = _shapely()
+        sliver = shapely.Polygon([(0, 0), (1, 0), (1, 0.001), (0, 0)])
+        with caplog.at_level("WARNING"):
+            result = simplify_table(_wkb_table([sliver]), 10.0, preserve_topology=False)
+        assert shapely.from_wkb(result.column("geometry")[0].as_py()).is_empty
+        assert "collapsed to empty" in caplog.text
+
+
+@requires_coarsen
+class TestStreamingFallbacks:
+    """Which write path a file takes, and what the streamed footer says."""
+
+    def _write_plain(self, path, table):
+        pq.write_table(table, str(path))
+        return str(path)
+
+    def test_large_string_column_falls_back_to_in_memory(self, tmp_path):
+        """The funnel normalizes large types; the streaming writer does not."""
+        shapely = _shapely()
+        table = pa.table(
+            {
+                "name": pa.array(["a"], type=pa.large_string()),
+                "geometry": pa.array([shapely.to_wkb(shapely.box(0, 0, 1, 1))], pa.binary()),
+            }
+        ).replace_schema_metadata({b"geo": json.dumps(_geo_block()).encode("utf-8")})
+        src = self._write_plain(tmp_path / "large.parquet", table)
+        out = tmp_path / "out.parquet"
+        simplify_file(src, str(out), tolerance=0.0)
+        result = pq.read_table(str(out))
+        assert result.num_rows == 1
+        assert pa.types.is_string(result.schema.field("name").type)
+
+    def test_row_group_size_mb_takes_the_in_memory_path(self, tmp_path):
+        """A byte-sized row group target is only the funnel's to resolve."""
+        shapely = _shapely()
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        src = tmp_path / "src.parquet"
+        write_geoparquet_table(_wkb_table([shapely.Point(1, 2).buffer(1, quad_segs=64)]), str(src))
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.1, row_group_size_mb=0.5)
+        assert pq.ParquetFile(str(out)).metadata.num_rows == 1
+
+    def test_input_without_a_geo_block_still_streams(self, tmp_path):
+        """A plain Parquet file with a WKB 'geometry' column gets a geo block."""
+        shapely = _shapely()
+        table = pa.table(
+            {"geometry": pa.array([shapely.to_wkb(shapely.box(0, 0, 2, 2))], pa.binary())}
+        )
+        src = self._write_plain(tmp_path / "plain.parquet", table)
+        out = tmp_path / "out.parquet"
+        simplify_file(src, str(out), tolerance=0.0)
+        geo = json.loads(pq.ParquetFile(str(out)).schema_arrow.metadata[b"geo"])
+        assert geo["primary_column"] == "geometry"
+        assert geo["columns"]["geometry"]["geometry_types"] == ["Polygon"]
+        assert geo["columns"]["geometry"]["bbox"] == [0.0, 0.0, 2.0, 2.0]
+
+    def test_all_null_geometries_stream_without_stats(self, tmp_path):
+        """Nothing valid to measure: the funnel's empty-table behavior stands."""
+        table = pa.table({"geometry": pa.array([None, None], type=pa.binary())})
+        src = self._write_plain(tmp_path / "nulls.parquet", table)
+        out = tmp_path / "out.parquet"
+        simplify_file(src, str(out), tolerance=0.1)
+        result = pq.read_table(str(out))
+        assert result.column("geometry").to_pylist() == [None, None]
+        geo = json.loads(result.schema.metadata[b"geo"])
+        assert "bbox" not in geo["columns"]["geometry"]
+
+    def test_all_empty_geometries_stream_strict_json(self, tmp_path):
+        """Empty geometries contribute no finite bounds; the streamed footer
+        omits the bbox key rather than writing a non-finite box, and the whole
+        block stays strict-JSON parseable."""
+        shapely = _shapely()
+
+        table = pa.table(
+            {"geometry": pa.array([shapely.to_wkb(shapely.Polygon())], pa.binary())}
+        ).replace_schema_metadata({b"geo": json.dumps(_geo_block()).encode("utf-8")})
+        src = self._write_plain(tmp_path / "empty.parquet", table)
+        out = tmp_path / "out.parquet"
+        simplify_file(src, str(out), tolerance=0.1)
+
+        def reject_constant(name):
+            raise AssertionError(f"non-finite JSON literal in geo footer: {name}")
+
+        raw = pq.ParquetFile(str(out)).schema_arrow.metadata[b"geo"]
+        streamed = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+        assert "bbox" not in streamed["columns"]["geometry"]
+
+    def test_collapsed_geometries_are_reported_while_streaming(self, tmp_path, caplog):
+        shapely = _shapely()
+        sliver = shapely.Polygon([(0, 0), (1, 0), (1, 0.001), (0, 0)])
+        src = self._write_plain(tmp_path / "sliver.parquet", _wkb_table([sliver]))
+        out = tmp_path / "out.parquet"
+        with caplog.at_level("WARNING"):
+            simplify_file(src, str(out), tolerance=10.0, preserve_topology=False)
+        assert "collapsed to empty" in caplog.text
+
+
+class TestCliSimplifyValueErrors:
+    def test_unreadable_input_is_a_clean_message(self, tmp_path):
+        """pyarrow raises ArrowInvalid (a ValueError) on a non-Parquet file."""
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        src = tmp_path / "not.parquet"
+        src.write_bytes(b"this is not a parquet file")
+        result = CliRunner().invoke(
+            cli,
+            [
+                "process",
+                "simplify",
+                str(src),
+                str(tmp_path / "o.parquet"),
+                "--tolerance",
+                "1",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
