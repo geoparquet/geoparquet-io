@@ -31,6 +31,7 @@ from geoparquet_io.core.geo_metadata import (
     compute_geo_stats_via_sql,
     create_geo_metadata,
     strip_bboxless_covering,
+    strip_illegal_bbox_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     WKB_EXTENSION_NAMES,
@@ -472,6 +473,12 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         # after create_geo_metadata's gate, so it runs again over them (#954).
         merge_secondary_geometry_metadata(geo_meta, geometry_info)
 
+        # `_detect_bbox_column` above only answers whether this write may
+        # DECLARE the column; the entry the input already declared over an
+        # illegal struct has to go too, which is the same gate's other half
+        # (#1172). The DuckDB strategies get it from
+        # `declare_carried_bbox_column`.
+        geo_meta = strip_illegal_bbox_covering(geo_meta, schema)
         return strip_bboxless_covering(geo_meta, verbose)
 
     def _stream_batches_to_file(

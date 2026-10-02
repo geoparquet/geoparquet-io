@@ -237,6 +237,14 @@ WRITE_PATHS = [
         lambda src, out: ["extract", "geoparquet", src, out, "--write-strategy", "streaming"],
     ),
     (
+        "extract-in-memory",
+        lambda src, out: ["extract", "geoparquet", src, out, "--write-strategy", "in-memory"],
+    ),
+    (
+        "extract-disk-rewrite",
+        lambda src, out: ["extract", "geoparquet", src, out, "--write-strategy", "disk-rewrite"],
+    ),
+    (
         "sort-1.1-geoarrow",
         lambda src, out: ["sort", "hilbert", src, out, "--geoparquet-version", "1.1-geoarrow"],
     ),
@@ -273,11 +281,19 @@ class TestEveryWritePath:
         assert bbox_field_names(out) == bbox_field_names(source)
         assert ("Not declaring a 'covering'" in caplog.text) is not expects_covering
 
-    @pytest.mark.parametrize(("path_id", "argv"), WRITE_PATHS[:6], ids=WRITE_IDS[:6])
+    @pytest.mark.parametrize(("path_id", "argv"), WRITE_PATHS, ids=WRITE_IDS)
     def test_a_covering_the_input_declared_over_an_illegal_struct_is_dropped_and_said(
         self, declared_illegal_v1_1, path_id, argv, tmp_path, caplog
     ):
-        """Both write facades agree: gpio does not carry a covering its validator rejects."""
+        """Every write facade agrees: gpio does not carry a covering its validator rejects.
+
+        This ran over the first six paths only. The two Arrow strategies warned
+        "so it is not written" and then wrote it anyway, because the gate they
+        ask -- ``bbox_column_to_declare`` -- answers "do not declare this
+        column" and nothing dropped the entry the input had already declared
+        (#1172). The slice is the whole list now: it is what says the drop
+        reached every path.
+        """
         out = tmp_path / f"{path_id}.parquet"
 
         with caplog.at_level("WARNING", logger="geoparquet_io"):
@@ -328,6 +344,23 @@ class TestEveryWritePath:
 
         assert bool(covering_of(out)) is declared
         assert spec_failures(out) == {}
+
+    def test_the_arrow_table_writer_drops_a_declared_illegal_covering(
+        self, declared_illegal_v1_1, tmp_path, caplog
+    ):
+        """Rule 2 on the other Arrow funnel: a table whose own block declares it."""
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        out = tmp_path / "declared_table.parquet"
+        with caplog.at_level("WARNING", logger="geoparquet_io"):
+            write_geoparquet_table(
+                pq.read_table(str(declared_illegal_v1_1)), str(out), geoparquet_version="1.1"
+            )
+
+        assert covering_of(out) is None
+        assert spec_failures(out) == {}
+        assert bbox_field_names(out) == OVERTURE_ORDER
+        assert "Dropping the 'covering' declared over" in caplog.text
 
     def test_a_partition_write_warns_once_not_once_per_file(self, overture_v1_0, tmp_path, caplog):
         with caplog.at_level("WARNING", logger="geoparquet_io"):

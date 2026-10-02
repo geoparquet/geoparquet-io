@@ -691,6 +691,60 @@ def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     )
 
 
+def strip_illegal_bbox_covering(geo_meta: dict, schema: pa.Schema) -> dict:
+    """Return ``geo_meta`` without any ``covering.bbox`` naming a struct the spec forbids.
+
+    The *drop* half of :func:`bbox_column_to_declare`'s rule 2, for the write
+    paths that build their block from an Arrow schema. The DuckDB paths get it
+    from :func:`declare_carried_bbox_column`, which probes the output query for
+    a schema and pops the same member on the same verdict; this asks the same
+    question of a schema the caller already has.
+
+    Without it those paths asked the gate only "may I declare this column?",
+    acted on the "no" by not declaring anything, and then wrote the entry the
+    *input* had already declared -- warning "so it is not written" first (#1172).
+
+    Only the ``bbox`` member goes: an ``h3``/``quadkey`` entry beside it is not
+    what the validator rejected, and :func:`strip_bboxless_covering` -- the gate
+    every path runs after this one -- decides whether what is left may stand
+    alone (#954). A covering naming a column the schema does not have is left to
+    :func:`prune_geo_metadata_to_columns`, whose question it is.
+
+    Never mutates its input, for the aliasing reason
+    :func:`strip_unsupported_covering` gives.
+    """
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return geo_meta
+
+    stripped: dict = {}
+    changed = False
+    for col_name, col_meta in columns.items():
+        covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
+        bbox_column = _covering_column(covering.get("bbox")) if isinstance(covering, dict) else None
+        problem = (
+            arrow_bbox_covering_problem(bbox_column, schema.field(bbox_column))
+            if bbox_column is not None and bbox_column in schema.names
+            else None
+        )
+        if problem is None:
+            stripped[col_name] = col_meta
+            continue
+        _note_undeclarable_bbox_column(bbox_column, problem, True)
+        remaining = {k: v for k, v in covering.items() if k != "bbox"}
+        pruned = {k: v for k, v in col_meta.items() if k != "covering"}
+        if remaining:
+            pruned["covering"] = remaining
+        stripped[col_name] = pruned
+        changed = True
+
+    if not changed:
+        return geo_meta
+    result = dict(geo_meta)
+    result["columns"] = stripped
+    return result
+
+
 def _add_custom_covering(
     geo_meta: dict, geom_col: str, custom_metadata: dict | None, verbose: bool
 ) -> None:

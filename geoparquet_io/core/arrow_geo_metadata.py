@@ -40,6 +40,7 @@ from geoparquet_io.core.geo_metadata import (
     sanitize_geo_metadata,
     sanitized_carried_geo,
     strip_bboxless_covering,
+    strip_illegal_bbox_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     is_geoarrow_extension_field,
@@ -892,6 +893,11 @@ def _build_geo_block(
 
     merge_secondary_geometry_metadata(geo_meta, geometry_info)
     # Secondary entries arrive after create_geo_metadata's gate (#954).
+    #
+    # `bbox_column` above answers "may this write declare that column?"; a `no`
+    # over a struct the INPUT already declared also has to drop the entry it
+    # declared, or the warning the gate just printed is a lie (#1172).
+    geo_meta = strip_illegal_bbox_covering(geo_meta, table.schema)
     return strip_bboxless_covering(geo_meta, verbose)
 
 
