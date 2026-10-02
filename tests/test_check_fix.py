@@ -215,9 +215,11 @@ class TestCheckFixSpatial:
         )
 
         assert result.exit_code == 0
-        if "No fix needed" not in result.output:
-            assert os.path.exists(fixed_file)
-            assert_places_output_is_sound(fixed_file, version="1.1", covering=True)
+        # The places fixture has one row group, so the verdict is withheld and
+        # the fix declines: nothing was judged, so nothing is rewritten (#755).
+        assert "not judged below 8 row groups" in result.output
+        assert "No fix needed" not in result.output, "a withheld verdict is not a pass"
+        assert not os.path.exists(fixed_file)
 
 
 class TestCheckFixAll:

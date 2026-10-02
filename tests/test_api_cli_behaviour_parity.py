@@ -132,11 +132,15 @@ class TestCheckGroupAgreesWithTable:
         assert api["has_bbox_column"] is True
         assert api["has_bbox_metadata"] is False
 
-    def test_check_spatial_agrees_on_a_sorted_file(self, places_with_covering_file):
-        assert "appears to be spatially ordered" in _cli(
+    def test_check_spatial_agrees_on_a_one_row_group_file(self, places_with_covering_file):
+        """One row group: both surfaces withhold the verdict rather than pass it."""
+        assert "not judged below 8 row groups" in _cli(
             "check", "spatial", places_with_covering_file
         )
-        assert gpio.read(places_with_covering_file).check_spatial().passed() is True
+        api = gpio.read(places_with_covering_file).check_spatial()
+        assert api.to_dict()["judged"] is False
+        assert api.passed() is True, "no verdict is not a failure"
+        assert any("not judged" in w for w in api.warnings())
 
     def test_table_check_reports_the_structure_sub_checks(self, places_with_covering_file):
         """`Table.check()` is `core.check_all`: structure only, no spatial or spec pass."""

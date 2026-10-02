@@ -317,7 +317,10 @@ def test_journey_07_csv_roundtrip(tmp_path):
     assert rows(sorted_out) == PLACES_ROWS
     assert "bbox" in columns(sorted_out)
     report = assert_check_all(sorted_out, 7)
-    assert "spatially ordered" in report
+    # 766 rows sort into one row group, below the footer check's floor: the
+    # report carries the numbers and withholds the verdict rather than pass it.
+    assert "not judged below 8 row groups" in report
+    assert "may not be optimally spatially ordered" not in report
 
 
 # ---------------------------------------------------------------------------
