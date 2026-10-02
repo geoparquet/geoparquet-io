@@ -722,11 +722,8 @@ def strip_illegal_bbox_covering(geo_meta: dict, schema: pa.Schema) -> dict:
     for col_name, col_meta in columns.items():
         covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
         bbox_column = _covering_column(covering.get("bbox")) if isinstance(covering, dict) else None
-        problem = (
-            arrow_bbox_covering_problem(bbox_column, schema.field(bbox_column))
-            if bbox_column is not None and bbox_column in schema.names
-            else None
-        )
+        field = _unambiguous_field(schema, bbox_column) if bbox_column is not None else None
+        problem = arrow_bbox_covering_problem(bbox_column, field) if field is not None else None
         if problem is None:
             stripped[col_name] = col_meta
             continue
@@ -1470,6 +1467,23 @@ def bbox_covering_problem(
     return None
 
 
+def _unambiguous_field(schema: pa.Schema, name: str) -> pa.Field | None:
+    """``schema``'s field called ``name``, or None when there is not exactly one.
+
+    Parquet allows a schema to hold one name twice, and ``Schema.field(name)``
+    raises ``KeyError: 'Column <name> does not exist in schema'`` when it does --
+    while ``name in schema.names`` says True. Every reader of a bbox column's
+    field asked the second question and then the first, so a table with two
+    ``bbox`` columns aborted the write instead of declining to declare over an
+    ambiguous name.
+
+    Absent and duplicated answer the same here on purpose: a covering names a
+    column, and a name that resolves to two of them names neither.
+    """
+    indices = schema.get_all_field_indices(name)
+    return schema.field(indices[0]) if len(indices) == 1 else None
+
+
 def arrow_bbox_covering_problem(column: str, field: pa.Field) -> str | None:
     """:func:`bbox_covering_problem` read off an Arrow field."""
     import pyarrow as pa
@@ -1589,7 +1603,12 @@ def bbox_column_to_declare(
         if verbose:
             debug(f"Not declaring '{name}' for the primary: another column's covering names it")
         return None
-    problem = arrow_bbox_covering_problem(name, schema.field(name))
+    field = _unambiguous_field(schema, name)
+    if field is None:
+        if verbose:
+            debug(f"Not declaring '{name}': the schema holds that name more than once")
+        return None
+    problem = arrow_bbox_covering_problem(name, field)
     if problem is None:
         return name
     _note_undeclarable_bbox_column(name, problem, name == declared)
@@ -1649,9 +1668,9 @@ def _self_evident_bbox_column(schema: pa.Schema, verbose: bool = False) -> str |
     """
     import pyarrow as pa
 
-    if SELF_EVIDENT_BBOX_COLUMN not in schema.names:
+    field = _unambiguous_field(schema, SELF_EVIDENT_BBOX_COLUMN)
+    if field is None:
         return None
-    field = schema.field(SELF_EVIDENT_BBOX_COLUMN)
     if not (
         pa.types.is_struct(field.type)
         and _BBOX_STRUCT_FIELDS.issubset({f.name for f in field.type})

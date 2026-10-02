@@ -189,6 +189,56 @@ class TestTheGate:
         assert caplog.text.count("Not declaring a 'covering'") == 1
         assert "gpio add bbox --force" in caplog.text
 
+    def test_a_name_the_schema_holds_twice_is_not_declarable(self):
+        """Parquet allows one name twice, and ``Schema.field(name)`` then raises.
+
+        ``name in schema.names`` is True either way, so the gate asked pyarrow
+        for a field it could not resolve and the write died with
+        ``KeyError: 'Column bbox does not exist in schema'`` instead of declining
+        to declare. A name that resolves to two columns says nothing about which
+        one a covering would mean, so it is no more declarable than an absent one.
+        """
+        struct = pa.struct([(n, pa.float64()) for n in SPEC_ORDER])
+        duplicated = pa.schema([("bbox", struct), ("bbox", struct)])
+
+        assert bbox_column_to_declare(duplicated) is None
+
+    def test_a_covering_over_a_name_the_schema_holds_twice_is_left_alone(self):
+        """The drop half of the rule answers "is this struct legal?", and here it cannot.
+
+        Unresolvable is not the same as illegal: the entry is left for
+        ``prune_geo_metadata_to_columns``, whose question an ambiguous name is.
+        """
+        from geoparquet_io.core.geo_metadata import (
+            build_bbox_covering,
+            strip_illegal_bbox_covering,
+        )
+
+        struct = pa.struct([(n, pa.float64()) for n in OVERTURE_ORDER])
+        duplicated = pa.schema([("bbox", struct), ("bbox", struct)])
+        geo_meta = {"columns": {"geometry": {"covering": {"bbox": build_bbox_covering("bbox")}}}}
+
+        assert strip_illegal_bbox_covering(geo_meta, duplicated) == geo_meta
+
+    def test_the_arrow_write_paths_do_not_crash_on_a_duplicated_name(self, tmp_path):
+        """The user-visible symptom: a write of such a table raised instead of writing."""
+        import geoparquet_io as gpio
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        struct = pa.struct([(n, pa.float64()) for n in SPEC_ORDER])
+        boxes = pa.array([{"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}], type=struct)
+        # POINT(0 0) as little-endian WKB: byte order, type 1, two zero doubles.
+        point = pa.array([bytes.fromhex("01" + "01000000" + "00" * 16)], type=pa.binary())
+        table = pa.table([point, boxes, boxes], names=["geometry", "bbox", "bbox"])
+
+        write_geoparquet_table(table, str(tmp_path / "funnel.parquet"), geometry_column="geometry")
+        gpio.Table(table, geometry_column="geometry").write(
+            str(tmp_path / "streamed.parquet"), write_strategy="streaming"
+        )
+
+        assert (tmp_path / "funnel.parquet").exists()
+        assert (tmp_path / "streamed.parquet").exists()
+
 
 # ---------------------------------------------------------------------------
 # Every write path, on a defective input: valid out, covering only where legal
