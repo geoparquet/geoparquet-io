@@ -1513,9 +1513,7 @@ def carried_covering_as_provenance(
     if not isinstance(covering, dict):
         return None
     present = set(column_names)
-    carried = {
-        key: entry for key, entry in covering.items() if _covering_column(entry) in present
-    }
+    carried = {key: entry for key, entry in covering.items() if _covering_column(entry) in present}
     return carried or None
 
 

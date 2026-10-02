@@ -623,7 +623,9 @@ def _fast_path_geo_decision(
     carried = strip_bboxless_covering(carried, verbose)
     if not _carries_more_than_duckdb_generates(carried):
         return None, False
-    if any(field not in carried["columns"][geometry_column] for field in _REQUIRED_CARRIED_GEO_FIELDS):
+    if any(
+        field not in carried["columns"][geometry_column] for field in _REQUIRED_CARRIED_GEO_FIELDS
+    ):
         if verbose:
             debug(
                 "Taking the metadata rewrite: the carried geo block says more than "
