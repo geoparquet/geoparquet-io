@@ -830,24 +830,6 @@ def write_parquet_with_metadata(
     # Check if we need to add/rewrite geo metadata
     rewrite_needed = needs_metadata_rewrite(effective_version, original_metadata)
 
-    # The 2.0 fast path's own answer, asked here rather than at the call site so
-    # it can still send the write down the rewrite path. It replaces DuckDB's
-    # whole `geo` key, so a block it cannot write verbatim is not a block the
-    # fast path can keep half of (#1172).
-    carried_geo_block, carried_geo_needs_rewrite = _fast_path_geo_decision(
-        original_metadata,
-        geometry_column,
-        effective_version,
-        con=con,
-        query=query,
-        verbose=verbose,
-        input_crs=input_crs,
-        input_file=input_file,
-        output_columns=output_columns,
-    )
-    if carried_geo_needs_rewrite:
-        rewrite_needed = True
-
     # Force rewrite if custom_metadata contains covering (e.g., bbox, H3, S2)
     # This ensures covering metadata is written even for 2.0→2.0 operations --
     # unless the covering could only be stripped again (#954): an index entry
@@ -862,6 +844,32 @@ def write_parquet_with_metadata(
                 debug("Forcing metadata rewrite for covering metadata")
         elif verbose:
             debug("Not forcing a rewrite: the covering has no bbox member to stand beside")
+
+    # The 2.0 fast path's own answer, asked here rather than at the call site so
+    # it can still send the write down the rewrite path. It replaces DuckDB's
+    # whole `geo` key, so a block it cannot write verbatim is not a block the
+    # fast path can keep half of (#1172).
+    #
+    # Asked only when the answer can still be used: `carried_geo_block` is read
+    # in the `not rewrite_needed` branch below and nowhere else, so a write
+    # another forcer has already sent down the rewrite path paid for the
+    # decision's schema probes and discarded what they bought.
+    carried_geo_block = None
+    carried_geo_needs_rewrite = False
+    if not rewrite_needed:
+        carried_geo_block, carried_geo_needs_rewrite = _fast_path_geo_decision(
+            original_metadata,
+            geometry_column,
+            effective_version,
+            con=con,
+            query=query,
+            verbose=verbose,
+            input_crs=input_crs,
+            input_file=input_file,
+            output_columns=output_columns,
+        )
+        if carried_geo_needs_rewrite:
+            rewrite_needed = True
 
     # Preserve non-geo KV metadata from input (e.g., vecorel, fiboa).
     # Build a merged local dict rather than mutating the caller-supplied
