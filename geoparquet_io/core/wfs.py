@@ -26,6 +26,7 @@ from typing import Final
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import duckdb
+import httpx
 import pyarrow as pa
 
 # Public API
@@ -2398,6 +2399,25 @@ def _fetch_with_spatial_tiles(
     return _with_server_crs(_infer_column_types(combined), server_crs)
 
 
+def _get_temporary_http_client(timeout: float = 30.0) -> httpx.Client:
+    """
+    Create a short-lived HTTP client for a single operation.
+
+    This is used by lightweight probes (like the startIndex limit detection)
+    that should not pin the shared connection pool's timeout. The client
+    should be closed/exited from its context after use.
+
+    Args:
+        timeout: Request timeout in seconds
+
+    Returns:
+        A new httpx.Client instance (not cached)
+    """
+    import httpx
+
+    return httpx.Client(timeout=timeout, follow_redirects=True)
+
+
 def _probe_startindex_limit(
     service_url: str,
     typename: str,
@@ -2434,22 +2454,31 @@ def _probe_startindex_limit(
     )
 
     try:
-        client = _get_shared_http_client(timeout=30)
-        response = client.get(url, headers={"Accept-Encoding": "gzip, deflate"})
-        if response.status_code == 400:
-            body = response.text.lower()
-            if "startindex" in body:
-                import re as _re
+        # Use a short-lived client for the probe instead of the shared client.
+        # The probe has a 30-second timeout, while the actual page fetches
+        # request 600 seconds. If we used the shared client, the probe would
+        # create the singleton with a 30-second timeout, pinning all subsequent
+        # page fetches at 30 seconds regardless of their own timeout request
+        # (issue #1184).
+        client = _get_temporary_http_client(timeout=30)
+        try:
+            response = client.get(url, headers={"Accept-Encoding": "gzip, deflate"})
+            if response.status_code == 400:
+                body = response.text.lower()
+                if "startindex" in body:
+                    import re as _re
 
-                match = _re.search(r"startindex.*?(\d[\d.,]+)", body)
-                if match:
-                    limit_str = match.group(1).replace(",", "").replace(".", "")
-                    try:
-                        return int(limit_str)
-                    except ValueError:
-                        pass
-                return 50000
-        return None
+                    match = _re.search(r"startindex.*?(\d[\d.,]+)", body)
+                    if match:
+                        limit_str = match.group(1).replace(",", "").replace(".", "")
+                        try:
+                            return int(limit_str)
+                        except ValueError:
+                            pass
+                    return 50000
+            return None
+        finally:
+            client.close()
     except (WFSError, httpx.HTTPError, OSError) as e:
         # Same contract as _get_feature_count: expected transport failures
         # degrade to "no limit known" but say so, because that answer silently
