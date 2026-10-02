@@ -329,6 +329,38 @@ def quote_identifier(name: str) -> str:
     return f'"{escaped}"'
 
 
+def free_column_name(base: str, column_names) -> str:
+    """``base``, or ``base_1``/``base_2``/... when ``column_names`` already takes it.
+
+    A computed column aliased ``AS base`` next to ``SELECT *`` does not fail
+    when the source already has that name: DuckDB silently renames one of the
+    two (``base_1``), and everything that goes on to say ``base`` then binds to
+    the *other* column. That is how a computed bbox came to be written under a
+    name its ``covering`` did not point at (#1079), and how the geometry built
+    from a CSV's WKT column came to be the source's own VARCHAR column of that
+    name (#1176). Picking the free name up front makes the alias and every later
+    reference one variable, agreeing by construction.
+
+    The comparison is case-insensitive because DuckDB binds identifiers that
+    way: a source column ``BBOX`` takes the name ``bbox`` just as surely, even
+    though Parquet itself would keep the two apart.
+
+    Args:
+        base: The name the computed column would like
+        column_names: The names it is emitted beside
+
+    Returns:
+        ``base`` when it is free, otherwise the first free ``base_<n>``
+    """
+    taken = {str(name).lower() for name in column_names}
+    candidate = base
+    suffix = 0
+    while candidate.lower() in taken:
+        suffix += 1
+        candidate = f"{base}_{suffix}"
+    return candidate
+
+
 # SQL keywords that could be dangerous in a user-supplied WHERE clause.
 # These could modify data or database structure.
 #

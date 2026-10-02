@@ -15,7 +15,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure
-from geoparquet_io.core.convert import _free_bbox_name, convert_to_geoparquet
+from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import free_column_name
 from geoparquet_io.core.validate import validate_geoparquet
 
 BBOX_STRUCT_FIELDS = {"xmin", "ymin", "xmax", "ymax"}
@@ -80,18 +81,18 @@ def parquet_with_string_bbox(test_data_dir, tmp_path):
 
 class TestFreeBboxName:
     def test_no_collision_keeps_bbox(self):
-        assert _free_bbox_name(["id", "geometry"]) == "bbox"
+        assert free_column_name("bbox", ["id", "geometry"]) == "bbox"
 
     def test_collision_picks_bbox_1(self):
-        assert _free_bbox_name(["id", "bbox", "geometry"]) == "bbox_1"
+        assert free_column_name("bbox", ["id", "bbox", "geometry"]) == "bbox_1"
 
     def test_chained_collision_picks_next_free(self):
-        assert _free_bbox_name(["id", "bbox", "bbox_1", "geometry"]) == "bbox_2"
+        assert free_column_name("bbox", ["id", "bbox", "bbox_1", "geometry"]) == "bbox_2"
 
     def test_collision_is_case_insensitive(self):
         # Parquet allows both spellings; DuckDB binds identifiers
         # case-insensitively, so either spelling collides.
-        assert _free_bbox_name(["id", "BBOX", "geometry"]) == "bbox_1"
+        assert free_column_name("bbox", ["id", "BBOX", "geometry"]) == "bbox_1"
 
 
 class TestParquetStringBboxCollision:

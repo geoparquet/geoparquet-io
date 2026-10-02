@@ -48,6 +48,7 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
+    _get_query_column_type,
     _get_query_columns,
     build_kv_metadata_clause,
     sql_path,
@@ -585,6 +586,24 @@ def _geo_block_to_carry_on_fast_path(
     return carried
 
 
+def _query_geometry_is_already_native(con, query: str, geometry_column: str | None) -> bool:
+    """Whether the query's geometry column is already GeoArrow-native.
+
+    Only ``convert`` builds a ``geometry_info``, so the encoding witness the
+    1.1-geoarrow guard used to read is absent on every other write path (sort,
+    extract, partition, the ``add`` family). Ask the query instead: DESCRIBE
+    alone, no scan. A native column describes as its nested shape
+    (``STRUCT(x DOUBLE, y DOUBLE)[][]`` for a polygon); a WKB/WKT one describes
+    as ``GEOMETRY``, ``GEOGRAPHY``, ``BLOB`` or ``VARCHAR`` (#1176).
+    """
+    if not geometry_column:
+        return False
+    col_type = _get_query_column_type(con, query, geometry_column)
+    return bool(col_type) and not col_type.upper().startswith(
+        ("GEOMETRY", "GEOGRAPHY", "BLOB", "VARCHAR")
+    )
+
+
 def write_parquet_with_metadata(
     con,
     query,
@@ -874,8 +893,13 @@ def write_parquet_with_metadata(
                 input_encoding = (
                     (geometry_info or {}).get("metadata", {}).get(primary, {}).get("encoding")
                 )
-                already_native = bool(
-                    input_encoding and input_encoding.lower() not in ("wkb", "wkt")
+                # `geometry_info` is convert's witness; on every other path it
+                # is None, so fall back to asking the query what the geometry
+                # column's type actually is (#1176).
+                already_native = (
+                    bool(input_encoding and input_encoding.lower() not in ("wkb", "wkt"))
+                    if input_encoding
+                    else _query_geometry_is_already_native(con, query, geometry_column)
                 )
                 if not already_native and write_strategy != "streaming":
                     if verbose:

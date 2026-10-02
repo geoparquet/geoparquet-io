@@ -1751,3 +1751,55 @@ def test_a_custom_projection_wkt_is_written_as_full_projjson(monkeypatch, tmp_pa
     assert crs["name"] == "Custom_Transverse_Mercator"
     assert "id" not in crs
     assert spec_problems(out) == []
+
+
+class TestExcludeColsThatLeavesNothing:
+    """``--exclude-cols`` that names every column was a silent no-op (#1176).
+
+    ``_exclude_columns`` returned the table unchanged when nothing would be left,
+    so ``--exclude-cols geometry`` on a geometry-only layer wrote full GeoParquet
+    including the column the user asked to drop. An empty table is not what was
+    asked for either: this is a typo, and the only useful answer is to say so.
+    """
+
+    def test_excluding_every_column_is_refused(self, monkeypatch):
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=3)
+
+        with pytest.raises(InvalidParameterError) as excinfo:
+            arcgis_to_table(SERVICE, exclude_cols="geometry,OBJECTID,name,pop")
+
+        message = str(excinfo.value)
+        assert "exclude" in message.lower()
+
+    def test_refused_before_any_feature_is_downloaded(self, monkeypatch):
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=3)
+
+        with pytest.raises(InvalidParameterError):
+            arcgis_to_table(SERVICE, exclude_cols="geometry,OBJECTID,name,pop")
+
+        assert not http.matching(_is_query), "features were downloaded before the refusal"
+
+    def test_excluding_every_column_of_a_narrowed_selection_is_refused(self, monkeypatch):
+        """``--include-cols name`` leaves ``geometry,name``; excluding both leaves nothing."""
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=3)
+
+        with pytest.raises(InvalidParameterError):
+            arcgis_to_table(SERVICE, include_cols="name", exclude_cols="geometry,name")
+
+    def test_an_empty_layer_is_refused_too(self, monkeypatch):
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=0)
+
+        with pytest.raises(InvalidParameterError):
+            arcgis_to_table(SERVICE, where="1=0", exclude_cols="geometry,OBJECTID,name,pop")
+
+    def test_a_partial_exclusion_still_works(self, monkeypatch):
+        http = FakeTransport.install(monkeypatch)
+        stub_service(http, total=3)
+
+        table = arcgis_to_table(SERVICE, exclude_cols="OBJECTID,name,pop")
+
+        assert table.column_names == ["geometry"]
