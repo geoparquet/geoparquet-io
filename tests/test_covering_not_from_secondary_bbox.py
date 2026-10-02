@@ -575,3 +575,90 @@ class TestExtractBboxFiltersOnThePrimary:
 
         assert table.num_rows == 1
         assert table.column("id").to_pylist() == [3]
+
+
+class TestAnIncompleteCoveringIsNotAPointer:
+    """The primary's own ``covering.bbox`` must name all four axes with
+    well-formed ``[column, field]`` paths. ``_covering_column`` accepts the
+    first list-shaped ref it sees, so these reach the stricter check above it."""
+
+    @staticmethod
+    def _block(bbox_refs):
+        return {
+            "primary_column": "geometry",
+            "columns": {"geometry": {"covering": {"bbox": bbox_refs}}},
+        }
+
+    def test_only_some_axes_is_not_a_pointer(self):
+        from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
+
+        partial = {"xmin": ["my_box", "xmin"], "ymin": ["my_box", "ymin"]}
+        assert _bbox_column_from_covering(self._block(partial)) is None
+
+    def test_one_malformed_axis_spoils_it(self):
+        from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
+
+        refs = {k: ["my_box", k] for k in ("xmin", "ymin", "xmax")}
+        refs["ymax"] = "my_box.ymax"  # a string, not a [column, field] path
+        assert _bbox_column_from_covering(self._block(refs)) is None
+
+    def test_all_four_well_formed_is_a_pointer(self):
+        from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
+
+        refs = {k: ["my_box", k] for k in ("xmin", "ymin", "xmax", "ymax")}
+        assert _bbox_column_from_covering(self._block(refs)) == "my_box"
+
+
+class TestTheClaimedNameIsExplainedWhenAsked:
+    """``--verbose`` says why the conventional name was not read as the
+    primary's bbox, so a user whose `bbox` struct is another column's covering
+    can tell that from a file that simply has none."""
+
+    @staticmethod
+    def _schema_info_of_a_file_with_a_bbox_struct(tmp_path):
+        """Real `parquet_schema()` output, so the struct walk is the real one."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.duckdb_metadata import get_schema_info
+
+        bbox_type = pa.struct([(axis, pa.float64()) for axis in ("xmin", "ymin", "xmax", "ymax")])
+        table = pa.table(
+            {
+                "geometry": pa.array([None], type=pa.binary()),
+                "bbox": pa.array([{"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}], bbox_type),
+            }
+        )
+        path = tmp_path / "with_bbox_struct.parquet"
+        pq.write_table(table, str(path))
+        return get_schema_info(str(path))
+
+    @staticmethod
+    def _refs(column):
+        return {axis: [column, axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
+
+    def test_it_says_which_covering_claimed_the_name(self, tmp_path, caplog):
+        import logging
+
+        from geoparquet_io.core.bbox_structure import _find_bbox_column_in_schema
+
+        schema_info = self._schema_info_of_a_file_with_a_bbox_struct(tmp_path)
+        claimed = {
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {},
+                "boundary": {"covering": {"bbox": self._refs("bbox")}},
+            },
+        }
+        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+            found = _find_bbox_column_in_schema(schema_info, True, claimed)
+
+        assert found is None
+        assert "another column's covering names it" in caplog.text
+
+    def test_an_unclaimed_conventional_name_is_still_read(self, tmp_path):
+        from geoparquet_io.core.bbox_structure import _find_bbox_column_in_schema
+
+        schema_info = self._schema_info_of_a_file_with_a_bbox_struct(tmp_path)
+        unclaimed = {"primary_column": "geometry", "columns": {"geometry": {}}}
+        assert _find_bbox_column_in_schema(schema_info, False, unclaimed) == "bbox"
