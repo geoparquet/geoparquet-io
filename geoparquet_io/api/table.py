@@ -1403,6 +1403,22 @@ class Table:
 
             preserved_kv = extract_preserved_kv_metadata(self._table.schema.metadata)
 
+            # A strategy's `write_from_table` gets `original_metadata=None` on
+            # purpose: the input's stats no longer describe whatever happened to
+            # the table in between. A `covering` is not a stat, though -- it says
+            # which column holds the geometry's envelope, and nothing else in a
+            # write can establish that for a column not named exactly `bbox`. So
+            # it travels through the provenance channel instead, which is how a
+            # caller that computed a bbox column already declares one. Three of
+            # the four strategies could not see it at all, which lost a GDAL
+            # `geometry_bbox` covering and the one `add_bbox(column_name=...)`
+            # records on everything but `in-memory` (#1172).
+            from geoparquet_io.core.geo_metadata import carried_covering_as_provenance
+
+            carried_covering = carried_covering_as_provenance(
+                self._table.schema.metadata, self._geometry_column, self._table.column_names
+            )
+
             strategy.write_from_table(
                 table=self._table,
                 output_path=str(local_path),
@@ -1414,6 +1430,7 @@ class Table:
                 row_group_rows=row_group_rows,
                 verbose=verbose,
                 input_crs=input_crs,
+                custom_metadata={"covering": carried_covering} if carried_covering else None,
                 extra_kv_metadata=preserved_kv or None,
             )
 

@@ -762,6 +762,14 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         if geoarrow_encoding is not None and geoarrow_encoding != "WKB":
             geo_meta["columns"][geometry_column]["encoding"] = geoarrow_encoding
 
+        # The two covering gates `write_from_query` runs, which this entry point
+        # did not: a covering reaches it only through `custom_metadata`, and that
+        # is provenance, not a licence to write a struct the spec forbids or a
+        # covering with no bbox member left (#1172, #1035, #954).
+        geo_meta = strip_bboxless_covering(
+            strip_illegal_bbox_covering(geo_meta, table.schema), verbose
+        )
+
         native_crs = native_geometry_crs(effective_version, geo_meta, geometry_column)
         if not should_add_geo_metadata:
             geo_meta = None

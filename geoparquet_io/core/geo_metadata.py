@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
@@ -1451,6 +1451,48 @@ def _declared_bbox_column(geo_meta: object) -> str | None:
     col_meta = columns.get(geo_meta.get("primary_column")) if isinstance(columns, dict) else None
     covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
     return _covering_column(covering.get("bbox")) if isinstance(covering, dict) else None
+
+
+def carried_covering_as_provenance(
+    table_metadata: dict | None, geometry_column: str | None, column_names: Collection[str]
+) -> dict | None:
+    """The ``covering`` an Arrow table's own ``geo`` block declares, as provenance.
+
+    A ``write_from_table`` is handed a table and ``original_metadata=None`` --
+    deliberately, because the input's *stats* no longer describe whatever the
+    caller did to the table in between. The ``covering`` is not a stat, though: it
+    says which column holds the geometry's envelope, and nothing else in a write
+    can establish that for a column not named exactly
+    :data:`SELF_EVIDENT_BBOX_COLUMN`. Three of the four strategies therefore lost
+    a GDAL ``geometry_bbox`` covering, and the one
+    ``Table.add_bbox(column_name="bounds")`` records, on ``Table.write`` (#1172).
+
+    The answer goes back in through ``custom_metadata["covering"]``, which is the
+    channel a caller that *computed* a bbox column already uses -- the one kind of
+    provenance a write trusts. It is provenance only: the struct-shape gate still
+    runs downstream, so this cannot smuggle an illegal covering past it.
+
+    Entries naming a column the table no longer has are dropped, the same
+    question :func:`prune_geo_metadata_to_columns` answers for a file write: a
+    projection can take the bbox column (or a spatial-index column) with it, and
+    an entry pointing at nothing is metadata every reader and ``gpio check spec``
+    rejects.
+
+    Returns ``None`` when there is nothing to carry.
+    """
+    geo_meta = sanitized_carried_geo(table_metadata)
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return None
+    col_meta = columns.get(geometry_column or geo_meta.get("primary_column"))
+    covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
+    if not isinstance(covering, dict):
+        return None
+    present = set(column_names)
+    carried = {
+        key: entry for key, entry in covering.items() if _covering_column(entry) in present
+    }
+    return carried or None
 
 
 def bbox_column_to_declare(
