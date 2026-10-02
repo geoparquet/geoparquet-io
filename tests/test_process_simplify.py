@@ -655,6 +655,8 @@ class TestNative20Input:
         out_geom = shapely.from_wkb(wkb)
         assert shapely.get_num_coordinates(out_geom) < shapely.get_num_coordinates(circle)
         assert geo["columns"]["geometry"]["geometry_types"] == ["Polygon"]
+
+
 class TestGeometryColumnResolution:
     """Dependency-free: these must fail before coarsen is imported."""
 
