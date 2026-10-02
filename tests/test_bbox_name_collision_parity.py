@@ -81,6 +81,44 @@ def file_with_upper_bbox(buildings_test_file, tmp_path):
     return str(path)
 
 
+#: The user's ``bbox`` struct, spelled the way the spec does not.
+UPPER_CHILD_NAMES = ("XMIN", "YMIN", "XMAX", "YMAX")
+
+
+@pytest.fixture
+def table_with_upper_child_bbox(buildings_test_file):
+    """A ``bbox`` struct whose children are ``XMIN/YMIN/XMAX/YMAX``.
+
+    A column spelled that way is not one gpio may read as a bbox: the file-based
+    detector matches child names as spelled, and no 1.1 ``covering`` may point at
+    it (``bbox_covering_problem``). So it is the user's own data, and the
+    computed struct has to move aside -- it must not be removed and replaced.
+    """
+    table = _at_1_1(pq.read_table(buildings_test_file))
+    corners = [
+        pa.array([float(i) for i in range(table.num_rows)], type=pa.float64())
+        for _ in UPPER_CHILD_NAMES
+    ]
+    struct = pa.StructArray.from_arrays(corners, names=list(UPPER_CHILD_NAMES))
+    return table.append_column("bbox", struct)
+
+
+@pytest.fixture
+def file_with_upper_child_bbox(table_with_upper_child_bbox, tmp_path):
+    path = tmp_path / "upper_child_bbox.parquet"
+    pq.write_table(table_with_upper_child_bbox, str(path))
+    return str(path)
+
+
+def _assert_upper_child_bbox_survived(schema):
+    """The user's ``bbox`` struct is still there, children spelled as they were."""
+    field = schema.field("bbox")
+    assert pa.types.is_struct(field.type), f"'bbox' is {field.type}, not the user's struct"
+    assert tuple(child.name for child in field.type) == UPPER_CHILD_NAMES, (
+        f"'bbox' children were rewritten to {[c.name for c in field.type]}"
+    )
+
+
 class TestAddBboxTable:
     """The Arrow path behind ``Table.add_bbox()`` and the extract backends."""
 
@@ -258,3 +296,59 @@ class TestThreePathsAgree:
         assert _covering_column(from_file) == "bbox_1"
         assert _covering_column(dict(from_table.schema.metadata)) == "bbox_1"
         assert _covering_column(from_convert) == "bbox_1"
+
+    def test_a_struct_with_case_variant_children_is_user_data(
+        self, file_with_upper_child_bbox, table_with_upper_child_bbox, tmp_path
+    ):
+        """``XMIN/YMIN/XMAX/YMAX`` children: no covering may point there, so the
+        column is the user's and the computed struct moves aside on all three
+        paths. The Arrow path used to *destroy* it (#1176)."""
+        from geoparquet_io.core.convert import convert_to_geoparquet
+
+        from_file = tmp_path / "from_file.parquet"
+        add_bbox_column(file_with_upper_child_bbox, str(from_file))
+        from_convert = tmp_path / "from_convert.parquet"
+        convert_to_geoparquet(
+            file_with_upper_child_bbox, str(from_convert), geoparquet_version="1.1"
+        )
+        from_table = add_bbox_table(table_with_upper_child_bbox, geometry_column="geometry")
+
+        for schema in (
+            pq.read_schema(str(from_file)),
+            pq.read_schema(str(from_convert)),
+            from_table.schema,
+        ):
+            _assert_upper_child_bbox_survived(schema)
+            assert _is_bbox_struct(schema.field("bbox_1"))
+
+        assert _covering_column(from_file) == "bbox_1"
+        assert _covering_column(from_convert) == "bbox_1"
+        assert _covering_column(dict(from_table.schema.metadata)) == "bbox_1"
+
+    def test_streaming_computes_rather_than_passing_through(
+        self, file_with_upper_child_bbox, tmp_path
+    ):
+        """The streaming detector substring-tested an upper-cased type string, so
+        the same struct read as "already has a bbox" and nothing was computed."""
+        from geoparquet_io.core.add.bbox import _add_bbox_streaming
+
+        output = tmp_path / "streamed.parquet"
+        _add_bbox_streaming(
+            input_path=file_with_upper_child_bbox,
+            output_path=str(output),
+            bbox_column_name="bbox",
+            verbose=False,
+            compression="ZSTD",
+            compression_level=None,
+            row_group_size_mb=None,
+            row_group_rows=None,
+            profile=None,
+            force=False,
+            geoparquet_version="1.1",
+            memory_limit=None,
+        )
+
+        schema = pq.read_schema(str(output))
+        _assert_upper_child_bbox_survived(schema)
+        assert _is_bbox_struct(schema.field("bbox_1"))
+        assert _covering_column(output) == "bbox_1"

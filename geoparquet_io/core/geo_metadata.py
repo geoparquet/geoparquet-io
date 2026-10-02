@@ -1371,6 +1371,22 @@ def bbox_field_order_is_covering_legal(field_names: Sequence[str]) -> bool:
     return tuple(field_names) in BBOX_COVERING_FIELD_ORDERS
 
 
+def bbox_struct_child_names_match(names: Collection[str]) -> bool:
+    """Whether a struct's children, **as spelled**, are a bbox column's four corners.
+
+    The one predicate every "is this really a bbox column?" detector shares, so
+    the answer cannot differ between the file path, the Arrow path and the
+    streaming one (#1176). Case-sensitive on purpose: Parquet child names are
+    matched as spelled, and no 1.1 ``covering`` may point at ``XMIN, YMIN, XMAX,
+    YMAX`` (see :func:`bbox_covering_problem`). A struct spelled that way is
+    therefore the user's own data -- a computed bbox moves aside rather than
+    replacing it. Order is not checked here: ``add bbox --force`` must still
+    replace an Overture-order ``xmin, xmax, ymin, ymax`` column in place, which
+    is the repair :data:`BBOX_REWRITE_HINT` points at.
+    """
+    return _BBOX_STRUCT_FIELDS <= set(names)
+
+
 def bbox_covering_problem(
     column: str, field_names: Sequence[str] | None, field_types: Sequence[str] | None = None
 ) -> str | None:
