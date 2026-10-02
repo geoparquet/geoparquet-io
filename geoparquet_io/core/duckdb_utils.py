@@ -847,6 +847,19 @@ def spill_space_hint(exc: BaseException | str | None) -> str | None:
     )
 
 
+def _ceiling_based_memory_limit() -> str | None:
+    """The default ``memory_limit`` for a connection that names none, or None.
+
+    Deferred import: :mod:`geoparquet_io.core.memory_limits` owns the ceiling and
+    the share of it gpio takes (one detector, one number -- #1156), and it imports
+    this module for its connections and setting helpers. Importing it at module
+    scope here would close that cycle.
+    """
+    from geoparquet_io.core.memory_limits import default_memory_limit
+
+    return default_memory_limit()
+
+
 def get_duckdb_connection(
     load_spatial=True,
     load_httpfs=None,
@@ -882,10 +895,16 @@ def get_duckdb_connection(
                     another volume, e.g. beside a very large output. Never share
                     one path between connections -- ``spill_directory(that_path)``
                     gives each its own leaf under the volume you chose.
-        memory_limit: DuckDB memory limit (e.g. "8GB"). Opt-in: DuckDB's own
-                    default (roughly 80% of RAM) is the right cap for most work,
-                    and a lower one only pushes queries to disk that fit in RAM.
-                    Once set, DuckDB spills to temp_directory rather than crashing.
+        memory_limit: DuckDB memory limit (e.g. "8GB"). Used exactly as given.
+                    Left unset, the connection takes gpio's ceiling-based default
+                    (``memory_limits.default_memory_limit``: half the process's
+                    cgroup cap or physical RAM, whichever is lower) rather than
+                    DuckDB's own ~80% of host RAM, which is blind to a container
+                    or Slurm job cgroup and allocates outside its own accounting,
+                    so the cap is reached before DuckDB ever spills (#1156,
+                    #1174). Either way DuckDB spills to temp_directory rather
+                    than crashing. A ceiling that cannot be read leaves DuckDB's
+                    own default in place.
 
     Returns:
         duckdb.DuckDBPyConnection: Configured connection with extensions loaded
@@ -913,8 +932,14 @@ def get_duckdb_connection(
     effective_temp_dir = temp_directory if temp_directory is not None else spill_directory()
     safe_temp_dir = _escape_sql_string(str(effective_temp_dir))
     con.execute(f"SET temp_directory = '{safe_temp_dir}';")
-    if memory_limit is not None:
-        safe_memory_limit = _escape_sql_string(str(memory_limit))
+    # An explicit value wins; otherwise the ceiling-based default, so that DuckDB
+    # work with no write to wrap -- a spatial join into a temp table, a format
+    # export, a disk-rewrite COPY -- is bounded too (#1174).
+    effective_memory_limit = (
+        memory_limit if memory_limit is not None else _ceiling_based_memory_limit()
+    )
+    if effective_memory_limit is not None:
+        safe_memory_limit = _escape_sql_string(str(effective_memory_limit))
         con.execute(f"SET memory_limit = '{safe_memory_limit}';")
 
     # Always load spatial extension by default (core use case)
