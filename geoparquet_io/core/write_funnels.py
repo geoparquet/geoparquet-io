@@ -37,9 +37,9 @@ from geoparquet_io.core.arrow_geo_metadata import (
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs, apply_output_crs
 from geoparquet_io.core.derive_geo_from_file import (
-    _ensure_v2_geo_metadata,
     _rewrite_file_with_geo_metadata,
     derive_secondary_geometry_info,
+    derive_v2_geo_metadata,
 )
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
@@ -78,6 +78,11 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.parquet_footer import (
+    FooterPatchRaced,
+    FooterPatchUnsupported,
+    patch_footer_kv,
+)
 from geoparquet_io.core.parquet_writer import (
     note_duckdb_copy_rounding,
     resolve_input_crs,
@@ -212,6 +217,56 @@ def _apply_nonplanar_edges(
         "type, so any native GEOGRAPHY input is rewritten as GEOMETRY (the "
         "edges metadata carries the interpretation)."
     )
+
+
+def _ensure_v2_geo_metadata(
+    output_path: str,
+    compression: str = "ZSTD",
+    compression_level: int | None = None,
+    row_group_rows: int | None = None,
+    verbose: bool = False,
+    primary_column: str | None = None,
+) -> None:
+    """Attach GeoParquet 2.0 geo metadata if the writer omitted it (#589).
+
+    DuckDB 1.5.4's V2 writer skips the geo KV metadata for M/ZM geometries;
+    ``derive_v2_geo_metadata`` rebuilds the block the file implies and this
+    writes it into the footer.
+
+    One footer key does not need the data decoded, so the key goes in with
+    ``patch_footer_kv``: every byte below the footer is copied verbatim, which
+    keeps the codec, the *compression level* Parquet does not record, the
+    encodings, the row-group boundaries the COPY just sized and the row order by
+    construction (#1177). The rewrite it replaced had to re-derive all of those
+    from pyarrow's own defaults, and came back both bigger than the COPY it was
+    repairing and re-chunked -- so an XYM 2.0 output had a different layout from
+    an XY one for the same command. It stays as the fallback for a footer that
+    cannot be read.
+
+    This lives here rather than beside the derivation because
+    ``derive_geo_from_file`` sits below ``parquet_footer`` in the import
+    layering; the funnel is the only caller either way.
+    """
+    geo_meta = derive_v2_geo_metadata(output_path, primary_column=primary_column)
+    if geo_meta is None:
+        return
+
+    try:
+        patch_footer_kv(output_path, {"geo": json.dumps(geo_meta)}, verbose=verbose)
+    except FooterPatchRaced:
+        # The file changed while the patch was copying it, and nothing was
+        # written. The rewrite fallback below would read the bytes that have
+        # arrived and stamp them with a `geo` block derived from the bytes
+        # that have gone -- another writer's rows under our stats -- so the
+        # refusal propagates instead (#1173's repair takes the same stance).
+        raise
+    except FooterPatchUnsupported as exc:
+        warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
+        _rewrite_file_with_geo_metadata(
+            output_path, geo_meta, compression, compression_level, row_group_rows
+        )
+    if verbose:
+        debug("Re-attached geo metadata (writer omitted it for M/ZM geometries)")
 
 
 def _plain_copy_to(

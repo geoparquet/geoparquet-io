@@ -74,7 +74,17 @@ def test_repaired_metadata_matches_duckdb_shape(zm_source, tmp_path):
 
 
 def test_repair_preserves_lz4_codec_and_row_groups(zm_source, tmp_path):
-    """The metadata repair rewrite must not change codec or row-group layout (todo 041)."""
+    """The repair must not change the codec or the row-group layout (todo 041).
+
+    Since #1177 the repair patches the footer instead of re-encoding, so the
+    layout is the one the COPY wrote -- and a bare DuckDB COPY rounds a
+    sub-vector ``--row-group-size`` up to its 2,048-row vector, which is exactly
+    what ``note_duckdb_copy_rounding`` warns about on every other fast-path
+    write. The pyarrow rewrite this replaced re-chunked to the requested 1 row
+    per group, which is how an XYM output came to have a different layout from
+    an XY one for the same command (see
+    ``tests/test_v2_zm_repair_patches_the_footer.py``).
+    """
     out = tmp_path / "out.parquet"
     convert_to_geoparquet(
         str(zm_source),
@@ -86,7 +96,7 @@ def test_repair_preserves_lz4_codec_and_row_groups(zm_source, tmp_path):
     )
     pf = pq.ParquetFile(str(out))
     assert b"geo" in pf.metadata.metadata, "geo metadata missing after repair"
-    assert pf.metadata.num_row_groups == 2, "explicit row-group size not preserved"
+    assert pf.metadata.num_row_groups == 1, "the repair re-chunked the COPY's row groups"
     codecs = {
         pf.metadata.row_group(i).column(0).compression for i in range(pf.metadata.num_row_groups)
     }
@@ -247,7 +257,9 @@ def test_rewrite_preserves_uneven_row_group_boundaries(tmp_path):
 def test_repair_uses_real_primary_column_not_alphabetical(tmp_path):
     """With two geometry columns, the repair must honor the caller's primary
     column instead of picking the alphabetically-first one."""
-    from geoparquet_io.core.derive_geo_from_file import _ensure_v2_geo_metadata
+    # The repair's two halves: derive_geo_from_file reads the block off the
+    # file, write_funnels attaches it (#1177).
+    from geoparquet_io.core.write_funnels import _ensure_v2_geo_metadata
 
     path = tmp_path / "two_geoms.parquet"
     con = get_duckdb_connection(load_spatial=True)

@@ -35,6 +35,7 @@ from geoparquet_io.core.duckdb_utils import (
     _DuckDBSchemaWrapper,
     _get_query_column_type,
     _get_query_columns,
+    _strip_trailing_order_by,
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
@@ -241,6 +242,16 @@ def compute_geometry_types_via_sql(
         List of spec geometry type names with dimension suffixes
         (e.g., ["Point", "LineString ZM"]) or empty list if column not in query
     """
+    # A SELECT DISTINCT over every row cannot change with the order they arrive
+    # in -- but DuckDB keeps the ORDER_BY operator in the plan of an ordered
+    # subquery, so measuring the types cost a full sort of the input on top of
+    # the sort the COPY already does (#1177). Stripped here, in the canonical
+    # implementation, because `disk-rewrite` calls it directly rather than
+    # through `compute_geo_stats_via_sql`, which strips for its own scan. The
+    # COPY is built from the caller's query and is untouched: the output's row
+    # order does not change.
+    query = _strip_trailing_order_by(query)
+
     # Check if geometry column exists in query result
     try:
         columns = _get_query_columns(con, query)
@@ -294,6 +305,13 @@ def compute_geometry_dimensions_via_sql(
         Set of geoarrow dimension codes (1=XY, 2=XYZ, 3=XYM, 4=XYZM). Empty set when
         the column is absent, native nested (STRUCT), or the dimension is undetectable.
     """
+    # Same DISTINCT shape, same reason as the type scan above: the set of
+    # dimensions present cannot change with the order the rows arrive in, and
+    # `arrow-streaming` calls this itself -- its bbox and types go through
+    # `compute_geo_stats_via_sql`, which strips, so this was the last sorted
+    # extra scan on the 1.1-geoarrow path (#1177).
+    query = _strip_trailing_order_by(query)
+
     try:
         columns = _get_query_columns(con, query)
         if geometry_column not in columns:

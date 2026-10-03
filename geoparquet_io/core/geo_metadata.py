@@ -28,6 +28,7 @@ import duckdb
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _get_query_column_type,
+    _strip_trailing_order_by,
     quote_identifier,
 )
 from geoparquet_io.core.logging_config import debug, warn
@@ -1357,6 +1358,12 @@ def compute_bbox_via_sql(
         [xmin, ymin, xmax, ymax] or None if query returns no rows
         or geometry column not in query
     """
+    # An extent is an aggregate over every row, so the order they are read in
+    # cannot change it -- but DuckDB keeps the ORDER_BY operator in the plan of
+    # an ordered subquery, so measuring one costs a full sort of the input on
+    # top of the sort the COPY already does (#1177).
+    query = _strip_trailing_order_by(query)
+
     # Check if geometry column exists in query result
     try:
         columns = _get_query_columns(con, query)
@@ -1471,6 +1478,16 @@ def compute_geo_stats_via_sql(
         ``(bbox_or_None, geometry_types)``
     """
     from geoparquet_io.core.common import compute_geometry_types_via_sql, zm_suffix_sql
+
+    # Both stats are aggregates over every row, so neither depends on the order
+    # the rows arrive in. `convert` hands the write funnel its Hilbert `ORDER BY`
+    # already applied, and DuckDB keeps the ORDER_BY operator in the plan of the
+    # subquery this wraps -- so every write whose carried stats had to be
+    # recomputed sorted the input twice, once here and once in the COPY (#1177).
+    # Stripped once, here, so the schema probes below and both single-stat
+    # helpers see the unordered query too. The COPY is built from the caller's
+    # query and is untouched: the output's row order does not change.
+    query = _strip_trailing_order_by(query)
 
     def _separately() -> tuple[list[float] | None, list[str]]:
         return (
