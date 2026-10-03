@@ -34,6 +34,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.geo_metadata import (
     compute_bbox_via_sql,
     declare_carried_bbox_column,
+    gate_illegal_bbox_covering,
     strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
@@ -242,6 +243,11 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 geoparquet_version,
                 geo_meta=geo_meta,
             )
+            # That declare is primary-scoped, so a SECONDARY column's covering
+            # over an illegal struct reached the output verbatim and `gpio check
+            # spec` failed the file gpio had just written (#1172/#1035). Same
+            # gate the Arrow builders run, over every column.
+            geo_meta = gate_illegal_bbox_covering(geo_meta, con, query)
             # A covering still without a bbox member is one geopandas cannot
             # read (#954).
             geo_meta = strip_bboxless_covering(geo_meta, verbose)

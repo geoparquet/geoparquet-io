@@ -39,7 +39,9 @@ from geoparquet_io.core.geo_metadata import (
     geoarrow_wkb_codes,
     sanitize_geo_metadata,
     sanitized_carried_geo,
+    strip_absent_covering,
     strip_bboxless_covering,
+    strip_illegal_bbox_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     is_geoarrow_extension_field,
@@ -892,6 +894,17 @@ def _build_geo_block(
 
     merge_secondary_geometry_metadata(geo_meta, geometry_info)
     # Secondary entries arrive after create_geo_metadata's gate (#954).
+    #
+    # Before the shape gate, which judges the struct a covering names and so has
+    # nothing to say about one naming no column at all. The DuckDB funnel prunes
+    # the carried block against the output's columns before any strategy sees it;
+    # this funnel had no equivalent, so a table whose own block declared a
+    # covering over a column it does not carry wrote the entry verbatim.
+    geo_meta = strip_absent_covering(geo_meta, table.column_names)
+    # `bbox_column` above answers "may this write declare that column?"; a `no`
+    # over a struct the INPUT already declared also has to drop the entry it
+    # declared, or the warning the gate just printed is a lie (#1172).
+    geo_meta = strip_illegal_bbox_covering(geo_meta, table.schema)
     return strip_bboxless_covering(geo_meta, verbose)
 
 

@@ -19,6 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
+    _bbox_column_to_declare,
     _compute_geometry_types,
     _detect_version_from_table,
 )
@@ -31,6 +32,7 @@ from geoparquet_io.core.geo_metadata import (
     compute_geo_stats_via_sql,
     create_geo_metadata,
     strip_bboxless_covering,
+    strip_illegal_bbox_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     WKB_EXTENSION_NAMES,
@@ -472,6 +474,12 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         # after create_geo_metadata's gate, so it runs again over them (#954).
         merge_secondary_geometry_metadata(geo_meta, geometry_info)
 
+        # `_detect_bbox_column` above only answers whether this write may
+        # DECLARE the column; the entry the input already declared over an
+        # illegal struct has to go too, which is the same gate's other half
+        # (#1172). The DuckDB strategies get it from
+        # `declare_carried_bbox_column`.
+        geo_meta = strip_illegal_bbox_covering(geo_meta, schema)
         return strip_bboxless_covering(geo_meta, verbose)
 
     def _stream_batches_to_file(
@@ -734,13 +742,26 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 if verbose:
                     debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")
 
+        # The same gate the other three strategies ask, rather than a hard-coded
+        # "no bbox column". A table that carries no `geo` block of its own -- what
+        # `convert` of a CSV builds, so `add_bbox` had nothing to record its
+        # computed column into -- left the schema as the only evidence, and this
+        # entry point consulted none of it: the struct was written undeclared
+        # while duckdb-kv, disk-rewrite and in-memory all declared it. A covering
+        # in `custom_metadata` still wins, as `create_geo_metadata` applies it
+        # after this one.
+        bbox_column = _bbox_column_to_declare(table, verbose)
+
         # Built for every version, parquet-geo-only included: it writes no `geo`
         # block, but the native Parquet GEOMETRY types are keyed off the CRS this
         # resolves per column, so it is built first and dropped after (#848).
         geo_meta = create_geo_metadata(
             original_metadata=None,
             geom_col=geometry_column,
-            bbox_info={"has_bbox_column": False, "bbox_column_name": None},
+            bbox_info={
+                "has_bbox_column": bbox_column is not None,
+                "bbox_column_name": bbox_column,
+            },
             custom_metadata=custom_metadata,
             verbose=verbose,
             version=metadata_version,
@@ -754,6 +775,14 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         # geoarrow_encoding is "WKB" for mixed/unconvertible geometry — no override.
         if geoarrow_encoding is not None and geoarrow_encoding != "WKB":
             geo_meta["columns"][geometry_column]["encoding"] = geoarrow_encoding
+
+        # The two covering gates `write_from_query` runs, which this entry point
+        # did not: a covering reaches it only through `custom_metadata`, and that
+        # is provenance, not a licence to write a struct the spec forbids or a
+        # covering with no bbox member left (#1172, #1035, #954).
+        geo_meta = strip_bboxless_covering(
+            strip_illegal_bbox_covering(geo_meta, table.schema), verbose
+        )
 
         native_crs = native_geometry_crs(effective_version, geo_meta, geometry_column)
         if not should_add_geo_metadata:

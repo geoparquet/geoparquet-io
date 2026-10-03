@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
@@ -759,6 +759,132 @@ def strip_bboxless_covering(geo_meta: dict, verbose: bool = False) -> dict:
     )
 
 
+def strip_illegal_bbox_covering(geo_meta: dict, schema: pa.Schema) -> dict:
+    """Return ``geo_meta`` without any ``covering.bbox`` naming a struct the spec forbids.
+
+    The *drop* half of :func:`bbox_column_to_declare`'s rule 2, for the write
+    paths that build their block from an Arrow schema. The DuckDB paths get it
+    from :func:`declare_carried_bbox_column`, which probes the output query for
+    a schema and pops the same member on the same verdict; this asks the same
+    question of a schema the caller already has.
+
+    Without it those paths asked the gate only "may I declare this column?",
+    acted on the "no" by not declaring anything, and then wrote the entry the
+    *input* had already declared -- warning "so it is not written" first (#1172).
+
+    Only the ``bbox`` member goes: an ``h3``/``quadkey`` entry beside it is not
+    what the validator rejected, and :func:`strip_bboxless_covering` -- the gate
+    every path runs after this one -- decides whether what is left may stand
+    alone (#954). A covering naming a column the schema does not have is somebody
+    else's question: :func:`prune_geo_metadata_to_columns` on the DuckDB funnel,
+    which prunes the carried block before any strategy sees it, and
+    :func:`strip_absent_covering` immediately before this gate on the Arrow table
+    funnel, which that prune never reached.
+
+    Never mutates its input, for the aliasing reason
+    :func:`strip_unsupported_covering` gives.
+    """
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return geo_meta
+
+    stripped: dict = {}
+    changed = False
+    for col_name, col_meta in columns.items():
+        covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
+        bbox_column = _covering_column(covering.get("bbox")) if isinstance(covering, dict) else None
+        field = _unambiguous_field(schema, bbox_column) if bbox_column is not None else None
+        problem = arrow_bbox_covering_problem(bbox_column, field) if field is not None else None
+        if problem is None:
+            stripped[col_name] = col_meta
+            continue
+        _note_undeclarable_bbox_column(bbox_column, problem, True)
+        remaining = {k: v for k, v in covering.items() if k != "bbox"}
+        pruned = {k: v for k, v in col_meta.items() if k != "covering"}
+        if remaining:
+            pruned["covering"] = remaining
+        stripped[col_name] = pruned
+        changed = True
+
+    if not changed:
+        return geo_meta
+    result = dict(geo_meta)
+    result["columns"] = stripped
+    return result
+
+
+def strip_absent_covering(geo_meta: dict, columns: Collection[str]) -> dict:
+    """Return ``geo_meta`` without any ``covering`` entry naming a column not in ``columns``.
+
+    The per-entry half of what :func:`prune_geo_metadata_to_columns` does to a
+    carried KV block, for a gate handed a ``geo`` block and the output's column
+    names instead. ``write_parquet_with_metadata`` prunes the carried block
+    against the output's columns before any strategy sees it; the Arrow *table*
+    funnel had no equivalent, so ``write_geoparquet_table`` of a table whose own
+    block declared a covering over a column the table does not have wrote the
+    entry verbatim and ``gpio check spec`` failed the result three ways -- the
+    column is absent, so its structure and its field types cannot be read either.
+
+    Only the entries naming an absent column go, for the reason
+    :func:`strip_illegal_bbox_covering` gives, and the ``covering`` key itself
+    goes when nothing is left. Never mutates its input.
+    """
+    col_entries = geo_meta.get("columns")
+    if not isinstance(col_entries, dict):
+        return geo_meta
+
+    present = set(columns)
+    stripped: dict = {}
+    changed = False
+    for col_name, col_meta in col_entries.items():
+        covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
+        if not isinstance(covering, dict):
+            stripped[col_name] = col_meta
+            continue
+        remaining = {k: v for k, v in covering.items() if _covering_column(v) in present}
+        if len(remaining) == len(covering):
+            stripped[col_name] = col_meta
+            continue
+        pruned = {k: v for k, v in col_meta.items() if k != "covering"}
+        if remaining:
+            pruned["covering"] = remaining
+        stripped[col_name] = pruned
+        changed = True
+
+    if not changed:
+        return geo_meta
+    result = dict(geo_meta)
+    result["columns"] = stripped
+    return result
+
+
+def gate_illegal_bbox_covering(geo_meta: dict, con: duckdb.DuckDBPyConnection, query: str) -> dict:
+    """:func:`strip_illegal_bbox_covering` for the three DuckDB write paths.
+
+    The 2.0 fast path, duckdb-kv and disk-rewrite build their block from the
+    input's and then run :func:`declare_carried_bbox_column`, which is scoped to
+    the PRIMARY column. A secondary column's ``covering`` over an illegal struct
+    was therefore never judged by any of them, and shipped verbatim into a file
+    ``gpio check spec`` rejects (#1035/#1172). This is the same gate the Arrow
+    builders run, asked of every column, over the schema the write's own query
+    produces.
+
+    Probes only when some column actually declares a ``covering.bbox``: with
+    nothing to judge the answer cannot differ, and ``declare_carried_bbox_column``
+    settles the common "the output has no bbox column" case from
+    ``output_columns`` without a probe, which a gate that always probed would
+    undo.
+    """
+    if not any(
+        isinstance(col_meta, dict)
+        and isinstance(col_meta.get("covering"), dict)
+        and "bbox" in col_meta["covering"]
+        for col_meta in (geo_meta.get("columns") or {}).values()
+    ):
+        return geo_meta
+    return strip_illegal_bbox_covering(geo_meta, output_query_schema(con, query))
+
+
 def _add_custom_covering(
     geo_meta: dict, geom_col: str, custom_metadata: dict | None, verbose: bool
 ) -> None:
@@ -841,6 +967,30 @@ def _rewrite_geo_metadata(metadata: dict | None, rewrite) -> dict | None:
         else:
             result[geo_key] = _encode_geo_value(rewritten, raw)
     return result
+
+
+def gate_carried_covering(
+    metadata: dict | None, schema: pa.Schema, verbose: bool = False
+) -> dict | None:
+    """Both covering gates, on a Parquet KV ``metadata`` dict and an output schema.
+
+    :func:`strip_illegal_bbox_covering` then :func:`strip_bboxless_covering`, in
+    the order every write path runs them, for a path that carries the input's
+    whole block forward instead of rebuilding it: the Arrow IPC stream
+    ``gpio ... -`` writes to stdout.
+
+    A stream is read and persisted exactly like the file a gpio write makes, and
+    ``pq.write_table`` of one is how it becomes that file -- but it reached
+    neither gate, so ``gpio extract geoparquet f.parquet - --exclude-cols bbox``
+    streamed a covering whose only remaining member was a spatial-index entry,
+    the shape ``geopandas.read_parquet`` cannot open (#954/#1172).
+
+    Returns a copy; the input is never mutated.
+    """
+    return _rewrite_geo_metadata(
+        metadata,
+        lambda geo: strip_bboxless_covering(strip_illegal_bbox_covering(geo, schema), verbose),
+    )
 
 
 def strip_derived_stats(
@@ -1449,6 +1599,23 @@ def bbox_covering_problem(
     return None
 
 
+def _unambiguous_field(schema: pa.Schema, name: str) -> pa.Field | None:
+    """``schema``'s field called ``name``, or None when there is not exactly one.
+
+    Parquet allows a schema to hold one name twice, and ``Schema.field(name)``
+    raises ``KeyError: 'Column <name> does not exist in schema'`` when it does --
+    while ``name in schema.names`` says True. Every reader of a bbox column's
+    field asked the second question and then the first, so a table with two
+    ``bbox`` columns aborted the write instead of declining to declare over an
+    ambiguous name.
+
+    Absent and duplicated answer the same here on purpose: a covering names a
+    column, and a name that resolves to two of them names neither.
+    """
+    indices = schema.get_all_field_indices(name)
+    return schema.field(indices[0]) if len(indices) == 1 else None
+
+
 def arrow_bbox_covering_problem(column: str, field: pa.Field) -> str | None:
     """:func:`bbox_covering_problem` read off an Arrow field."""
     import pyarrow as pa
@@ -1481,6 +1648,46 @@ def _declared_bbox_column(geo_meta: object) -> str | None:
     col_meta = columns.get(geo_meta.get("primary_column")) if isinstance(columns, dict) else None
     covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
     return _covering_column(covering.get("bbox")) if isinstance(covering, dict) else None
+
+
+def carried_covering_as_provenance(
+    table_metadata: dict | None, geometry_column: str | None, column_names: Collection[str]
+) -> dict | None:
+    """The ``covering`` an Arrow table's own ``geo`` block declares, as provenance.
+
+    A ``write_from_table`` is handed a table and ``original_metadata=None`` --
+    deliberately, because the input's *stats* no longer describe whatever the
+    caller did to the table in between. The ``covering`` is not a stat, though: it
+    says which column holds the geometry's envelope, and nothing else in a write
+    can establish that for a column not named exactly
+    :data:`SELF_EVIDENT_BBOX_COLUMN`. Three of the four strategies therefore lost
+    a GDAL ``geometry_bbox`` covering, and the one
+    ``Table.add_bbox(column_name="bounds")`` records, on ``Table.write`` (#1172).
+
+    The answer goes back in through ``custom_metadata["covering"]``, which is the
+    channel a caller that *computed* a bbox column already uses -- the one kind of
+    provenance a write trusts. It is provenance only: the struct-shape gate still
+    runs downstream, so this cannot smuggle an illegal covering past it.
+
+    Entries naming a column the table no longer has are dropped, the same
+    question :func:`prune_geo_metadata_to_columns` answers for a file write: a
+    projection can take the bbox column (or a spatial-index column) with it, and
+    an entry pointing at nothing is metadata every reader and ``gpio check spec``
+    rejects.
+
+    Returns ``None`` when there is nothing to carry.
+    """
+    geo_meta = sanitized_carried_geo(table_metadata)
+    columns = geo_meta.get("columns")
+    if not isinstance(columns, dict):
+        return None
+    col_meta = columns.get(geometry_column or geo_meta.get("primary_column"))
+    covering = col_meta.get("covering") if isinstance(col_meta, dict) else None
+    if not isinstance(covering, dict):
+        return None
+    present = set(column_names)
+    carried = {key: entry for key, entry in covering.items() if _covering_column(entry) in present}
+    return carried or None
 
 
 def bbox_column_to_declare(
@@ -1528,7 +1735,12 @@ def bbox_column_to_declare(
         if verbose:
             debug(f"Not declaring '{name}' for the primary: another column's covering names it")
         return None
-    problem = arrow_bbox_covering_problem(name, schema.field(name))
+    field = _unambiguous_field(schema, name)
+    if field is None:
+        if verbose:
+            debug(f"Not declaring '{name}': the schema holds that name more than once")
+        return None
+    problem = arrow_bbox_covering_problem(name, field)
     if problem is None:
         return name
     _note_undeclarable_bbox_column(name, problem, name == declared)
@@ -1588,9 +1800,9 @@ def _self_evident_bbox_column(schema: pa.Schema, verbose: bool = False) -> str |
     """
     import pyarrow as pa
 
-    if SELF_EVIDENT_BBOX_COLUMN not in schema.names:
+    field = _unambiguous_field(schema, SELF_EVIDENT_BBOX_COLUMN)
+    if field is None:
         return None
-    field = schema.field(SELF_EVIDENT_BBOX_COLUMN)
     if not (
         pa.types.is_struct(field.type)
         and _BBOX_STRUCT_FIELDS.issubset({f.name for f in field.type})
@@ -1599,6 +1811,18 @@ def _self_evident_bbox_column(schema: pa.Schema, verbose: bool = False) -> str |
     if verbose:
         debug(f"Found conventional bbox column in table: {SELF_EVIDENT_BBOX_COLUMN}")
     return SELF_EVIDENT_BBOX_COLUMN
+
+
+def output_query_schema(con: duckdb.DuckDBPyConnection, query: str) -> pa.Schema:
+    """The Arrow schema a write's own query produces, without reading a row.
+
+    One shape for the sanctioned probe, shared by the steps that have to judge
+    what the *output* carries: ``declare_carried_bbox_column`` below, and the
+    three DuckDB write paths' :func:`strip_illegal_bbox_covering` gate (the 2.0
+    fast path, duckdb-kv, disk-rewrite), which each need the same schema to ask
+    the same question of a secondary column's covering.
+    """
+    return con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
 
 
 def declare_carried_bbox_column(
@@ -1644,7 +1868,7 @@ def declare_carried_bbox_column(
         return False
     if declared is None and _bbox_claimed_by_another_column(geo_meta, name):
         return False
-    schema = con.execute(f"SELECT * FROM ({query}) LIMIT 0").arrow().schema
+    schema = output_query_schema(con, query)
     if name not in schema.names:
         return False
 
