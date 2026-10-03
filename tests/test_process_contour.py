@@ -268,6 +268,18 @@ class TestContourColumnNameValidation:
         with pytest.raises(InvalidParameterError, match="geometry"):
             contour_array(dem, [0.0, 1.0], min_column="geometry")
 
+    def test_max_column_may_not_shadow_contourrs_value_output(self):
+        """contourrs names its band column 'value'; a max column by that name
+        would be swept up by the rename and leave two identically named
+        columns in the output."""
+        import numpy as np
+
+        from geoparquet_io.core.process.raster.contour import contour_array
+
+        dem = np.zeros((4, 4), dtype=np.float32)
+        with pytest.raises(InvalidParameterError, match="value"):
+            contour_array(dem, [0.0, 1.0], max_column="value")
+
 
 @requires_contourrs
 @requires_rasterio

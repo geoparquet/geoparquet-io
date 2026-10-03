@@ -189,6 +189,56 @@ class TestTheGate:
         assert caplog.text.count("Not declaring a 'covering'") == 1
         assert "gpio add bbox --force" in caplog.text
 
+    def test_a_name_the_schema_holds_twice_is_not_declarable(self):
+        """Parquet allows one name twice, and ``Schema.field(name)`` then raises.
+
+        ``name in schema.names`` is True either way, so the gate asked pyarrow
+        for a field it could not resolve and the write died with
+        ``KeyError: 'Column bbox does not exist in schema'`` instead of declining
+        to declare. A name that resolves to two columns says nothing about which
+        one a covering would mean, so it is no more declarable than an absent one.
+        """
+        struct = pa.struct([(n, pa.float64()) for n in SPEC_ORDER])
+        duplicated = pa.schema([("bbox", struct), ("bbox", struct)])
+
+        assert bbox_column_to_declare(duplicated) is None
+
+    def test_a_covering_over_a_name_the_schema_holds_twice_is_left_alone(self):
+        """The drop half of the rule answers "is this struct legal?", and here it cannot.
+
+        Unresolvable is not the same as illegal: the entry is left for
+        ``prune_geo_metadata_to_columns``, whose question an ambiguous name is.
+        """
+        from geoparquet_io.core.geo_metadata import (
+            build_bbox_covering,
+            strip_illegal_bbox_covering,
+        )
+
+        struct = pa.struct([(n, pa.float64()) for n in OVERTURE_ORDER])
+        duplicated = pa.schema([("bbox", struct), ("bbox", struct)])
+        geo_meta = {"columns": {"geometry": {"covering": {"bbox": build_bbox_covering("bbox")}}}}
+
+        assert strip_illegal_bbox_covering(geo_meta, duplicated) == geo_meta
+
+    def test_the_arrow_write_paths_do_not_crash_on_a_duplicated_name(self, tmp_path):
+        """The user-visible symptom: a write of such a table raised instead of writing."""
+        import geoparquet_io as gpio
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        struct = pa.struct([(n, pa.float64()) for n in SPEC_ORDER])
+        boxes = pa.array([{"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}], type=struct)
+        # POINT(0 0) as little-endian WKB: byte order, type 1, two zero doubles.
+        point = pa.array([bytes.fromhex("01" + "01000000" + "00" * 16)], type=pa.binary())
+        table = pa.table([point, boxes, boxes], names=["geometry", "bbox", "bbox"])
+
+        write_geoparquet_table(table, str(tmp_path / "funnel.parquet"), geometry_column="geometry")
+        gpio.Table(table, geometry_column="geometry").write(
+            str(tmp_path / "streamed.parquet"), write_strategy="streaming"
+        )
+
+        assert (tmp_path / "funnel.parquet").exists()
+        assert (tmp_path / "streamed.parquet").exists()
+
 
 # ---------------------------------------------------------------------------
 # Every write path, on a defective input: valid out, covering only where legal
@@ -237,6 +287,14 @@ WRITE_PATHS = [
         lambda src, out: ["extract", "geoparquet", src, out, "--write-strategy", "streaming"],
     ),
     (
+        "extract-in-memory",
+        lambda src, out: ["extract", "geoparquet", src, out, "--write-strategy", "in-memory"],
+    ),
+    (
+        "extract-disk-rewrite",
+        lambda src, out: ["extract", "geoparquet", src, out, "--write-strategy", "disk-rewrite"],
+    ),
+    (
         "sort-1.1-geoarrow",
         lambda src, out: ["sort", "hilbert", src, out, "--geoparquet-version", "1.1-geoarrow"],
     ),
@@ -273,11 +331,19 @@ class TestEveryWritePath:
         assert bbox_field_names(out) == bbox_field_names(source)
         assert ("Not declaring a 'covering'" in caplog.text) is not expects_covering
 
-    @pytest.mark.parametrize(("path_id", "argv"), WRITE_PATHS[:6], ids=WRITE_IDS[:6])
+    @pytest.mark.parametrize(("path_id", "argv"), WRITE_PATHS, ids=WRITE_IDS)
     def test_a_covering_the_input_declared_over_an_illegal_struct_is_dropped_and_said(
         self, declared_illegal_v1_1, path_id, argv, tmp_path, caplog
     ):
-        """Both write facades agree: gpio does not carry a covering its validator rejects."""
+        """Every write facade agrees: gpio does not carry a covering its validator rejects.
+
+        This ran over the first six paths only. The two Arrow strategies warned
+        "so it is not written" and then wrote it anyway, because the gate they
+        ask -- ``bbox_column_to_declare`` -- answers "do not declare this
+        column" and nothing dropped the entry the input had already declared
+        (#1172). The slice is the whole list now: it is what says the drop
+        reached every path.
+        """
         out = tmp_path / f"{path_id}.parquet"
 
         with caplog.at_level("WARNING", logger="geoparquet_io"):
@@ -328,6 +394,23 @@ class TestEveryWritePath:
 
         assert bool(covering_of(out)) is declared
         assert spec_failures(out) == {}
+
+    def test_the_arrow_table_writer_drops_a_declared_illegal_covering(
+        self, declared_illegal_v1_1, tmp_path, caplog
+    ):
+        """Rule 2 on the other Arrow funnel: a table whose own block declares it."""
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        out = tmp_path / "declared_table.parquet"
+        with caplog.at_level("WARNING", logger="geoparquet_io"):
+            write_geoparquet_table(
+                pq.read_table(str(declared_illegal_v1_1)), str(out), geoparquet_version="1.1"
+            )
+
+        assert covering_of(out) is None
+        assert spec_failures(out) == {}
+        assert bbox_field_names(out) == OVERTURE_ORDER
+        assert "Dropping the 'covering' declared over" in caplog.text
 
     def test_a_partition_write_warns_once_not_once_per_file(self, overture_v1_0, tmp_path, caplog):
         with caplog.at_level("WARNING", logger="geoparquet_io"):

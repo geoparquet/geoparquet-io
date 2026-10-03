@@ -48,6 +48,7 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
+    _get_query_column_type,
     _get_query_columns,
     build_kv_metadata_clause,
     sql_path,
@@ -60,6 +61,7 @@ from geoparquet_io.core.geo_metadata import (
     SELF_EVIDENT_BBOX_COLUMN,
     carried_geometry_column,
     declare_carried_bbox_column,
+    gate_illegal_bbox_covering,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
     strip_bboxless_covering,
@@ -545,15 +547,48 @@ def _geo_block_to_carry_on_fast_path(
     input_file: str | None = None,
     output_columns: list[str] | None = None,
 ) -> dict | None:
-    """The `geo` block the 2.0 fast path must write instead of DuckDB's generated one.
+    """The block the 2.0 fast path writes, dropping the must-rewrite half.
+
+    See :func:`_fast_path_geo_decision`, which answers both halves at once. Kept
+    as the name the write path and its tests ask by.
+    """
+    carried, _ = _fast_path_geo_decision(
+        original_metadata,
+        geometry_column,
+        effective_version,
+        con=con,
+        query=query,
+        verbose=verbose,
+        input_crs=input_crs,
+        input_file=input_file,
+        output_columns=output_columns,
+    )
+    return carried
+
+
+def _fast_path_geo_decision(
+    original_metadata: dict | None,
+    geometry_column: str | None,
+    effective_version: str,
+    con=None,
+    query: str | None = None,
+    verbose: bool = False,
+    input_crs=None,
+    input_file: str | None = None,
+    output_columns: list[str] | None = None,
+) -> tuple[dict | None, bool]:
+    """``(block to write instead of DuckDB's, whether to take the rewrite instead)``.
 
     DuckDB regenerates the `geo` key on the fast path, and its generated block
     carries only `version`, `primary_column`, `encoding`, `geometry_types` and
     `bbox`. Everything else the input declared — a `covering` (#738), `epoch`,
     `orientation` (#772) — is silently dropped. Returning the carried block here
     lets `_plain_copy_to` write it verbatim, keeping the fast path's write
-    configuration intact: forcing the rewrite instead would clamp threads and
-    memory, drop `--compression-level`, and can add a full stats rescan.
+    configuration intact: forcing the rewrite instead clamps the write to one
+    thread and caps its memory (`duckdb_kv._configure_duckdb_memory`, which needs
+    `threads = 1` for the cap to hold at all), and can add a full stats rescan.
+    `--compression-level` is *not* among the costs: duckdb-kv passes
+    COMPRESSION_LEVEL through to its own COPY.
 
     The carried block goes through `apply_output_crs`, the single source of truth
     for the null-vs-default CRS rule, so the fast path cannot write a `crs: null`
@@ -571,14 +606,27 @@ def _geo_block_to_carry_on_fast_path(
     test_a_conventional_bbox_column_is_declared_at_v2`). `output_columns` lets it
     skip its schema probe when the output has no bbox column to declare at all.
 
-    Returns None when the version is not 2.0 (1.x already rewrites), when the
-    input resolves to more than one file (see below), when the carried block is
-    too thin to stand in for DuckDB's (a caller invalidated the derived stats and
-    only the rewrite path can recompute them), or when it says nothing DuckDB
-    would not write itself — the caller then keeps its existing behaviour.
+    Both answers are ``(None, False)`` — "let DuckDB write its own block on the
+    fast path" — when the version is not 2.0 (1.x already rewrites), when the
+    input resolves to more than one file (see below), or when the carried block
+    says nothing DuckDB would not write itself.
+
+    The second answer is ``True`` only when the block IS worth keeping and still
+    cannot be written verbatim, because a caller invalidated the derived stats and
+    nothing here can recompute them. The fast path cannot merge: it replaces
+    DuckDB's whole ``geo`` key with what this returns, so a block missing
+    ``geometry_types`` would ship *without* the key GeoParquet requires. Taking
+    the rewrite is what ``_REQUIRED_CARRIED_GEO_FIELDS`` always said the answer
+    was; what actually happened was the fast path running with DuckDB's bare
+    block, so ``gpio partition quadkey|kdtree`` and ``extract --where/--limit
+    /--bbox`` of a 2.0 input lost the covering it declared and ``gpio check bbox``
+    then called its bbox column undeclared (#1172). The thinness test is asked
+    *after* the declare step for the same reason the "says more than DuckDB"
+    gate is: until that step has run, there is no telling whether the block has
+    anything the fast path would lose.
     """
     if effective_version != "2.0" or not geometry_column or not original_metadata:
-        return None
+        return None, False
 
     # A glob/directory input merges several files, but `original_metadata` was
     # read from the FIRST file's footer only. Carrying its bbox/geometry_types
@@ -591,7 +639,7 @@ def _geo_block_to_carry_on_fast_path(
                 "Not carrying the input's geo block: a multi-file input's merged "
                 "stats cannot come from the first file's footer"
             )
-        return None
+        return None, False
 
     # A write-path reader in the strongest sense: whatever comes back is written
     # to the output file verbatim, so the block goes through the shared shape
@@ -599,12 +647,10 @@ def _geo_block_to_carry_on_fast_path(
     # `'list' object has no attribute 'get'` on the next line (#947).
     geo_dict = sanitized_carried_geo(original_metadata)
     if not geo_dict:
-        return None
+        return None, False
     col_meta = (geo_dict.get("columns") or {}).get(geometry_column)
     if not isinstance(col_meta, dict):
-        return None
-    if any(field not in col_meta for field in _REQUIRED_CARRIED_GEO_FIELDS):
-        return None
+        return None, False
     carried = copy.deepcopy(geo_dict)
     carried["version"] = "2.0.0"
     # Before the gate: a block whose only extra key was a default or null
@@ -620,13 +666,90 @@ def _geo_block_to_carry_on_fast_path(
             output_columns=output_columns,
             geo_meta=carried,
         )
+        # The declare above is primary-scoped, so a SECONDARY column's covering
+        # over an illegal struct reached the output verbatim and `gpio check
+        # spec` failed the file gpio had just written (#1172/#1035). Same gate
+        # the Arrow builders run, over every column.
+        carried = gate_illegal_bbox_covering(carried, con, query)
     # After the declare above: a carried covering still without a bbox member
     # (e.g. only a spatial-index entry) is one geopandas cannot read (#954),
     # so it is not carried onto the output either.
     carried = strip_bboxless_covering(carried, verbose)
     if not _carries_more_than_duckdb_generates(carried):
+        return None, False
+    if any(
+        field not in carried["columns"][geometry_column] for field in _REQUIRED_CARRIED_GEO_FIELDS
+    ):
+        if verbose:
+            debug(
+                "Taking the metadata rewrite: the carried geo block says more than "
+                "DuckDB's would but has had its derived stats invalidated, so the "
+                "fast path cannot write it verbatim"
+            )
+        return None, True
+    return carried, False
+
+
+def _memory_limit_for_strategy(
+    memory_limit: str | None,
+    strategy_enum,
+    write_strategy: str,
+    *,
+    auto_routed_strategy: bool,
+    funnel_forced_rewrite: bool,
+) -> str | None:
+    """The memory limit a rewrite strategy may be given, or None.
+
+    Of the rewrite strategies only duckdb-kv honours a memory limit. If *we* put
+    the write here, the user did nothing wrong: warn and drop the limit rather
+    than aborting a command that worked before ``--write-memory`` was plumbed
+    through (#663). Two routings are ours, not theirs -- the 1.1-geoarrow reroute
+    and the rewrite this funnel takes to keep a 2.0 input's own covering, which
+    no flag asked for and which turned a working ``extract --limit N
+    --write-strategy streaming --write-memory 2GB`` into exit 2 (#1172). A
+    strategy the user explicitly asked for is a real error -- raised as a core
+    exception so the CLI shows a clean message instead of a traceback.
+    """
+    if memory_limit is None or strategy_enum == WriteStrategy.DUCKDB_KV:
+        return memory_limit
+    if auto_routed_strategy:
+        warn(
+            "--write-memory is ignored for GeoParquet 1.1-geoarrow output: "
+            "GeoArrow encoding requires the arrow-streaming write strategy, "
+            "which does not support a memory limit."
+        )
         return None
-    return carried
+    if funnel_forced_rewrite:
+        warn(
+            f"--write-memory is ignored for this write: keeping the input's "
+            f"geo metadata (its covering) needs the metadata rewrite, and the "
+            f"'{write_strategy}' write strategy does not support a memory "
+            f"limit. Use --write-strategy duckdb-kv to apply it."
+        )
+        return None
+    raise InvalidParameterError(
+        "--write-memory",
+        f"a memory limit is only supported with the 'duckdb-kv' "
+        f"write strategy, not '{write_strategy}'",
+    )
+
+
+def _query_geometry_is_already_native(con, query: str, geometry_column: str | None) -> bool:
+    """Whether the query's geometry column is already GeoArrow-native.
+
+    Only ``convert`` builds a ``geometry_info``, so the encoding witness the
+    1.1-geoarrow guard used to read is absent on every other write path (sort,
+    extract, partition, the ``add`` family). Ask the query instead: DESCRIBE
+    alone, no scan. A native column describes as its nested shape
+    (``STRUCT(x DOUBLE, y DOUBLE)[][]`` for a polygon); a WKB/WKT one describes
+    as ``GEOMETRY``, ``GEOGRAPHY``, ``BLOB`` or ``VARCHAR`` (#1176).
+    """
+    if not geometry_column:
+        return False
+    col_type = _get_query_column_type(con, query, geometry_column)
+    return bool(col_type) and not col_type.upper().startswith(
+        ("GEOMETRY", "GEOGRAPHY", "BLOB", "VARCHAR")
+    )
 
 
 def write_parquet_with_metadata(
@@ -832,6 +955,32 @@ def write_parquet_with_metadata(
         elif verbose:
             debug("Not forcing a rewrite: the covering has no bbox member to stand beside")
 
+    # The 2.0 fast path's own answer, asked here rather than at the call site so
+    # it can still send the write down the rewrite path. It replaces DuckDB's
+    # whole `geo` key, so a block it cannot write verbatim is not a block the
+    # fast path can keep half of (#1172).
+    #
+    # Asked only when the answer can still be used: `carried_geo_block` is read
+    # in the `not rewrite_needed` branch below and nowhere else, so a write
+    # another forcer has already sent down the rewrite path paid for the
+    # decision's schema probes and discarded what they bought.
+    carried_geo_block = None
+    carried_geo_needs_rewrite = False
+    if not rewrite_needed:
+        carried_geo_block, carried_geo_needs_rewrite = _fast_path_geo_decision(
+            original_metadata,
+            geometry_column,
+            effective_version,
+            con=con,
+            query=query,
+            verbose=verbose,
+            input_crs=input_crs,
+            input_file=input_file,
+            output_columns=output_columns,
+        )
+        if carried_geo_needs_rewrite:
+            rewrite_needed = True
+
     # Preserve non-geo KV metadata from input (e.g., vecorel, fiboa).
     # Build a merged local dict rather than mutating the caller-supplied
     # extra_kv_metadata: partition loops reuse one dict across writes, and
@@ -891,17 +1040,7 @@ def write_parquet_with_metadata(
                 geoparquet_version=effective_version,
                 input_crs=input_crs,
                 geometry_column=geometry_column,
-                carry_geo_metadata=_geo_block_to_carry_on_fast_path(
-                    original_metadata,
-                    geometry_column,
-                    effective_version,
-                    con=con,
-                    query=query,
-                    verbose=verbose,
-                    input_crs=input_crs,
-                    input_file=input_file,
-                    output_columns=output_columns,
-                ),
+                carry_geo_metadata=carried_geo_block,
                 extra_kv_metadata=extra_kv_metadata,
                 memory_limit=memory_limit,
             )
@@ -918,8 +1057,13 @@ def write_parquet_with_metadata(
                 input_encoding = (
                     (geometry_info or {}).get("metadata", {}).get(primary, {}).get("encoding")
                 )
-                already_native = bool(
-                    input_encoding and input_encoding.lower() not in ("wkb", "wkt")
+                # `geometry_info` is convert's witness; on every other path it
+                # is None, so fall back to asking the query what the geometry
+                # column's type actually is (#1176).
+                already_native = (
+                    bool(input_encoding and input_encoding.lower() not in ("wkb", "wkt"))
+                    if input_encoding
+                    else _query_geometry_is_already_native(con, query, geometry_column)
                 )
                 if not already_native and write_strategy != "streaming":
                     if verbose:
@@ -930,26 +1074,13 @@ def write_parquet_with_metadata(
             strategy_enum = WriteStrategy(write_strategy)
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
-            # Of the rewrite strategies only duckdb-kv honours a memory limit. If *we* rerouted the
-            # strategy (1.1-geoarrow above), the user did nothing wrong: warn and
-            # drop the limit rather than aborting a command that worked before
-            # --write-memory was plumbed through (#663). A strategy the user
-            # explicitly asked for is a real error — raised as a core exception so
-            # the CLI shows a clean message instead of a traceback.
-            if memory_limit is not None and strategy_enum != WriteStrategy.DUCKDB_KV:
-                if auto_routed_strategy:
-                    warn(
-                        "--write-memory is ignored for GeoParquet 1.1-geoarrow output: "
-                        "GeoArrow encoding requires the arrow-streaming write strategy, "
-                        "which does not support a memory limit."
-                    )
-                    memory_limit = None
-                else:
-                    raise InvalidParameterError(
-                        "--write-memory",
-                        f"a memory limit is only supported with the 'duckdb-kv' "
-                        f"write strategy, not '{write_strategy}'",
-                    )
+            memory_limit = _memory_limit_for_strategy(
+                memory_limit,
+                strategy_enum,
+                write_strategy,
+                auto_routed_strategy=auto_routed_strategy,
+                funnel_forced_rewrite=carried_geo_needs_rewrite,
+            )
 
             if verbose:
                 debug(f"Writing GeoParquet version: {effective_version}")

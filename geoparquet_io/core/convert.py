@@ -1435,19 +1435,25 @@ def _csv_carried_columns(geom_info):
     return [name for name in geom_info["source_columns"] if str(name).lower() not in excluded]
 
 
-def _resolve_tabular_geometry_name(carried_columns):
+def _resolve_tabular_geometry_name(carried_columns, base="geometry"):
     """The name the geometry built from WKT or lat/lon columns is written under.
 
-    Normally ``geometry``. A source column of that name which is *not* the one
-    the geometry is built from -- a label, a tile id -- takes it, and aliasing
-    the parsed geometry ``AS geometry`` beside it made DuckDB rename one of the
-    two: the Hilbert key, the repair pass and the ``geo`` block then all bound
-    to the source's VARCHAR column ("ST_IsEmpty(VARCHAR)", #1176). The computed
-    column moves aside instead, as the computed bbox does (#1079).
+    ``base`` is the name asked for -- ``geometry_column``'s value on the Arrow
+    read path, the ``geometry`` default on the SQL conversion path, which has no
+    caller that requests one. A tabular source can honour the request because it
+    aliases the geometry it builds; a spatial one cannot, and reports back the
+    ``geometry`` its reads hard-code (#1176).
+
+    A source column of that name which is *not* one the geometry is built from --
+    a label, a tile id -- takes it, and aliasing the parsed geometry ``AS base``
+    beside it made DuckDB rename one of the two: the Hilbert key, the repair pass
+    and the ``geo`` block then all bound to the source's VARCHAR column
+    ("ST_IsEmpty(VARCHAR)", #1176). The computed column moves aside instead, as
+    the computed bbox does (#1079).
     """
-    geometry_name = free_column_name("geometry", carried_columns)
-    if geometry_name != "geometry":
-        taken = next(str(name) for name in carried_columns if str(name).lower() == "geometry")
+    geometry_name = free_column_name(base, carried_columns)
+    if geometry_name != base:
+        taken = next(str(name) for name in carried_columns if str(name).lower() == base.lower())
         warn(
             f"Input already has a column named '{taken}' that is not geometry; "
             f"writing the geometry built from the source columns as '{geometry_name}'"
@@ -2345,10 +2351,13 @@ def read_spatial_to_arrow(
         crs: CRS for CSV geometry data (default: EPSG:4326/WGS84)
         skip_invalid: Skip rows with invalid geometries instead of failing
         profile: AWS profile name for S3 operations
-        geometry_column: Name for output geometry column (default: 'geometry').
-            A tabular source (WKT or lat/lon columns) reports back the name it
-            could actually use: a carried source column of that name takes it,
-            and the built geometry moves aside (#1176).
+        geometry_column: Requested name for the output geometry column
+            (default: 'geometry'). Every source reports back the name it could
+            actually use, which is the third return value: a tabular source
+            (WKT or lat/lon columns) takes the requested name, moving the built
+            geometry aside to ``<name>_1`` when a carried source column already
+            has it; a spatial source always emits ``geometry``, because both of
+            its reads alias ``ST_AsWKB(...) AS geometry`` (#1176).
         layer: Layer name for multi-layer formats (GeoPackage, FileGDB). If not specified,
                reads the first/default layer.
         repair_geometry: Repair invalid geometry with ST_MakeValid (default: True).
@@ -2462,11 +2471,17 @@ def read_spatial_to_arrow(
             # describe the output; keep only its horizontal component.
             detected_crs = horizontal_crs(detected_crs)
 
-        # Build and execute query. A tabular source reports the name it built
-        # the geometry under: it is not always `geometry` (#1176).
+        # Build and execute query. A tabular source builds the geometry itself,
+        # so it can take the requested name -- and reports back the one it used,
+        # which a collision may have moved aside (#1176).
         if parquet_tabular is not None:
             arrow_table, geometry_column = _tabular_geometry_to_arrow(
-                con, parquet_tabular, skip_invalid, verbose, force_2d=force_2d
+                con,
+                parquet_tabular,
+                skip_invalid,
+                verbose,
+                force_2d=force_2d,
+                geometry_name=geometry_column or "geometry",
             )
         elif is_csv:
             arrow_table, geometry_column = _read_csv_to_arrow(
@@ -2480,6 +2495,7 @@ def read_spatial_to_arrow(
                 verbose,
                 encoding=encoding,
                 force_2d=force_2d,
+                geometry_name=geometry_column or "geometry",
             )
         else:
             arrow_table = _read_spatial_to_arrow(
@@ -2494,6 +2510,10 @@ def read_spatial_to_arrow(
                 encoding=encoding,
                 force_2d=force_2d,
             )
+            # Both spatial reads emit `ST_AsWKB(...) AS geometry` (here and in the
+            # linearized retry), so report that rather than the requested name: the
+            # repair below and the Table the API hands back both key off it (#1176).
+            geometry_column = "geometry"
 
         # No geometry found — read as plain table
         if arrow_table is None:
@@ -2562,6 +2582,7 @@ def _read_csv_to_arrow(
     verbose,
     encoding=None,
     force_2d=False,
+    geometry_name="geometry",
 ):
     """``(table, geometry column)`` with geometry as WKB; ``(None, None)`` if none."""
     geom_info = _detect_csv_geometry_column(
@@ -2570,16 +2591,21 @@ def _read_csv_to_arrow(
     if geom_info is None:
         warn("No geometry columns found in CSV/TSV. Reading as plain table.")
         return None, None
-    return _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=force_2d)
+    return _tabular_geometry_to_arrow(
+        con, geom_info, skip_invalid, verbose, force_2d=force_2d, geometry_name=geometry_name
+    )
 
 
-def _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=False):
+def _tabular_geometry_to_arrow(
+    con, geom_info, skip_invalid, verbose, force_2d=False, geometry_name="geometry"
+):
     """``(table, geometry column)``: WKB geometry built from WKT or lat/lon columns.
 
-    The column is ``geometry`` unless a carried source column already takes that
-    name, in which case the built one moves aside exactly as it does on the SQL
-    conversion path (#1176) -- two columns of one name is not an Arrow table
-    anything downstream can use.
+    The column takes ``geometry_name`` -- the caller's requested name, which a
+    tabular source can honour because it aliases what it builds -- unless a
+    carried source column already takes it, in which case the built one moves
+    aside exactly as it does on the SQL conversion path (#1176): two columns of
+    one name is not an Arrow table anything downstream can use.
     """
     geom_info["force_2d"] = force_2d
 
@@ -2598,7 +2624,9 @@ def _tabular_geometry_to_arrow(con, geom_info, skip_invalid, verbose, force_2d=F
         )
 
     csv_read = geom_info["csv_read"]
-    geometry_name = _resolve_tabular_geometry_name(_csv_carried_columns(geom_info))
+    geometry_name = _resolve_tabular_geometry_name(
+        _csv_carried_columns(geom_info), base=geometry_name
+    )
     quoted_geometry = quote_identifier(geometry_name)
 
     # Build query based on geometry type

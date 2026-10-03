@@ -31,6 +31,7 @@ from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identif
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
+    gate_carried_covering,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
 )
@@ -349,9 +350,14 @@ def _write_stream_output(
     # actually being written. Without the backfill the stream omits
     # `geometry_types`, which GeoParquet 1.1 requires and which DuckDB refuses to
     # read a file without; without the prune the orphan entry has none either.
+    # ... and then run the two covering gates every file write runs. A stream is
+    # read and persisted exactly like a file gpio wrote, so a covering the
+    # pruning has just emptied of its bbox member -- or one declared over a
+    # struct the spec forbids -- is no more writable here than there (#1172).
     if original_metadata:
         original_metadata = prune_geo_metadata_to_columns(original_metadata, table.column_names)
         original_metadata = backfill_derived_stats(original_metadata, table)
+        original_metadata = gate_carried_covering(original_metadata, table.schema)
         table = apply_metadata_to_table(table, original_metadata)
 
     write_arrow_stream(table)

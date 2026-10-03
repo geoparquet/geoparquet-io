@@ -13,17 +13,21 @@ Docs: docs/guide/process-simplify.md
 from __future__ import annotations
 
 import json
+import math
 import os
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
 )
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
+from geoparquet_io.core.geoarrow_encoding import is_wkb_extension_field
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
 from geoparquet_io.core.parquet_writer import (
@@ -57,6 +61,67 @@ def strip_stale_geometry_stats(geo_meta: dict, geometry_column: str) -> dict:
     return geo_meta
 
 
+def _utm_epsg(lon: float, lat: float) -> int:
+    """EPSG code of the UTM zone containing (lon, lat), hemisphere-aware."""
+    zone = min(60, max(1, int((lon + 180.0) // 6) + 1))
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+def _coord_func(transformer):
+    """A shapely.transform callback over an (n, 2) coordinate array."""
+
+    def apply(coords):
+        np = load_module("numpy")
+        x, y = transformer.transform(coords[:, 0], coords[:, 1])
+        return np.column_stack([x, y])
+
+    return apply
+
+
+def _simplify_crs_transformers(
+    simplify_crs: str,
+    src_crs_json: dict | None,
+    sample_wkb: bytes | None,
+):
+    """(forward, inverse) shapely-transform callbacks for ``simplify_crs``.
+
+    ``auto-utm`` derives the UTM zone from a sample geometry's centroid —
+    the right answer for per-zone partitioned global data. The source CRS
+    comes from the carried geo block, defaulting to OGC:CRS84 like the rest
+    of gpio.
+    """
+    from pyproj import CRS, Transformer
+    from pyproj.exceptions import CRSError
+
+    shapely = load_module("shapely")
+    try:
+        src = CRS.from_json_dict(src_crs_json) if src_crs_json else CRS.from_user_input("OGC:CRS84")
+    except CRSError as e:
+        raise InvalidParameterError("simplify_crs", f"input CRS unusable: {e}") from e
+    if simplify_crs.lower() in ("auto-utm", "utm"):
+        if not src.is_geographic:
+            raise InvalidParameterError(
+                "simplify_crs",
+                "'auto-utm' needs geographic (lon/lat) input; give an explicit CRS",
+            )
+        if sample_wkb is None:
+            return None, None  # nothing to transform
+        centroid = shapely.from_wkb(sample_wkb).centroid
+        target = CRS.from_epsg(_utm_epsg(centroid.x, centroid.y))
+    else:
+        try:
+            target = CRS.from_user_input(simplify_crs)
+        except CRSError as e:
+            raise InvalidParameterError("simplify_crs", str(e)) from e
+    forward = Transformer.from_crs(src, target, always_xy=True)
+    inverse = Transformer.from_crs(target, src, always_xy=True)
+    return _coord_func(forward), _coord_func(inverse)
+
+
+def _first_wkb(values_iter) -> bytes | None:
+    return next((v for v in values_iter if v is not None), None)
+
+
 def _geometry_column_of(table: pa.Table, override: str | None) -> str:
     """Resolve the geometry column: override, carried primary, or 'geometry'."""
     name = override
@@ -67,13 +132,38 @@ def _geometry_column_of(table: pa.Table, override: str | None) -> str:
         raise InvalidParameterError(
             "geometry_column", f"geometry column '{name}' not found in table"
         )
-    col_type = table.schema.field(name).type
-    if col_type not in (pa.binary(), pa.large_binary()):
+    field = table.schema.field(name)
+    if field.type not in (pa.binary(), pa.large_binary()) and not is_wkb_extension_field(field):
         raise InvalidParameterError(
             "geometry_column",
-            f"column '{name}' is {col_type}, not a WKB binary column",
+            f"column '{name}' is {field.type}, not a WKB binary column",
         )
     return name
+
+
+def _with_wkb_storage(table: pa.Table, geom_col: str) -> pa.Table:
+    """Unwrap a WKB extension column (#1198) to its plain-WKB storage.
+
+    ``is_wkb_extension_field`` is the single definition of "WKB bytes"
+    (geoarrow.wkb and ogc.wkb alike); only the resolved-extension carrier
+    needs unwrapping — the metadata-only carrier is already plain binary.
+    The output's native 2.0 shape is the write funnel's job (auto version
+    resolution preserves the carried 2.0 declaration and converts the
+    column back on write).
+    """
+    column = table.column(geom_col)
+    if not isinstance(column.type, pa.ExtensionType) or not is_wkb_extension_field(
+        table.schema.field(geom_col)
+    ):
+        return table
+    storage = pa.chunked_array(
+        [chunk.storage for chunk in column.chunks], type=column.type.storage_type
+    )
+    return table.set_column(
+        table.column_names.index(geom_col),
+        pa.field(geom_col, column.type.storage_type, nullable=True),
+        storage,
+    )
 
 
 def _simplify_values(
@@ -84,12 +174,16 @@ def _simplify_values(
     preserve_topology: bool,
     simplify_boundary: bool,
     threads: int | None,
-) -> tuple[list, int, list]:
+    forward=None,
+    inverse=None,
+) -> tuple[list, int, list, Any, list]:
     """Simplify a list of WKB values (``None`` passes through).
 
     Returns the new WKB list, the count of geometries the operation
-    collapsed to empty, and a per-row mask that is True where the output
-    geometry is empty (nulls are never marked).
+    collapsed to empty, a per-row mask that is True where the output
+    geometry is empty (nulls are never marked), the simplified shapely
+    geometry array for the non-null rows, and those rows' positions — so
+    callers fold stats and bounds without re-parsing the output WKB.
     """
     coarsen = require_coarsen()
     shapely = load_module("shapely")
@@ -98,17 +192,21 @@ def _simplify_values(
 
     idx = [i for i, v in enumerate(values) if v is not None]
     if not idx:
-        return list(values), 0, [False] * len(values)
+        return list(values), 0, [False] * len(values), np.empty(0, dtype=object), []
     try:
         geoms = shapely.from_wkb(np.array([values[i] for i in idx], dtype=object))
     except Exception as e:
         raise GeoParquetError(f"could not parse a WKB geometry in the input: {e}") from e
+    if forward is not None:
+        geoms = shapely.transform(geoms, forward)
     if coverage:
         out = coarsen.coverage_simplify(
             geoms, tolerance, simplify_boundary=simplify_boundary, threads=threads
         )
     else:
         out = coarsen.simplify(geoms, tolerance, preserve_topology, threads=threads)
+    if inverse is not None:
+        out = shapely.transform(out, inverse)
     out_empty = shapely.is_empty(out)
     collapsed = int(np.sum(out_empty)) - int(np.sum(shapely.is_empty(geoms)))
     result: list = [None] * len(values)
@@ -116,30 +214,36 @@ def _simplify_values(
     for i, wkb, is_empty in zip(idx, shapely.to_wkb(out), out_empty, strict=True):
         result[i] = wkb
         empty_mask[i] = bool(is_empty)
-    return result, max(collapsed, 0), empty_mask
+    return result, max(collapsed, 0), empty_mask, out, idx
 
 
-def _covering_bbox_column(geo_meta: dict, geom_col: str) -> str | None:
-    """The bbox struct column the carried covering declares for ``geom_col``."""
-    covering = geo_meta.get("columns", {}).get(geom_col, {}).get("covering")
-    bbox_refs = covering.get("bbox") if isinstance(covering, dict) else None
-    if not isinstance(bbox_refs, dict) or "xmin" not in bbox_refs:
-        return None
-    ref = bbox_refs["xmin"]
-    return ref[0] if isinstance(ref, list) and ref else None
+def _row_bounds(shapely, np, n_rows: int, geoms: Any, idx: list) -> Any:
+    """Per-row ``(n, 4)`` bounds of the simplified geometries; NaN rows for nulls."""
+    bounds = np.full((n_rows, 4), np.nan)
+    if idx:
+        bounds[idx] = shapely.bounds(geoms)
+    return bounds
 
 
-def _refresh_bbox_covering(table: pa.Table, geom_col: str) -> pa.Table:
-    """Recompute a declared bbox covering column from ``geom_col``'s data."""
+def _refresh_bbox_covering(table: pa.Table, geom_col: str, bounds=None) -> pa.Table:
+    """Recompute a declared bbox covering column from ``geom_col``'s data.
+
+    ``bounds`` is the per-row ``(n, 4)`` array the simplify step already
+    computed (:func:`_row_bounds`); when omitted it is re-derived from the
+    column's WKB. The covering lookup is the owner module's
+    (:func:`bbox_covering_column_for`): a partial or dangling covering is
+    not a declaration and must not be rewritten.
+    """
     shapely = load_module("shapely")
 
     np = load_module("numpy")
     geo = sanitized_carried_geo(table.schema.metadata)
-    bbox_col = _covering_bbox_column(geo, geom_col)
+    bbox_col = bbox_covering_column_for(geo, geom_col)
     if bbox_col is None or bbox_col not in table.column_names:
         return table
-    wkb = np.array(table.column(geom_col).to_pylist(), dtype=object)
-    bounds = shapely.bounds(shapely.from_wkb(wkb))  # (n, 4); NaN rows for nulls
+    if bounds is None:
+        wkb = np.array(table.column(geom_col).to_pylist(), dtype=object)
+        bounds = shapely.bounds(shapely.from_wkb(wkb))  # (n, 4); NaN rows for nulls
     null_mask = np.isnan(bounds[:, 0])
     bounds = np.nan_to_num(bounds)  # children under a null parent still need values
     struct_type = table.schema.field(bbox_col).type
@@ -197,9 +301,14 @@ def simplify_table(
     threads: int | None = None,
     geometry_column: str | None = None,
     drop_empty: bool = False,
+    simplify_crs: str | None = None,
     verbose: bool = False,
 ) -> pa.Table:
     """Simplify a table's geometry column; metadata stats are refreshed.
+
+    ``simplify_crs`` projects to that CRS for the simplification (tolerance
+    in its units — meters for UTM) and projects the result back (#1197);
+    ``"auto-utm"`` picks the UTM zone from the data.
 
     ``drop_empty=True`` drops rows whose geometry is empty after
     simplification (#1199); nulls are kept either way — null is "unknown",
@@ -212,9 +321,20 @@ def simplify_table(
     if tolerance < 0:
         raise InvalidParameterError("tolerance", "must be >= 0")
     geom_col = _geometry_column_of(table, geometry_column)
+    table = _with_wkb_storage(table, geom_col)
     column = table.column(geom_col)
+    forward = inverse = None
+    if simplify_crs:
+        src_crs = (
+            sanitized_carried_geo(table.schema.metadata)
+            .get("columns", {})
+            .get(geom_col, {})
+            .get("crs")
+        )
+        sample = _first_wkb(v for chunk in column.chunks for v in chunk.to_pylist())
+        forward, inverse = _simplify_crs_transformers(simplify_crs, src_crs, sample)
 
-    def run(values: list) -> tuple[list, int, list]:
+    def run(values: list) -> tuple[list, int, list, Any, list]:
         return _simplify_values(
             values,
             tolerance,
@@ -222,25 +342,32 @@ def simplify_table(
             preserve_topology=preserve_topology,
             simplify_boundary=simplify_boundary,
             threads=threads,
+            forward=forward,
+            inverse=inverse,
         )
 
+    shapely = load_module("shapely")
+    np = load_module("numpy")
     collapsed = 0
     empty_flags: list[bool] = []
+    bounds_parts: list = []
     if coverage:
         if table.num_rows > _COVERAGE_WARN_ROWS:
             warn(
                 f"coverage simplification holds all {table.num_rows:,} geometries "
                 "in memory at once to preserve shared edges"
             )
-        new_values, collapsed, empty_flags = run(column.to_pylist())
+        new_values, collapsed, empty_flags, geoms, idx = run(column.to_pylist())
         chunks = [pa.array(new_values, type=column.type)]
+        bounds_parts.append(_row_bounds(shapely, np, len(empty_flags), geoms, idx))
     else:
         chunks = []
         for chunk in column.chunks:
-            values, n, flags = run(chunk.to_pylist())
+            values, n, flags, geoms, idx = run(chunk.to_pylist())
             collapsed += n
             empty_flags.extend(flags)
             chunks.append(pa.array(values, type=column.type))
+            bounds_parts.append(_row_bounds(shapely, np, len(flags), geoms, idx))
     if collapsed:
         warn(f"{collapsed} geometries collapsed to empty at tolerance {tolerance}")
     result = table.set_column(
@@ -248,11 +375,14 @@ def simplify_table(
         table.schema.field(geom_col),
         pa.chunked_array(chunks, type=column.type),
     )
+    row_bounds = np.concatenate(bounds_parts) if bounds_parts else np.empty((0, 4))
     if drop_empty and any(empty_flags):
-        result = result.filter(pa.array([not flag for flag in empty_flags]))
+        keep = [not flag for flag in empty_flags]
+        result = result.filter(pa.array(keep))
+        row_bounds = row_bounds[np.array(keep)]
         info(f"dropped {sum(empty_flags)} empty geometries")
     result = _with_stripped_geo(result, geom_col)
-    return _refresh_bbox_covering(result, geom_col)
+    return _refresh_bbox_covering(result, geom_col, bounds=row_bounds)
 
 
 #: Output versions the streaming writer can produce faithfully: plain WKB
@@ -289,18 +419,21 @@ def _can_stream(pf: pq.ParquetFile, geom_col: str, resolved_version: str | None)
     return bool(pa.types.is_binary(pf.schema_arrow.field(geom_col).type))
 
 
-def _accumulate_stats(shapely, np, wkb_values: list, types: set, bbox: list) -> None:
-    """Fold one batch's simplified geometries into the running stats."""
-    non_null = [v for v in wkb_values if v is not None]
-    if not non_null:
+def _accumulate_stats(shapely, np, geoms, row_bounds, types: set, bbox: list) -> None:
+    """Fold one batch's simplified geometries into the running stats.
+
+    ``geoms`` and ``row_bounds`` come from the simplify step itself
+    (:func:`_simplify_values` / :func:`_row_bounds`), not a re-parse of the
+    output WKB; null rows are NaN in ``row_bounds`` and absent from ``geoms``.
+    """
+    if len(geoms) == 0:
         return
-    geoms = shapely.from_wkb(np.array(non_null, dtype=object))
     has_z = shapely.has_z(geoms)
     for type_id, z in zip(shapely.get_type_id(geoms), has_z, strict=True):
         name = _TYPE_NAMES.get(int(type_id))
         if name:
             types.add(f"{name} Z" if z else name)
-    bounds = shapely.bounds(geoms)
+    bounds = row_bounds
     finite = np.isfinite(bounds[:, 0])
     if finite.any():
         bounds = bounds[finite]
@@ -337,11 +470,17 @@ def _footer_kv_via_funnel(
     col_meta = columns.setdefault(geom_col, {"encoding": "WKB"})
     if types:
         col_meta["geometry_types"] = sorted(types)
-        col_meta["bbox"] = bbox
     else:
         # Zero valid geometries: leave stats to the funnel's own empty-table
         # behavior, same as the in-memory path.
         col_meta.pop("geometry_types", None)
+    if all(math.isfinite(v) for v in bbox):
+        col_meta["bbox"] = bbox
+    else:
+        # No finite bounds (every geometry empty): omit the key the way
+        # _compute_bbox_from_data does. The accumulator's inf sentinel must
+        # never reach json.dumps, which would emit it as bare Infinity and
+        # make the geo footer unreadable to strict JSON parsers.
         col_meta.pop("bbox", None)
     metadata[b"geo"] = json.dumps(geo).encode("utf-8")
     empty = schema.with_metadata(metadata).empty_table()
@@ -375,7 +514,9 @@ def _simplify_file_streaming(
     row_group_rows: int | None,
     geoparquet_version: str | None,
     drop_empty: bool,
+    simplify_crs: str | None,
     verbose: bool,
+    drop_columns: list[str] | None = None,
 ) -> None:
     """Stream-simplify batch by batch: memory is bounded by one row group."""
     from geoparquet_io.core.derive_geo_from_file import _rewrite_writer_kwargs
@@ -384,59 +525,103 @@ def _simplify_file_streaming(
     shapely = load_module("shapely")
     np = load_module("numpy")
     schema = pf.schema_arrow
+    if drop_columns:
+        schema = pa.schema(
+            [f for f in schema if f.name not in drop_columns], metadata=schema.metadata
+        )
     rows = resolve_row_group_rows(row_group_rows, None)
     writer_schema = schema.with_metadata(None)
     types: set = set()
     bbox = [float("inf"), float("inf"), float("-inf"), float("-inf")]
     collapsed = 0
     dropped = 0
+    forward = inverse = None
+    if simplify_crs:
+        src_crs = (
+            sanitized_carried_geo(schema.metadata).get("columns", {}).get(geom_col, {}).get("crs")
+        )
+        # Scan the geometry column alone (bounded memory) until a sample turns
+        # up: the first batch can be all nulls, and auto-utm falling back to
+        # "nothing to transform" would silently apply a metre tolerance in
+        # degrees to the rest of the file. No sample at all means every
+        # geometry is null, so there genuinely is nothing to transform —
+        # matching the in-memory path's whole-column scan.
+        sample = _first_wkb(
+            v
+            for sample_batch in pf.iter_batches(batch_size=rows, columns=[geom_col])
+            for v in sample_batch.column(geom_col).to_pylist()
+        )
+        forward, inverse = _simplify_crs_transformers(simplify_crs, src_crs, sample)
+    batches = pf.iter_batches(batch_size=rows)
     with remote_write_context(output_parquet, is_directory=False, verbose=verbose) as (
         actual_output,
         is_remote,
     ):
         writer_kwargs = _rewrite_writer_kwargs(compression, compression_level)
-        # store_schema=False: the geo footer arrives via add_key_value_metadata
-        # at close (stats are only known then), and an embedded ARROW:schema
-        # written at open would shadow it on read. DuckDB-written GeoParquet
-        # carries no ARROW:schema either, so readers already live without it.
-        with pq.ParquetWriter(
-            actual_output, writer_schema, store_schema=False, **writer_kwargs
-        ) as writer:
-            for batch in pf.iter_batches(batch_size=rows):
-                table = pa.Table.from_batches([batch], schema=schema)
-                values, n, empty_flags = _simplify_values(
-                    table.column(geom_col).to_pylist(),
-                    tolerance,
-                    coverage=False,
-                    preserve_topology=preserve_topology,
-                    simplify_boundary=True,
-                    threads=threads,
+        # A local write streams into a pid-scoped sibling and is published by
+        # os.replace only once the footer is complete: pyarrow's writer
+        # finalizes a readable file even when the loop raises, and a mid-run
+        # failure must not leave a truncated, geo-less file at the user's
+        # destination. The remote branch already uploads only on success.
+        write_target = (
+            actual_output if is_remote else f"{actual_output}.stream-{os.getpid()}.tmp.parquet"
+        )
+        try:
+            # store_schema=False: the geo footer arrives via add_key_value_metadata
+            # at close (stats are only known then), and an embedded ARROW:schema
+            # written at open would shadow it on read. DuckDB-written GeoParquet
+            # carries no ARROW:schema either, so readers already live without it.
+            with pq.ParquetWriter(
+                write_target, writer_schema, store_schema=False, **writer_kwargs
+            ) as writer:
+                for batch in batches:
+                    table = pa.Table.from_batches([batch])
+                    if drop_columns:
+                        table = table.drop_columns(drop_columns)
+                    table = table.replace_schema_metadata(schema.metadata)
+                    values, n, empty_flags, geoms, idx = _simplify_values(
+                        table.column(geom_col).to_pylist(),
+                        tolerance,
+                        coverage=False,
+                        preserve_topology=preserve_topology,
+                        simplify_boundary=True,
+                        threads=threads,
+                        forward=forward,
+                        inverse=inverse,
+                    )
+                    collapsed += n
+                    table = table.set_column(
+                        table.column_names.index(geom_col),
+                        table.schema.field(geom_col),
+                        pa.chunked_array([pa.array(values, type=pa.binary())]),
+                    )
+                    row_bounds = _row_bounds(shapely, np, len(empty_flags), geoms, idx)
+                    if drop_empty and any(empty_flags):
+                        keep = [not flag for flag in empty_flags]
+                        table = table.filter(pa.array(keep))
+                        dropped += sum(empty_flags)
+                        keep_rows = np.array(keep)
+                        row_bounds = row_bounds[keep_rows]
+                        geoms = geoms[keep_rows[idx]]
+                    table = _refresh_bbox_covering(table, geom_col, bounds=row_bounds)
+                    _accumulate_stats(shapely, np, geoms, row_bounds, types, bbox)
+                    writer.write_table(table, row_group_size=rows)
+                writer.add_key_value_metadata(
+                    _footer_kv_via_funnel(
+                        schema,
+                        geom_col,
+                        types,
+                        bbox,
+                        geoparquet_version,
+                        compression,
+                        compression_level,
+                    )
                 )
-                collapsed += n
-                table = table.set_column(
-                    table.column_names.index(geom_col),
-                    table.schema.field(geom_col),
-                    pa.chunked_array([pa.array(values, type=pa.binary())]),
-                )
-                if drop_empty and any(empty_flags):
-                    keep = [not flag for flag in empty_flags]
-                    table = table.filter(pa.array(keep))
-                    dropped += sum(empty_flags)
-                    values = [v for v, k in zip(values, keep, strict=True) if k]
-                table = _refresh_bbox_covering(table, geom_col)
-                _accumulate_stats(shapely, np, values, types, bbox)
-                writer.write_table(table, row_group_size=rows)
-            writer.add_key_value_metadata(
-                _footer_kv_via_funnel(
-                    schema,
-                    geom_col,
-                    types,
-                    bbox,
-                    geoparquet_version,
-                    compression,
-                    compression_level,
-                )
-            )
+            if not is_remote:
+                os.replace(write_target, actual_output)
+        finally:
+            if not is_remote and os.path.exists(write_target):
+                os.remove(write_target)
         if is_remote:
             upload_if_remote(actual_output, output_parquet, is_directory=False, verbose=verbose)
     if collapsed:
@@ -450,9 +635,12 @@ def _simplify_file_in_memory(
     input_parquet: str,
     output_parquet: str,
     tolerance: float,
+    drop_columns: list[str] | None = None,
     **kwargs,
 ) -> None:
     table = pq.read_table(input_parquet)
+    if drop_columns:
+        table = table.drop_columns(drop_columns)
     write_args = {
         k: kwargs[k]
         for k in (
@@ -474,6 +662,7 @@ def _simplify_file_in_memory(
         threads=kwargs["threads"],
         geometry_column=kwargs["geometry_column"],
         drop_empty=kwargs["drop_empty"],
+        simplify_crs=kwargs["simplify_crs"],
         verbose=kwargs["verbose"],
     )
     write_geoparquet_table(result, output_parquet, **write_args)
@@ -490,14 +679,23 @@ def simplify_file(
     threads: int | None = None,
     geometry_column: str | None = None,
     drop_empty: bool = False,
+    simplify_crs: str | None = None,
+    refresh_metrics: bool = False,
     compression: str = "ZSTD",
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
     geoparquet_version: str | None = None,
     verbose: bool = False,
+    _drop_columns: list[str] | None = None,
 ) -> None:
     """Simplify a GeoParquet file's geometries and write the result.
+
+    ``refresh_metrics`` recomputes the vecorel ``metrics:area`` /
+    ``metrics:perimeter`` columns from the simplified geometry (#1200) by
+    routing the output through the ``add geometry-metrics`` core — one
+    owner for the geodesic math. It refreshes, never adds: inputs without
+    the columns get a warning and a plain simplify.
 
     Plain mode streams batch by batch, so peak memory is bounded by one row
     group regardless of file size (a planet-scale file simplifies on a
@@ -510,6 +708,26 @@ def simplify_file(
     """
     if "://" not in input_parquet and not os.path.exists(input_parquet):
         raise FileNotFoundGeoParquetError(input_parquet)
+    if refresh_metrics:
+        _simplify_then_refresh_metrics(
+            input_parquet,
+            output_parquet,
+            tolerance,
+            coverage=coverage,
+            preserve_topology=preserve_topology,
+            simplify_boundary=simplify_boundary,
+            threads=threads,
+            geometry_column=geometry_column,
+            drop_empty=drop_empty,
+            simplify_crs=simplify_crs,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            geoparquet_version=geoparquet_version,
+            verbose=verbose,
+        )
+        return
     kwargs = {
         "coverage": coverage,
         "preserve_topology": preserve_topology,
@@ -517,6 +735,7 @@ def simplify_file(
         "threads": threads,
         "geometry_column": geometry_column,
         "drop_empty": drop_empty,
+        "simplify_crs": simplify_crs,
         "compression": compression,
         "compression_level": compression_level,
         "row_group_size_mb": row_group_size_mb,
@@ -525,7 +744,9 @@ def simplify_file(
         "verbose": verbose,
     }
     if coverage or row_group_size_mb is not None:
-        _simplify_file_in_memory(input_parquet, output_parquet, tolerance, **kwargs)
+        _simplify_file_in_memory(
+            input_parquet, output_parquet, tolerance, drop_columns=_drop_columns, **kwargs
+        )
         return
     with pq.ParquetFile(input_parquet, pre_buffer=False) as pf:
         resolved = resolve_output_geoparquet_version(
@@ -537,7 +758,9 @@ def simplify_file(
         geom_col = _geometry_column_of(pf.schema_arrow.empty_table(), geometry_column)
         if not _can_stream(pf, geom_col, resolved):
             pf.close()
-            _simplify_file_in_memory(input_parquet, output_parquet, tolerance, **kwargs)
+            _simplify_file_in_memory(
+                input_parquet, output_parquet, tolerance, drop_columns=_drop_columns, **kwargs
+            )
             return
         _simplify_file_streaming(
             pf,
@@ -551,5 +774,85 @@ def simplify_file(
             row_group_rows=row_group_rows,
             geoparquet_version=geoparquet_version,
             drop_empty=drop_empty,
+            simplify_crs=simplify_crs,
+            verbose=verbose,
+            drop_columns=_drop_columns,
+        )
+
+
+def _simplify_then_refresh_metrics(
+    input_parquet: str,
+    output_parquet: str,
+    tolerance: float,
+    *,
+    geoparquet_version: str | None,
+    verbose: bool,
+    compression: str,
+    compression_level: int | None,
+    row_group_size_mb: float | None,
+    row_group_rows: int | None,
+    **simplify_kwargs,
+) -> None:
+    """Simplify, then recompute vecorel metric columns from the result.
+
+    The stale columns are dropped during the simplify pass (streamed or
+    in-memory) into a pid-scoped temp sibling of the output — never a
+    cwd-relative path, which collides across concurrent jobs — and the
+    ``add geometry-metrics`` core computes them fresh while writing the
+    final file. Inherits that core's WGS84 geodesic assumption.
+    """
+    from geoparquet_io.core.add.geometry_metrics import (
+        AREA_COLUMN,
+        PERIMETER_COLUMN,
+        add_geometry_metrics,
+    )
+
+    with pq.ParquetFile(input_parquet, pre_buffer=False) as pf:
+        present = [c for c in (AREA_COLUMN, PERIMETER_COLUMN) if c in pf.schema_arrow.names]
+    if not present:
+        warn(
+            "--refresh-metrics: input has no metrics:area/metrics:perimeter "
+            "columns; nothing to refresh (use 'gpio add geometry-metrics' to add them)"
+        )
+        simplify_file(
+            input_parquet,
+            output_parquet,
+            tolerance,
+            geoparquet_version=geoparquet_version,
+            verbose=verbose,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            **simplify_kwargs,
+        )
+        return
+    tmp_path = f"{output_parquet}.refresh-{os.getpid()}.tmp.parquet"
+    try:
+        simplify_file(
+            input_parquet,
+            tmp_path,
+            tolerance,
+            geoparquet_version=geoparquet_version,
+            verbose=verbose,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            _drop_columns=present,
+            **simplify_kwargs,
+        )
+        add_geometry_metrics(
+            tmp_path,
+            output_parquet,
+            compression=compression,
+            compression_level=compression_level,
+            row_group_size_mb=row_group_size_mb,
+            row_group_rows=row_group_rows,
+            geoparquet_version=geoparquet_version,
+            overwrite=True,
             verbose=verbose,
         )
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)

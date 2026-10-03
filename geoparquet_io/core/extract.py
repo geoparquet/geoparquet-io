@@ -487,6 +487,14 @@ def build_column_selection(
 
     Returns:
         list: Columns to select (preserving original order)
+
+    Raises:
+        InvalidParameterError: If the selection leaves no columns at all. The
+            empty list used to reach the three SQL builders below it and come
+            back as a raw ``ParserException: SELECT clause without selection
+            list`` -- on the file-based path, the streaming path and
+            ``extract_table`` alike. This is the guard ``extract arcgis``
+            already makes, in the one place all three share (#1176).
     """
     exclude_set = set(exclude_cols) if exclude_cols else set()
 
@@ -504,7 +512,13 @@ def build_column_selection(
         selected = set(all_columns)
 
     # Preserve original column order
-    return [c for c in all_columns if c in selected]
+    result = [c for c in all_columns if c in selected]
+    if all_columns and not result:
+        raise InvalidParameterError(
+            "exclude_cols" if exclude_cols else "columns",
+            f"this selection leaves no columns to extract (available: {', '.join(all_columns)})",
+        )
+    return result
 
 
 def validate_columns(

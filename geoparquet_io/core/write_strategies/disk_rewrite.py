@@ -34,10 +34,12 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.geo_metadata import (
     compute_bbox_via_sql,
     declare_carried_bbox_column,
+    gate_illegal_bbox_covering,
     strip_bboxless_covering,
 )
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
@@ -201,7 +203,12 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             if verbose:
                 debug(f"Writing via DuckDB COPY TO with {duckdb_compression} compression...")
 
-            con.execute(copy_query)
+            # This strategy takes no `--write-memory` (the CLI rejects the
+            # combination), so the scope applies the ceiling-based default:
+            # phase one is a COPY of the whole, possibly sorted query and used
+            # to run at DuckDB's own 80%-of-host default (#1174).
+            with scoped_write_memory_limit(con, None, verbose):
+                con.execute(copy_query)
 
             if verbose:
                 # Closed before leaving the block: this file is `os.unlink`ed a
@@ -236,6 +243,11 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 geoparquet_version,
                 geo_meta=geo_meta,
             )
+            # That declare is primary-scoped, so a SECONDARY column's covering
+            # over an illegal struct reached the output verbatim and `gpio check
+            # spec` failed the file gpio had just written (#1172/#1035). Same
+            # gate the Arrow builders run, over every column.
+            geo_meta = gate_illegal_bbox_covering(geo_meta, con, query)
             # A covering still without a bbox member is one geopandas cannot
             # read (#954).
             geo_meta = strip_bboxless_covering(geo_meta, verbose)
@@ -449,7 +461,8 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
             if verbose:
                 debug(f"Writing plain Parquet with {duckdb_compression} compression...")
-            con.execute(copy_query)
+            with scoped_write_memory_limit(con, None, verbose):
+                con.execute(copy_query)
 
             if is_remote:
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)

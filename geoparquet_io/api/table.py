@@ -394,7 +394,14 @@ def convert(
 
     Args:
         path: Path to input file (local or S3 URL)
-        geometry_column: Name for geometry column in output (default: 'geometry')
+        geometry_column: Requested name for the geometry column (default:
+               'geometry'). It is a *request*, and the returned Table carries
+               the name actually used. A tabular source (WKT or lat/lon columns)
+               honours it, because it aliases the geometry it builds -- unless a
+               carried source column already has that name, in which case the
+               built one moves aside to ``<name>_1``. A spatial source cannot
+               honour it: both of its reads alias ``ST_AsWKB(...) AS geometry``,
+               so the Table comes back with ``geometry`` (#1176).
         wkt_column: For CSV or a Parquet file with no geometry column:
                column containing WKT geometry
         lat_column: For CSV or a Parquet file with no geometry column:
@@ -1224,10 +1231,11 @@ class Table:
 
         Raises:
             InvalidParameterError: If this table's geometry column name is not a
-                column of the table -- a stale or mistyped name. Every write
-                strategy refuses it the same way, rather than one crashing, one
-                writing a `geo` block naming a column the file does not have and
-                one silently writing plain Parquet (#1176).
+                column of the table -- a stale or mistyped name. Every output
+                format and every write strategy refuses it the same way, rather
+                than one crashing, one writing a `geo` block naming a column the
+                file does not have, one silently writing plain Parquet and the
+                GDAL formats ignoring the name altogether (#1176).
 
         Examples:
             >>> table.write('output.parquet')              # GeoParquet (auto-detect)
@@ -1236,6 +1244,12 @@ class Table:
             >>> table.write('s3://bucket/output.fgb')      # FlatGeobuf to S3
             >>> table.write('output.dat', format='csv')    # Explicit format
         """
+
+        # Above the format dispatch, so every format refuses a stale geometry
+        # name alike. Below it, only `.parquet` did: the GDAL writers re-detect
+        # the geometry themselves, so `.gpkg`/`.geojson`/`.fgb`/`.csv` ignored the
+        # typo and wrote a file (#1176).
+        self._require_geometry_column_present()
 
         # Detect format from extension if not explicitly provided
         # Normalize to lowercase for case-insensitive comparison
@@ -1300,6 +1314,11 @@ class Table:
         parameter unrelated to it. The check is here, above the dispatch, so all
         four agree, and it names the columns the table does have because the
         cause is almost always a stale or mistyped name.
+
+        Called from :meth:`write` above the format dispatch -- the GDAL writers
+        re-detect the geometry themselves, so they ignored the stale name while
+        ``.parquet`` raised (#1176) -- and again from :meth:`_write_geoparquet`,
+        which the prospective-check path calls without going through ``write``.
 
         ``None`` is not a wrong name: a table with no geometry writes plain
         Parquet deliberately.
@@ -1441,6 +1460,22 @@ class Table:
 
             preserved_kv = extract_preserved_kv_metadata(self._table.schema.metadata)
 
+            # A strategy's `write_from_table` gets `original_metadata=None` on
+            # purpose: the input's stats no longer describe whatever happened to
+            # the table in between. A `covering` is not a stat, though -- it says
+            # which column holds the geometry's envelope, and nothing else in a
+            # write can establish that for a column not named exactly `bbox`. So
+            # it travels through the provenance channel instead, which is how a
+            # caller that computed a bbox column already declares one. Three of
+            # the four strategies could not see it at all, which lost a GDAL
+            # `geometry_bbox` covering and the one `add_bbox(column_name=...)`
+            # records on everything but `in-memory` (#1172).
+            from geoparquet_io.core.geo_metadata import carried_covering_as_provenance
+
+            carried_covering = carried_covering_as_provenance(
+                self._table.schema.metadata, self._geometry_column, self._table.column_names
+            )
+
             strategy.write_from_table(
                 table=self._table,
                 output_path=str(local_path),
@@ -1452,6 +1487,7 @@ class Table:
                 row_group_rows=row_group_rows,
                 verbose=verbose,
                 input_crs=input_crs,
+                custom_metadata={"covering": carried_covering} if carried_covering else None,
                 extra_kv_metadata=preserved_kv or None,
             )
 
@@ -1669,6 +1705,7 @@ class Table:
         simplify_boundary: bool = True,
         threads: int | None = None,
         drop_empty: bool = False,
+        simplify_crs: str | None = None,
     ) -> Table:
         """
         Simplify geometries with coarsen (GEOS-identical Rust).
@@ -1686,6 +1723,9 @@ class Table:
             threads: Worker threads for coarsen (default: library decides)
             drop_empty: Drop rows whose geometry is empty after
                 simplification (default: keep and warn)
+            simplify_crs: Project to this CRS for the simplification
+                (tolerance in its units), then back; 'auto-utm' picks the
+                UTM zone from the data
 
         Returns:
             New Table with simplified geometries and refreshed metadata
@@ -1701,6 +1741,7 @@ class Table:
             threads=threads,
             geometry_column=self._geometry_column,
             drop_empty=drop_empty,
+            simplify_crs=simplify_crs,
         )
         return self._wrap(result, self._geometry_column)
 

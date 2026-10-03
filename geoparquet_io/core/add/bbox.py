@@ -12,7 +12,11 @@ from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadat
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
-from geoparquet_io.core.geo_metadata import build_bbox_covering, covering_supported
+from geoparquet_io.core.geo_metadata import (
+    bbox_struct_child_names_match,
+    build_bbox_covering,
+    covering_supported,
+)
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
@@ -25,9 +29,6 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
-
-#: Struct fields a bbox covering column must expose, lowercased.
-_BBOX_STRUCT_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
 
 
 def _bbox_metadata_advice(parquet_file: str) -> str:
@@ -56,15 +57,17 @@ def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
     Mirrors what :func:`check_bbox_structure` decides for files, but from a live
     DuckDB relation, so the streaming path can take the same "already has a bbox"
     decision as the file-based one.
+
+    Reads the relation's Arrow schema (zero rows) rather than DuckDB's rendered
+    type string: that string was upper-cased and substring-tested, so a ``bbox``
+    struct spelled ``XMIN/YMIN/XMAX/YMAX`` -- the user's own data, which no
+    ``covering`` may point at -- passed as gpio's own and the stream wrote
+    nothing at all (#1176).
     """
-    for name, col_type, *_ in con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall():
-        if name != bbox_column_name:
-            continue
-        upper = col_type.upper()
-        return upper.startswith("STRUCT") and all(
-            field in upper for field in ("XMIN", "YMIN", "XMAX", "YMAX")
-        )
-    return False
+    schema = con.execute(f"SELECT * FROM {source} LIMIT 0").arrow().read_all().schema
+    if bbox_column_name not in schema.names:
+        return False
+    return _is_bbox_struct_field(schema.field(bbox_column_name))
 
 
 def add_bbox_table(
@@ -158,10 +161,16 @@ def add_bbox_table(
 
 
 def _is_bbox_struct_field(field) -> bool:
-    """Whether an Arrow field is a bbox covering struct rather than a column of that name."""
+    """Whether an Arrow field is a bbox covering struct rather than a column of that name.
+
+    Child names are matched as spelled, which is what the file-based detector
+    (``bbox_structure``) does: a ``bbox`` struct whose children are
+    ``XMIN/YMIN/XMAX/YMAX`` is the user's own data -- the folded-case test read
+    it as gpio's own and *destroyed* it (#1176).
+    """
     if not pa.types.is_struct(field.type):
         return False
-    return _BBOX_STRUCT_FIELDS <= {child.name.lower() for child in field.type}
+    return bbox_struct_child_names_match({child.name for child in field.type})
 
 
 def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[pa.Table, str]:

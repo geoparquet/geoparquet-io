@@ -27,6 +27,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import _sanitize_url_for_logging, is_remote_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
@@ -785,7 +786,11 @@ def _execute_per_level_joins(
             )
         else:
             temp_table = f"_gpio_admin_step_{i}"
-            con.execute(f"CREATE OR REPLACE TEMP TABLE {temp_table} AS {level_query}")
+            # The same memory policy as the final write below: this join
+            # materializes the whole input, so leaving it at DuckDB's own
+            # host-sized default is what reached the cgroup cap (#1174).
+            with scoped_write_memory_limit(con, memory_limit, verbose):
+                con.execute(f"CREATE OR REPLACE TEMP TABLE {temp_table} AS {level_query}")
             current_source = temp_table
 
     if dry_run:

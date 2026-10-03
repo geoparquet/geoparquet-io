@@ -35,6 +35,7 @@ from geoparquet_io.core.exceptions import (
 from geoparquet_io.core.file_utils import resolve_file_url, validate_output_path
 from geoparquet_io.core.geometry_detection import detect_parquet_geometry_column
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import (
     is_remote_url,
     needs_httpfs,
@@ -300,7 +301,11 @@ def write_gdal_format(
         """
 
         debug(f"Executing: {query}")
-        con.execute(query)
+        # No `--write-memory` on the export commands, so this is the
+        # ceiling-based default; the export used to run at DuckDB's own
+        # 80%-of-host default, blind to a container or job cgroup (#1174).
+        with scoped_write_memory_limit(con, None, verbose):
+            con.execute(query)
 
         success(f"Created {config['description']}: {output_path}")
         return output_path
@@ -427,7 +432,8 @@ def write_csv(
         """
 
         debug(f"Executing: {query}")
-        con.execute(query)
+        with scoped_write_memory_limit(con, None, verbose):
+            con.execute(query)
 
         success(f"Created CSV: {output_path}")
         return output_path

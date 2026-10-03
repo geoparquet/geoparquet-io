@@ -538,3 +538,64 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
         }
 
         assert _geo_block_to_carry_on_fast_path(metadata, "geometry", "2.0") is None
+
+
+class TestTheDecisionIsNotAskedWhenTheRewriteIsAlreadyDecided:
+    """The decision costs schema probes, and its answer is readable on the fast path only.
+
+    ``carried_geo_block`` is read inside the ``if not rewrite_needed:`` branch and
+    nowhere else, so a 1.x -> 2.0 write -- which always rewrites -- paid for the
+    decision's ``SELECT * FROM (query) LIMIT 0`` steps and threw the answer away.
+    Asking it only when it can still be used is the whole claim; what it costs
+    when it *is* asked belongs to the paths it calls.
+    """
+
+    @staticmethod
+    def _decisions_for(monkeypatch, source, destination, output_version: str) -> int:
+        """How many times this write asks ``_fast_path_geo_decision``."""
+        from geoparquet_io.core import write_funnels
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+        real_decision = write_funnels._fast_path_geo_decision
+        calls = []
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            return real_decision(*args, **kwargs)
+
+        monkeypatch.setattr(write_funnels, "_fast_path_geo_decision", spy)
+
+        original = dict(pq.ParquetFile(str(source)).schema_arrow.metadata or {})
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            write_funnels.write_parquet_with_metadata(
+                con=con,
+                query=f"SELECT * FROM '{source}'",
+                output_file=str(destination),
+                original_metadata=original,
+                compression="ZSTD",
+                compression_level=None,
+                geoparquet_version=output_version,
+                input_file=str(source),
+            )
+        finally:
+            con.close()
+        return len(calls)
+
+    def test_a_write_that_always_rewrites_does_not_ask(
+        self, monkeypatch, places_test_file, tmp_path
+    ):
+        """1.0 -> 2.0: the rewrite is settled before the decision could inform it."""
+        out = tmp_path / "rewritten.parquet"
+
+        assert self._decisions_for(monkeypatch, places_test_file, out, "2.0") == 0
+        assert _geo(out)["version"].startswith("2.")
+
+    def test_the_decision_is_still_asked_where_its_answer_is_used(
+        self, monkeypatch, v2_epoch_orientation_bbox, tmp_path
+    ):
+        """The control: a 2.0 -> 2.0 write reaches the fast path, so the question is real."""
+        out = tmp_path / "carried.parquet"
+
+        assert self._decisions_for(monkeypatch, v2_epoch_orientation_bbox, out, "2.0") == 1
+        assert "covering" in _geo(out)["columns"]["geometry"]

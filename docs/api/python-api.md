@@ -771,10 +771,12 @@ table.write('output.parquet', row_group_size_mb=128)
 
 A geometry column name the table does not carry — `Table(arrow_table,
 geometry_column='geom')` on a table whose column is `geometry` — raises
-`InvalidParameterError` naming the columns the table does have. Every write
-strategy refuses it the same way, instead of one crashing with a `KeyError`,
-one writing a `geo` block that names a column the file lacks, and one quietly
-writing plain Parquet ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)).
+`InvalidParameterError` naming the columns the table does have. Every output
+format and every write strategy refuses it the same way, instead of one crashing
+with a `KeyError`, one writing a `geo` block that names a column the file lacks,
+one quietly writing plain Parquet, and `.gpkg`/`.geojson`/`.fgb`/`.csv` ignoring
+the name altogether because their GDAL writers re-detect the geometry
+themselves ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)).
 A table with *no* geometry column is not the same thing, and still writes plain
 Parquet deliberately.
 
@@ -1488,6 +1490,26 @@ table = gpio.convert('ehak.shp', encoding='ISO-8859-1')
 table = gpio.convert('etak_3d.shp', force_2d=True)
 ```
 
+`geometry_column` is a *request*, and the returned `Table` carries the name
+actually used — read it off `table.geometry_column` rather than assuming. A
+tabular source (`wkt_column`, or `lat_column`/`lon_column`) honours the request,
+because it aliases the geometry it builds; if a column the source carries through
+already has that name, the built one moves aside to `<name>_1` with a warning. A
+spatial source (GeoPackage, Shapefile, GeoJSON, FlatGeobuf, FileGDB) cannot
+honour it — both of its reads alias `ST_AsWKB(...) AS geometry` — so the table
+comes back with `geometry` ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176)).
+
+```python
+# Honoured: the geometry is built here, so it can take the name
+table = gpio.convert('pts.csv', lat_column='lat', lon_column='lon',
+                     geometry_column='geom')
+table.geometry_column   # 'geom'
+
+# A GeoPackage's geometry is read, not built: the name is reported back
+table = gpio.convert('data.gpkg', geometry_column='geom')
+table.geometry_column   # 'geometry'
+```
+
 Unlike the CLI `convert` command, the Python API does NOT apply Hilbert sorting by default. Chain `.sort_hilbert()` explicitly if you want spatial ordering:
 
 ```python
@@ -1752,7 +1774,7 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.sub_partition_by_a5(directory, min_size, resolution=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into A5 sub-partitions |
 | `ops.sub_partition_by_quadkey(directory, min_size, resolution=None, partition_resolution=None, use_centroid=False, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into quadkey sub-partitions (pass both resolutions, or `auto=True`) |
 | `ops.sub_partition_by_s2(directory, min_size, level=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into S2 sub-partitions |
-| `ops.simplify(table, tolerance, coverage=False, preserve_topology=True, simplify_boundary=True, threads=None, geometry_column=None, drop_empty=False)` | Simplify geometries with coarsen (requires the `simplify` extra; `coverage=True` preserves shared edges) |
+| `ops.simplify(table, tolerance, coverage=False, preserve_topology=True, simplify_boundary=True, threads=None, geometry_column=None, drop_empty=False, simplify_crs=None)` | Simplify geometries with coarsen (requires the `simplify` extra; `coverage=True` preserves shared edges) |
 | `ops.polygonize(input_raster, band=1, values=None, value_column='value', nodata=None, use_mask=True)` | Polygonize a categorical raster band (requires the `raster` extra, Python 3.12+) |
 | `ops.contour(input_raster, levels=None, interval=None, base=0.0, band=1, nodata=None, min_column='min', max_column='max')` | Extract filled contour bands from a raster band (requires the `raster` extra, Python 3.12+) |
 | `ops.get_row_group_geo_stats(parquet_file)` | Per-row-group geo bbox statistics |
