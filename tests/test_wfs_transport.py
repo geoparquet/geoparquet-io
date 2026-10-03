@@ -198,13 +198,25 @@ def test_a_429_honours_an_integer_retry_after(monkeypatch):
     assert http.sleeps == [11.0]
 
 
+def test_a_429_retry_after_is_capped_at_sixty_seconds(monkeypatch):
+    """A server (or WAF) that answers ``Retry-After: 86400`` must not park gpio for a day.
+
+    The cap matches Carto's (carto.MAX_RETRY_AFTER, #1027), and clamping is
+    logged so the wait is visible in verbose output.
+    """
+    http = FakeTransport.install(monkeypatch)
+    http.respond(SERVICE, error_reply(429, retry_after=86400), xml_reply(b"<ok/>"))
+
+    assert _make_request(SERVICE) == b"<ok/>"
+    assert http.sleeps == [60.0]
+
+
 def test_an_http_date_retry_after_degrades_to_linear_backoff(monkeypatch):
-    """`Retry-After` is honoured only when `.isdigit()` (wfs.py:263-268).
+    """`Retry-After` is honoured only in the delay-seconds form (wfs.py:263-268).
 
     RFC 9110 also allows an HTTP-date. gpio ignores that form and uses its own
-    backoff instead — graceful degradation, not a defect, but invisible unless
-    asserted. Pinning it here makes a future date-parsing change show up as a
-    failing test rather than a silent behaviour change.
+    backoff instead — deliberate, documented degradation. Only the integer
+    seconds form is parsed.
     """
     http = FakeTransport.install(monkeypatch)
     http.respond(

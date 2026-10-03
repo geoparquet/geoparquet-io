@@ -32,6 +32,11 @@ DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 1.0
 
+# The longest a server's Retry-After is honoured for, so a hostile or confused
+# header cannot park the client for a day. Carto's extractor has the same cap
+# (carto.MAX_RETRY_AFTER, #1027).
+MAX_RETRY_AFTER = 60.0  # seconds
+
 # The HTTP statuses a server uses to refuse a page it could not produce: its
 # own 500 (ArcGIS Server's "Error performing query operation" HTML page) and a
 # proxy giving up on it (502, 504). Not 503 or 501, which say something specific
@@ -240,11 +245,18 @@ def make_request_with_retry(
                 warn(f"HTTP {status} (attempt {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
                     retry_after = e.response.headers.get("Retry-After")
-                    delay = (
-                        float(retry_after)
-                        if retry_after and retry_after.isdigit()
-                        else retry_delay * (attempt + 1)
-                    )
+                    if retry_after and retry_after.isdigit():
+                        # Only the delay-seconds form is honoured; an
+                        # HTTP-date (RFC 9110) falls through to the linear
+                        # backoff below (#1052).
+                        delay = min(float(retry_after), MAX_RETRY_AFTER)
+                        if delay < float(retry_after):
+                            warn(
+                                f"Retry-After {retry_after}s exceeds "
+                                f"{MAX_RETRY_AFTER}s; sleeping {delay}s instead"
+                            )
+                    else:
+                        delay = retry_delay * (attempt + 1)
                     time.sleep(delay)
                     continue
                 if page_refused and batch_size is not None:  # the latter narrows the type

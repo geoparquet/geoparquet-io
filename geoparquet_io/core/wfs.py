@@ -54,6 +54,9 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
+    MAX_RETRY_AFTER,
+)
+from geoparquet_io.core.http_retry import (
     get_shared_http_client as _get_shared_http_client_base,
 )
 from geoparquet_io.core.http_retry import (
@@ -258,11 +261,18 @@ def _make_request(
                 warn(f"HTTP {status} (attempt {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
                     retry_after = e.response.headers.get("Retry-After")
-                    delay = (
-                        float(retry_after)
-                        if retry_after and retry_after.isdigit()
-                        else retry_delay * (attempt + 1)
-                    )
+                    if retry_after and retry_after.isdigit():
+                        # Only the delay-seconds form is honoured; an
+                        # HTTP-date (RFC 9110) falls through to the linear
+                        # backoff below (#1052).
+                        delay = min(float(retry_after), MAX_RETRY_AFTER)
+                        if delay < float(retry_after):
+                            warn(
+                                f"Retry-After {retry_after}s exceeds "
+                                f"{MAX_RETRY_AFTER}s; sleeping {delay}s instead"
+                            )
+                    else:
+                        delay = retry_delay * (attempt + 1)
                     time.sleep(delay)
                     continue
             elif status == 401:
