@@ -323,17 +323,25 @@ GeoParquet files can have multiple geometry columns (e.g., `geometry` for point 
     can stand behind the claim:
 
     - it computed the bbox column itself, from the geometry, during this convert
-    - the input's own metadata already declared a covering for the column being
-      preserved
+    - the **primary** geometry column's own metadata already declared a covering
+      for the column being preserved
     - the output carries a conventional `bbox` struct column (the shape every
       GeoParquet 1.0 writer emitted, before `covering` existed) — this is what
       makes a 1.0 → 1.1 upgrade declare it
 
-    A preserved column with any other name — `bounds`, `parcel_extent`,
-    `tile_bounds` — is left undeclared, because its name is not evidence that
-    its values bound the geometry, and a wrong covering makes readers skip rows
-    that genuinely match. Declare such a column deliberately with
-    [`gpio add bbox-metadata`](add.md); `gpio check bbox` will point this out.
+    The same two pieces of evidence decide which column convert treats as *the*
+    input's bbox in the first place. A struct column with any other name —
+    `bounds`, `parcel_extent`, `tile_bounds`, or the `boundary_bbox` that
+    belongs to a secondary geometry column — is carried through as ordinary
+    data: it is not declared, it is not dropped for a native-geometry output,
+    and a 1.x output gets convert's own computed `bbox` beside it. Its name is
+    not evidence that its values bound the primary geometry, and a wrong
+    covering makes readers skip rows that genuinely match. Declare such a column
+    deliberately with
+    [`gpio add bbox-metadata --bbox-name <column>`](add.md), which is you
+    supplying the evidence gpio cannot read off a schema. Note that
+    `gpio check bbox` does *not* point this out: it reports on the primary's bbox
+    column, so an undeclared `bounds` reads there as no bbox column at all.
 
     If the input already has a column named `bbox` that is not a bbox struct
     (a string tile id, say), it is kept as it is, and the computed bbox is

@@ -327,10 +327,12 @@ entirely**, cutting the scan to a small fraction:
 | `bbox` | Center of the bbox covering column | **no** |
 | `<column>` | An existing point column | **no** |
 
-The bbox column is auto-detected from the file's GeoParquet `covering.bbox`
-metadata when present, falling back to naming conventions (`bbox`, `*_bbox`,
-`bounds`, `extent` structs with `xmin`/`ymin`/`xmax`/`ymax`); pass
-`--bbox-column NAME` for uncovered, nonconventional names. Bbox center differs from the true
+The bbox column is auto-detected from the **primary** geometry column's own
+`covering.bbox` metadata when present, falling back to a struct column named
+exactly `bbox` with `xmin`/`ymin`/`xmax`/`ymax` fields. Nothing else is guessed
+from a name: a `boundary_bbox` bounds the secondary `boundary` column, not the
+geometry being keyed. Pass `--bbox-column NAME` for an undeclared column under
+any other name. Bbox center differs from the true
 centroid only for L-shaped/very elongated features — negligible at aggregation
 resolutions, where keying by centroid is already an approximation.
 

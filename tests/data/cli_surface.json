@@ -834,6 +834,22 @@
      "kind": "command",
      "params": [
       {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "bbox_name",
+       "nargs": 1,
+       "opts": [
+        "--bbox-name"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
        "default": "<unset>",
        "hidden": false,
        "is_flag": false,

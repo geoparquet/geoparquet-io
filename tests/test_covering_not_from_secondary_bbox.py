@@ -344,3 +344,584 @@ class TestDeclareComputedBbox:
         from geoparquet_io.core.add.bbox import _declare_computed_bbox
 
         assert _declare_computed_bbox(kv, "geometry", "bounds") is kv
+
+
+# ---------------------------------------------------------------------------
+# #1171: the same mistake in the second detector, `check_bbox_structure`
+# ---------------------------------------------------------------------------
+
+
+def _check_bbox_structure(path):
+    from geoparquet_io.core.bbox_structure import check_bbox_structure
+
+    return check_bbox_structure(str(path))
+
+
+def _secondary_bbox_file(tmp_path, name, **kwargs):
+    path = tmp_path / f"{name}.parquet"
+    create_multi_geometry_with_secondary_bbox(str(path), **kwargs)
+    return path
+
+
+class TestCheckBboxStructureAnswersForThePrimary:
+    """`bbox_structure.check_bbox_structure` reports the PRIMARY's bbox or none (#1171).
+
+    Its covering lookup took the first `covering.bbox` of ANY column and its
+    name fallback matched any name ending in `bbox`, so a `boundary_bbox` — the
+    SECONDARY `boundary` column's envelope — was handed to every caller as the
+    primary's bbox column.
+    """
+
+    @pytest.mark.parametrize(
+        ("case", "kwargs"),
+        [
+            ("undeclared", {}),
+            ("declared-by-the-secondary", {"declare_boundary_covering": True}),
+            (
+                "declared-under-the-exact-name",
+                {"declare_boundary_covering": True, "bbox_name": "bbox"},
+            ),
+        ],
+    )
+    def test_a_secondarys_bbox_is_not_the_primarys(self, case, kwargs, tmp_path):
+        info = _check_bbox_structure(_secondary_bbox_file(tmp_path, case, **kwargs))
+
+        assert info["bbox_column_name"] is None
+        assert info["has_bbox_column"] is False
+        assert info["has_bbox_metadata"] is False
+
+    def test_the_primarys_own_covering_is_still_found(self, tmp_path):
+        """Provenance on the primary wins, whatever the column is called."""
+        path = _secondary_bbox_file(
+            tmp_path,
+            "primary_declares",
+            declare_boundary_covering=True,
+            primary_covering_column="geometry_bbox",
+        )
+
+        info = _check_bbox_structure(path)
+
+        assert info["bbox_column_name"] == "geometry_bbox"
+        assert info["has_bbox_column"] is True
+        assert info["has_bbox_metadata"] is True
+        assert info["status"] == "optimal"
+
+
+class TestEveryConsumerGetsThePrimarysAnswer:
+    """`check spatial` and `inspect` read the primary's bbox column, not any name.
+
+    `duckdb_metadata.has_bbox_column` matched any column whose name *ends* in
+    `bbox`/`bounds`/`extent`, so these consumers still took a SECONDARY
+    geometry's `boundary_bbox` as the primary's: `check spatial` measured row
+    group overlap on the Polygon column's extents while `check bbox` reported
+    no bbox column at all, and `inspect meta` printed those extents as the
+    primary's bounds (#1171).
+    """
+
+    def test_check_spatial_refuses_what_check_bbox_does_not_see(self, tmp_path):
+        from geoparquet_io.core.check_spatial_order import check_spatial_order_bbox_stats
+
+        path = _secondary_bbox_file(tmp_path, "in")
+        assert _check_bbox_structure(path)["bbox_column_name"] is None
+
+        with pytest.raises(ValueError, match="does not have a bbox column"):
+            check_spatial_order_bbox_stats(str(path))
+
+    def test_pushdown_readiness_reports_no_bbox_column(self, tmp_path):
+        from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness
+
+        result = check_spatial_pushdown_readiness(str(_secondary_bbox_file(tmp_path, "in")))
+
+        assert result["has_geo_bbox"] is False
+
+    def test_row_group_bounds_are_not_the_secondarys_extents(self, tmp_path):
+        """The boundary polygons reach (-0.5, -0.5)-(2.5, 2.5); the points do not."""
+        from geoparquet_io.core.metadata_utils import extract_bbox_from_row_group_stats
+
+        path = _secondary_bbox_file(tmp_path, "in")
+
+        assert extract_bbox_from_row_group_stats(str(path), "geometry") is None
+
+    def test_the_primarys_own_covering_is_still_read(self, tmp_path):
+        """The positive half: declared provenance gives the POINTS' extents."""
+        from geoparquet_io.core.metadata_utils import extract_bbox_from_row_group_stats
+
+        path = _secondary_bbox_file(
+            tmp_path,
+            "primary_declares",
+            declare_boundary_covering=True,
+            primary_covering_column="geometry_bbox",
+        )
+
+        assert extract_bbox_from_row_group_stats(str(path), "geometry") == [0.0, 0.0, 2.0, 2.0]
+
+
+class TestAMalformedPrimaryColumnIsNotALookupKey:
+    """`primary_column` can be any JSON value in someone else's file (#947/#1171).
+
+    The primary-only lookup indexes `columns` by it, so a list or an object
+    raised `unhashable type: 'list'` where the truthful answer is that the block
+    names no primary entry and so declares no covering.
+    """
+
+    BLOCKS = [["geometry"], {"name": "geometry"}, 42, None]
+    IDS = ["list", "object", "number", "null"]
+
+    def _file(self, tmp_path, primary, name):
+        geo = {
+            "version": "1.1.0",
+            "primary_column": primary,
+            "columns": {"geometry": {"encoding": "WKB"}},
+        }
+        table = pa.table(
+            {
+                "geometry": pa.array([b"\x00"], type=pa.binary()),
+                "bbox": pa.array(
+                    [{"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}], BBOX_STRUCT
+                ),
+            }
+        ).replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
+        path = tmp_path / f"{name}.parquet"
+        pq.write_table(table, str(path))
+        return path, geo
+
+    @pytest.mark.parametrize("primary", BLOCKS, ids=IDS)
+    def test_the_file_detector_reports_the_conventional_column(self, primary, tmp_path):
+        path, _ = self._file(tmp_path, primary, "malformed_primary")
+
+        info = _check_bbox_structure(path)
+
+        assert info["bbox_column_name"] == "bbox"
+        assert info["has_bbox_metadata"] is False
+
+    @pytest.mark.parametrize("primary", BLOCKS, ids=IDS)
+    def test_the_write_side_gate_agrees(self, primary, tmp_path):
+        _, geo = self._file(tmp_path, primary, "malformed_primary")
+        schema = pa.schema([pa.field("geometry", pa.binary()), pa.field("bbox", BBOX_STRUCT)])
+
+        assert bbox_column_to_declare(schema, geo) == "bbox"
+
+
+class TestGoodFilesKeepTheirBboxAdvice:
+    """The tightening must not report "no bbox column" on a sound file (#1171)."""
+
+    def test_a_covering_the_primary_declares_stays_optimal(self, austria_bbox_covering_file):
+        """A non-conventional name the primary itself declares is the whole point of #738."""
+        info = _check_bbox_structure(austria_bbox_covering_file)
+
+        assert info["bbox_column_name"] == "geometry_bbox"
+        assert info["has_bbox_metadata"] is True
+        assert info["status"] == "optimal"
+
+    def test_an_undeclared_exact_bbox_is_suboptimal_not_absent(self, places_test_file):
+        """The 1.0 -> 1.1 upgrade path: the conventional column is still found."""
+        info = _check_bbox_structure(places_test_file)
+
+        assert info["bbox_column_name"] == "bbox"
+        assert info["has_bbox_metadata"] is False
+        assert info["status"] == "suboptimal"
+
+    def test_check_bbox_advice_is_unchanged_for_a_sound_file(self, austria_bbox_covering_file):
+        """`gpio check bbox` still names the column and reports it as optimal."""
+        result = CliRunner().invoke(cli, ["check", "bbox", austria_bbox_covering_file])
+
+        assert result.exit_code == 0, result.output
+        assert "geometry_bbox" in result.output
+
+
+class TestConvertDoesNotCrossColumns:
+    """`gpio convert geoparquet` of the #1171 shape (the #953 output, second route)."""
+
+    def test_the_primary_does_not_get_the_secondarys_bbox(self, tmp_path):
+        input_file = _secondary_bbox_file(tmp_path, "in")
+        output_file = tmp_path / "out.parquet"
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "convert",
+                "geoparquet",
+                str(input_file),
+                str(output_file),
+                "--geoparquet-version",
+                "1.1",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        geo = _geo(output_file)
+        primary_meta = geo["columns"][geo["primary_column"]]
+        assert "boundary_bbox" not in _covering_columns(primary_meta), primary_meta
+
+    def test_geoarrow_does_not_drop_the_secondarys_declared_bbox(self, tmp_path):
+        """1.1-geoarrow drops "the" bbox column; the secondary's is not it."""
+        input_file = _secondary_bbox_file(tmp_path, "in", declare_boundary_covering=True)
+        output_file = tmp_path / "out.parquet"
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "convert",
+                "geoparquet",
+                str(input_file),
+                str(output_file),
+                "--geoparquet-version",
+                "1.1-geoarrow",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        columns = pq.ParquetFile(str(output_file)).schema_arrow.names
+        assert "boundary_bbox" in columns, columns
+
+
+class TestAddBboxMetadataDoesNotCrossColumns:
+    """`gpio add bbox-metadata` declared the SECONDARY's struct on the primary (#1171)."""
+
+    def test_it_refuses_rather_than_declare_a_secondarys_bbox(self, tmp_path):
+        input_file = _secondary_bbox_file(tmp_path, "in")
+
+        result = CliRunner().invoke(cli, ["add", "bbox-metadata", str(input_file)])
+
+        assert result.exit_code != 0, result.output
+        assert "boundary_bbox" not in result.output
+        assert "No valid bbox column" in result.output
+        assert _covering_columns(_geo(input_file)["columns"]["geometry"]) == set()
+
+    def test_it_still_declares_an_undeclared_exact_bbox(self, tmp_path):
+        """The positive half: the conventional column on a sound file is declared."""
+        target = _places_like(tmp_path)
+
+        result = CliRunner().invoke(cli, ["add", "bbox-metadata", str(target)])
+
+        assert result.exit_code == 0, result.output
+        assert _covering_columns(_geo(target)["columns"]["geometry"]) == {"bbox"}
+
+    # --- the escape hatch: --bbox-name asserts a column the policy will not ---
+
+    def _add(self, target, *args):
+        return CliRunner().invoke(cli, ["add", "bbox-metadata", str(target), *args])
+
+    def test_bbox_name_declares_the_column_the_user_vouches_for(self, tmp_path):
+        """The GDAL shape: a `geometry_bbox` struct no metadata declares."""
+        target = _unclaimed_bbox_struct_file(tmp_path, "geometry_bbox")
+
+        result = self._add(target, "--bbox-name", "geometry_bbox")
+
+        assert result.exit_code == 0, result.output
+        assert _covering_columns(_geo(target)["columns"]["geometry"]) == {"geometry_bbox"}
+
+    def test_bbox_name_cannot_claim_a_secondarys_declared_bbox(self, tmp_path):
+        """The flag is an escape hatch from the naming policy, not from #1171."""
+        target = _secondary_bbox_file(tmp_path, "in", declare_boundary_covering=True)
+
+        result = self._add(target, "--bbox-name", "boundary_bbox")
+
+        assert result.exit_code != 0, result.output
+        assert "boundary_bbox" in result.output
+        assert _covering_columns(_geo(target)["columns"]["geometry"]) == set()
+
+    def test_bbox_name_over_an_overture_order_struct_is_refused(self, tmp_path):
+        """`xmin, xmax, ymin, ymax` is a struct no 1.1 covering may point at."""
+        target = _unclaimed_bbox_struct_file(
+            tmp_path, "bounds", field_order=("xmin", "xmax", "ymin", "ymax")
+        )
+
+        result = self._add(target, "--bbox-name", "bounds")
+
+        assert result.exit_code != 0, result.output
+        assert "Cannot add bbox covering metadata" in result.output
+        assert _covering_columns(_geo(target)["columns"]["geometry"]) == set()
+
+    def test_bbox_name_for_a_column_that_is_not_there_is_refused(self, tmp_path):
+        target = _unclaimed_bbox_struct_file(tmp_path, "geometry_bbox")
+
+        result = self._add(target, "--bbox-name", "nosuch")
+
+        assert result.exit_code != 0, result.output
+        assert "nosuch" in result.output
+        assert _covering_columns(_geo(target)["columns"]["geometry"]) == set()
+
+
+def _unclaimed_bbox_struct_file(tmp_path, column, field_order=("xmin", "ymin", "xmax", "ymax")):
+    """A 1.1 file whose only bbox struct is called ``column`` and is undeclared.
+
+    What OGR and friends write: the struct is named after the geometry column
+    (``geometry_bbox``) or something descriptive (``bounds``), which the
+    #738/#1171 policy will not vouch for on its own. ``--bbox-name`` is how the
+    user vouches for it.
+    """
+    import struct
+
+    bbox_type = pa.struct([(axis, pa.float64()) for axis in field_order])
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+    }
+    table = pa.table(
+        {
+            "id": pa.array([1], type=pa.int32()),
+            "geometry": pa.array([struct.pack("<BIdd", 1, 1, 1.0, 1.0)], type=pa.binary()),
+            column: pa.array([dict.fromkeys(field_order, 1.0)], type=bbox_type),
+        }
+    )
+    path = tmp_path / f"{column}_{'_'.join(field_order)}.parquet"
+    pq.write_table(
+        table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")}), str(path)
+    )
+    return path
+
+
+class TestAddBboxSaysWhatItIsComputingBeside:
+    """`gpio add bbox` names the bbox-shaped struct it is adding a column next to.
+
+    The duplication is the documented intent -- gpio cannot vouch for a column
+    it did not compute -- but it used to be announced ("File will have 2 bbox
+    columns"), because the old suffix match made a `bounds` struct the
+    "existing" bbox column. After #1171 `check_bbox_structure` reports none, so
+    `_handle_existing_bbox` returns on its first guard and the second struct
+    appeared with no notice at all.
+    """
+
+    def test_it_names_the_struct_it_is_computing_beside(self, tmp_path):
+        source = _unclaimed_bbox_struct_file(tmp_path, "bounds")
+        output_file = tmp_path / "out.parquet"
+
+        result = CliRunner().invoke(cli, ["add", "bbox", str(source), str(output_file)])
+
+        assert result.exit_code == 0, result.output
+        assert "bounds" in result.output
+        columns = pq.ParquetFile(str(output_file)).schema_arrow.names
+        assert {"bounds", "bbox"} <= set(columns), columns
+
+    def test_the_note_does_not_make_it_the_detected_column(self, tmp_path):
+        """Mentioning the struct must not feed back into detection (#1171)."""
+        source = _unclaimed_bbox_struct_file(tmp_path, "bounds")
+        output_file = tmp_path / "out.parquet"
+
+        CliRunner().invoke(cli, ["add", "bbox", str(source), str(output_file)])
+
+        geo = _geo(output_file)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bbox"}
+
+    def test_a_file_with_no_other_bbox_struct_says_nothing(self, buildings_test_file, tmp_path):
+        output_file = tmp_path / "out.parquet"
+
+        result = CliRunner().invoke(cli, ["add", "bbox", buildings_test_file, str(output_file)])
+
+        assert result.exit_code == 0, result.output
+        assert "looks like a bbox struct" not in result.output
+
+
+class TestAddBboxHonoursAnExplicitlyNamedStruct:
+    """``--bbox-name bounds`` over a legal, unclaimed ``bounds`` struct is honoured.
+
+    Naming the column is the user supplying the provenance detection cannot
+    infer -- the same reasoning as ``add bbox-metadata --bbox-name``. Detection
+    reports no bbox column for it, so ``_handle_existing_bbox`` returned on its
+    status guard and ``add_computed_column`` then refused the duplicate name
+    outright; the streaming path, which tests the REQUESTED name by shape, passed
+    the same input through. The two must agree.
+    """
+
+    def _add(self, source, output_file, *args):
+        return CliRunner().invoke(
+            cli, ["add", "bbox", str(source), str(output_file), "--bbox-name", "bounds", *args]
+        )
+
+    def test_it_is_passed_through_rather_than_duplicated(self, tmp_path):
+        source = _unclaimed_bbox_struct_file(tmp_path, "bounds")
+        output_file = tmp_path / "out.parquet"
+
+        result = self._add(source, output_file)
+
+        assert result.exit_code == 0, result.output
+        columns = pq.ParquetFile(str(output_file)).schema_arrow.names
+        assert columns.count("bounds") == 1, columns
+        assert "bbox" not in columns, columns
+        # The advice must name the flag that can actually declare this column.
+        assert "--bbox-name" in result.output
+
+    def test_force_replaces_it_in_place_and_declares_it(self, tmp_path):
+        source = _unclaimed_bbox_struct_file(tmp_path, "bounds")
+        output_file = tmp_path / "out.parquet"
+
+        result = self._add(source, output_file, "--force")
+
+        assert result.exit_code == 0, result.output
+        columns = pq.ParquetFile(str(output_file)).schema_arrow.names
+        assert columns.count("bounds") == 1, columns
+        geo = _geo(output_file)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bounds"}
+
+    def test_a_struct_another_column_claims_is_not_adopted_by_the_primary(self, tmp_path):
+        """#1171 still holds: the secondary's envelope is not the primary's to reuse.
+
+        #1176 moves the computed column aside rather than refusing, so the run
+        succeeds -- but the primary's covering must name the column gpio
+        computed, never the `boundary_bbox` the SECONDARY declares.
+        """
+        source = _secondary_bbox_file(tmp_path, "in", declare_boundary_covering=True)
+        output_file = tmp_path / "out.parquet"
+
+        result = CliRunner().invoke(
+            cli,
+            ["add", "bbox", str(source), str(output_file), "--bbox-name", "boundary_bbox"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "boundary_bbox_1" in result.output
+        geo = _geo(output_file)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"boundary_bbox_1"}
+        # The secondary keeps its own covering, over its own column.
+        assert _covering_columns(geo["columns"]["boundary"]) == {"boundary_bbox"}
+        # The user's column is the input's own data and keeps its values.
+        assert (
+            pq.read_table(str(output_file)).column("boundary_bbox").to_pylist()
+            == pq.read_table(str(source)).column("boundary_bbox").to_pylist()
+        )
+
+    def test_a_same_named_column_that_is_not_a_bbox_struct_is_left_alone(self, tmp_path):
+        """A string column called `bounds` is the input's own data (#1176)."""
+        import struct as _struct
+
+        geo = {
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        }
+        table = pa.table(
+            {
+                "geometry": pa.array([_struct.pack("<BIdd", 1, 1, 1.0, 1.0)], type=pa.binary()),
+                "bounds": pa.array(["tile-1"], type=pa.string()),
+            }
+        )
+        source = tmp_path / "string_bounds.parquet"
+        pq.write_table(
+            table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")}), str(source)
+        )
+        output_file = tmp_path / "out.parquet"
+
+        result = self._add(source, output_file)
+
+        assert result.exit_code == 0, result.output
+        table = pq.read_table(str(output_file))
+        assert table.column("bounds").to_pylist() == ["tile-1"]
+        geo = _geo(output_file)
+        assert _covering_columns(geo["columns"][geo["primary_column"]]) == {"bounds_1"}
+
+
+class TestExtractBboxFiltersOnThePrimary:
+    """`gpio extract geoparquet --bbox` pre-filtered on the SECONDARY's extents (#1171)."""
+
+    def _extract(self, input_file, output_file, bbox):
+        result = CliRunner().invoke(
+            cli,
+            ["extract", "geoparquet", str(input_file), str(output_file), "--bbox", bbox],
+        )
+        assert result.exit_code == 0, result.output
+        return pq.read_table(str(output_file))
+
+    def test_a_box_that_holds_no_point_returns_no_rows(self, tmp_path):
+        """1.6,1.6,1.7,1.7 falls inside the polygon around POINT(2 2), not on the point."""
+        input_file = _secondary_bbox_file(tmp_path, "in")
+
+        table = self._extract(input_file, tmp_path / "out.parquet", "1.6,1.6,1.7,1.7")
+
+        assert table.num_rows == 0, table.to_pydict()
+
+    def test_a_box_that_holds_a_point_still_returns_it(self, tmp_path):
+        input_file = _secondary_bbox_file(tmp_path, "in")
+
+        table = self._extract(input_file, tmp_path / "out.parquet", "1.9,1.9,2.1,2.1")
+
+        assert table.num_rows == 1
+        assert table.column("id").to_pylist() == [3]
+
+
+class TestAnIncompleteCoveringIsNotAPointer:
+    """The primary's own ``covering.bbox`` must name all four axes with
+    well-formed ``[column, field]`` paths. ``_covering_column`` accepts the
+    first list-shaped ref it sees, so these reach the stricter check above it."""
+
+    @staticmethod
+    def _block(bbox_refs):
+        return {
+            "primary_column": "geometry",
+            "columns": {"geometry": {"covering": {"bbox": bbox_refs}}},
+        }
+
+    def test_only_some_axes_is_not_a_pointer(self):
+        from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
+
+        partial = {"xmin": ["my_box", "xmin"], "ymin": ["my_box", "ymin"]}
+        assert _bbox_column_from_covering(self._block(partial)) is None
+
+    def test_one_malformed_axis_spoils_it(self):
+        from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
+
+        refs = {k: ["my_box", k] for k in ("xmin", "ymin", "xmax")}
+        refs["ymax"] = "my_box.ymax"  # a string, not a [column, field] path
+        assert _bbox_column_from_covering(self._block(refs)) is None
+
+    def test_all_four_well_formed_is_a_pointer(self):
+        from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
+
+        refs = {k: ["my_box", k] for k in ("xmin", "ymin", "xmax", "ymax")}
+        assert _bbox_column_from_covering(self._block(refs)) == "my_box"
+
+
+class TestTheClaimedNameIsExplainedWhenAsked:
+    """``--verbose`` says why the conventional name was not read as the
+    primary's bbox, so a user whose `bbox` struct is another column's covering
+    can tell that from a file that simply has none."""
+
+    @staticmethod
+    def _schema_info_of_a_file_with_a_bbox_struct(tmp_path):
+        """Real `parquet_schema()` output, so the struct walk is the real one."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.duckdb_metadata import get_schema_info
+
+        bbox_type = pa.struct([(axis, pa.float64()) for axis in ("xmin", "ymin", "xmax", "ymax")])
+        table = pa.table(
+            {
+                "geometry": pa.array([None], type=pa.binary()),
+                "bbox": pa.array([{"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}], bbox_type),
+            }
+        )
+        path = tmp_path / "with_bbox_struct.parquet"
+        pq.write_table(table, str(path))
+        return get_schema_info(str(path))
+
+    @staticmethod
+    def _refs(column):
+        return {axis: [column, axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
+
+    def test_it_says_which_covering_claimed_the_name(self, tmp_path, caplog):
+        import logging
+
+        from geoparquet_io.core.bbox_structure import _find_bbox_column_in_schema
+
+        schema_info = self._schema_info_of_a_file_with_a_bbox_struct(tmp_path)
+        claimed = {
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {},
+                "boundary": {"covering": {"bbox": self._refs("bbox")}},
+            },
+        }
+        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+            found = _find_bbox_column_in_schema(schema_info, True, claimed)
+
+        assert found is None
+        assert "another column's covering names it" in caplog.text
+
+    def test_an_unclaimed_conventional_name_is_still_read(self, tmp_path):
+        from geoparquet_io.core.bbox_structure import _find_bbox_column_in_schema
+
+        schema_info = self._schema_info_of_a_file_with_a_bbox_struct(tmp_path)
+        unclaimed = {"primary_column": "geometry", "columns": {"geometry": {}}}
+        assert _find_bbox_column_in_schema(schema_info, False, unclaimed) == "bbox"

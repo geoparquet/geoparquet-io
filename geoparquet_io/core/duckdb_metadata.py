@@ -1164,48 +1164,6 @@ def get_bloom_filter_info(parquet_file: str, con=None) -> list[dict]:
             connection.close()
 
 
-def has_bbox_column(parquet_file: str, con=None) -> tuple[bool, str | None]:
-    """
-    Check if file has a bbox struct column with proper structure.
-
-    Returns (has_bbox, bbox_column_name).
-
-    Note:
-        DuckDB's parquet_schema() returns nested struct fields without parent prefix.
-        For a struct column 'bbox' with fields xmin/ymin/xmax/ymax:
-        - bbox appears with num_children=4
-        - Child fields appear as 'xmin', 'ymin', 'xmax', 'ymax' (not 'bbox.xmin')
-    """
-    schema = get_schema_info(parquet_file, con)
-
-    # Check for columns ending with these suffixes (e.g., geometry_bbox, bbox)
-    conventional_suffixes = ["bbox", "bounds", "extent"]
-    required_fields = {"xmin", "ymin", "xmax", "ymax"}
-
-    for i, col in enumerate(schema):
-        name = col.get("name", "")
-        num_children = col.get("num_children", 0)
-
-        if not name:
-            continue
-
-        # Check if column name ends with conventional suffixes and has struct children
-        is_bbox_name = any(name.endswith(suffix) for suffix in conventional_suffixes)
-        if is_bbox_name and num_children >= 4:
-            # Get the next num_children entries as the struct's child fields
-            child_names = set()
-            for j in range(1, num_children + 1):
-                if i + j < len(schema):
-                    child_name = schema[i + j].get("name", "")
-                    child_names.add(child_name)
-
-            # Check if all required fields are present
-            if required_fields.issubset(child_names):
-                return True, name
-
-    return False, None
-
-
 def find_primary_geometry_column_duckdb(parquet_file: str, con=None) -> str:
     """
     Find primary geometry column from GeoParquet metadata.

@@ -6,13 +6,18 @@ import json
 
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure, resolve_bbox_name
+from geoparquet_io.core.bbox_structure import (
+    bbox_shaped_struct_columns,
+    check_bbox_structure,
+    resolve_bbox_name,
+)
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata
+from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
+    _bbox_claimed_by_another_column,
     bbox_struct_child_names_match,
     build_bbox_covering,
     covering_supported,
@@ -21,7 +26,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.logging_config import progress, success, warn
+from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
@@ -31,11 +36,16 @@ from geoparquet_io.core.streaming import (
 )
 
 
-def _bbox_metadata_advice(parquet_file: str) -> str:
+def _bbox_metadata_advice(parquet_file: str, declare_by_name: str | None = None) -> str:
     """Advice for a file that has a bbox column but no covering metadata.
 
     'covering' is 1.1-only, so a 1.0 file cannot be fixed by 'add bbox-metadata'
     (which refuses) — it needs a version upgrade first.
+
+    ``declare_by_name`` is set when the column is one ``add bbox-metadata`` will
+    not find on its own — an explicitly requested ``bounds`` or
+    ``geometry_bbox`` — so the advice names the ``--bbox-name`` flag instead of
+    sending the user to a command that would report no bbox column at all.
     """
 
     geo_meta = get_geo_metadata(parquet_file) or {}
@@ -43,12 +53,58 @@ def _bbox_metadata_advice(parquet_file: str) -> str:
     if covering_supported(version):
         if check_bbox_structure(parquet_file).get("covering_problem"):
             return "The existing column cannot carry a 'covering'; use --force to rewrite it."
-        return "Run 'gpio add bbox-metadata' to add metadata, or use --force to replace."
+        flag = f" --bbox-name {declare_by_name}" if declare_by_name else ""
+        return f"Run 'gpio add bbox-metadata{flag}' to add metadata, or use --force to replace."
     return (
         f"'covering' requires GeoParquet 1.1+ (this file is {version}). Use --force to "
         "rewrite the bbox column at 1.1 with covering, or convert first: "
         "gpio convert geoparquet IN.parquet OUT.parquet --geoparquet-version 1.1"
     )
+
+
+def _explicitly_named_bbox_struct(input_parquet: str, bbox_column_name: str) -> bool:
+    """Whether ``--bbox-name`` names an existing bbox struct this run may reuse.
+
+    Detection answers for the PRIMARY geometry column, so a legal but undeclared
+    ``bounds`` is not "the file's bbox column" (#738/#1171) -- correct, and it
+    left an *explicit* ``--bbox-name bounds`` with nowhere to go: the file path
+    fell through to ``add_computed_column``, which refused the duplicate name,
+    while the streaming path (which tests the requested name by shape) passed the
+    same input through. Naming the column is the user supplying the provenance
+    detection cannot infer, exactly as it is for ``add bbox-metadata``.
+
+    What naming it still cannot do is claim a struct some NON-primary geometry
+    column already declares as *its* covering: those values bound that column's
+    geometry. Such a column, and one that is not a bbox struct at all, keep the
+    plain name-collision refusal.
+    """
+    if bbox_column_name not in bbox_shaped_struct_columns(get_schema_info(input_parquet)):
+        return False
+    return not _bbox_claimed_by_another_column(get_geo_metadata(input_parquet), bbox_column_name)
+
+
+def _note_bbox_structs_computed_beside(
+    input_parquet: str, bbox_column_name: str, verbose: bool
+) -> None:
+    """Name the bbox-shaped structs this run is about to compute a column next to.
+
+    Purely informational, and deliberately NOT part of detection: declaring a
+    column gpio did not compute asserts a relationship only its name suggests,
+    which is exactly what #738/#1171 removed. The duplication is the documented
+    intent; the silence was not. Before the narrowing a ``bounds`` struct
+    name-matched, so this ran into ``_handle_existing_bbox``'s "File will have 2
+    bbox columns" warning; afterwards ``check_bbox_structure`` reports no bbox
+    column at all and that branch is never reached.
+    """
+    for name in bbox_shaped_struct_columns(get_schema_info(input_parquet)):
+        if name == bbox_column_name:
+            continue
+        warn(
+            f"Note: '{name}' looks like a bbox struct but nothing declares it as this "
+            f"file's covering; computing '{bbox_column_name}' beside it."
+        )
+        if verbose:
+            debug(f"'{name}' is carried through as ordinary data, undeclared")
 
 
 def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
@@ -594,6 +650,10 @@ def _add_bbox_file_based(
             get_column_names(input_parquet), geoparquet_version, requested=bbox_column_name
         )
 
+    # A column is being computed. Say which bbox-shaped structs it will sit
+    # beside, undeclared, so the duplication is visible rather than silent.
+    _note_bbox_structs_computed_beside(input_parquet, bbox_column_name, verbose)
+
     # Get geometry column for the SQL expression
     geom_col = find_primary_geometry_column(input_parquet, verbose)
 
@@ -651,8 +711,17 @@ def _handle_existing_bbox(
     dry-run, that copy has been described). Otherwise the caller computes the
     column, excluding ``replace_column`` from the copy of the input schema.
     """
+    # An explicit --bbox-name over a legal, unclaimed bbox struct detection does
+    # not report is the same situation as an existing bbox column, so it takes
+    # the same branches below rather than falling through to the duplicate-name
+    # refusal. `declare_by_name` makes the advice name the flag that can declare
+    # it: plain `add bbox-metadata` would report no bbox column for it.
+    declare_by_name = None
     if bbox_info["status"] not in ("optimal", "suboptimal"):
-        return False, None
+        if not _explicitly_named_bbox_struct(input_parquet, bbox_column_name):
+            return False, None
+        declare_by_name = bbox_column_name
+        bbox_info = {"status": "suboptimal", "bbox_column_name": bbox_column_name}
 
     existing_bbox_col = bbox_info.get("bbox_column_name")
 
@@ -679,7 +748,15 @@ def _handle_existing_bbox(
         )
         return False, existing_bbox_col
 
-    _report_bbox_copy(bbox_info, existing_bbox_col, input_parquet, output_parquet, verbose, dry_run)
+    _report_bbox_copy(
+        bbox_info,
+        existing_bbox_col,
+        input_parquet,
+        output_parquet,
+        verbose,
+        dry_run,
+        declare_by_name,
+    )
     return True, None
 
 
@@ -690,6 +767,7 @@ def _report_bbox_copy(
     output_parquet: str | None,
     verbose: bool,
     dry_run: bool,
+    declare_by_name: str | None = None,
 ) -> None:
     """Announce -- and, outside dry-run, perform -- the copy that answers this run."""
     if bbox_info["status"] == "optimal":
@@ -697,7 +775,7 @@ def _report_bbox_copy(
         advice = "Use --force to recompute and replace the existing bbox column."
     else:
         headline = f"File has bbox column '{existing_bbox_col}' but lacks covering metadata."
-        advice = _bbox_metadata_advice(input_parquet)
+        advice = _bbox_metadata_advice(input_parquet, declare_by_name)
 
     progress(headline)
     if dry_run:

@@ -47,6 +47,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import add, check, convert, inspect
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     get_bbox_from_row_group_stats,
@@ -56,7 +57,6 @@ from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
     get_per_row_group_bbox_stats,
     get_schema_info,
-    has_bbox_column,
 )
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError
@@ -128,7 +128,7 @@ class TestSafeFileUrlIsIdempotentlyApplied:
             get_geo_metadata,
             get_column_names,
             detect_geometry_columns,
-            has_bbox_column,
+            check_bbox_structure,
         ],
     )
     def test_metadata_getters_accept_raw_path(self, apostrophe_file, getter):
@@ -139,8 +139,8 @@ class TestSafeFileUrlIsIdempotentlyApplied:
         assert get_compression_info(apostrophe_file)
 
     def test_bbox_stats_accept_raw_path(self, apostrophe_file_with_bbox):
-        has_bbox, bbox_col = has_bbox_column(apostrophe_file_with_bbox)
-        assert has_bbox and bbox_col == "bbox"
+        bbox_col = check_bbox_structure(apostrophe_file_with_bbox)["bbox_column_name"]
+        assert bbox_col == "bbox"
         assert get_per_row_group_bbox_stats(apostrophe_file_with_bbox, bbox_col)
         assert get_bbox_from_row_group_stats(apostrophe_file_with_bbox, bbox_col)
 

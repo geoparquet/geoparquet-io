@@ -73,6 +73,15 @@ Creates a struct column with `{xmin, ymin, xmax, ymax}` for each feature, plus t
 
 ### Existing Bbox Detection
 
+An "existing bbox column" means the same two things everywhere in gpio: the
+column the **primary** geometry column's own `covering.bbox` names, or a struct
+column called exactly `bbox` that no other column's covering claims. A
+`bounds`, `tile_extent` or `boundary_bbox` struct nothing declared is ordinary
+data — `gpio add bbox` computes its own column beside it,
+`gpio extract --bbox` filters on the geometry rather than pre-filtering on
+values nothing vouched for, and `gpio add bbox-metadata` reports that there is
+no bbox column to declare unless you name one with `--bbox-name`.
+
 The command automatically checks for existing bbox columns:
 
 - **If bbox exists with metadata**: Nothing is recomputed, and the input is copied to the output file unchanged
@@ -190,6 +199,40 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
     table = gpio.read('file_with_bbox.parquet')
     table.add_bbox_metadata().write('output.parquet')
     ```
+
+#### Declaring a column gpio will not vouch for
+
+Auto-detection names two columns and no others: the one the **primary** geometry
+column's own `covering.bbox` already points at, and a struct called exactly
+`bbox` that no other column's covering claims. A file GDAL wrote carries its
+struct as `geometry_bbox` — exactly the right four numbers, under a name that is
+not evidence of what they bound. `--bbox-name` is where you supply that
+evidence:
+
+=== "CLI"
+
+    <!-- doctest: skip="needs a gdal_written.parquet carrying a geometry_bbox struct" -->
+    ```bash
+    gpio add bbox-metadata gdal_written.parquet --bbox-name geometry_bbox
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs a gdal_written.parquet carrying a geometry_bbox struct" -->
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('gdal_written.parquet')
+    table.add_bbox_metadata(bbox_column='geometry_bbox').write('output.parquet')
+    ```
+
+Naming a column is an assertion about its values, so three things stay refused.
+A column the file does not have. A struct the spec forbids a `covering` to point
+at (Overture's `xmin, xmax, ymin, ymax`) — see the field-order note above. And a
+struct some **other** geometry column already declares as *its* covering: those
+values bound that column's geometry, not the primary's, so declaring them on the
+primary would make readers prune rows that genuinely match. Compute the
+primary's own column instead with `gpio add bbox`.
 
 ## H3 Hexagonal Cells
 

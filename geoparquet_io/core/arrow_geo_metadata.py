@@ -31,11 +31,12 @@ from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
     OVERVIEWS_KEY,
+    _bbox_claimed_by_another_column,
     _get_geometry_type_name,
+    _self_evident_bbox_column,
     bbox_column_to_declare,
     carried_version,
     create_geo_metadata,
-    detect_bbox_column_from_schema,
     geoarrow_wkb_codes,
     sanitize_geo_metadata,
     sanitized_carried_geo,
@@ -144,20 +145,33 @@ def _table_bbox_struct_ok(table, column_name: str) -> bool:
 
 
 def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
-    """
-    Detect bbox struct column from Arrow table schema.
+    """The PRIMARY geometry's bbox struct column in an Arrow table, or None.
 
-    Consults the GeoParquet ``covering.bbox`` metadata first (the authoritative
-    pointer, which may use a non-conventional name), then falls back to columns
-    with conventional names (bbox, bounds, extent) that have the required
-    struct fields (xmin, ymin, xmax, ymax).
+    The table-side twin of
+    :func:`~geoparquet_io.core.bbox_structure.check_bbox_structure`, and it
+    applies the same two rules: the PRIMARY column's own ``covering.bbox`` is
+    the authoritative pointer (its name need not follow any convention), and
+    with no such provenance only the one self-evident conventional name
+    (:data:`~geoparquet_io.core.geo_metadata.SELF_EVIDENT_BBOX_COLUMN`) may be
+    read as the primary's envelope -- not even that when a non-primary column's
+    own ``covering`` already claims it. The broader read-side names
+    (``bounds``, ``extent``, any ``*_bbox`` suffix) used to match here, so
+    ``process aggregate --bucket-point bbox`` keyed a multi-geometry table's
+    Point cells from the SECONDARY ``boundary`` column's extents in memory
+    while the identical file was refused on the file path (#1171/#953).
+
+    Deliberately NOT routed through
+    :func:`~geoparquet_io.core.geo_metadata.bbox_column_to_declare`: this is a
+    read-side probe, and reading ``bbox.xmin`` by name works in any field
+    order, so the struct-order gate that decides what may be *declared* does
+    not apply.
 
     Args:
         table: PyArrow Table to check
         verbose: Whether to print verbose output
 
     Returns:
-        str: Name of bbox column if found, None otherwise
+        str: Name of the primary's bbox column if found, None otherwise
     """
     geo_meta = parse_geo_metadata_from_schema(table.schema.metadata)
     covering_column = _bbox_column_from_covering(geo_meta)
@@ -166,7 +180,14 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
             debug(f"Found bbox column from covering metadata: {covering_column}")
         return covering_column
 
-    return detect_bbox_column_from_schema(table.schema, verbose)
+    name = _self_evident_bbox_column(table.schema, verbose)
+    if name is None:
+        return None
+    if _bbox_claimed_by_another_column(geo_meta, name):
+        if verbose:
+            debug(f"Not reading '{name}' as the primary's bbox: another column's covering names it")
+        return None
+    return name
 
 
 def _bbox_column_to_declare(

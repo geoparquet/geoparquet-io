@@ -6,6 +6,15 @@ that same column, and a covering pointing somewhere else is a dangling
 reference rather than a declaration (#738). ``check_bbox_structure`` answers
 both; ``get_bbox_advice`` turns the answer, plus the file's type, into the
 recommendation a command gives the user.
+
+Both answers are about the PRIMARY geometry column, because that is what every
+caller does with them -- pre-filter on, declare a covering over, regenerate
+after a reprojection. A secondary geometry column's bbox struct is the
+*secondary*'s envelope, so neither its name nor its own ``covering`` may put it
+here (#1171); the rule is the one
+:func:`~geoparquet_io.core.geo_metadata.bbox_column_to_declare` applies on the
+write side (#953), and its two halves are imported from there rather than spelt
+again.
 """
 
 import json
@@ -16,12 +25,15 @@ from geoparquet_io.core.duckdb_utils import free_column_name
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
+    SELF_EVIDENT_BBOX_COLUMN,
+    _bbox_claimed_by_another_column,
+    _declared_bbox_column,
     bbox_covering_problem,
     covering_supported,
     is_covering_path,
 )
 from geoparquet_io.core.logging_config import debug, warn
-from geoparquet_io.core.parquet_schema import schema_direct_children
+from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
 
 #: Struct fields a bbox covering column must expose.
 _BBOX_REQUIRED_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
@@ -47,22 +59,25 @@ def _covering_bbox_refs(col_info) -> dict | None:
 
 
 def _bbox_column_from_covering(geo_meta) -> str | None:
-    """Return the bbox column name referenced by GeoParquet ``covering.bbox``.
+    """Return the bbox column the PRIMARY column's ``covering.bbox`` references.
 
-    The covering metadata is the authoritative pointer to a file's bbox column
-    (its name need not follow any convention). Returns ``None`` when absent or
-    malformed.
+    The covering metadata is the authoritative pointer to the primary
+    geometry's bbox column (its name need not follow any convention), but only
+    the primary column's *own* entry speaks for the primary. The lookup used to
+    take the first well-formed ``covering.bbox`` of ANY column, so a
+    multi-geometry file whose secondary ``boundary`` declares a
+    ``boundary_bbox`` handed that struct to every caller as the primary's bbox:
+    a Point column filtered, declared and regenerated on a Polygon column's
+    extents (#1171, the #953 shape in this second detector). Returns ``None``
+    when absent or malformed.
     """
-    if not isinstance(geo_meta, dict):
+    if _declared_bbox_column(geo_meta) is None:
         return None
-    columns = geo_meta.get("columns", {})
-    if not isinstance(columns, dict):
-        return None
-    for col_info in columns.values():
-        refs = _covering_bbox_refs(col_info)
-        if refs is not None:
-            return cast("str", refs["xmin"][0])
-    return None
+    # Non-None means the walk above found the primary's entry, its ``covering``
+    # and a ``bbox`` inside it, all objects; the shape of the four axis paths is
+    # what is still open, and only a complete, well-formed one is a pointer.
+    refs = _covering_bbox_refs(geo_meta["columns"][geo_meta["primary_column"]])
+    return cast("str", refs["xmin"][0]) if refs is not None else None
 
 
 def bbox_covering_column_for(geo_meta, geometry_column: str) -> str | None:
@@ -106,12 +121,46 @@ def _schema_struct_child_field_names(schema_info, column_name) -> list[str] | No
     return children[0] if children else None
 
 
-def _find_bbox_column_in_schema(schema_info, verbose):
-    """Find bbox column in schema by conventional names or structure.
+def bbox_shaped_struct_columns(schema_info: list[dict]) -> list[str]:
+    """Every root-level struct column that *looks* like a bbox covering column.
+
+    Shape alone: a root column whose direct children cover
+    :data:`_BBOX_REQUIRED_FIELDS`, whatever it is called and whatever the ``geo``
+    block says about it. It is deliberately NOT a detector -- answering "which
+    column is the primary geometry's bbox" from shape would reopen #1171 the way
+    name matching did. It exists so a command can *mention* a struct it is about
+    to leave alone: ``convert reproject`` regenerates only the primary's
+    declared (or self-evidently named) column, so any other bbox-shaped struct
+    comes out of a reprojection still holding source-CRS numbers.
+    """
+    names = []
+    for column in root_schema_columns(schema_info):
+        name = column.get("name") or ""
+        children = _schema_struct_child_field_names(schema_info, name)
+        if children and _BBOX_REQUIRED_FIELDS.issubset(children):
+            names.append(name)
+    return names
+
+
+def _find_bbox_column_in_schema(schema_info, verbose, geo_meta=None):
+    """The one column name that is self-evidently the PRIMARY geometry's bbox.
+
+    The fallback for a file whose primary declares no ``covering``: with no
+    provenance, only the exact conventional name
+    (:data:`~geoparquet_io.core.geo_metadata.SELF_EVIDENT_BBOX_COLUMN`) may be
+    read as the primary geometry's envelope -- the #738 policy -- and not even
+    that when another column's own ``covering`` already claims it. The broader
+    read-side names (``bounds``, ``extent``, and any ``*_bbox`` suffix) used to
+    match here, so a multi-geometry file's ``boundary_bbox`` -- the SECONDARY
+    ``boundary`` column's envelope -- was reported as the primary's bbox column,
+    and callers then pre-filtered, declared and regenerated on it (#1171, the
+    #953 shape in this second detector).
 
     Args:
         schema_info: List of column dicts from get_schema_info()
         verbose: Whether to print verbose output
+        geo_meta: The file's parsed ``geo`` block, consulted only to see whether
+            a non-primary column's ``covering`` already names the candidate.
 
     Note:
         DuckDB's parquet_schema() returns nested struct fields without parent prefix.
@@ -119,34 +168,19 @@ def _find_bbox_column_in_schema(schema_info, verbose):
         - bbox appears with num_children=4
         - Child fields appear as 'xmin', 'ymin', 'xmax', 'ymax' (not 'bbox.xmin')
     """
-    # Check for columns ending with these suffixes (e.g., geometry_bbox, bbox)
-    conventional_suffixes = ["bbox", "bounds", "extent"]
-    required_fields = {"xmin", "ymin", "xmax", "ymax"}
-
-    for i, col in enumerate(schema_info):
-        name = col.get("name", "")
-        num_children = col.get("num_children", 0)
-
-        if not name:
-            continue
-
-        # Check if column name ends with conventional suffixes and has struct children
-        is_bbox_name = any(name.endswith(suffix) for suffix in conventional_suffixes)
-        if is_bbox_name and num_children >= 4:
-            # Get the next num_children entries as the struct's child fields
-            child_names = set()
-            for j in range(1, num_children + 1):
-                if i + j < len(schema_info):
-                    child_name = schema_info[i + j].get("name", "")
-                    child_names.add(child_name)
-
-            # Check if all required fields are present
-            if required_fields.issubset(child_names):
-                if verbose:
-                    debug(f"Found bbox column: {name} with children: {child_names}")
-                return name
-
-    return None
+    children = _schema_struct_child_field_names(schema_info, SELF_EVIDENT_BBOX_COLUMN)
+    if not children or not _BBOX_REQUIRED_FIELDS.issubset(children):
+        return None
+    if _bbox_claimed_by_another_column(geo_meta, SELF_EVIDENT_BBOX_COLUMN):
+        if verbose:
+            debug(
+                f"Not reading '{SELF_EVIDENT_BBOX_COLUMN}' as the primary's bbox: "
+                "another column's covering names it"
+            )
+        return None
+    if verbose:
+        debug(f"Found bbox column: {SELF_EVIDENT_BBOX_COLUMN} with children: {children}")
+    return SELF_EVIDENT_BBOX_COLUMN
 
 
 def _check_bbox_metadata_covering(geo_meta, has_bbox_column, verbose, bbox_column_name=None):
@@ -267,8 +301,9 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
             if name:  # Skip empty names
                 debug(f"  {name}: {col_type}")
 
-    # Find the bbox column: the authoritative covering metadata first (spec-valid
-    # files may use non-conventional names), then the naming-convention fallback.
+    # Find the primary's bbox column: the authoritative covering metadata on its
+    # own entry first (spec-valid files may use non-conventional names), then the
+    # one self-evident conventional name as the no-provenance fallback (#1171).
     geo_meta = get_geo_metadata(parquet_file)
     bbox_column_name = None
     covering_column = _bbox_column_from_covering(geo_meta)
@@ -279,7 +314,7 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
             if verbose:
                 debug(f"Found bbox column from covering metadata: {covering_column}")
     if bbox_column_name is None:
-        bbox_column_name = _find_bbox_column_in_schema(schema_info, verbose)
+        bbox_column_name = _find_bbox_column_in_schema(schema_info, verbose, geo_meta)
     has_bbox_column = bbox_column_name is not None
 
     # Check for bbox covering in the geo metadata

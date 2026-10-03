@@ -4,10 +4,10 @@
 import random as _random
 from statistics import mean
 
+from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
-    has_bbox_column,
 )
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -169,8 +169,8 @@ def check_spatial_order_bbox_stats(
         ratio (float) if return_results=False, or dict if return_results=True
     """
 
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-    if not has_bbox or not bbox_col_name:
+    bbox_col_name = check_bbox_structure(parquet_file, verbose).get("bbox_column_name")
+    if not bbox_col_name:
         raise ValueError(
             f"File {parquet_file} does not have a bbox column. "
             "Use the sampling-based method instead."
@@ -312,8 +312,8 @@ def check_spatial_order(
     raw_url = resolve_file_url(parquet_file, verbose)
 
     # Try bbox-stats method first (faster)
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
-    if has_bbox and bbox_col_name:
+    bbox_col_name = check_bbox_structure(parquet_file, verbose).get("bbox_column_name")
+    if bbox_col_name:
         if verbose:
             debug(f"Using bbox-stats method (bbox column: {bbox_col_name})")
         try:
@@ -546,12 +546,12 @@ def check_spatial_pushdown_readiness(
             recommendations (list[str]): Suggestions for improvement.
     """
 
-    has_bbox, bbox_col_name = has_bbox_column(parquet_file)
+    bbox_col_name = check_bbox_structure(parquet_file, verbose).get("bbox_column_name")
 
     issues: list[str] = []
     recommendations: list[str] = []
 
-    if not has_bbox or not bbox_col_name:
+    if not bbox_col_name:
         if verbose:
             debug("No geo_bbox column found, pushdown not possible")
         issues.append(
