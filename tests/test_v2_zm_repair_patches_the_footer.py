@@ -185,6 +185,24 @@ def test_an_unpatchable_footer_still_gets_its_geo_metadata(xym_source, monkeypat
     assert geo["primary_column"] == "geometry"
 
 
+def test_a_raced_footer_patch_propagates_instead_of_rewriting(xym_source, monkeypatch):
+    """A concurrency refusal must not be answered by re-encoding whatever
+    arrived: the derived block describes the bytes that have gone (#1177)."""
+    from geoparquet_io.core import write_funnels
+    from geoparquet_io.core.parquet_footer import FooterPatchRaced
+
+    def race(*args, **kwargs):
+        raise FooterPatchRaced("pretend the file changed while it was being copied")
+
+    monkeypatch.setattr(write_funnels, "patch_footer_kv", race)
+    before = xym_source.read_bytes()
+
+    with pytest.raises(FooterPatchRaced):
+        write_funnels._ensure_v2_geo_metadata(str(xym_source), primary_column="geometry")
+
+    assert xym_source.read_bytes() == before, "the raced repair rewrote the file anyway"
+
+
 def test_a_file_that_already_has_geo_metadata_is_left_alone(xy_source):
     """XY data gets its geo key from DuckDB; the repair must not touch the file."""
     from geoparquet_io.core.write_funnels import _ensure_v2_geo_metadata

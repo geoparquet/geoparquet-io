@@ -78,7 +78,11 @@ from geoparquet_io.core.logging_config import (
     warn,
 )
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
-from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
+from geoparquet_io.core.parquet_footer import (
+    FooterPatchRaced,
+    FooterPatchUnsupported,
+    patch_footer_kv,
+)
 from geoparquet_io.core.parquet_writer import (
     note_duckdb_copy_rounding,
     resolve_input_crs,
@@ -249,6 +253,13 @@ def _ensure_v2_geo_metadata(
 
     try:
         patch_footer_kv(output_path, {"geo": json.dumps(geo_meta)}, verbose=verbose)
+    except FooterPatchRaced:
+        # The file changed while the patch was copying it, and nothing was
+        # written. The rewrite fallback below would read the bytes that have
+        # arrived and stamp them with a `geo` block derived from the bytes
+        # that have gone -- another writer's rows under our stats -- so the
+        # refusal propagates instead (#1173's repair takes the same stance).
+        raise
     except FooterPatchUnsupported as exc:
         warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
         _rewrite_file_with_geo_metadata(
