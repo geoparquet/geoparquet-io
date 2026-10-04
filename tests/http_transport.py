@@ -58,6 +58,10 @@ _CLIENT_SEAMS = (
     ("geoparquet_io.core.wfs", "_get_shared_http_client_base", "_reset_http_client_base"),
 )
 
+# Temporary client getters (no reset needed). Each entry is
+# (module, getter attribute).
+_TEMPORARY_CLIENT_SEAMS = (("geoparquet_io.core.wfs", "_get_temporary_http_client"),)
+
 
 @dataclass(frozen=True)
 class RecordedRequest:
@@ -258,6 +262,31 @@ class FakeTransport:
         for module_name, getter, resetter in _CLIENT_SEAMS:
             monkeypatch.setattr(f"{module_name}.{getter}", _get_client)
             monkeypatch.setattr(f"{module_name}.{resetter}", _reset)
+
+        class _TemporaryClientWrapper:
+            """Wraps the shared client for temporary probe operations.
+
+            Supports close() without actually closing the shared client,
+            allowing temporary clients to be closed independently in tests.
+            """
+
+            def __init__(self, wrapped: httpx.Client) -> None:
+                self._wrapped = wrapped
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._wrapped, name)
+
+            def close(self) -> None:
+                # Don't close the wrapped shared client
+                pass
+
+        def _get_temporary_client(timeout: float = 30.0) -> httpx.Client:
+            """Return a temporary client (wrapped in tests to avoid closing shared client)."""
+            fake.client_timeouts.append(timeout)
+            return _TemporaryClientWrapper(client)  # type: ignore
+
+        for module_name, getter in _TEMPORARY_CLIENT_SEAMS:
+            monkeypatch.setattr(f"{module_name}.{getter}", _get_temporary_client)
 
         shim = _TimeShim(fake.sleeps)
         for module_name in _TIME_PATCHED_MODULES:
