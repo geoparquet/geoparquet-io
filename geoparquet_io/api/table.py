@@ -3545,6 +3545,47 @@ class Table:
 
         return self._wrap(new_table, self._geometry_column)
 
+    def add_stac_metadata(
+        self,
+        collection: dict | str | Path,
+        *,
+        version: str = "1.1.0",
+    ) -> Table:
+        """
+        Attach a STAC Collection under the `stac-geoparquet` metadata key.
+
+        A stac-geoparquet file holds STAC Items as rows; this carries the
+        Collection those Items belong to in the file's own metadata, so a
+        reader that has the file has the Collection too.
+
+        The value is `{"version": ..., "collections": {<id>: <collection>}}`:
+        `collections` is a map keyed by collection id. The singular
+        `collection` key the 1.0.0 draft allowed is deprecated in 1.1.0 and is
+        not written. Every other metadata key, `geo` included, is kept.
+
+        Mirrors `gpio add stac-metadata`, which writes the same value into an
+        already-written file's footer without re-encoding it.
+
+        Args:
+            collection: A STAC Collection dict, or a path to a JSON file with one
+            version: stac-geoparquet spec version, "1.0.0" or "1.1.0"
+
+        Returns:
+            Table with the key set on its schema metadata
+
+        Raises:
+            GeoParquetError: If the version is not one the spec defines, the
+                Collection cannot be read, or it has no `id`
+
+        Example:
+            >>> table = gpio.read('items.parquet')
+            >>> table.add_stac_metadata('collection.json').write('out.parquet')
+        """
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table
+
+        new_table = add_stac_metadata_table(self._table, collection, version=version)
+        return self._wrap(new_table, self._geometry_column)
+
     def partition_by_string(
         self,
         output_dir: str | Path,

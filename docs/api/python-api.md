@@ -1371,6 +1371,45 @@ a table read from plain Parquet is refused here exactly as `gpio add bbox-metada
 refuses the file. Convert it first: `gpio convert geoparquet in.parquet out.parquet`.
 `ops.add_bbox_metadata(table)` is the function form and applies the same rules.
 
+#### `add_stac_metadata(collection, *, version='1.1.0')`
+
+Attach a STAC Collection under the `stac-geoparquet` metadata key. A
+stac-geoparquet file holds STAC Items as rows; this carries the Collection
+those Items belong to in the file's own metadata, so a reader that has the file
+has the Collection too.
+
+<!-- doctest: skip="needs a collection.json and a table of STAC items" -->
+```python
+# From a Collection on disk
+table.add_stac_metadata('collection.json').write('items.parquet')
+
+# Or from a dict you already hold
+table.add_stac_metadata(collection_dict, version='1.0.0').write('items.parquet')
+```
+
+The value written is
+`{"version": ..., "collections": {"<collection id>": {...}}}`. `collections` is
+a **map keyed by collection id** — the singular `collection` key the 1.0.0
+draft allowed is deprecated in 1.1.0 and is never written. Every other metadata
+key, `geo` included, is kept.
+
+Raises `GeoParquetError` when `version` is anything but `'1.0.0'` or `'1.1.0'`
+(the only two the specification defines), when the Collection cannot be read,
+or when it has no `id` — the id is what an Item's `collection` field points at,
+so there is no key to file the Collection under without one.
+
+`ops.add_stac_metadata_table(table, collection)` is the function form.
+`ops.add_stac_metadata(path, collection)` is the **file** form: it patches an
+already-written file's footer without re-encoding it, exactly as
+`gpio add stac-metadata` does.
+
+<!-- doctest: skip="needs a collection.json and an items.parquet" -->
+```python
+from geoparquet_io.api import ops
+
+ops.add_stac_metadata('items.parquet', 'collection.json')
+```
+
 #### `check()` / `check_spatial()` / `check_compression()` / `check_bbox()` / `check_row_groups()`
 
 Run best-practice checks on the table.
@@ -1778,6 +1817,8 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 |----------|-------------|
 | `ops.add_bbox(table, column_name='bbox', geometry_column=None)` | Add bounding box column |
 | `ops.add_bbox_metadata(table, bbox_column='bbox', geometry_column=None)` | Add `covering` metadata for an existing bbox column |
+| `ops.add_stac_metadata_table(table, collection, version='1.1.0')` | Set the `stac-geoparquet` key on a table's schema metadata |
+| `ops.add_stac_metadata(parquet_file, collection, version='1.1.0', output_file=None, overwrite=False)` | Write the `stac-geoparquet` key into a written file's footer |
 | `ops.add_quadkey(table, column_name='quadkey', resolution=13, use_centroid=False, geometry_column=None)` | Add quadkey column |
 | `ops.add_h3(table, column_name='h3_cell', resolution=9, geometry_column=None)` | Add H3 cell column |
 | `ops.add_a5(table, column_name='a5_cell', resolution=15, geometry_column=None)` | Add A5 cell column |

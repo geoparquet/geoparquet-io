@@ -21,21 +21,36 @@ Only the one field is re-encoded. ``FileMetaData`` is read far enough to find
 field 5, ``key_value_metadata``, and its byte span; every other byte of the
 footer is copied as it was. That needs a thrift *skip*, not a parser, which is
 the short table of compact-protocol rules below.
+
+One wrinkle inside that field: pyarrow stores the Arrow schema there a second
+time, base64'd under ``ARROW:schema``, and an Arrow reader reads the key's
+metadata out of *that* rather than out of the plain entries. So the same
+updates are applied inside the blob when a file carries one, or the file would
+come out disagreeing with itself. See :func:`_arrow_schema_in_step`.
 """
 
 from __future__ import annotations
 
+import base64
 import os
 import stat
 import struct
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import BinaryIO
+from typing import BinaryIO, TypeAlias
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.write_strategies import atomic_write
+
+#: Keys to set or, with a ``None`` value, to remove. A caller spells them as
+#: text; everything below the ``_normalized`` boundary works in the encoded
+#: form the footer itself holds, and the two spellings meet in this union
+#: because ``_normalized`` is idempotent.
+_Updates: TypeAlias = Mapping[str, str | bytes | None] | Mapping[bytes, bytes | None]
 
 MAGIC = b"PAR1"
 ENCRYPTED_MAGIC = b"PARE"
@@ -55,6 +70,8 @@ _FIXED_WIDTH = {_BOOL_TRUE: 0, _BOOL_FALSE: 0, _BYTE: 1, _DOUBLE: 8, _UUID: 16}
 
 # FileMetaData.key_value_metadata, the only field this module rewrites.
 _KV_FIELD_ID = 5
+# pyarrow's second copy of the schema, base64'd into one of those entries.
+_ARROW_SCHEMA_KEY = b"ARROW:schema"
 # KeyValue { 1: required string key; 2: optional string value }. Both fields
 # are BINARY and each follows the previous id by one, so both headers are the
 # same byte: delta 1 in the high nibble, type 8 in the low one.
@@ -279,7 +296,7 @@ def _decode_kv_list(buf: bytes, pos: int) -> list[_Entry]:
     return entries
 
 
-def _normalized(updates: dict[str, str | bytes | None]) -> dict[bytes, bytes | None]:
+def _normalized(updates: _Updates) -> dict[bytes, bytes | None]:
     """`updates` with str keys and values encoded, `None` left as the deletion."""
     return {
         (key.encode("utf-8") if isinstance(key, str) else key): (
@@ -289,7 +306,7 @@ def _normalized(updates: dict[str, str | bytes | None]) -> dict[bytes, bytes | N
     }
 
 
-def _apply_updates(entries: list[_Entry], updates: dict[str, str | bytes | None]) -> list[_Entry]:
+def _apply_updates(entries: list[_Entry], updates: _Updates) -> list[_Entry]:
     """`entries` with `updates` applied in place, then anything new appended.
 
     A key the file carries twice, which the format allows and a writer can
@@ -319,6 +336,73 @@ def _apply_updates(entries: list[_Entry], updates: dict[str, str | bytes | None]
     return result
 
 
+def _decoded_arrow_schema(blob: bytes) -> pa.Schema:
+    """The schema pyarrow base64'd into the `ARROW:schema` entry."""
+    try:
+        raw = base64.b64decode(blob)
+        return pa.ipc.read_schema(pa.BufferReader(raw))
+    # binascii.Error and pyarrow's ArrowInvalid are both ValueError; a
+    # truncated buffer comes back as an OSError from the IPC reader.
+    except (ValueError, OSError) as exc:
+        raise FooterPatchUnsupported(
+            f"the file's ARROW:schema entry could not be read: {exc}"
+        ) from exc
+
+
+def _encoded_arrow_schema(schema: pa.Schema) -> bytes:
+    """`schema` as pyarrow writes it into the footer."""
+    return base64.b64encode(schema.serialize().to_pybytes())
+
+
+def _arrow_schema_in_step(
+    existing: dict[bytes, bytes] | None, wanted: dict[bytes, bytes | None]
+) -> dict[bytes, bytes | None]:
+    """The extra update that keeps pyarrow's embedded schema from shadowing ours.
+
+    pyarrow writes the Arrow schema into the footer a *second* time, base64'd
+    under `ARROW:schema`, and for an Arrow reader that copy wins: both
+    `pq.read_table(path).schema.metadata` and `ParquetFile.schema_arrow.metadata`
+    are read out of it, not out of the plain key-value entries. Patching only
+    the plain entry leaves such a file disagreeing with itself — DuckDB and
+    anything reading Parquet metadata directly see the new value, while pyarrow,
+    pandas and geopandas go on reporting the old one, or report nothing at all
+    for a key that was just added.
+
+    So when the file carries that blob, the same updates are applied inside it.
+    A file written by anything else — DuckDB's output, most writers' — has no
+    blob and needs nothing: there `schema_arrow` is derived from the plain
+    entries already.
+
+    A caller setting `ARROW:schema` itself is left alone; it has said what it
+    wants the blob to be.
+
+    Args:
+        existing: The file's current key-value metadata, as pyarrow reports it.
+        wanted: The keys this call is setting or removing, already normalized
+            to the encoded form by :func:`_normalized`.
+
+    Returns:
+        `{b"ARROW:schema": <new blob>}`, or an empty dict when there is nothing
+        to reconcile.
+    """
+    blob = (existing or {}).get(_ARROW_SCHEMA_KEY)
+    if blob is None or _ARROW_SCHEMA_KEY in wanted:
+        return {}
+
+    schema = _decoded_arrow_schema(blob)
+    before = dict(schema.metadata or {})
+    after = dict(before)
+    for key, value in wanted.items():
+        if value is None:
+            after.pop(key, None)
+        else:
+            after[key] = value
+
+    if after == before:
+        return {}
+    return {_ARROW_SCHEMA_KEY: _encoded_arrow_schema(schema.with_metadata(after))}
+
+
 def _insert_kv_field(footer: bytes, fields: list[_Field], index: int, value: bytes) -> bytes:
     """Splice the field in ahead of `fields[index]`, whose delta must be redone."""
     following = fields[index]
@@ -334,7 +418,7 @@ def _insert_kv_field(footer: bytes, fields: list[_Field], index: int, value: byt
     )
 
 
-def _rewrite_kv_field(footer: bytes, updates: dict[str, str | bytes | None]) -> bytes:
+def _rewrite_kv_field(footer: bytes, updates: _Updates) -> bytes:
     """The footer with `key_value_metadata` rewritten, everything else verbatim."""
     fields, stop = _struct_fields(footer)
 
@@ -363,7 +447,7 @@ def _rewrite_kv_field(footer: bytes, updates: dict[str, str | bytes | None]) -> 
     return footer[:stop] + header + _encode_kv_list(entries) + footer[stop:]
 
 
-def _patch_footer(footer: bytes, updates: dict[str, str | bytes | None]) -> bytes:
+def _patch_footer(footer: bytes, updates: _Updates) -> bytes:
     """`_rewrite_kv_field`, with a malformed footer named as unsupported."""
     try:
         return _rewrite_kv_field(footer, updates)
@@ -539,6 +623,10 @@ def patch_footer_kv(
         parquet_file: Path to a local Parquet file. Only read.
         updates: Keys to set, as `str` or `bytes`; a `None` value removes a key.
             Keys the file already carries and `updates` does not name are kept.
+            A pyarrow-written file's embedded `ARROW:schema` is kept in step
+            with them, so an Arrow reader sees what a Parquet-level one does
+            (`_arrow_schema_in_step`). Naming `ARROW:schema` in `updates`
+            takes that over.
         output_file: Where to write the result. Defaults to the input, replaced
             atomically once the new footer has been read back.
         verbose: Report the footer sizes.
@@ -560,13 +648,18 @@ def patch_footer_kv(
         original = source.read(footer_length)
     stamp = _file_stamp(parquet_file)
 
-    footer = _patch_footer(original, updates)
+    # Read before the patch rather than after it: a pyarrow-written file needs
+    # its embedded `ARROW:schema` updated alongside the plain entries, or the
+    # stale blob shadows them for every Arrow reader.
+    before = _read_metadata_or_refuse(parquet_file)
+    wanted = _normalized(updates)
+    wanted.update(_arrow_schema_in_step(before.metadata, wanted))
+    footer = _patch_footer(original, wanted)
     if footer == original and destination == parquet_file:
         # Nothing to write, and copying a file onto itself to say so would cost
         # a full pass over it.
         return
 
-    before = _read_metadata_or_refuse(parquet_file)
     if verbose:
         debug(
             f"Footer: {footer_length:,} bytes in, {len(footer):,} out; "

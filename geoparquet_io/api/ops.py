@@ -28,6 +28,9 @@ from geoparquet_io.core.add.h3 import add_h3_table
 from geoparquet_io.core.add.kdtree import DEFAULT_KDTREE_TARGET_ROWS, add_kdtree_table
 from geoparquet_io.core.add.quadkey import add_quadkey_table
 from geoparquet_io.core.add.s2 import add_s2_table
+from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
+from geoparquet_io.core.add.stac_metadata import add_stac_metadata as _add_stac_metadata_file
+from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table as _add_stac_metadata_table
 from geoparquet_io.core.extract import extract_table
 from geoparquet_io.core.hilbert_order import hilbert_order_table
 from geoparquet_io.core.reproject import reproject_table
@@ -94,6 +97,75 @@ def add_bbox_metadata(
         bbox_column=bbox_column,
         geometry_column=geometry_column,
     )
+
+
+def add_stac_metadata(
+    parquet_file: str | Path,
+    collection: dict | str | Path,
+    *,
+    version: str = DEFAULT_STAC_GEOPARQUET_VERSION,
+    output_file: str | Path | None = None,
+    overwrite: bool = False,
+) -> None:
+    """
+    Write the `stac-geoparquet` key into a Parquet file's footer.
+
+    Mirrors `gpio add stac-metadata`. The value is
+    `{"version": ..., "collections": {<id>: <collection>}}`: `collections` is a
+    map keyed by collection id, and the singular `collection` key the 1.0.0
+    draft allowed is deprecated in 1.1.0 and is not written.
+
+    Only the footer is rewritten; every page below it is copied verbatim, so
+    the compression codec and level, the encodings, the bloom filters, the page
+    index, the row-group boundaries and the row order are all preserved.
+
+    Args:
+        parquet_file: Path to a local Parquet file. Modified in place unless
+            `output_file` is given.
+        collection: A STAC Collection dict, or a path to a JSON file with one.
+        version: stac-geoparquet spec version, "1.0.0" or "1.1.0"
+        output_file: Where to write the result instead of over the input
+        overwrite: Replace `output_file` if it already exists
+
+    Raises:
+        GeoParquetError: If a path is remote, the output exists and `overwrite`
+            was not given, the version is not one the spec defines, the
+            Collection cannot be read, or it has no `id`
+    """
+    _add_stac_metadata_file(
+        str(parquet_file),
+        collection,
+        version=version,
+        output_file=str(output_file) if output_file is not None else None,
+        overwrite=overwrite,
+    )
+
+
+def add_stac_metadata_table(
+    table: pa.Table,
+    collection: dict | str | Path,
+    *,
+    version: str = DEFAULT_STAC_GEOPARQUET_VERSION,
+) -> pa.Table:
+    """
+    Set the `stac-geoparquet` key on an in-memory table's schema metadata.
+
+    The in-memory counterpart of `add_stac_metadata()`, for a table that has
+    not been written yet. Every other schema metadata key — `geo` first among
+    them — is kept.
+
+    Args:
+        table: Input PyArrow Table
+        collection: A STAC Collection dict, or a path to a JSON file with one
+        version: stac-geoparquet spec version, "1.0.0" or "1.1.0"
+
+    Returns:
+        New table carrying the key. The columns are untouched.
+
+    Raises:
+        GeoParquetError: If the version or the Collection is refused
+    """
+    return _add_stac_metadata_table(table, collection, version=version)
 
 
 def add_quadkey(

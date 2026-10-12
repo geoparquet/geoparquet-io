@@ -23,6 +23,7 @@ from geoparquet_io.core.parquet_footer import (
     _LIST,
     FooterPatchRaced,
     FooterPatchUnsupported,
+    _arrow_schema_in_step,
     _copy_below_footer,
     _decode_kv_list,
     _encode_kv_list,
@@ -546,3 +547,97 @@ class TestTheThriftSkip:
     def test_an_unknown_type_is_refused(self):
         with pytest.raises(FooterPatchUnsupported, match="unknown thrift type"):
             _struct_fields(b"\x1f\x00")
+
+
+class TestTheEmbeddedArrowSchema:
+    """A patched key must not stay shadowed by pyarrow's second copy of it.
+
+    pyarrow writes the Arrow schema into the footer twice: once as the plain
+    key-value entries, and once base64'd under `ARROW:schema`. An Arrow reader
+    reads the blob, so patching only the plain entry left such a file
+    disagreeing with itself -- DuckDB saw the new value and pyarrow, pandas and
+    geopandas went on reporting the old one.
+    """
+
+    def test_a_patched_key_is_visible_to_pyarrow(self, tmp_path):
+        path = tmp_path / "arrow.parquet"
+        table = pa.table({"a": [1, 2, 3]}).replace_schema_metadata({b"geo": b'{"v":"before"}'})
+        pq.write_table(table, str(path))
+
+        patch_footer_kv(str(path), {"geo": '{"v":"after"}'})
+
+        assert pq.read_metadata(str(path)).metadata[b"geo"] == b'{"v":"after"}'
+        assert pq.read_table(str(path)).schema.metadata[b"geo"] == b'{"v":"after"}'
+        assert pq.ParquetFile(str(path)).schema_arrow.metadata[b"geo"] == b'{"v":"after"}'
+
+    def test_a_new_key_is_visible_to_pyarrow(self, arrow_file):
+        patch_footer_kv(str(arrow_file), {"stac-geoparquet": "{}"})
+
+        assert pq.read_table(str(arrow_file)).schema.metadata[b"stac-geoparquet"] == b"{}"
+
+    def test_a_removed_key_goes_from_both_copies(self, tmp_path):
+        path = tmp_path / "arrow.parquet"
+        table = pa.table({"a": [1]}).replace_schema_metadata({b"gone": b"soon"})
+        pq.write_table(table, str(path))
+
+        patch_footer_kv(str(path), {"gone": None})
+
+        assert b"gone" not in pq.read_metadata(str(path)).metadata
+        assert not (pq.read_table(str(path)).schema.metadata or {})
+
+    def test_the_columns_survive_the_re_serialized_schema(self, tmp_path):
+        """Reconciling the blob rewrites it, so the schema it holds must round-trip."""
+        path = tmp_path / "typed.parquet"
+        table = pa.table(
+            {
+                "i": pa.array([1], pa.int32()),
+                "s": pa.array(["x"]),
+                "n": pa.array([{"inner": 1.5}], pa.struct([("inner", pa.float64())])),
+                "d": pa.array(["a"]).dictionary_encode(),
+            }
+        )
+        pq.write_table(table, str(path))
+
+        patch_footer_kv(str(path), {"geo": GEO})
+
+        after = pq.read_table(str(path))
+        assert after.schema.types == table.schema.types
+        assert after.to_pydict() == table.to_pydict()
+
+    def test_a_file_with_no_embedded_schema_is_left_alone(self, geo_file):
+        """DuckDB writes no `ARROW:schema`, so there is nothing to reconcile."""
+        assert b"ARROW:schema" not in pq.read_metadata(str(geo_file)).metadata
+
+        patch_footer_kv(str(geo_file), {"note": "x"})
+
+        assert b"ARROW:schema" not in pq.read_metadata(str(geo_file)).metadata
+
+    def test_a_caller_setting_the_blob_itself_is_not_second_guessed(self, arrow_file):
+        blob = pq.read_metadata(str(arrow_file)).metadata[b"ARROW:schema"]
+
+        patch_footer_kv(str(arrow_file), {"ARROW:schema": blob, "note": "x"})
+
+        metadata = pq.read_metadata(str(arrow_file)).metadata
+        assert metadata[b"ARROW:schema"] == blob
+        assert metadata[b"note"] == b"x"
+
+    def test_setting_a_key_to_the_value_it_already_holds_writes_nothing(self, tmp_path):
+        path = tmp_path / "arrow.parquet"
+        pq.write_table(
+            pa.table({"a": [1]}).replace_schema_metadata({b"geo": GEO.encode()}), str(path)
+        )
+        before, inode = path.read_bytes(), path.stat().st_ino
+
+        patch_footer_kv(str(path), {"geo": GEO})
+
+        assert path.read_bytes() == before
+        assert path.stat().st_ino == inode
+
+    def test_a_blob_that_cannot_be_read_is_refused(self):
+        """Not reachable through a file pyarrow will open -- it rejects such a
+        file itself -- so the guard is exercised where it lives."""
+        with pytest.raises(FooterPatchUnsupported, match="ARROW:schema entry could not be read"):
+            _arrow_schema_in_step({b"ARROW:schema": b"bm90IGlwYw=="}, {b"geo": GEO.encode()})
+
+    def test_a_file_with_no_footer_keys_at_all_needs_no_reconciling(self):
+        assert _arrow_schema_in_step(None, {b"geo": GEO.encode()}) == {}

@@ -234,6 +234,76 @@ values bound that column's geometry, not the primary's, so declaring them on the
 primary would make readers prune rows that genuinely match. Compute the
 primary's own column instead with `gpio add bbox`.
 
+## STAC Collection Metadata
+
+A [stac-geoparquet](https://github.com/stac-utils/stac-geoparquet) file holds
+STAC Items as rows. The specification asks it to carry the Collections those
+Items belong to in the file's own footer, under the `stac-geoparquet` key, so a
+reader that has the file has the Collection too and does not need a catalog to
+interpret it. `gpio add stac-metadata` writes that key:
+
+The setup each example below runs first — copying a file to `items.parquet`
+and writing a small `collection.json` — lives in a `doctest:` comment above
+each fence, so the examples execute in the docs lane rather than being skipped.
+
+=== "CLI"
+
+    <!-- doctest: setup="cp input.parquet items.parquet", setup="printf %s '{@type@:@Collection@,@id@:@PSScene@,@stac_version@:@1.1.0@,@description@:@PlanetScope scenes@,@license@:@proprietary@,@extent@:{@spatial@:{@bbox@:[[-180,-90,180,90]]},@temporal@:{@interval@:[[null,null]]}},@links@:[]}' | tr @ '\042' > collection.json" -->
+    ```bash
+    # In place
+    gpio add stac-metadata items.parquet --collection collection.json
+
+    # Or to a copy
+    gpio add stac-metadata items.parquet out.parquet --collection collection.json
+    ```
+
+=== "Python"
+
+    <!-- doctest: setup="cp input.parquet items.parquet", setup="printf %s '{@type@:@Collection@,@id@:@PSScene@,@stac_version@:@1.1.0@,@description@:@PlanetScope scenes@,@license@:@proprietary@,@extent@:{@spatial@:{@bbox@:[[-180,-90,180,90]]},@temporal@:{@interval@:[[null,null]]}},@links@:[]}' | tr @ '\042' > collection.json" -->
+    ```python
+    from geoparquet_io.api import ops
+
+    # The file form patches the footer of a file already on disk
+    ops.add_stac_metadata('items.parquet', 'collection.json')
+    ```
+
+    <!-- doctest: setup="cp input.parquet items.parquet", setup="printf %s '{@type@:@Collection@,@id@:@PSScene@,@stac_version@:@1.1.0@,@description@:@PlanetScope scenes@,@license@:@proprietary@,@extent@:{@spatial@:{@bbox@:[[-180,-90,180,90]]},@temporal@:{@interval@:[[null,null]]}},@links@:[]}' | tr @ '\042' > collection.json" -->
+    ```python
+    import geoparquet_io as gpio
+
+    # Or set it before the file is written
+    table = gpio.read('items.parquet')
+    table.add_stac_metadata('collection.json').write('out.parquet')
+    ```
+
+The value written is:
+
+```json
+{"version": "1.1.0", "collections": {"PSScene": {"type": "Collection", "id": "PSScene"}}}
+```
+
+!!! note "`collections` is a map, and the singular `collection` is deprecated"
+
+    `collections` is keyed by collection id, which is what an Item's
+    `collection` field points at. A Collection with no `id` is refused rather
+    than filed under a made-up key. The singular `collection` key that
+    stac-geoparquet 1.0.0 allowed is **deprecated in 1.1.0**, so gpio never
+    writes it. `--stac-geoparquet-version` takes `1.0.0` or `1.1.0`, the only
+    two the specification defines; anything else is refused, because the
+    version in the footer is what a reader dispatches on.
+
+!!! info "The data is not re-encoded"
+
+    Like `gpio add bbox-metadata`, this rewrites the footer and copies every
+    page below it byte for byte, so the compression codec *and its level*, the
+    encodings, the bloom filters, the page index, the row-group boundaries and
+    the row order all come out as they went in. Unlike `add bbox-metadata`
+    there is no rewrite behind it: a footer gpio cannot patch is reported
+    rather than re-encoded, since re-encoding a whole file to add one key
+    would cost its compression level to buy nothing.
+
+    Remote URLs are not supported — download the file, add the key, upload it.
+
 ## H3 Hexagonal Cells
 
 !!! note "Input CRS"

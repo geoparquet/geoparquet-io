@@ -2187,6 +2187,110 @@
        "type": "text"
       }
      ]
+    },
+    "stac-metadata": {
+     "class": "SingleFileCommand",
+     "hidden": false,
+     "kind": "command",
+     "params": [
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "collection",
+       "nargs": 1,
+       "opts": [
+        "--collection"
+       ],
+       "param_type": "Option",
+       "required": true,
+       "secondary_opts": [],
+       "type": "path[exists=True,file_okay=True,dir_okay=False,writable=False,readable=True,resolve_path=False]"
+      },
+      {
+       "default": "<unset>",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "input_parquet",
+       "nargs": 1,
+       "opts": [
+        "input_parquet"
+       ],
+       "param_type": "Argument",
+       "required": true,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "output_parquet",
+       "nargs": 1,
+       "opts": [
+        "output_parquet"
+       ],
+       "param_type": "Argument",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "overwrite",
+       "nargs": 1,
+       "opts": [
+        "--overwrite"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "'1.1.0'",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "stac_geoparquet_version",
+       "nargs": 1,
+       "opts": [
+        "--stac-geoparquet-version"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "choice[1.0.0|1.1.0,case_sensitive=True]"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "verbose",
+       "nargs": 1,
+       "opts": [
+        "--verbose",
+        "-v"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      }
+     ]
     }
    },
    "default_subcommand": null,

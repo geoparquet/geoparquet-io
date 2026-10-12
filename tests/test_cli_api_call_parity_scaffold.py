@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -119,6 +120,7 @@ from geoparquet_io.core.add import h3 as core_h3
 from geoparquet_io.core.add import kdtree as core_kdtree
 from geoparquet_io.core.add import quadkey as core_quadkey
 from geoparquet_io.core.add import s2 as core_s2
+from geoparquet_io.core.add import stac_metadata as core_stac_metadata
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from geoparquet_io.core.partition import by_h3 as core_part_h3
@@ -341,6 +343,19 @@ def _swallow(call: Callable[[], Any]) -> Any:
         return None
 
 
+def _collection_json(ctx: Ctx) -> str:
+    """A STAC Collection on disk, so both front ends name the same file.
+
+    `gpio add stac-metadata --collection` takes a path and `ops.add_stac_metadata`
+    takes a path or a dict; handing both the same path is what makes the captured
+    `collection` values comparable.
+    """
+    path = Path(ctx.scratch("parity-collection.json"))
+    if not path.exists():
+        path.write_text(json.dumps({"type": "Collection", "id": "parity"}))
+    return str(path)
+
+
 CASES: list[ParityCase] = [
     ParityCase(
         id="add bbox",
@@ -358,6 +373,26 @@ CASES: list[ParityCase] = [
             lambda c: c.gpio_table.add_bbox(),
         ),
         normalize={"column_name": ("bbox_column_name", "bbox_column_name")},
+    ),
+    ParityCase(
+        id="add stac-metadata",
+        cli=_cli(
+            "add_stac_metadata_impl",
+            core_stac_metadata.add_stac_metadata,
+            lambda c: ["add", "stac-metadata", c.input_file, "--collection", _collection_json(c)],
+            module=cli_add,
+        ),
+        ops=_ops(
+            "_add_stac_metadata_file",
+            core_stac_metadata.add_stac_metadata,
+            lambda c: ops.add_stac_metadata(c.input_file, _collection_json(c)),
+        ),
+        normalize={
+            "collection": ("collection", "collection"),
+            "version": ("version", "version"),
+            "output_file": ("output_file", "output_file"),
+            "overwrite": ("overwrite", "overwrite"),
+        },
     ),
     ParityCase(
         id="add h3",
