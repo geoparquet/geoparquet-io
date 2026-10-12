@@ -386,6 +386,10 @@ Validates file structure and metadata against the GeoParquet specification:
   specific static frame (e.g. GDA2020) it warns; on a dynamic frame (e.g. ITRF)
   it passes. With an explicit `"crs": null` the datum cannot be verified, so an
   epoch produces a warning.
+- **One `geo` key** — a footer that carries the `geo` key more than once fails
+  `geo_key_unique`. Readers pick different entries, so the file means different
+  things to different tools. DuckDB writes this shape when a `geo` entry is
+  supplied beside `GEOPARQUET_VERSION` `V1` or `V2` (#1229).
 - **Malformed metadata** — a `geo` key containing invalid JSON or a non-object
   value fails cleanly in auto mode instead of crashing. The same holds for a
   value *inside* a valid `geo` object whose type is wrong: a `covering` that is
