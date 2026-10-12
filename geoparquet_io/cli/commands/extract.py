@@ -525,7 +525,7 @@ def _resolve_bigquery_positionals(
     :func:`~geoparquet_io.core.extract_bigquery._validate_sql_source`, which
     refuses a TABLE_ID and a statement together by name.
     """
-    if sql and table_id is not None and output_file is None:
+    if sql is not None and table_id is not None and output_file is None:
         return None, table_id
     return table_id, output_file
 
@@ -569,7 +569,7 @@ def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
     is what a Python API caller gets; this adds the one judgement only Click
     can make.
     """
-    if not sql:
+    if sql is None:
         return
     from click.core import ParameterSource
 
@@ -592,8 +592,9 @@ def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
 @click.option(
     "--sql",
     help="GoogleSQL to run as the source, in place of TABLE_ID. For what "
-    "--where cannot express: a window function, a join, a GROUP BY. Requires "
-    "--project, and cannot be combined with any query-shaping option.",
+    "--where cannot express: a window function, a join, a GROUP BY. Must be a "
+    "single SELECT or WITH query. Requires --project, and cannot be combined "
+    "with any query-shaping option.",
 )
 @click.option(
     "--project",

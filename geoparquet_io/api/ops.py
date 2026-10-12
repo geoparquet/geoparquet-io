@@ -1910,8 +1910,9 @@ def read_bigquery(
             Omit it when ``sql`` is given.
         sql: GoogleSQL to run as the source, in place of ``table_id``. For
             what ``where`` cannot express -- a window function, a join, a
-            GROUP BY. Requires ``project``, and is mutually exclusive with
-            every argument that shapes the query (``where``, ``bbox``,
+            GROUP BY. Must be a single SELECT or WITH query. Requires
+            ``project``, and is mutually exclusive with every argument that
+            shapes the query (``where``, ``bbox``,
             ``bbox_mode``, ``bbox_threshold``, ``limit``, ``columns``,
             ``exclude_columns``): the statement says all of that itself.
             Filter inside it -- a query job materializes its whole result
@@ -1982,19 +1983,20 @@ def read_bigquery(
     include_cols = join_column_list(columns, "columns")
     exclude_cols = join_column_list(exclude_columns, "exclude_columns")
 
+    source = table_id if table_id is not None else "the sql query"
+
     # Validate bbox_mode
     valid_bbox_modes = {"auto", "server", "local"}
     if bbox_mode not in valid_bbox_modes:
         raise ValueError(
-            f"Invalid bbox_mode '{bbox_mode}' for table '{table_id}'. "
+            f"Invalid bbox_mode '{bbox_mode}' for {source!r}. "
             f"Must be one of: {', '.join(sorted(valid_bbox_modes))}"
         )
 
     # Validate bbox_threshold
     if not isinstance(bbox_threshold, int) or bbox_threshold < 0:
         raise ValueError(
-            f"Invalid bbox_threshold '{bbox_threshold}' for table '{table_id}'. "
-            "Must be an integer >= 0."
+            f"Invalid bbox_threshold '{bbox_threshold}' for {source!r}. Must be an integer >= 0."
         )
 
     # Get PyArrow table (don't write to file)

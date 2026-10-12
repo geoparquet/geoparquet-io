@@ -811,7 +811,8 @@ What changes on a view:
   it. Only the subset both dialects read identically is accepted on a view:
   bare column names, plain single-quoted strings with no quote or backslash
   inside, and no comments. A double-quoted name is refused, because GoogleSQL
-  reads `"name"` as a string literal.
+  reads `"name"` as a string literal. For anything more, use
+  [`--sql`](#running-your-own-sql).
 - **`--bbox-mode local` reads the whole view** and filters it in DuckDB; leave
   the default (`auto` filters a view server-side).
 - `--dry-run` cannot tell a view from a table, so it shows the table form.
@@ -862,7 +863,7 @@ BigQuery query job and its result is what gets written.
     table.write('output.parquet')
     ```
 
-Three things to know.
+Four things to know.
 
 **It replaces the table source.** There is no `TABLE_ID`; the statement names
 its own relations. `--project` becomes required, because the query job has to
@@ -874,6 +875,11 @@ be billed to a project and there is no table id to take one from.
 which rows and how many; a second, outer answer to the same question could
 only disagree with it. Combining them is an error rather than a silent
 precedence rule.
+
+**It must be one read-only query.** The statement has to open with `SELECT`
+or `WITH` and hold no second statement after a `;`. BigQuery runs whatever it
+is handed, and it would run a `DELETE`, `CREATE` or `MERGE` while gpio is still
+reading the schema, so those are refused before anything is sent.
 
 **Filter inside the statement.** A query job materializes its entire result
 before anything is read back, so an unfiltered `SELECT *` over a large

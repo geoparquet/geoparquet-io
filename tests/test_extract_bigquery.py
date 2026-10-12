@@ -2741,3 +2741,128 @@ class TestBigQuerySqlIntegration:
         meta = pq.ParquetFile(output_file).metadata
         assert meta.num_rows == 5
         assert b"geo" in meta.metadata
+
+
+class TestSqlFalsyQueryShapingValues:
+    """A query-shaping argument given as a falsy value is still given."""
+
+    @pytest.mark.parametrize("kwargs", [{"limit": 0}, {"include_cols": ""}, {"where": ""}])
+    def test_a_falsy_value_alongside_sql_is_refused(self, kwargs):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="express columns, filters and limits"):
+            extract_bigquery(sql="SELECT 1", project="my-project", dry_run=True, **kwargs)
+
+
+class TestSqlMustBeOneReadOnlyQuery:
+    """``extract`` reads. A DML/DDL statement, or a script that smuggles one
+    in after a ``;``, would run in BigQuery -- during the DESCRIBE that
+    reads the schema, before gpio sees a row -- so it is refused up front."""
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "DELETE FROM `p.d.t` WHERE TRUE",
+            "drop table `p.d.t`",
+            "INSERT INTO `p.d.t` SELECT * FROM `p.d.u`",
+            "CREATE OR REPLACE TABLE `p.d.t` AS SELECT 1 AS x",
+            "MERGE `p.d.t` USING `p.d.u` ON TRUE WHEN MATCHED THEN DELETE",
+            "SELECT 1; DELETE FROM `p.d.t` WHERE TRUE",
+            "SELECT 1 /* ; */ ; DROP TABLE `p.d.t`",
+            "-- leading comment\nTRUNCATE TABLE `p.d.t`",
+        ],
+        ids=[
+            "delete",
+            "drop",
+            "insert",
+            "create",
+            "merge",
+            "script",
+            "script-after-comment",
+            "commented-truncate",
+        ],
+    )
+    def test_a_statement_that_is_not_one_query_is_refused(self, sql):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="single SELECT"):
+            extract_bigquery(sql=sql, project="my-project", dry_run=True)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1",
+            "  select * from `p.d.t`;  ",
+            "WITH a AS (SELECT 1 AS x) SELECT * FROM a",
+            "(SELECT 1) UNION ALL (SELECT 2)",
+            "/* why */ -- note\n# hash comment\nSELECT ';' AS semi, \"; DROP\" AS s2",
+            "SELECT '''a ; b''' AS t, r'\\'; x' AS r, `odd;name` FROM `p.d.t`",
+            "SELECT * FROM `p.d.t` WHERE note = 'it\\'s; fine'",
+        ],
+        ids=["plain", "trailing-semicolon", "with", "paren", "comments", "literals", "escape"],
+    )
+    def test_a_single_query_passes(self, sql):
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        assert extract_bigquery(sql=sql, project="my-project", dry_run=True) is None
+
+
+class TestEmptySqlIsNotAbsentSql:
+    """``--sql ""`` was read as "no --sql", so with a TABLE_ID it silently read
+    the table instead, and with one positional it parsed the output path as a
+    table id. An empty statement is a statement, and not a query."""
+
+    def test_cli_empty_sql_with_a_table_id_is_refused(self, tmp_path):
+        with patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as conn:
+            result = CliRunner().invoke(
+                extract,
+                [
+                    "bigquery",
+                    "--sql",
+                    "",
+                    "--project",
+                    "my-project",
+                    "my-project.d.t",
+                    str(tmp_path / "out.parquet"),
+                ],
+            )
+        assert result.exit_code != 0
+        assert not conn.called
+        assert not (tmp_path / "out.parquet").exists()
+
+    def test_cli_empty_sql_with_one_positional_names_the_sql(self, tmp_path):
+        with patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as conn:
+            result = CliRunner().invoke(
+                extract,
+                ["bigquery", "--sql", "", "--project", "my-project", str(tmp_path / "o.parquet")],
+            )
+        assert result.exit_code != 0
+        assert not conn.called
+        assert "single SELECT" in result.output
+
+    def test_api_empty_sql_is_refused(self):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        with pytest.raises(InvalidParameterError, match="single SELECT"):
+            extract_bigquery(sql="", project="my-project", dry_run=True)
+
+
+class TestSqlErrorsSpeakTheApisNames:
+    """A Python caller passed ``columns=``, not ``--include-cols``."""
+
+    def test_the_exclusivity_error_names_the_api_argument(self):
+        from geoparquet_io.api import ops
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with pytest.raises(InvalidParameterError, match=r"Given with sql: columns, limit\."):
+            ops.read_bigquery(sql="SELECT 1", project="my-project", columns=["x"], limit=5)
+
+    def test_a_bad_bbox_mode_does_not_report_table_none(self):
+        from geoparquet_io.api import ops
+
+        with pytest.raises(ValueError) as exc:
+            ops.read_bigquery(sql="SELECT 1", project="my-project", bbox_mode="bogus")
+        assert "'None'" not in str(exc.value)

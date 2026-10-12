@@ -689,8 +689,9 @@ class Table:
                 (project.dataset.table). Omit it when ``sql`` is given.
             sql: GoogleSQL to run as the source, in place of ``table_id``.
                 For what ``where`` cannot express -- a window function, a
-                join, a GROUP BY. Requires ``project``, and is mutually
-                exclusive with every argument that shapes the query
+                join, a GROUP BY. Must be a single SELECT or WITH query.
+                Requires ``project``, and is mutually exclusive with every
+                argument that shapes the query
                 (``where``, ``bbox``, ``bbox_mode``, ``bbox_threshold``,
                 ``limit``, ``columns``, ``exclude_columns``): the statement
                 says all of that itself. Filter inside it -- a query job

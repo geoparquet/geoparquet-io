@@ -53,7 +53,10 @@ DOCS_ROOT = GUIDE_DIR.parent
 # for, so the input cannot be seeded with gpio commands: every gpio write that
 # produces such a column also declares it, which is the case the example is not
 # about. Same reason as the `file_with_bbox.parquet` block above it.
-MAX_SKIPPED_BLOCKS = 251
+# 251 -> 253: the `extract bigquery --sql` CLI/Python pair in extract.md. It
+# runs a GoogleSQL query job, which needs BigQuery credentials and a billing
+# project; there is no local stand-in for bigquery_query().
+MAX_SKIPPED_BLOCKS = 253
 MIN_EXECUTED_BLOCKS = 217
 
 #: Looks like a command rather than prose or sample output.

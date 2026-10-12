@@ -115,6 +115,8 @@ has to be billed somewhere), and the flags that shape the *query* --
 `--include-cols`, `--exclude-cols`, `--where`, `--bbox`, `--bbox-mode`,
 `--bbox-threshold`, `--limit` -- are refused, because the statement already
 says all of that. Everything that shapes the *output file* still applies.
+The statement must be a single `SELECT` or `WITH` query: DML, DDL and
+multi-statement scripts are refused, since `extract` only reads.
 See the [User Guide](../guide/extract.md#running-your-own-sql).
 
 !!! warning "Filter inside the statement"

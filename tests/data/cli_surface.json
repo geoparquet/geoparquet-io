@@ -5972,7 +5972,23 @@
        "default": "<unset>",
        "hidden": false,
        "is_flag": false,
-       "metavar": "TABLE_ID",
+       "metavar": null,
+       "multiple": false,
+       "name": "sql",
+       "nargs": 1,
+       "opts": [
+        "--sql"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": "[TABLE_ID]",
        "multiple": false,
        "name": "table_id",
        "nargs": 1,
@@ -5980,7 +5996,7 @@
         "table_id"
        ],
        "param_type": "Argument",
-       "required": true,
+       "required": false,
        "secondary_opts": [],
        "type": "text"
       },

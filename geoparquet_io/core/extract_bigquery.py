@@ -428,6 +428,59 @@ _SQL_EXCLUSIVE_MESSAGE = (
 )
 
 
+# One GoogleSQL lexeme the statement check must step over whole, so that a
+# ';' or a keyword inside it is not mistaken for code: a triple-quoted, quoted
+# or backtick-quoted literal (any r/b prefix; a backslash always escapes the
+# next character as far as finding the end is concerned), or a comment in any
+# of GoogleSQL's three spellings. Block comments do not nest in GoogleSQL.
+# (\x22 is a double quote, spelled out so the pattern reads as no quoting.)
+_GOOGLESQL_OPAQUE = re.compile(
+    r"(?:[rRbB]{1,2})?(?:'{3}(?:\\.|[^\\])*?'{3}|\x22{3}(?:\\.|[^\\])*?\x22{3})"
+    r"|(?:[rRbB]{1,2})?(?:'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\")"
+    r"|`(?:\\.|[^`\\])*`"
+    r"|(?:--|#)[^\n]*"
+    r"|/\*.*?\*/",
+    re.S,
+)
+_READ_ONLY_LEADS = ("SELECT", "WITH")
+
+
+def _require_single_query(sql: str) -> None:
+    """Refuse a ``--sql`` that is not exactly one SELECT (or WITH) query.
+
+    ``extract`` reads, but BigQuery runs whatever it is handed, and it runs it
+    while gpio is still only describing the schema. A DELETE, a CREATE, a
+    MERGE -- or a script that appends one after a ``;`` -- would change the
+    warehouse before a single row came back. So the statement must open with
+    SELECT or WITH (after any comments and opening parentheses) and contain no
+    ``;`` but an optional trailing one. Literals and comments are stepped over
+    with GoogleSQL's own quoting rules, so a ``;`` inside them is data.
+
+    This is a guard against accidents, with the same standing as the --where
+    keyword check, not a permission boundary: the credentials decide what the
+    job may touch.
+
+    Raises:
+        InvalidParameterError: If the statement is not a single query.
+    """
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    # A comment becomes whitespace and a literal becomes an empty one, so what
+    # is left is the statement's code alone.
+    code = _GOOGLESQL_OPAQUE.sub(lambda m: " " if m.group(0)[0] in "-#/" else "''", sql)
+    statements = [part for part in code.split(";") if part.strip()]
+    head = code.lstrip(" \t\r\n(")
+    lead = head.split(None, 1)[0].upper() if head.strip() else ""
+    if len(statements) != 1 or lead not in _READ_ONLY_LEADS:
+        raise InvalidParameterError(
+            "sql",
+            "--sql must be a single SELECT (or WITH ... SELECT) query: extract "
+            "only reads, and BigQuery would run any other statement -- or a "
+            "second one after a ';' -- against the warehouse before a row came "
+            "back.",
+        )
+
+
 def _bigquery_query_relation(project: str, googlesql: str) -> str:
     """Wrap a GoogleSQL statement as a DuckDB ``bigquery_query(...)`` relation.
 
@@ -548,7 +601,7 @@ def _require_where_portable_to_googlesql(where: str) -> None:
             "inside BigQuery as GoogleSQL, and only bare column names, plain "
             "single-quoted strings (no quote or backslash inside) and no comments "
             "read the same there as in DuckDB. Simplify the clause, or write the "
-            "GoogleSQL yourself."
+            "whole GoogleSQL statement with --sql."
         )
 
 
@@ -1071,13 +1124,15 @@ def _validate_sql_source(
     """
     from geoparquet_io.core.exceptions import InvalidParameterError
 
-    if not table_id and not sql:
+    # "is None", not truthiness: an empty statement is a (bad) statement, and
+    # reading it as "no --sql" would silently fall back to the table.
+    if not table_id and sql is None:
         raise InvalidParameterError(
             "TABLE_ID",
             "No BigQuery source given. Pass a TABLE_ID, or --sql with the "
             "GoogleSQL statement to run.",
         )
-    if not sql:
+    if sql is None:
         return
     if table_id:
         raise InvalidParameterError(
@@ -1091,11 +1146,14 @@ def _validate_sql_source(
             "--sql requires --project: the query job has to be billed to a "
             "project, and with no TABLE_ID there is none to take it from.",
         )
-    supplied = sorted(name for name, value in query_shaping.items() if value)
+    _require_single_query(sql)
+    # "is not None", not truthiness: limit=0 or an empty column list is still
+    # an answer to a question the statement already answers.
+    supplied = sorted(name for name, value in query_shaping.items() if value is not None)
     if supplied:
         raise InvalidParameterError(
             "sql",
-            f"{_SQL_EXCLUSIVE_MESSAGE} Given with --sql: {', '.join(supplied)}.",
+            f"{_SQL_EXCLUSIVE_MESSAGE} Given with sql: {', '.join(supplied)}.",
         )
 
 
@@ -1196,19 +1254,20 @@ def extract_bigquery(
 
     # Settle the source before anything else: which of table_id and sql is in
     # play decides what every step below is even about. The dict spells the
-    # user-facing flag names because that is what the message quotes back.
+    # Python API argument names: the CLI refuses these combinations itself,
+    # by flag name, before it gets here, so only an API caller reads them.
     _validate_sql_source(
         table_id,
         sql,
         project,
         {
-            "--include-cols": include_cols,
-            "--exclude-cols": exclude_cols,
-            "--where": where,
-            "--bbox": bbox,
-            "--bbox-mode": bbox_mode if bbox_mode != "auto" else None,
-            "--bbox-threshold": bbox_threshold if bbox_threshold != 500000 else None,
-            "--limit": limit,
+            "columns": include_cols,
+            "exclude_columns": exclude_cols,
+            "where": where,
+            "bbox": bbox,
+            "bbox_mode": bbox_mode if bbox_mode != "auto" else None,
+            "bbox_threshold": bbox_threshold if bbox_threshold != 500000 else None,
+            "limit": limit,
         },
     )
 
