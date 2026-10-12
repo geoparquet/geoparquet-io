@@ -3748,6 +3748,16 @@ def validate_geoparquet(
         )
         return result
 
+    # Before the file-type dispatch: an empty `geo` object reads as no
+    # GeoParquet metadata, and a forced parquet-geo-only target skips the
+    # GeoParquet checks, but a repeated key is wrong either way. Those runs
+    # only report the failure, a single key is not theirs to vouch for.
+    runs_geoparquet_checks = target_version != "parquet-geo-only" and file_type_info[
+        "file_type"
+    ] in ("geoparquet_v1", "geoparquet_v2")
+    if geo_entry_count and (geo_entry_count > 1 or runs_geoparquet_checks):
+        result.checks.append(_check_geo_key_unique(geo_entry_count))
+
     # A geo key that exists but doesn't parse to a JSON object must fail in
     # ANY mode; without this, auto-detect classifies the file as plain
     # parquet-geo-only and a corrupt file passes validation — and valid-JSON
@@ -3793,7 +3803,6 @@ def validate_geoparquet(
                     con,
                     sample_size,
                     validate_data,
-                    geo_entry_count=geo_entry_count,
                 )
             )
         else:
@@ -3968,19 +3977,12 @@ def _run_geoparquet_checks(
     con,
     sample_size: int,
     validate_data: bool,
-    geo_entry_count: int | None = None,
 ) -> list[ValidationCheck]:
-    """Run checks for GeoParquet files (1.x or 2.0).
-
-    ``geo_entry_count`` is how many ``geo`` entries the footer carries, which
-    ``kv_metadata`` (a dict) cannot show. None skips the uniqueness check.
-    """
+    """Run checks for GeoParquet files (1.x or 2.0)."""
     checks = []
 
     # Core metadata checks (1.0+)
     checks.append(_check_geo_key_exists(kv_metadata))
-    if geo_entry_count:
-        checks.append(_check_geo_key_unique(geo_entry_count))
 
     if not isinstance(geo_meta, dict):
         checks.append(

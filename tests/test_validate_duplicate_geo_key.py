@@ -108,3 +108,21 @@ def test_a_duplicate_duckdb_cannot_parse_is_still_counted(tmp_path):
 
     assert _check(result, "geo_key_unique").status == CheckStatus.FAILED
     assert not result.is_valid
+
+
+def test_an_empty_duplicate_on_a_native_file_still_fails(tmp_path):
+    """An empty ``geo`` object reads as no GeoParquet metadata, so the file is
+    checked as parquet-geo-only, and the duplicate must still fail there."""
+    path = _write(tmp_path / "empty.parquet", "V2", "{}")
+
+    result = validate_geoparquet(path, validate_data=False)
+
+    assert _check(result, "geo_key_unique").status == CheckStatus.FAILED
+    assert not result.is_valid
+
+
+def test_a_duplicate_fails_when_parquet_geo_only_is_forced(duplicated):
+    result = validate_geoparquet(duplicated, validate_data=False, target_version="parquet-geo-only")
+
+    assert _check(result, "geo_key_unique").status == CheckStatus.FAILED
+    assert not result.is_valid
