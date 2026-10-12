@@ -62,8 +62,21 @@ The `--bbox-mode` option controls where spatial filtering occurs:
 
 The `--bbox-threshold` sets the row count where `auto` switches to server-side filtering. Default is 500,000 rows. See the [User Guide](../guide/extract.md#bbox-filtering-mode-server-vs-local) for detailed tradeoff analysis.
 
+!!! note "Views and materialized views"
+    A view, materialized view or external table cannot be read through the
+    BigQuery Storage Read API, so gpio falls back to a BigQuery **query job**
+    for those. It detects this from BigQuery's own refusal, on the read, and
+    retries automatically -- there is no flag to set.
+
+    Two consequences worth knowing. A query job is billed by bytes scanned,
+    and a materialized view does **not** prune columns, so `SELECT *` over one
+    can scan far more than the columns you asked for. And `--where`, `--bbox`
+    and `--limit` are pushed into the query job rather than applied after the
+    fetch, so an unfiltered read of a very large view can fail with "Response
+    too large to return". Filter it.
+
 !!! warning "Limitations"
-    **Cannot read BigQuery views or external tables** - this is a limitation of the BigQuery Storage Read API. BIGNUMERIC columns are not supported (exceeds DuckDB's precision).
+    BIGNUMERIC columns are not supported (exceeds DuckDB's precision).
 
 ### extract arcgis
 

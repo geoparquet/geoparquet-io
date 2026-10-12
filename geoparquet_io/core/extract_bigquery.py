@@ -409,6 +409,48 @@ def extract_bigquery_table(
     return result
 
 
+# The Storage Read API backs bigquery_scan, and it serves physical tables
+# only. BigQuery refuses a view, a materialized view or an external table in
+# these words. Matched lowercased, against the message of the raised error.
+_NON_TABLE_ENTITY = "non-table entities cannot be read with the storage api"
+
+
+def _bigquery_view_relation(
+    table_id: str,
+    conditions: list[str] | None = None,
+    limit: int | None = None,
+) -> str:
+    """Build a ``bigquery_query(...)`` relation for a non-table entity.
+
+    ``bigquery_scan`` reads through the Storage Read API, which serves physical
+    tables only. ``bigquery_query`` runs a real query job instead, so it reads
+    a view the same way the BigQuery console does. It takes no ``filter=``
+    argument, so a server-side predicate becomes a GoogleSQL ``WHERE`` inside
+    the statement -- the better place for it anyway, because BigQuery can then
+    prune partitions rather than filtering a materialised stream.
+
+    The GoogleSQL travels inside a DuckDB string literal, so it is escaped
+    once, here, at the point of interpolation. ``table_id`` is interpolated raw
+    for the same reason as in :func:`_schema_rows`: the caller must have run it
+    through :func:`_normalize_table_id`, whose ``_TABLE_PART_PATTERN`` admits
+    only ``[A-Za-z0-9_-]`` per part and so cannot carry a backtick or a quote.
+
+    Args:
+        table_id: Pre-validated, fully qualified ``project.dataset.name``
+        conditions: GoogleSQL predicates to AND into the statement
+        limit: Row cap to push into the statement, when nothing filters after it
+    """
+    # bigquery_query bills the job to its first argument. _normalize_table_id
+    # has already made the id fully qualified, so its project is the right one.
+    project = table_id.split(".")[0]
+    inner = f"SELECT * FROM `{table_id}`"
+    if conditions:
+        inner += " WHERE " + " AND ".join(conditions)
+    if limit is not None:
+        inner += f" LIMIT {limit}"
+    return f"bigquery_query('{project}', '{_escape_sql_string(inner)}')"
+
+
 def _schema_rows(
     con: duckdb.DuckDBPyConnection,
     table_id: str,
@@ -747,6 +789,7 @@ def _determine_bbox_strategy(
     table_id: str,
     bbox_mode: str,
     bbox_threshold: int,
+    is_view: bool = False,
 ) -> bool:
     """
     Determine whether to use server-side bbox filtering.
@@ -761,7 +804,14 @@ def _determine_bbox_strategy(
         debug("Using local bbox filter (forced by --bbox-mode local)")
         return False
 
-    # Auto mode - decide based on row count
+    # Auto mode weighs a row count against the threshold, but a view has no
+    # __TABLES__ entry to count. Falling through to the local default would
+    # stream the whole view across the wire to discard most of it, so a view
+    # filters server-side: BigQuery evaluates the predicate and can prune.
+    if is_view:
+        debug("Using server-side bbox filter (a view has no row count to weigh)")
+        return True
+
     row_count = _get_table_row_count(con, table_id)
     if row_count is not None:
         use_server = row_count >= bbox_threshold
@@ -1077,27 +1127,47 @@ def _execute_bigquery_extraction(
         )
 
         # Build query with bbox and where filters
-        query = _build_bigquery_query(
-            con=con,
-            validated_table_id=validated_table_id,
-            select_cols=select_cols,
-            bbox=bbox,
-            bbox_mode=bbox_mode,
-            bbox_threshold=bbox_threshold,
-            geom_col=geom_col,
-            where=where,
-            limit=limit,
-            is_native_geometry=is_native_geometry,
-            geometry_format=geometry_format,
-        )
+        def build_query(is_view: bool) -> str:
+            return _build_bigquery_query(
+                con=con,
+                validated_table_id=validated_table_id,
+                select_cols=select_cols,
+                bbox=bbox,
+                bbox_mode=bbox_mode,
+                bbox_threshold=bbox_threshold,
+                geom_col=geom_col,
+                where=where,
+                limit=limit,
+                is_native_geometry=is_native_geometry,
+                geometry_format=geometry_format,
+                is_view=is_view,
+            )
+
+        query = build_query(is_view=False)
 
         if show_sql:
             progress(f"SQL: {query}")
 
-        # Execute query
+        # Execute query. Whether this id is a table or a view is settled here,
+        # by BigQuery, rather than guessed beforehand: a DESCRIBE answers out
+        # of table metadata and so succeeds for a view, which leaves the read
+        # as the only place the difference shows. The refused attempt opens no
+        # read session and scans no bytes, so a table pays nothing for this and
+        # a view pays one wasted round-trip. Reacting to the error also covers
+        # the external tables the Storage Read API refuses in the same words.
         debug(f"Executing BigQuery query: {query}")
         progress("Querying BigQuery...")
-        result = con.execute(query).arrow().read_all()
+        try:
+            result = con.execute(query).arrow().read_all()
+        except duckdb.Error as exc:
+            if _NON_TABLE_ENTITY not in str(exc).lower():
+                raise
+            debug(f"{validated_table_id} is not a physical table; retrying as a query job")
+            query = build_query(is_view=True)
+            if show_sql:
+                progress(f"SQL: {query}")
+            debug(f"Executing BigQuery query: {query}")
+            result = con.execute(query).arrow().read_all()
         row_count = result.num_rows
         progress(f"Retrieved {row_count:,} rows from BigQuery")
 
@@ -1169,6 +1239,7 @@ def _build_bigquery_query(
     limit: int | None,
     is_native_geometry: bool = True,
     geometry_format: str = "wkt",
+    is_view: bool = False,
 ) -> str:
     """Build the BigQuery query with filters applied."""
     bq_filters: list[str] = []
@@ -1177,7 +1248,7 @@ def _build_bigquery_query(
     # Handle bbox filtering
     if bbox and geom_col:
         use_server_side = _determine_bbox_strategy(
-            con, validated_table_id, bbox_mode, bbox_threshold
+            con, validated_table_id, bbox_mode, bbox_threshold, is_view=is_view
         )
         bq_filters, local_conditions = _build_bbox_filters(
             bbox, geom_col, use_server_side, is_native_geometry, geometry_format
@@ -1186,6 +1257,33 @@ def _build_bigquery_query(
         warn("--bbox specified but no geometry column detected; ignoring spatial filter")
 
     # Build base query
+    if is_view:
+        # A view opens no Storage Read API session and so has no filter=
+        # argument; the predicates ride inside the GoogleSQL instead.
+        #
+        # --where goes down with them rather than staying an outer DuckDB
+        # filter. A scan streams, so filtering late there only wastes
+        # bandwidth, but a query job must finish its whole result first: left
+        # outside, `SELECT * FROM <view>` asks BigQuery to materialise the
+        # entire relation, which on a billion-row view fails outright with
+        # "Response too large to return". --where is documented as BigQuery
+        # SQL, so BigQuery is where it belongs.
+        view_conditions = list(bq_filters)
+        if where:
+            # Validated upstream in extract_bigquery(); wrapped so a trailing
+            # '--' cannot comment out the rest of the GoogleSQL either.
+            view_conditions.append(where_condition_fragment(where))
+        # LIMIT only goes down when nothing filters after it. With a local
+        # bbox condition outside, an inner LIMIT would cut the candidates
+        # before that filter ran and return fewer rows than asked for.
+        push_limit = limit if not local_conditions else None
+        relation = _bigquery_view_relation(validated_table_id, view_conditions, push_limit)
+        query = f"SELECT {select_cols} FROM {relation}"
+        if local_conditions:
+            query += " WHERE " + " AND ".join(local_conditions)
+        if limit is not None and push_limit is None:
+            query += f" LIMIT {limit}"
+        return query
     if bq_filters:
         # The GoogleSQL filter travels inside a DuckDB string literal, so it is
         # escaped once, here, at the point of interpolation. A BigQuery flexible
