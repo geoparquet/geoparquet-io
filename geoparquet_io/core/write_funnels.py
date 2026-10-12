@@ -647,7 +647,6 @@ def _geo_block_to_carry_on_fast_path(
     input_crs=None,
     input_file: str | None = None,
     output_columns: list[str] | None = None,
-    geometry_info: dict | None = None,
 ) -> dict | None:
     """The block the 2.0 fast path writes, dropping the must-rewrite half.
 
@@ -664,7 +663,6 @@ def _geo_block_to_carry_on_fast_path(
         input_crs=input_crs,
         input_file=input_file,
         output_columns=output_columns,
-        geometry_info=geometry_info,
     )
     return carried
 
@@ -679,7 +677,6 @@ def _fast_path_geo_decision(
     input_crs=None,
     input_file: str | None = None,
     output_columns: list[str] | None = None,
-    geometry_info: dict | None = None,
 ) -> tuple[dict | None, bool]:
     """``(block to write instead of DuckDB's, whether to take the rewrite instead)``.
 
@@ -709,10 +706,6 @@ def _fast_path_geo_decision(
     between the two paths (`tests/test_covering_v2.py::
     test_a_conventional_bbox_column_is_declared_at_v2`). `output_columns` lets it
     skip its schema probe when the output has no bbox column to declare at all.
-
-    `geometry_info` names the write's other geometry columns, so a secondary the
-    carried block omits is still described rather than un-described by carrying
-    (see the merge below, #1175).
 
     Both answers are ``(None, False)`` — "let DuckDB write its own block on the
     fast path" — when the version is not 2.0 (1.x already rewrites), when the
@@ -795,22 +788,6 @@ def _fast_path_geo_decision(
                 "fast path cannot write it verbatim"
             )
         return None, True
-    # Last, once the block is known to be carried: a merged secondary entry
-    # (its own `crs`/`edges`) must not by itself tip the "says more than
-    # DuckDB" gate, because DuckDB's own block already describes that column,
-    # with its real `geometry_types`.
-    #
-    # Whatever comes back REPLACES DuckDB's generated block, and DuckDB's does
-    # describe every geometry column in the file -- so a carried block that omits
-    # one (a native secondary the input never declared) would un-describe it,
-    # which 2.0 requires for every geometry column (#1175). The shared merge adds
-    # the entry: the secondary's OWN crs/edges, and the spec's "not known"
-    # `geometry_types: []` where the input said nothing. `[]` rather than the real
-    # list is the price of keeping the carried block at all -- only the rewrite
-    # path can compute one, and the keys that make this block worth carrying
-    # (`epoch`, `orientation`, a `covering`) would be lost by handing the write
-    # back to DuckDB instead.
-    merge_secondary_geometry_metadata(carried, geometry_info)
     return carried, False
 
 
@@ -1079,18 +1056,6 @@ def write_parquet_with_metadata(
         elif verbose:
             debug("Not forcing a rewrite: the covering has no bbox member to stand beside")
 
-    # Which OTHER geometry columns does this write carry? Resolved here, ahead of
-    # the fast/rewrite branch, because BOTH need the answer: the 2.0 fast path
-    # writes the input's own `geo` block verbatim, so a 2.0 input whose block omits
-    # a native secondary kept it undescribed through `sort`/`extract` (#1175).
-    # Skipped where neither path can use it -- a fast path with no block to carry
-    # lets DuckDB generate its own, and DuckDB's V2 block already describes every
-    # geometry column in the file.
-    if rewrite_needed or (effective_version == "2.0" and original_metadata):
-        geometry_info, output_columns = _resolve_geometry_info(
-            con, query, geometry_info, geometry_column, input_file, output_columns, verbose
-        )
-
     # The 2.0 fast path's own answer, asked here rather than at the call site so
     # it can still send the write down the rewrite path. It replaces DuckDB's
     # whole `geo` key, so a block it cannot write verbatim is not a block the
@@ -1113,10 +1078,33 @@ def write_parquet_with_metadata(
             input_crs=input_crs,
             input_file=input_file,
             output_columns=output_columns,
-            geometry_info=geometry_info,
         )
         if carried_geo_needs_rewrite:
             rewrite_needed = True
+
+    # Which OTHER geometry columns does this write carry? Asked only where the
+    # answer is used -- the rewrite, and a fast path that carries the input's own
+    # block -- since it may read the input's footer again (an HTTP round trip
+    # for a remote input). A fast path with no block to carry lets DuckDB
+    # generate its own, and DuckDB's V2 block already describes every geometry
+    # column in the file, with its real `geometry_types`.
+    if rewrite_needed or carried_geo_block is not None:
+        geometry_info, output_columns = _resolve_geometry_info(
+            con, query, geometry_info, geometry_column, input_file, output_columns, verbose
+        )
+    if carried_geo_block is not None:
+        # The carried block REPLACES DuckDB's generated one, which does describe
+        # every geometry column -- so a block that omits a native secondary the
+        # input never declared would un-describe it, and 2.0 requires an entry
+        # for every geometry column (#1175). The merge adds the entry: the
+        # secondary's OWN crs/edges, and the spec's "not known" `geometry_types:
+        # []` where the input said nothing. `[]` rather than the real list is the
+        # price of keeping the carried block at all -- only the rewrite path can
+        # compute one, and the keys that make the block worth carrying (`epoch`,
+        # `orientation`, a `covering`) would be lost by handing the write back to
+        # DuckDB instead. Merged after the "says more than DuckDB" gate, so a
+        # secondary's own `crs` cannot by itself make a block worth carrying.
+        merge_secondary_geometry_metadata(carried_geo_block, geometry_info)
 
     # Preserve non-geo KV metadata from input (e.g., vecorel, fiboa).
     # Build a merged local dict rather than mutating the caller-supplied

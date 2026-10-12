@@ -340,6 +340,40 @@ class TestTheTwoPointZeroFastPath:
         assert "centroid" in geo["columns"], "the fast path leaves the secondary undescribed"
         assert geo["columns"]["centroid"]["crs"]["id"] == EPSG_3857
 
+    def test_a_fast_path_with_no_block_to_carry_derives_nothing(self, native_pair, tmp_path):
+        """The derivation can re-read the input's footer -- an HTTP round trip for a
+        remote input -- so it is not asked when DuckDB writes its own block, whose
+        answer would only be discarded. DuckDB's V2 block describes every geometry
+        column in the file by itself.
+        """
+        from unittest import mock
+
+        from geoparquet_io.core import write_funnels
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+
+        plain_v2 = tmp_path / "plain_v2.parquet"
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            con.execute(
+                f"""COPY (
+                    SELECT i AS id, ST_Point(i, 0) AS geometry, ST_Point(i, 1) AS centroid
+                    FROM range(50) t(i)
+                ) TO {sql_path(str(plain_v2))} (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')"""
+            )
+        finally:
+            con.close()
+        output = tmp_path / "out.parquet"
+
+        with mock.patch.object(
+            write_funnels,
+            "derive_secondary_geometry_info",
+            wraps=write_funnels.derive_secondary_geometry_info,
+        ) as derive:
+            _run_cli("extract", "geoparquet", plain_v2, output, "--geoparquet-version", "2.0")
+
+        assert derive.call_count == 0
+        assert "centroid" in _geo(output)["columns"]
+
 
 # ---------------------------------------------------------------------------
 # The Table API: no query, no input file -- the table's own schema
@@ -382,3 +416,183 @@ class TestTheTableApi:
         assert info["secondary"] == ["centroid"]
         assert info["metadata"]["centroid"]["crs"]["id"] == EPSG_3857
         assert info["metadata"]["centroid"]["geometry_types"] == []
+
+    @pytest.mark.parametrize("version", ["1.1", "2.0"])
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+    def test_a_declared_plain_wkb_secondary_survives_a_table_write(
+        self, declared_wkb_pair, tmp_path, version, strategy
+    ):
+        """A secondary the carried ``geo`` key declares is a geometry column too.
+
+        It arrives as plain WKB bytes with no GeoArrow extension name, so a
+        schema-only witness skipped it: every strategy dropped it from
+        ``geo.columns``, and ``in-memory`` at 2.0 retyped it native while leaving
+        it undescribed, which ``check spec`` fails.
+        """
+        import geoparquet_io as gpio
+        from tests.native_geo_probes import logical_geo_types, spec_problems
+
+        output = tmp_path / "out.parquet"
+
+        gpio.read(str(declared_wkb_pair)).write(
+            output, geoparquet_version=version, write_strategy=strategy
+        )
+
+        columns = _geo(output)["columns"]
+        assert "centroid" in columns, "the declared secondary was dropped"
+        assert columns["centroid"]["crs"]["id"] == EPSG_3857
+        if version == "2.0":
+            assert logical_geo_types(output)["centroid"][1] == EPSG_3857
+        else:
+            assert "centroid" not in logical_geo_types(output)
+        assert spec_problems(output) == []
+
+
+@pytest.fixture(scope="module")
+def declared_wkb_pair(tmp_path_factory):
+    """A 1.1 file whose ``geo`` key declares a plain-WKB EPSG:3857 secondary."""
+    from tests.native_geo_probes import conus_wkb, projjson
+
+    rows = conus_wkb(
+        "cell", "ST_Transform(ST_Centroid(cell), 'EPSG:4326', 'EPSG:3857', always_xy := true)"
+    )
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {"encoding": "WKB", "geometry_types": ["Polygon"]},
+            "centroid": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "crs": json.loads(projjson(3857)),
+            },
+        },
+    }
+    table = pa.table(
+        {
+            "id": [row[0] for row in rows],
+            "geometry": [bytes(row[2]) for row in rows],
+            "centroid": [bytes(row[3]) for row in rows],
+        }
+    ).replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+    path = tmp_path_factory.mktemp("declared_wkb_pair") / "declared.parquet"
+    pq.write_table(table, str(path))
+    return path
+
+
+@pytest.mark.parametrize("version", ["1.1", "2.0"])
+@pytest.mark.parametrize("strategy", ["in-memory", "streaming"])
+def test_a_spherical_secondary_keeps_its_edges_through_a_table_write(tmp_path, version, strategy):
+    """The table's schema carries a GeoArrow ``edge_type`` as well as a CRS.
+
+    Reading only the CRS turned a spherical secondary into a planar one with no
+    warning: ``edges`` was left off the entry, and at 2.0 the native type came out
+    a planar GEOMETRY. (duckdb-kv and disk-rewrite refuse non-planar edges outright,
+    a separate limitation.)
+    """
+    import geoarrow.pyarrow as ga
+
+    import geoparquet_io as gpio
+    from tests.native_geo_probes import conus_wkb, projjson, write_native_geo_only
+
+    rows = conus_wkb(
+        "ST_Transform(cell, 'EPSG:4326', 'EPSG:5070', always_xy := true)", "ST_Centroid(cell)"
+    )
+    source = write_native_geo_only(
+        tmp_path / "in.parquet",
+        rows,
+        {
+            "geometry": (2, ga.wkb().with_crs(projjson(5070))),
+            "centroid": (3, ga.wkb().with_edge_type(ga.EdgeType.SPHERICAL)),
+        },
+    )
+    output = tmp_path / "out.parquet"
+
+    gpio.read(str(source)).write(output, geoparquet_version=version, write_strategy=strategy)
+
+    assert _geo(output)["columns"]["centroid"].get("edges") == "spherical"
+    if version == "2.0":
+        with pq.ParquetFile(str(output)) as reader:
+            schema = reader.schema
+            logical = {
+                schema.column(i).name: str(schema.column(i).logical_type)
+                for i in range(len(schema))
+            }
+        assert logical["centroid"].startswith("Geography"), logical["centroid"]
+
+
+@pytest.mark.parametrize("version", ["1.1", "2.0"])
+def test_a_fresh_process_table_write_describes_the_native_secondary(tmp_path, version):
+    """``gpio.read`` has to see the native secondary without help from the process.
+
+    Plain pyarrow reads a native Parquet GEOMETRY column as bare ``binary`` unless
+    ``geoarrow.pyarrow`` has registered its extension types -- a process-global
+    side effect this suite's own fixtures trigger, so only a subprocess can see
+    the difference. The input is DuckDB-written, so no Arrow schema in the file
+    carries the extension name either.
+    """
+    import subprocess
+    import sys
+
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+
+    source = tmp_path / "duckdb_native.parquet"
+    output = tmp_path / "out.parquet"
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        con.execute(
+            f"""COPY (
+                SELECT i AS id, ST_Point(i, 0) AS geometry,
+                       ST_SetCRS(ST_Point(i * 1000, 1), 'EPSG:3857') AS centroid
+                FROM range(50) t(i)
+            ) TO {sql_path(str(source))} (FORMAT PARQUET, GEOPARQUET_VERSION 'NONE')"""
+        )
+    finally:
+        con.close()
+
+    script = (
+        "import sys, geoparquet_io as gpio\n"
+        "assert 'geoarrow.pyarrow' not in sys.modules\n"
+        "gpio.read(sys.argv[1]).write(sys.argv[2], geoparquet_version=sys.argv[3])\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(output), version],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    columns = _geo(output)["columns"]
+    assert "centroid" in columns, "a fresh process left the secondary undescribed"
+    assert columns["centroid"]["crs"]["id"] == EPSG_3857
+
+
+def test_describe_reads_a_crs_whose_text_holds_an_apostrophe():
+    """DuckDB renders an embedded ``'`` as ``''`` inside ``GEOMETRY('...')``.
+
+    The pattern stopped at the first quote, so the column was skipped and a
+    partition of it was left undescribed -- a native type inside a 1.1 file.
+    """
+    from pyproj import CRS
+
+    from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
+    from geoparquet_io.core.duckdb_utils import _escape_sql_string, get_duckdb_connection
+    from geoparquet_io.core.geometry_detection import native_geometry_types_from_query
+
+    crs = CRS.from_epsg(3857).to_json_dict()
+    crs.pop("id")
+    crs["name"] = "O'Brien Mercator"
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        query = (
+            f"SELECT ST_Point(0, 0) AS geometry, "
+            f"ST_SetCRS(ST_Point(1, 2), '{_escape_sql_string(json.dumps(crs))}') AS centroid"
+        )
+        native = native_geometry_types_from_query(con, query)
+    finally:
+        con.close()
+
+    assert "centroid" in native, "the apostrophe hid the column"
+    parsed = parse_geometry_logical_type(native["centroid"])
+    assert "O'Brien Mercator" in json.dumps(parsed)

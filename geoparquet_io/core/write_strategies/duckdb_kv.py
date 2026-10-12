@@ -17,9 +17,9 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import duckdb
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
@@ -29,7 +29,9 @@ from geoparquet_io.core.arrow_geo_metadata import (
     table_geometry_info,
 )
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
+from geoparquet_io.core.crs_utils import is_default_crs
 from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     quote_identifier,
@@ -52,9 +54,6 @@ from geoparquet_io.core.write_strategies.base import (
     resolve_geometry_columns,
 )
 from geoparquet_io.core.write_strategies.row_group_sizing import _resolve_row_group_rows
-
-if TYPE_CHECKING:
-    import pyarrow as pa
 
 # Valid compression values whitelist (prevents injection via compression param)
 VALID_COMPRESSIONS = frozenset({"ZSTD", "SNAPPY", "GZIP", "LZ4", "UNCOMPRESSED", "BROTLI"})
@@ -101,6 +100,52 @@ def _plain_wkb_for_secondary_columns(
     return _canonicalize_wkb_columns(
         table, sorted(secondaries), verbose, native_columns={geometry_column}
     )
+
+
+def _table_query_with_native_geometry(
+    table, geometry_column: str, geometry_info: dict | None, geoparquet_version: str
+) -> str:
+    """``SELECT`` over the registered ``input_table`` with its WKB columns made GEOMETRY.
+
+    geoarrow.wkb extension columns already register as GEOMETRY in DuckDB, where
+    ST_GeomFromWKB(GEOMETRY) is a binder error. The extension name has to be read
+    from the field metadata as well as the Arrow type: gpio's own `add`
+    operations hand back a plain `large_binary` column carrying
+    `ARROW:extension:name`, which DuckDB still registers as GEOMETRY (#727).
+
+    At 2.0 the same goes for a secondary the table's carried ``geo`` key declares
+    as plain WKB bytes: left a BLOB, it is described in ``geo.columns`` but not
+    natively typed, which 2.0 requires of every geometry column (#1175). It gets
+    its own declared CRS, never the primary's. Below 2.0 the secondaries stay WKB
+    and the write path's blob conversion handles them.
+    """
+    replacements = []
+    columns = [geometry_column]
+    if geoparquet_version == "2.0":
+        columns += list((geometry_info or {}).get("secondary") or ())
+    metadata = (geometry_info or {}).get("metadata") or {}
+    for name in columns:
+        if name not in table.schema.names:
+            continue
+        field = table.schema.field(name)
+        if arrow_extension_name(field) == "geoarrow.wkb":
+            continue
+        # A secondary is converted only when it really is plain WKB bytes: a
+        # native GeoArrow struct or a WKT string is not ST_GeomFromWKB's to read.
+        if name != geometry_column and (
+            arrow_extension_name(field)
+            or not (pa.types.is_binary(field.type) or pa.types.is_large_binary(field.type))
+        ):
+            continue
+        ident = quote_identifier(name)
+        expr = f"ST_GeomFromWKB({ident})"
+        crs = (metadata.get(name) or {}).get("crs") if name != geometry_column else None
+        if isinstance(crs, dict) and not is_default_crs(crs):
+            expr = f"ST_SetCRS({expr}, '{_escape_sql_string(json.dumps(crs))}')"
+        replacements.append(f"{expr} AS {ident}")
+    if not replacements:
+        return "SELECT * FROM input_table"
+    return f"SELECT * REPLACE ({', '.join(replacements)}) FROM input_table"
 
 
 def _build_copy_options(
@@ -521,20 +566,9 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             con.register("input_table", table)
 
             # Convert WKB bytes to GEOMETRY for proper spatial processing.
-            # geoarrow.wkb extension columns already register as GEOMETRY in
-            # DuckDB, where ST_GeomFromWKB(GEOMETRY) is a binder error. The
-            # extension name has to be read from the field metadata as well as
-            # the Arrow type: gpio's own `add` operations hand back a plain
-            # `large_binary` column carrying `ARROW:extension:name`, which
-            # DuckDB still registers as GEOMETRY (#727).
-            geom_field = table.schema.field(geometry_column)
-            if arrow_extension_name(geom_field) == "geoarrow.wkb":
-                query = "SELECT * FROM input_table"
-            else:
-                query = f"""
-                    SELECT * REPLACE (ST_GeomFromWKB({quote_identifier(geometry_column)}) AS {quote_identifier(geometry_column)})
-                    FROM input_table
-                """
+            query = _table_query_with_native_geometry(
+                table, geometry_column, geometry_info, effective_version
+            )
 
             self.write_from_query(
                 con=con,

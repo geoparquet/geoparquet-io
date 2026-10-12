@@ -275,6 +275,12 @@ def _crs_as_projjson(crs):
         return None
 
 
+def _is_spherical_edge_type(arrow_type) -> bool:
+    """Whether a GeoArrow extension type declares spherical edges."""
+    edge_type = getattr(arrow_type, "edge_type", None)
+    return getattr(edge_type, "name", "").upper() == "SPHERICAL"
+
+
 # What a secondary geometry column's carried entry says about the column ITSELF,
 # as opposed to about the rows a particular write happens to put in it. Only these
 # travel into a derived `geometry_info`; `bbox` and `covering` are the derived
@@ -312,7 +318,12 @@ def table_geometry_info(table, primary_column: str, carried_geo: dict | None = N
     declared = (carried_geo or {}).get("columns") or {}
     metadata: dict[str, dict] = {}
     for field in table.schema:
-        if field.name == primary_column or not is_geoarrow_extension_field(field):
+        if field.name == primary_column:
+            continue
+        # A column the carried key declares is a geometry column even as plain
+        # WKB bytes with no extension name -- dropping it here would un-describe
+        # a secondary the input itself described.
+        if not is_geoarrow_extension_field(field) and field.name not in declared:
             continue
         declared_meta = declared.get(field.name) or {}
         # The descriptive keys the input stated for this column, which the entry
@@ -333,6 +344,10 @@ def table_geometry_info(table, primary_column: str, carried_geo: dict | None = N
             # is where that rule lives for the primary.
             if isinstance(crs, dict) and not is_default_crs(crs):
                 col_meta["crs"] = crs
+        # The schema carries the edge interpretation as well as the CRS: left
+        # behind, a spherical secondary came out planar with no warning.
+        if "edges" not in col_meta and _is_spherical_edge_type(field.type):
+            col_meta["edges"] = "spherical"
         metadata[field.name] = col_meta
 
     if not metadata:
@@ -418,6 +433,10 @@ def _process_geometry_column_for_version(
                 new_type = wkb_arr.type.with_crs(resolved_crs)
             else:
                 new_type = ga.wkb()
+            # The CRS is normalized, never the edges: a spherical column rebuilt
+            # as a bare `ga.wkb()` came out a planar GEOMETRY (#1175).
+            if _is_spherical_edge_type(wkb_arr.type):
+                new_type = new_type.with_edge_type(ga.EdgeType.SPHERICAL)
             # Always rebuild: geoarrow's WkbType.__eq__ ignores the CRS, so a
             # "types are equal" shortcut would skip precisely the case this is
             # here to normalize.

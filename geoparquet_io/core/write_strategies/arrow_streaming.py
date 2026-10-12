@@ -891,8 +891,15 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             if verbose:
                 with_crs = sorted(name for name, crs in native_crs.items() if crs)
                 debug(f"Native Parquet GEOMETRY type for {sorted(geo_columns)}, CRS on {with_crs}")
+            declared = (geo_meta or {}).get("columns") or {}
             new_fields = [
-                pa.field(field.name, native_wkb_type(native_crs.get(field.name)))
+                pa.field(
+                    field.name,
+                    native_wkb_type(
+                        native_crs.get(field.name),
+                        edges=(declared.get(field.name) or {}).get("edges"),
+                    ),
+                )
                 if field.name in geo_columns
                 else field
                 for field in schema

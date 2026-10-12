@@ -19,8 +19,11 @@ STANDARD_GEOMETRY_NAMES = ["geometry", "geom", "wkb_geometry", "shape", "the_geo
 
 # How DuckDB's DESCRIBE renders a geometry type: `GEOMETRY`, or
 # `GEOMETRY('EPSG:3857')` once it carries a CRS. Anchored at both ends so a
-# struct or list type that merely mentions GEOMETRY is not matched.
-_DESCRIBE_GEO_TYPE = re.compile(r"^(GEOMETRY|GEOGRAPHY)(?:\(\s*'([^']*)'\s*\))?$", re.IGNORECASE)
+# struct or list type that merely mentions GEOMETRY is not matched. The CRS is a
+# SQL string literal, so an embedded `'` arrives doubled (`O''Brien`).
+_DESCRIBE_GEO_TYPE = re.compile(
+    r"^(GEOMETRY|GEOGRAPHY)(?:\(\s*'((?:[^']|'')*)'\s*\))?$", re.IGNORECASE | re.DOTALL
+)
 
 
 def detect_geometry_column_from_names(column_names) -> str | None:
@@ -211,7 +214,7 @@ def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> 
         if not name or not match:
             continue
         family = "Geography" if match.group(1).upper() == "GEOGRAPHY" else "Geometry"
-        crs = match.group(2)
+        crs = match.group(2).replace("''", "'") if match.group(2) else None
         native[name] = f"{family}Type(crs={crs})" if crs else f"{family}Type()"
     return native
 

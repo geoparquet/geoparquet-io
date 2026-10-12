@@ -70,7 +70,7 @@ def is_geoarrow_extension_field(field: pa.Field) -> bool:
     return name is not None and name.startswith("geoarrow.")
 
 
-def native_wkb_type(crs: dict | None):
+def native_wkb_type(crs: dict | None, edges: str | None = None):
     """The ``geoarrow.wkb`` type a 2.0 / parquet-geo-only geometry column is written as.
 
     PyArrow writes this extension type as a native Parquet GEOMETRY logical
@@ -90,6 +90,10 @@ def native_wkb_type(crs: dict | None):
     geoarrow_type = ga.wkb()
     if crs and not is_default_crs(crs):
         geoarrow_type = geoarrow_type.with_crs(crs)
+    # A column the block declares spherical is a GEOGRAPHY; typing it a planar
+    # GEOMETRY beside `edges: spherical` makes the file disagree with itself.
+    if edges == "spherical":
+        geoarrow_type = geoarrow_type.with_edge_type(ga.EdgeType.SPHERICAL)
     return geoarrow_type
 
 

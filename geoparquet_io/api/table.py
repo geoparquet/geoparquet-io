@@ -265,6 +265,13 @@ def read(path: str | Path, **kwargs) -> Table:
         >>> table = gpio.read('data.parquet')
         >>> table.add_bbox().write('output.parquet')
     """
+    # Registers the GeoArrow extension types, so a native Parquet GEOMETRY /
+    # GEOGRAPHY column arrives as `geoarrow.wkb` carrying its own CRS and edges
+    # rather than bare `binary`. Process-global, so it is done here rather than
+    # relied on: without it a DuckDB-written native secondary column was
+    # invisible to the write, and left out of `geo.columns` (#1175).
+    import geoarrow.pyarrow  # noqa: F401
+
     from geoparquet_io.core.common import resolve_geoparquet_version_from_file
 
     arrow_table = pq.read_table(str(path), **kwargs)
