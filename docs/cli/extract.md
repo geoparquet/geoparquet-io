@@ -68,12 +68,12 @@ The `--bbox-threshold` sets the row count where `auto` switches to server-side f
     for those. It detects this from BigQuery's own refusal, on the read, and
     retries automatically -- there is no flag to set.
 
-    Two consequences worth knowing. A query job is billed by bytes scanned,
-    and a materialized view does **not** prune columns, so `SELECT *` over one
-    can scan far more than the columns you asked for. And `--where`, `--bbox`
-    and `--limit` are pushed into the query job rather than applied after the
-    fetch, so an unfiltered read of a very large view can fail with "Response
-    too large to return". Filter it.
+    The job is billed by bytes scanned. The selected columns, `--where`, a
+    server-side `--bbox` and `--limit` are pushed into it, so an unfiltered
+    read of a very large view can fail with "Response too large to return".
+    On a view `--where` runs as GoogleSQL, so only bare column names, plain
+    single-quoted strings and no comments are accepted there. See the
+    [User Guide](../guide/extract.md#views-and-materialized-views).
 
 !!! warning "Limitations"
     BIGNUMERIC columns are not supported (exceeds DuckDB's precision).

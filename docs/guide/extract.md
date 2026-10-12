@@ -794,6 +794,28 @@ Consider adjusting `--bbox-threshold` when:
 - You've benchmarked and found a different crossover point for your data
 - Your BigQuery pricing tier or network conditions differ from typical
 
+### Views and Materialized Views
+
+The BigQuery Storage Read API serves physical tables only. When the id names a
+view, a materialized view or an external table, gpio sees BigQuery refuse the
+read and runs a BigQuery **query job** instead -- there is no flag to set, and
+the CLI and Python examples above work unchanged with a view's id.
+
+What changes on a view:
+
+- **It is billed by bytes scanned.** The columns you select, `--where`, a
+  server-side `--bbox` and `--limit` all go into the query job, so BigQuery
+  reads only the columns asked for and can prune partitions. An unfiltered read
+  of a very large view can fail with "Response too large to return": filter it.
+- **`--where` runs inside BigQuery, as GoogleSQL.** On a table DuckDB evaluates
+  it. Only the subset both dialects read identically is accepted on a view:
+  bare column names, plain single-quoted strings with no quote or backslash
+  inside, and no comments. A double-quoted name is refused, because GoogleSQL
+  reads `"name"` as a string literal.
+- **`--bbox-mode local` reads the whole view** and filters it in DuckDB; leave
+  the default (`auto` filters a view server-side).
+- `--dry-run` cannot tell a view from a table, so it shows the table form.
+
 ### Authentication
 
 The command uses Google Cloud credentials in this order:

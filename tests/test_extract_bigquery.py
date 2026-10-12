@@ -1876,9 +1876,13 @@ class TestViewPushesFiltersIntoTheQueryJob:
         assert "a = 1" in inner
         assert inner.count(" WHERE ") == 1
 
-    def test_a_hostile_where_cannot_split_the_statement(self):
-        sql = self._view_sql(where="1=1) OR TRUE --")
-        assert len(duckdb.extract_statements(sql)) == 1
+    def test_a_hostile_where_never_reaches_the_googlesql(self):
+        """Counting DuckDB statements cannot see a GoogleSQL break-out, so the
+        comment that would make one is refused before the job is built."""
+        from geoparquet_io.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._view_sql(where="1=1) OR TRUE --")
 
     def test_the_table_path_still_filters_in_duckdb(self):
         """Unchanged behaviour for a physical table: no silent push-down."""
@@ -2040,3 +2044,174 @@ class TestShowSqlDuringTheViewRetry:
         sqls = [m for m in printed if m.startswith("SQL: ")]
         assert any("bigquery_scan(" in s for s in sqls), sqls
         assert any("bigquery_query(" in s for s in sqls), sqls
+
+
+class TestViewQueryProjectsOnlyTheRequestedColumns:
+    """A query job is billed by the columns it reads, so ``SELECT *`` over a
+    view bills every column even when --include-cols asked for two. BigQuery
+    prunes columns through a view only when the statement names them."""
+
+    def _sql(self, **over):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        kwargs = {
+            "con": None,
+            "validated_table_id": "my-project.ds.v",
+            "select_cols": '"id", ST_AsWKB("geom") AS "geom"',
+            "bbox": None,
+            "bbox_mode": "auto",
+            "bbox_threshold": 1000,
+            "geom_col": "geom",
+            "where": None,
+            "limit": None,
+            "is_view": True,
+            "source_columns": ["id", "geom"],
+        }
+        kwargs.update(over)
+        return _build_bigquery_query(**kwargs)
+
+    def test_the_inner_statement_names_the_columns(self):
+        assert _inner_googlesql(self._sql()) == "SELECT `id`, `geom` FROM `my-project.ds.v`"
+
+    def test_all_columns_keeps_select_star(self):
+        assert _inner_googlesql(self._sql(source_columns=None)) == (
+            "SELECT * FROM `my-project.ds.v`"
+        )
+
+    def test_a_local_bbox_filter_keeps_its_geometry_column(self):
+        """The outer DuckDB filter reads the geometry even when it is excluded."""
+        inner = _inner_googlesql(
+            self._sql(
+                select_cols='"id"',
+                source_columns=["id"],
+                bbox="0,0,1,1",
+                bbox_mode="local",
+            )
+        )
+        assert inner == "SELECT `id`, `geom` FROM `my-project.ds.v`"
+
+    def test_a_hostile_column_name_is_quoted_for_googlesql(self):
+        sql = self._sql(select_cols='"a`b\'c"', source_columns=["a`b'c"], geom_col=None)
+        assert len(duckdb.extract_statements(sql)) == 1
+        assert _inner_googlesql(sql) == "SELECT `a\\`b'c` FROM `my-project.ds.v`"
+
+    def test_the_table_path_ignores_source_columns(self):
+        sql = self._sql(is_view=False, select_cols='"id"', source_columns=["id"], geom_col=None)
+        assert sql == "SELECT \"id\" FROM bigquery_scan('my-project.ds.v')"
+
+
+class TestViewWhereMustReadTheSameInGoogleSQL:
+    """On a view --where runs inside BigQuery. Two DuckDB spellings parse
+    there too but mean something else, silently: ``"col"`` is a STRING
+    literal in GoogleSQL (so ``"name" = 'x'`` compares two constants and
+    returns no rows), and a backslash in a string literal is an escape
+    sequence. Refuse those rather than return a wrong answer."""
+
+    def _sql(self, where, is_view=True):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        return _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.v",
+            select_cols="*",
+            bbox=None,
+            bbox_mode="auto",
+            bbox_threshold=1000,
+            geom_col=None,
+            where=where,
+            limit=None,
+            is_view=is_view,
+        )
+
+    @pytest.mark.parametrize("where", ["\"name\" = 'x'", '"my col" IS NOT NULL'])
+    def test_a_double_quoted_identifier_is_refused(self, where):
+        from geoparquet_io.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="double-quoted name"):
+            self._sql(where)
+
+    @pytest.mark.parametrize(
+        "where",
+        [
+            "name = 'it''s'",
+            "name = " + "'" * 3 + "x" + "'" * 3,
+            "a = 1 -- trailing",
+            "a = 1 /* x */ AND b = 2",
+            "/* lead */ a = 1",
+            "a = 1 /* /* nested */ ) OR TRUE */",
+        ],
+        ids=[
+            "doubled-quote",
+            "triple-quote",
+            "line-comment",
+            "block-comment",
+            "leading-comment",
+            "nested-comment",
+        ],
+    )
+    def test_a_lexically_ambiguous_clause_is_refused(self, where):
+        """DuckDB and GoogleSQL disagree where these strings and comments end,
+        so what DuckDB validated as data could be code to BigQuery."""
+        from geoparquet_io.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="runs inside BigQuery"):
+            self._sql(where)
+
+    def test_a_backslash_in_a_string_literal_is_refused(self):
+        from geoparquet_io.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="backslash"):
+            self._sql("path = 'C:\\new'")
+
+    @pytest.mark.parametrize(
+        "where",
+        [
+            "name = 'x'",
+            "pop >= 10 AND kind IN ('a', 'b')",
+            "note = 'say \"hi\"'",
+            "d >= '2025-09-01' AND (x IS NOT NULL OR y <> 3.5)",
+        ],
+    )
+    def test_portable_predicates_still_push_down(self, where):
+        assert where in _inner_googlesql(self._sql(where))
+
+    def test_the_table_path_still_accepts_a_double_quoted_identifier(self):
+        assert "\"name\" = 'x'" in self._sql("\"name\" = 'x'", is_view=False)
+
+
+class TestViewFallbackTellsTheUserAboutBilling:
+    SCHEMA = [("id", "VARCHAR"), ("geom", "GEOMETRY")]
+
+    def test_the_fallback_is_announced(self, tmp_path, monkeypatch):
+        import geoparquet_io.core.extract_bigquery as bq
+
+        printed: list[str] = []
+        monkeypatch.setattr(bq, "progress", printed.append)
+        table = pa.table({"id": pa.array(["a"]), "geom": pa.array([None], pa.binary())})
+
+        def execute(sql, *a, **k):
+            if "bigquery_scan(" in str(sql) and "DESCRIBE" not in str(sql):
+                raise duckdb.BinderException(
+                    "non-table entities cannot be read with the storage API"
+                )
+            result = MagicMock()
+            result.arrow.return_value.read_all.return_value = table
+            return result
+
+        con = MagicMock()
+        con.execute.side_effect = execute
+        with (
+            patch.object(bq, "BigQueryConnection") as mock_conn,
+            patch.object(bq, "_schema_rows", return_value=self.SCHEMA),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            bq.extract_bigquery(
+                table_id="my-project.ds.relation",
+                output_parquet=str(tmp_path / "o.parquet"),
+                include_cols="id",
+            )
+
+        assert any("query job" in m and "billed" in m for m in printed), printed
+        issued = [str(c.args[0]) for c in con.execute.call_args_list]
+        job = next(q for q in issued if "bigquery_query(" in q)
+        assert _inner_googlesql(job).startswith("SELECT `id`, `geom` FROM")

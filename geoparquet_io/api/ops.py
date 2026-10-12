@@ -1935,7 +1935,9 @@ def read_bigquery(
         retries automatically. The job is billed by bytes scanned, and
         ``where``, ``bbox`` and ``limit`` are pushed into it rather than
         applied afterwards, so filter a large view or the job can fail with
-        "Response too large to return".
+        "Response too large to return". So are the selected columns. On a
+        view ``where`` runs as GoogleSQL, so only bare column names, plain
+        single-quoted strings and no comments are accepted there.
 
     Example:
         >>> from geoparquet_io.api import ops

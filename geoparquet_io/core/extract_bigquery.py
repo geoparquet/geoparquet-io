@@ -9,6 +9,7 @@ converting GEOGRAPHY columns to GeoParquet geometry with spherical edges.
 from __future__ import annotations
 
 import os
+import re
 
 import duckdb
 import pyarrow as pa
@@ -24,6 +25,7 @@ from geoparquet_io.core.duckdb_utils import (
     validate_where_clause,
     where_condition_fragment,
 )
+from geoparquet_io.core.exceptions import ValidationError
 from geoparquet_io.core.extract import parse_bbox
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
@@ -419,6 +421,7 @@ def _bigquery_view_relation(
     table_id: str,
     conditions: list[str] | None = None,
     limit: int | None = None,
+    columns: list[str] | None = None,
 ) -> str:
     """Build a ``bigquery_query(...)`` relation for a non-table entity.
 
@@ -439,16 +442,77 @@ def _bigquery_view_relation(
         table_id: Pre-validated, fully qualified ``project.dataset.name``
         conditions: GoogleSQL predicates to AND into the statement
         limit: Row cap to push into the statement, when nothing filters after it
+        columns: RAW column names to project, or None for ``*``. A query job is
+            billed by the columns it reads, and BigQuery prunes columns through
+            a view only when the statement names them.
     """
     # bigquery_query bills the job to its first argument. _normalize_table_id
     # has already made the id fully qualified, so its project is the right one.
     project = table_id.split(".")[0]
-    inner = f"SELECT * FROM `{table_id}`"
+    projection = ", ".join(_quote_bigquery_identifier(c) for c in columns) if columns else "*"
+    inner = f"SELECT {projection} FROM `{table_id}`"
     if conditions:
         inner += " WHERE " + " AND ".join(conditions)
     if limit is not None:
         inner += f" LIMIT {limit}"
     return f"bigquery_query('{project}', '{_escape_sql_string(inner)}')"
+
+
+# The only string literal both dialects lex identically: single quotes, with no
+# quote or backslash inside. DuckDB doubles a quote to escape it and treats a
+# backslash as a plain character; GoogleSQL backslash-escapes and reads three
+# quotes as a triple-quoted string.
+_PORTABLE_STRING = re.compile(r"'[^'\\]*'\s*")
+# Any other token is one unbroken word or operator; whitespace followed by more
+# text inside its span means a comment the tokenizer skipped.
+_PORTABLE_TOKEN = re.compile(r"\S+\s*")
+
+
+def _where_portability_problem(text: str, kind: object) -> str | None:
+    """Name what makes one token of a --where read differently in GoogleSQL."""
+    if kind == duckdb.token_type.string_const:
+        if _PORTABLE_STRING.fullmatch(text):
+            return None
+        return f"the string literal {text.strip()} (a quote, a backslash or a comment)"
+    if kind == duckdb.token_type.identifier and text.startswith('"'):
+        return f"the double-quoted name {text.strip()}, which GoogleSQL reads as a string"
+    if not _PORTABLE_TOKEN.fullmatch(text):
+        return "a comment"
+    return None
+
+
+def _require_where_portable_to_googlesql(where: str) -> None:
+    """Refuse a --where that BigQuery would read differently from DuckDB.
+
+    On a view the clause runs inside the GoogleSQL query job, but it was
+    validated -- and on a table is evaluated -- as DuckDB SQL. Where the two
+    lexers disagree the clause can silently change meaning (``"col"`` is a
+    STRING literal in GoogleSQL, so ``"name" = 'x'`` compares two constants),
+    and worse, a string boundary DuckDB saw can move: a backslash escape, a
+    doubled or tripled quote, or a nested ``/* */`` comment (DuckDB nests them,
+    GoogleSQL does not) can turn what DuckDB validated as data into GoogleSQL
+    code outside the WHERE. So only the lexical subset both dialects agree on
+    is let through: bare names, plain single-quoted strings, no comments.
+    Functions that differ between the dialects fail loudly in BigQuery.
+
+    Raises:
+        ValidationError: If any token falls outside that subset.
+    """
+    tokens = duckdb.tokenize(where)
+    problem = "a comment" if tokens and where[: tokens[0][0]].strip() else None
+    if "\\" in where:
+        problem = "a backslash"
+    ends = [pos for pos, _ in tokens[1:]] + [len(where)]
+    for (start, kind), end in zip(tokens, ends, strict=True):
+        problem = problem or _where_portability_problem(where[start:end], kind)
+    if problem:
+        raise ValidationError(
+            f"--where contains {problem}. This relation is a view, so the clause runs "
+            "inside BigQuery as GoogleSQL, and only bare column names, plain "
+            "single-quoted strings (no quote or backslash inside) and no comments "
+            "read the same there as in DuckDB. Simplify the clause, or write the "
+            "GoogleSQL yourself."
+        )
 
 
 def _schema_rows(
@@ -1125,6 +1189,8 @@ def _execute_bigquery_extraction(
         select_cols, _ = _build_select_with_wkb(
             cols_to_select, geom_col, con, validated_table_id, geometry_format
         )
+        # A query job reads only these when it names them; None reads all.
+        source_columns = None if cols_to_select is None else list(cols_to_select)
 
         # Build query with bbox and where filters
         def build_query(is_view: bool) -> str:
@@ -1141,6 +1207,7 @@ def _execute_bigquery_extraction(
                 is_native_geometry=is_native_geometry,
                 geometry_format=geometry_format,
                 is_view=is_view,
+                source_columns=source_columns,
             )
 
         query = build_query(is_view=False)
@@ -1162,7 +1229,11 @@ def _execute_bigquery_extraction(
         except duckdb.Error as exc:
             if _NON_TABLE_ENTITY not in str(exc).lower():
                 raise
-            debug(f"{validated_table_id} is not a physical table; retrying as a query job")
+            progress(
+                f"{validated_table_id} is a view or external table, which the Storage "
+                "Read API cannot serve; reading it with a BigQuery query job instead, "
+                "billed by bytes scanned"
+            )
             query = build_query(is_view=True)
             if show_sql:
                 progress(f"SQL: {query}")
@@ -1240,8 +1311,13 @@ def _build_bigquery_query(
     is_native_geometry: bool = True,
     geometry_format: str = "wkt",
     is_view: bool = False,
+    source_columns: list[str] | None = None,
 ) -> str:
-    """Build the BigQuery query with filters applied."""
+    """Build the BigQuery query with filters applied.
+
+    ``source_columns`` are the RAW names ``select_cols`` reads, or None when it
+    reads every column; only the view path uses them, to project the query job.
+    """
     bq_filters: list[str] = []
     local_conditions: list[str] = []
 
@@ -1258,32 +1334,16 @@ def _build_bigquery_query(
 
     # Build base query
     if is_view:
-        # A view opens no Storage Read API session and so has no filter=
-        # argument; the predicates ride inside the GoogleSQL instead.
-        #
-        # --where goes down with them rather than staying an outer DuckDB
-        # filter. A scan streams, so filtering late there only wastes
-        # bandwidth, but a query job must finish its whole result first: left
-        # outside, `SELECT * FROM <view>` asks BigQuery to materialise the
-        # entire relation, which on a billion-row view fails outright with
-        # "Response too large to return". --where is documented as BigQuery
-        # SQL, so BigQuery is where it belongs.
-        view_conditions = list(bq_filters)
-        if where:
-            # Validated upstream in extract_bigquery(); wrapped so a trailing
-            # '--' cannot comment out the rest of the GoogleSQL either.
-            view_conditions.append(where_condition_fragment(where))
-        # LIMIT only goes down when nothing filters after it. With a local
-        # bbox condition outside, an inner LIMIT would cut the candidates
-        # before that filter ran and return fewer rows than asked for.
-        push_limit = limit if not local_conditions else None
-        relation = _bigquery_view_relation(validated_table_id, view_conditions, push_limit)
-        query = f"SELECT {select_cols} FROM {relation}"
-        if local_conditions:
-            query += " WHERE " + " AND ".join(local_conditions)
-        if limit is not None and push_limit is None:
-            query += f" LIMIT {limit}"
-        return query
+        return _build_view_query(
+            validated_table_id,
+            select_cols,
+            bq_filters=bq_filters,
+            local_conditions=local_conditions,
+            where=where,
+            limit=limit,
+            source_columns=source_columns,
+            geom_col=geom_col,
+        )
     if bq_filters:
         # The GoogleSQL filter travels inside a DuckDB string literal, so it is
         # escaped once, here, at the point of interpolation. A BigQuery flexible
@@ -1309,4 +1369,52 @@ def _build_bigquery_query(
     if limit is not None:
         query += f" LIMIT {limit}"
 
+    return query
+
+
+def _build_view_query(
+    validated_table_id: str,
+    select_cols: str,
+    *,
+    bq_filters: list[str],
+    local_conditions: list[str],
+    where: str | None,
+    limit: int | None,
+    source_columns: list[str] | None,
+    geom_col: str | None,
+) -> str:
+    """Build the DuckDB query that reads a view through a BigQuery query job.
+
+    A view opens no Storage Read API session and so has no filter= argument;
+    the predicates ride inside the GoogleSQL instead.
+
+    --where goes down with them rather than staying an outer DuckDB filter. A
+    scan streams, so filtering late there only wastes bandwidth, but a query
+    job must finish its whole result first: left outside, ``SELECT * FROM
+    <view>`` asks BigQuery to materialise the entire relation, which on a
+    billion-row view fails outright with "Response too large to return", and
+    a partitioned view could not prune. The clause is checked first for the
+    DuckDB spellings that would silently change meaning in GoogleSQL.
+    """
+    view_conditions = list(bq_filters)
+    if where:
+        _require_where_portable_to_googlesql(where)
+        # Validated upstream in extract_bigquery(); wrapped so a trailing
+        # '--' cannot comment out the rest of the GoogleSQL either.
+        view_conditions.append(where_condition_fragment(where))
+    # The outer DuckDB filter reads the geometry column, so the query job must
+    # return it even when the user excluded it from the output.
+    columns = list(source_columns) if source_columns is not None else None
+    if columns is not None and local_conditions and geom_col and geom_col not in columns:
+        columns.append(geom_col)
+    # LIMIT only goes down when nothing filters after it. With a local bbox
+    # condition outside, an inner LIMIT would cut the candidates before that
+    # filter ran and return fewer rows than asked for.
+    push_limit = limit if not local_conditions else None
+    relation = _bigquery_view_relation(validated_table_id, view_conditions, push_limit, columns)
+    query = f"SELECT {select_cols} FROM {relation}"
+    if local_conditions:
+        query += " WHERE " + " AND ".join(local_conditions)
+    if limit is not None and push_limit is None:
+        query += f" LIMIT {limit}"
     return query
