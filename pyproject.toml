@@ -73,6 +73,7 @@ dependencies = [
     "idna>=3.15",  # CVE-2026-45409 fix
     "urllib3>=2.7.0",  # PYSEC-2026-141, PYSEC-2026-142 fix
     "msgpack>=1.2.1",  # GHSA-6v7p-g79w-8964 fix (transitive via CacheControl)
+    "multidict>=6.9.1",  # CVE-2026-104874 fix (transitive via aiohttp)
 ]
 
 [project.scripts]
