@@ -178,6 +178,41 @@ table = gpio.Table.from_bigquery(
 
 See the [Extract Guide](../guide/extract.md#bbox-filtering-mode-server-vs-local) for detailed tradeoff analysis.
 
+**Running your own SQL:**
+
+`where` can only add a predicate to `SELECT * FROM <table>`. Pass `sql`
+instead when the question needs more than that -- a window function, a join,
+a `GROUP BY`. It replaces `table_id` as the source and runs as a BigQuery
+query job:
+
+```python
+table = gpio.Table.from_bigquery(
+    sql="""
+        SELECT * EXCEPT(rn) FROM (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY item_id ORDER BY version DESC) AS rn
+          FROM `myproject.geodata.items`
+          WHERE acquired_at >= TIMESTAMP('2025-09-01')
+        ) WHERE rn = 1
+    """,
+    project='myproject',
+    geography_column='geometry',
+)
+```
+
+`project` is required with `sql`, because the query job has to be billed
+somewhere and there is no `table_id` to take a project from. `sql` is
+mutually exclusive with every argument that shapes the query -- `columns`,
+`exclude_columns`, `where`, `bbox`, `bbox_mode`, `bbox_threshold`, `limit` --
+since the statement already says all of that. The arguments that shape the
+output (`geography_column`, `geometry_format`, `edges`, `repair_geometry`)
+still apply. The same `sql=` argument is on `ops.read_bigquery()`.
+
+!!! warning "Filter inside the statement"
+    A query job materializes its whole result before anything is read, so an
+    unfiltered `SELECT *` over a large relation fails with "Response too
+    large to return" rather than returning slowly.
+
 !!! note "BigQuery views"
     A view, materialized view or external table is read through a BigQuery
     query job instead of the Storage Read API, detected and retried

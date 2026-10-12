@@ -657,8 +657,9 @@ class Table:
     @classmethod
     def from_bigquery(
         cls,
-        table_id: str,
+        table_id: str | None = None,
         *,
+        sql: str | None = None,
         project: str | None = None,
         credentials_file: str | None = None,
         where: str | None = None,
@@ -684,8 +685,20 @@ class Table:
         can be parsed by specifying geography_column and geometry_format.
 
         Args:
-            table_id: Fully qualified BigQuery table ID (project.dataset.table)
-            project: GCP project ID (overrides project in table_id if set)
+            table_id: Fully qualified BigQuery table ID
+                (project.dataset.table). Omit it when ``sql`` is given.
+            sql: GoogleSQL to run as the source, in place of ``table_id``.
+                For what ``where`` cannot express -- a window function, a
+                join, a GROUP BY. Requires ``project``, and is mutually
+                exclusive with every argument that shapes the query
+                (``where``, ``bbox``, ``bbox_mode``, ``bbox_threshold``,
+                ``limit``, ``columns``, ``exclude_columns``): the statement
+                says all of that itself. Filter inside it -- a query job
+                materializes its whole result first, so an unfiltered
+                statement over a large relation fails with "Response too
+                large to return".
+            project: GCP project ID (overrides project in table_id if set;
+                required with ``sql``)
             credentials_file: Path to service account JSON file
             where: SQL WHERE clause for filtering (BigQuery SQL syntax)
             bbox: Bounding box for spatial filter as "minx,miny,maxx,maxy"
@@ -737,6 +750,13 @@ class Table:
             ...     geography_column='geometry',
             ...     geometry_format='wkt'
             ... )
+
+            >>> # Run your own GoogleSQL instead of reading a table
+            >>> table = gpio.Table.from_bigquery(
+            ...     sql="SELECT name, geog FROM `p.d.t` QUALIFY ROW_NUMBER() "
+            ...         "OVER (PARTITION BY id ORDER BY version DESC) = 1",
+            ...     project='myproject',
+            ... )
         """
         from geoparquet_io.core.column_selection import join_column_list
         from geoparquet_io.core.extract_bigquery import extract_bigquery
@@ -751,6 +771,7 @@ class Table:
         arrow_table = extract_bigquery(
             table_id=table_id,
             output_parquet=None,  # Return table instead of writing
+            sql=sql,
             project=project,
             credentials_file=credentials_file,
             where=where,
@@ -769,11 +790,10 @@ class Table:
 
         if arrow_table is None:
             raise RuntimeError(
-                f"Failed to read from BigQuery table: {table_id}. "
+                f"Failed to read from BigQuery: {table_id or sql}. "
                 "Possible causes: (1) Authentication/credentials issue - verify your service "
                 "account has BigQuery Data Viewer role or check gcloud auth; "
-                "(2) Table not found - verify the table_id format (project.dataset.table); "
-                "(3) Views or external tables are not supported by the BigQuery Storage Read API."
+                "(2) Table not found - verify the table_id format (project.dataset.table)."
             )
 
         return cls(arrow_table)
