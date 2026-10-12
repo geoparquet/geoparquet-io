@@ -741,3 +741,34 @@ def test_geoparquet_copy_options_refuses_a_geo_block_beside_a_v1_writer(duckdb_v
 
     with pytest.raises(ValueError, match="geo"):
         geoparquet_copy_options(duckdb_version, {"geo": "{}"})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["extract", "geoparquet"], ["sort", "column"]],
+    ids=["extract", "sort-column"],
+)
+def test_a_carried_covering_on_a_v2_input_stays_one_geo_entry(tmp_path, command):
+    """#1225 reached every fast-path write that carries the input's block, not only --add-bbox."""
+    src = _write_native_v2(tmp_path / "raw.parquet", "EPSG:3857")
+    staged = tmp_path / "in.parquet"
+    _run("sort", "str", src, staged, "--add-bbox")
+    out = tmp_path / "out.parquet"
+
+    tail = ["id"] if command == ["sort", "column"] else []
+    _run(*command, staged, out, *tail)
+
+    entries = _geo_kv_entries(out)
+    assert len(entries) == 1, f"expected one geo entry, got {len(entries)}: {entries}"
+    col = entries[0]["columns"]["geometry"]
+    assert col["covering"] == {"bbox": BBOX_COVERING}
+    assert col["crs"]["id"] == {"authority": "EPSG", "code": 3857}
+
+
+def test_sort_add_bbox_at_parquet_geo_only_writes_no_geo_entry(tmp_path):
+    src = _write_native_v2(tmp_path / "in.parquet", "EPSG:3857")
+    out = tmp_path / "out.parquet"
+
+    _run("sort", "hilbert", src, out, "--add-bbox", "--geoparquet-version", "parquet-geo-only")
+
+    assert _geo_kv_entries(out) == []

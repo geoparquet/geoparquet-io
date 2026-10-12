@@ -506,18 +506,19 @@ def _rewrite_with_geo(
             debug(f"Native GEOMETRY type: {has_native_geometry}")
             debug(f"Existing metadata keys: {list(existing_kv.keys())}")
 
-        # Build COPY options. The rewrite always supplies its own `geo` block,
-        # so DuckDB must be told 'NONE': under 'V2' it writes ours and then
-        # appends its own generated `geo` key beside it (#1225), and under
-        # 'V1' it would write its own block too. 'NONE' governs the *metadata*
-        # only, so a 2.0 input keeps its native GEOMETRY logical type; keeping
-        # the v1.x geometry columns physically unchanged is what
-        # _wrap_query_with_blob_conversion below is for (#712).
+        # Build COPY options. 'NONE' for every input, native or not: this
+        # rewrite always supplies its own `geo` block, and under 'V2' (or 'V1')
+        # DuckDB writes ours and then appends its own generated `geo` key
+        # beside it (#1225). 'NONE' governs the *metadata* only, so a 2.0 input
+        # keeps its native GEOMETRY logical type, CRS and statistics. Keeping
+        # the v1.x geometry columns physically WKB is what
+        # _wrap_query_with_blob_conversion below is for (#712), which is the
+        # only thing `has_native_geometry` decides here.
         copy_options = [
             "FORMAT PARQUET",
             f"COMPRESSION {compression}",
             *geoparquet_copy_options(
-                "V2" if has_native_geometry else "NONE",
+                "NONE",
                 _kv_pairs_with_geo(existing_kv, geo_meta),
             ),
             f"ROW_GROUP_SIZE {row_group_size}",
