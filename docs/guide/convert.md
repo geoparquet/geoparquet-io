@@ -66,7 +66,7 @@ Auto-detected by file extension:
 - **GeoPackage** (.gpkg)
 - **FlatGeobuf** (.fgb)
 - **File Geodatabase** (.gdb)
-- **CSV/TSV** (.csv, .tsv, .txt) - See [CSV/TSV Support](#csvtsv-support) below
+- **CSV/TSV** (.csv, .tsv, .txt) - See [CSV/TSV Support](#tabular-sources-csv-tsv-and-parquet-without-geometry) below
 
 Any format supported by DuckDB's spatial extension (50+ formats) can be read.
 

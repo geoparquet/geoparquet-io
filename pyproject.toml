@@ -113,9 +113,7 @@ dev = [
     "deptry>=0.25.0",
 ]
 docs = [
-    "mkdocs>=1.5.0",
-    "mkdocs-material>=9.5.0",
-    "mkdocstrings[python]>=0.24.0",
+    "zensical>=0.0.69; python_version >= '3.11'",
     "pymdown-extensions>=10.21.3",  # CVE-2026-46338 fix
 ]
 benchmark = [
@@ -420,7 +418,7 @@ sort_by_size = true
 verbose = false
 
 [tool.codespell]
-# site/ (mkdocs build) and mutants/ (mutmut working tree) are gitignored
+# site/ (zensical build) and mutants/ (mutmut working tree) are gitignored
 # build artifacts; scanning them made test_codespell_passes fail on any
 # machine that had built docs or run mutation testing locally.
 # *.csv and *.geojson are sample data, not prose: real-world place names and

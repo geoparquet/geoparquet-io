@@ -63,8 +63,8 @@ uv sync --all-extras
 ### Documentation
 
 ```bash
-uv sync --group docs
-uv run mkdocs serve
+uv sync --extra docs
+uv run zensical serve
 ```
 
 ## Verifying Installation

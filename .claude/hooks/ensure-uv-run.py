@@ -25,7 +25,7 @@ UV_COMMANDS = [
     "mypy",
     "vulture",
     "radon",
-    "mkdocs",  # For documentation
+    "zensical",  # For documentation
     "python -m pytest",
     "python -m",
 ]

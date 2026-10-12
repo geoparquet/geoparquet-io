@@ -104,12 +104,23 @@
 }
 
 /*
- * The primary color matches the body text, so the current page in the
- * navigation and table of contents is marked by weight instead.
+ * The theme marks the current page in the navigation with the accent.
+ * Orange on blue reads well, so dark mode keeps it. Orange on cream does
+ * not, so light mode marks the current page in blue at a heavier weight.
  */
 .md-nav__link--active,
 .md-nav__item--active > .md-nav__link {
   font-weight: 700;
+}
+
+[data-md-color-scheme="default"] .md-nav__link--active,
+[data-md-color-scheme="default"] .md-nav__link--active:hover {
+  color: var(--gpio-blue);
+}
+
+/* The header mark is a dark square, so soften its corners on cream. */
+.md-header__button.md-logo img {
+  border-radius: 0.2rem;
 }
 
 /* The home page logo. */

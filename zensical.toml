@@ -1,0 +1,109 @@
+[project]
+site_name = "geoparquet-io"
+site_description = "Fast I/O and transformation tools for GeoParquet files"
+site_author = "Chris Holmes"
+site_url = "https://geoparquet.io/"
+repo_name = "geoparquet/geoparquet-io"
+repo_url = "https://github.com/geoparquet/geoparquet-io"
+edit_uri = "edit/main/docs/"
+extra_css = ["stylesheets/extra.css"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting Started" = [
+    { "Installation" = "getting-started/installation.md" },
+    { "Quick Start" = "getting-started/quickstart.md" },
+  ] },
+  { "Concepts" = [
+    { "What is GeoParquet?" = "concepts/geoparquet-overview.md" },
+    { "Spatial Performance" = "concepts/spatial-indices.md" },
+    { "Best Practices" = "concepts/best-practices.md" },
+  ] },
+  { "User Guide" = [
+    { "Inspecting Files" = "guide/inspect.md" },
+    { "Viewing Metadata" = "guide/meta.md" },
+    { "Converting Formats" = "guide/convert.md" },
+    { "GeoJSON & PMTiles" = "guide/geojson.md" },
+    { "Extracting Data" = "guide/extract.md" },
+    { "Write Strategies" = "guide/write-strategies.md" },
+    { "Checking Best Practices" = "guide/check.md" },
+    { "Sorting Data" = "guide/sort.md" },
+    { "Adding Spatial Indices" = "guide/add.md" },
+    { "Partitioning Files" = "guide/partition.md" },
+    { "Sub-Partitioning Large Files" = "guide/sub-partitioning.md" },
+    { "Aggregating Data" = "guide/process-aggregate.md" },
+    { "Overview Levels" = "guide/process-overview.md" },
+    { "Simplifying Geometries" = "guide/process-simplify.md" },
+    { "Raster to Vector" = "guide/process-raster.md" },
+    { "Remote Files & Authentication" = "guide/remote-files.md" },
+    { "Unix Piping" = "guide/piping.md" },
+    { "Uploading to Cloud Storage" = "guide/upload.md" },
+    { "STAC Generation" = "guide/stac.md" },
+    { "Benchmarking" = "guide/benchmarks.md" },
+    { "Plugins" = "guide/plugins.md" },
+    { "fiboa Plugin" = "guide/fiboa.md" },
+    { "LLM Integration" = "guide/llm-integration.md" },
+  ] },
+  { "CLI Reference" = [
+    { "Overview" = "cli/overview.md" },
+    { "convert" = "cli/convert.md" },
+    { "inspect" = [
+      { "inspect" = "cli/inspect.md" },
+      { "inspect meta" = "cli/meta.md" },
+    ] },
+    { "extract" = "cli/extract.md" },
+    { "check" = "cli/check.md" },
+    { "sort" = "cli/sort.md" },
+    { "add" = "guide/add.md" },
+    { "partition" = "guide/partition.md" },
+    { "publish" = [
+      { "publish upload" = "cli/upload.md" },
+      { "publish stac" = "cli/stac.md" },
+    ] },
+    { "benchmark" = "cli/benchmark.md" },
+  ] },
+  { "Python API" = "api/python-api.md" },
+  { "Examples" = [
+    { "Basic Usage" = "examples/basic.md" },
+    { "Batch Processing" = "examples/batch.md" },
+  ] },
+  { "Troubleshooting" = "troubleshooting.md" },
+  { "Contributing" = "contributing.md" },
+  { "Changelog" = "CHANGELOG.md" },
+]
+
+[project.theme]
+logo = "assets/logo-mark.png"
+favicon = "assets/favicon.png"
+features = [
+  "navigation.top",
+  "search.suggest",
+  "search.highlight",
+  "content.code.copy",
+]
+
+# Dark is the default: the first palette entry is the one a new visitor
+# sees. The colors themselves live in docs/stylesheets/extra.css.
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to dark mode"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+tables = {}
+toc.permalink = true
+"pymdownx.superfences" = {}
+"pymdownx.tabbed".alternate_style = true
+"pymdownx.highlight" = {}
+"pymdownx.snippets" = { base_path = "docs", check_paths = true }

@@ -206,7 +206,7 @@ because of that, a lot can merge without a human bottleneck.
 ## Documentation
 
 ```bash
-uv run mkdocs serve
+uv run zensical serve
 ```
 
 ## Commits
