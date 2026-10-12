@@ -397,6 +397,34 @@ def get_kv_metadata(parquet_file: str, con=None) -> dict[bytes, bytes]:
         return _pyarrow_get_kv_metadata(resolved_path)
 
     # Slow path: use DuckDB for remote files or when connection is provided
+    # Convert to dict with bytes keys for backward compatibility
+    kv_dict = {}
+    for key_bytes, val_bytes in _read_kv_entries(parquet_file, con):
+        if key_bytes:
+            kv_dict[key_bytes] = val_bytes
+    return kv_dict
+
+
+def count_kv_key(parquet_file: str, key: str, con=None) -> int:
+    """How many file-level key/value entries the footer carries under ``key``.
+
+    The Parquet footer is a list, not a map, so a key can repeat. Every dict
+    this module returns collapses the repeats to one value, which is why a
+    footer with two ``geo`` entries looked fine to ``gpio check spec`` (#1229).
+    Read through DuckDB, local files included, since pyarrow's
+    ``FileMetaData.metadata`` is a dict too. DuckDB refuses a footer whose
+    ``geo`` value it cannot parse; ``parquet_footer.read_footer_kv`` reads a
+    local footer without that limit.
+
+    Raises:
+        GeoParquetError: If file is not a valid Parquet file or cannot be read.
+    """
+    wanted = key.encode("utf-8")
+    return sum(1 for key_bytes, _ in _read_kv_entries(parquet_file, con) if key_bytes == wanted)
+
+
+def _read_kv_entries(parquet_file: str, con=None) -> list[tuple[bytes | None, bytes | None]]:
+    """Every footer key/value entry, in order and with repeats, read by DuckDB."""
     metadata_path = _metadata_path(parquet_file)
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
@@ -407,15 +435,14 @@ def get_kv_metadata(parquet_file: str, con=None) -> dict[bytes, bytes]:
             FROM parquet_kv_metadata({sql_path(metadata_path)})
         """).fetchall()
 
-        # Convert to dict with bytes keys for backward compatibility
-        kv_dict = {}
-        for k, v in result:
-            # Handle both bytes and string types
-            key_bytes = k if isinstance(k, bytes) else k.encode("utf-8") if k else None
-            val_bytes = v if isinstance(v, bytes) else v.encode("utf-8") if v else None
-            if key_bytes:
-                kv_dict[key_bytes] = val_bytes
-        return kv_dict
+        # Handle both bytes and string types
+        return [
+            (
+                k if isinstance(k, bytes) else k.encode("utf-8") if k else None,
+                v if isinstance(v, bytes) else v.encode("utf-8") if v else None,
+            )
+            for k, v in result
+        ]
     except duckdb.InvalidInputException as e:
         # File is not a valid Parquet file (e.g., wrong format, corrupt)
         error_msg = str(e)

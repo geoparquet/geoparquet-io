@@ -30,6 +30,7 @@ from geoparquet_io.core.crs_utils import (
     is_geographic_crs,
 )
 from geoparquet_io.core.duckdb_metadata import (
+    count_kv_key,
     is_geometry_column,
     parse_geometry_logical_type,
     resolve_authority_code_crs,
@@ -51,6 +52,7 @@ from geoparquet_io.core.geo_metadata import (
     is_covering_path,
 )
 from geoparquet_io.core.logging_config import configure_verbose
+from geoparquet_io.core.parquet_footer import read_footer_kv
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
     schema_direct_children,
@@ -191,6 +193,42 @@ def _check_geo_key_exists(kv_metadata: dict) -> ValidationCheck:
         else 'file must include a "geo" metadata key',
         category="core_metadata",
     )
+
+
+def _check_geo_key_unique(geo_entry_count: int) -> ValidationCheck:
+    """The footer must carry exactly one 'geo' entry.
+
+    Readers resolve a repeated key differently (pyarrow keeps one, DuckDB
+    another), so two entries make the file mean different things to different
+    tools. A DuckDB COPY that supplies its own `geo` beside a non-NONE
+    GEOPARQUET_VERSION writes exactly this (#1225, #1229).
+    """
+    unique = geo_entry_count == 1
+    return ValidationCheck(
+        name="geo_key_unique",
+        status=CheckStatus.PASSED if unique else CheckStatus.FAILED,
+        message='file carries one "geo" metadata key'
+        if unique
+        else f'file carries {geo_entry_count} "geo" metadata keys, readers pick different ones',
+        category="core_metadata",
+    )
+
+
+def _geo_entry_count(parquet_file: str) -> int | None:
+    """How many `geo` entries the footer carries, or None when it cannot be read.
+
+    A local file is read from its raw footer, because DuckDB refuses a footer
+    whose `geo` value it cannot parse, and those are files this validator must
+    still report on. Anything else (remote, a directory, a glob) goes through
+    DuckDB. None skips the uniqueness check; the other checks already say what
+    is wrong with a footer that cannot be read.
+    """
+    try:
+        if Path(parquet_file).is_file():
+            return sum(1 for key, _ in read_footer_kv(parquet_file) if key == b"geo")
+        return count_kv_key(parquet_file, "geo")
+    except (GeoParquetError, OSError):
+        return None
 
 
 def _check_metadata_is_json(geo_meta: Any) -> ValidationCheck:
@@ -3693,6 +3731,8 @@ def validate_geoparquet(
     # function's job.
     try:
         kv_metadata = get_kv_metadata(parquet_file)
+        # The dict above collapses a repeated key, so count the raw entries.
+        geo_entry_count = _geo_entry_count(parquet_file) if b"geo" in kv_metadata else None
         geo_meta = get_geo_metadata(parquet_file)
         schema_info = get_schema_info(parquet_file)
         geo_columns = detect_geometry_columns(parquet_file)
@@ -3753,6 +3793,7 @@ def validate_geoparquet(
                     con,
                     sample_size,
                     validate_data,
+                    geo_entry_count=geo_entry_count,
                 )
             )
         else:
@@ -3927,12 +3968,19 @@ def _run_geoparquet_checks(
     con,
     sample_size: int,
     validate_data: bool,
+    geo_entry_count: int | None = None,
 ) -> list[ValidationCheck]:
-    """Run checks for GeoParquet files (1.x or 2.0)."""
+    """Run checks for GeoParquet files (1.x or 2.0).
+
+    ``geo_entry_count`` is how many ``geo`` entries the footer carries, which
+    ``kv_metadata`` (a dict) cannot show. None skips the uniqueness check.
+    """
     checks = []
 
     # Core metadata checks (1.0+)
     checks.append(_check_geo_key_exists(kv_metadata))
+    if geo_entry_count:
+        checks.append(_check_geo_key_unique(geo_entry_count))
 
     if not isinstance(geo_meta, dict):
         checks.append(

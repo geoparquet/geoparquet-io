@@ -39,6 +39,7 @@ from geoparquet_io.core.validate import (
     _check_covering_bbox_paths,
     _check_covering_bbox_structure,
     _check_encoding_matches_data,
+    _check_geo_key_unique,
     _check_geometry_types_match_data,
     _execute_bounds_query,
     _interpret_bbox_result,
@@ -648,6 +649,17 @@ def test_geo_metadata_that_is_not_an_object_fails_the_run():
     assert checks[-1].message == "failed to parse 'geo' metadata as a JSON object"
 
 
+def test_a_repeated_geo_key_fails_and_a_single_one_passes():
+    """Two `geo` entries in one footer (#1229). The file-level case lives in
+    tests/test_validate_duplicate_geo_key.py, which builds the footer DuckDB writes."""
+    repeated = _check_geo_key_unique(2)
+    assert repeated.name == "geo_key_unique"
+    assert repeated.status == CheckStatus.FAILED
+    assert repeated.message == 'file carries 2 "geo" metadata keys, readers pick different ones'
+
+    assert _check_geo_key_unique(1).status == CheckStatus.PASSED
+
+
 # =============================================================================
 # The ratchet: a new FAILED arm must not arrive untested and unnoticed
 # =============================================================================
@@ -680,6 +692,7 @@ FAILED_ARMS = {
     "_check_v2_crs_in_parquet_type": HERE,
     "_check_version_matches": HERE,
     "_run_geoparquet_checks": HERE,
+    "_check_geo_key_unique": HERE,
     "_check_geo_key_exists": ELSEWHERE,
     "_check_metadata_is_json": ELSEWHERE,
     "_check_version_present": ELSEWHERE,

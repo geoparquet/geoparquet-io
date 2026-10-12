@@ -511,6 +511,37 @@ def _verify_data_untouched(before: pq.FileMetaData, patched_file: str) -> None:
             raise FooterPatchUnsupported(f"row group {index} moved in the patched footer")
 
 
+def read_footer_kv(parquet_file: str) -> list[_Entry]:
+    """Every footer key/value entry of a local file, in order, repeats included.
+
+    pyarrow and DuckDB both hand the entries back as a map, so a repeated key
+    is invisible through them, and DuckDB refuses the whole read when a `geo`
+    value is not a block it can parse. This reads the raw list instead, which is
+    what ``gpio check spec`` needs to see a footer with two `geo` entries
+    (#1229).
+
+    Raises:
+        FooterPatchUnsupported: The file is not a readable, unencrypted Parquet file.
+    """
+    with open(parquet_file, "rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        footer_start, footer_length = _footer_span(handle, size, parquet_file)
+        handle.seek(footer_start)
+        footer = handle.read(footer_length)
+    try:
+        fields, _ = _struct_fields(footer)
+        for field in fields:
+            if field.field_id == _KV_FIELD_ID:
+                return _decode_kv_list(footer, field.value_start)
+    except FooterPatchUnsupported:
+        raise
+    except (IndexError, ValueError, OverflowError) as exc:
+        raise FooterPatchUnsupported(
+            f"the footer's thrift structure could not be read: {exc}"
+        ) from exc
+    return []
+
+
 def patch_footer_kv(
     parquet_file: str,
     updates: dict[str, str | bytes | None],
