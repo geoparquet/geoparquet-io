@@ -596,3 +596,58 @@ def test_describe_reads_a_crs_whose_text_holds_an_apostrophe():
     assert "centroid" in native, "the apostrophe hid the column"
     parsed = parse_geometry_logical_type(native["centroid"])
     assert "O'Brien Mercator" in json.dumps(parsed)
+
+
+class TestTheEdgesOfTheHelpers:
+    def test_the_table_query_converts_only_plain_wkb_secondaries(self):
+        from geoparquet_io.core.write_strategies.duckdb_kv import (
+            _table_query_with_native_geometry,
+        )
+
+        table = pa.table(
+            {
+                "geometry": pa.array([b"\x01"], type=pa.binary()),
+                "centroid": pa.array([b"\x01"], type=pa.large_binary()),
+                "label_wkt": pa.array(["POINT (0 0)"]),
+            }
+        )
+        info = {
+            "primary": "geometry",
+            "secondary": ["centroid", "label_wkt", "dropped"],
+            "metadata": {"centroid": {"crs": {"id": {"authority": "OGC", "code": "CRS84"}}}},
+        }
+
+        query = _table_query_with_native_geometry(table, "geometry", info, "2.0")
+
+        assert 'ST_GeomFromWKB("centroid") AS "centroid"' in query, "a default CRS is not set"
+        assert "label_wkt" not in query, "a WKT string is not ST_GeomFromWKB's to read"
+        assert "dropped" not in query
+        assert (
+            _table_query_with_native_geometry(table, "geometry", info, "1.1").count(
+                "ST_GeomFromWKB"
+            )
+            == 1
+        )
+
+    def test_a_describe_that_fails_answers_nothing(self):
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        from geoparquet_io.core.geometry_detection import native_geometry_types_from_query
+
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            assert (
+                native_geometry_types_from_query(con, "SELECT * FROM nowhere", verbose=True) == {}
+            )
+        finally:
+            con.close()
+
+    def test_the_callers_primary_is_never_added_as_a_secondary(self):
+        from geoparquet_io.core.write_funnels import _merge_derived_geometry_info
+
+        caller = {"primary": "geometry", "secondary": [], "metadata": {}}
+        derived = {"primary": "other", "secondary": ["geometry", "centroid"], "metadata": {}}
+
+        merged = _merge_derived_geometry_info(caller, derived)
+
+        assert merged["secondary"] == ["centroid"]
+        assert caller["secondary"] == [], "the caller's own dict was mutated"
