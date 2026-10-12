@@ -1565,11 +1565,23 @@ class TestBigQueryIntegration:
 def _inner_googlesql(sql: str) -> str:
     """Decode the GoogleSQL string literal out of a ``bigquery_query`` call.
 
-    DuckDB does the decoding, so the assertion is about the SQL BigQuery
-    actually receives rather than about how the Python f-string looked.
+    Scans for the second argument's quoted literal, honouring DuckDB's
+    doubled-quote escape, because the call may be followed by an outer
+    WHERE or LIMIT whose own parens and quotes would defeat a naive split.
+    DuckDB does the final decoding, so the assertion is about the SQL
+    BigQuery actually receives rather than how the f-string looked.
     """
-    after_project = sql.split("bigquery_query(", 1)[1].split(",", 1)[1]
-    literal = after_project.rsplit(")", 1)[0].strip()
+    rest = sql.split("bigquery_query(", 1)[1].split(",", 1)[1]
+    start = rest.index("'")
+    i = start + 1
+    while i < len(rest):
+        if rest[i] == "'":
+            if i + 1 < len(rest) and rest[i + 1] == "'":
+                i += 2
+                continue
+            break
+        i += 1
+    literal = rest[start : i + 1]
     con = duckdb.connect()
     try:
         return con.execute(f"SELECT {literal}").fetchone()[0]
@@ -1922,3 +1934,109 @@ class TestBigQueryViewIntegration:
 
         assert Path(output_file).exists()
         assert pq.ParquetFile(output_file).metadata.num_rows == 10
+
+
+class TestViewWithALocalBboxFilter:
+    """--bbox-mode local on a view: the filter runs in DuckDB, so LIMIT
+    cannot be pushed down with it.
+
+    The inner query would otherwise cut candidates before the spatial filter
+    saw them, returning fewer rows than asked for. This combination is the
+    only path where the view relation carries an outer WHERE.
+    """
+
+    def _sql(self, limit):
+        from geoparquet_io.core.extract_bigquery import _build_bigquery_query
+
+        return _build_bigquery_query(
+            con=None,
+            validated_table_id="my-project.ds.v",
+            select_cols="*",
+            bbox="0,0,10,10",
+            bbox_mode="local",
+            bbox_threshold=1000,
+            geom_col="geom",
+            where=None,
+            limit=limit,
+            is_view=True,
+        )
+
+    def test_the_local_filter_lands_outside_the_query_job(self):
+        sql = self._sql(None)
+        outer = sql.split("bigquery_query(", 1)[1]
+        assert "ST_Intersects" in outer.rsplit(")", 1)[-1] or "WHERE" in sql
+        assert "ST_Intersects" in sql
+
+    def test_the_spatial_predicate_is_not_pushed_into_the_googlesql(self):
+        inner = _inner_googlesql(self._sql(None))
+        assert "ST_Intersects" not in inner
+        assert "ST_INTERSECTS" not in inner
+
+    def test_limit_stays_outside_when_a_local_filter_follows_it(self):
+        sql = self._sql(7)
+        inner = _inner_googlesql(sql)
+        assert "LIMIT" not in inner, inner
+        assert _strip_line_comments(sql).rstrip().endswith("LIMIT 7")
+
+    def test_it_is_still_one_statement(self):
+        assert len(duckdb.extract_statements(self._sql(7))) == 1
+
+
+class TestBboxStrategyFallsThroughForATable:
+    """The is_view shortcut must not swallow the table path."""
+
+    def test_auto_mode_on_a_table_still_weighs_the_row_count(self):
+        from geoparquet_io.core.extract_bigquery import _determine_bbox_strategy
+
+        con = MagicMock()
+        with patch(
+            "geoparquet_io.core.extract_bigquery._get_table_row_count",
+            return_value=1_000_000,
+        ):
+            assert _determine_bbox_strategy(con, "p.d.t", "auto", 500_000) is True
+        with patch(
+            "geoparquet_io.core.extract_bigquery._get_table_row_count",
+            return_value=10,
+        ):
+            assert _determine_bbox_strategy(con, "p.d.t", "auto", 500_000) is False
+
+
+class TestShowSqlDuringTheViewRetry:
+    """--show-sql must print the query that actually ran, not only the one
+    that was refused."""
+
+    SCHEMA = [("id", "VARCHAR"), ("geom", "GEOMETRY")]
+    NON_TABLE_ERROR = "Binder Error: non-table entities cannot be read with the storage API"
+
+    def test_both_the_scan_and_the_retry_are_printed(self, tmp_path, monkeypatch):
+        import geoparquet_io.core.extract_bigquery as bq
+        from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+        printed: list[str] = []
+        monkeypatch.setattr(bq, "progress", printed.append)
+
+        table = pa.table({"id": pa.array(["a"]), "geom": pa.array([None], pa.binary())})
+
+        def execute(sql, *a, **k):
+            if "bigquery_scan(" in str(sql) and "DESCRIBE" not in str(sql):
+                raise duckdb.BinderException(self.NON_TABLE_ERROR)
+            result = MagicMock()
+            result.arrow.return_value.read_all.return_value = table
+            return result
+
+        con = MagicMock()
+        con.execute.side_effect = execute
+        with (
+            patch.object(bq, "BigQueryConnection") as mock_conn,
+            patch.object(bq, "_schema_rows", return_value=self.SCHEMA),
+        ):
+            mock_conn.return_value.__enter__.return_value = con
+            extract_bigquery(
+                table_id="my-project.ds.relation",
+                output_parquet=str(tmp_path / "o.parquet"),
+                show_sql=True,
+            )
+
+        sqls = [m for m in printed if m.startswith("SQL: ")]
+        assert any("bigquery_scan(" in s for s in sqls), sqls
+        assert any("bigquery_query(" in s for s in sqls), sqls
