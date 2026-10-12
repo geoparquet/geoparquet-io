@@ -526,9 +526,11 @@ def geoparquet_copy_options(duckdb_version: str, kv_pairs: Mapping[str, str] | N
     logical type, the CRS in it and its geospatial statistics.
 
     A ``'V1'`` or ``'BOTH'`` request with a ``geo`` key is refused rather than
-    rewritten: those writers turn a ``GEOMETRY`` column into WKB, and ``'NONE'``
-    would write it native instead, which a 1.x file must not carry (#712). No
-    caller does this today; a caller that wants it has to cast to ``BLOB``
+    rewritten. ``'V1'`` turns a ``GEOMETRY`` column into WKB, and ``'NONE'``
+    would write it native instead, which a 1.x file must not carry (#712).
+    ``'BOTH'`` keeps the column native, but what it promises is DuckDB's own
+    dual-readable block, which a supplied block would silently stand in for.
+    No caller does this today; a caller that wants it has to cast to ``BLOB``
     itself and ask for ``'NONE'``.
 
     Args:
