@@ -1,3 +1,7 @@
+<p align="center">
+  <img class="gpio-logo" src="https://raw.githubusercontent.com/geoparquet/geoparquet-io/main/docs/assets/logo.png" alt="geoparquet-io logo: a globe robot carrying a stack of Parquet row groups" width="320">
+</p>
+
 # geoparquet-io
 
 [![PyPI version](https://badge.fury.io/py/geoparquet-io.svg)](https://badge.fury.io/py/geoparquet-io)
