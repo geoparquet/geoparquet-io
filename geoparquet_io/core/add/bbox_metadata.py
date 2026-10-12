@@ -27,7 +27,6 @@ from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _wrap_query_with_blob_conversion,
-    build_kv_metadata_clause,
     get_duckdb_connection,
     sql_path,
 )
@@ -45,6 +44,7 @@ from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, success, warn
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, patch_footer_kv
+from geoparquet_io.core.parquet_writer import geoparquet_copy_options
 from geoparquet_io.core.streaming import find_geometry_column_from_table
 
 if TYPE_CHECKING:
@@ -108,33 +108,25 @@ def _get_existing_kv_metadata(conn: duckdb.DuckDBPyConnection, parquet_file: str
     return metadata
 
 
-def _build_kv_metadata_clause(existing_metadata: dict, new_geo_meta: dict) -> str:
-    """Build the KV_METADATA clause preserving existing metadata.
+def _kv_pairs_with_geo(existing_metadata: dict, new_geo_meta: dict) -> dict[str, str]:
+    """The file-level KV pairs the rewrite writes: every existing key, new ``geo``.
 
-    DuckDB's KV_METADATA replaces all metadata, so we must include all existing
-    keys we want to preserve, plus the updated geo key.
-
-    The clause itself comes from the shared ``build_kv_metadata_clause()``: it
-    quotes key names as well as escaping them, where this function used to emit
-    bare keys and hand-roll ``value.replace("'", "''")``. A preserved key
-    containing ``:`` -- ``stac:collection``, or pyarrow's ``ARROW:schema`` --
-    made DuckDB's parser reject the whole COPY (#756).
+    DuckDB's KV_METADATA replaces all metadata, so every existing key we want
+    to preserve has to be carried, plus the updated geo key. The pairs stay RAW:
+    ``geoparquet_copy_options`` builds the clause through the shared
+    ``build_kv_metadata_clause()``, which quotes key names as well as escaping
+    them. A preserved key containing ``:`` -- ``stac:collection``, or pyarrow's
+    ``ARROW:schema`` -- used to make DuckDB's parser reject the whole COPY
+    (#756).
 
     Args:
         existing_metadata: Dict of existing key-value pairs (raw, unescaped)
         new_geo_meta: The new geo metadata dict to set
-
-    Returns:
-        KV_METADATA clause string for DuckDB COPY
     """
     # Carry every existing key except 'geo', which this rewrite replaces.
     pairs = {key: value for key, value in existing_metadata.items() if key != "geo"}
     pairs["geo"] = json.dumps(new_geo_meta)
-
-    clause = build_kv_metadata_clause(pairs)
-    # `pairs` always holds at least 'geo', so the helper never returns None.
-    assert clause is not None
-    return clause
+    return pairs
 
 
 def require_geo_metadata_for_covering(geo_meta: object, source: str | None = None) -> dict:
@@ -514,23 +506,20 @@ def _rewrite_with_geo(
             debug(f"Native GEOMETRY type: {has_native_geometry}")
             debug(f"Existing metadata keys: {list(existing_kv.keys())}")
 
-        # Build KV_METADATA clause preserving all existing metadata
-        kv_metadata_clause = _build_kv_metadata_clause(existing_kv, geo_meta)
-
-        # Build COPY options.
-        # 'V2' keeps the native GEOMETRY logical type of a 2.0 input. 'NONE' means
-        # "don't manage geo metadata" — without it DuckDB writes its own V1 geo
-        # block and clobbers the covering this command exists to add. Note 'NONE'
-        # governs the *metadata* only; keeping the v1.x geometry columns
-        # physically unchanged is what _wrap_query_with_blob_conversion below is
-        # for (#712).
-        geoparquet_version = "V2" if has_native_geometry else "NONE"
-
+        # Build COPY options. The rewrite always supplies its own `geo` block,
+        # so DuckDB must be told 'NONE': under 'V2' it writes ours and then
+        # appends its own generated `geo` key beside it (#1225), and under
+        # 'V1' it would write its own block too. 'NONE' governs the *metadata*
+        # only, so a 2.0 input keeps its native GEOMETRY logical type; keeping
+        # the v1.x geometry columns physically unchanged is what
+        # _wrap_query_with_blob_conversion below is for (#712).
         copy_options = [
             "FORMAT PARQUET",
             f"COMPRESSION {compression}",
-            f"GEOPARQUET_VERSION '{geoparquet_version}'",
-            kv_metadata_clause,
+            *geoparquet_copy_options(
+                "V2" if has_native_geometry else "NONE",
+                _kv_pairs_with_geo(existing_kv, geo_meta),
+            ),
             f"ROW_GROUP_SIZE {row_group_size}",
         ]
 

@@ -165,3 +165,47 @@ def test_a_footer_it_cannot_patch_falls_back_to_the_rewrite(zstd15_file, monkeyp
     assert zstd15_file.stat().st_size > before, (
         "the fallback is the rewrite, so this file is expected to come back inflated"
     )
+
+
+def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatch):
+    """#1225: the rewrite used 'V2' beside a KV `geo` block, and DuckDB appended its own."""
+    path = tmp_path / "native.parquet"
+    conn = get_duckdb_connection(load_spatial=True)
+    try:
+        conn.execute(f"""
+            COPY (
+              SELECT i AS id,
+                {{'xmin': ST_XMin(g), 'ymin': ST_YMin(g),
+                  'xmax': ST_XMax(g), 'ymax': ST_YMax(g)}} AS bbox,
+                g AS geometry
+              FROM (SELECT i, ST_SetCRS(ST_Point(i, i), 'EPSG:3857') AS g
+                    FROM range(100) t(i))
+            ) TO '{path.as_posix()}' (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')
+        """)
+    finally:
+        conn.close()
+
+    def refuse(*args, **kwargs):
+        raise FooterPatchUnsupported("planted")
+
+    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+
+    add_bbox_metadata(str(path))
+
+    conn = get_duckdb_connection(load_spatial=False)
+    try:
+        entries = conn.execute(
+            "SELECT decode(value) FROM parquet_kv_metadata(?) WHERE decode(key) = 'geo'",
+            [path.as_posix()],
+        ).fetchall()
+        logical = conn.execute(
+            "SELECT logical_type FROM parquet_schema(?) WHERE name = 'geometry'",
+            [path.as_posix()],
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert len(entries) == 1, entries
+    col = json.loads(entries[0][0])["columns"]["geometry"]
+    assert "covering" in col
+    assert col["crs"]["id"] == {"authority": "EPSG", "code": 3857}
+    assert logical.startswith("GeometryType"), "the native GEOMETRY type was lost"

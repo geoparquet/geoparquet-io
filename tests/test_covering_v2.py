@@ -586,3 +586,158 @@ def test_a_carried_conventional_bbox_column_is_declared_at_1_1(tmp_path):
     _run("extract", "geoparquet", src, out, "--geoparquet-version", "1.1")
 
     assert _geometry_column_meta(out)["covering"]["bbox"] == BBOX_COVERING
+
+
+# ---------------------------------------------------------------------------
+# exactly one `geo` key: a carried block must not sit beside DuckDB's own
+# ---------------------------------------------------------------------------
+#
+# DuckDB's COPY with GEOPARQUET_VERSION 'V2' and a `geo` key in KV_METADATA
+# writes the supplied entry and then appends its own generated one. Only
+# 'NONE' writes the supplied entry alone, and on a native GEOMETRY column it
+# keeps the logical type and the geospatial statistics (#1225).
+
+
+def _geo_kv_entries(path) -> list[dict]:
+    """Every `geo` entry in the footer, in order. pyarrow shows only one."""
+    con = duckdb.connect()
+    try:
+        rows = con.execute(
+            "SELECT decode(value) FROM parquet_kv_metadata(?) WHERE decode(key) = 'geo'",
+            [str(path)],
+        ).fetchall()
+    finally:
+        con.close()
+    return [json.loads(row[0]) for row in rows]
+
+
+def _geometry_logical_type(path, column: str = "geometry") -> str | None:
+    con = duckdb.connect()
+    try:
+        row = con.execute(
+            "SELECT logical_type FROM parquet_schema(?) WHERE name = ?", [str(path), column]
+        ).fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
+def _write_native_v2(path, srid: str) -> str:
+    """A native 2.0 file, written the way DuckDB writes one, in ``srid``."""
+    con = duckdb.connect()
+    try:
+        con.execute("LOAD spatial")
+        con.execute(
+            f"COPY (SELECT i AS id, ST_SetCRS(ST_Point(13.4 + i / 100.0, 52.5 + i / 100.0), "
+            f"'{srid}') AS geometry FROM range(20) t(i)) "
+            f"TO '{path}' (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')"
+        )
+    finally:
+        con.close()
+    return str(path)
+
+
+@pytest.mark.parametrize("command", ["str", "hilbert"])
+@pytest.mark.parametrize("version_args", [["--geoparquet-version", "2.0"], []], ids=["2.0", "auto"])
+@pytest.mark.parametrize(
+    "srid, expected_crs_id",
+    [
+        # The default CRS is signalled by omitting `crs` (#815).
+        ("EPSG:4326", None),
+        ("EPSG:3857", {"authority": "EPSG", "code": 3857}),
+    ],
+)
+def test_sort_add_bbox_at_v2_writes_one_geo_entry(
+    tmp_path, command, version_args, srid, expected_crs_id
+):
+    """#1225: the carried block replaces DuckDB's, it does not sit beside it."""
+    src = _write_native_v2(tmp_path / "in.parquet", srid)
+    out = tmp_path / "out.parquet"
+
+    _run("sort", command, src, out, "--add-bbox", *version_args)
+
+    entries = _geo_kv_entries(out)
+    assert len(entries) == 1, f"expected one geo entry, got {len(entries)}: {entries}"
+    col = entries[0]["columns"]["geometry"]
+    assert entries[0]["version"] == "2.0.0"
+    assert col["covering"] == {"bbox": BBOX_COVERING}
+    assert (col.get("crs") or {}).get("id") == expected_crs_id
+    logical = _geometry_logical_type(out)
+    assert logical and logical.startswith("GeometryType"), logical
+    native_crs_id = json.loads(logical[len("GeometryType(crs=") : -1])["id"]
+    # The single entry agrees with the native column: the same CRS, or the
+    # default spelled by omission.
+    assert native_crs_id == (expected_crs_id or {"authority": "EPSG", "code": 4326})
+    assert _has_native_geo_statistics(out)
+
+
+def test_sort_add_bbox_at_1_1_keeps_one_geo_entry_and_wkb(tmp_path):
+    src = _write_native_v2(tmp_path / "in.parquet", "EPSG:3857")
+    out = tmp_path / "out.parquet"
+
+    _run("sort", "str", src, out, "--add-bbox", "--geoparquet-version", "1.1")
+
+    entries = _geo_kv_entries(out)
+    assert len(entries) == 1, entries
+    assert entries[0]["version"] == "1.1.0"
+    assert entries[0]["columns"]["geometry"]["covering"] == {"bbox": BBOX_COVERING}
+    assert entries[0]["columns"]["geometry"]["crs"]["id"] == {"authority": "EPSG", "code": 3857}
+    assert _geometry_logical_type(out) is None, "a 1.1 output must keep a plain WKB column"
+
+
+def test_plain_copy_to_writes_a_carried_block_as_the_only_geo_entry(tmp_path):
+    from geoparquet_io.core.write_funnels import _plain_copy_to
+
+    carried = {
+        "version": "2.0.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "bbox": [1.0, 2.0, 1.0, 2.0],
+                "epoch": 2020.5,
+            }
+        },
+    }
+    out = tmp_path / "out.parquet"
+    con = duckdb.connect()
+    try:
+        con.execute("LOAD spatial")
+        _plain_copy_to(
+            con,
+            "SELECT ST_Point(1, 2) AS geometry",
+            str(out),
+            geoparquet_version="2.0",
+            geometry_column="geometry",
+            carry_geo_metadata=carried,
+            extra_kv_metadata={"fiboa": '{"x": 1}'},
+        )
+    finally:
+        con.close()
+
+    assert _geo_kv_entries(out) == [carried]
+    assert pq.read_metadata(str(out)).metadata[b"fiboa"] == b'{"x": 1}'
+    assert _geometry_logical_type(out).startswith("GeometryType")
+    assert _has_native_geo_statistics(out)
+
+
+def test_geoparquet_copy_options_tells_duckdb_none_when_a_geo_block_is_supplied():
+    from geoparquet_io.core.parquet_writer import geoparquet_copy_options
+
+    with_geo = geoparquet_copy_options("V2", {"geo": "{}", "fiboa": "{}"})
+    assert with_geo[0] == "GEOPARQUET_VERSION 'NONE'"
+    assert with_geo[1].startswith("KV_METADATA")
+
+    assert geoparquet_copy_options("V2", {"fiboa": "{}"})[0] == "GEOPARQUET_VERSION 'V2'"
+    assert geoparquet_copy_options("V1", None) == ["GEOPARQUET_VERSION 'V1'"]
+    assert geoparquet_copy_options("NONE", {"geo": "{}"})[0] == "GEOPARQUET_VERSION 'NONE'"
+
+
+@pytest.mark.parametrize("duckdb_version", ["V1", "BOTH"])
+def test_geoparquet_copy_options_refuses_a_geo_block_beside_a_v1_writer(duckdb_version):
+    """'NONE' would turn a 1.x WKB column native, so there is no safe answer here."""
+    from geoparquet_io.core.parquet_writer import geoparquet_copy_options
+
+    with pytest.raises(ValueError, match="geo"):
+        geoparquet_copy_options(duckdb_version, {"geo": "{}"})

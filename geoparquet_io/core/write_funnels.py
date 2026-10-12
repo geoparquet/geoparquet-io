@@ -50,7 +50,6 @@ from geoparquet_io.core.duckdb_metadata import (
 from geoparquet_io.core.duckdb_utils import (
     _get_query_column_type,
     _get_query_columns,
-    build_kv_metadata_clause,
     sql_path,
     validate_compression_level,
 )
@@ -84,6 +83,7 @@ from geoparquet_io.core.parquet_footer import (
     patch_footer_kv,
 )
 from geoparquet_io.core.parquet_writer import (
+    geoparquet_copy_options,
     note_duckdb_copy_rounding,
     resolve_input_crs,
     resolve_output_geoparquet_version,
@@ -307,9 +307,11 @@ def _plain_copy_to(
         carry_geo_metadata: A `geo` block to write verbatim instead of the one
             DuckDB would generate. Used to preserve a `covering` the input
             declared, which DuckDB's own generated metadata does not include.
-            Supplying it alongside GEOPARQUET_VERSION 'V2' keeps the native
-            GEOMETRY logical type and its geospatial statistics — only the KV
-            entry is replaced.
+            DuckDB does not replace a supplied `geo` key under 'V2', it appends
+            its own beside it, so `geoparquet_copy_options` asks for 'NONE'
+            instead (#1225). The column keeps its native GEOMETRY logical type
+            and geospatial statistics either way: 'NONE' governs the KV entry
+            only.
         extra_kv_metadata: Non-geo sidecar keys (fiboa, vecorel, STAC fragments)
             to carry into the output. DuckDB accepts KV_METADATA alongside
             GEOPARQUET_VERSION, so these ride along on the fast path instead of
@@ -342,7 +344,6 @@ def _plain_copy_to(
     options = [
         "FORMAT PARQUET",
         f"COMPRESSION {duckdb_compression}",
-        f"GEOPARQUET_VERSION '{duckdb_version}'",
     ]
     # DuckDB accepts COMPRESSION_LEVEL for ZSTD only; pairing it with GZIP or
     # BROTLI is a binder error, not a silently ignored option.
@@ -358,9 +359,10 @@ def _plain_copy_to(
         # excludes `geo`); only a caller that hand-passes `geo` is affected, and
         # `carry_geo_metadata` is the block this write decided to emit.
         kv_pairs["geo"] = json.dumps(carry_geo_metadata)
-    kv_clause = build_kv_metadata_clause(kv_pairs)
-    if kv_clause:
-        options.append(kv_clause)
+    # A carried `geo` block turns the request into 'NONE', or DuckDB writes its
+    # own `geo` key after ours (#1225). `duckdb_version` keeps the request, which
+    # is what the V2 repair below is keyed on.
+    options.extend(geoparquet_copy_options(duckdb_version, kv_pairs))
 
     copy_query = f"""
         COPY ({final_query})

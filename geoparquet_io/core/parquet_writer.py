@@ -22,7 +22,8 @@ write path is entitled to answer for itself:
 3. **Which CRS the output declares** when the caller did not name one --
    :func:`resolve_input_crs`.
 4. **Whether a ``geo`` key appears in the output's file-level metadata at all**
-   -- :func:`apply_output_kv_metadata`.
+   -- :func:`apply_output_kv_metadata`, and for a DuckDB ``COPY`` that carries
+   its own ``geo`` block, :func:`geoparquet_copy_options`.
 
 The third exists because it is the *same question as the second*, asked of the
 same witness. Both are "what did the input declare", and a rewrite that answers
@@ -58,10 +59,12 @@ the column it read carried, which is how ``gpio sort quadkey`` stamped
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+from geoparquet_io.core.duckdb_utils import build_kv_metadata_clause
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import debug, info
 from geoparquet_io.core.streaming import extract_version_from_metadata
@@ -504,6 +507,52 @@ def apply_output_kv_metadata(
         metadata[bkey] = bval
 
     return table.replace_schema_metadata(metadata)
+
+
+def geoparquet_copy_options(duckdb_version: str, kv_pairs: Mapping[str, str] | None) -> list[str]:
+    """The ``GEOPARQUET_VERSION`` and ``KV_METADATA`` options of one DuckDB ``COPY``.
+
+    The fourth decision, for a write that hands DuckDB a ``geo`` block of its
+    own. DuckDB's writer with ``GEOPARQUET_VERSION`` ``'V1'``, ``'V2'`` or
+    ``'BOTH'`` does not replace a ``geo`` key supplied in ``KV_METADATA``: it
+    writes the supplied entry and then appends the one it generated, so the
+    footer carries two ``geo`` keys that disagree (one with the ``covering``,
+    one with DuckDB's ``crs``) and each reader picks its own (#1225). Only
+    ``'NONE'`` writes the supplied entry alone.
+
+    So whenever ``kv_pairs`` holds ``geo``, a ``'V2'`` request becomes
+    ``'NONE'``. That is lossless on a native ``GEOMETRY`` column: ``'NONE'``
+    governs the ``geo`` key only, and the column keeps its Parquet ``GEOMETRY``
+    logical type, the CRS in it and its geospatial statistics.
+
+    A ``'V1'`` or ``'BOTH'`` request with a ``geo`` key is refused rather than
+    rewritten: those writers turn a ``GEOMETRY`` column into WKB, and ``'NONE'``
+    would write it native instead, which a 1.x file must not carry (#712). No
+    caller does this today; a caller that wants it has to cast to ``BLOB``
+    itself and ask for ``'NONE'``.
+
+    Args:
+        duckdb_version: The ``GEOPARQUET_VERSION`` the write would otherwise use.
+        kv_pairs: RAW file-level key/value pairs for ``KV_METADATA``, or None.
+
+    Returns:
+        ``["GEOPARQUET_VERSION '...'"]``, plus the ``KV_METADATA`` clause when
+        there is anything to write.
+    """
+    pairs = dict(kv_pairs or {})
+    if "geo" in pairs and duckdb_version != "NONE":
+        if duckdb_version != "V2":
+            raise ValueError(
+                f"a supplied geo block cannot be written beside GEOPARQUET_VERSION "
+                f"'{duckdb_version}': DuckDB would append its own geo key, and 'NONE' "
+                f"would write the geometry column native"
+            )
+        duckdb_version = "NONE"
+    options = [f"GEOPARQUET_VERSION '{duckdb_version}'"]
+    kv_clause = build_kv_metadata_clause(pairs)
+    if kv_clause:
+        options.append(kv_clause)
+    return options
 
 
 @dataclass
