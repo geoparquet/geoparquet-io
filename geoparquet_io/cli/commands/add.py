@@ -572,6 +572,12 @@ def add_stac_metadata_cmd(
     'collections' is a map keyed by collection id. The singular 'collection'
     key the 1.0.0 draft allowed is deprecated in 1.1.0 and is not written.
 
+    A file that already carries a stac-geoparquet key keeps every collection
+    it already named: this call's Collection is added to the existing
+    'collections' map (replacing its own id if that id was already there),
+    not written over the whole key. The declared version always becomes the
+    one this call asks for.
+
     With no OUTPUT the file is modified in place. Either way only the footer is
     rewritten: every page below it is copied verbatim, so the compression level,
     the encodings, the bloom filters and the row order are all preserved.

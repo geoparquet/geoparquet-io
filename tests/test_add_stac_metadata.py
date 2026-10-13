@@ -33,6 +33,21 @@ COLLECTION = {
     "links": [],
 }
 
+# A second, distinct Collection -- used to prove a second call adds to the
+# `collections` map rather than replacing it.
+COLLECTION_B = {
+    "type": "Collection",
+    "id": "SkySatCollect",
+    "stac_version": "1.1.0",
+    "description": "y",
+    "license": "proprietary",
+    "extent": {
+        "spatial": {"bbox": [[-180, -90, 180, 90]]},
+        "temporal": {"interval": [[None, None]]},
+    },
+    "links": [],
+}
+
 
 @pytest.fixture
 def parquet(tmp_path):
@@ -48,6 +63,13 @@ def parquet(tmp_path):
 def collection_file(tmp_path):
     p = tmp_path / "collection.json"
     p.write_text(json.dumps(COLLECTION))
+    return p
+
+
+@pytest.fixture
+def collection_b_file(tmp_path):
+    p = tmp_path / "collection-b.json"
+    p.write_text(json.dumps(COLLECTION_B))
     return p
 
 
@@ -116,6 +138,57 @@ def test_running_it_twice_replaces_rather_than_duplicates(parquet, collection_fi
             add, ["stac-metadata", str(parquet), "--collection", str(collection_file)]
         )
     assert _meta(parquet)["collections"]["PSScene"]["id"] == "PSScene"
+
+
+def test_a_second_different_collection_is_added_not_replacing_the_first(
+    parquet, collection_file, collection_b_file
+):
+    # `collections` is a map precisely so one stac-geoparquet file can index
+    # items from several collections; a second call naming a different id
+    # must not throw the first one away.
+    CliRunner().invoke(add, ["stac-metadata", str(parquet), "--collection", str(collection_file)])
+    r = CliRunner().invoke(
+        add, ["stac-metadata", str(parquet), "--collection", str(collection_b_file)]
+    )
+    assert r.exit_code == 0, r.output
+    collections = _meta(parquet)["collections"]
+    assert set(collections) == {"PSScene", "SkySatCollect"}
+    assert collections["PSScene"]["id"] == "PSScene"
+    assert collections["SkySatCollect"]["id"] == "SkySatCollect"
+
+
+def test_a_later_calls_declared_version_wins_over_an_earlier_ones(
+    parquet, collection_file, collection_b_file
+):
+    # `version` describes how to interpret the write being made right now, not
+    # a property of any one collection, so the most recent call's choice wins
+    # -- and the merge still happens even though the version changed.
+    CliRunner().invoke(
+        add,
+        [
+            "stac-metadata",
+            str(parquet),
+            "--collection",
+            str(collection_file),
+            "--stac-geoparquet-version",
+            "1.0.0",
+        ],
+    )
+    r = CliRunner().invoke(
+        add,
+        [
+            "stac-metadata",
+            str(parquet),
+            "--collection",
+            str(collection_b_file),
+            "--stac-geoparquet-version",
+            "1.1.0",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    meta = _meta(parquet)
+    assert meta["version"] == "1.1.0"
+    assert set(meta["collections"]) == {"PSScene", "SkySatCollect"}
 
 
 def test_the_python_api_matches_the_cli(parquet):
@@ -294,6 +367,18 @@ class TestTheCoreModule:
         payload = stac_geoparquet_metadata(COLLECTION)
         assert payload == {"version": "1.1.0", "collections": {"PSScene": COLLECTION}}
 
+    def test_a_malformed_existing_stac_geoparquet_key_is_refused_not_overwritten(
+        self, parquet, monkeypatch
+    ):
+        from geoparquet_io.core.add import stac_metadata as module
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        monkeypatch.setattr(module, "_existing_stac_geoparquet_raw", lambda path: b"{not json")
+        before = parquet.read_bytes()
+        with pytest.raises(GeoParquetError, match="not valid JSON"):
+            module.add_stac_metadata(str(parquet), COLLECTION)
+        assert parquet.read_bytes() == before
+
 
 class TestThePythonAPI:
     def test_ops_takes_a_collection_path(self, parquet, collection_file):
@@ -335,3 +420,12 @@ class TestThePythonAPI:
         bare = pa.table({"id": ["a"]})
         out = ops.add_stac_metadata_table(bare, COLLECTION)
         assert json.loads(out.schema.metadata[b"stac-geoparquet"])["version"] == "1.1.0"
+
+    def test_chaining_the_table_method_merges_rather_than_replaces(self, parquet):
+        import geoparquet_io as gpio
+
+        table = (
+            gpio.read(str(parquet)).add_stac_metadata(COLLECTION).add_stac_metadata(COLLECTION_B)
+        )
+        payload = json.loads(table.table.schema.metadata[b"stac-geoparquet"])
+        assert set(payload["collections"]) == {"PSScene", "SkySatCollect"}

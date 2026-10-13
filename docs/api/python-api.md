@@ -1393,6 +1393,11 @@ a **map keyed by collection id** — the singular `collection` key the 1.0.0
 draft allowed is deprecated in 1.1.0 and is never written. Every other metadata
 key, `geo` included, is kept.
 
+A `stac-geoparquet` key already present is merged with, not replaced by, the
+Collection this call adds: a new collection id joins the map alongside the
+ones already there, a repeated id replaces its own entry, and the declared
+`version` becomes whichever this call asked for.
+
 Raises `GeoParquetError` when `version` is anything but `'1.0.0'` or `'1.1.0'`
 (the only two the specification defines), when the Collection cannot be read,
 or when it has no `id` — the id is what an Item's `collection` field points at,

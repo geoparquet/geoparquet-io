@@ -17,6 +17,14 @@ written. ``version`` is the version of the *stac-geoparquet* specification, not
 of STAC or of GeoParquet, and the specification defines only ``1.0.0`` and
 ``1.1.0``.
 
+A file that already carries a ``stac-geoparquet`` key keeps every collection
+it already named: the new call's Collection is unioned into the existing
+``collections`` map (replacing its own id if that id was already there),
+rather than the whole key being overwritten. The map exists so one
+stac-geoparquet file can index Items from several Collections, and
+overwriting it on every call would throw that away. The declared ``version``
+always becomes the one this call asked for.
+
 The file path patches the footer in place and copies every page below it
 verbatim (``core/parquet_footer.py``, #1141), the same way ``add
 bbox-metadata`` does: adding one footer key does not need the data decoded, so
@@ -35,6 +43,8 @@ import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.logging_config import debug, success
@@ -146,6 +156,45 @@ def stac_geoparquet_metadata(
     return {"version": version, "collections": {_collection_id(parsed): parsed}}
 
 
+def _parsed_existing_payload(raw: bytes | None, source: str) -> dict | None:
+    """Any ``stac-geoparquet`` value `source` already carries, parsed -- or ``None``.
+
+    Shared by the file path and the in-memory path so a value neither of them
+    wrote (malformed JSON) is refused with the same sentence rather than
+    silently discarded.
+    """
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GeoParquetError(
+            f"{source} already carries a stac-geoparquet key that is not valid JSON: {exc}"
+        ) from exc
+
+
+def _merged_payload(existing: dict | None, payload: dict) -> dict:
+    """`payload`'s one collection, unioned into any ``collections`` map already there.
+
+    ``collections`` is a map precisely so one stac-geoparquet file can index
+    Items from more than one Collection -- replacing the whole key on every
+    call would throw that away and leave only the most recently added
+    Collection, silently. A new collection id is added alongside the ones
+    already present; a repeated id replaces its own entry, since writing the
+    same id again is what a caller asking to update it looks like.
+
+    `existing`'s ``version``, if it names a different one, does not survive:
+    ``version`` describes how to interpret the write being made right now, not
+    a property of any one collection, so a call that did not ask to change it
+    should get the version it asked for rather than whatever an earlier call
+    declared.
+    """
+    carried = (existing or {}).get("collections")
+    collections = dict(carried) if isinstance(carried, dict) else {}
+    collections.update(payload["collections"])
+    return {"version": payload["version"], "collections": collections}
+
+
 def add_stac_metadata_table(
     table: "pa.Table",
     collection: "dict | str | Path",
@@ -160,6 +209,9 @@ def add_stac_metadata_table(
     refuses. Every other schema metadata key the table carries -- ``geo``
     first among them -- is kept.
 
+    A ``stac-geoparquet`` key the table already carries is merged with, not
+    replaced by, this call's Collection: see :func:`_merged_payload`.
+
     Args:
         table: Input Arrow table.
         collection: A STAC Collection, or a path to a JSON file holding one.
@@ -169,11 +221,17 @@ def add_stac_metadata_table(
         pa.Table: A new table carrying the key. The columns are untouched.
 
     Raises:
-        GeoParquetError: If the version or the Collection is refused.
+        GeoParquetError: If the version or the Collection is refused, or the
+            table already carries a ``stac-geoparquet`` key that is not valid
+            JSON.
     """
     payload = stac_geoparquet_metadata(collection, version)
     schema_metadata = dict(table.schema.metadata) if table.schema.metadata else {}
-    schema_metadata[STAC_GEOPARQUET_KEY.encode("utf-8")] = json.dumps(payload).encode("utf-8")
+    existing = _parsed_existing_payload(
+        schema_metadata.get(STAC_GEOPARQUET_KEY.encode("utf-8")), "the table"
+    )
+    merged = _merged_payload(existing, payload)
+    schema_metadata[STAC_GEOPARQUET_KEY.encode("utf-8")] = json.dumps(merged).encode("utf-8")
     return table.replace_schema_metadata(schema_metadata)
 
 
@@ -185,6 +243,25 @@ def _refuse_remote(*paths: "str | None") -> None:
                 f"Remote URLs are not supported for footer metadata: {path}\n"
                 "Download the file locally, add the metadata, then upload it."
             )
+
+
+def _existing_stac_geoparquet_raw(parquet_file: str) -> bytes | None:
+    """`parquet_file`'s current ``stac-geoparquet`` entry, as an Arrow reader sees it.
+
+    Read through the *effective* Arrow schema rather than the plain footer
+    entries directly: pyarrow keeps a second, base64'd copy of schema metadata
+    in the footer (``ARROW:schema``), and an Arrow reader -- ``pq.read_table``,
+    pandas, geopandas, the kind of reader most likely to read this value back
+    -- resolves metadata from that copy when the file carries one. Merging
+    against whichever copy an Arrow reader would see is what keeps both copies
+    in agreement once :func:`patch_footer_kv` has updated them (see
+    ``core/parquet_footer.py``'s ``_arrow_schema_in_step``).
+    """
+    try:
+        metadata = pq.read_schema(parquet_file).metadata
+    except Exception as exc:  # pyarrow raises assorted error types here
+        raise GeoParquetError(f"Cannot read {parquet_file}'s existing metadata: {exc}") from exc
+    return (metadata or {}).get(STAC_GEOPARQUET_KEY.encode("utf-8"))
 
 
 def add_stac_metadata(
@@ -199,7 +276,9 @@ def add_stac_metadata(
     """Write the ``stac-geoparquet`` key into a Parquet file's footer.
 
     The payload is built and validated before anything is opened, so a refused
-    Collection or version leaves the input exactly as it was.
+    Collection or version leaves the input exactly as it was. A
+    ``stac-geoparquet`` key the input already carries is merged with, not
+    replaced by, this call's Collection: see :func:`_merged_payload`.
 
     Args:
         parquet_file: Path to a local Parquet file. Only read when
@@ -213,7 +292,8 @@ def add_stac_metadata(
     Raises:
         GeoParquetError: If a path is remote, the output exists and
             ``overwrite`` was not given, the Collection or version is refused,
-            or the footer cannot be patched.
+            the input already carries a ``stac-geoparquet`` key that is not
+            valid JSON, or the footer cannot be patched.
     """
     payload = stac_geoparquet_metadata(collection, version)
 
@@ -223,6 +303,9 @@ def add_stac_metadata(
         raise GeoParquetError(
             f"Output file already exists: {destination}\nUse --overwrite to replace it."
         )
+
+    existing = _parsed_existing_payload(_existing_stac_geoparquet_raw(parquet_file), parquet_file)
+    payload = _merged_payload(existing, payload)
 
     if verbose:
         debug(f"stac-geoparquet payload:\n{json.dumps(payload, indent=2)}")

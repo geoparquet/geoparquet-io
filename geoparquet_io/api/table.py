@@ -3563,6 +3563,12 @@ class Table:
         `collection` key the 1.0.0 draft allowed is deprecated in 1.1.0 and is
         not written. Every other metadata key, `geo` included, is kept.
 
+        A `stac-geoparquet` key the table already carries keeps every
+        collection it already named: this call's Collection is added to the
+        existing `collections` map (replacing its own id if that id was
+        already there), not written over the whole key. The declared version
+        always becomes the one this call asks for.
+
         Mirrors `gpio add stac-metadata`, which writes the same value into an
         already-written file's footer without re-encoding it.
 

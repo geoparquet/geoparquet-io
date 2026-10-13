@@ -304,6 +304,15 @@ The value written is:
 
     Remote URLs are not supported — download the file, add the key, upload it.
 
+!!! note "A second call adds a collection, it does not replace the map"
+
+    `collections` is a map precisely so one stac-geoparquet file can index
+    Items from more than one Collection. Running `gpio add stac-metadata`
+    again with a different `--collection` adds that Collection alongside the
+    ones already in the footer; running it again with the same collection id
+    replaces that one entry. The version declared by the most recent call
+    wins.
+
 ## H3 Hexagonal Cells
 
 !!! note "Input CRS"

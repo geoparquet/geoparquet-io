@@ -115,6 +115,12 @@ def add_stac_metadata(
     map keyed by collection id, and the singular `collection` key the 1.0.0
     draft allowed is deprecated in 1.1.0 and is not written.
 
+    A file that already carries a `stac-geoparquet` key keeps every collection
+    it already named: this call's Collection is added to the existing
+    `collections` map (replacing its own id if that id was already there), not
+    written over the whole key. The declared version always becomes the one
+    this call asks for.
+
     Only the footer is rewritten; every page below it is copied verbatim, so
     the compression codec and level, the encodings, the bloom filters, the page
     index, the row-group boundaries and the row order are all preserved.
@@ -152,7 +158,9 @@ def add_stac_metadata_table(
 
     The in-memory counterpart of `add_stac_metadata()`, for a table that has
     not been written yet. Every other schema metadata key — `geo` first among
-    them — is kept.
+    them — is kept. A `stac-geoparquet` key the table already carries is
+    merged with, not replaced by, this call's Collection, the same way the
+    file path is.
 
     Args:
         table: Input PyArrow Table
