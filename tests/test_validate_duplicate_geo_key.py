@@ -102,7 +102,7 @@ def test_the_cli_exits_1(duplicated):
 def test_a_duplicate_duckdb_cannot_parse_is_still_counted(tmp_path):
     """DuckDB refuses to read a footer whose `geo` value it cannot parse, so a
     local file is counted from its raw footer instead."""
-    path = _write(tmp_path / "unparseable.parquet", "V2", json.dumps({"columns": "nope"}))
+    path = _write(tmp_path / "unparsable.parquet", "V2", json.dumps({"columns": "nope"}))
 
     result = validate_geoparquet(path, validate_data=False)
 
