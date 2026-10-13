@@ -17,12 +17,14 @@ import json
 import struct
 from pathlib import Path
 
+import duckdb
 import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.add import bbox_metadata
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.parquet_footer import FooterPatchUnsupported
 
 GEO_NO_COVERING = json.dumps(
@@ -209,3 +211,58 @@ def test_the_fallback_on_a_native_file_writes_one_geo_entry(tmp_path, monkeypatc
     assert "covering" in col
     assert col["crs"]["id"] == {"authority": "EPSG", "code": 3857}
     assert logical.startswith("GeometryType"), "the native GEOMETRY type was lost"
+
+
+def _is_closed(conn) -> bool:
+    try:
+        conn.execute("SELECT 1")
+    except duckdb.ConnectionException:
+        return True
+    return False
+
+
+@pytest.mark.parametrize(
+    "failing_step",
+    ["_detect_native_geometry", "_get_existing_kv_metadata", "_wrap_query_with_blob_conversion"],
+)
+def test_a_failed_rewrite_closes_its_connection(zstd15_file, monkeypatch, failing_step):
+    """#1244: the fallback closed its DuckDB connection only after a successful COPY."""
+    opened = []
+
+    def spy(*args, **kwargs):
+        conn = get_duckdb_connection(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    def refuse(*args, **kwargs):
+        raise FooterPatchUnsupported("planted")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("planted failure")
+
+    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+    monkeypatch.setattr(bbox_metadata, "get_duckdb_connection", spy)
+    monkeypatch.setattr(bbox_metadata, failing_step, boom)
+
+    with pytest.raises(GeoParquetError, match="planted failure"):
+        add_bbox_metadata(str(zstd15_file))
+
+    assert len(opened) == 1
+    assert _is_closed(opened[0]), "the rewrite leaked its DuckDB connection"
+
+
+def test_a_verbose_fallback_reports_what_it_preserves(zstd15_file, monkeypatch, caplog):
+    """The verbose rewrite logs the properties it carries and the COPY it runs."""
+
+    def refuse(*args, **kwargs):
+        raise FooterPatchUnsupported("planted")
+
+    monkeypatch.setattr(bbox_metadata, "patch_footer_kv", refuse)
+
+    with caplog.at_level("DEBUG", logger="geoparquet_io"):
+        add_bbox_metadata(str(zstd15_file), verbose=True)
+
+    assert "Preserving file properties" in caplog.text
+    assert "DuckDB COPY SQL" in caplog.text
+    geo = json.loads(pq.read_metadata(str(zstd15_file)).metadata[b"geo"])
+    assert "covering" in geo["columns"]["geometry"]

@@ -490,72 +490,71 @@ def _rewrite_with_geo(
     try:
         # Use DuckDB COPY TO with KV_METADATA to preserve file properties
         # This preserves bloom filters and native GEOMETRY logical type (fixes #433)
-        conn = get_duckdb_connection()
+        # The connection is closed on every exit, a failed step included (#1244).
+        with get_duckdb_connection() as conn:
+            # Detect if file uses native GEOMETRY type (GeoParquet 2.0)
+            # Pass the actual geometry column name - it might not be 'geometry'
+            has_native_geometry = _detect_native_geometry(conn, read_url, primary_col)
 
-        # Detect if file uses native GEOMETRY type (GeoParquet 2.0)
-        # Pass the actual geometry column name - it might not be 'geometry'
-        has_native_geometry = _detect_native_geometry(conn, read_url, primary_col)
+            # Read existing KV metadata to preserve non-geo keys
+            existing_kv = _get_existing_kv_metadata(conn, read_url)
 
-        # Read existing KV metadata to preserve non-geo keys
-        existing_kv = _get_existing_kv_metadata(conn, read_url)
+            if verbose:
+                debug("\nPreserving file properties:")
+                debug(f"Row group size: {row_group_size:,} rows")
+                debug(f"Compression: {compression}")
+                debug(f"Native GEOMETRY type: {has_native_geometry}")
+                debug(f"Existing metadata keys: {list(existing_kv.keys())}")
 
-        if verbose:
-            debug("\nPreserving file properties:")
-            debug(f"Row group size: {row_group_size:,} rows")
-            debug(f"Compression: {compression}")
-            debug(f"Native GEOMETRY type: {has_native_geometry}")
-            debug(f"Existing metadata keys: {list(existing_kv.keys())}")
+            # Build COPY options. Ask for what the output is: 'V2' keeps the native
+            # GEOMETRY logical type of a 2.0 input, 'NONE' leaves a 1.x input's
+            # metadata to us. Because this rewrite always supplies its own `geo`
+            # block, geoparquet_copy_options sends 'NONE' either way, or DuckDB
+            # would append its own generated `geo` key beside ours (#1225). 'NONE'
+            # governs the *metadata* only, so a 2.0 input keeps its native type,
+            # CRS and statistics. Keeping the v1.x geometry columns physically WKB
+            # is what _wrap_query_with_blob_conversion below is for (#712).
+            copy_options = [
+                "FORMAT PARQUET",
+                f"COMPRESSION {compression}",
+                *geoparquet_copy_options(
+                    "V2" if has_native_geometry else "NONE",
+                    _kv_pairs_with_geo(existing_kv, geo_meta),
+                ),
+                f"ROW_GROUP_SIZE {row_group_size}",
+            ]
 
-        # Build COPY options. Ask for what the output is: 'V2' keeps the native
-        # GEOMETRY logical type of a 2.0 input, 'NONE' leaves a 1.x input's
-        # metadata to us. Because this rewrite always supplies its own `geo`
-        # block, geoparquet_copy_options sends 'NONE' either way, or DuckDB
-        # would append its own generated `geo` key beside ours (#1225). 'NONE'
-        # governs the *metadata* only, so a 2.0 input keeps its native type,
-        # CRS and statistics. Keeping the v1.x geometry columns physically WKB
-        # is what _wrap_query_with_blob_conversion below is for (#712).
-        copy_options = [
-            "FORMAT PARQUET",
-            f"COMPRESSION {compression}",
-            *geoparquet_copy_options(
-                "V2" if has_native_geometry else "NONE",
-                _kv_pairs_with_geo(existing_kv, geo_meta),
-            ),
-            f"ROW_GROUP_SIZE {row_group_size}",
-        ]
+            # This command is documented as metadata-only, so the geometry columns'
+            # physical types have to survive it. With the spatial extension loaded --
+            # and GEOPARQUET_VERSION above loads it whether or not we ask -- DuckDB
+            # reads a v1.x WKB column as its own GEOMETRY type, and the COPY then
+            # writes a native Parquet GEOMETRY logical type back out while the declared
+            # version stays 1.1.0. gpio's own validator rejects that combination
+            # (#712). Casting straight back to BLOB keeps the columns plain WKB, which
+            # is what a 1.x file must carry. Every column the file declares as geometry
+            # needs that cast, not just the primary one -- the validator names any
+            # native column, and a 1.1 file may carry several. A file that is *already*
+            # native is left alone: there the native type is the correct output.
+            source_query = f"SELECT * FROM {sql_path(read_url)}"
+            if not has_native_geometry:
+                secondary_cols = [col for col in geo_meta["columns"] if col != primary_col]
+                source_query = _wrap_query_with_blob_conversion(
+                    source_query, primary_col, conn, secondary_columns=secondary_cols
+                )
 
-        # This command is documented as metadata-only, so the geometry columns'
-        # physical types have to survive it. With the spatial extension loaded --
-        # and GEOPARQUET_VERSION above loads it whether or not we ask -- DuckDB
-        # reads a v1.x WKB column as its own GEOMETRY type, and the COPY then
-        # writes a native Parquet GEOMETRY logical type back out while the declared
-        # version stays 1.1.0. gpio's own validator rejects that combination
-        # (#712). Casting straight back to BLOB keeps the columns plain WKB, which
-        # is what a 1.x file must carry. Every column the file declares as geometry
-        # needs that cast, not just the primary one -- the validator names any
-        # native column, and a 1.1 file may carry several. A file that is *already*
-        # native is left alone: there the native type is the correct output.
-        source_query = f"SELECT * FROM {sql_path(read_url)}"
-        if not has_native_geometry:
-            secondary_cols = [col for col in geo_meta["columns"] if col != primary_col]
-            source_query = _wrap_query_with_blob_conversion(
-                source_query, primary_col, conn, secondary_columns=secondary_cols
-            )
+            copy_sql = f"""
+                COPY ({source_query})
+                TO {sql_path(temp_file)}
+                ({", ".join(copy_options)})
+            """
 
-        copy_sql = f"""
-            COPY ({source_query})
-            TO {sql_path(temp_file)}
-            ({", ".join(copy_options)})
-        """
+            if verbose:
+                debug(f"\nDuckDB COPY SQL:\n{copy_sql}")
 
-        if verbose:
-            debug(f"\nDuckDB COPY SQL:\n{copy_sql}")
-
-        # This fallback re-encodes the whole file, so bound it like every
-        # other gpio write (#1156) instead of DuckDB's own 80%-of-RAM default.
-        with scoped_write_memory_limit(conn, None, verbose):
-            conn.execute(copy_sql)
-        conn.close()
+            # This fallback re-encodes the whole file, so bound it like every
+            # other gpio write (#1156) instead of DuckDB's own 80%-of-RAM default.
+            with scoped_write_memory_limit(conn, None, verbose):
+                conn.execute(copy_sql)
 
         if temp_file != output_file:
             # Replace the existing destination atomically
