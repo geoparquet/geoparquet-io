@@ -696,7 +696,11 @@ def _assert_ladder_walked_the_layer(http, pages) -> None:
         (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
         for request in http.matching(_is_query)
     ]
-    assert windows[0] == (0, 100)  # the ladder starts at the size that was asked for
+    # The ladder starts at the size that was asked for. Either worker's first
+    # window may reach the transport first, but offset 0 is always issued:
+    # the collect loop waits on it before cancelling anything.
+    assert windows[0][1] == 100
+    assert (0, 100) in windows
     # Each refused rung is restarted from offset 0; how many of its siblings
     # were issued before the cancel is the scheduler's.
     assert {offset for offset, size in windows if size == 100} <= {0, 100}

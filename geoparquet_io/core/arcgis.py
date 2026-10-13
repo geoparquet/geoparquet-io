@@ -1311,21 +1311,24 @@ def _geojson_page_to_table(features: list[dict], con=None) -> pa.Table | None:
     )
 
 
-# Members GDAL looks for near the start of a file to pick the ESRIJSON driver.
-_ESRIJSON_IDENTIFYING_KEYS = ("geometryType", "spatialReference", "fields", "objectIdFieldName")
-
-
 def _prepare_esrijson_for_gdal(page: dict) -> dict:
-    """Return a shallow copy of an EsriJSON page with its identifying members first.
+    """Return a shallow copy of an EsriJSON page with `features` moved last.
 
     GDAL identifies the format from the beginning of the file. When a large
-    `features` array comes before `geometryType` and friends, it picks the
-    GeoJSON driver and fails to read the Esri-shaped features (issue #501).
-    Members that are present move to the front; every other member keeps its
-    relative order. Values are shared with `page`, which is left unchanged.
+    `features` array comes before `geometryType`, it picks the GeoJSON driver
+    and fails to read the Esri-shaped features (issue #501).
+
+    `geometryType` goes first, `features` goes last, and every other member
+    keeps its original order. Which members GDAL treats as ESRIJSON markers is
+    GDAL's business (`fields` and `fieldAliases` count too), so none of them is
+    moved ahead of another: apart from the few bytes `geometryType` adds in
+    front, no member other than `features` starts later than it did in `page`.
+    Values are shared with `page`, which is left unchanged.
     """
-    prepared = {key: page[key] for key in _ESRIJSON_IDENTIFYING_KEYS if key in page}
+    prepared = {"geometryType": page["geometryType"]} if "geometryType" in page else {}
     prepared.update(page)
+    if "features" in prepared:
+        prepared["features"] = prepared.pop("features")
     return prepared
 
 
@@ -1334,7 +1337,7 @@ def _esrijson_page_to_table(page: dict, con=None) -> pa.Table | None:
 
     Unlike GeoJSON, GDAL's ESRIJSON driver needs the whole response object
     (geometryType / spatialReference / fields / features), so the page is
-    written whole, with its identifying members moved to the front so GDAL
+    written whole, with `geometryType` first and `features` last so GDAL
     recognizes it whatever order the server used. `attributes` are flattened
     to columns by the driver. GDAL may or may not add OGC_FID for EsriJSON;
     extra columns are kept here and dropped later by _cast_table_to_schema.
