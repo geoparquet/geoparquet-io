@@ -488,6 +488,8 @@ def test_a_failed_conversion_cleans_up_and_leaves_a_supplied_connection_open(
     """
     page = _reordered(shoreline_bytes, ORDERS["features_first"])
     without_spatial = get_duckdb_connection(load_spatial=False, load_httpfs=False)
+    # Keep the failure deliberate should a future DuckDB autoload spatial for ST_Read.
+    without_spatial.execute("SET autoload_known_extensions = false")
     try:
         with pytest.raises(duckdb.Error, match="spatial"):
             _esrijson_page_to_table(page, con=without_spatial)
