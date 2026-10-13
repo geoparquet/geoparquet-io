@@ -717,6 +717,12 @@ NOT_TABLE_IN_TABLE_OUT: dict[str, str] = {
     "add_geometry_metrics": "file round trip onto add_geometry_metrics",
     "aggregate_admin": "Table.aggregate_admin calls ops.aggregate_admin -- one door, "
     "and that one round-trips through a file",
+    # File in, nothing out: `ops.add_stac_metadata` patches an already-written
+    # file's footer, where `Table.add_stac_metadata` sets the same key on a
+    # schema in memory. Same key, same validation, no shared in-memory call.
+    "add_stac_metadata": "file in, nothing out: the ops door patches a footer on "
+    "disk, the Table door sets the key on a schema; compared in "
+    "tests/test_add_stac_metadata.py",
     # Not a transform of a table at all.
     "explain_analyze": "file path in, dict out; Table's is a classmethod, not an operation",
     "from_wfs": "constructor: fetches a service over the network, no input table",
@@ -822,6 +828,8 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "from_carto": "reader: fetches a service over the network, no input table",
     "from_wfs_layers": "reader: writes many layers to a directory, so there is no single "
     "table to hand back (`from_wfs`, which returns one, is a shared name)",
+    "add_stac_metadata_table": "`Table.add_stac_metadata` is the method-side spelling; "
+    "`ops.add_stac_metadata` is taken by the file form, which patches a footer on disk",
     "get_row_group_geo_stats": "inspection helper: reads row-group stats off a path",
     "read_bigquery": "`Table.from_bigquery` <-> `ops.read_bigquery`, differently spelled twin",
     # Directory sub-partitioning (#853) is deliberately `Table`-twin-less: the

@@ -178,8 +178,49 @@ table = gpio.Table.from_bigquery(
 
 See the [Extract Guide](../guide/extract.md#bbox-filtering-mode-server-vs-local) for detailed tradeoff analysis.
 
+**Running your own SQL:**
+
+`where` can only add a predicate to `SELECT * FROM <table>`. Pass `sql`
+instead when the question needs more than that -- a window function, a join,
+a `GROUP BY`. It replaces `table_id` as the source and runs as a BigQuery
+query job:
+
+```python
+table = gpio.Table.from_bigquery(
+    sql="""
+        SELECT * EXCEPT(rn) FROM (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY item_id ORDER BY version DESC) AS rn
+          FROM `myproject.geodata.items`
+          WHERE acquired_at >= TIMESTAMP('2025-09-01')
+        ) WHERE rn = 1
+    """,
+    project='myproject',
+    geography_column='geometry',
+)
+```
+
+`project` is required with `sql`, because the query job has to be billed
+somewhere and there is no `table_id` to take a project from. `sql` is
+mutually exclusive with every argument that shapes the query -- `columns`,
+`exclude_columns`, `where`, `bbox`, `bbox_mode`, `bbox_threshold`, `limit` --
+since the statement already says all of that. The arguments that shape the
+output (`geography_column`, `geometry_format`, `edges`, `repair_geometry`)
+still apply. The same `sql=` argument is on `ops.read_bigquery()`.
+
+!!! warning "Filter inside the statement"
+    A query job materializes its whole result before anything is read, so an
+    unfiltered `SELECT *` over a large relation fails with "Response too
+    large to return" rather than returning slowly.
+
+!!! note "BigQuery views"
+    A view, materialized view or external table is read through a BigQuery
+    query job instead of the Storage Read API, detected and retried
+    automatically. The job is billed by bytes scanned; the selected columns,
+    `where`, `bbox` and `limit` are pushed into it, and on a view `where` runs
+    as GoogleSQL (bare column names, plain single-quoted strings, no comments).
+
 !!! warning "BigQuery Limitations"
-    - **Cannot read views or external tables** (Storage Read API limitation)
     - BIGNUMERIC columns are not supported
 
 ### Reading from ArcGIS Feature Services
@@ -1330,6 +1371,52 @@ a table read from plain Parquet is refused here exactly as `gpio add bbox-metada
 refuses the file. Convert it first: `gpio convert geoparquet in.parquet out.parquet`.
 `ops.add_bbox_metadata(table)` is the function form and applies the same rules.
 
+#### `add_stac_metadata(collection, *, version='1.1.0')`
+
+Attach a STAC Collection under the `stac-geoparquet` metadata key. A
+stac-geoparquet file holds STAC Items as rows; this carries the Collection
+those Items belong to in the file's own metadata, so a reader that has the file
+has the Collection too.
+
+<!-- doctest: skip="needs a collection.json and a table of STAC items" -->
+```python
+# From a Collection on disk
+table.add_stac_metadata('collection.json').write('items.parquet')
+
+# Or from a dict you already hold
+table.add_stac_metadata(collection_dict, version='1.0.0').write('items.parquet')
+```
+
+The value written is
+`{"version": ..., "collections": {"<collection id>": {...}}}`. `collections` is
+a **map keyed by collection id** — the singular `collection` key of the 1.0.0
+release is deprecated in 1.1.0, so it is written only under version 1.0.0
+(beside the map, and a 1.0.0 value can hold just one Collection). Every other
+metadata
+key, `geo` included, is kept.
+
+A `stac-geoparquet` key already present is merged with, not replaced by, the
+Collection this call adds: a new collection id joins the map alongside the
+ones already there, a repeated id replaces its own entry, and the declared
+`version` becomes whichever this call asked for.
+
+Raises `GeoParquetError` when `version` is anything but `'1.0.0'` or `'1.1.0'`
+(the only two the specification defines), when the Collection cannot be read,
+or when it has no `id` — the id is what an Item's `collection` field points at,
+so there is no key to file the Collection under without one.
+
+`ops.add_stac_metadata_table(table, collection)` is the function form.
+`ops.add_stac_metadata(path, collection)` is the **file** form: it patches an
+already-written file's footer without re-encoding it, exactly as
+`gpio add stac-metadata` does.
+
+<!-- doctest: skip="needs a collection.json and an items.parquet" -->
+```python
+from geoparquet_io.api import ops
+
+ops.add_stac_metadata('items.parquet', 'collection.json')
+```
+
 #### `check()` / `check_spatial()` / `check_compression()` / `check_bbox()` / `check_row_groups()`
 
 Run best-practice checks on the table.
@@ -1737,6 +1824,8 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 |----------|-------------|
 | `ops.add_bbox(table, column_name='bbox', geometry_column=None)` | Add bounding box column |
 | `ops.add_bbox_metadata(table, bbox_column='bbox', geometry_column=None)` | Add `covering` metadata for an existing bbox column |
+| `ops.add_stac_metadata_table(table, collection, version='1.1.0')` | Set the `stac-geoparquet` key on a table's schema metadata |
+| `ops.add_stac_metadata(parquet_file, collection, version='1.1.0', output_file=None, overwrite=False)` | Write the `stac-geoparquet` key into a written file's footer |
 | `ops.add_quadkey(table, column_name='quadkey', resolution=13, use_centroid=False, geometry_column=None)` | Add quadkey column |
 | `ops.add_h3(table, column_name='h3_cell', resolution=9, geometry_column=None)` | Add H3 cell column |
 | `ops.add_a5(table, column_name='a5_cell', resolution=15, geometry_column=None)` | Add A5 cell column |

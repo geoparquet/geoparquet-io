@@ -33,7 +33,8 @@ gpio extract bigquery PROJECT.DATASET.TABLE output.parquet
 
 **Options:**
 
-- `--project` - GCP project ID (overrides project in TABLE_ID)
+- `--sql` - GoogleSQL to run as the source, in place of TABLE_ID
+- `--project` - GCP project ID (overrides project in TABLE_ID; required with `--sql`)
 - `--credentials-file` - Path to service account JSON file
 - `--include-cols` - Comma-separated columns to include
 - `--exclude-cols` - Comma-separated columns to exclude
@@ -62,8 +63,70 @@ The `--bbox-mode` option controls where spatial filtering occurs:
 
 The `--bbox-threshold` sets the row count where `auto` switches to server-side filtering. Default is 500,000 rows. See the [User Guide](../guide/extract.md#bbox-filtering-mode-server-vs-local) for detailed tradeoff analysis.
 
+!!! note "Views and materialized views"
+    A view, materialized view or external table cannot be read through the
+    BigQuery Storage Read API, so gpio falls back to a BigQuery **query job**
+    for those. It detects this from BigQuery's own refusal, on the read, and
+    retries automatically -- there is no flag to set.
+
+    The job is billed by bytes scanned. The selected columns, `--where`, a
+    server-side `--bbox` and `--limit` are pushed into it, so an unfiltered
+    read of a very large view can fail with "Response too large to return".
+    On a view `--where` runs as GoogleSQL, so only bare column names, plain
+    single-quoted strings and no comments are accepted there. See the
+    [User Guide](../guide/extract.md#views-and-materialized-views).
+
+**Your own SQL:**
+
+`--sql` replaces the table source with a statement you write, run as a
+BigQuery query job. It is for what `--where` cannot express -- a window
+function, a join, a `GROUP BY`:
+
+=== "CLI"
+
+    ```bash
+    gpio extract bigquery --project myproject output.parquet \
+      --sql "SELECT * EXCEPT(rn) FROM (
+               SELECT *, ROW_NUMBER() OVER (
+                 PARTITION BY item_id ORDER BY version DESC) AS rn
+               FROM \`myproject.geodata.items\`
+               WHERE acquired_at >= TIMESTAMP('2025-09-01')
+             ) WHERE rn = 1" \
+      --geography-column geometry
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.Table.from_bigquery(
+        sql="SELECT * EXCEPT(rn) FROM (SELECT *, ROW_NUMBER() OVER "
+            "(PARTITION BY item_id ORDER BY version DESC) AS rn "
+            "FROM `myproject.geodata.items` "
+            "WHERE acquired_at >= TIMESTAMP('2025-09-01')) WHERE rn = 1",
+        project='myproject',
+        geography_column='geometry',
+    ).write('output.parquet')
+    ```
+
+With `--sql` there is no `TABLE_ID`, `--project` is required (the query job
+has to be billed somewhere), and the flags that shape the *query* --
+`--include-cols`, `--exclude-cols`, `--where`, `--bbox`, `--bbox-mode`,
+`--bbox-threshold`, `--limit` -- are refused, because the statement already
+says all of that. Everything that shapes the *output file* still applies.
+The statement must be a single `SELECT` or `WITH` query: DML, DDL and
+multi-statement scripts are refused, since `extract` only reads.
+See the [User Guide](../guide/extract.md#running-your-own-sql).
+
+!!! warning "Filter inside the statement"
+    A query job materializes its whole result before anything is read, so an
+    unfiltered `SELECT *` over a large relation fails with "Response too
+    large to return" rather than returning slowly. An outer `--limit` would
+    not help, which is the other reason it is refused.
+
 !!! warning "Limitations"
-    **Cannot read BigQuery views or external tables** - this is a limitation of the BigQuery Storage Read API. BIGNUMERIC columns are not supported (exceeds DuckDB's precision).
+    BIGNUMERIC columns are not supported (exceeds DuckDB's precision).
 
 ### extract arcgis
 

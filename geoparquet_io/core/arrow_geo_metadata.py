@@ -275,6 +275,86 @@ def _crs_as_projjson(crs):
         return None
 
 
+def _is_spherical_edge_type(arrow_type) -> bool:
+    """Whether a GeoArrow extension type declares spherical edges."""
+    edge_type = getattr(arrow_type, "edge_type", None)
+    return getattr(edge_type, "name", "").upper() == "SPHERICAL"
+
+
+# What a secondary geometry column's carried entry says about the column ITSELF,
+# as opposed to about the rows a particular write happens to put in it. Only these
+# travel into a derived `geometry_info`; `bbox` and `covering` are the derived
+# facts a transform can invalidate (#934).
+_DESCRIPTIVE_SECONDARY_KEYS = frozenset(
+    {"encoding", "geometry_types", "crs", "edges", "orientation"}
+)
+
+
+def table_geometry_info(table, primary_column: str, carried_geo: dict | None = None) -> dict | None:
+    """``geometry_info`` for an in-memory table whose caller supplied none.
+
+    The table entry points -- ``write_geoparquet_table``, each strategy's
+    ``write_from_table``, and the Python API's ``Table.write`` behind them -- get
+    no ``geometry_info``, and the only secondaries they learned about were the ones
+    the table's own carried ``geo`` key happened to name. A table read from a
+    native-geo-only file (``gpio.read(f).write(out)``) carries no such key, so its
+    secondary geometry column was left out of ``geo.columns`` -- which 2.0 requires
+    for every geometry column -- and written as a native Parquet GEOMETRY logical
+    type inside a 1.1 file (#1175).
+
+    The table's *schema* is the witness those entry points do have: a GeoArrow
+    extension field is a geometry column whether or not a ``geo`` key says so, and
+    it carries its OWN CRS, never the primary's (#993/#1000). Each secondary gets
+    the spec's "not known" ``geometry_types: []`` -- every 1.x entry needs the key
+    present, and the write paths that can recompute a real list do.
+
+    This is the sibling of
+    :func:`~geoparquet_io.core.derive_geo_from_file.derive_secondary_geometry_info`:
+    same answer, read off an in-memory table rather than a written file, which is
+    the line between this module and that one.
+
+    Returns None when the table has no secondary geometry column.
+    """
+    declared = (carried_geo or {}).get("columns") or {}
+    metadata: dict[str, dict] = {}
+    for field in table.schema:
+        if field.name == primary_column:
+            continue
+        # A column the carried key declares is a geometry column even as plain
+        # WKB bytes with no extension name -- dropping it here would un-describe
+        # a secondary the input itself described.
+        if not is_geoarrow_extension_field(field) and field.name not in declared:
+            continue
+        declared_meta = declared.get(field.name) or {}
+        # The descriptive keys the input stated for this column, which the entry
+        # points do not otherwise carry over. Deliberately NOT `bbox` or
+        # `covering`: those are derived facts a transform can invalidate, and the
+        # write paths that can recompute them do.
+        col_meta = {
+            key: value for key, value in declared_meta.items() if key in _DESCRIPTIVE_SECONDARY_KEYS
+        }
+        # Every 1.x entry needs the key present -- DuckDB refuses to open a file
+        # whose described column has no geometry_types -- so an undescribed
+        # column gets the spec's "not known" sentinel, which the paths that can
+        # measure the real list treat as a gap (#952).
+        col_meta.setdefault("geometry_types", [])
+        if "crs" not in col_meta:
+            crs = _crs_as_projjson(getattr(field.type, "crs", None))
+            # The spec states the default by OMITTING the key; `apply_output_crs`
+            # is where that rule lives for the primary.
+            if isinstance(crs, dict) and not is_default_crs(crs):
+                col_meta["crs"] = crs
+        # The schema carries the edge interpretation as well as the CRS: left
+        # behind, a spherical secondary came out planar with no warning.
+        if "edges" not in col_meta and _is_spherical_edge_type(field.type):
+            col_meta["edges"] = "spherical"
+        metadata[field.name] = col_meta
+
+    if not metadata:
+        return None
+    return {"primary": primary_column, "secondary": list(metadata), "metadata": metadata}
+
+
 def _process_geometry_column_for_version(
     table,
     geometry_column: str,
@@ -353,6 +433,10 @@ def _process_geometry_column_for_version(
                 new_type = wkb_arr.type.with_crs(resolved_crs)
             else:
                 new_type = ga.wkb()
+            # The CRS is normalized, never the edges: a spherical column rebuilt
+            # as a bare `ga.wkb()` came out a planar GEOMETRY (#1175).
+            if _is_spherical_edge_type(wkb_arr.type):
+                new_type = new_type.with_edge_type(ga.EdgeType.SPHERICAL)
             # Always rebuild: geoarrow's WkbType.__eq__ ignores the CRS, so a
             # "types are equal" shortcut would skip precisely the case this is
             # here to normalize.
@@ -776,6 +860,14 @@ def _apply_geoparquet_metadata(
     carried_geo = _parse_geo_metadata_quietly(original_metadata) or _parse_geo_metadata_quietly(
         table.schema.metadata
     )
+
+    # A table with no carried key at all still names its geometry columns, in its
+    # schema: a GeoArrow extension field is one whether or not a `geo` key says so.
+    # Without this, `gpio.read(native_geo_only).write(out)` left its secondary out
+    # of `geo.columns` and wrote it as a native Parquet GEOMETRY inside a 1.1 file
+    # (#1175). A caller that supplied `geometry_info` has already answered.
+    if geometry_info is None:
+        geometry_info = table_geometry_info(table, geometry_column, carried_geo)
 
     # Step 1: Build the geo metadata, BEFORE the geometry columns are retyped.
     #

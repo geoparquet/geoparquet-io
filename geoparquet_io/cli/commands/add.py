@@ -32,6 +32,11 @@ from geoparquet_io.core.add.h3 import add_h3_column as add_h3_column_impl
 from geoparquet_io.core.add.kdtree import add_kdtree_column as add_kdtree_column_impl
 from geoparquet_io.core.add.quadkey import add_quadkey_column as add_quadkey_column_impl
 from geoparquet_io.core.add.s2 import add_s2_column as add_s2_column_impl
+from geoparquet_io.core.add.stac_metadata import (
+    DEFAULT_STAC_GEOPARQUET_VERSION,
+    SUPPORTED_STAC_GEOPARQUET_VERSIONS,
+)
+from geoparquet_io.core.add.stac_metadata import add_stac_metadata as add_stac_metadata_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.streaming import StreamingError
 
@@ -533,6 +538,60 @@ def add_bbox_metadata_cmd(ctx, parquet_file, bbox_name, verbose):
         setup_aws_profile_if_needed(None, parquet_file)
 
         add_bbox_metadata_impl(parquet_file, verbose, bbox_column=bbox_name)
+
+
+@add.command(name="stac-metadata", cls=SingleFileCommand)
+@click.argument("input_parquet")
+@click.argument("output_parquet", required=False, default=None)
+@click.option(
+    "--collection",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to the STAC Collection JSON to embed in the footer",
+)
+@click.option(
+    "--stac-geoparquet-version",
+    type=click.Choice(SUPPORTED_STAC_GEOPARQUET_VERSIONS),
+    default=DEFAULT_STAC_GEOPARQUET_VERSION,
+    show_default=True,
+    help="Version of the stac-geoparquet specification to declare",
+)
+@overwrite_option
+@verbose_option
+@click.pass_context
+def add_stac_metadata_cmd(
+    ctx, input_parquet, output_parquet, collection, stac_geoparquet_version, overwrite, verbose
+):
+    """Write the stac-geoparquet key into a Parquet file's footer.
+
+    A stac-geoparquet file holds STAC Items as rows; this writes the Collection
+    those Items belong to into the file's own footer metadata, so a reader that
+    has the file has the Collection too.
+
+    The value is {"version": ..., "collections": {<id>: <collection>}} --
+    'collections' is a map keyed by collection id. The singular 'collection' key of the
+    1.0.0 release is deprecated in 1.1.0, so it is written only under version 1.0.0
+    (beside the map, and a 1.0.0 value can hold just one Collection).
+
+    A file that already carries a stac-geoparquet key keeps every collection
+    it already named: this call's Collection is added to the existing
+    'collections' map (replacing its own id if that id was already there),
+    not written over the whole key. The declared version always becomes the
+    one this call asks for.
+
+    With no OUTPUT the file is modified in place. Either way only the footer is
+    rewritten: every page below it is copied verbatim, so the compression level,
+    the encodings, the bloom filters and the row order are all preserved.
+    """
+    with _activate_s3(ctx):
+        add_stac_metadata_impl(
+            input_parquet,
+            collection,
+            version=stac_geoparquet_version,
+            output_file=output_parquet,
+            overwrite=overwrite,
+            verbose=verbose,
+        )
 
 
 @add.command(name="h3", cls=SingleFileCommand)

@@ -20,8 +20,11 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
     _bbox_column_to_declare,
+    _canonicalize_wkb_columns,
     _compute_geometry_types,
     _detect_version_from_table,
+    _parse_geo_metadata_quietly,
+    table_geometry_info,
 )
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import apply_output_crs
@@ -713,6 +716,21 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         version_config = GEOPARQUET_VERSIONS.get(effective_version, GEOPARQUET_VERSIONS["1.1"])
         metadata_version = version_config["metadata_version"]
 
+        # This entry point gets no `geometry_info`, so the table's own schema is
+        # what names a block-less table's secondaries (#1175). Below 2.0 they also
+        # have to give up the GeoArrow carrier the schema builder would otherwise
+        # write as a native Parquet GEOMETRY type -- illegal in a 1.x file.
+        geometry_info = table_geometry_info(
+            table, geometry_column, _parse_geo_metadata_quietly(table.schema.metadata)
+        )
+        if geometry_info and effective_version in ("1.0", "1.1"):
+            table = _canonicalize_wkb_columns(
+                table,
+                sorted(geometry_info["secondary"]),
+                verbose,
+                native_columns={geometry_column},
+            )
+
         use_native_geometry = effective_version in ("2.0", "parquet-geo-only")
         should_add_geo_metadata = effective_version != "parquet-geo-only"
         geoarrow_native = effective_version == "1.1-geoarrow"
@@ -771,6 +789,10 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         apply_output_crs(geo_meta["columns"][geometry_column], input_crs)
 
+        # Before `native_geometry_crs` below: a secondary's native Parquet type is
+        # keyed off the CRS its own entry declares, so the entry has to exist first.
+        merge_secondary_geometry_metadata(geo_meta, geometry_info)
+
         # Override encoding when geoarrow_target_type resolved a native encoding.
         # geoarrow_encoding is "WKB" for mixed/unconvertible geometry — no override.
         if geoarrow_encoding is not None and geoarrow_encoding != "WKB":
@@ -784,7 +806,9 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             strip_illegal_bbox_covering(geo_meta, table.schema), verbose
         )
 
-        native_crs = native_geometry_crs(effective_version, geo_meta, geometry_column)
+        native_crs = native_geometry_crs(
+            effective_version, geo_meta, geometry_column, geometry_info
+        )
         if not should_add_geo_metadata:
             geo_meta = None
 
@@ -867,8 +891,15 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             if verbose:
                 with_crs = sorted(name for name, crs in native_crs.items() if crs)
                 debug(f"Native Parquet GEOMETRY type for {sorted(geo_columns)}, CRS on {with_crs}")
+            declared = (geo_meta or {}).get("columns") or {}
             new_fields = [
-                pa.field(field.name, native_wkb_type(native_crs.get(field.name)))
+                pa.field(
+                    field.name,
+                    native_wkb_type(
+                        native_crs.get(field.name),
+                        edges=(declared.get(field.name) or {}).get("edges"),
+                    ),
+                )
                 if field.name in geo_columns
                 else field
                 for field in schema

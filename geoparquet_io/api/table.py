@@ -24,6 +24,7 @@ from geoparquet_io.core.add.kdtree import (
     ITERATIONS_CONFLICT,
     ITERATIONS_MISSING,
 )
+from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.logging_config import warn
@@ -265,6 +266,13 @@ def read(path: str | Path, **kwargs) -> Table:
         >>> table = gpio.read('data.parquet')
         >>> table.add_bbox().write('output.parquet')
     """
+    # Registers the GeoArrow extension types, so a native Parquet GEOMETRY /
+    # GEOGRAPHY column arrives as `geoarrow.wkb` carrying its own CRS and edges
+    # rather than bare `binary`. Process-global, so it is done here rather than
+    # relied on: without it a DuckDB-written native secondary column was
+    # invisible to the write, and left out of `geo.columns` (#1175).
+    import geoarrow.pyarrow  # noqa: F401
+
     from geoparquet_io.core.common import resolve_geoparquet_version_from_file
 
     arrow_table = pq.read_table(str(path), **kwargs)
@@ -657,8 +665,9 @@ class Table:
     @classmethod
     def from_bigquery(
         cls,
-        table_id: str,
+        table_id: str | None = None,
         *,
+        sql: str | None = None,
         project: str | None = None,
         credentials_file: str | None = None,
         where: str | None = None,
@@ -684,8 +693,21 @@ class Table:
         can be parsed by specifying geography_column and geometry_format.
 
         Args:
-            table_id: Fully qualified BigQuery table ID (project.dataset.table)
-            project: GCP project ID (overrides project in table_id if set)
+            table_id: Fully qualified BigQuery table ID
+                (project.dataset.table). Omit it when ``sql`` is given.
+            sql: GoogleSQL to run as the source, in place of ``table_id``.
+                For what ``where`` cannot express -- a window function, a
+                join, a GROUP BY. Must be a single SELECT or WITH query.
+                Requires ``project``, and is mutually exclusive with every
+                argument that shapes the query
+                (``where``, ``bbox``, ``bbox_mode``, ``bbox_threshold``,
+                ``limit``, ``columns``, ``exclude_columns``): the statement
+                says all of that itself. Filter inside it -- a query job
+                materializes its whole result first, so an unfiltered
+                statement over a large relation fails with "Response too
+                large to return".
+            project: GCP project ID (overrides project in table_id if set;
+                required with ``sql``)
             credentials_file: Path to service account JSON file
             where: SQL WHERE clause for filtering (BigQuery SQL syntax)
             bbox: Bounding box for spatial filter as "minx,miny,maxx,maxy"
@@ -708,8 +730,15 @@ class Table:
             RuntimeError: If BigQuery query fails
 
         Note:
-            **Cannot read BigQuery views or external tables** - this is a
-            limitation of the BigQuery Storage Read API.
+            A view, materialized view or external table is read with a
+            BigQuery query job rather than the Storage Read API, which serves
+            physical tables only. gpio detects this from BigQuery's refusal on
+            the read and retries automatically. The job is billed by bytes
+            scanned, and ``where``, ``bbox`` and ``limit`` are pushed into it
+            rather than applied afterwards, so filter a large view or the job
+            can fail with "Response too large to return". So are the selected
+            columns. On a view ``where`` runs as GoogleSQL, so only bare column
+            names, plain single-quoted strings and no comments are accepted.
 
         Example:
             >>> import geoparquet_io as gpio
@@ -730,6 +759,13 @@ class Table:
             ...     geography_column='geometry',
             ...     geometry_format='wkt'
             ... )
+
+            >>> # Run your own GoogleSQL instead of reading a table
+            >>> table = gpio.Table.from_bigquery(
+            ...     sql="SELECT name, geog FROM `p.d.t` QUALIFY ROW_NUMBER() "
+            ...         "OVER (PARTITION BY id ORDER BY version DESC) = 1",
+            ...     project='myproject',
+            ... )
         """
         from geoparquet_io.core.column_selection import join_column_list
         from geoparquet_io.core.extract_bigquery import extract_bigquery
@@ -744,6 +780,7 @@ class Table:
         arrow_table = extract_bigquery(
             table_id=table_id,
             output_parquet=None,  # Return table instead of writing
+            sql=sql,
             project=project,
             credentials_file=credentials_file,
             where=where,
@@ -762,11 +799,10 @@ class Table:
 
         if arrow_table is None:
             raise RuntimeError(
-                f"Failed to read from BigQuery table: {table_id}. "
+                f"Failed to read from BigQuery: {table_id or sql}. "
                 "Possible causes: (1) Authentication/credentials issue - verify your service "
                 "account has BigQuery Data Viewer role or check gcloud auth; "
-                "(2) Table not found - verify the table_id format (project.dataset.table); "
-                "(3) Views or external tables are not supported by the BigQuery Storage Read API."
+                "(2) Table not found - verify the table_id format (project.dataset.table)."
             )
 
         return cls(arrow_table)
@@ -3508,6 +3544,54 @@ class Table:
             geometry_column=geom_col,
         )
 
+        return self._wrap(new_table, self._geometry_column)
+
+    def add_stac_metadata(
+        self,
+        collection: dict | str | Path,
+        *,
+        version: str = DEFAULT_STAC_GEOPARQUET_VERSION,
+    ) -> Table:
+        """
+        Attach a STAC Collection under the `stac-geoparquet` metadata key.
+
+        A stac-geoparquet file holds STAC Items as rows; this carries the
+        Collection those Items belong to in the file's own metadata, so a
+        reader that has the file has the Collection too.
+
+        The value is `{"version": ..., "collections": {<id>: <collection>}}`:
+        `collections` is a map keyed by collection id. The singular `collection` key of
+        the 1.0.0 release is deprecated in 1.1.0, so it is written only under version
+        1.0.0 (beside the map, and a 1.0.0 value can hold just one Collection). Every
+        other metadata key, `geo` included, is kept.
+
+        A `stac-geoparquet` key the table already carries keeps every
+        collection it already named: this call's Collection is added to the
+        existing `collections` map (replacing its own id if that id was
+        already there), not written over the whole key. The declared version
+        always becomes the one this call asks for.
+
+        Mirrors `gpio add stac-metadata`, which writes the same value into an
+        already-written file's footer without re-encoding it.
+
+        Args:
+            collection: A STAC Collection dict, or a path to a JSON file with one
+            version: stac-geoparquet spec version, "1.0.0" or "1.1.0"
+
+        Returns:
+            Table with the key set on its schema metadata
+
+        Raises:
+            GeoParquetError: If the version is not one the spec defines, the
+                Collection cannot be read, or it has no `id`
+
+        Example:
+            >>> table = gpio.read('items.parquet')
+            >>> table.add_stac_metadata('collection.json').write('out.parquet')
+        """
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table
+
+        new_table = add_stac_metadata_table(self._table, collection, version=version)
         return self._wrap(new_table, self._geometry_column)
 
     def partition_by_string(

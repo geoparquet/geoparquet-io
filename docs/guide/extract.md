@@ -794,6 +794,107 @@ Consider adjusting `--bbox-threshold` when:
 - You've benchmarked and found a different crossover point for your data
 - Your BigQuery pricing tier or network conditions differ from typical
 
+### Views and Materialized Views
+
+The BigQuery Storage Read API serves physical tables only. When the id names a
+view, a materialized view or an external table, gpio sees BigQuery refuse the
+read and runs a BigQuery **query job** instead -- there is no flag to set, and
+the CLI and Python examples above work unchanged with a view's id.
+
+What changes on a view:
+
+- **It is billed by bytes scanned.** The columns you select, `--where`, a
+  server-side `--bbox` and `--limit` all go into the query job, so BigQuery
+  reads only the columns asked for and can prune partitions. An unfiltered read
+  of a very large view can fail with "Response too large to return": filter it.
+- **`--where` runs inside BigQuery, as GoogleSQL.** On a table DuckDB evaluates
+  it. Only the subset both dialects read identically is accepted on a view:
+  bare column names, plain single-quoted strings with no quote or backslash
+  inside, and no comments. A double-quoted name is refused, because GoogleSQL
+  reads `"name"` as a string literal. For anything more, use
+  [`--sql`](#running-your-own-sql).
+- **`--bbox-mode local` reads the whole view** and filters it in DuckDB; leave
+  the default (`auto` filters a view server-side).
+- `--dry-run` cannot tell a view from a table, so it shows the table form.
+
+### Running Your Own SQL
+
+`--where` can only add a predicate to `SELECT * FROM <table>`. When the
+question needs more than that -- a window function, a join, a `GROUP BY`, a
+`QUALIFY` -- give the whole statement with `--sql` instead. It runs as a
+BigQuery query job and its result is what gets written.
+
+=== "CLI"
+
+    <!-- doctest: skip="queries a table that exists only in the reader's own warehouse" -->
+    ```bash
+    # Latest version of each item: no --where can express this
+    gpio extract bigquery --project myproject output.parquet \
+      --sql "SELECT * EXCEPT(rn) FROM (
+               SELECT *, ROW_NUMBER() OVER (
+                 PARTITION BY item_id ORDER BY version DESC) AS rn
+               FROM \`myproject.geodata.items\`
+               WHERE acquired_at >= TIMESTAMP('2025-09-01')
+                 AND acquired_at <  TIMESTAMP('2025-09-02')
+             ) WHERE rn = 1" \
+      --geography-column geometry --geometry-format geojson
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="queries a table that exists only in the reader's own warehouse" -->
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.Table.from_bigquery(
+        sql="""
+            SELECT * EXCEPT(rn) FROM (
+              SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY item_id ORDER BY version DESC) AS rn
+              FROM `myproject.geodata.items`
+              WHERE acquired_at >= TIMESTAMP('2025-09-01')
+                AND acquired_at <  TIMESTAMP('2025-09-02')
+            ) WHERE rn = 1
+        """,
+        project='myproject',
+        geography_column='geometry',
+        geometry_format='geojson',
+    )
+    table.write('output.parquet')
+    ```
+
+Four things to know.
+
+**It replaces the table source.** There is no `TABLE_ID`; the statement names
+its own relations. `--project` becomes required, because the query job has to
+be billed to a project and there is no table id to take one from.
+
+**It is mutually exclusive with every query-shaping option** --
+`--include-cols`, `--exclude-cols`, `--where`, `--bbox`, `--bbox-mode`,
+`--bbox-threshold` and `--limit`. The statement already says which columns,
+which rows and how many; a second, outer answer to the same question could
+only disagree with it. Combining them is an error rather than a silent
+precedence rule.
+
+**It must be one read-only query.** The statement has to open with `SELECT`
+or `WITH` and hold no second statement after a `;`. BigQuery runs whatever it
+is handed, and it would run a `DELETE`, `CREATE` or `MERGE` while gpio is still
+reading the schema, so those are refused before anything is sent.
+
+**Filter inside the statement.** A query job materializes its entire result
+before anything is read back, so an unfiltered `SELECT *` over a large
+relation does not return slowly -- it fails outright with "Response too large
+to return". This is also why `--limit` has nowhere useful to go: capping rows
+the job has already built saves nothing.
+
+The options that shape the *output file* all still apply:
+`--geography-column`, `--geometry-format`, `--edges`, `--compression`,
+`--row-group-size`, `--geoparquet-version`, `--overwrite` and the rest.
+
+!!! tip "See the statement before you pay for it"
+    `--dry-run` prints the query gpio would issue without connecting to
+    BigQuery, and `--show-sql` prints it on a real run.
+
 ### Authentication
 
 The command uses Google Cloud credentials in this order:

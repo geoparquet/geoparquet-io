@@ -66,7 +66,7 @@ geoparquet_io/
 
 | Command Group | Subcommands | Description |
 |---------------|-------------|-------------|
-| `gpio add` | a5, admin-divisions, bbox, bbox-metadata, geometry-metrics, h3, kdtree, quadkey, s2 | Commands for enhancing GeoParquet files in various ways |
+| `gpio add` | a5, admin-divisions, bbox, bbox-metadata, geometry-metrics, h3, kdtree, quadkey, s2, stac-metadata | Commands for enhancing GeoParquet files in various ways |
 | `gpio benchmark` | compare, explain, report, suite | Benchmark GeoParquet performance |
 | `gpio check` | all, bbox, compression, optimization, row-group, spatial, spec, stac | Check GeoParquet files for best practices |
 | `gpio convert` | csv, flatgeobuf, geojson, geopackage, geoparquet, reproject, shapefile | Convert between formats and coordinate systems |

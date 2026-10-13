@@ -495,13 +495,111 @@ def extract_arcgis(
         )
 
 
+#: The options that shape the BigQuery *query*, as opposed to the output file.
+#: Each is mutually exclusive with --sql, which shapes the query itself.
+_BIGQUERY_QUERY_SHAPING_OPTIONS = (
+    "include_cols",
+    "exclude_cols",
+    "where",
+    "bbox",
+    "bbox_mode",
+    "bbox_threshold",
+    "limit",
+)
+
+
+def _resolve_bigquery_positionals(
+    sql: str | None,
+    table_id: str | None,
+    output_file: str | None,
+) -> tuple[str | None, str | None]:
+    """Decide which of the two positionals is which, given ``--sql``.
+
+    Click binds positionals left to right, so once TABLE_ID is optional,
+    ``gpio extract bigquery --sql "..." out.parquet`` binds out.parquet to
+    TABLE_ID and leaves OUTPUT_FILE empty -- gpio would then go looking for a
+    BigQuery table called "out.parquet" and write nothing. With --sql there is
+    no table source at all, so a lone positional can only be the output.
+
+    Two positionals with --sql is left alone and falls through to
+    :func:`~geoparquet_io.core.extract_bigquery._validate_sql_source`, which
+    refuses a TABLE_ID and a statement together by name.
+    """
+    if sql is not None and table_id is not None and output_file is None:
+        return None, table_id
+    return table_id, output_file
+
+
+def _check_bigquery_source(
+    table_id: str | None,
+    sql: str | None,
+    project: str | None,
+) -> None:
+    """Re-raise the core's source verdict as a plain CLI error.
+
+    The rule itself lives in core, so the Python API enforces the same one.
+    What this adds is presentation: ``InvalidParameterError`` renders through
+    ``handle_core_exception`` as "Invalid value for 'project': Invalid
+    parameter 'project': ...", which says the same thing three times. The
+    reason alone is already a complete sentence written for a user.
+    """
+    from geoparquet_io.core.exceptions import InvalidParameterError
+    from geoparquet_io.core.extract_bigquery import _validate_sql_source
+
+    try:
+        # The query-shaping options are checked separately, off the parameter
+        # source rather than the value, so none are passed here.
+        _validate_sql_source(table_id, sql, project, {})
+    except InvalidParameterError as exc:
+        raise click.ClickException(exc.reason) from None
+
+
+def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
+    """Refuse ``--sql`` combined with any flag that shapes the query.
+
+    ``ctx.get_parameter_source`` rather than a comparison against the default,
+    because ``--bbox-mode`` and ``--bbox-threshold`` have non-None defaults:
+    ``auto`` and ``500000`` are what an untouched command line carries too, so
+    a value check cannot tell "the user asked for server-side filtering" from
+    "the user said nothing". Typing the default explicitly is still a
+    contradiction worth naming, and this catches it.
+
+    The core runs the same rule on the values it was given
+    (:func:`~geoparquet_io.core.extract_bigquery._validate_sql_source`), which
+    is what a Python API caller gets; this adds the one judgement only Click
+    can make.
+    """
+    if sql is None:
+        return
+    from click.core import ParameterSource
+
+    from geoparquet_io.core.extract_bigquery import _SQL_EXCLUSIVE_MESSAGE
+
+    given = [
+        name
+        for name in _BIGQUERY_QUERY_SHAPING_OPTIONS
+        if ctx.get_parameter_source(name) is not ParameterSource.DEFAULT
+    ]
+    if given:
+        flags = ", ".join("--" + name.replace("_", "-") for name in given)
+        raise click.ClickException(f"{_SQL_EXCLUSIVE_MESSAGE} Given with --sql: {flags}.")
+
+
 @extract.command(name="bigquery")
 @handle_geoparquet_errors
-@click.argument("table_id", metavar="TABLE_ID")
+@click.argument("table_id", metavar="[TABLE_ID]", required=False, default=None)
 @click.argument("output_file", type=click.Path(), required=False, default=None)
 @click.option(
+    "--sql",
+    help="GoogleSQL to run as the source, in place of TABLE_ID. For what "
+    "--where cannot express: a window function, a join, a GROUP BY. Must be a "
+    "single SELECT or WITH query. Requires --project, and cannot be combined "
+    "with any query-shaping option.",
+)
+@click.option(
     "--project",
-    help="GCP project ID (overrides project in TABLE_ID if specified)",
+    help="GCP project ID (overrides project in TABLE_ID if specified). "
+    "Required with --sql, which has no TABLE_ID to bill the query job to.",
 )
 @click.option(
     "--credentials-file",
@@ -578,9 +676,12 @@ def extract_arcgis(
 @show_sql_option
 @verbose_option
 @any_extension_option
+@click.pass_context
 def extract_bigquery_cmd(
+    ctx,
     table_id,
     output_file,
+    sql,
     project,
     credentials_file,
     include_cols,
@@ -610,7 +711,24 @@ def extract_bigquery_cmd(
     Extract data from a BigQuery table to GeoParquet.
 
     TABLE_ID is the fully qualified BigQuery table identifier:
-    PROJECT.DATASET.TABLE or DATASET.TABLE (if --project is set).
+    PROJECT.DATASET.TABLE or DATASET.TABLE (if --project is set). Omit it when
+    you give --sql.
+
+    \b
+    --sql replaces the table source: the statement runs as a BigQuery query
+    job and its result is what gets written. Use it for anything --where
+    cannot express -- a window function, a join, a GROUP BY. It needs
+    --project, because the job has to be billed somewhere and there is no
+    TABLE_ID to take a project from, and it cannot be combined with
+    --include-cols, --exclude-cols, --where, --bbox, --bbox-mode,
+    --bbox-threshold or --limit: say all of that in the statement instead.
+    The options that shape the output file all still apply.
+
+    \b
+    Filter inside the statement, not after it. A query job materializes its
+    whole result before anything is read, so an unfiltered SELECT * over a
+    large relation fails with "Response too large to return" rather than
+    returning slowly.
 
     Authentication (in order of precedence):
 
@@ -625,8 +743,15 @@ def extract_bigquery_cmd(
     If no geometry column is found, the output is plain Parquet.
 
     \b
+    A view, materialized view or external table is read with a BigQuery query
+    job instead of the Storage Read API, which serves physical tables only.
+    This is detected and retried automatically. The job is billed by bytes
+    scanned; the selected columns and --where/--bbox/--limit are pushed into
+    it, and on a view --where runs as GoogleSQL (bare column names, plain
+    single-quoted strings, no comments).
+
+    \b
     Limitations:
-    - Cannot read BigQuery views or external tables (Storage Read API limitation)
     - BIGNUMERIC columns are not supported
 
     Examples:
@@ -663,14 +788,28 @@ def extract_bigquery_cmd(
         \b
         # Extract without geometry (plain Parquet)
         gpio extract bigquery myproject.dataset.table output.parquet
+
+        \b
+        # Run your own GoogleSQL: latest version of each item, which no
+        # --where can express
+        gpio extract bigquery --project myproject output.parquet \\
+            --sql "SELECT * EXCEPT(rn) FROM (SELECT *, ROW_NUMBER() OVER \\
+            (PARTITION BY item_id ORDER BY version DESC) AS rn FROM \\
+            \\`myproject.dataset.items\\` WHERE acquired_at >= '2025-09-01') \\
+            WHERE rn = 1"
     """
     from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+    table_id, output_file = _resolve_bigquery_positionals(sql, table_id, output_file)
+    _reject_query_shaping_with_sql(ctx, sql)
+    _check_bigquery_source(table_id, sql, project)
 
     row_group_mb = prepare_output(output_file, any_extension, row_group_size, row_group_size_mb)
 
     extract_bigquery(
         table_id=table_id,
         output_parquet=output_file,
+        sql=sql,
         project=project,
         credentials_file=credentials_file,
         where=where,

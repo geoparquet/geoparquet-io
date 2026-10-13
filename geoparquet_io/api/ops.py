@@ -28,6 +28,9 @@ from geoparquet_io.core.add.h3 import add_h3_table
 from geoparquet_io.core.add.kdtree import DEFAULT_KDTREE_TARGET_ROWS, add_kdtree_table
 from geoparquet_io.core.add.quadkey import add_quadkey_table
 from geoparquet_io.core.add.s2 import add_s2_table
+from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
+from geoparquet_io.core.add.stac_metadata import add_stac_metadata as _add_stac_metadata_file
+from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table as _add_stac_metadata_table
 from geoparquet_io.core.extract import extract_table
 from geoparquet_io.core.hilbert_order import hilbert_order_table
 from geoparquet_io.core.reproject import reproject_table
@@ -94,6 +97,84 @@ def add_bbox_metadata(
         bbox_column=bbox_column,
         geometry_column=geometry_column,
     )
+
+
+def add_stac_metadata(
+    parquet_file: str | Path,
+    collection: dict | str | Path,
+    *,
+    version: str = DEFAULT_STAC_GEOPARQUET_VERSION,
+    output_file: str | Path | None = None,
+    overwrite: bool = False,
+) -> None:
+    """
+    Write the `stac-geoparquet` key into a Parquet file's footer.
+
+    Mirrors `gpio add stac-metadata`. The value is
+    `{"version": ..., "collections": {<id>: <collection>}}`: `collections` is a
+    map keyed by collection id, and the singular `collection` key of the 1.0.0 release
+    is deprecated in 1.1.0, so it is written only under version 1.0.0 (beside the map,
+    and a 1.0.0 value can hold just one Collection).
+
+    A file that already carries a `stac-geoparquet` key keeps every collection
+    it already named: this call's Collection is added to the existing
+    `collections` map (replacing its own id if that id was already there), not
+    written over the whole key. The declared version always becomes the one
+    this call asks for.
+
+    Only the footer is rewritten; every page below it is copied verbatim, so
+    the compression codec and level, the encodings, the bloom filters, the page
+    index, the row-group boundaries and the row order are all preserved.
+
+    Args:
+        parquet_file: Path to a local Parquet file. Modified in place unless
+            `output_file` is given.
+        collection: A STAC Collection dict, or a path to a JSON file with one.
+        version: stac-geoparquet spec version, "1.0.0" or "1.1.0"
+        output_file: Where to write the result instead of over the input
+        overwrite: Replace `output_file` if it already exists
+
+    Raises:
+        GeoParquetError: If a path is remote, the output exists and `overwrite`
+            was not given, the version is not one the spec defines, the
+            Collection cannot be read, or it has no `id`
+    """
+    _add_stac_metadata_file(
+        str(parquet_file),
+        collection,
+        version=version,
+        output_file=str(output_file) if output_file is not None else None,
+        overwrite=overwrite,
+    )
+
+
+def add_stac_metadata_table(
+    table: pa.Table,
+    collection: dict | str | Path,
+    *,
+    version: str = DEFAULT_STAC_GEOPARQUET_VERSION,
+) -> pa.Table:
+    """
+    Set the `stac-geoparquet` key on an in-memory table's schema metadata.
+
+    The in-memory counterpart of `add_stac_metadata()`, for a table that has
+    not been written yet. Every other schema metadata key — `geo` first among
+    them — is kept. A `stac-geoparquet` key the table already carries is
+    merged with, not replaced by, this call's Collection, the same way the
+    file path is.
+
+    Args:
+        table: Input PyArrow Table
+        collection: A STAC Collection dict, or a path to a JSON file with one
+        version: stac-geoparquet spec version, "1.0.0" or "1.1.0"
+
+    Returns:
+        New table carrying the key. The columns are untouched.
+
+    Raises:
+        GeoParquetError: If the version or the Collection is refused
+    """
+    return _add_stac_metadata_table(table, collection, version=version)
 
 
 def add_quadkey(
@@ -1878,8 +1959,9 @@ def sub_partition_by_s2(
 
 
 def read_bigquery(
-    table_id: str,
+    table_id: str | None = None,
     *,
+    sql: str | None = None,
     project: str | None = None,
     credentials_file: str | None = None,
     where: str | None = None,
@@ -1905,8 +1987,20 @@ def read_bigquery(
     can be parsed by specifying geography_column and geometry_format.
 
     Args:
-        table_id: Fully qualified BigQuery table ID (project.dataset.table)
-        project: GCP project ID (overrides project in table_id if set)
+        table_id: Fully qualified BigQuery table ID (project.dataset.table).
+            Omit it when ``sql`` is given.
+        sql: GoogleSQL to run as the source, in place of ``table_id``. For
+            what ``where`` cannot express -- a window function, a join, a
+            GROUP BY. Must be a single SELECT or WITH query. Requires
+            ``project``, and is mutually exclusive with every argument that
+            shapes the query (``where``, ``bbox``,
+            ``bbox_mode``, ``bbox_threshold``, ``limit``, ``columns``,
+            ``exclude_columns``): the statement says all of that itself.
+            Filter inside it -- a query job materializes its whole result
+            first, so an unfiltered statement over a large relation fails
+            with "Response too large to return".
+        project: GCP project ID (overrides project in table_id if set;
+            required with ``sql``)
         credentials_file: Path to service account JSON file
         where: SQL WHERE clause for filtering (BigQuery SQL syntax)
         bbox: Bounding box for spatial filter as "minx,miny,maxx,maxy"
@@ -1929,8 +2023,15 @@ def read_bigquery(
         RuntimeError: If BigQuery query fails
 
     Note:
-        **Cannot read BigQuery views or external tables** - this is a
-        limitation of the BigQuery Storage Read API.
+        A view, materialized view or external table is read with a BigQuery
+        query job rather than the Storage Read API, which serves physical
+        tables only. gpio detects this from BigQuery's refusal on the read and
+        retries automatically. The job is billed by bytes scanned, and
+        ``where``, ``bbox`` and ``limit`` are pushed into it rather than
+        applied afterwards, so filter a large view or the job can fail with
+        "Response too large to return". So are the selected columns. On a
+        view ``where`` runs as GoogleSQL, so only bare column names, plain
+        single-quoted strings and no comments are accepted there.
 
     Example:
         >>> from geoparquet_io.api import ops
@@ -1944,6 +2045,13 @@ def read_bigquery(
         ...     geography_column='geometry',
         ...     geometry_format='wkt'
         ... )
+
+        >>> # Run your own GoogleSQL instead of reading a table
+        >>> table = ops.read_bigquery(
+        ...     sql="SELECT name, geog FROM `p.d.t` QUALIFY ROW_NUMBER() "
+        ...         "OVER (PARTITION BY id ORDER BY version DESC) = 1",
+        ...     project='myproject',
+        ... )
     """
     from geoparquet_io.core.column_selection import join_column_list
     from geoparquet_io.core.extract_bigquery import extract_bigquery
@@ -1956,25 +2064,27 @@ def read_bigquery(
     include_cols = join_column_list(columns, "columns")
     exclude_cols = join_column_list(exclude_columns, "exclude_columns")
 
+    source = table_id if table_id is not None else "the sql query"
+
     # Validate bbox_mode
     valid_bbox_modes = {"auto", "server", "local"}
     if bbox_mode not in valid_bbox_modes:
         raise ValueError(
-            f"Invalid bbox_mode '{bbox_mode}' for table '{table_id}'. "
+            f"Invalid bbox_mode '{bbox_mode}' for {source!r}. "
             f"Must be one of: {', '.join(sorted(valid_bbox_modes))}"
         )
 
     # Validate bbox_threshold
     if not isinstance(bbox_threshold, int) or bbox_threshold < 0:
         raise ValueError(
-            f"Invalid bbox_threshold '{bbox_threshold}' for table '{table_id}'. "
-            "Must be an integer >= 0."
+            f"Invalid bbox_threshold '{bbox_threshold}' for {source!r}. Must be an integer >= 0."
         )
 
     # Get PyArrow table (don't write to file)
     arrow_table = extract_bigquery(
         table_id=table_id,
         output_parquet=None,  # Return table instead of writing
+        sql=sql,
         project=project,
         credentials_file=credentials_file,
         where=where,
@@ -1992,7 +2102,7 @@ def read_bigquery(
     )
 
     if arrow_table is None:
-        raise RuntimeError(f"Failed to read from BigQuery table: {table_id}")
+        raise RuntimeError(f"Failed to read from BigQuery: {table_id or sql}")
 
     return arrow_table
 

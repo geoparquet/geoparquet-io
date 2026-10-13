@@ -386,6 +386,10 @@ class TestNoGeoBlockCrs:
         some earlier import in the session did so decides *where* PyArrow puts
         the CRS. This test owns its process so the unregistered state -- the one
         that lost the CRS -- is the one actually exercised.
+
+        ``gpio.read`` now registers the extension types itself (#1175), so the
+        unregistered state is reached the way a caller still can: wrapping a
+        table that plain ``pq.read_table`` produced.
         """
         src = tmp_path / "in.parquet"
         out = tmp_path / "out.parquet"
@@ -399,7 +403,7 @@ class TestNoGeoBlockCrs:
 
             src, out = sys.argv[1], sys.argv[2]
             assert "geoarrow.pyarrow" not in sys.modules, "geoarrow.pyarrow was imported"
-            gpio.read(src).write(out)
+            gpio.Table(pq.read_table(src)).write(out)
             assert "geoarrow.pyarrow" not in sys.modules, "geoarrow.pyarrow was imported"
             geo = json.loads(pq.read_schema(out).metadata[b"geo"].decode("utf-8"))
             print(json.dumps(geo["columns"][geo["primary_column"]].get("crs")))
