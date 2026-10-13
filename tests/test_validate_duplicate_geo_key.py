@@ -18,8 +18,10 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_metadata import count_kv_key
+from geoparquet_io.core import parquet_footer, validate
+from geoparquet_io.core.duckdb_metadata import count_kv_key, get_kv_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.parquet_footer import FooterPatchUnsupported, read_footer_kv
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 
 
@@ -126,3 +128,61 @@ def test_a_duplicate_fails_when_parquet_geo_only_is_forced(duplicated):
 
     assert _check(result, "geo_key_unique").status == CheckStatus.FAILED
     assert not result.is_valid
+
+
+def test_get_kv_metadata_through_a_caller_connection_keeps_one_value_per_key(duplicated):
+    """With a connection supplied the DuckDB path runs, and the dict still
+    collapses the repeat to one entry."""
+    con = get_duckdb_connection(load_spatial=False)
+    try:
+        kv = get_kv_metadata(duplicated, con=con)
+    finally:
+        con.close()
+
+    assert list(kv).count(b"geo") == 1
+
+
+def test_a_directory_is_counted_through_duckdb(tmp_path):
+    folder = tmp_path / "parts"
+    folder.mkdir()
+    _write(folder / "part-0.parquet", "V2", _geo_block("2.0.0"))
+
+    assert validate._geo_entry_count(str(folder)) == 2
+
+
+def test_an_unreadable_footer_skips_the_count(tmp_path, monkeypatch):
+    path = _write(tmp_path / "single.parquet", "V2", None)
+
+    def refuse(_path):
+        raise FooterPatchUnsupported("encrypted")
+
+    monkeypatch.setattr(validate, "read_footer_kv", refuse)
+
+    assert validate._geo_entry_count(path) is None
+
+
+def test_a_footer_without_key_value_metadata_reads_empty(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = str(tmp_path / "plain.parquet")
+    pq.write_table(pa.table({"a": [1]}), path, store_schema=False)
+
+    assert read_footer_kv(path) == []
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [IndexError("short"), FooterPatchUnsupported("odd type")],
+    ids=["thrift", "unsupported"],
+)
+def test_a_footer_that_does_not_decode_is_unsupported(tmp_path, monkeypatch, raised):
+    path = _write(tmp_path / "single.parquet", "V2", None)
+
+    def broken(*_args, **_kwargs):
+        raise raised
+
+    monkeypatch.setattr(parquet_footer, "_struct_fields", broken)
+
+    with pytest.raises(FooterPatchUnsupported):
+        read_footer_kv(path)
