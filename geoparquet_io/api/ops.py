@@ -112,8 +112,9 @@ def add_stac_metadata(
 
     Mirrors `gpio add stac-metadata`. The value is
     `{"version": ..., "collections": {<id>: <collection>}}`: `collections` is a
-    map keyed by collection id, and the singular `collection` key the 1.0.0
-    draft allowed is deprecated in 1.1.0 and is not written.
+    map keyed by collection id, and the singular `collection` key of the 1.0.0 release
+    is deprecated in 1.1.0, so it is written only under version 1.0.0 (beside the map,
+    and a 1.0.0 value can hold just one Collection).
 
     A file that already carries a `stac-geoparquet` key keeps every collection
     it already named: this call's Collection is added to the existing

@@ -569,8 +569,9 @@ def add_stac_metadata_cmd(
     has the file has the Collection too.
 
     The value is {"version": ..., "collections": {<id>: <collection>}} --
-    'collections' is a map keyed by collection id. The singular 'collection'
-    key the 1.0.0 draft allowed is deprecated in 1.1.0 and is not written.
+    'collections' is a map keyed by collection id. The singular 'collection' key of the
+    1.0.0 release is deprecated in 1.1.0, so it is written only under version 1.0.0
+    (beside the map, and a 1.0.0 value can hold just one Collection).
 
     A file that already carries a stac-geoparquet key keeps every collection
     it already named: this call's Collection is added to the existing

@@ -24,6 +24,7 @@ from geoparquet_io.core.add.kdtree import (
     ITERATIONS_CONFLICT,
     ITERATIONS_MISSING,
 )
+from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.logging_config import warn
@@ -3549,7 +3550,7 @@ class Table:
         self,
         collection: dict | str | Path,
         *,
-        version: str = "1.1.0",
+        version: str = DEFAULT_STAC_GEOPARQUET_VERSION,
     ) -> Table:
         """
         Attach a STAC Collection under the `stac-geoparquet` metadata key.
@@ -3559,9 +3560,10 @@ class Table:
         reader that has the file has the Collection too.
 
         The value is `{"version": ..., "collections": {<id>: <collection>}}`:
-        `collections` is a map keyed by collection id. The singular
-        `collection` key the 1.0.0 draft allowed is deprecated in 1.1.0 and is
-        not written. Every other metadata key, `geo` included, is kept.
+        `collections` is a map keyed by collection id. The singular `collection` key of
+        the 1.0.0 release is deprecated in 1.1.0, so it is written only under version
+        1.0.0 (beside the map, and a 1.0.0 value can hold just one Collection). Every
+        other metadata key, `geo` included, is kept.
 
         A `stac-geoparquet` key the table already carries keeps every
         collection it already named: this call's Collection is added to the

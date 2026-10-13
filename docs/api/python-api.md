@@ -1389,8 +1389,10 @@ table.add_stac_metadata(collection_dict, version='1.0.0').write('items.parquet')
 
 The value written is
 `{"version": ..., "collections": {"<collection id>": {...}}}`. `collections` is
-a **map keyed by collection id** — the singular `collection` key the 1.0.0
-draft allowed is deprecated in 1.1.0 and is never written. Every other metadata
+a **map keyed by collection id** — the singular `collection` key of the 1.0.0
+release is deprecated in 1.1.0, so it is written only under version 1.0.0
+(beside the map, and a 1.0.0 value can hold just one Collection). Every other
+metadata
 key, `geo` included, is kept.
 
 A `stac-geoparquet` key already present is merged with, not replaced by, the

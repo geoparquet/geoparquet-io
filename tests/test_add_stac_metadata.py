@@ -12,6 +12,7 @@ deprecated and must not be written.
 """
 
 import json
+import os
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -71,6 +72,14 @@ def collection_b_file(tmp_path):
     p = tmp_path / "collection-b.json"
     p.write_text(json.dumps(COLLECTION_B))
     return p
+
+
+def _carry_raw(path, raw):
+    """Rewrite `path` so its footer carries `raw` as the stac-geoparquet value."""
+    table = pq.read_table(path)
+    meta = dict(table.schema.metadata or {})
+    meta[b"stac-geoparquet"] = raw
+    pq.write_table(table.replace_schema_metadata(meta), path)
 
 
 def _meta(path):
@@ -367,43 +376,35 @@ class TestTheCoreModule:
         payload = stac_geoparquet_metadata(COLLECTION)
         assert payload == {"version": "1.1.0", "collections": {"PSScene": COLLECTION}}
 
-    def test_a_malformed_existing_stac_geoparquet_key_is_refused_not_overwritten(
-        self, parquet, monkeypatch
-    ):
+    def test_a_malformed_existing_stac_geoparquet_key_is_refused_not_overwritten(self, parquet):
         from geoparquet_io.core.add import stac_metadata as module
         from geoparquet_io.core.exceptions import GeoParquetError
 
-        monkeypatch.setattr(module, "_existing_stac_geoparquet_raw", lambda path: b"{not json")
+        _carry_raw(parquet, b"{not json")
         before = parquet.read_bytes()
         with pytest.raises(GeoParquetError, match="not valid JSON"):
             module.add_stac_metadata(str(parquet), COLLECTION)
         assert parquet.read_bytes() == before
 
-    def test_an_existing_value_that_is_not_a_json_object_is_refused(self, parquet, monkeypatch):
+    def test_an_existing_value_that_is_not_a_json_object_is_refused(self, parquet):
         # A bare JSON scalar has no `collections` to merge into -- and must
         # not reach `.get()` and raise an uncaught AttributeError instead.
         from geoparquet_io.core.add import stac_metadata as module
         from geoparquet_io.core.exceptions import GeoParquetError
 
-        monkeypatch.setattr(module, "_existing_stac_geoparquet_raw", lambda path: b"7")
+        _carry_raw(parquet, b"7")
         before = parquet.read_bytes()
         with pytest.raises(GeoParquetError, match="JSON object"):
             module.add_stac_metadata(str(parquet), COLLECTION)
         assert parquet.read_bytes() == before
 
-    def test_an_existing_collections_entry_that_is_not_an_object_is_refused(
-        self, parquet, monkeypatch
-    ):
+    def test_an_existing_collections_entry_that_is_not_an_object_is_refused(self, parquet):
         # A `collections` entry that isn't a map (here, a JSON array) must be
         # refused, not silently discarded and merged over as if it were `{}`.
         from geoparquet_io.core.add import stac_metadata as module
         from geoparquet_io.core.exceptions import GeoParquetError
 
-        monkeypatch.setattr(
-            module,
-            "_existing_stac_geoparquet_raw",
-            lambda path: b'{"version": "1.1.0", "collections": ["not", "a", "map"]}',
-        )
+        _carry_raw(parquet, b'{"version": "1.1.0", "collections": ["not", "a", "map"]}')
         before = parquet.read_bytes()
         with pytest.raises(GeoParquetError, match="collections"):
             module.add_stac_metadata(str(parquet), COLLECTION)
@@ -477,3 +478,224 @@ class TestThePythonAPI:
         )
         payload = json.loads(table.table.schema.metadata[b"stac-geoparquet"])
         assert set(payload["collections"]) == {"PSScene", "SkySatCollect"}
+
+
+class TestReviewFixes:
+    """Defects found reviewing #1231: each test failed before its fix."""
+
+    def _with_existing(self, tmp_path, value):
+        path = tmp_path / "carried.parquet"
+        table = pa.table({"id": ["a"]}).replace_schema_metadata(
+            {b"stac-geoparquet": json.dumps(value).encode("utf-8")}
+        )
+        pq.write_table(table, path)
+        return path
+
+    def test_an_existing_singular_1_0_0_collection_is_kept(self, tmp_path, collection_file):
+        # 1.0.0 files carry their Collection under the singular key; merging must
+        # fold it into the map rather than silently dropping it.
+        old = {**COLLECTION_B}
+        path = self._with_existing(tmp_path, {"version": "1.0.0", "collection": old})
+        r = CliRunner().invoke(
+            add, ["stac-metadata", str(path), "--collection", str(collection_file)]
+        )
+        assert r.exit_code == 0, r.output
+        meta = _meta(path)
+        assert set(meta["collections"]) == {"PSScene", "SkySatCollect"}
+        assert meta["collections"]["SkySatCollect"] == old
+        assert "collection" not in meta
+
+    def test_an_existing_singular_collection_without_an_id_is_refused(self, tmp_path):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        table = pa.table({"id": ["a"]}).replace_schema_metadata(
+            {b"stac-geoparquet": json.dumps({"collection": {"type": "Collection"}}).encode()}
+        )
+        with pytest.raises(GeoParquetError, match="singular 'collection'"):
+            add_stac_metadata_table(table, COLLECTION)
+
+    def test_an_existing_singular_collection_that_is_not_an_object_is_refused(self):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        table = pa.table({"id": ["a"]}).replace_schema_metadata(
+            {b"stac-geoparquet": json.dumps({"collection": "PSScene"}).encode()}
+        )
+        with pytest.raises(GeoParquetError, match="singular 'collection'"):
+            add_stac_metadata_table(table, COLLECTION)
+
+    def test_a_collection_dict_that_is_not_json_is_refused_not_a_traceback(self):
+        import datetime
+
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        bad = {**COLLECTION, "created": datetime.date(2024, 1, 1)}
+        with pytest.raises(GeoParquetError, match="JSON"):
+            add_stac_metadata_table(pa.table({"id": ["a"]}), bad)
+
+    def test_a_nan_in_the_collection_is_refused(self, tmp_path, parquet):
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        bad = tmp_path / "nan.json"
+        bad.write_text('{"id": "x", "type": "Collection", "extent": NaN}')
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+
+        with pytest.raises(GeoParquetError, match="JSON"):
+            add_stac_metadata(str(parquet), str(bad))
+
+    def test_a_deeply_nested_collection_file_is_refused_not_a_traceback(self, tmp_path, parquet):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        deep = tmp_path / "deep.json"
+        deep.write_text("[" * 200_000)
+        with pytest.raises(GeoParquetError, match="JSON"):
+            add_stac_metadata(str(parquet), str(deep))
+
+    def test_an_aliased_output_is_treated_as_in_place(self, parquet, collection_file):
+        # `<dir>/sub/../items.parquet` and `<dir>/items.parquet` are one file:
+        # it is an in-place patch, not an "output already exists" refusal.
+        # Built as a string -- pathlib would collapse the alias away.
+        (parquet.parent / "sub").mkdir()
+        alias = f"{parquet.parent}{os.sep}sub{os.sep}..{os.sep}{parquet.name}"
+        r = CliRunner().invoke(
+            add, ["stac-metadata", str(parquet), alias, "--collection", str(collection_file)]
+        )
+        assert r.exit_code == 0, r.output
+        assert set(_meta(parquet)["collections"]) == {"PSScene"}
+
+    def test_a_missing_input_is_named_as_missing(self, tmp_path):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        with pytest.raises(GeoParquetError, match="Input file not found"):
+            add_stac_metadata(str(tmp_path / "missing.parquet"), COLLECTION)
+
+    def test_version_1_0_0_also_writes_the_singular_collection(self, parquet):
+        # 1.0.0 defines only the singular `collection`; a strict 1.0.0 reader
+        # looks there. The map is kept beside it, as the reference library does.
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+
+        add_stac_metadata(str(parquet), COLLECTION, version="1.0.0")
+        meta = _meta(parquet)
+        assert meta["collection"] == COLLECTION
+        assert meta["collections"] == {"PSScene": COLLECTION}
+
+    def test_version_1_0_0_refuses_a_second_collection(self, parquet):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        add_stac_metadata(str(parquet), COLLECTION)
+        before = parquet.read_bytes()
+        with pytest.raises(GeoParquetError, match="1.0.0 holds a single"):
+            add_stac_metadata(str(parquet), COLLECTION_B, version="1.0.0")
+        assert parquet.read_bytes() == before
+
+    def test_an_unknown_top_level_field_is_carried_through(self, tmp_path):
+        path = self._with_existing(
+            tmp_path, {"version": "1.1.0", "collections": {}, "x-custom": [1, 2]}
+        )
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+
+        add_stac_metadata(str(path), COLLECTION)
+        assert _meta(path)["x-custom"] == [1, 2]
+
+    def test_a_value_only_in_the_plain_footer_entry_is_merged_not_lost(self, tmp_path):
+        # A Parquet-level patch can leave the plain entry and pyarrow's
+        # ARROW:schema copy disagreeing; both copies' Collections survive.
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+        from geoparquet_io.core.parquet_footer import patch_footer_kv
+
+        path = tmp_path / "split.parquet"
+        arrow_side = {"version": "1.1.0", "collections": {"A": {"id": "A"}}}
+        table = pa.table({"id": ["a"]}).replace_schema_metadata(
+            {b"stac-geoparquet": json.dumps(arrow_side).encode()}
+        )
+        pq.write_table(table, path)
+        blob = pq.read_metadata(path).metadata[b"ARROW:schema"]
+        plain_side = {"version": "1.1.0", "collections": {"P": {"id": "P"}}}
+        # Naming ARROW:schema keeps the blob as-is, so only the plain entry moves.
+        patch_footer_kv(
+            str(path), {"stac-geoparquet": json.dumps(plain_side), "ARROW:schema": blob}
+        )
+
+        add_stac_metadata(str(path), {"id": "B"})
+        plain = json.loads(pq.read_metadata(path).metadata[b"stac-geoparquet"])
+        assert set(plain["collections"]) == {"A", "P", "B"}
+        assert set(_meta(path)["collections"]) == {"A", "P", "B"}
+
+    def test_a_non_collection_stac_object_is_warned_about(self, caplog):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table
+
+        with caplog.at_level("WARNING"):
+            add_stac_metadata_table(pa.table({"id": ["a"]}), {"type": "Feature", "id": "i1"})
+        assert "not 'Collection'" in caplog.text
+
+    def test_rows_missing_item_columns_are_warned_about(self, parquet, caplog):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+
+        with caplog.at_level("WARNING"):
+            add_stac_metadata(str(parquet), COLLECTION)
+        assert "requires of a STAC Item row" in caplog.text
+        assert "links" in caplog.text
+
+    def test_an_item_shaped_table_is_not_warned_about(self, caplog):
+        from geoparquet_io.core.add.stac_metadata import (
+            REQUIRED_ITEM_COLUMNS,
+            add_stac_metadata_table,
+        )
+
+        table = pa.table({name: ["x"] for name in REQUIRED_ITEM_COLUMNS})
+        with caplog.at_level("WARNING"):
+            add_stac_metadata_table(table, COLLECTION)
+        assert "STAC Item row" not in caplog.text
+
+    def test_the_success_line_names_the_collection_this_call_added(
+        self, parquet, collection_file, collection_b_file, caplog
+    ):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+
+        add_stac_metadata(str(parquet), str(collection_file))
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            add_stac_metadata(str(parquet), str(collection_b_file))
+        text = caplog.text
+        assert "'SkySatCollect'" in text
+        assert "'PSScene, SkySatCollect'" not in text
+
+    def test_the_table_method_default_follows_the_core_constant(self):
+        import inspect
+
+        from geoparquet_io.api.table import Table
+        from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
+
+        default = inspect.signature(Table.add_stac_metadata).parameters["version"].default
+        assert default is DEFAULT_STAC_GEOPARQUET_VERSION
+
+    def test_a_value_only_the_plain_entry_carries_is_kept(self, tmp_path):
+        # The ARROW:schema copy has no stac-geoparquet key at all.
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+        from geoparquet_io.core.parquet_footer import patch_footer_kv
+
+        path = tmp_path / "plain-only.parquet"
+        pq.write_table(pa.table({"id": ["a"]}), path)
+        blob = pq.read_metadata(path).metadata[b"ARROW:schema"]
+        plain_side = {"version": "1.1.0", "collections": {"P": {"id": "P"}}}
+        patch_footer_kv(
+            str(path), {"stac-geoparquet": json.dumps(plain_side), "ARROW:schema": blob}
+        )
+
+        add_stac_metadata(str(path), {"id": "B"})
+        assert set(_meta(path)["collections"]) == {"P", "B"}
+
+    def test_an_input_that_is_not_parquet_is_refused_by_name(self, tmp_path):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        junk = tmp_path / "junk.parquet"
+        junk.write_bytes(b"not a parquet file at all")
+        with pytest.raises(GeoParquetError, match="Cannot read"):
+            add_stac_metadata(str(junk), COLLECTION)
+        assert junk.read_bytes() == b"not a parquet file at all"

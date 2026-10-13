@@ -237,7 +237,7 @@ primary's own column instead with `gpio add bbox`.
 ## STAC Collection Metadata
 
 A [stac-geoparquet](https://github.com/stac-utils/stac-geoparquet) file holds
-STAC Items as rows. The specification asks it to carry the Collections those
+STAC Items as rows. The specification lets it carry the Collections those
 Items belong to in the file's own footer, under the `stac-geoparquet` key, so a
 reader that has the file has the Collection too and does not need a catalog to
 interpret it. `gpio add stac-metadata` writes that key:
@@ -286,11 +286,22 @@ The value written is:
 
     `collections` is keyed by collection id, which is what an Item's
     `collection` field points at. A Collection with no `id` is refused rather
-    than filed under a made-up key. The singular `collection` key that
-    stac-geoparquet 1.0.0 allowed is **deprecated in 1.1.0**, so gpio never
-    writes it. `--stac-geoparquet-version` takes `1.0.0` or `1.1.0`, the only
-    two the specification defines; anything else is refused, because the
-    version in the footer is what a reader dispatches on.
+    than filed under a made-up key. stac-geoparquet 1.0.0 defined a singular
+    `collection` key instead; 1.1.0 **deprecated** it, so under the default
+    1.1.0 gpio never writes it. With `--stac-geoparquet-version 1.0.0` gpio
+    writes `collection` (for a strict 1.0.0 reader) beside the map, and refuses
+    a file that would name more than one Collection, which 1.0.0 cannot
+    express. Those are the only two versions the specification defines;
+    anything else is refused, because the version in the footer is what a
+    reader dispatches on.
+
+!!! warning "The rows should be STAC Items, and the Collection should be one"
+
+    gpio warns, but does not refuse, when the file lacks a column the
+    specification requires of an Item row (`id`, `geometry`, `bbox`, `links`,
+    `assets`, `stac_extensions`), or when the object passed is not of type
+    `Collection`. The Collection is embedded as given — including any signed
+    hrefs in its links — so check it before publishing the file.
 
 !!! info "The data is not re-encoded"
 
@@ -300,7 +311,8 @@ The value written is:
     the row order all come out as they went in. Unlike `add bbox-metadata`
     there is no rewrite behind it: a footer gpio cannot patch is reported
     rather than re-encoded, since re-encoding a whole file to add one key
-    would cost its compression level to buy nothing.
+    would cost its compression level to buy nothing. The file is still copied
+    once, so the command needs room for a second copy beside it.
 
     Remote URLs are not supported — download the file, add the key, upload it.
 
@@ -310,8 +322,9 @@ The value written is:
     Items from more than one Collection. Running `gpio add stac-metadata`
     again with a different `--collection` adds that Collection alongside the
     ones already in the footer; running it again with the same collection id
-    replaces that one entry. The version declared by the most recent call
-    wins.
+    replaces that one entry. A 1.0.0 file's singular `collection`, and any
+    other top-level field, is carried over too. The version declared by the
+    most recent call wins.
 
 ## H3 Hexagonal Cells
 
