@@ -12,6 +12,7 @@ memory, and of constructed pages.
 
 import gzip
 import hashlib
+import itertools
 import json
 import os
 import tempfile
@@ -20,7 +21,7 @@ from pathlib import Path
 import duckdb
 import pyarrow.parquet as pq
 import pytest
-from pyproj import Transformer
+from pyproj import CRS, Transformer
 
 from geoparquet_io.core import arcgis
 from geoparquet_io.core.arcgis import (
@@ -38,7 +39,9 @@ from tests.native_geo_probes import geo_block, geo_block_crs_id, spec_problems
 SHORELINE = Path(__file__).parent / "data" / "arcgis_json" / "shoreline.esrijson.json.gz"
 SHORELINE_SHA256 = "3c5adade08109e09059e30786fe241fcd1929b0d3926b5ab374f83aaedb939b5"
 
-IDENTIFYING_KEYS = ("geometryType", "spatialReference", "fields", "objectIdFieldName")
+# The order reference pages are converted in. It is chosen here, not taken from
+# the production rule, so a bad choice there shows up as a mismatch.
+REFERENCE_ORDER = ("geometryType", "spatialReference", "fields", "objectIdFieldName")
 
 # Top-level orders for the same page. The identifying members follow
 # `features` in both problematic orders; the second resembles the response
@@ -98,7 +101,7 @@ def _reordered(raw: bytes, order: tuple[str, ...]) -> dict:
 
 
 def _metadata_first(page: dict) -> dict:
-    return {key: page[key] for key in IDENTIFYING_KEYS if key in page} | page
+    return {key: page[key] for key in REFERENCE_ORDER if key in page} | page
 
 
 def _reference_table(page: dict, con):
@@ -168,53 +171,41 @@ def _small_page() -> dict:
     }
 
 
+SHORELINE_PREPARED = [
+    "geometryType",
+    "objectIdFieldName",
+    "uniqueIdField",
+    "globalIdFieldName",
+    "geometryProperties",
+    "spatialReference",
+    "fields",
+    "features",
+]
+
+
 @pytest.mark.parametrize(
     ("order", "expected"),
     [
-        (
-            ORDERS["features_first"],
-            [
-                "geometryType",
-                "spatialReference",
-                "fields",
-                "objectIdFieldName",
-                "features",
-                "uniqueIdField",
-                "globalIdFieldName",
-                "geometryProperties",
-            ],
-        ),
-        (
-            ORDERS["geometry_properties_before_features"],
-            [
-                "geometryType",
-                "spatialReference",
-                "fields",
-                "objectIdFieldName",
-                "uniqueIdField",
-                "globalIdFieldName",
-                "geometryProperties",
-                "features",
-            ],
-        ),
+        (ORDERS["features_first"], SHORELINE_PREPARED),
+        (ORDERS["geometry_properties_before_features"], SHORELINE_PREPARED),
         (
             ("fields", "geometryType", "features", "objectIdFieldName", "spatialReference")
             + ("uniqueIdField", "globalIdFieldName", "geometryProperties"),
             [
                 "geometryType",
-                "spatialReference",
                 "fields",
                 "objectIdFieldName",
-                "features",
+                "spatialReference",
                 "uniqueIdField",
                 "globalIdFieldName",
                 "geometryProperties",
+                "features",
             ],
         ),
     ],
     ids=["features_first", "geometry_properties_before_features", "interspersed"],
 )
-def test_prepare_puts_identifying_members_first(order, expected, shoreline_bytes):
+def test_prepare_puts_geometry_type_first_and_features_last(order, expected, shoreline_bytes):
     page = _reordered(shoreline_bytes, order)
 
     assert list(_prepare_esrijson_for_gdal(page)) == expected
@@ -228,17 +219,48 @@ def test_prepare_keeps_every_member_and_the_order_of_the_rest():
 
     assert list(prepared) == [
         "geometryType",
-        "spatialReference",
-        "fields",
-        "objectIdFieldName",
-        "features",
         "vendorInfo",
+        "objectIdFieldName",
         "hasZ",
         "hasM",
+        "fields",
         "exceededTransferLimit",
+        "spatialReference",
+        "features",
     ]
     assert prepared == json.loads(before)
     assert json.dumps(page) == before
+
+
+def _member_offsets(page: dict) -> dict[str, int]:
+    text = json.dumps(page)
+    return {key: text.index(json.dumps(key) + ":") for key in page}
+
+
+@pytest.mark.parametrize("with_geometry_type", [False, True])
+def test_prepare_never_moves_another_member_later(with_geometry_type):
+    """Across every member order, no member but `features` starts later than before.
+
+    GDAL may recognize ESRIJSON by several members (`fields`, `fieldAliases`,
+    ...), so none may lose ground. `geometryType` goes first; the members it
+    overtakes move later by at most its own length.
+    """
+    pool = _small_page() | {"fieldAliases": {"OBJECTID": "Object ID"}}
+    members = ["features", "vendorInfo", "fields", "fieldAliases", "spatialReference"]
+    members.append("objectIdFieldName")
+    if with_geometry_type:
+        members.append("geometryType")
+    allowance = len(json.dumps({"geometryType": pool["geometryType"]})) if with_geometry_type else 0
+
+    for order in itertools.permutations(members):
+        page = {key: pool[key] for key in order}
+        before = _member_offsets(page)
+        after = _member_offsets(_prepare_esrijson_for_gdal(page))
+
+        if with_geometry_type:
+            assert after["geometryType"] == 1, order
+        for key in set(page) - {"features", "geometryType"}:
+            assert after[key] <= before[key] + allowance, (order, key)
 
 
 def test_prepare_reuses_nested_values():
@@ -251,13 +273,14 @@ def test_prepare_reuses_nested_values():
         assert prepared[key] is value, key
 
 
-def test_prepare_does_not_add_missing_identifying_members():
+def test_prepare_does_not_add_missing_metadata_members():
     page = _small_page()
     del page["spatialReference"], page["objectIdFieldName"]
 
     prepared = _prepare_esrijson_for_gdal(page)
 
-    assert list(prepared)[:3] == ["geometryType", "fields", "features"]
+    assert list(prepared)[0] == "geometryType"
+    assert list(prepared)[-1] == "features"
     assert "spatialReference" not in prepared
     assert "objectIdFieldName" not in prepared
 
@@ -272,6 +295,28 @@ def test_prepare_is_idempotent():
     once = _prepare_esrijson_for_gdal(_small_page())
 
     assert json.dumps(_prepare_esrijson_for_gdal(once)) == json.dumps(once)
+
+
+def test_prepare_without_features_only_moves_geometry_type():
+    page = _small_page()
+    del page["features"]
+    before = json.dumps(page)
+
+    prepared = _prepare_esrijson_for_gdal(page)
+
+    assert list(prepared) == [
+        "geometryType",
+        "vendorInfo",
+        "objectIdFieldName",
+        "hasZ",
+        "hasM",
+        "fields",
+        "exceededTransferLimit",
+        "spatialReference",
+    ]
+    assert prepared == json.loads(before)
+    assert "features" not in prepared
+    assert json.dumps(page) == before
 
 
 @pytest.mark.parametrize("page", [{}, {"features": []}, {"features": None}, {"geometryType": "x"}])
@@ -374,6 +419,41 @@ def test_shoreline_variant_converts_like_its_metadata_first_form(build, shorelin
     reference = _reference_table(page, con)
 
     _assert_same_table(_esrijson_page_to_table(page, con=con), reference)
+
+
+_LONG_WKT_FEATURES = [{"attributes": {"id": 1}, "geometry": {"x": 1, "y": 2}}]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        ("fields", "features", "spatialReference"),
+        ("fieldAliases", "features", "spatialReference"),
+        ("fieldAliases", "features", "spatialReference", "fields"),
+    ],
+    ids=["fields_first", "field_aliases_first", "field_aliases_first_fields_last"],
+)
+def test_a_page_readable_as_sent_stays_readable(order, con):
+    """No `geometryType`; a recognized member first, a long WKT `spatialReference` later.
+
+    GDAL reads these pages as sent because `fields` or `fieldAliases` is near
+    the start. Moving the 10 KB `spatialReference` ahead of it would push that
+    marker out of GDAL's view, so the reference is the page converted exactly
+    as sent.
+    """
+    wkt = CRS.from_epsg(4326).to_wkt(version="WKT1_GDAL").replace("WGS 84", "X" * 10_000, 1)
+    members = {
+        "fields": [{"name": "id", "type": "esriFieldTypeInteger"}],
+        "fieldAliases": {"id": "id"},
+        "features": _LONG_WKT_FEATURES,
+        "spatialReference": {"wkt": wkt},
+    }
+    page = {key: members[key] for key in order}
+    as_sent = _json_doc_to_table(page, exclude="geom", suffix=".json", con=con)
+    # Without `fields`, GDAL types `id` as a string.
+    assert [str(value) for value in as_sent.column("id").to_pylist()] == ["1"]
+
+    _assert_same_table(_esrijson_page_to_table(page, con=con), as_sent)
 
 
 # ---------------------------------------------------------------------------
