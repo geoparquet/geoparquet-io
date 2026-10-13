@@ -267,6 +267,7 @@ def _split_input(
             geoparquet_version=resolve_output_geoparquet_version(
                 None, input_file=input_path, verbose=verbose
             ),
+            input_file=input_path,
             compression_level=3,  # read once by tippecanoe; not worth level 15
         )
         for values, partition_dir in iter_staging_partitions(staging):

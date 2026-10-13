@@ -623,9 +623,10 @@ def _create_all_partitions(
     rewrites each (small) staging partition into its final nested file with the
     correct per-partition metadata.
 
-    ``input_parquet`` is the user's own file, and it is here for one reason: the
-    version this run writes has to be resolved from it, not from the staging
-    file each partition write actually reads. See ``PartitionWriteOptions``.
+    ``input_parquet`` is the user's own file, and it is here because the
+    version this run writes, and the CRS and edges each partition declares, have
+    to come from it, not from the staging file each partition write actually
+    reads. See ``PartitionWriteOptions``.
     Unlike the index-adding partition drivers, the admin join reads the user's
     file directly -- the enriched table is ``a.*`` plus the admin columns, with
     only the join predicate reprojected -- so this file is a truthful witness
@@ -639,6 +640,7 @@ def _create_all_partitions(
         geoparquet_version=resolve_output_geoparquet_version(
             geoparquet_version, input_file=input_parquet, verbose=verbose
         ),
+        input_file=input_parquet,
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,

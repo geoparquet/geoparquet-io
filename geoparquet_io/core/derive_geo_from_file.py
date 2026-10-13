@@ -237,8 +237,8 @@ def derive_secondary_geometry_info(
     ``native_types`` is the same ``{column: logical type string}`` map read from
     somewhere other than the input's footer -- in practice the output query's own
     ``DESCRIBE`` (:func:`geoparquet_io.core.geometry_detection.native_geometry_types_from_query`),
-    which is what lets a caller with **no** input witness at all (``partition``
-    staging) derive its secondaries. The input's own types win where both speak:
+    which is what lets a caller with **no** input witness at all (an Arrow
+    stream read from stdin) derive its secondaries. The input's own types win where both speak:
     a logical type carries inline PROJJSON, while ``DESCRIBE`` renders the CRS as
     a bare ``EPSG:3857`` reference. ``input_file`` may be None when only
     ``native_types`` is available.

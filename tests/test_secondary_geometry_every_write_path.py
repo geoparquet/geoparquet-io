@@ -181,7 +181,7 @@ class TestMultiFileAndRemoteInputs:
 
 
 # ---------------------------------------------------------------------------
-# `partition` staging: no input-file witness at all
+# `partition` staging: rows from a staging file, witness from the input (#1005)
 # ---------------------------------------------------------------------------
 
 
@@ -189,7 +189,7 @@ class TestPartitionStaging:
     def test_a_1_1_partition_describes_and_converts_the_native_secondary(
         self, native_pair, tmp_path
     ):
-        """``finalize_partition_file`` passes no ``input_file``; the query's DESCRIBE answers.
+        """A 1.1 partition describes the native secondary and converts it to WKB.
 
         Before: every partition held ``centroid`` as a native Parquet GEOMETRY
         inside a file declaring 1.1 -- which ``check spec`` rejects -- and left it

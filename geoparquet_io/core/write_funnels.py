@@ -493,9 +493,11 @@ def _resolve_geometry_info(
       the secondaries that are *not* native there;
     * failing that, the output query's own ``DESCRIBE``, which names every
       ``GEOMETRY`` column the write emits and the CRS each one carries. It is the
-      only source a caller with no witness at all has (``partition`` staging), and
-      it is asked only of those callers: where a witness exists it has already
-      answered, more completely, for the same columns (#1175).
+      only source a caller with no witness at all has (an Arrow stream read from
+      stdin), and it is asked only of those callers: where a witness exists it
+      has already answered, more completely, for the same columns (#1175). It
+      cannot see a GEOGRAPHY's edges, which is why ``partition`` passes its
+      input as the witness rather than relying on this (#1234).
 
     Gated on knowing the output's columns, so a projection cannot come out
     declaring a geometry column it dropped. Returns the resolved ``geometry_info``
@@ -1289,7 +1291,7 @@ def _preserve_edges_after_write(
 
     Prefers the input file (sees native GEOGRAPHY logical types as well as geo
     metadata); falls back to the input's KV metadata dict when only that is
-    available (e.g. partition staging rewrites). ``exclude_columns`` names
+    available (e.g. an Arrow stream read from stdin). ``exclude_columns`` names
     columns whose declaration the write itself invalidated (#601): the input
     still declares them, but they must not come back.
     """

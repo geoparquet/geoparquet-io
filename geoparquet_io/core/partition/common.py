@@ -859,21 +859,16 @@ def partition_by_column(
             if verbose:
                 debug(f"Created output directory: {actual_output}")
 
-            # Resolved here, once, from the file this run reads -- see
-            # PartitionWriteOptions for why a per-partition write cannot do it.
-            #
-            # For `partition string` that file is the user's own, so auto mode
-            # keeps a native-geo-only input native (#600). The index-adding
-            # drivers pass their scratch file instead, so they resolve from a
-            # 1.1 WKB rewrite and the upgrade does not reach them. That is a
-            # gap, not an oversight to patch here: their scratch write also
-            # loses the input's CRS, so resolving from the user's file would
-            # give them a native 2.0 output asserting the wrong CRS -- exactly
-            # what `sort quadkey` does today. Fix the scratch write instead.
+            # Resolved here, once, from the file this run reads, which is also
+            # every partition write's witness for the CRS and edges the staging
+            # file cannot carry -- see PartitionWriteOptions. For `partition
+            # string` that file is the user's own; the index-adding drivers pass
+            # their scratch file, which is lossless with respect to it (#993).
             write_options = PartitionWriteOptions(
                 geoparquet_version=resolve_output_geoparquet_version(
                     geoparquet_version, input_file=input_parquet, verbose=verbose
                 ),
+                input_file=input_parquet,
                 compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,
