@@ -2442,7 +2442,11 @@ def read_spatial_to_arrow(
             pass
         elif is_parquet:
             # RAW path: extract_crs_from_parquet escapes its own argument (#718).
-            crs_from_file = extract_crs_from_parquet(input_file, verbose=verbose)
+            # Name the primary: with no geo block, a secondary column ahead of
+            # it in schema order would otherwise lend it its CRS (#1232).
+            crs_from_file = extract_crs_from_parquet(
+                input_file, verbose=verbose, geometry_column=parquet_geom_column
+            )
             if crs_from_file and not is_default_crs(crs_from_file):
                 # Same repair-or-reject as _determine_effective_crs: the API
                 # write path copies this CRS into the output verbatim (#705).
@@ -2963,12 +2967,18 @@ def _determine_effective_crs(
     is_parquet: bool,
     con,
     verbose: bool,
+    geometry_column: str | None = None,
 ) -> dict | None:
     """Determine the effective CRS for output based on input file type.
 
     ``is_csv`` is true for every tabular source whose geometry gpio builds
     from WKT or lat/lon columns -- a CSV, or a plain Parquet file routed down
     the same path -- since only those take a user-supplied ``--crs``.
+
+    ``geometry_column`` is the Parquet input's primary geometry column. A file
+    with no ``geo`` block records each column's CRS only in its logical type,
+    and without the name the first non-default CRS in schema order answers --
+    a secondary column's, when one comes first (#1232).
     """
     user_specified_crs = crs != "EPSG:4326"
 
@@ -2988,7 +2998,9 @@ def _determine_effective_crs(
 
     if is_parquet:
         # RAW path: extract_crs_from_parquet escapes its own argument (#718).
-        detected = extract_crs_from_parquet(input_file, verbose=verbose)
+        detected = extract_crs_from_parquet(
+            input_file, verbose=verbose, geometry_column=geometry_column
+        )
         if not detected or is_default_crs(detected):
             return None
         # Repair or reject before writing: an input CRS that is not valid
@@ -3203,7 +3215,15 @@ def convert_to_geoparquet(
         )
         tabular = is_csv or parquet_tabular is not None
 
-        effective_crs = _determine_effective_crs(input_file, crs, tabular, is_parquet, con, verbose)
+        effective_crs = _determine_effective_crs(
+            input_file,
+            crs,
+            tabular,
+            is_parquet,
+            con,
+            verbose,
+            geometry_column=_carried_geometry_name(parquet_geometry),
+        )
         if force_2d:
             # Same as the Arrow path: no Z, no vertical CRS component.
             effective_crs = horizontal_crs(effective_crs)
