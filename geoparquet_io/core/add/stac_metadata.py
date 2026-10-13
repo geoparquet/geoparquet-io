@@ -160,17 +160,32 @@ def _parsed_existing_payload(raw: bytes | None, source: str) -> dict | None:
     """Any ``stac-geoparquet`` value `source` already carries, parsed -- or ``None``.
 
     Shared by the file path and the in-memory path so a value neither of them
-    wrote (malformed JSON) is refused with the same sentence rather than
-    silently discarded.
+    wrote is refused with the same sentence rather than silently discarded or
+    merged with: not valid JSON, not a JSON object, or a ``collections`` entry
+    that is itself not a JSON object (the one shape :func:`_merged_payload`
+    could merge into) are all refusals here, before `_merged_payload` ever
+    sees the value.
     """
     if raw is None:
         return None
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise GeoParquetError(
             f"{source} already carries a stac-geoparquet key that is not valid JSON: {exc}"
         ) from exc
+    if not isinstance(parsed, dict):
+        raise GeoParquetError(
+            f"{source} already carries a stac-geoparquet key that is not a JSON object, "
+            "so it has no 'collections' map to merge the new Collection into."
+        )
+    carried = parsed.get("collections")
+    if carried is not None and not isinstance(carried, dict):
+        raise GeoParquetError(
+            f"{source} already carries a stac-geoparquet 'collections' entry that is not "
+            "a JSON object (a map keyed by collection id), so it cannot be merged with."
+        )
+    return parsed
 
 
 def _merged_payload(existing: dict | None, payload: dict) -> dict:

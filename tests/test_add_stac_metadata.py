@@ -379,6 +379,54 @@ class TestTheCoreModule:
             module.add_stac_metadata(str(parquet), COLLECTION)
         assert parquet.read_bytes() == before
 
+    def test_an_existing_value_that_is_not_a_json_object_is_refused(self, parquet, monkeypatch):
+        # A bare JSON scalar has no `collections` to merge into -- and must
+        # not reach `.get()` and raise an uncaught AttributeError instead.
+        from geoparquet_io.core.add import stac_metadata as module
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        monkeypatch.setattr(module, "_existing_stac_geoparquet_raw", lambda path: b"7")
+        before = parquet.read_bytes()
+        with pytest.raises(GeoParquetError, match="JSON object"):
+            module.add_stac_metadata(str(parquet), COLLECTION)
+        assert parquet.read_bytes() == before
+
+    def test_an_existing_collections_entry_that_is_not_an_object_is_refused(
+        self, parquet, monkeypatch
+    ):
+        # A `collections` entry that isn't a map (here, a JSON array) must be
+        # refused, not silently discarded and merged over as if it were `{}`.
+        from geoparquet_io.core.add import stac_metadata as module
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        monkeypatch.setattr(
+            module,
+            "_existing_stac_geoparquet_raw",
+            lambda path: b'{"version": "1.1.0", "collections": ["not", "a", "map"]}',
+        )
+        before = parquet.read_bytes()
+        with pytest.raises(GeoParquetError, match="collections"):
+            module.add_stac_metadata(str(parquet), COLLECTION)
+        assert parquet.read_bytes() == before
+
+    def test_the_table_path_refuses_an_existing_value_that_is_not_a_json_object(self):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        bad = pa.table({"id": ["a"]}).replace_schema_metadata({b"stac-geoparquet": b"7"})
+        with pytest.raises(GeoParquetError, match="JSON object"):
+            add_stac_metadata_table(bad, COLLECTION)
+
+    def test_the_table_path_refuses_an_existing_collections_entry_that_is_not_an_object(self):
+        from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        bad = pa.table({"id": ["a"]}).replace_schema_metadata(
+            {b"stac-geoparquet": b'{"version": "1.1.0", "collections": ["bad"]}'}
+        )
+        with pytest.raises(GeoParquetError, match="collections"):
+            add_stac_metadata_table(bad, COLLECTION)
+
 
 class TestThePythonAPI:
     def test_ops_takes_a_collection_path(self, parquet, collection_file):
