@@ -1311,21 +1311,42 @@ def _geojson_page_to_table(features: list[dict], con=None) -> pa.Table | None:
     )
 
 
+# Members GDAL looks for near the start of a file to pick the ESRIJSON driver.
+_ESRIJSON_IDENTIFYING_KEYS = ("geometryType", "spatialReference", "fields", "objectIdFieldName")
+
+
+def _prepare_esrijson_for_gdal(page: dict) -> dict:
+    """Return a shallow copy of an EsriJSON page with its identifying members first.
+
+    GDAL identifies the format from the beginning of the file. When a large
+    `features` array comes before `geometryType` and friends, it picks the
+    GeoJSON driver and fails to read the Esri-shaped features (issue #501).
+    Members that are present move to the front; every other member keeps its
+    relative order. Values are shared with `page`, which is left unchanged.
+    """
+    prepared = {key: page[key] for key in _ESRIJSON_IDENTIFYING_KEYS if key in page}
+    prepared.update(page)
+    return prepared
+
+
 def _esrijson_page_to_table(page: dict, con=None) -> pa.Table | None:
     """Convert a page of EsriJSON features to a PyArrow Table with WKB geometry.
 
     Unlike GeoJSON, GDAL's ESRIJSON driver needs the whole response object
-    (geometryType / spatialReference / fields / features), so the raw page is
-    written verbatim. `attributes` are flattened to columns by the driver.
-    GDAL may or may not add OGC_FID for EsriJSON; extra columns are kept here
-    and dropped later by _cast_table_to_schema.
+    (geometryType / spatialReference / fields / features), so the page is
+    written whole, with its identifying members moved to the front so GDAL
+    recognizes it whatever order the server used. `attributes` are flattened
+    to columns by the driver. GDAL may or may not add OGC_FID for EsriJSON;
+    extra columns are kept here and dropped later by _cast_table_to_schema.
 
     Returns a PyArrow Table with WKB geometry column, or None if no features.
     """
     if not page.get("features"):
         return None
 
-    return _json_doc_to_table(page, exclude="geom", suffix=".json", con=con)
+    return _json_doc_to_table(
+        _prepare_esrijson_for_gdal(page), exclude="geom", suffix=".json", con=con
+    )
 
 
 def _stream_features_to_parquet(
