@@ -1,24 +1,39 @@
 """EsriJSON pages convert regardless of top-level member order (issue #501).
 
-GDAL identifies an ESRIJSON file from the members near its start. When a large
-``features`` array comes before ``geometryType``/``spatialReference``/``fields``,
-it can pick the GeoJSON driver and fail. These tests use real DuckDB/GDAL
-conversion of a recorded page, reordered in memory.
+GDAL identifies an ESRIJSON file from the members near its start. With the GDAL
+bundled in DuckDB spatial when these tests were written (DuckDB 1.5.6), a page
+whose first member is ``features`` was read as GeoJSON at any size, and so was a
+page whose ``geometryType`` started beyond roughly the first 6 KB (a large
+``features`` array ahead of it). Either way the read failed. Other GDAL builds
+may draw the line elsewhere; the tests assert successful conversion, not the
+failure. They use real DuckDB/GDAL conversion of a recorded page, reordered in
+memory, and of constructed pages.
 """
 
 import gzip
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
+import duckdb
+import pyarrow.parquet as pq
 import pytest
+from pyproj import Transformer
 
+from geoparquet_io.core import arcgis
 from geoparquet_io.core.arcgis import (
     _esrijson_page_to_table,
+    _geojson_page_to_table,
     _json_doc_to_table,
     _prepare_esrijson_for_gdal,
+    arcgis_to_table,
+    convert_arcgis_to_geoparquet,
 )
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from tests.http_transport import FakeTransport, json_reply
+from tests.native_geo_probes import geo_block, geo_block_crs_id, spec_problems
 
 SHORELINE = Path(__file__).parent / "data" / "arcgis_json" / "shoreline.esrijson.json.gz"
 SHORELINE_SHA256 = "3c5adade08109e09059e30786fe241fcd1929b0d3926b5ab374f83aaedb939b5"
@@ -82,6 +97,26 @@ def _reordered(raw: bytes, order: tuple[str, ...]) -> dict:
     return {key: page[key] for key in order}
 
 
+def _metadata_first(page: dict) -> dict:
+    return {key: page[key] for key in IDENTIFYING_KEYS if key in page} | page
+
+
+def _reference_table(page: dict, con):
+    """Convert ``page`` metadata-first, bypassing `_esrijson_page_to_table`."""
+    return _json_doc_to_table(_metadata_first(page), exclude="geom", suffix=".json", con=con)
+
+
+def _assert_same_table(table, reference):
+    assert table is not None
+    assert table.schema.equals(reference.schema, check_metadata=True)
+    assert [field.nullable for field in table.schema] == [
+        field.nullable for field in reference.schema
+    ]
+    for name in reference.column_names:
+        assert table.column(name).equals(reference.column(name)), name
+    assert table.column("geometry").to_pylist() == reference.column("geometry").to_pylist()
+
+
 @pytest.fixture(scope="module")
 def reference(shoreline_bytes, con):
     """Metadata-first page converted without the EsriJSON page converter.
@@ -90,10 +125,7 @@ def reference(shoreline_bytes, con):
     `_esrijson_page_to_table` out of the reference, so a bug there cannot
     change both sides of the comparison.
     """
-    page = json.loads(shoreline_bytes)
-    metadata_first = {key: page[key] for key in IDENTIFYING_KEYS}
-    metadata_first.update(page)
-    table = _json_doc_to_table(metadata_first, exclude="geom", suffix=".json", con=con)
+    table = _reference_table(json.loads(shoreline_bytes), con)
 
     assert table.num_rows == 1
     assert table.column("OBJECTID").to_pylist() == [11]
@@ -109,14 +141,7 @@ def test_esrijson_page_converts_regardless_of_member_order(order, shoreline_byte
     table = _esrijson_page_to_table(page, con=con)
 
     assert json.dumps(page) == before
-    assert table is not None
-    assert table.schema.equals(reference.schema, check_metadata=True)
-    assert [field.nullable for field in table.schema] == [
-        field.nullable for field in reference.schema
-    ]
-    for name in reference.column_names:
-        assert table.column(name).equals(reference.column(name)), name
-    assert table.column("geometry").to_pylist() == reference.column("geometry").to_pylist()
+    _assert_same_table(table, reference)
 
 
 def _small_page() -> dict:
@@ -238,8 +263,7 @@ def test_prepare_does_not_add_missing_identifying_members():
 
 
 def test_prepare_leaves_metadata_first_order_alone(shoreline_bytes):
-    page = json.loads(shoreline_bytes)
-    page = {key: page[key] for key in IDENTIFYING_KEYS} | page
+    page = _metadata_first(json.loads(shoreline_bytes))
 
     assert json.dumps(_prepare_esrijson_for_gdal(page)) == json.dumps(page)
 
@@ -256,3 +280,265 @@ def test_esrijson_page_without_features_returns_none(page):
 
     assert _esrijson_page_to_table(page) is None
     assert json.dumps(page) == before
+
+
+# ---------------------------------------------------------------------------
+# Conversion of other page shapes and member sets
+# ---------------------------------------------------------------------------
+
+# When `geometryType` follows `features`, 200 features put it well past the
+# ~6 KB identification window seen in the tested GDAL build, so both orders
+# below fail without the fix.
+SHAPES = {
+    "point_z": (
+        "esriGeometryPoint",
+        {"hasZ": True},
+        lambda i: {"x": -75.0 + i / 1000, "y": 38.0, "z": i / 2},
+    ),
+    "multipoint": (
+        "esriGeometryMultipoint",
+        {},
+        lambda i: {"points": [[-75.0 + i / 1000, 38.0], [-75.0 + i / 1000, 38.01]]},
+    ),
+    "polygon_with_hole": (
+        "esriGeometryPolygon",
+        {},
+        lambda i: {
+            "rings": [
+                [[i, 0], [i, 10], [i + 10, 10], [i + 10, 0], [i, 0]],
+                [[i + 2, 2], [i + 8, 2], [i + 8, 8], [i + 2, 8], [i + 2, 2]],
+            ]
+        },
+    ),
+    "multipart_line": (
+        "esriGeometryPolyline",
+        {},
+        lambda i: {"paths": [[[i, 0], [i + 1, 1]], [[i + 2, 0], [i + 3, 1]]]},
+    ),
+}
+
+
+def _shape_page(shape: str, order: str) -> dict:
+    geometry_type, extra, geometry = SHAPES[shape]
+    features = [
+        {"attributes": {"OBJECTID": i, "label": f"f-{i}"}, "geometry": geometry(i)}
+        for i in range(1, 201)
+    ]
+    features.append({"attributes": {"OBJECTID": 201, "label": None}, "geometry": None})
+    metadata = {
+        "objectIdFieldName": "OBJECTID",
+        "geometryType": geometry_type,
+        "spatialReference": {"wkid": 4326, "latestWkid": 4326},
+        **extra,
+        "fields": [
+            {"name": "OBJECTID", "type": "esriFieldTypeOID"},
+            {"name": "label", "type": "esriFieldTypeString", "length": 20},
+        ],
+    }
+    if order == "features_first":
+        return {"features": features} | metadata
+    return {"exceededTransferLimit": False, "features": features} | metadata
+
+
+@pytest.mark.parametrize("order", ["features_first", "other_metadata_before_features"])
+@pytest.mark.parametrize("shape", list(SHAPES))
+def test_constructed_page_converts_regardless_of_member_order(shape, order, con):
+    page = _shape_page(shape, order)
+    before = json.dumps(page)
+    reference = _reference_table(page, con)
+    assert reference.num_rows == 201
+    assert reference.column("geometry").null_count == 1
+
+    table = _esrijson_page_to_table(page, con=con)
+
+    assert json.dumps(page) == before
+    _assert_same_table(table, reference)
+
+
+def _shoreline_unknown_member_first(raw: bytes) -> dict:
+    page = json.loads(raw)
+    return {"vendorInfo": {"generator": "test"}, "features": page.pop("features")} | page
+
+
+def _shoreline_without_object_id_field_name(raw: bytes) -> dict:
+    page = _reordered(raw, ORDERS["features_first"])
+    del page["objectIdFieldName"]
+    return page
+
+
+@pytest.mark.parametrize(
+    "build", [_shoreline_unknown_member_first, _shoreline_without_object_id_field_name]
+)
+def test_shoreline_variant_converts_like_its_metadata_first_form(build, shoreline_bytes, con):
+    page = build(shoreline_bytes)
+    reference = _reference_table(page, con)
+
+    _assert_same_table(_esrijson_page_to_table(page, con=con), reference)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def page_temp_dir(tmp_path, monkeypatch):
+    """Point the converter's temp files at an empty directory of our own."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setenv("OGR_GEOJSON_MAX_OBJ_SIZE", "123")
+    return tmp_path
+
+
+def test_an_owned_connection_converts_and_cleans_up(shoreline_bytes, reference, page_temp_dir):
+    page = _reordered(shoreline_bytes, ORDERS["features_first"])
+
+    _assert_same_table(_esrijson_page_to_table(page), reference)
+
+    assert list(page_temp_dir.iterdir()) == []
+    assert os.environ["OGR_GEOJSON_MAX_OBJ_SIZE"] == "123"
+
+
+def test_a_failed_conversion_cleans_up_and_leaves_a_supplied_connection_open(
+    shoreline_bytes, page_temp_dir
+):
+    """Without spatial, `ST_Read` fails at bind time, before GDAL reads the file.
+
+    That is still after the temp file is written and inside the size-limit
+    context, so it exercises the same cleanup as a failed GDAL read.
+    """
+    page = _reordered(shoreline_bytes, ORDERS["features_first"])
+    without_spatial = get_duckdb_connection(load_spatial=False, load_httpfs=False)
+    try:
+        with pytest.raises(duckdb.Error, match="spatial"):
+            _esrijson_page_to_table(page, con=without_spatial)
+
+        assert without_spatial.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        without_spatial.close()
+    assert list(page_temp_dir.iterdir()) == []
+    assert os.environ["OGR_GEOJSON_MAX_OBJ_SIZE"] == "123"
+
+
+def test_geojson_pages_are_not_prepared(monkeypatch, con):
+    def _fail(page):
+        raise AssertionError("EsriJSON preparation applied to a GeoJSON page")
+
+    monkeypatch.setattr(arcgis, "_prepare_esrijson_for_gdal", _fail)
+    feature = {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [-75.0, 38.0]},
+        "properties": {"OBJECTID": 1},
+    }
+
+    table = _geojson_page_to_table([feature], con=con)
+
+    assert table.column("OBJECTID").to_pylist() == [1]
+
+
+# ---------------------------------------------------------------------------
+# Complete offline extraction
+# ---------------------------------------------------------------------------
+
+SERVICE = (
+    "https://services.example.com/arcgis/rest/services/ASIS_Shoreline_2005_2020/FeatureServer/1"
+)
+UTM_18N = 26918
+
+
+def _layer_json(page: dict) -> dict:
+    """Layer metadata matching the recorded page (WGS84 polylines)."""
+    return {
+        "id": 1,
+        "name": "Shoreline",
+        "type": "Feature Layer",
+        "geometryType": page["geometryType"],
+        "spatialReference": page["spatialReference"],
+        "maxRecordCount": 2000,
+        "objectIdField": "OBJECTID",
+        "fields": page["fields"],
+    }
+
+
+def _extraction_pages(raw: bytes, wkid: int) -> tuple[dict, dict]:
+    """A small page (OBJECTID 1) and the recorded page (OBJECTID 11), metadata-first.
+
+    The small feature is derived: the first three positions of the recorded
+    line, with its own ID. For UTM 18N both pages are derived by projecting the
+    recorded WGS84 coordinates, as a server honouring ``outSR`` would.
+    """
+    large = json.loads(raw)
+    feature = large["features"][0]
+    small_feature = {
+        "attributes": feature["attributes"] | {"OBJECTID": 1, "LinkID": "small"},
+        "geometry": {"paths": [feature["geometry"]["paths"][0][:3]]},
+    }
+    small = {key: value for key, value in large.items() if key != "features"}
+    small["features"] = [small_feature]
+    if wkid != 4326:
+        to_utm = Transformer.from_crs(4326, wkid, always_xy=True)
+        for page in (small, large):
+            page["spatialReference"] = {"wkid": wkid, "latestWkid": wkid}
+            for item in page["features"]:
+                item["geometry"] = {
+                    "paths": [
+                        [list(to_utm.transform(x, y)) for x, y in path]
+                        for path in item["geometry"]["paths"]
+                    ]
+                }
+    return small, large
+
+
+def _install_service(monkeypatch, layer: dict, pages: list[dict]) -> FakeTransport:
+    http = FakeTransport.install(monkeypatch)
+    http.respond(lambda r: r.path.endswith("/FeatureServer/1"), json_reply(layer))
+    http.respond(
+        lambda r: r.params.get("returnCountOnly") == "true", json_reply({"count": len(pages)})
+    )
+    http.respond(
+        lambda r: r.path.endswith("/query") and r.params.get("returnCountOnly") != "true",
+        lambda request: json_reply(pages[int(request.params.get("resultOffset", 0))])(request),
+    )
+    return http
+
+
+@pytest.mark.parametrize(
+    "late_order",
+    [
+        lambda page: {"features": page["features"]} | page,
+        lambda page: {key: page[key] for key in ORDERS["geometry_properties_before_features"]},
+    ],
+    ids=["features_first", "geometry_properties_before_features"],
+)
+@pytest.mark.parametrize(
+    ("output_crs", "wkid", "file_crs"),
+    [
+        # WGS84 is written as GeoParquet's default: no `crs` key.
+        ("native", 4326, "<no crs key -- resolves as OGC:CRS84>"),
+        (f"EPSG:{UTM_18N}", UTM_18N, {"authority": "EPSG", "code": UTM_18N}),
+    ],
+)
+def test_extraction_reads_a_late_metadata_page_after_a_normal_one(
+    output_crs, wkid, file_crs, late_order, shoreline_bytes, monkeypatch, tmp_path
+):
+    small, large = _extraction_pages(shoreline_bytes, wkid)
+    layer = _layer_json(json.loads(shoreline_bytes))
+
+    _install_service(monkeypatch, layer, [small, large])
+    reference = arcgis_to_table(SERVICE, output_crs=output_crs, batch_size=1)
+    reference_file = tmp_path / "reference.parquet"
+    convert_arcgis_to_geoparquet(SERVICE, str(reference_file), output_crs=output_crs, batch_size=1)
+
+    http = _install_service(monkeypatch, layer, [small, late_order(large)])
+    table = arcgis_to_table(SERVICE, output_crs=output_crs, batch_size=1)
+    out = tmp_path / "shoreline.parquet"
+    convert_arcgis_to_geoparquet(SERVICE, str(out), output_crs=output_crs, batch_size=1)
+
+    pages = [r for r in http.requests if r.path.endswith("/query") and "resultOffset" in r.params]
+    assert [r.params["resultOffset"] for r in pages] == ["0", "1"] * 2
+    assert {(r.params["f"], r.params["outSR"]) for r in pages} == {("json", str(wkid))}
+    assert table.column("OBJECTID").to_pylist() == [1, 11]
+    assert table.equals(reference, check_metadata=True)
+    assert spec_problems(out) == []
+    assert geo_block(out) == geo_block(reference_file)
+    assert pq.read_table(out).equals(pq.read_table(reference_file), check_metadata=True)
+    assert geo_block_crs_id(out) == file_crs
