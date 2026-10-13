@@ -188,7 +188,8 @@ def test_an_unreadable_block_is_left_alone(raw):
     assert _with_primary_column(raw, "geometry") is None
 
 
-def test_the_correction_is_a_footer_patch(tmp_path, v2_input):
+@pytest.mark.parametrize("verbose", [False, True], ids=["quiet", "verbose"])
+def test_the_correction_is_a_footer_patch(tmp_path, v2_input, verbose):
     """The relabel goes in by ``patch_footer_kv``: no page below the footer moves."""
     from unittest.mock import patch
 
@@ -198,7 +199,15 @@ def test_the_correction_is_a_footer_patch(tmp_path, v2_input):
     with patch.object(
         write_funnels, "patch_footer_kv", wraps=write_funnels.patch_footer_kv
     ) as patched:
-        _run("extract", "geoparquet", v2_input, out, "--geoparquet-version", "2.0")
+        _run(
+            "extract",
+            "geoparquet",
+            v2_input,
+            out,
+            "--geoparquet-version",
+            "2.0",
+            *(["--verbose"] if verbose else []),
+        )
 
     (call,) = patched.call_args_list
     assert json.loads(call.args[1]["geo"])["primary_column"] == "geometry"
