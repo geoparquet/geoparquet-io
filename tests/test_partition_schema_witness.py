@@ -166,3 +166,28 @@ def test_every_partition_write_options_names_its_witness():
 
     assert len(sites) >= 3, sites
     assert all(named for _, named in sites), [site for site, ok in sites if not ok]
+
+
+@pytest.mark.parametrize(
+    "remote",
+    ["s3://bucket/data.parquet", "https://example.com/data.parquet", "gs://bucket/data.parquet"],
+)
+def test_a_remote_witness_is_not_forwarded_to_each_partition(remote):
+    """A remote input is not re-read once per partition.
+
+    Every partition write would fetch the remote footer again, several times
+    and on a new connection each (#1013): 100 partitions of an HTTP input went
+    from 5 s to over 5 minutes. A local witness is a pyarrow footer read,
+    about half a millisecond, so only a local one is forwarded.
+    """
+    from geoparquet_io.core.partition.staging import PartitionWriteOptions
+
+    assert PartitionWriteOptions(input_file=remote).as_write_kwargs()["input_file"] is None
+
+
+def test_a_local_witness_is_forwarded(projected_conus):
+    from geoparquet_io.core.partition.staging import PartitionWriteOptions
+
+    options = PartitionWriteOptions(input_file=str(projected_conus))
+    assert options.as_write_kwargs()["input_file"] == str(projected_conus)
+    assert PartitionWriteOptions().as_write_kwargs()["input_file"] is None
