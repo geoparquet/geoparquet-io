@@ -235,7 +235,9 @@ def _ensure_v2_geo_metadata(
 
     DuckDB 1.5.4's V2 writer skips the geo KV metadata for M/ZM geometries;
     ``derive_v2_geo_metadata`` rebuilds the block the file implies and this
-    writes it into the footer.
+    writes it into the footer. The same patch corrects a block DuckDB did
+    write but whose ``primary_column`` names its first geometry column rather
+    than ``primary_column`` -- a secondary that comes before the primary.
 
     One footer key does not need the data decoded, so the key goes in with
     ``patch_footer_kv``: every byte below the footer is copied verbatim, which
@@ -270,7 +272,9 @@ def _ensure_v2_geo_metadata(
             output_path, geo_meta, compression, compression_level, row_group_rows
         )
     if verbose:
-        debug("Re-attached geo metadata (writer omitted it for M/ZM geometries)")
+        debug(
+            f"Wrote the geo metadata the writer omitted or mislabelled: {geo_meta['primary_column']!r} is primary"
+        )
 
 
 def _plain_copy_to(
@@ -381,7 +385,8 @@ def _plain_copy_to(
     # DuckDB 1.5.4's V2 writer omits the geo KV metadata for geometries with
     # an M dimension (XY/XYZ are written correctly). Without it the output
     # silently degrades to parquet-geo-only, so repair it from the file's own
-    # native geospatial statistics (#589).
+    # native geospatial statistics (#589). When it does write the block, it
+    # names the first geometry column primary, which the same repair corrects.
     if duckdb_version == "V2":
         _ensure_v2_geo_metadata(
             output_path,

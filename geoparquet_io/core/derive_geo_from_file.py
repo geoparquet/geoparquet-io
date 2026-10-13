@@ -275,11 +275,29 @@ def derive_secondary_geometry_info(
     return {"primary": primary_column, "secondary": secondary, "metadata": metadata}
 
 
+def _with_primary_column(raw_geo: bytes, primary_column: str | None) -> dict | None:
+    """``raw_geo`` relabelled to name ``primary_column``, or None if it already does.
+
+    None too when the block cannot be read or does not describe
+    ``primary_column``: naming a column the block has no entry for would make it
+    invalid, and a block this cannot parse is not this repair's to rewrite.
+    """
+    try:
+        geo = json.loads(raw_geo)
+    except ValueError:
+        return None
+    if not isinstance(geo, dict) or not isinstance(geo.get("columns"), dict):
+        return None
+    if primary_column not in geo["columns"] or geo.get("primary_column") == primary_column:
+        return None
+    return {**geo, "primary_column": primary_column}
+
+
 def derive_v2_geo_metadata(
     output_path: str,
     primary_column: str | None = None,
 ) -> dict | None:
-    """The GeoParquet 2.0 ``geo`` block a written file implies, when it has none.
+    """The GeoParquet 2.0 ``geo`` block a written file needs, when its own is wrong.
 
     DuckDB 1.5.4's V2 writer skips the geo KV metadata for M/ZM geometries, so
     the block has to be rebuilt from the file's native geospatial statistics and
@@ -287,8 +305,16 @@ def derive_v2_geo_metadata(
     ``primary_column`` names the real geometry column for multi-geometry files;
     without it the fallback is "geometry", then alphabetical.
 
-    Returns ``None`` when there is nothing to attach: the file already carries a
-    ``geo`` key, or it has no native geometry column to describe.
+    When the file does carry a ``geo`` key, the one thing checked is its
+    ``primary_column``. DuckDB's generated block names the FIRST geometry column
+    in the schema, so a secondary written before the primary (``centroid``
+    before ``geometry``) became the primary. A block that describes
+    ``primary_column`` but names another column comes back with only that field
+    changed; DuckDB's stats are kept as written.
+
+    Returns ``None`` when there is nothing to attach: the file's ``geo`` key
+    already names ``primary_column`` (or does not describe it, or is not a block
+    this can read), or it has no native geometry column to describe.
 
     Read-only by design. *Attaching* the block is the caller's job, because the
     cheap way to do it is a footer patch and ``core/parquet_footer`` sits above
@@ -299,7 +325,7 @@ def derive_v2_geo_metadata(
     try:
         kv = pf.metadata.metadata or {}
         if b"geo" in kv:
-            return None
+            return _with_primary_column(kv[b"geo"], primary_column)
         schema = pf.metadata.schema
         geo_cols: dict[int, tuple[str, str]] = {}
         for i in range(len(schema)):
