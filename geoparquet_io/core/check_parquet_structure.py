@@ -7,6 +7,7 @@ from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.check_verdict import (
     ISSUE_SEVERITY_KEY,
     SEVERITY_KEY,
+    Verdict,
     combine_results,
     severity,
 )
@@ -719,8 +720,37 @@ def _check_geoparquet_v1(
         }
 
 
+def _apply_bbox_value_report(result: dict, report) -> None:
+    """Fold a bbox-vs-geometry comparison into a ``check_metadata_and_bbox`` result.
+
+    Deliberately leaves ``fix_available`` alone. ``check bbox --fix`` adds a
+    missing column or drops an unusable one; a column whose *numbers* are wrong
+    has to be recomputed from the geometry, which is the rewrite ``gpio add
+    bbox --force`` does. Setting the flag here would make ``--fix`` answer a
+    question it is not answering.
+
+    ``failed`` is what ``MultiFileCheckRunner`` reads to sort a verdict into
+    "failed" rather than "warnings", so an undersized bbox sets it and an
+    oversized one -- which leaves ``report["passed"]`` True -- does not.
+    """
+    result["bbox_values"] = report
+    result["issues"].extend(report["issues"])
+    # First, so ``--fix`` names this repair when it declines to make it.
+    result["recommendations"][:0] = report["recommendations"]
+    if not report["passed"]:
+        result["passed"] = False
+        result["failed"] = True
+        result[SEVERITY_KEY] = Verdict.FAILURE.label
+
+
 def check_metadata_and_bbox(
-    parquet_file, verbose=False, return_results=False, quiet=False, geo_meta=None
+    parquet_file,
+    verbose=False,
+    return_results=False,
+    quiet=False,
+    geo_meta=None,
+    verify_rows=0,
+    all_rows=False,
 ):
     """Check GeoParquet metadata version and bbox structure (version-aware).
 
@@ -736,6 +766,12 @@ def check_metadata_and_bbox(
         quiet: If True, suppress all output (for multi-file batch mode)
         geo_meta: The file's parsed ``geo`` block, when the caller already read
             it; read here when not supplied (see :func:`_geo_block`)
+        verify_rows: Rows whose bbox values are compared against their geometry;
+            0 (the default) skips that comparison. Off by default because every
+            other question here is answered from the footer: ``check all`` is a
+            metadata-only pass, and reading geometry is a data scan that belongs
+            to the command that asked for it (``gpio check bbox``).
+        all_rows: Compare every row rather than ``verify_rows`` of them
 
     Returns:
         dict if return_results=True, containing:
@@ -749,7 +785,30 @@ def check_metadata_and_bbox(
             - recommendations: list of recommendations
             - fix_available: bool
             - needs_bbox_removal: bool (for v2/parquet-geo-only with bbox)
+            - bbox_values: the bbox-vs-geometry report, when one was asked for
     """
+    result = _check_metadata_and_bbox_structure(
+        parquet_file, verbose, return_results, quiet, geo_meta
+    )
+
+    if verify_rows > 0 or all_rows:
+        from geoparquet_io.core.check_bbox_values import check_bbox_covers_geometry
+
+        report = check_bbox_covers_geometry(
+            parquet_file,
+            sample_rows=verify_rows,
+            all_rows=all_rows,
+            verbose=verbose,
+            quiet=quiet,
+        )
+        if result is not None and report["checked"]:
+            _apply_bbox_value_report(result, report)
+
+    return result
+
+
+def _check_metadata_and_bbox_structure(parquet_file, verbose, return_results, quiet, geo_meta):
+    """The footer-only half of :func:`check_metadata_and_bbox`, dispatched by file type."""
     # Detect file type first
     file_type_info = detect_geoparquet_file_type(parquet_file, verbose)
 
@@ -780,6 +839,7 @@ def check_metadata_and_bbox(
             "recommendations": [],
             "fix_available": False,
         }
+    return None
 
 
 def check_covering_encoding(
@@ -841,7 +901,9 @@ def check_covering_encoding(
         }
 
 
-def check_bbox(parquet_file, verbose=False, return_results=False, quiet=False):
+def check_bbox(
+    parquet_file, verbose=False, return_results=False, quiet=False, verify_rows=0, all_rows=False
+):
     """``gpio check bbox``: the bbox column and metadata, and a covering readers can use.
 
     :func:`check_metadata_and_bbox` and :func:`check_covering_encoding`, judged
@@ -852,7 +914,13 @@ def check_bbox(parquet_file, verbose=False, return_results=False, quiet=False):
     """
     geo_meta = get_geo_metadata(parquet_file)
     bbox = check_metadata_and_bbox(
-        parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
+        parquet_file,
+        verbose,
+        return_results=True,
+        quiet=quiet,
+        geo_meta=geo_meta,
+        verify_rows=verify_rows,
+        all_rows=all_rows,
     )
     covering = check_covering_encoding(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta

@@ -25,6 +25,7 @@ from geoparquet_io.core.add.kdtree import (
     ITERATIONS_MISSING,
 )
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
+from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.logging_config import warn
@@ -3237,19 +3238,34 @@ class Table:
             "compression", check_compression, verbose=False, return_results=True, quiet=True
         )
 
-    def check_bbox(self) -> CheckResult:
+    def check_bbox(
+        self,
+        sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS,
+        all_rows: bool = False,
+    ) -> CheckResult:
         """
-        Check bbox structure and metadata.
+        Check bbox structure, metadata, and whether the values cover the geometry.
 
         Verifies:
         - Bbox column exists and has correct structure
         - GeoParquet covering metadata is present
         - A declared covering has a ``bbox`` member readers can use
+        - Each row's bbox actually contains that row's geometry
 
-        The same checks, and verdict, as ``gpio check bbox``.
+        The same checks, and verdict, as ``gpio check bbox``. A bbox smaller
+        than its geometry fails the check: readers prune on the covering, so
+        such rows go missing from spatial query results with no error anywhere.
+        A bbox larger than its geometry is reported as a warning only -- readers
+        over-fetch, but the answer stays correct.
 
         Measured on the source file when this Table was read from one; see
         ``CheckResult.prospective``.
+
+        Args:
+            sample_rows: Rows compared against their geometry, mirroring
+                ``gpio check bbox --sample-rows``. 0 skips that comparison and
+                checks structure and metadata only.
+            all_rows: Compare every row, mirroring ``--all-rows``
 
         Returns:
             CheckResult with bbox analysis
@@ -3262,7 +3278,15 @@ class Table:
         """
         from geoparquet_io.core.check_parquet_structure import check_bbox
 
-        return self._run_check("bbox", check_bbox, verbose=False, return_results=True, quiet=True)
+        return self._run_check(
+            "bbox",
+            check_bbox,
+            verbose=False,
+            return_results=True,
+            quiet=True,
+            verify_rows=sample_rows,
+            all_rows=all_rows,
+        )
 
     def check_row_groups(self, profile: CheckProfile | None = None) -> CheckResult:
         """

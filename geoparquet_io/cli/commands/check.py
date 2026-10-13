@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import click
+from click.core import ParameterSource
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import (
@@ -36,6 +37,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
 )
 from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_common
+from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_CHECK
@@ -1256,6 +1258,18 @@ def check_compression_cmd(
     is_flag=True,
     help="Skip .bak backup when fixing",
 )
+@click.option(
+    "--sample-rows",
+    type=click.IntRange(min=0),
+    default=DEFAULT_BBOX_SAMPLE_ROWS,
+    show_default=True,
+    help="Rows to compare bbox values against geometry (0 to skip that comparison)",
+)
+@click.option(
+    "--all-rows",
+    is_flag=True,
+    help="Compare every row's bbox against its geometry, not a sample",
+)
 @overwrite_option
 @strict_option
 @check_partition_options
@@ -1267,6 +1281,8 @@ def check_bbox_cmd(
     fix,
     fix_output,
     no_backup,
+    sample_rows,
+    all_rows,
     overwrite,
     check_all_files,
     check_sample,
@@ -1277,12 +1293,22 @@ def check_bbox_cmd(
     For GeoParquet 1.x: bbox column is recommended for spatial filtering.
     For GeoParquet 2.0/parquet-geo-only: bbox column is NOT recommended
     (native Parquet geo types provide row group statistics).
+
+    Also compares each row's bbox against its geometry's real envelope. A bbox
+    that does not cover its geometry is a failure -- readers prune on the
+    covering, so those rows go missing from spatial query results with no error
+    anywhere. A bbox larger than its geometry is only a warning: readers
+    over-fetch, but the answer stays right.
     """
     from geoparquet_io.core.check_fixes import fix_bbox_all, fix_bbox_removal
     from geoparquet_io.core.check_parquet_structure import check_bbox
 
     configure_verbose(verbose)
-    bbox_recheck = quiet_recheck(check_bbox, False)
+    if all_rows and ctx.get_parameter_source("sample_rows") is not ParameterSource.DEFAULT:
+        raise click.UsageError(
+            "--all-rows compares every row; it cannot be combined with --sample-rows"
+        )
+    bbox_recheck = quiet_recheck(check_bbox, False, verify_rows=sample_rows, all_rows=all_rows)
 
     with _activate_s3(ctx):
         runner = begin_check_run(
@@ -1310,6 +1336,8 @@ def check_bbox_cmd(
                     verbose and show_output,
                     return_results=True,
                     quiet=quiet,
+                    verify_rows=sample_rows,
+                    all_rows=all_rows,
                 ),
             )
             if result is None:

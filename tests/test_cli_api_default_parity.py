@@ -514,7 +514,9 @@ _INSPECTION_NOT_A_TABLE = (
 
 NO_OPS_TWIN: dict[str, str] = {
     "check all": _REPORT_NOT_A_TABLE,
-    "check bbox": _REPORT_NOT_A_TABLE,
+    # "check bbox" was listed here until `ops.check_bbox` was added. Its
+    # row-level comparison is a question about written bytes, so the
+    # path-taking twin this entry anticipated now exists.
     "check compression": _REPORT_NOT_A_TABLE,
     "check optimization": _REPORT_NOT_A_TABLE,
     "check row-group": _REPORT_NOT_A_TABLE,
