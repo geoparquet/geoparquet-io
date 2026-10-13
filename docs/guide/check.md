@@ -312,16 +312,14 @@ metadata only.
 
     <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
     ```python
-    from geoparquet_io.api import ops
-
     result = table.check_bbox(all_rows=True)
     if not result.passed():
         for failure in result.failures():
             print(failure)
 
-    # Or straight from a path
-    report = ops.check_bbox('myfile.parquet', sample_rows=50000).to_dict()
-    print(report['bbox_values']['undersized_rows'])
+    # Wider sample, and the per-row report behind the verdict
+    report = table.check_bbox(sample_rows=50000).to_dict()['bbox_values']
+    print(report['undersized_rows'], report['undersized_examples'])
     ```
 
 **Tolerance.** Exact equality is the wrong test — a bbox that has been through a

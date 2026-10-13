@@ -720,13 +720,6 @@ NOT_TABLE_IN_TABLE_OUT: dict[str, str] = {
     # File in, nothing out: `ops.add_stac_metadata` patches an already-written
     # file's footer, where `Table.add_stac_metadata` sets the same key on a
     # schema in memory. Same key, same validation, no shared in-memory call.
-    # Path in, report out. The only `check` with an `ops` door: its row-level
-    # comparison is a question about written bytes, so a path-taking function
-    # has somewhere natural to live. Both doors call the same
-    # `check_metadata_and_bbox`, which takes a path either way, so there is no
-    # in-memory core call to record.
-    "check_bbox": "path in, CheckResult out; both doors call check_metadata_and_bbox "
-    "on a path, compared in tests/test_check_bbox_covers_geometry.py",
     "add_stac_metadata": "file in, nothing out: the ops door patches a footer on "
     "disk, the Table door sets the key on a schema; compared in "
     "tests/test_add_stac_metadata.py",
@@ -851,8 +844,7 @@ OPS_ONLY_SURFACE: dict[str, str] = {
 #: The public `Table` methods with no same-named `ops` function, same contract.
 TABLE_ONLY_SURFACE: dict[str, str] = {
     "check": "returns a CheckResult, not a table; the checks are a method-door feature",
-    # "check_bbox" was listed here until `ops.check_bbox` was added; it is now
-    # a shared name, recorded in NOT_TABLE_IN_TABLE_OUT instead.
+    "check_bbox": "returns a CheckResult, not a table",
     "check_bloom_filters": "returns a CheckResult, not a table",
     "check_compression": "returns a CheckResult, not a table",
     "check_optimization": "returns a CheckResult, not a table",

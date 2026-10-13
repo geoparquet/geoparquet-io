@@ -620,7 +620,12 @@ class TestCheckBboxCli:
 
 
 class TestPythonApi:
-    """Every CLI option has a twin on the Python API."""
+    """Both new CLI options have a twin on ``Table.check_bbox``.
+
+    ``Table`` is the whole Python door for the ``check`` group: `ops` is
+    table-in/table-out and a check returns a report, which is why
+    ``tests/test_api.py`` pins every ``check_*`` method as ``Table``-only.
+    """
 
     def test_table_check_bbox_detects_a_wrong_bbox(self, tmp_path):
         import geoparquet_io as gpio
@@ -647,10 +652,3 @@ class TestPythonApi:
         path = _write_geoparquet(tmp_path / "api_skip.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
         result = gpio.read(path).check_bbox(sample_rows=0)
         assert result.passed() is True
-
-    def test_ops_check_bbox(self, tmp_path):
-        from geoparquet_io.api import ops
-
-        path = _write_geoparquet(tmp_path / "ops.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
-        result = ops.check_bbox(path)
-        assert result.passed() is False

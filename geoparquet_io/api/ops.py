@@ -31,7 +31,6 @@ from geoparquet_io.core.add.s2 import add_s2_table
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata as _add_stac_metadata_file
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table as _add_stac_metadata_table
-from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.extract import extract_table
 from geoparquet_io.core.hilbert_order import hilbert_order_table
 from geoparquet_io.core.reproject import reproject_table
@@ -42,8 +41,6 @@ from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from geoparquet_io.api.check import CheckResult
 
 
 def add_bbox(
@@ -149,49 +146,6 @@ def add_stac_metadata(
         output_file=str(output_file) if output_file is not None else None,
         overwrite=overwrite,
     )
-
-
-def check_bbox(
-    parquet_file: str | Path,
-    *,
-    sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS,
-    all_rows: bool = False,
-) -> CheckResult:
-    """
-    Check a file's bbox column: structure, covering metadata, and the values.
-
-    Mirrors `gpio check bbox`. Takes a path rather than a table because every
-    question it answers is a question about written bytes — a bbox column, the
-    `covering` key that declares it, and whether the four numbers on each row
-    contain that row's geometry.
-
-    A bbox smaller than its geometry fails: readers prune on the covering, so
-    those rows go missing from spatial query results and nothing raises. A bbox
-    larger than its geometry is a warning only — readers over-fetch, but the
-    answer stays correct.
-
-    Args:
-        parquet_file: Path to a GeoParquet file
-        sample_rows: Rows compared against their geometry (`--sample-rows`).
-            0 skips that comparison and checks structure and metadata only.
-        all_rows: Compare every row instead of a sample (`--all-rows`)
-
-    Returns:
-        A `CheckResult`; `to_dict()["bbox_values"]` carries the per-row report
-        when a comparison was run.
-    """
-    from geoparquet_io.api.check import CheckResult
-    from geoparquet_io.core.check_parquet_structure import check_metadata_and_bbox
-
-    results = check_metadata_and_bbox(
-        str(parquet_file),
-        verbose=False,
-        return_results=True,
-        quiet=True,
-        verify_rows=sample_rows,
-        all_rows=all_rows,
-    )
-    return CheckResult(results, check_type="bbox", source_path=str(parquet_file))
 
 
 def add_stac_metadata_table(
