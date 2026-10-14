@@ -1011,6 +1011,32 @@ def detect_geometry_columns(parquet_file: str, con=None) -> dict[str, str]:
     return geo_columns
 
 
+# Arrow storage types that hold coordinates rather than serialized bytes.
+_NESTED_TYPE_PREFIXES = ("struct", "list", "large_list", "fixed_size_list")
+
+
+def detect_native_geometry_columns(parquet_file: str, con=None) -> dict[str, str]:
+    """The subset of ``detect_geometry_columns`` stored as Parquet GEOMETRY/GEOGRAPHY.
+
+    The local schema reader also reports a GeoArrow extension column
+    (``geoarrow.point`` and its kin) as ``GeometryType()``, which is right for
+    "which columns are geometry" but wrong for "does this file use the native
+    Parquet geo types". Those types annotate a BYTE_ARRAY, so a struct or list
+    column carrying a GeoArrow extension name is never one, and a file whose
+    only geometry is such a column is not ``parquet_geo_only`` (#624).
+    """
+    geo_columns = detect_geometry_columns(parquet_file, con)
+    if not geo_columns:
+        return geo_columns
+    nested = {
+        col.get("name")
+        for col in get_schema_info(parquet_file, con)
+        if col.get("num_children")
+        or str(col.get("type") or "").lower().startswith(_NESTED_TYPE_PREFIXES)
+    }
+    return {name: kind for name, kind in geo_columns.items() if name not in nested}
+
+
 def get_bbox_from_row_group_stats(
     parquet_file: str, bbox_column: str = "bbox", con=None
 ) -> list[float] | None:

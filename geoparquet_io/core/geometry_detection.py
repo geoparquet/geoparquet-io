@@ -5,10 +5,14 @@ This module provides functions to detect geometry columns in Parquet files
 by examining GeoParquet metadata and column names.
 """
 
+from __future__ import annotations
+
 import re
+from dataclasses import dataclass
 
 import duckdb
 
+from geoparquet_io.core.duckdb_utils import _geoarrow_coord_exprs, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import carried_column_name
 from geoparquet_io.core.logging_config import debug
@@ -270,3 +274,205 @@ def _detect_geometry_from_query(
         if verbose:
             debug(f"Error detecting geometry from query: {e}")
         return None
+
+
+# =============================================================================
+# How a geometry column is read (#624, #1082)
+# =============================================================================
+
+# A GeoArrow coordinate struct, bare (a point) or wrapped in one list level per
+# nesting step, so `STRUCT(x DOUBLE, y DOUBLE)[][]` is a polygon's rings.
+_GEOARROW_STRUCT_TYPE = re.compile(r"^STRUCT\((.*)\)((?:\[\])*)$", re.IGNORECASE | re.DOTALL)
+
+# List depth of a GeoArrow column -> an encoding whose coordinate path it
+# exposes. Depth alone cannot tell linestring from multipoint, nor polygon from
+# multilinestring, but both twins share a coordinate path, which is all a reader
+# of coordinates needs.
+_GEOARROW_ENCODING_BY_DEPTH = {0: "point", 1: "linestring", 2: "polygon", 3: "multipolygon"}
+
+_READABLE_KINDS = frozenset({"native", "wkb", "geoarrow"})
+
+
+def _geoarrow_struct_depth(duckdb_type: str) -> int | None:
+    """List depth of a GeoArrow coordinate struct type, None when it is not one."""
+    match = _GEOARROW_STRUCT_TYPE.match(duckdb_type.strip())
+    if not match:
+        return None
+    fields = {f.strip().split(" ")[0].strip('"').lower() for f in match.group(1).split(",")}
+    if not {"x", "y"} <= fields:
+        return None
+    return len(match.group(2)) // 2
+
+
+def _read_kind(duckdb_type: str | None) -> str:
+    if duckdb_type is None:
+        return "missing"
+    text = duckdb_type.strip()
+    if _DESCRIBE_GEO_TYPE.match(text):
+        return "native"
+    if text.upper() == "BLOB":
+        return "wkb"
+    if _geoarrow_struct_depth(text) in _GEOARROW_ENCODING_BY_DEPTH:
+        return "geoarrow"
+    return "unsupported"
+
+
+@dataclass(frozen=True)
+class GeometryRead:
+    """The one answer to "how does SQL read this geometry column?".
+
+    Every check that reads geometry needs the same facts, and each used to
+    guess them from ``"GEOMETRY" in col_type`` (#624). The expression that
+    yields a GEOMETRY, the predicate for "this row holds a value" and, when the
+    column cannot be read at all, a sentence saying why. ``kind`` is one of
+    ``native`` (a GEOMETRY column), ``wkb`` (a BLOB of WKB), ``geoarrow`` (a
+    coordinate struct), ``missing`` or ``unsupported``.
+
+    A zero-length BLOB is not WKB (#1082), and neither are bytes that do not
+    parse (#1064). ``expr`` maps both to NULL and ``present_sql`` excludes them,
+    so a check reads the other rows instead of dying on them. Only an encoding
+    check goes looking for them, through ``empty_sql`` and ``unparsable_sql``.
+    """
+
+    column: str
+    kind: str
+    duckdb_type: str = ""
+
+    @classmethod
+    def for_type(cls, column: str, duckdb_type: str | None) -> GeometryRead:
+        return cls(column, _read_kind(duckdb_type), duckdb_type or "")
+
+    @property
+    def readable(self) -> bool:
+        return self.kind in _READABLE_KINDS
+
+    @property
+    def quoted(self) -> str:
+        return quote_identifier(self.column)
+
+    @property
+    def expr(self) -> str:
+        """SQL for the value as GEOMETRY (NULL for a NULL or zero-length value).
+
+        For a GeoArrow column this is a representative point, the centre of the
+        value's coordinate extent, which is what a distance-based reader needs.
+        """
+        if self.kind == "wkb":
+            # CASE, not a WHERE conjunct, so no evaluation order can hand a bad
+            # value to ST_GeomFromWKB.
+            return f"(CASE WHEN {self.parseable_sql} THEN ST_GeomFromWKB({self.quoted}) END)"
+        if self.kind == "geoarrow":
+            return self._geoarrow_point_expr()
+        return self.quoted
+
+    @property
+    def present_sql(self) -> str:
+        """Predicate for a row that holds a geometry value to read."""
+        return f"{self.quoted} IS NOT NULL AND {self.parseable_sql}"
+
+    @property
+    def parseable_sql(self) -> str:
+        """Predicate for a value SQL can read as a geometry.
+
+        For WKB, non-empty bytes that ``ST_GeomFromWKB`` parses. The length test
+        comes first because ``TRY(ST_GeomFromWKB(''))`` is not NULL, it is a
+        value every later function rejects. ``list_extract([v], 1)`` hands
+        ``TRY`` a flat vector. On a dictionary-encoded column, pyarrow's
+        default, one failing row otherwise nulls every row of the vector
+        (measured on DuckDB 1.5.6, see tests/test_validate_malformed_wkb.py).
+        """
+        if self.kind != "wkb":
+            return "TRUE"
+        q = self.quoted
+        return (
+            f"(octet_length({q}) > 0 AND TRY(ST_GeomFromWKB(list_extract([{q}], 1))) IS NOT NULL)"
+        )
+
+    @property
+    def empty_sql(self) -> str:
+        """Predicate for a value that is present but zero-length (never valid WKB)."""
+        if self.kind == "wkb":
+            return f"octet_length({self.quoted}) = 0"
+        return "FALSE"
+
+    @property
+    def unparsable_sql(self) -> str:
+        """Predicate for a non-empty value that is not valid WKB."""
+        if self.kind == "wkb":
+            return f"(octet_length({self.quoted}) > 0 AND NOT {self.parseable_sql})"
+        return "FALSE"
+
+    @property
+    def problem(self) -> str | None:
+        """Why this column cannot be read, or None when it can."""
+        if self.kind == "missing":
+            return f'geometry column "{self.column}" not found in the file'
+        if self.kind == "unsupported":
+            return (
+                f'geometry column "{self.column}" has type {self.duckdb_type}, '
+                "which is not WKB, a GEOMETRY type or a GeoArrow coordinate struct"
+            )
+        return None
+
+    def _geoarrow_point_expr(self) -> str:
+        depth = _geoarrow_struct_depth(self.duckdb_type) or 0
+        encoding = _GEOARROW_ENCODING_BY_DEPTH[depth]
+        _, _, _, _, cx, cy = _geoarrow_coord_exprs(self.quoted, encoding)
+        return f"ST_Point({cx}, {cy})"
+
+
+@dataclass(frozen=True)
+class GeometryPresence:
+    """Row counts for a geometry column, and how many hold no readable value.
+
+    The ``first_*_row`` fields are 0-based row indexes in the file, so a user
+    can find the value.
+    """
+
+    total: int
+    nulls: int
+    empties: int
+    first_empty_row: int | None
+    unparsable: int = 0
+    first_unparsable_row: int | None = None
+
+
+def _find_described_type(described, column: str) -> str | None:
+    by_name = {row[0]: str(row[1]) for row in described if row and row[0]}
+    if column in by_name:
+        return by_name[column]
+    folded = {name.lower(): col_type for name, col_type in by_name.items()}
+    return folded.get(column.lower())
+
+
+def resolve_geometry_read(con, raw_url: str, column: str) -> GeometryRead:
+    """How ``column`` of the Parquet file at RAW ``raw_url`` is read on ``con``.
+
+    The answer depends on the connection. With GeoParquet conversion on, DuckDB
+    presents a WKB column as GEOMETRY and decodes it lazily, so a caller that
+    must see the stored bytes calls ``disable_geoparquet_conversion`` first.
+    """
+    described = con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_path(raw_url)})").fetchall()
+    return GeometryRead.for_type(column, _find_described_type(described, column))
+
+
+def count_geometry_presence(
+    con, raw_url: str, read: GeometryRead, limit_clause: str
+) -> GeometryPresence:
+    """Count rows, NULL, zero-length and unparsable values over the sampled rows."""
+    q = read.quoted
+    empty, bad = read.empty_sql, read.unparsable_sql
+    row = con.execute(f"""
+        SELECT COUNT(*),
+               COUNT(*) FILTER (WHERE {q} IS NULL),
+               COUNT(*) FILTER (WHERE {empty}),
+               MIN(file_row_number) FILTER (WHERE {empty}),
+               COUNT(*) FILTER (WHERE {bad}),
+               MIN(file_row_number) FILTER (WHERE {bad})
+        FROM (
+            SELECT {q}, file_row_number
+            FROM read_parquet({sql_path(raw_url)}, file_row_number = true)
+            {limit_clause}
+        )
+    """).fetchone()
+    return GeometryPresence(*row) if row else GeometryPresence(0, 0, 0, None)

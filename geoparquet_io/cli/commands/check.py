@@ -83,6 +83,7 @@ class MultiFileCheckRunner:
         self.issues: list[tuple[str, str, str]] = []  # (file, level, message)
         self.fixed: list[tuple[str, str | None]] = []  # (output path, backup path)
         self.fix_failures: list[tuple[str, str]] = []  # (file, error)
+        self.check_errors: list[tuple[str, str]] = []  # (file, why a check could not run)
         self.current_index = 0
         self.is_multi_file = len(files) > 1
 
@@ -175,6 +176,39 @@ class MultiFileCheckRunner:
     def run_check(self, file_path: str, check_call: Callable[[], dict]) -> dict | None:
         """The check stage for one file, or None when it could not be checked."""
         return self._guard(file_path, check_call, "Check")
+
+    def run_stage(self, file_path: str, call: Callable[[], T], stage: str) -> T | None:
+        """One check of several on a file. If it cannot run, say so and carry on.
+
+        ``check all`` is a report, so one check that dies must not take the
+        others with it (#1082). The failure is printed in place of the check's
+        result and counted, and :meth:`raise_if_any_check_errored` turns it
+        into a non-zero exit, since a check that could not run is not a pass.
+        Click exceptions and interrupts propagate, as in :meth:`_guard`.
+        """
+        try:
+            return call()
+        except (click.Abort, click.ClickException, click.exceptions.Exit):
+            raise
+        except (KeyboardInterrupt, duckdb.InterruptException):
+            self._print_fix_summary()
+            raise
+        except Exception as e:
+            self.note_check_error(file_path, stage, str(e))
+            return None
+
+    def note_check_error(self, file_path: str, stage: str, reason: str) -> None:
+        """Record and print a check that could not run on ``file_path``."""
+        self.check_errors.append((file_path, f"{stage} could not run, {reason}"))
+        click.echo("\r" + " " * 80 + "\r", nl=False)
+        click.echo(
+            click.style(f"  ✗ {stage} could not run on {Path(file_path).name}, {reason}", fg="red")
+        )
+
+    def raise_if_any_check_errored(self) -> None:
+        """Exit non-zero when a check could not run on some file."""
+        if self.check_errors:
+            raise click.exceptions.Exit(1)
 
     def apply_fix(self, file_path: str, fix_call: Callable[[], tuple[str, str | None] | None]):
         """Run one file's fix, recording it -- or its failure -- and carrying on (#1041).
@@ -360,6 +394,60 @@ def begin_check_run(
     )
 
 
+_SPATIAL_STAGE = "Spatial order check"
+
+
+def _spatial_stage(runner: MultiFileCheckRunner, file_path: str, call) -> dict:
+    """The spatial order verdict for ``check all``, never an exception.
+
+    A check that could not read the geometry comes back with an ``error``
+    (from core) or raises. Either way it is reported, counted, and handed on
+    as a failed, unfixable result, so the spec validation still runs.
+    """
+    result = runner.run_stage(file_path, call, _SPATIAL_STAGE)
+    if result is None:
+        reason = runner.check_errors[-1][1]
+        return {
+            "passed": False,
+            "ratio": None,
+            "issues": [f"❌ {reason}"],
+            "recommendations": [],
+            "fix_available": False,
+            "error": reason,
+        }
+    if isinstance(result, dict) and result.get("error"):
+        runner.note_check_error(file_path, _SPATIAL_STAGE, result["error"])
+    return result
+
+
+def _echo_spec_result(spec_result, spec_details: bool) -> None:
+    """Print the spec validation block of ``check all``."""
+    if spec_result is None:
+        click.echo(click.style("  ✗ Spec validation could not run", fg="red"))
+        return
+    if spec_details:
+        from geoparquet_io.core.validate import format_terminal_output
+
+        format_terminal_output(spec_result)
+        return
+    if spec_result.failed_count > 0:
+        click.echo(
+            click.style(
+                f"  ✗ {spec_result.failed_count} failed, {spec_result.passed_count} passed",
+                fg="red",
+            )
+        )
+    elif spec_result.warning_count > 0:
+        click.echo(
+            click.style(
+                f"  ⚠ {spec_result.passed_count} passed, {spec_result.warning_count} warnings",
+                fg="yellow",
+            )
+        )
+    else:
+        click.echo(click.style(f"  ✓ {spec_result.passed_count} checks passed", fg="green"))
+
+
 @check.command(name="all", cls=GlobAwareCommand)
 @click.argument("parquet_file")
 @click.option(
@@ -501,16 +589,29 @@ def check_all(
                 )
                 if show_output:
                     click.echo("\nSpatial Order Analysis:")
-                spatial = check_spatial_impl(
+                spatial = _spatial_stage(
+                    runner,
                     file_path,
-                    random_sample_size,
-                    limit_rows,
-                    verbose and show_output,
-                    return_results=True,
-                    quiet=quiet,
+                    partial(
+                        check_spatial_impl,
+                        file_path,
+                        random_sample_size,
+                        limit_rows,
+                        verbose and show_output,
+                        return_results=True,
+                        quiet=quiet,
+                    ),
                 )
-                spec = validate_geoparquet(
-                    file_path, validate_data=True, sample_size=1000, verbose=False
+                spec = runner.run_stage(
+                    file_path,
+                    partial(
+                        validate_geoparquet,
+                        file_path,
+                        validate_data=True,
+                        sample_size=1000,
+                        verbose=False,
+                    ),
+                    "Spec validation",
                 )
                 return {"structure": structure, "spatial": spatial, "spec": spec}
 
@@ -531,40 +632,17 @@ def check_all(
             # Display spec validation results
             if show_output:
                 click.echo("\nSpec Validation:")
-                if spec_details:
-                    # Full output
-                    from geoparquet_io.core.validate import format_terminal_output
-
-                    format_terminal_output(spec_result)
-                else:
-                    # Summary only
-                    if spec_result.failed_count > 0:
-                        click.echo(
-                            click.style(
-                                f"  ✗ {spec_result.failed_count} failed, "
-                                f"{spec_result.passed_count} passed",
-                                fg="red",
-                            )
-                        )
-                    elif spec_result.warning_count > 0:
-                        click.echo(
-                            click.style(
-                                f"  ⚠ {spec_result.passed_count} passed, "
-                                f"{spec_result.warning_count} warnings",
-                                fg="yellow",
-                            )
-                        )
-                    else:
-                        click.echo(
-                            click.style(f"  ✓ {spec_result.passed_count} checks passed", fg="green")
-                        )
+                _echo_spec_result(spec_result, spec_details)
 
             # Aggregate results for runner tracking (include spec failures)
             combined_passed, combined_issues, _ = aggregate_check_results(
                 structure_results, spatial_result
             )
             # Include spec failures in passed status and issues summary
-            if spec_result.failed_count > 0:
+            if spec_result is None:
+                combined_passed = False
+                combined_issues.append("❌ Spec validation could not run")
+            elif spec_result.failed_count > 0:
                 combined_passed = False
                 combined_issues.append(f"Spec validation: {spec_result.failed_count} checks failed")
             runner.record_result(
@@ -626,6 +704,7 @@ def check_all(
         # Print summary for multi-file checks
         runner.print_summary()
         runner.raise_if_any_fix_failed()
+        runner.raise_if_any_check_errored()
 
 
 @check.command(name="spatial", cls=GlobAwareCommand)
@@ -714,6 +793,11 @@ def check_spatial(
             )
             if result is None:
                 continue
+            if result.get("error"):
+                # Could not read the geometry, so there is no verdict and no fix.
+                runner.note_check_error(file_path, _SPATIAL_STAGE, result["error"])
+                runner.record_result(file_path, result)
+                continue
             ratio = result["ratio"]
             passed = result.get("passed", ratio < 0.5 if ratio is not None else True)
 
@@ -792,6 +876,7 @@ def check_spatial(
         # Print summary for multi-file checks
         runner.print_summary()
         runner.raise_if_any_fix_failed()
+        runner.raise_if_any_check_errored()
 
 
 @check.command(name="compression", cls=GlobAwareCommand)

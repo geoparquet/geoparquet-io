@@ -153,10 +153,12 @@ COLUMN_METADATA_CASES = [
     ),
 ]
 
-#: Table ids whose one defect makes DuckDB refuse to *read* the file, so the
-#: three data checks also FAIL, each quoting DuckDB's "Invalid Input Error"
-#: rather than a verdict of their own (#1080).
-CASCADING_CASES = {"geometry_types_not_a_list", "crs_is_a_bare_string"}
+#: Table ids whose one defect still fails a second check. The data checks read
+#: the column with DuckDB's geoparquet conversion off, so a malformed ``geo``
+#: block no longer stops DuckDB reading the file (#1080). A ``geometry_types``
+#: string is still compared to the data as if it were a list, so
+#: geometry_types_match_data FAILs on top of geometry_types_list.
+CASCADING_CASES = {"geometry_types_not_a_list"}
 
 
 @pytest.mark.parametrize(
@@ -187,8 +189,8 @@ def test_the_base_fixture_is_clean(tmp_path):
             id=case[0],
             marks=pytest.mark.xfail(
                 strict=True,
-                reason="#1080: DuckDB refuses to read the file, so encoding_matches_data, "
-                "geometry_types_match_data and coordinates_valid_for_crs FAIL too",
+                reason="a geometry_types string is compared to the data as a list, "
+                "so geometry_types_match_data FAILs too",
             )
             if case[0] in CASCADING_CASES
             else (),
@@ -590,10 +592,7 @@ class TestChecksAgainstAnUntypedColumn:
         assert check.message == 'all geometry values match "WKB" encoding (2 checked)'
 
     def test_encoding_matches_data_reports_unparsable_bytes(self, tmp_path):
-        """The verdict is FAILED, but the message is DuckDB's, not the check's own
-        "N of M geometries do not match" -- ``ST_GeomFromWKB`` raises instead of
-        returning NULL, so the counting arm is unreachable (#1064). Asserted as it
-        is, so the day that arm starts working this test says so."""
+        """Counted, not DuckDB's raw parse error (#1064)."""
         con = get_duckdb_connection(load_spatial=True)
         try:
             path = self._plain_wkb_file(tmp_path / "f.parquet", [WKB_POINT, b"\x00\x01\x02"])
@@ -601,7 +600,9 @@ class TestChecksAgainstAnUntypedColumn:
         finally:
             con.close()
         assert check.status == CheckStatus.FAILED
-        assert check.message.startswith("failed to validate encoding:")
+        assert check.message == (
+            '1 of 2 geometries do not match "WKB" encoding, first at row 1 (counting from 0)'
+        )
 
     def test_geometry_types_match_data_parses_wkb_itself(self, tmp_path):
         con = get_duckdb_connection(load_spatial=True)
@@ -681,6 +682,7 @@ FAILED_ARMS = {
     "_check_geometry_byte_array": HERE,
     "_check_geometry_not_repeated": HERE,
     "_check_encoding_matches_data": HERE,
+    "_wkb_encoding_verdict": "tests/test_validate_malformed_wkb.py",
     "_check_geometry_types_match_data": HERE,
     "_check_covering_bbox_paths": HERE,
     "_covering_bbox_column": HERE,

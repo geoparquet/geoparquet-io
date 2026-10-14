@@ -178,6 +178,19 @@ def restore_duckdb_settings(
                 debug(f"Could not restore DuckDB setting {key}: {e}")
 
 
+def disable_geoparquet_conversion(con: duckdb.DuckDBPyConnection) -> None:
+    """Read a GeoParquet WKB column as the BLOB it stores, not as GEOMETRY.
+
+    With conversion on, DuckDB presents a WKB column as GEOMETRY and decodes
+    each value only when something reads it, so a check that counts values
+    passes bytes it never looked at, and the first query that does decode one
+    fails on a zero-length or malformed value with no row to point at (#1082).
+    A checker owns its connection and wants the bytes, so it turns this off.
+    Columns stored with the native Parquet GEOMETRY type stay GEOMETRY.
+    """
+    con.execute("SET enable_geoparquet_conversion = false")
+
+
 def _current_setting(con: duckdb.DuckDBPyConnection, key: str) -> object:
     return con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
 

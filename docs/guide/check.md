@@ -38,6 +38,11 @@ Runs all validation checks:
 - GeoParquet v2.0 upgrade recommendation (for v1.1 files)
 - Spec validation
 
+Every check runs even when an earlier one cannot. A check that cannot run
+prints a line naming the check and the reason, the remaining checks still run,
+and `gpio check all` then exits with status 1. A check that could not read the
+data is never reported as a pass (#624).
+
 ## Individual Checks
 
 ### Spatial Ordering
@@ -74,6 +79,12 @@ Checks if data is spatially ordered. Spatially ordered data improves:
 
 - **Bbox-stats method**: Checks if consecutive row groups have overlapping bounding boxes. Non-overlapping row groups indicate good spatial ordering. Passes if < 30% of row group pairs overlap.
 - **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5.
+
+The sampling method reads WKB, native Parquet GEOMETRY and GeoArrow coordinate
+struct columns. NULL, zero-length and unparsable values are skipped, and the
+spec validation reports them. When the geometry column is missing or has a type
+that holds no geometry, the check fails with the reason and `gpio check spatial`
+exits with status 1 (#624).
 
 ### Compression
 
@@ -402,6 +413,14 @@ Validates file structure and metadata against the GeoParquet specification:
   paths, a `bbox` that is not an array of finite numbers. Each gets a FAILED
   check quoting the value it found (bounded, so a huge value cannot flood the
   report), and the rest of the report is still printed (#1062).
+- **Empty and unparsable WKB.** `encoding_matches_data_<column>` reads the
+  bytes the file stores and counts the values that are not WKB. A zero-length
+  value is reported as `N of M geometries in column "geometry" are empty
+  (zero-length) WKB`, and bytes that do not parse as `K of M geometries do not
+  match "WKB" encoding`, each with the row of the first one. Both fail, and a
+  NULL geometry is allowed. The other data checks judge the values that do
+  parse, so one bad value is reported once, not as a DuckDB error under every
+  later check (#1064, #1082).
 - **Dimension-aware geometry types** — `geometry_types` entries carry Z/M
   suffixes (`"Point Z"`, `"LineString ZM"`), and validation matches declared
   suffixes against the actual coordinate dimensions in both directions

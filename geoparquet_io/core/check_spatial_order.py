@@ -4,14 +4,23 @@
 import random as _random
 from statistics import mean
 
+import duckdb
+
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    disable_geoparquet_conversion,
+    get_duckdb_connection,
+    sql_path,
+)
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    find_primary_geometry_column,
+    resolve_geometry_read,
+)
 from geoparquet_io.core.logging_config import debug, progress, warn
 from geoparquet_io.core.remote import needs_httpfs
 
@@ -44,13 +53,17 @@ def _bboxes_overlap(bbox1: dict, bbox2: dict) -> bool:
     return x_overlap and y_overlap
 
 
-def _calculate_consecutive_avg(con, raw_url, geometry_column, row_limit, verbose):
-    """Calculate average distance between consecutive features."""
-    quoted_geom = quote_identifier(geometry_column)
+def _calculate_consecutive_avg(con, raw_url, read, row_limit, verbose):
+    """Calculate average distance between consecutive features.
+
+    Rows holding no geometry (NULL or zero-length) are left out before the
+    pairing, so they neither pair up nor fail the decode (#1082).
+    """
     query = f"""
     WITH numbered AS (
-        SELECT ROW_NUMBER() OVER () as id, {quoted_geom} as geom
-        FROM {sql_path(raw_url)} {row_limit}
+        SELECT ROW_NUMBER() OVER () as id, {read.expr} as geom
+        FROM (SELECT * FROM {sql_path(raw_url)} {row_limit})
+        WHERE {read.present_sql}
     )
     SELECT AVG(ST_Distance(a.geom, b.geom)) as avg_dist
     FROM numbered a JOIN numbered b ON b.id = a.id + 1;
@@ -64,11 +77,14 @@ def _calculate_consecutive_avg(con, raw_url, geometry_column, row_limit, verbose
     return avg
 
 
-def _calculate_random_avg(con, raw_url, geometry_column, row_limit, random_sample_size, verbose):
+def _calculate_random_avg(con, raw_url, read, row_limit, random_sample_size, verbose):
     """Calculate average distance between random pairs of features."""
-    quoted_geom = quote_identifier(geometry_column)
     query = f"""
-    WITH sample AS (SELECT {quoted_geom} as geom FROM {sql_path(raw_url)} {row_limit}),
+    WITH sample AS (
+        SELECT {read.expr} as geom
+        FROM (SELECT * FROM {sql_path(raw_url)} {row_limit})
+        WHERE {read.present_sql}
+    ),
     random_pairs AS (
         SELECT a.geom as geom1, b.geom as geom2
         FROM (SELECT geom FROM sample ORDER BY random() LIMIT {random_sample_size}) a,
@@ -84,6 +100,25 @@ def _calculate_random_avg(con, raw_url, geometry_column, row_limit, random_sampl
     if verbose:
         debug(f"Average distance between random features: {avg}")
     return avg
+
+
+def _errored_results(reason: str) -> dict:
+    """The verdict for a sampling check that could not read the geometry.
+
+    Not a pass, and not a fixable ordering problem either. ``error`` carries
+    the reason so a caller can tell "could not check" from "badly ordered".
+    """
+    return {
+        "passed": False,
+        "ratio": None,
+        "consecutive_avg": None,
+        "random_avg": None,
+        "method": "sampling",
+        "issues": [f"❌ Cannot check spatial order, {reason}"],
+        "recommendations": [],
+        "fix_available": False,
+        "error": reason,
+    }
 
 
 def _build_results_dict(ratio, consecutive_avg, random_avg):
@@ -357,26 +392,43 @@ def check_spatial_order(
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
     try:
-        row_limit = _get_row_limit_clause(con, raw_url, limit_rows, verbose)
-
-        consecutive_avg = _calculate_consecutive_avg(
-            con, raw_url, geometry_column, row_limit, verbose
+        disable_geoparquet_conversion(con)
+        averages = _sample_distances(
+            con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
         )
-        random_avg = _calculate_random_avg(
-            con, raw_url, geometry_column, row_limit, random_sample_size, verbose
-        )
-
-        ratio = consecutive_avg / random_avg if consecutive_avg and random_avg else None
-
-        if not verbose and not quiet:
-            _print_standalone_results(ratio, consecutive_avg, random_avg)
-
-        if return_results:
-            return _build_results_dict(ratio, consecutive_avg, random_avg)
-
-        return ratio
+    except duckdb.Error as e:
+        averages = f"could not read geometry column {geometry_column!r} ({e})"
     finally:
         con.close()
+
+    if isinstance(averages, str):
+        # A caller asking for results presents the verdict itself.
+        if return_results:
+            return _errored_results(averages)
+        warn(f"Cannot check spatial order of {parquet_file}, {averages}")
+        return None
+
+    consecutive_avg, random_avg = averages
+    ratio = consecutive_avg / random_avg if consecutive_avg and random_avg else None
+
+    if not verbose and not quiet:
+        _print_standalone_results(ratio, consecutive_avg, random_avg)
+
+    if return_results:
+        return _build_results_dict(ratio, consecutive_avg, random_avg)
+
+    return ratio
+
+
+def _sample_distances(con, raw_url, geometry_column, limit_rows, random_sample_size, verbose):
+    """(consecutive avg, random avg), or a sentence saying why the column cannot be read."""
+    read = resolve_geometry_read(con, raw_url, geometry_column)
+    if not read.readable:
+        return read.problem
+    row_limit = _get_row_limit_clause(con, raw_url, limit_rows, verbose)
+    consecutive_avg = _calculate_consecutive_avg(con, raw_url, read, row_limit, verbose)
+    random_avg = _calculate_random_avg(con, raw_url, read, row_limit, random_sample_size, verbose)
+    return consecutive_avg, random_avg
 
 
 def _compute_data_extent(row_group_bboxes: list[dict]) -> dict:
