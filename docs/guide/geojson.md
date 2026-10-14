@@ -452,19 +452,17 @@ GeoJSON output is lon/lat (RFC 7946), so gpio reprojects any other input CRS fir
 
 === "CLI"
 
-    <!-- doctest: skip="needs a file whose CRS PROJ cannot read" -->
     ```bash
-    gpio convert reproject data.parquet fixed.parquet --src-crs EPSG:32631
+    gpio convert reproject data.parquet fixed.parquet --src-crs EPSG:3857
     gpio convert geojson fixed.parquet out.geojson
     ```
 
 === "Python"
 
-    <!-- doctest: skip="needs a file whose CRS PROJ cannot read" -->
     ```python
     import geoparquet_io as gpio
 
-    gpio.read("data.parquet").reproject(source_crs="EPSG:32631").to_geojson("out.geojson")
+    gpio.read("data.parquet").reproject(source_crs="EPSG:3857").to_geojson("out.geojson")
     ```
 
 ## Writing to File
