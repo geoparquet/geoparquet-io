@@ -75,9 +75,15 @@ def test_the_fixture_carries_the_plain_string(name, native_files):
 
 
 def _h3_cells(native_files, tmp_path, name, *command) -> list:
+    """The h3 cells a command wrote, in an order that does not depend on row order."""
     out = tmp_path / f"{name}.parquet"
     _invoke(*command, str(native_files[name]), str(out), "--resolution", "7")
-    return pq.read_table(str(out)).column("h3_cell").to_pylist()
+    table = pq.read_table(str(out))
+    cells = table.column("h3_cell").to_pylist()
+    # Row order is not part of either command's contract (aggregate groups).
+    if "id" in table.column_names:
+        return sorted(zip(table.column("id").to_pylist(), cells, strict=True))
+    return sorted(cells)
 
 
 @pytest.mark.parametrize("command", [("add", "h3"), ("process", "aggregate", "h3")])
