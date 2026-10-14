@@ -166,3 +166,23 @@ def test_kdtree_table_reads_bare_wkb_without_geo_metadata(converted):
     result = add_kdtree_table(bare, iterations=2, geometry_column="geometry")
 
     assert len(set(result.column("kdtree_cell").to_pylist())) == 4
+
+
+class TestDescribeWkbGeometryLeavesTablesAlone:
+    def test_existing_geo_key_is_kept(self):
+        import pyarrow as pa
+
+        from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
+
+        table = pa.table({"geometry": pa.array([b"\x01"], pa.binary())}).replace_schema_metadata(
+            {b"geo": b'{"keep": true}'}
+        )
+        assert describe_wkb_geometry(table, "geometry") is table
+
+    def test_missing_geometry_column_is_left_alone(self):
+        import pyarrow as pa
+
+        from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
+
+        table = pa.table({"id": [1]})
+        assert describe_wkb_geometry(table, "geometry") is table

@@ -181,3 +181,45 @@ def test_meta_json_outputs_are_strict(typed_parquet):
         result = CliRunner().invoke(cli, ["inspect", "meta", typed_parquet, "--json", *flags])
         assert result.exit_code == 0, (flags, result.output)
         _strict_loads(result.output)
+
+
+class TestScalarFallbacks:
+    def test_numpy_scalar_and_array_become_python(self):
+        assert to_jsonable(np.int64(7)) == 7
+        assert to_jsonable(np.float64("nan")) is None
+        assert to_jsonable(np.array([1.5, np.inf])) == [1.5, None]
+
+    def test_numpy_object_without_tolist_uses_item(self):
+        from geoparquet_io.core.json_output import _numpy_to_python
+
+        class _Scalar:
+            __module__ = "numpy.fake"
+
+            def item(self):
+                return 3
+
+        assert _numpy_to_python(_Scalar()) == (True, 3)
+
+    def test_unknown_object_falls_back_to_str(self):
+        class _Thing:
+            def __str__(self):
+                return "thing"
+
+        assert to_jsonable(_Thing()) == "thing"
+
+
+def test_row_group_geo_stats_json_without_stats_is_valid(tmp_path, capsys):
+    """A file with no native geo stats and no bbox column still prints JSON."""
+    from geoparquet_io.core.metadata_utils import format_row_group_geo_stats
+
+    path = tmp_path / "plain.parquet"
+    con = get_duckdb_connection(load_spatial=False)
+    try:
+        con.execute(f"COPY (SELECT 1 AS id) TO {sql_path(str(path))} (FORMAT PARQUET)")
+    finally:
+        con.close()
+    format_row_group_geo_stats(str(path), json_output=True)
+    assert _strict_loads(capsys.readouterr().out) == {
+        "row_group_geo_stats": [],
+        "message": "No geo stats found",
+    }
