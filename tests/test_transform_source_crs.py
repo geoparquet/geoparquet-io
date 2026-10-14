@@ -182,6 +182,13 @@ class TestUncodedBodies:
         assert "PROJ does not know" not in caplog.text
         assert "not a valid authority code" in caplog.text
 
+    def test_an_id_with_no_code_is_ignored_with_a_warning(self, tm_body, caplog):
+        crs = dict(tm_body, id={"authority": "EPSG"})
+        with caplog.at_level("WARNING"):
+            src = transform_source_crs(crs)
+        assert src is not None and src.startswith("{")
+        assert "not a valid authority code" in caplog.text
+
     def test_a_long_ignored_id_is_truncated(self, tm_body, caplog):
         crs = dict(tm_body, id={"authority": "EPSG", "code": "9" * 500})
         with caplog.at_level("WARNING"):
@@ -229,6 +236,10 @@ class TestUnresolvableFailsLoudly:
         with pytest.raises(UnresolvableCRSError, match="--src-crs") as excinfo:
             transform_source_crs(crs)
         assert isinstance(excinfo.value, GeoParquetError)
+
+    def test_an_oversized_string_is_refused_before_parsing(self):
+        with pytest.raises(UnresolvableCRSError, match="too large"):
+            transform_source_crs("x" * 300_000)
 
     def test_an_oversized_body_is_refused_before_pyproj(self, tm_body):
         with pytest.raises(UnresolvableCRSError, match="too large"):
