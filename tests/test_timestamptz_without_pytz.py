@@ -235,3 +235,40 @@ def test_aggregate_breakdown_values_timestamptz_without_pytz(temporal_file):
         assert matched == 1
     finally:
         con.close()
+
+
+def test_api_table_stats_falls_back_per_column_when_batch_fails(monkeypatch, temporal_file):
+    import geoparquet_io as gpio
+    from geoparquet_io.core import duckdb_utils
+
+    real_fetch_row = duckdb_utils.fetch_row
+    calls = []
+
+    def fail_batched_once(con, query, params=None):
+        calls.append(query)
+        if len(calls) == 1:
+            raise duckdb.BinderException("simulated batched failure")
+        return real_fetch_row(con, query, params)
+
+    monkeypatch.setattr(duckdb_utils, "fetch_row", fail_batched_once)
+
+    stats = gpio.read(temporal_file).stats()
+
+    assert len(calls) == 1  # per-column fallback goes through inspect_utils
+    assert stats["ts_tz"]["min"] == TZ_MIN
+    assert stats["ts_tz"]["nulls"] == 1
+    assert stats["d"]["max"] == date(2024, 6, 30)
+
+
+def test_api_table_stats_interrupt_is_not_swallowed(monkeypatch, temporal_file):
+    import geoparquet_io as gpio
+    from geoparquet_io.core import duckdb_utils
+
+    def interrupted(con, query, params=None):
+        raise duckdb.InterruptException("interrupted")
+
+    table = gpio.read(temporal_file)
+    monkeypatch.setattr(duckdb_utils, "fetch_row", interrupted)
+
+    with pytest.raises(duckdb.InterruptException):
+        table.stats()

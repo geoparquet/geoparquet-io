@@ -800,8 +800,8 @@ def compute_column_stats(con, col_name: str, is_geometry: bool, source: str) -> 
     except duckdb.Error as e:
         debug(f"Could not compute statistics for column '{col_name}': {e}")
         return dict(_UNKNOWN_STATS)
-    if row is None:
-        return dict(_UNKNOWN_STATS)
+    # An aggregate with no GROUP BY always returns exactly one row.
+    assert row is not None
     if is_geometry:
         return {**_UNKNOWN_STATS, "nulls": row[0]}
     return {"nulls": row[0], "min": row[1], "max": row[2], "unique": row[3]}
