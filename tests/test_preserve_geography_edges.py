@@ -1,9 +1,10 @@
 """Rewrites must not silently drop non-planar edges semantics (gpio #588).
 
-DuckDB has no GEOGRAPHY type, so a native-GEOGRAPHY input inevitably comes
-back as GEOMETRY — but the `edges` declaration (spherical/ellipsoidal edge
-interpretation) must survive in the geo metadata, or consumers will read
-great-circle edges as planar.
+DuckDB has no GEOGRAPHY type, so its rewrites demote a native GEOGRAPHY to
+GEOMETRY and drop `edges` from the geo metadata. The `edges` declaration
+(spherical/ellipsoidal edge interpretation) must survive in the geo metadata,
+or consumers will read great-circle edges as planar; at 2.0 the column is also
+retyped back to GEOGRAPHY (#999, tests/test_geography_stays_geography.py).
 """
 
 import json

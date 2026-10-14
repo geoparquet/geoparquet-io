@@ -297,23 +297,8 @@ def test_the_vecorel_rewrite_round_trips_a_geography_unchanged(spherical_geograp
     assert spec_problems(subject) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "`add bbox` on a native GEOGRAPHY input writes a planar Parquet GEOMETRY "
-        "logical type, while the `geo` block it builds declares "
-        '`"edges": "spherical"` -- so `check spec` warns that the two halves of '
-        "the output describe different shapes over the same bytes. It is still an "
-        "improvement on main, which wrote 1.1 WKB and dropped the `edges` "
-        "declaration outright, silently replanning the edges with nothing in the "
-        "file saying so. The witness #993 adds carries the CRS, not the edge type: "
-        "DuckDB reads a GEOGRAPHY column as a planar GEOMETRY and the write has "
-        "nothing left to restate it from, so closing this means teaching the "
-        "write path to round-trip the edge type (#999). Delete this marker then."
-    ),
-)
 def test_add_keeps_a_geography_column_spherical(spherical_geography, tmp_path):
-    """Measured, not assumed: the output must not silently replan the edges."""
+    """Measured, not assumed: the output must not silently replan the edges (#999)."""
     out = tmp_path / "bbox.parquet"
 
     _run_cli("add", "bbox", spherical_geography, out)

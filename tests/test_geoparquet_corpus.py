@@ -364,8 +364,9 @@ class TestWritePath:
         "rel",
         WRITE_SUBSET
         + [
-            # Geography input: the native type demotes to GEOMETRY (DuckDB has
-            # no geography type) but the edges declaration must survive (#588).
+            # Geography input: DuckDB demotes it to GEOMETRY, and the write
+            # must restore both the edges declaration (#588) and the GEOGRAPHY
+            # logical type (#999).
             "data/encodings/point-native-geography.parquet",
             "data/zm/linestring-xyzm-native-geometry.parquet",
         ],
@@ -379,13 +380,14 @@ class TestWritePath:
 
         assert has_native_geo_types(str(out)), "native logical type lost"
         assert get_geoparquet_version(str(out)) == "2.0.0"
-        # GEOGRAPHY inputs must keep geography semantics (native type or edges).
+        # GEOGRAPHY inputs must keep geography semantics: native type *and* edges.
         src_types = {c["name"]: c.get("logical_type") or "" for c in get_schema_info(str(src))}
         out_types = {c["name"]: c.get("logical_type") or "" for c in get_schema_info(str(out))}
         for col, lt in src_types.items():
             if "GeographyType" in lt:
                 out_geo = get_geo_metadata(str(out))["columns"][col]
-                assert "GeographyType" in out_types.get(col, "") or out_geo.get("edges") in (
+                assert "GeographyType" in out_types.get(col, "")
+                assert out_geo.get("edges") in (
                     "spherical",
                     "vincenty",
                     "thomas",

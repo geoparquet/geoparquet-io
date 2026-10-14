@@ -81,8 +81,10 @@ from geoparquet_io.core.logging_config import (
 )
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_footer import (
+    EDGE_ALGORITHMS,
     FooterPatchRaced,
     FooterPatchUnsupported,
+    patch_footer,
     patch_footer_kv,
 )
 from geoparquet_io.core.parquet_writer import (
@@ -173,54 +175,85 @@ def _apply_nonplanar_edges(
     row_group_rows: int | None = None,
     verbose: bool = False,
 ) -> None:
-    """Re-attach non-planar edges declarations to an output's geo metadata (#588).
+    """Restate non-planar edges in an output's geo block *and* its logical types.
 
-    DuckDB has no GEOGRAPHY type, so rewrites demote native GEOGRAPHY columns
-    to GEOMETRY and drop ``edges`` from regenerated metadata. Losing the edge
-    interpretation silently corrupts semantics (great-circle edges read as
-    planar), so re-attach it to the output's geo metadata.
+    DuckDB reads a Parquet GEOGRAPHY column as a planar GEOMETRY and has no
+    geography type to write back, so every rewrite through it demotes the
+    column and drops ``edges`` from the block it regenerates (#588). Losing the
+    edge interpretation silently changes the shapes -- great-circle edges read
+    as straight lines over the same bytes -- so both carriers are restored:
+
+    * the ``geo`` block's ``edges``, mapped to what the block's version can
+      say (:func:`_edges_for_output_version`);
+    * the Parquet logical type, retyped from GEOMETRY to GEOGRAPHY with the
+      same CRS and the edge algorithm (#999). Restoring only the block left a
+      2.0 output whose block said spherical over a planar column, which
+      ``check spec`` reports. A 1.x output has no logical type to retype.
+
+    Both go into the footer in one ``patch_footer`` call: the data pages are
+    the same WKB either way, so nothing below the footer is re-encoded. The
+    block-only rewrite this replaced cost a full pass and lost the compression
+    level; it stays as the fallback for a footer that cannot be read.
     """
     if not edges_by_col:
         return
 
-    pf = pq.ParquetFile(output_file)
-    try:
-        kv = pf.metadata.metadata or {}
-        if b"geo" not in kv:
-            warn(
-                "Input declares non-planar edges but output has no geo metadata "
-                f"to carry them ({', '.join(sorted(edges_by_col))}). Edge "
-                "interpretation is lost; avoid parquet-geo-only for geography data."
-            )
-            return
-        geo_meta = json.loads(kv[b"geo"].decode("utf-8"))
-    finally:
-        # Release the read handle before rewriting (Windows requires it).
-        pf.close()
+    geo_meta = _read_geo_key(output_file)
+    geo_version = str((geo_meta or {}).get("version") or "")
+    edges_by_col = {
+        name: _edges_for_output_version(edges, geo_version) for name, edges in edges_by_col.items()
+    }
+    geo_updates = _geo_block_with_edges(geo_meta, edges_by_col)
+    geography = {name: e for name, e in edges_by_col.items() if e in EDGE_ALGORITHMS}
 
-    geo_version = str(geo_meta.get("version") or "")
+    try:
+        retyped = patch_footer(output_file, geo_updates, geography=geography, verbose=verbose)
+    except FooterPatchRaced:
+        # Nothing was written, and a rewrite now would describe another
+        # writer's bytes (see _ensure_v2_geo_metadata).
+        raise
+    except FooterPatchUnsupported as exc:
+        retyped = []
+        warn(f"{exc}. Edge columns stay planar in the Parquet schema.")
+        if geo_updates:
+            _rewrite_file_with_geo_metadata(
+                output_file,
+                json.loads(geo_updates["geo"]),
+                compression,
+                compression_level,
+                row_group_rows,
+            )
+
+    if geo_meta is None and not retyped:
+        warn(
+            "Input declares non-planar edges but output has no geo metadata or "
+            f"GEOGRAPHY column to carry them ({', '.join(sorted(edges_by_col))}). "
+            "Edge interpretation is lost."
+        )
+    elif verbose:
+        debug(
+            f"Kept non-planar edges for {', '.join(sorted(edges_by_col))}"
+            + (f"; retyped GEOGRAPHY: {', '.join(retyped)}" if retyped else "")
+        )
+
+
+def _read_geo_key(output_file: str) -> dict | None:
+    """The output's ``geo`` block, or None when it has none."""
+    # Closed before the patch replaces the file (Windows requires it).
+    with pq.ParquetFile(output_file) as pf:
+        raw = (pf.metadata.metadata or {}).get(b"geo")
+    return json.loads(raw.decode("utf-8")) if raw else None
+
+
+def _geo_block_with_edges(geo_meta: dict | None, edges_by_col: dict[str, str]) -> dict[str, str]:
+    """``{"geo": <block>}`` with each described column's edges set, or ``{}``."""
     changed = False
     for name, edges in edges_by_col.items():
-        edges = _edges_for_output_version(edges, geo_version)
-        col_meta = geo_meta.get("columns", {}).get(name)
+        col_meta = ((geo_meta or {}).get("columns") or {}).get(name)
         if isinstance(col_meta, dict) and col_meta.get("edges") != edges:
             col_meta["edges"] = edges
             changed = True
-
-    if not changed:
-        return
-
-    _rewrite_file_with_geo_metadata(
-        output_file, geo_meta, compression, compression_level, row_group_rows
-    )
-    # Neutral wording: the input may have declared edges via metadata only,
-    # without ever having a native GEOGRAPHY logical type.
-    warn(
-        "Preserved non-planar edges declaration in geo metadata for: "
-        f"{', '.join(sorted(edges_by_col))}. Note: DuckDB has no geography "
-        "type, so any native GEOGRAPHY input is rewritten as GEOMETRY (the "
-        "edges metadata carries the interpretation)."
-    )
+    return {"geo": json.dumps(geo_meta)} if changed else {}
 
 
 def _ensure_v2_geo_metadata(

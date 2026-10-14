@@ -2435,8 +2435,22 @@ def _is_bbox_valid(geo_bbox: dict) -> bool:
     return True
 
 
-def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> ValidationCheck:
-    """Check that geometry column has native Parquet GeospatialStatistics (geo_bbox)."""
+def _is_geography_column(schema_info: list | None, geom_col: str) -> bool:
+    return any(
+        col.get("name") == geom_col and "GeographyType" in (col.get("logical_type") or "")
+        for col in schema_info or []
+    )
+
+
+def _check_native_geo_statistics(
+    parquet_file: str, geom_col: str, schema_info: list | None = None
+) -> ValidationCheck:
+    """Check that geometry column has native Parquet GeospatialStatistics (geo_bbox).
+
+    A GEOGRAPHY column without a bounding box is not warned about: a box of the
+    vertices does not bound a geodesic edge, so Arrow writes none for one and
+    gpio drops DuckDB's planar one when it retypes a column GEOGRAPHY (#999).
+    """
     from geoparquet_io.core.duckdb_metadata import (
         aggregate_native_geo_stats,
         get_native_geo_stats_by_row_group,
@@ -2492,6 +2506,14 @@ def _check_native_geo_statistics(parquet_file: str, geom_col: str) -> Validation
                 name=f"native_geo_stats_{geom_col}",
                 status=CheckStatus.PASSED,
                 message=f"geometry column has geospatial statistics: {bbox_str}{wrap_note}",
+                category="parquet_geo_types",
+            )
+        elif _is_geography_column(schema_info, geom_col):
+            return ValidationCheck(
+                name=f"native_geo_stats_{geom_col}",
+                status=CheckStatus.SKIPPED,
+                message="GEOGRAPHY column has no bounding-box statistics "
+                "(a vertex bbox does not bound non-planar edges)",
                 category="parquet_geo_types",
             )
         else:
@@ -4008,7 +4030,7 @@ def _run_parquet_geo_only_checks(
         # was written for it once, never registered, and removed in #1038).
         checks.append(_check_native_geo_type_present(schema_info, geom_col))
         checks.append(_check_geography_edges_valid(schema_info, geom_col))
-        checks.append(_check_native_geo_statistics(parquet_file, geom_col))
+        checks.append(_check_native_geo_statistics(parquet_file, geom_col, schema_info))
 
         # Parquet-geo-only specific CRS check (more detailed than _check_native_crs_format)
         checks.append(_check_parquet_geo_only_crs(schema_info, geom_col, parquet_file))
@@ -4191,7 +4213,7 @@ def _run_geoparquet_checks(
             checks.append(_check_native_geo_type_present(schema_info, col_name))
             checks.append(_check_native_crs_format(schema_info, col_name))
             checks.append(_check_geography_edges_valid(schema_info, col_name))
-            checks.append(_check_native_geo_statistics(parquet_file, col_name))
+            checks.append(_check_native_geo_statistics(parquet_file, col_name, schema_info))
             checks.append(
                 _check_geometry_types_match_stats(
                     parquet_file, col_name, col_meta.get("geometry_types") or []
