@@ -7,6 +7,7 @@ oracle is the file: everything below the footer must stay byte for byte the
 same, and only the named top-level GEOMETRY leaf may change.
 """
 
+import base64
 import json
 import struct
 from pathlib import Path
@@ -211,6 +212,11 @@ class TestTheEmbeddedArrowSchema:
 
         field = pq.read_schema(str(path)).field("geometry")
         assert str(field.type.edge_type) == "EdgeType.SPHERICAL"
+        # pyarrow happens to prefer the logical type, but the blob is what an
+        # Arrow reader restores field metadata from: it must not stay planar.
+        blob = pq.read_metadata(str(path)).metadata[b"ARROW:schema"]
+        embedded = pa.ipc.read_schema(pa.BufferReader(base64.b64decode(blob)))
+        assert str(embedded.field("geometry").type.edge_type) == "EdgeType.SPHERICAL"
         assert _logical(path)["geometry"]["Type"] == "Geography"
 
     def test_an_unregistered_field_has_its_extension_metadata_edited(self):
