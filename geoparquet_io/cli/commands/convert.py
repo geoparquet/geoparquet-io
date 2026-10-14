@@ -24,6 +24,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
 )
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.crs_utils import transform_source_label
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.reproject import reproject as reproject_core
@@ -442,7 +443,7 @@ def _reproject_impl_cli(
     # result is None for streaming mode (stdout)
     if result:
         click.echo(f"\nReprojected {result.feature_count:,} features")
-        click.echo(f"  Source CRS: {result.source_crs}")
+        click.echo(f"  Source CRS: {transform_source_label(result.source_crs)}")
         click.echo(f"  Destination CRS: {result.target_crs}")
         click.echo(f"  Output: {result.output_path}")
 

@@ -443,9 +443,10 @@ GeoJSON output is lon/lat (RFC 7946), so gpio reprojects any other input CRS fir
 | Input CRS | What gpio does |
 |-----------|----------------|
 | Absent, `OGC:CRS84` or `EPSG:4326` | Writes coordinates as they are |
+| A plain lon/lat WGS 84 string such as `WGS84` or `+proj=longlat +datum=WGS84 +no_defs` | Writes coordinates as they are |
 | Has an authority code PROJ knows (`EPSG:32631`) | Reprojects from that code |
 | PROJJSON or WKT with no authority code (a custom Transverse Mercator) | Reprojects from the definition itself |
-| An `id` PROJ does not know, next to a valid definition | Warns and reprojects from the definition |
+| An `id` that is malformed or that PROJ does not know, next to a valid definition | Warns once and reprojects from the definition |
 | Anything PROJ cannot read | Fails and asks for an explicit source CRS |
 
 `--keep-crs` skips all of this and writes the input coordinates unchanged. When the CRS cannot be read, reproject with an explicit source CRS first:

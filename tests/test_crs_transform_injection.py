@@ -50,10 +50,20 @@ INJECTION_CRS_VALUES = [
 
 #: Free-form values a Parquet writer may legally emit; none is an authority code.
 FREEFORM_CRS_VALUES = [
-    "4326",
-    "WGS 84",
     'GEOGCS["WGS 84",DATUM["WGS_1984"]]',
     "EPSG:12 34",  # colon-bearing, but not the quote-free authority-code shape
+    "+proj=tmerc +lat_0=36",
+    "NAD83",
+]
+
+#: Free-form values that pyproj reads as lon/lat WGS 84. They need no transform,
+#: so they resolve to ``None`` and never reach SQL (DuckDB ``ST_SetCRS`` writes
+#: such strings into the native GEOMETRY type).
+LONLAT_FREEFORM_CRS_VALUES = [
+    "4326",
+    "WGS 84",
+    "WGS84",
+    "+proj=longlat +datum=WGS84 +no_defs",
 ]
 
 
@@ -97,7 +107,13 @@ class TestTransformSourceRejectsFreeform:
         with pytest.raises(UnresolvableCRSError):
             transform_source_crs(value)
 
-    @pytest.mark.parametrize("value", INJECTION_CRS_VALUES + FREEFORM_CRS_VALUES)
+    @pytest.mark.parametrize("value", LONLAT_FREEFORM_CRS_VALUES)
+    def test_lon_lat_free_form_values_need_no_transform(self, value):
+        assert transform_source_crs(value) is None
+
+    @pytest.mark.parametrize(
+        "value", INJECTION_CRS_VALUES + FREEFORM_CRS_VALUES + LONLAT_FREEFORM_CRS_VALUES
+    )
     def test_free_form_values_name_no_authority_code(self, value):
         assert crs_authority_code(value) is None
 

@@ -29,6 +29,7 @@ from geoparquet_io.core.crs_utils import (
     transform_source_crs,
     transform_source_label,
 )
+from geoparquet_io.core.duckdb_utils import _escape_sql_string
 from geoparquet_io.core.exceptions import GeoParquetError
 
 TM_PROJ4 = (
@@ -75,6 +76,10 @@ class TestLonLatInputNeedsNoTransform:
             "OGC:CRS84",
             "srid:4326",
             "urn:ogc:def:crs:OGC:1.3:CRS84",
+            "WGS84",
+            "WGS 84",
+            "4326",
+            "+proj=longlat +datum=WGS84 +no_defs",
         ],
         ids=repr,
     )
@@ -158,6 +163,32 @@ class TestUncodedBodies:
         x, y = _transform_point(src)
         assert (x, y) == pytest.approx(TOKYO_LONLAT, abs=1e-3)
 
+    def test_the_ignored_id_warning_is_emitted_once_per_id(self, tm_body, caplog):
+        crs = dict(tm_body, id={"authority": "MAPINFO", "code": 9999})
+        other = dict(tm_body, id={"authority": "MAPINFO", "code": 9998})
+        with caplog.at_level("WARNING"):
+            transform_source_crs(crs)
+            transform_source_crs(crs)
+            transform_source_crs(other)
+        assert caplog.text.count("MAPINFO:9999") == 1
+        assert caplog.text.count("MAPINFO:9998") == 1
+        assert "PROJ does not know" in caplog.text
+
+    def test_a_malformed_id_is_not_blamed_on_proj(self, tm_body, caplog):
+        crs = dict(tm_body, id={"authority": "EPSG", "code": "'; DROP TABLE t; --"})
+        with caplog.at_level("WARNING"):
+            src = transform_source_crs(crs)
+        assert src is not None and "DROP" not in src
+        assert "PROJ does not know" not in caplog.text
+        assert "not a valid authority code" in caplog.text
+
+    def test_a_long_ignored_id_is_truncated(self, tm_body, caplog):
+        crs = dict(tm_body, id={"authority": "EPSG", "code": "9" * 500})
+        with caplog.at_level("WARNING"):
+            transform_source_crs(crs)
+        assert "9" * 81 not in caplog.text
+        assert "9" * 70 in caplog.text
+
     def test_a_quote_in_the_name_survives_one_escape(self, tm_body):
         src = transform_source_crs(dict(tm_body, name="O'Brien grid"))
         assert "O'Brien" in src
@@ -177,11 +208,12 @@ class TestUnresolvableFailsLoudly:
     @pytest.mark.parametrize(
         "crs",
         [
-            "WGS 84",
-            "4326",
             "EPSG:12 34",
             'GEOGCS["WGS 84",DATUM["WGS_1984"]]',
             "+proj=tmerc +lat_0=36",
+            "+proj=longlat +ellps=GRS80 +no_defs",
+            "NAD83",
+            "'); DROP TABLE t; --",
             "{not json",
             {"type": "ProjectedCRS"},
             {"id": {"authority": "EPSG", "code": "'||(SELECT '4326')||'"}},
@@ -213,6 +245,42 @@ class TestSinks:
         sql = transform_geom_sql('"g"', dict(tm_body, name="O'Brien grid"))
         assert "O''Brien" in sql and "O''''Brien" not in sql
 
+    HOSTILE_TEXT = "O'Brien \"grid\" '); DROP TABLE t; -- back\\slash nul\x00 sep end"
+
+    def _hostile_source(self, tm_body) -> str:
+        src = transform_source_crs(dict(tm_body, name=self.HOSTILE_TEXT, remarks=self.HOSTILE_TEXT))
+        assert json.loads(src)["name"] == self.HOSTILE_TEXT
+        return src
+
+    @staticmethod
+    def _run(sql_expr: str):
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL spatial")
+            con.execute("LOAD spatial")
+            con.execute("SET geometry_always_xy = true")
+            con.execute("CREATE TABLE t AS SELECT 1 AS id")
+            row = con.execute(f"SELECT ST_X(g), ST_Y(g) FROM (SELECT {sql_expr} AS g)").fetchone()
+            assert con.execute("SELECT count(*) FROM t").fetchone()[0] == 1
+            return row
+        finally:
+            con.close()
+
+    def test_hostile_projjson_is_escaped_exactly_once_by_transform_geom_sql(self, tm_body):
+        src = self._hostile_source(tm_body)
+        sql = transform_geom_sql(f"ST_Point({TM_XY[0]}, {TM_XY[1]})", src)
+        assert sql.count(_escape_sql_string(src)) == 1
+        assert _escape_sql_string(_escape_sql_string(src)) not in sql
+        assert self._run(sql) == pytest.approx(TOKYO_LONLAT, abs=1e-3)
+
+    def test_hostile_projjson_is_escaped_exactly_once_by_reproject_to_source_sql(self, tm_body):
+        src = self._hostile_source(tm_body)
+        sql = reproject_to_source_sql(f"ST_Point({TOKYO_LONLAT[0]}, {TOKYO_LONLAT[1]})", src)
+        assert sql.count(_escape_sql_string(src)) == 1
+        assert _escape_sql_string(_escape_sql_string(src)) not in sql
+        # TOKYO_LONLAT is rounded to 1e-4 degrees, about 10 m.
+        assert self._run(sql) == pytest.approx(TM_XY, abs=20.0)
+
     def test_transform_geom_sql_leaves_lon_lat_alone(self):
         assert transform_geom_sql('"g"', None) == '"g"'
 
@@ -222,7 +290,7 @@ class TestSinks:
 
     def test_reproject_to_source_sql_raises_on_garbage(self):
         with pytest.raises(UnresolvableCRSError):
-            reproject_to_source_sql('"g"', "WGS 84")
+            reproject_to_source_sql('"g"', "+proj=tmerc +lat_0=36")
 
 
 class TestAuthorityCodeForComparison:

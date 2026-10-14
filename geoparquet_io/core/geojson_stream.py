@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import hashlib
 import io
 import sys
 from typing import TYPE_CHECKING
@@ -33,9 +34,12 @@ if TYPE_CHECKING:
     import duckdb
 
 from geoparquet_io.core.crs_utils import (
+    crs_is_explicitly_null,
     crs_string_from_table,
+    parse_geo_metadata_from_schema,
     source_crs_string,
     transform_source_label,
+    warn_null_crs_once,
 )
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -597,6 +601,18 @@ def convert_to_geojson_stream(
         con.close()
 
 
+def _warn_on_explicit_null_crs(table, geometry_column: str) -> None:
+    """Warn once per stream ``geo`` block whose column says ``"crs": null`` (unknown)."""
+    metadata = table.schema.metadata or {}
+    geo_meta = parse_geo_metadata_from_schema(metadata)
+    columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+    col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
+    if col_meta is None or not crs_is_explicitly_null(col_meta):
+        return
+    digest = hashlib.sha1(metadata[b"geo"], usedforsecurity=False).hexdigest()
+    warn_null_crs_once(f"table:{digest}")
+
+
 def _convert_from_stream(
     output_path: str | None = None,
     rs: bool = True,
@@ -658,6 +674,7 @@ def _convert_from_stream(
 
     debug(f"Using geometry column: {geometry_column}")
 
+    _warn_on_explicit_null_crs(table, geometry_column)
     # --keep-crs writes the input coordinates, so the CRS is never resolved.
     source_crs = None if keep_crs else crs_string_from_table(table, geometry_column)
     needs_reproject = _needs_reprojection(source_crs)

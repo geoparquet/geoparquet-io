@@ -1345,19 +1345,31 @@ def _resolvable_authority_code(crs: dict) -> str | None:
     if "id" not in crs:
         return None
     identifier = _extract_crs_identifier({"id": crs["id"]})
-    shown = _shown_crs(crs["id"])
-    if identifier is not None:
-        authority, code = identifier
-        candidate = f"{authority}:{code}"
-        if not _TRANSFORM_CRS_SHAPE.match(candidate):
-            candidate = None
-        elif _projjson_from_authority(str(authority), str(code)) is not None:
-            return candidate
-        shown = candidate or shown
-    warn(
-        f"Ignoring CRS id {shown} because PROJ does not know it, reading the CRS definition instead"
-    )
+    if identifier is None:
+        _emit_ignored_crs_id_warning(_shown_crs_id(crs["id"]), known_shape=False)
+        return None
+    authority, code = identifier
+    candidate = f"{authority}:{code}"
+    if not _TRANSFORM_CRS_SHAPE.match(candidate):
+        _emit_ignored_crs_id_warning(_shown_crs_id(candidate), known_shape=False)
+        return None
+    if _projjson_from_authority(str(authority), str(code)) is not None:
+        return candidate
+    _emit_ignored_crs_id_warning(_shown_crs_id(candidate), known_shape=True)
     return None
+
+
+def _shown_crs_id(value) -> str:
+    """A CRS id bounded to about 80 characters for a warning line."""
+    shown = value if isinstance(value, str) else json.dumps(value, default=str)
+    return shown if len(shown) <= 80 else f"{shown[:80]}..."
+
+
+@lru_cache(maxsize=256)
+def _emit_ignored_crs_id_warning(shown: str, known_shape: bool) -> None:
+    """Warn once per distinct ignored id that the CRS definition is used instead."""
+    reason = "PROJ does not know it" if known_shape else "it is not a valid authority code"
+    warn(f"Ignoring CRS id {shown}, {reason}. Using the CRS definition instead")
 
 
 def _transform_source_from_dict(crs: dict) -> str | None:
@@ -1403,9 +1415,30 @@ def _transform_source_from_string(text: str) -> str | None:
                 raise _unresolvable(text, "PROJ does not know that authority code")
             return candidate
     body = projjson_from_wkt(stripped)
-    if body is None:
-        raise _unresolvable(text, "it is not an authority code, PROJJSON or WKT")
-    return _transform_source_from_dict(body)
+    if body is not None:
+        return _transform_source_from_dict(body)
+    if _free_form_is_lonlat(stripped):
+        return None
+    raise _unresolvable(text, "it is not an authority code, PROJJSON or WKT")
+
+
+@lru_cache(maxsize=64)
+def _free_form_is_lonlat(text: str) -> bool:
+    """True when pyproj reads a free-form CRS string as OGC:CRS84, ignoring axis order.
+
+    DuckDB ``ST_SetCRS`` writes any string into the native GEOMETRY type, so a
+    file can say ``WGS84`` or ``+proj=longlat +datum=WGS84 +no_defs``. Those
+    are lon/lat and need no transform. The string only ever decides "no
+    transform", it is never returned, so it never reaches SQL.
+    """
+    from pyproj import CRS
+    from pyproj.exceptions import CRSError
+
+    try:
+        parsed = CRS.from_user_input(text)
+    except (CRSError, TypeError, ValueError):
+        return False
+    return parsed.equals(CRS.from_user_input("OGC:CRS84"), ignore_axis_order=True)
 
 
 def transform_source_crs(crs) -> str | None:
@@ -1425,8 +1458,9 @@ def transform_source_crs(crs) -> str | None:
       parses. An id PROJ does not know is dropped with a warning.
 
     Anything else raises :class:`UnresolvableCRSError` with a ``--src-crs``
-    hint. A PROJ string or a bare name from a file never reaches pyproj, and
-    pyproj's ``to_authority()`` is never asked to guess a near match. The result
+    hint. A PROJ string or a bare name from a file is only asked whether it
+    is lon/lat WGS 84 (then ``None``), it is never returned or used as a
+    source, and pyproj's ``to_authority()`` is never asked to guess a near match. The result
     is idempotent, ``transform_source_crs(transform_source_crs(x))`` gives the
     same answer, so a caller may hand an already-resolved string back in.
     """

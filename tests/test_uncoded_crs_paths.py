@@ -131,6 +131,28 @@ def test_convert_geojson_stdin(variant, fixtures, tmp_path):
     _assert_tokyo(*_geojson_centre(out.read_text()))
 
 
+def _explicit_null_crs_table() -> pa.Table:
+    geo = {"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": {}}}
+    geo["columns"]["geometry"]["crs"] = None
+    table = pa.table({"geometry": pa.array([shapely.to_wkb(TM_SQUARE)], pa.binary())})
+    return table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+
+
+def test_convert_geojson_stdin_warns_once_on_an_explicit_null_crs(tmp_path, caplog):
+    """An explicit ``crs: null`` on stdin is unknown, not lon/lat, so the user is told."""
+    from geoparquet_io.core.geojson_stream import _convert_from_stream
+
+    table = _explicit_null_crs_table()
+    with (
+        patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table),
+        caplog.at_level("WARNING"),
+    ):
+        _convert_from_stream(output_path=str(tmp_path / "a.geojson"))
+        _convert_from_stream(output_path=str(tmp_path / "b.geojson"))
+    warned = [r for r in caplog.records if r.getMessage().startswith("Input has an explicit null")]
+    assert len(warned) == 1
+
+
 def test_convert_geojson_keep_crs_does_not_resolve(fixtures, tmp_path):
     """``--keep-crs`` writes the input coordinates, so an unresolvable CRS is no error."""
     src = tmp_path / "garbage.parquet"
@@ -155,6 +177,15 @@ def test_convert_reproject(variant, fixtures, tmp_path):
     _invoke("convert", "reproject", str(fixtures[variant]), str(out), "--verbose")
     c = shapely.from_wkb(pq.read_table(str(out)).column("geometry")[0].as_py()).centroid
     _assert_tokyo(c.x, c.y)
+
+
+def test_convert_reproject_summary_names_an_uncoded_source(fixtures, tmp_path):
+    """The summary line shows a short label, not a page of PROJJSON."""
+    out = tmp_path / "out.parquet"
+    result = _invoke("convert", "reproject", str(fixtures["geo-block"]), str(out))
+    source_line = next(ln for ln in result.output.splitlines() if "Source CRS" in ln)
+    assert "(no authority code)" in source_line
+    assert "{" not in source_line
 
 
 def test_convert_reproject_src_crs_works_around_an_unresolvable_crs(tmp_path):
@@ -189,11 +220,7 @@ def test_a_builder_without_a_signature_gets_no_crs():
 def test_table_explicit_null_crs_is_not_read_from_the_field():
     from geoparquet_io.core.crs_utils import extract_crs_from_table
 
-    geo = {"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": {}}}
-    geo["columns"]["geometry"]["crs"] = None
-    table = pa.table({"geometry": pa.array([shapely.to_wkb(TM_SQUARE)], pa.binary())})
-    table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
-    assert extract_crs_from_table(table) is None
+    assert extract_crs_from_table(_explicit_null_crs_table()) is None
 
 
 # --------------------------------------------------------------------------- #
