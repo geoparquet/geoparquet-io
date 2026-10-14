@@ -397,6 +397,13 @@ Validates file structure and metadata against the GeoParquet specification:
   paths, a `bbox` that is not an array of finite numbers. Each gets a FAILED
   check quoting the value it found (bounded, so a huge value cannot flood the
   report), and the rest of the report is still printed (#1062).
+- **Empty and unparsable WKB** — `encoding_matches_data_<column>` reads the
+  bytes the file stores and counts the values that are not WKB: a zero-length
+  value is reported as `N of M geometries in column "geometry" are empty
+  (zero-length) WKB`, bytes that do not parse as `K of M geometries do not
+  match "WKB" encoding`. Both fail; a NULL geometry is allowed. The other data
+  checks judge the values that do parse, so one bad value is reported once,
+  not as a DuckDB error under every later check (#1064, #1082).
 - **Dimension-aware geometry types** — `geometry_types` entries carry Z/M
   suffixes (`"Point Z"`, `"LineString ZM"`), and validation matches declared
   suffixes against the actual coordinate dimensions in both directions
