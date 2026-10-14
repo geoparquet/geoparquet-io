@@ -813,6 +813,24 @@ def _native_primary_column(root_columns: list[dict], requested: str | None) -> s
     return native[0] if native else None
 
 
+def _block_omits_requested_column(
+    parquet_file, block_col: str | None, requested: str | None
+) -> bool:
+    """True when a ``geo`` block exists, skips ``requested``, and the schema has it.
+
+    Only then does the block's answer belong to another column. A requested name
+    the file does not have still falls back to the primary.
+    """
+    if requested is None or block_col is None or block_col == requested:
+        return False
+    from geoparquet_io.core.duckdb_metadata import get_schema_info
+    from geoparquet_io.core.parquet_schema import root_schema_columns
+
+    return any(
+        col["name"] == requested for col in root_schema_columns(get_schema_info(parquet_file))
+    )
+
+
 def _is_native_geo_column(col: dict) -> bool:
     return (col.get("logical_type") or "").startswith(("GeometryType(", "GeographyType("))
 
@@ -927,6 +945,10 @@ def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None):
     regardless.
     """
     geo_block_crs, block_col = _crs_from_geo_block(parquet_file, geometry_column)
+    if _block_omits_requested_column(parquet_file, block_col, geometry_column):
+        # The block answered for its primary, not for the column asked about.
+        # It says nothing about that column, so its native type is the answer.
+        geo_block_crs, block_col = None, geometry_column
     # Compare like with like: the block's answer is about one column, so the
     # logical type it is held against has to be that column's. A valid file
     # with a second geometry column in another CRS ahead of the primary in

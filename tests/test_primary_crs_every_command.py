@@ -137,6 +137,23 @@ class TestPrimaryCrsResolver:
         )
         assert extract_crs_from_parquet(str(secondary_first)) is None
 
+    def test_named_column_the_geo_block_omits_reads_its_native_type(self, secondary_first):
+        """A requested column the block does not describe is still that column.
+
+        Falling back to the block's primary would answer for the wrong column.
+        """
+        _with_geo_block(
+            secondary_first,
+            {
+                "version": "1.1.0",
+                "primary_column": "geometry",
+                "columns": {"geometry": {"encoding": "WKB", "geometry_types": []}},
+            },
+        )
+        crs = extract_crs_from_parquet(str(secondary_first), geometry_column="other")
+        assert _crs_code(crs) == "EPSG:3857"
+        assert source_crs_string(str(secondary_first), geometry_column="other") == "EPSG:3857"
+
 
 # --------------------------------------------------------------------------- #
 # The callers
