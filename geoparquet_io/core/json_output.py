@@ -70,7 +70,7 @@ def _is_pandas_missing(value: Any) -> bool:
 
 def _numpy_scalar_to_python(value: Any) -> Any:
     """A numpy scalar as a value ``to_jsonable`` can finish converting."""
-    import numpy as np
+    np = sys.modules["numpy"]
 
     if isinstance(value, np.datetime64):
         return None if np.isnat(value) else str(np.datetime_as_string(value))
@@ -86,7 +86,9 @@ def _numpy_to_python(value: Any) -> tuple[bool, Any]:
     module = type(value).__module__
     if not module.startswith("numpy"):
         return False, None
-    import numpy as np
+    # A numpy value exists only once numpy is loaded, so take it from there
+    # rather than importing a package gpio depends on only transitively.
+    np = sys.modules["numpy"]
 
     if isinstance(value, np.ndarray):
         # Walk the elements so each scalar gets the scalar rules above.
