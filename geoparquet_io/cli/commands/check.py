@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import TypeVar
 
 import click
-import duckdb
 
 from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
 from geoparquet_io.cli.decorators import (
@@ -30,6 +29,7 @@ from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_commo
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
+from geoparquet_io.core.duckdb_utils import is_interrupt
 from geoparquet_io.core.geo_metadata import BBOX_REWRITE_HINT
 from geoparquet_io.core.logging_config import configure_verbose
 
@@ -84,6 +84,7 @@ class MultiFileCheckRunner:
         self.fixed: list[tuple[str, str | None]] = []  # (output path, backup path)
         self.fix_failures: list[tuple[str, str]] = []  # (file, error)
         self.check_errors: list[tuple[str, str]] = []  # (file, why a check could not run)
+        self._interrupted = False
         self.current_index = 0
         self.is_multi_file = len(files) > 1
 
@@ -154,18 +155,19 @@ class MultiFileCheckRunner:
         A single-file run keeps its old shape -- the exception propagates with
         its message. Click's own exceptions always propagate: a declined
         prompt or a bad parameter is a verdict on the invocation, not on this
-        file. So does an interrupt: DuckDB raises Ctrl-C as a plain
-        ``InterruptException``, and treating that as "this file failed, next"
+        file. So does an interrupt: DuckDB raises Ctrl-C as an
+        ``InterruptException`` or a plain ``RuntimeError``, and treating that as "this file failed, next"
         would keep rewriting files after the user asked it to stop.
         """
         try:
             return call()
         except (click.Abort, click.ClickException, click.exceptions.Exit):
             raise
-        except (KeyboardInterrupt, duckdb.InterruptException):
-            self._print_fix_summary()
+        except KeyboardInterrupt:
+            self._on_interrupt()
             raise
         except Exception as e:
+            self._raise_if_interrupt(e)
             if not self.is_multi_file:
                 raise
             self.fix_failures.append((file_path, str(e)))
@@ -190,12 +192,32 @@ class MultiFileCheckRunner:
             return call()
         except (click.Abort, click.ClickException, click.exceptions.Exit):
             raise
-        except (KeyboardInterrupt, duckdb.InterruptException):
-            self._print_fix_summary()
+        except KeyboardInterrupt:
+            self._on_interrupt()
             raise
         except Exception as e:
+            self._raise_if_interrupt(e)
             self.note_check_error(file_path, stage, str(e))
             return None
+
+    def _raise_if_interrupt(self, error: Exception) -> None:
+        """Turn ``error`` into ``KeyboardInterrupt`` when it is Ctrl-C.
+
+        DuckDB reports a SIGINT as ``InterruptException`` or as a plain
+        ``RuntimeError("Query interrupted")``. Either one means stop, never
+        "this check failed, carry on and --fix the file". Raised as
+        ``KeyboardInterrupt``, Click ends the run with "Aborted!" instead of a
+        traceback.
+        """
+        if is_interrupt(error):
+            self._on_interrupt()
+            raise KeyboardInterrupt(str(error)) from error
+
+    def _on_interrupt(self) -> None:
+        """Print the fix summary once, however many guards the interrupt crosses."""
+        if not self._interrupted:
+            self._interrupted = True
+            self._print_fix_summary()
 
     def note_check_error(self, file_path: str, stage: str, reason: str) -> None:
         """Record and print a check that could not run on ``file_path``."""
@@ -594,6 +616,8 @@ def check_all(
             def run_all_checks(file_path=file_path, show_output=show_output, quiet=quiet):
                 from geoparquet_io.core.validate import validate_geoparquet
 
+                # The structure check is the gate. A file it cannot read fails
+                # as a whole (run_check), and is not spatially checked or fixed.
                 structure = check_structure_impl(
                     file_path,
                     verbose and show_output,

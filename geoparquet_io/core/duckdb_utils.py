@@ -178,6 +178,23 @@ def restore_duckdb_settings(
                 debug(f"Could not restore DuckDB setting {key}: {e}")
 
 
+# What DuckDB's Python client raises when a SIGINT stops a running query
+# (measured on 1.5.6). It is a plain RuntimeError, not an InterruptException.
+_QUERY_INTERRUPTED = "Query interrupted"
+
+
+def is_interrupt(exc: BaseException) -> bool:
+    """Whether ``exc`` is the user stopping the run (Ctrl-C), not a failure.
+
+    A guard that turns errors into verdicts must re-raise these. DuckDB
+    reports a SIGINT during a query as ``RuntimeError("Query interrupted")``,
+    which ``except Exception`` would otherwise swallow and carry on past.
+    """
+    if isinstance(exc, (KeyboardInterrupt, duckdb.InterruptException)):
+        return True
+    return isinstance(exc, (RuntimeError, duckdb.Error)) and str(exc) == _QUERY_INTERRUPTED
+
+
 def disable_geoparquet_conversion(con: duckdb.DuckDBPyConnection) -> None:
     """Read a GeoParquet WKB column as the BLOB it stores, not as GEOMETRY.
 

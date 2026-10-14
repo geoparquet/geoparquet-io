@@ -40,6 +40,7 @@ from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _geoarrow_coord_exprs,
     disable_geoparquet_conversion,
+    is_interrupt,
     quote_identifier,
     sql_path,
 )
@@ -3682,8 +3683,13 @@ class _ReopeningConnection:
 
         try:
             return self._con.execute(*args)
-        except duckdb.Error:
-            if not self._usable():
+        except Exception as e:
+            if is_interrupt(e):
+                # Every check turns its own errors into a verdict with
+                # ``except Exception``. Ctrl-C must stop the whole validation,
+                # so it leaves as a KeyboardInterrupt, which none of them catch.
+                raise KeyboardInterrupt(str(e)) from e
+            if isinstance(e, duckdb.Error) and not self._usable():
                 self._try_reopen()
             raise
 

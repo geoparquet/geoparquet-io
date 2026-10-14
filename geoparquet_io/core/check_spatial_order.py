@@ -14,6 +14,7 @@ from geoparquet_io.core.duckdb_metadata import (
 from geoparquet_io.core.duckdb_utils import (
     disable_geoparquet_conversion,
     get_duckdb_connection,
+    is_interrupt,
     sql_path,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -396,10 +397,10 @@ def check_spatial_order(
         averages = _sample_distances(
             con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
         )
-    except duckdb.InterruptException:
-        # A subclass of duckdb.Error, and a user stopping the run, not a verdict.
-        raise
     except duckdb.Error as e:
+        if is_interrupt(e):
+            # The user stopping the run (Ctrl-C), not a verdict on the file.
+            raise
         averages = f"could not read geometry column {geometry_column!r} ({e})"
     finally:
         con.close()
