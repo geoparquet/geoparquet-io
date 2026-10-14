@@ -659,7 +659,8 @@ def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> t
             f"column '{column}' has type {col_type}; a breakdown needs a column of "
             "strings, numbers, booleans or dates",
         )
-    # Through Arrow: a TIMESTAMPTZ breakdown column would otherwise need pytz.
+    # fetch_rows reads a TIMESTAMPTZ column as UTC and makes it aware with
+    # zoneinfo. fetchall() would need pytz for it.
     rows = fetch_rows(
         con,
         f"SELECT {qcol} AS v, COUNT(*) AS n FROM ({source_sql}) "

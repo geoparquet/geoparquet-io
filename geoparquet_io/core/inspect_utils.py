@@ -789,13 +789,27 @@ def _column_stats_query(col_name: str, is_geometry: bool, source: str) -> str:
     """
 
 
-def compute_column_stats(con, col_name: str, is_geometry: bool, source: str) -> dict[str, Any]:
+def _stats_query_types(is_geometry: bool, column_type: str | None) -> list[str] | None:
+    """The output types of :func:`_column_stats_query`, or None when the column's is unknown."""
+    if is_geometry:
+        return ["BIGINT"]
+    if column_type is None:
+        return None
+    return ["BIGINT", column_type, column_type, "BIGINT"]
+
+
+def compute_column_stats(
+    con, col_name: str, is_geometry: bool, source: str, column_type: str | None = None
+) -> dict[str, Any]:
     """Stats for one column of ``source`` (a SQL-ready relation or path literal).
 
-    A failed query reports every figure as unknown (None). An interrupt propagates.
+    ``column_type`` is the column's DuckDB type, when known, which spares a
+    DESCRIBE of the stats query. A failed query reports every figure as unknown
+    (None). An interrupt propagates.
     """
+    query = _column_stats_query(col_name, is_geometry, source)
     try:
-        row = fetch_row(con, _column_stats_query(col_name, is_geometry, source))
+        row = fetch_row(con, query, column_types=_stats_query_types(is_geometry, column_type))
     except duckdb.Error as e:
         if is_interrupt(e):
             raise
@@ -808,15 +822,29 @@ def compute_column_stats(con, col_name: str, is_geometry: bool, source: str) -> 
     return {"nulls": row[0], "min": row[1], "max": row[2], "unique": row[3]}
 
 
+def _source_column_types(con, source: str) -> dict[str, str]:
+    """Each column's DuckDB type from one DESCRIBE of ``source``, empty if that fails."""
+    try:
+        rows = con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()
+    except duckdb.Error as e:
+        if is_interrupt(e):
+            raise
+        debug(f"Could not describe {source}, so each stats query is described instead: {e}")
+        return {}
+    return {row[0]: row[1] for row in rows}
+
+
 def get_column_statistics(
     parquet_file: str, columns_info: list[dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
     """
     Calculate column statistics using DuckDB.
 
-    Rows are fetched through Arrow, so TIMESTAMP WITH TIME ZONE min and max come
-    back as tz-aware datetimes without DuckDB needing ``pytz``. A figure that
-    could not be computed is None, never a made-up zero.
+    Rows come through :func:`fetch_row`, so TIMESTAMP WITH TIME ZONE min and
+    max are fetched as UTC and come back as datetimes aware of the session time
+    zone (``zoneinfo``), without DuckDB needing ``pytz``. The file is described
+    once for every column's type, so no per-column DESCRIBE is needed. A figure
+    that could not be computed is None, never a made-up zero.
 
     Args:
         parquet_file: Path to the parquet file
@@ -829,8 +857,11 @@ def get_column_statistics(
     source = sql_path(raw_url)
     con = get_duckdb_connection(load_httpfs=needs_httpfs(parquet_file))
     try:
+        types = _source_column_types(con, source)
         return {
-            col["name"]: compute_column_stats(con, col["name"], col["is_geometry"], source)
+            col["name"]: compute_column_stats(
+                con, col["name"], col["is_geometry"], source, types.get(col["name"])
+            )
             for col in columns_info
         }
     finally:

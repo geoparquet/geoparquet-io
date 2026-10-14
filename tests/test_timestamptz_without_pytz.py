@@ -170,7 +170,7 @@ def test_fetch_helpers_return_intervals_as_timedelta_like_fetchone():
 
 
 def test_stats_query_failure_reports_unknown_not_zero_nulls(monkeypatch, temporal_file):
-    def boom(con, query, params=None):
+    def boom(con, query, params=None, **_):
         raise duckdb.InvalidInputException("simulated conversion failure")
 
     messages = []
@@ -207,7 +207,7 @@ INTERRUPT_IDS = ["interrupt_exception", "query_interrupted_text", "chained"]
 def test_stats_query_interrupt_is_not_swallowed(monkeypatch, temporal_file, make_interrupt):
     interrupt = make_interrupt()
 
-    def interrupted(con, query, params=None):
+    def interrupted(con, query, params=None, **_):
         raise interrupt
 
     columns_info, _ = _stats(temporal_file)
@@ -285,11 +285,11 @@ def test_api_table_stats_falls_back_per_column_when_batch_fails(monkeypatch, tem
     real_fetch_row = duckdb_utils.fetch_row
     calls = []
 
-    def fail_batched_once(con, query, params=None):
+    def fail_batched_once(con, query, params=None, **kwargs):
         calls.append(query)
         if len(calls) == 1:
             raise duckdb.BinderException("simulated batched failure")
-        return real_fetch_row(con, query, params)
+        return real_fetch_row(con, query, params, **kwargs)
 
     monkeypatch.setattr(duckdb_utils, "fetch_row", fail_batched_once)
 
@@ -308,7 +308,7 @@ def test_api_table_stats_interrupt_is_not_swallowed(monkeypatch, temporal_file, 
 
     interrupt = make_interrupt()
 
-    def interrupted(con, query, params=None):
+    def interrupted(con, query, params=None, **_):
         raise interrupt
 
     table = gpio.read(temporal_file)
@@ -322,7 +322,9 @@ def test_api_table_stats_interrupt_is_not_swallowed(monkeypatch, temporal_file, 
 # datetime.max/min and returns BC or year 10000+ values as DuckDB's text, and
 # the stats must keep doing so rather than crash.
 
-EDGE_COLUMNS = "ts_inf, d_ninf, d_bc, d_far, tstz_inf"
+EDGE_COLUMNS = "ts_inf, d_ninf, d_bc, d_far, tstz_inf, tstz_bc, tstz_far"
+TZ_BC = "0100-01-01 (BC) 00:00:00+00"
+TZ_FAR = "12000-01-01 00:00:00+00"
 
 
 @pytest.fixture
@@ -336,9 +338,12 @@ def edge_file(tmp_path):
             COPY (
                 SELECT * FROM (VALUES
                     (TIMESTAMP 'infinity', DATE '-infinity', DATE '0044-03-15 (BC)',
-                     DATE '10000-01-01', TIMESTAMPTZ 'infinity', ST_Point(0, 0)),
+                     DATE '10000-01-01', TIMESTAMPTZ 'infinity', TIMESTAMPTZ '{TZ_BC}',
+                     TIMESTAMPTZ '{TZ_FAR}', ST_Point(0, 0)),
                     (TIMESTAMP '2024-01-01 12:00:00', DATE '2024-01-01', DATE '2024-01-01',
-                     DATE '2024-01-01', TIMESTAMPTZ '2024-01-01 12:00:00+00', ST_Point(1, 1))
+                     DATE '2024-01-01', TIMESTAMPTZ '2024-01-01 12:00:00+00',
+                     TIMESTAMPTZ '2024-01-01 12:00:00+00', TIMESTAMPTZ '2024-01-01 12:00:00+00',
+                     ST_Point(1, 1))
                 ) t({EDGE_COLUMNS}, geometry)
             ) TO {sql_path(str(path))} (FORMAT parquet)
             """
@@ -354,6 +359,9 @@ EDGE_EXPECTED = {
     "d_bc": ("0044-03-15 (BC)", date(2024, 1, 1)),
     "d_far": (date(2024, 1, 1), "10000-01-01"),
     "tstz_inf": (TZ_MIN, datetime.max),
+    # fetchone() gives DuckDB's UTC text with its "+00", so it still reads back right.
+    "tstz_bc": (TZ_BC, TZ_MIN),
+    "tstz_far": (TZ_MIN, TZ_FAR),
 }
 
 
@@ -379,6 +387,8 @@ def test_cli_inspect_stats_out_of_range_temporal_values(edge_file):
     assert stats["d_bc"]["min"] == "0044-03-15 (BC)"
     assert stats["d_far"]["max"] == "10000-01-01"
     assert stats["tstz_inf"]["max"] == datetime.max.isoformat()
+    assert stats["tstz_bc"]["min"] == TZ_BC
+    assert stats["tstz_far"]["max"] == TZ_FAR
 
 
 def test_api_table_stats_out_of_range_temporal_values(edge_file):
@@ -408,6 +418,122 @@ def test_aggregate_breakdown_out_of_range_temporal_values(edge_file):
             top, has_other = resolve_breakdown_values(con, source, name, limit=2)
             assert set(top) == set(values), name
             assert has_other is False
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("zone", ["UTC", "America/New_York", "Africa/Cairo"])
+@pytest.mark.parametrize("column", ["tstz_bc", "tstz_far"])
+def test_breakdown_out_of_range_timestamptz_counts_its_rows_in_any_zone(edge_file, zone, column):
+    """The breakdown spells each kept value back as a SQL literal, read in the session zone."""
+    from geoparquet_io.core.process.aggregate.common import (
+        resolve_breakdown_values,
+        sql_literal,
+    )
+
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        con.execute(f"SET TimeZone = '{zone}'")
+        source = f"SELECT * FROM {sql_path(edge_file)}"
+        top, _ = resolve_breakdown_values(con, source, column, limit=2)
+        (out_of_range,) = [value for value in top if isinstance(value, str)]
+        (matched,) = con.execute(
+            f"SELECT COUNT(*) FROM ({source}) WHERE {column} = {sql_literal(out_of_range)}"
+        ).fetchone()
+        assert matched == 1
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("zone", ["UTC", "America/New_York", "Asia/Kolkata"])
+def test_fetch_row_out_of_range_timestamptz_keeps_utc_offset(zone):
+    from geoparquet_io.core.duckdb_utils import fetch_row
+
+    con = duckdb.connect()
+    try:
+        con.execute(f"SET TimeZone = '{zone}'")
+        row = fetch_row(con, f"SELECT TIMESTAMPTZ '{TZ_BC}', TIMESTAMPTZ '{TZ_FAR}'")
+        assert row == (TZ_BC, TZ_FAR)
+    finally:
+        con.close()
+
+
+def test_fetch_helpers_accept_a_query_ending_in_a_comment():
+    from geoparquet_io.core.duckdb_utils import fetch_row, fetch_rows
+
+    query = "SELECT TIMESTAMPTZ '2024-01-01 12:00:00+00' AS t, 1 AS n -- trailing note"
+    con = duckdb.connect()
+    try:
+        assert fetch_rows(con, query) == [(TZ_MIN, 1)]
+        assert fetch_row(con, query) == (TZ_MIN, 1)
+    finally:
+        con.close()
+
+
+class _RecordingConnection:
+    """A DuckDB connection that records each statement it runs."""
+
+    def __init__(self, con):
+        self._con = con
+        self.statements = []
+
+    def execute(self, query, params=None):
+        self.statements.append(query)
+        return self._con.execute(query, params)
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+
+def test_get_column_statistics_describes_the_file_once(monkeypatch, temporal_file):
+    """One DESCRIBE per file, not one per column, keeps remote footer reads flat."""
+    recorded = []
+    real = inspect_utils.get_duckdb_connection
+
+    def recording(*args, **kwargs):
+        con = _RecordingConnection(real(*args, **kwargs))
+        recorded.append(con)
+        return con
+
+    monkeypatch.setattr(inspect_utils, "get_duckdb_connection", recording)
+
+    _, stats = _stats(temporal_file)
+
+    describes = [q for con in recorded for q in con.statements if q.startswith("DESCRIBE")]
+    assert len(describes) == 1
+    assert stats["ts_tz"]["min"] == TZ_MIN
+    assert stats["ts"]["max"] == datetime(2024, 6, 30, 12, 30)
+
+
+class _FailingConnection:
+    def __init__(self, error):
+        self.error = error
+
+    def execute(self, query, params=None):
+        raise self.error
+
+
+def test_source_types_fall_back_to_per_query_describe(monkeypatch):
+    messages = []
+    monkeypatch.setattr(inspect_utils, "debug", messages.append)
+    con = _FailingConnection(duckdb.CatalogException("no such table"))
+
+    assert inspect_utils._source_column_types(con, "missing") == {}
+    assert any("no such table" in m for m in messages)
+
+
+def test_source_types_let_an_interrupt_through():
+    con = _FailingConnection(duckdb.InvalidInputException("Query interrupted"))
+
+    with pytest.raises(duckdb.InvalidInputException):
+        inspect_utils._source_column_types(con, "t")
+
+
+def test_compute_column_stats_describes_when_the_type_is_unknown(temporal_file):
+    con = duckdb.connect()
+    try:
+        stats = inspect_utils.compute_column_stats(con, "ts_tz", False, sql_path(temporal_file))
+        assert (stats["min"], stats["max"], stats["nulls"]) == (TZ_MIN, TZ_MAX, 1)
     finally:
         con.close()
 

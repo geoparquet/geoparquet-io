@@ -637,7 +637,8 @@ def preview_partition(
         ORDER BY record_count DESC
     """
 
-    # Through Arrow: a TIMESTAMPTZ partition column would otherwise need pytz.
+    # fetch_rows reads a TIMESTAMPTZ column as UTC and makes it aware with
+    # zoneinfo. fetchall() would need pytz for it.
     all_partitions = fetch_rows(con, query)
 
     con.close()

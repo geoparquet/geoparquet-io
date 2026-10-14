@@ -2839,8 +2839,9 @@ class Table:
             regular_cols = [f.name for f in self._table.schema if f.name != self._geometry_column]
             stats = {}
 
-            # One batched query for all non-geometry columns. Rows come through
-            # Arrow, so TIMESTAMPTZ min and max need no pytz.
+            # One batched query for all non-geometry columns, so one DESCRIBE.
+            # fetch_row reads TIMESTAMPTZ min and max as UTC and makes them aware
+            # with zoneinfo, so they need no pytz.
             if regular_cols:
                 select_parts = []
                 for col_name in regular_cols:
