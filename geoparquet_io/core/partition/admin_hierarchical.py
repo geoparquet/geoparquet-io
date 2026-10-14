@@ -23,7 +23,7 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_rows, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
@@ -932,8 +932,7 @@ def _get_preview_partitions(con, table_name, partition_columns, level_names):
         ORDER BY record_count DESC
     """
 
-    result = con.execute(query)
-    return result.fetchall()
+    return fetch_rows(con, query)
 
 
 def _display_preview_header(level_names, all_partitions, total_records, limit):

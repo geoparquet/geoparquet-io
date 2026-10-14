@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from geoparquet_io.core.duckdb_utils import (
+    fetch_row,
     load_community_extension,
     quote_identifier,
     sql_path,
@@ -151,7 +152,7 @@ def _scheme_for_column(con, relation: str, name: str, dtype: str) -> str:
             "Pass --scheme a5 or --scheme h3 to disambiguate.",
         )
     qcol = quote_identifier(name)
-    row = con.execute(f"SELECT {qcol} FROM {relation} WHERE {qcol} IS NOT NULL LIMIT 1").fetchone()
+    row = fetch_row(con, f"SELECT {qcol} FROM {relation} WHERE {qcol} IS NOT NULL LIMIT 1")
     if row and isinstance(row[0], str) and _H3_STRING_RE.match(row[0]):
         return "h3"
     return "admin"

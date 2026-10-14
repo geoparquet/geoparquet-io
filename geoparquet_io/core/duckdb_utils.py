@@ -1266,45 +1266,87 @@ class _DuckDBFieldWrapper:
         self.name = col_info.get("name", "")
 
 
-def _interval_as_timedelta(value) -> datetime.timedelta | None:
-    """An Arrow MonthDayNano as the timedelta ``fetchone()`` gives (a month is 30 days)."""
-    if value is None:
-        return None
-    return datetime.timedelta(
-        days=value.months * 30 + value.days, microseconds=value.nanoseconds // 1000
+_TIMESTAMPTZ = "TIMESTAMP WITH TIME ZONE"
+_UTC = datetime.timezone.utc
+
+
+def _without_timestamptz(con, query: str, params) -> tuple[str, list[int]]:
+    """``query`` with its TIMESTAMPTZ columns as UTC TIMESTAMPs, and their positions.
+
+    DESCRIBE only binds the query, so this costs no scan. Positional references
+    (``#n``) keep duplicate output names, such as two bare ``MIN(...)``, apart.
+    """
+    columns = con.execute(f"DESCRIBE {query}", params).fetchall()
+    positions = [i for i, column in enumerate(columns) if column[1] == _TIMESTAMPTZ]
+    if not positions:
+        return query, positions
+    select = ", ".join(
+        f"timezone('UTC', #{i + 1})" if i in positions else f"#{i + 1}" for i in range(len(columns))
     )
+    return f"SELECT {select} FROM ({query.rstrip().rstrip(';')})", positions
 
 
-def _column_values(column) -> list:
-    """A column's values as Python objects, with INTERVAL kept as ``timedelta``."""
-    import pyarrow as pa
+def _session_zone(con) -> datetime.tzinfo:
+    """The connection's TimeZone setting as a tzinfo, UTC when Python cannot resolve it."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-    values = column.to_pylist()
-    if pa.types.is_interval(column.type):
-        return [_interval_as_timedelta(v) for v in values]
-    return values
+    (name,) = con.execute("SELECT current_setting('TimeZone')").fetchone()
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return _UTC
+
+
+def _utc_as_zone(value, zone: datetime.tzinfo):
+    """A naive UTC value as an aware datetime in ``zone``, the way ``fetchone()`` gives it.
+
+    Infinities stay as ``fetchone()`` clamps them (naive ``datetime.max``/``min``),
+    and values it returns as text, such as BC dates, stay text.
+    """
+    if not isinstance(value, datetime.datetime) or value in (
+        datetime.datetime.max,
+        datetime.datetime.min,
+    ):
+        return value
+    aware = value.replace(tzinfo=_UTC)
+    try:
+        return aware.astimezone(zone)
+    except OverflowError:  # within hours of year 1 or 9999
+        return aware
+
+
+def _restore_zones(rows: list[tuple], positions: list[int], zone) -> list[tuple]:
+    if not positions:
+        return rows
+    return [
+        tuple(_utc_as_zone(v, zone) if i in positions else v for i, v in enumerate(row))
+        for row in rows
+    ]
 
 
 def fetch_rows(con, query: str, params=None) -> list[tuple]:
-    """Run ``query`` and return every row as a tuple, fetched through Arrow.
+    """Run ``query`` and return every row as ``fetchall()`` would, without needing pytz.
 
     Use this instead of ``fetchall()`` whenever a row can carry a user column's
-    value. DuckDB's own Python row conversion of a TIMESTAMP WITH TIME ZONE needs
-    ``pytz``, which gpio does not depend on. The Arrow path returns tz-aware
-    datetimes built on ``zoneinfo`` and needs nothing extra. Values otherwise
-    match ``fetchall()``, including INTERVAL as ``timedelta``.
+    value. DuckDB's Python conversion of a TIMESTAMP WITH TIME ZONE imports
+    ``pytz``, which gpio does not depend on. Those columns are fetched as UTC
+    TIMESTAMPs and made aware in the session time zone with ``zoneinfo``. Every
+    other column goes through ``fetchall()`` untouched. A TIMESTAMPTZ nested in
+    a STRUCT, LIST or MAP still needs pytz, as it does with ``fetchall()``.
     """
-    table = con.execute(query, params).arrow().read_all()
-    # Column-wise, so duplicate output names (two bare MIN(...)) do not collapse.
-    return list(zip(*(_column_values(column) for column in table.columns), strict=True))
+    rewritten, positions = _without_timestamptz(con, query, params)
+    zone = _session_zone(con) if positions else None
+    return _restore_zones(con.execute(rewritten, params).fetchall(), positions, zone)
 
 
 def fetch_row(con, query: str, params=None) -> tuple | None:
     """The first row of ``query`` as :func:`fetch_rows` builds it, or None when it is empty."""
-    table = con.execute(query, params).arrow().read_all()
-    if table.num_rows == 0:
+    rewritten, positions = _without_timestamptz(con, query, params)
+    zone = _session_zone(con) if positions else None
+    row = con.execute(rewritten, params).fetchone()
+    if row is None:
         return None
-    return tuple(_column_values(column.slice(0, 1))[0] for column in table.columns)
+    return _restore_zones([row], positions, zone)[0]
 
 
 def _get_query_columns(con, query: str) -> list[str]:

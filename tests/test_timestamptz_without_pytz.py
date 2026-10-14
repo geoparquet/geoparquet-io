@@ -290,3 +290,170 @@ def test_api_table_stats_interrupt_is_not_swallowed(monkeypatch, temporal_file):
 
     with pytest.raises(duckdb.InterruptException):
         table.stats()
+
+
+# Values Python's datetime cannot hold. fetchone() clamps infinities to
+# datetime.max/min and returns BC or year 10000+ values as DuckDB's text, and
+# the stats must keep doing so rather than crash.
+
+EDGE_COLUMNS = "ts_inf, d_ninf, d_bc, d_far, tstz_inf"
+
+
+@pytest.fixture
+def edge_file(tmp_path):
+    """A GeoParquet file whose temporal columns hold infinities, BC and year 10000 values."""
+    path = tmp_path / "edge.parquet"
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        con.execute(
+            f"""
+            COPY (
+                SELECT * FROM (VALUES
+                    (TIMESTAMP 'infinity', DATE '-infinity', DATE '0044-03-15 (BC)',
+                     DATE '10000-01-01', TIMESTAMPTZ 'infinity', ST_Point(0, 0)),
+                    (TIMESTAMP '2024-01-01 12:00:00', DATE '2024-01-01', DATE '2024-01-01',
+                     DATE '2024-01-01', TIMESTAMPTZ '2024-01-01 12:00:00+00', ST_Point(1, 1))
+                ) t({EDGE_COLUMNS}, geometry)
+            ) TO {sql_path(str(path))} (FORMAT parquet)
+            """
+        )
+    finally:
+        con.close()
+    return str(path)
+
+
+EDGE_EXPECTED = {
+    "ts_inf": (datetime(2024, 1, 1, 12, 0), datetime.max),
+    "d_ninf": (date.min, date(2024, 1, 1)),
+    "d_bc": ("0044-03-15 (BC)", date(2024, 1, 1)),
+    "d_far": (date(2024, 1, 1), "10000-01-01"),
+    "tstz_inf": (TZ_MIN, datetime.max),
+}
+
+
+def test_get_column_statistics_out_of_range_temporal_values(edge_file):
+    _, stats = _stats(edge_file)
+
+    for name, (low, high) in EDGE_EXPECTED.items():
+        assert (stats[name]["min"], stats[name]["max"]) == (low, high), name
+        assert stats[name]["nulls"] == 0, name
+
+
+def test_cli_inspect_stats_out_of_range_temporal_values(edge_file):
+    text = CliRunner().invoke(cli, ["inspect", "stats", edge_file])
+    assert text.exit_code == 0, text.output
+    assert "0044-03-15 (BC)" in text.output
+    assert "10000-01-01" in text.output
+
+    as_json = CliRunner().invoke(cli, ["inspect", "stats", edge_file, "--json"])
+    assert as_json.exit_code == 0, as_json.output
+    stats = json.loads(as_json.output)["statistics"]
+    assert stats["ts_inf"]["max"] == datetime.max.isoformat()
+    assert stats["d_ninf"]["min"] == date.min.isoformat()
+    assert stats["d_bc"]["min"] == "0044-03-15 (BC)"
+    assert stats["d_far"]["max"] == "10000-01-01"
+    assert stats["tstz_inf"]["max"] == datetime.max.isoformat()
+
+
+def test_api_table_stats_out_of_range_temporal_values(edge_file):
+    import geoparquet_io as gpio
+
+    stats = gpio.read(edge_file).stats()
+
+    for name, (low, high) in EDGE_EXPECTED.items():
+        assert (stats[name]["min"], stats[name]["max"]) == (low, high), name
+
+
+def test_partition_preview_out_of_range_temporal_values(edge_file):
+    from geoparquet_io.core.partition.common import preview_partition
+
+    for name, values in EDGE_EXPECTED.items():
+        result = preview_partition(edge_file, name)
+        assert {value for value, _ in result["partitions"]} == set(values), name
+
+
+def test_aggregate_breakdown_out_of_range_temporal_values(edge_file):
+    from geoparquet_io.core.process.aggregate.common import resolve_breakdown_values
+
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        source = f"SELECT * FROM {sql_path(edge_file)}"
+        for name, values in EDGE_EXPECTED.items():
+            top, has_other = resolve_breakdown_values(con, source, name, limit=2)
+            assert set(top) == set(values), name
+            assert has_other is False
+    finally:
+        con.close()
+
+
+# Every other type comes back exactly as fetchall() gives it, also when a
+# TIMESTAMPTZ column in the same row sends the query through the rewrite.
+
+PARITY_QUERY = """
+    SELECT * FROM (VALUES
+        (UUID 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+         170141183460469231731687303715884105727::HUGEINT,
+         340282366920938463463374607431768211455::UHUGEINT,
+         '0101'::BIT, '123456789012345678901234567890'::BIGNUM,
+         TIMETZ '12:34:56+05:30', INTERVAL '1 month 2 days',
+         TIMESTAMP_NS '2024-01-01 12:00:01.123456789',
+         MAP([1, 2], ['one', 'two']), [1, 2, 3]::INTEGER[3],
+         TIMESTAMP '-infinity', DATE '0044-03-15 (BC)', 1.5::DECIMAL(4, 1)),
+        (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+    ) t(u, h, uh, b, big, ttz, i, tns, m, arr, ts, d, dec)
+"""
+
+
+def test_fetch_helpers_match_fetchall_for_other_types():
+    from geoparquet_io.core.duckdb_utils import fetch_row, fetch_rows
+
+    con = duckdb.connect()
+    try:
+        expected = con.execute(PARITY_QUERY).fetchall()
+        assert fetch_rows(con, PARITY_QUERY) == expected
+        assert fetch_row(con, PARITY_QUERY) == expected[0]
+
+        with_tz = f"SELECT *, TIMESTAMPTZ '2024-01-01 12:00:00+00' AS tz FROM ({PARITY_QUERY})"
+        assert fetch_rows(con, with_tz) == [(*row, TZ_MIN) for row in expected]
+        assert fetch_row(con, with_tz) == (*expected[0], TZ_MIN)
+    finally:
+        con.close()
+
+
+def test_admin_partition_preview_timestamptz_without_pytz():
+    from geoparquet_io.core.partition.admin_hierarchical import _get_preview_partitions
+
+    con = duckdb.connect()
+    try:
+        con.execute(
+            "CREATE TABLE t AS SELECT * FROM (VALUES (TIMESTAMPTZ '2024-01-01 12:00:00+00'),"
+            " (TIMESTAMPTZ '2024-01-01 12:00:00+00'), (NULL)) v(ts_tz)"
+        )
+        assert _get_preview_partitions(con, "t", ["ts_tz"], ["level"]) == [(TZ_MIN, 2)]
+    finally:
+        con.close()
+
+
+def test_overview_scheme_detection_timestamptz_without_pytz():
+    from geoparquet_io.core.process.overview.detect import _scheme_for_column
+
+    con = duckdb.connect()
+    try:
+        relation = "(SELECT TIMESTAMPTZ '2024-01-01 12:00:00+00' AS cell)"
+        assert _scheme_for_column(con, relation, "cell", "TIMESTAMP WITH TIME ZONE") == "admin"
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("zone", ["UTC", "America/New_York", "Asia/Kolkata", "Pacific/Chatham"])
+def test_fetch_row_keeps_session_time_zone(zone):
+    from geoparquet_io.core.duckdb_utils import fetch_row
+
+    con = duckdb.connect()
+    try:
+        con.execute(f"SET TimeZone = '{zone}'")
+        (value,) = fetch_row(con, "SELECT TIMESTAMPTZ '2024-01-01 12:00:00+00'")
+        assert value == TZ_MIN
+        assert value.tzinfo.key == zone
+    finally:
+        con.close()
