@@ -5,6 +5,7 @@ This module provides functions for creating and managing DuckDB connections
 with appropriate extensions loaded for GeoParquet operations.
 """
 
+import datetime
 import os
 import re
 import shutil
@@ -1265,28 +1266,45 @@ class _DuckDBFieldWrapper:
         self.name = col_info.get("name", "")
 
 
-def fetch_row(con, query: str, params=None) -> tuple | None:
-    """Run ``query`` and return its first row as a tuple, or None when it is empty.
-
-    Use this instead of ``fetchone()`` whenever the row can carry a user column's
-    value. DuckDB's own Python row conversion of a TIMESTAMP WITH TIME ZONE needs
-    ``pytz``, which gpio does not depend on. The Arrow path returns tz-aware
-    datetimes built on ``zoneinfo`` and needs nothing extra.
-    """
-    table = con.execute(query, params).arrow().read_all()
-    if table.num_rows == 0:
+def _interval_as_timedelta(value) -> datetime.timedelta | None:
+    """An Arrow MonthDayNano as the timedelta ``fetchone()`` gives (a month is 30 days)."""
+    if value is None:
         return None
-    # Column-wise, so duplicate output names (two bare MIN(...)) do not collapse.
-    return tuple(column[0].as_py() for column in table.columns)
+    return datetime.timedelta(
+        days=value.months * 30 + value.days, microseconds=value.nanoseconds // 1000
+    )
+
+
+def _column_values(column) -> list:
+    """A column's values as Python objects, with INTERVAL kept as ``timedelta``."""
+    import pyarrow as pa
+
+    values = column.to_pylist()
+    if pa.types.is_interval(column.type):
+        return [_interval_as_timedelta(v) for v in values]
+    return values
 
 
 def fetch_rows(con, query: str, params=None) -> list[tuple]:
     """Run ``query`` and return every row as a tuple, fetched through Arrow.
 
-    The ``fetchall()`` counterpart of :func:`fetch_row`, for the same reason.
+    Use this instead of ``fetchall()`` whenever a row can carry a user column's
+    value. DuckDB's own Python row conversion of a TIMESTAMP WITH TIME ZONE needs
+    ``pytz``, which gpio does not depend on. The Arrow path returns tz-aware
+    datetimes built on ``zoneinfo`` and needs nothing extra. Values otherwise
+    match ``fetchall()``, including INTERVAL as ``timedelta``.
     """
     table = con.execute(query, params).arrow().read_all()
-    return list(zip(*(column.to_pylist() for column in table.columns), strict=True))
+    # Column-wise, so duplicate output names (two bare MIN(...)) do not collapse.
+    return list(zip(*(_column_values(column) for column in table.columns), strict=True))
+
+
+def fetch_row(con, query: str, params=None) -> tuple | None:
+    """The first row of ``query`` as :func:`fetch_rows` builds it, or None when it is empty."""
+    table = con.execute(query, params).arrow().read_all()
+    if table.num_rows == 0:
+        return None
+    return tuple(_column_values(column.slice(0, 1))[0] for column in table.columns)
 
 
 def _get_query_columns(con, query: str) -> list[str]:

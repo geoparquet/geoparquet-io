@@ -151,6 +151,24 @@ def test_fetch_row_returns_tz_aware_without_pytz():
         con.close()
 
 
+def test_fetch_helpers_return_intervals_as_timedelta_like_fetchone():
+    """Arrow hands INTERVAL back as MonthDayNano. The helpers keep fetchone's timedelta."""
+    from geoparquet_io.core.duckdb_utils import fetch_row, fetch_rows
+
+    query = (
+        "SELECT * FROM (VALUES (INTERVAL 3 DAY, 1),"
+        " (INTERVAL '1 month 2 days 3 seconds 5 microseconds', 2),"
+        " (INTERVAL '-1 month', 3), (NULL, 4)) t(i, n)"
+    )
+    con = duckdb.connect()
+    try:
+        expected = con.execute(query).fetchall()
+        assert fetch_rows(con, query) == expected
+        assert fetch_row(con, query) == expected[0]
+    finally:
+        con.close()
+
+
 def test_stats_query_failure_reports_unknown_not_zero_nulls(monkeypatch, temporal_file):
     def boom(con, query, params=None):
         raise duckdb.InvalidInputException("simulated conversion failure")
