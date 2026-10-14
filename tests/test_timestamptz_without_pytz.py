@@ -183,14 +183,37 @@ def test_stats_query_failure_reports_unknown_not_zero_nulls(monkeypatch, tempora
     assert any("ts_tz" in m and "simulated conversion failure" in m for m in messages)
 
 
-def test_stats_query_interrupt_is_not_swallowed(monkeypatch, temporal_file):
-    def interrupted(con, query, params=None):
+def _interrupt_as_error():
+    """A duckdb.Error that is an interrupt only through its cause chain."""
+    try:
         raise duckdb.InterruptException("interrupted")
+    except duckdb.InterruptException as cause:
+        error = duckdb.InvalidInputException("conversion failed")
+        error.__cause__ = cause
+        return error
+
+
+# DuckDB raises a SIGINT as InterruptException, as a plain error reading
+# "Query interrupted", or wrapped in another error. All of them must propagate.
+INTERRUPTS = [
+    lambda: duckdb.InterruptException("interrupted"),
+    lambda: duckdb.InvalidInputException("Query interrupted"),
+    _interrupt_as_error,
+]
+INTERRUPT_IDS = ["interrupt_exception", "query_interrupted_text", "chained"]
+
+
+@pytest.mark.parametrize("make_interrupt", INTERRUPTS, ids=INTERRUPT_IDS)
+def test_stats_query_interrupt_is_not_swallowed(monkeypatch, temporal_file, make_interrupt):
+    interrupt = make_interrupt()
+
+    def interrupted(con, query, params=None):
+        raise interrupt
 
     columns_info, _ = _stats(temporal_file)
     monkeypatch.setattr(inspect_utils, "fetch_row", interrupted)
 
-    with pytest.raises(duckdb.InterruptException):
+    with pytest.raises(type(interrupt)):
         get_column_statistics(temporal_file, columns_info)
 
 
@@ -278,17 +301,20 @@ def test_api_table_stats_falls_back_per_column_when_batch_fails(monkeypatch, tem
     assert stats["d"]["max"] == date(2024, 6, 30)
 
 
-def test_api_table_stats_interrupt_is_not_swallowed(monkeypatch, temporal_file):
+@pytest.mark.parametrize("make_interrupt", INTERRUPTS, ids=INTERRUPT_IDS)
+def test_api_table_stats_interrupt_is_not_swallowed(monkeypatch, temporal_file, make_interrupt):
     import geoparquet_io as gpio
     from geoparquet_io.core import duckdb_utils
 
+    interrupt = make_interrupt()
+
     def interrupted(con, query, params=None):
-        raise duckdb.InterruptException("interrupted")
+        raise interrupt
 
     table = gpio.read(temporal_file)
     monkeypatch.setattr(duckdb_utils, "fetch_row", interrupted)
 
-    with pytest.raises(duckdb.InterruptException):
+    with pytest.raises(type(interrupt)):
         table.stats()
 
 

@@ -2823,7 +2823,11 @@ class Table:
         """
         import duckdb
 
-        from geoparquet_io.core.duckdb_utils import fetch_row, get_duckdb_connection
+        from geoparquet_io.core.duckdb_utils import (
+            fetch_row,
+            get_duckdb_connection,
+            is_interrupt,
+        )
         from geoparquet_io.core.inspect_utils import compute_column_stats
         from geoparquet_io.core.logging_config import debug
 
@@ -2852,9 +2856,9 @@ class Table:
                 query = f"SELECT {', '.join(select_parts)} FROM input_table"
                 try:
                     row = fetch_row(con, query)
-                except duckdb.InterruptException:
-                    raise
                 except duckdb.Error as e:
+                    if is_interrupt(e):
+                        raise
                     debug(f"Batched stats query failed, falling back to per-column queries: {e}")
                     row = None
                 for i, col_name in enumerate(regular_cols):

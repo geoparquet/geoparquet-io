@@ -35,6 +35,7 @@ from geoparquet_io.core.duckdb_metadata import (
 from geoparquet_io.core.duckdb_utils import (
     fetch_row,
     get_duckdb_connection,
+    is_interrupt,
     quote_identifier,
     sql_path,
 )
@@ -795,9 +796,9 @@ def compute_column_stats(con, col_name: str, is_geometry: bool, source: str) -> 
     """
     try:
         row = fetch_row(con, _column_stats_query(col_name, is_geometry, source))
-    except duckdb.InterruptException:
-        raise
     except duckdb.Error as e:
+        if is_interrupt(e):
+            raise
         debug(f"Could not compute statistics for column '{col_name}': {e}")
         return dict(_UNKNOWN_STATS)
     # An aggregate with no GROUP BY always returns exactly one row.
