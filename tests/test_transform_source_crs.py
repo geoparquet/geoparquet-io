@@ -217,9 +217,7 @@ class TestUnresolvableFailsLoudly:
         [
             "EPSG:12 34",
             'GEOGCS["WGS 84",DATUM["WGS_1984"]]',
-            "+proj=tmerc +lat_0=36",
-            "+proj=longlat +ellps=GRS80 +no_defs",
-            "NAD83",
+            "not a coordinate reference system",
             "'); DROP TABLE t; --",
             "{not json",
             {"type": "ProjectedCRS"},
@@ -301,7 +299,7 @@ class TestSinks:
 
     def test_reproject_to_source_sql_raises_on_garbage(self):
         with pytest.raises(UnresolvableCRSError):
-            reproject_to_source_sql('"g"', "+proj=tmerc +lat_0=36")
+            reproject_to_source_sql('"g"', "not a coordinate reference system")
 
 
 class TestAuthorityCodeForComparison:
@@ -342,3 +340,107 @@ class TestLabel:
 
     def test_a_user_value_that_is_not_json_is_shown_bounded(self):
         assert transform_source_label("{" + "x" * 500).endswith("...")
+
+
+class TestFreeFormStrings:
+    """A free-form string resolves the way the GeoArrow field reader reads it.
+
+    pyproj parses it. Lon/lat WGS 84 (a compound CRS by its horizontal part)
+    needs no transform, a code PROJ is certain of comes back as that code, and
+    anything else as pyproj's own PROJJSON. The raw string never comes back.
+    """
+
+    @pytest.mark.parametrize(
+        "crs", ["EPSG:4326+5773", "WGS 84 + EGM96 height", "+proj=longlat +datum=WGS84"]
+    )
+    def test_lon_lat_and_compound_over_lon_lat_need_no_transform(self, crs):
+        assert transform_source_crs(crs) is None
+
+    @pytest.mark.parametrize(("crs", "code"), [("NAD83", "EPSG:4269"), ("Tokyo", "EPSG:4301")])
+    def test_a_name_proj_is_certain_of_comes_back_as_its_code(self, crs, code):
+        assert transform_source_crs(crs) == code
+
+    @pytest.mark.parametrize(
+        "crs",
+        [
+            "+proj=longlat +ellps=WGS84",
+            "+proj=longlat +datum=NAD83",
+            "+proj=longlat +ellps=GRS80",
+            "+proj=utm +zone=31 +datum=WGS84",
+        ],
+    )
+    def test_a_proj_string_comes_back_as_pyproj_projjson(self, crs):
+        src = transform_source_crs(crs)
+        assert json.loads(src) == json.loads(CRS.from_user_input(crs).to_json())
+
+    def test_a_proj_string_transforms_like_its_definition(self):
+        assert _transform_point(transform_source_crs(TM_PROJ4)) == pytest.approx(
+            TOKYO_LONLAT, abs=1e-3
+        )
+
+    def test_a_compound_over_a_projected_crs_transforms(self):
+        src = transform_source_crs("EPSG:32631+5773")
+        assert src is not None
+        x, y = _transform_point(src, xy=(500000.0, 4982950.4))
+        assert (x, y) == pytest.approx((3.0, 45.0), abs=1e-3)
+
+
+class TestProjInitFilesAreNeverRead:
+    """A file's CRS string must not make PROJ open a local file or a URL."""
+
+    @pytest.fixture
+    def init_file(self, tmp_path):
+        path = tmp_path / "sentinel_init"
+        path.write_text("<x> +proj=utm +zone=31 +datum=WGS84 +units=m +no_defs <>\n")
+        return path
+
+    def test_the_sentinel_would_change_the_answer(self, init_file):
+        # Proves the guard is what refuses it. PROJ reads the file when asked.
+        assert CRS.from_user_input(f"+init={init_file}:x").is_projected
+
+    @pytest.mark.parametrize(
+        "template",
+        ["+init={path}:x", "init={path}:x", "+INIT={path}:x", "+proj=longlat +init = {path}:x"],
+    )
+    def test_an_init_parameter_is_refused_before_pyproj(self, template, init_file, monkeypatch):
+        import pyproj
+
+        def _fail(*_args, **_kwargs):
+            raise AssertionError("pyproj was asked to parse an init= string")
+
+        monkeypatch.setattr(pyproj.CRS, "from_user_input", _fail)
+        with pytest.raises(UnresolvableCRSError, match="init"):
+            transform_source_crs(template.format(path=init_file))
+
+    def test_a_remote_init_is_refused(self):
+        with pytest.raises(UnresolvableCRSError, match="init"):
+            transform_source_crs("+init=https://example.invalid/proj:x")
+
+    def test_the_geoarrow_reader_does_not_parse_an_init_string(self, init_file):
+        from geoarrow.types.crs import StringCrs
+
+        from geoparquet_io.core.crs_utils import geoarrow_crs_to_projjson
+
+        text = f"+init={init_file}:x"
+        assert geoarrow_crs_to_projjson(StringCrs(text)) == text
+        with pytest.raises(UnresolvableCRSError):
+            transform_source_crs(geoarrow_crs_to_projjson(StringCrs(text)))
+
+
+class TestLabelIsBoundedAndPrintable:
+    def test_a_long_name_is_truncated(self):
+        label = transform_source_label(json.dumps({"type": "ProjectedCRS", "name": "n" * 500}))
+        assert len(label) <= 100
+        assert "..." in label
+
+    @pytest.mark.parametrize(
+        "name",
+        ["evil\x1b[31mred\x1b[0m", "line\nbreak\rreturn", "nul\x00bell\x07", "sep par "],
+    )
+    def test_control_characters_are_stripped(self, name):
+        label = transform_source_label(json.dumps({"type": "ProjectedCRS", "name": name}))
+        assert label.isprintable()
+        assert "[31m" not in label
+
+    def test_a_user_code_is_bounded_too(self):
+        assert len(transform_source_label("EPSG:" + "9" * 500)) <= 100

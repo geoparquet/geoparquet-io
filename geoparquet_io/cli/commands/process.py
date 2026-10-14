@@ -23,6 +23,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     where_option,
 )
+from geoparquet_io.core.crs_utils import UnresolvableCRSError
 from geoparquet_io.core.exceptions import InvalidParameterError, ValidationError
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5 as aggregate_by_a5_impl
 from geoparquet_io.core.process.aggregate.by_admin import (
@@ -309,7 +310,13 @@ def process_aggregate_a5(
                 bbox_column=bbox_column,
                 memory_limit=write_memory,
             )
-        except (InvalidParameterError, ValidationError, ValueError, duckdb.Error) as exc:
+        except (
+            InvalidParameterError,
+            ValidationError,
+            UnresolvableCRSError,
+            ValueError,
+            duckdb.Error,
+        ) as exc:
             raise _aggregate_error(exc, where) from exc
 
 
@@ -393,7 +400,13 @@ def process_aggregate_h3(
                 bbox_column=bbox_column,
                 memory_limit=write_memory,
             )
-        except (InvalidParameterError, ValidationError, ValueError, duckdb.Error) as exc:
+        except (
+            InvalidParameterError,
+            ValidationError,
+            UnresolvableCRSError,
+            ValueError,
+            duckdb.Error,
+        ) as exc:
             raise _aggregate_error(exc, where) from exc
 
 
@@ -495,7 +508,13 @@ def process_aggregate_admin(
                 bbox_column=bbox_column,
                 memory_limit=write_memory,
             )
-        except (InvalidParameterError, ValidationError, ValueError, duckdb.Error) as exc:
+        except (
+            InvalidParameterError,
+            ValidationError,
+            UnresolvableCRSError,
+            ValueError,
+            duckdb.Error,
+        ) as exc:
             raise _aggregate_error(exc, where) from exc
 
 

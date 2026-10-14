@@ -188,6 +188,30 @@ def test_convert_reproject_summary_names_an_uncoded_source(fixtures, tmp_path):
     assert "{" not in source_line
 
 
+def test_convert_reproject_summary_names_an_uncoded_crs84_body_ogc_crs84(tmp_path):
+    """A lon/lat body with no id is reported as OGC:CRS84, as before the resolver."""
+    body = CRS.from_user_input("OGC:CRS84").to_json_dict()
+    body.pop("id", None)
+    src = tmp_path / "crs84.parquet"
+    _write_geo_block(src, shapely.box(0, 0, 1, 1), body)
+    result = _invoke("convert", "reproject", str(src), str(tmp_path / "out.parquet"))
+    source_line = next(ln for ln in result.output.splitlines() if "Source CRS" in ln)
+    assert source_line.strip() == "Source CRS: OGC:CRS84"
+
+
+@pytest.mark.parametrize("grid", [("h3", "--resolution", "7"), ("a5", "--resolution", "10")])
+def test_process_aggregate_unresolvable_is_a_clean_error(grid, tmp_path):
+    """An unusable CRS prints one ``Error:`` line, like every other command, not a traceback."""
+    src = tmp_path / "garbage.parquet"
+    _write_geo_block(src, TM_SQUARE, {"type": "ProjectedCRS", "name": "not a real crs"})
+    args = ["process", "aggregate", grid[0], str(src), str(tmp_path / "o.parquet"), *grid[1:]]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert "Error: Cannot use the input CRS" in result.output
+    assert "--src-crs" in result.output
+
+
 def test_convert_reproject_src_crs_works_around_an_unresolvable_crs(tmp_path):
     """``--src-crs`` is what the error message points at, so it must not read the file's CRS."""
     src = tmp_path / "garbage.parquet"

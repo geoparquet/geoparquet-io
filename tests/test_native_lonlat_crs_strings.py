@@ -29,7 +29,13 @@ LON, LAT = 139.9, 35.7
 _POINTS = (
     f"(VALUES (1, 'POINT ({LON} {LAT})'), (2, 'POINT ({LON + 0.05} {LAT + 0.05})')) t(id, wkt)"
 )
-LONLAT_STRINGS = {"wgs84": "WGS84", "longlat": "+proj=longlat +datum=WGS84 +no_defs"}
+#: A compound CRS counts as lon/lat when its horizontal part is.
+LONLAT_STRINGS = {
+    "wgs84": "WGS84",
+    "longlat": "+proj=longlat +datum=WGS84 +no_defs",
+    "compound_code": "EPSG:4326+5773",
+    "compound_name": "WGS 84 + EGM96 height",
+}
 
 
 @pytest.fixture(scope="module")

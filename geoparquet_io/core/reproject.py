@@ -24,6 +24,7 @@ from geoparquet_io.core.crs_utils import (
     extract_crs_from_table,
     geoparquet_crs_is_null,
     is_geographic_crs,
+    lonlat_source_name,
     parse_crs_string_to_projjson,
     transform_source_crs,
     transform_source_label,
@@ -112,9 +113,9 @@ def _detect_crs_from_table(table: pa.Table, geom_col: str) -> str:
     Returns:
         ``"AUTH:CODE"``, canonical PROJJSON, or ``"EPSG:4326"`` when absent
     """
-    resolved = transform_source_crs(extract_crs_from_table(table, geom_col))
-    # Default to WGS84 per GeoParquet spec
-    return resolved or "EPSG:4326"
+    crs = extract_crs_from_table(table, geom_col)
+    # A missing CRS is WGS84 per the GeoParquet spec.
+    return transform_source_crs(crs) or lonlat_source_name(crs)
 
 
 def _table_geo_column_meta(table: pa.Table, geom_col: str) -> dict:
@@ -330,9 +331,9 @@ def _detect_source_crs(input_path: str, verbose: bool, geom_col: str | None = No
         return resolved
 
     # Default to WGS84 per GeoParquet spec (missing CRS = WGS84)
-    if verbose:
+    if verbose and not crs_info:
         debug("No CRS found in metadata, assuming EPSG:4326 (WGS84)")
-    return "EPSG:4326"
+    return lonlat_source_name(crs_info)
 
 
 def _get_bbox_column_name(input_path: str, verbose: bool) -> str | None:

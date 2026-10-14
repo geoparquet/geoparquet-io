@@ -1414,31 +1414,58 @@ def _transform_source_from_string(text: str) -> str | None:
             if _projjson_from_authority(str(authority), str(code)) is None:
                 raise _unresolvable(text, "PROJ does not know that authority code")
             return candidate
+    if names_proj_init_file(stripped):
+        raise _unresolvable(text, "it names a PROJ init= file, which gpio does not read")
     body = projjson_from_wkt(stripped)
     if body is not None:
         return _transform_source_from_dict(body)
-    if _free_form_is_lonlat(stripped):
-        return None
-    raise _unresolvable(text, "it is not an authority code, PROJJSON or WKT")
+    parsed, source = _free_form_source(stripped)
+    if not parsed:
+        raise _unresolvable(text, "PROJ cannot read it as a CRS")
+    return source
+
+
+#: A PROJ ``init=`` parameter, with or without ``+``. PROJ opens the file (or,
+#: with PROJ_NETWORK=ON, fetches the URL) it names, and the string comes from
+#: an untrusted file, so it is refused before pyproj sees it.
+_PROJ_INIT_PARAM = re.compile(r"init\s*=", re.IGNORECASE)
+
+
+def names_proj_init_file(text: str) -> bool:
+    """True when ``text`` carries a PROJ ``init=`` parameter that would read a file."""
+    return bool(_PROJ_INIT_PARAM.search(text))
 
 
 @lru_cache(maxsize=64)
-def _free_form_is_lonlat(text: str) -> bool:
-    """True when pyproj reads a free-form CRS string as OGC:CRS84, ignoring axis order.
+def _free_form_source(text: str) -> tuple[bool, str | None]:
+    """``(parsed, source)`` for a free-form CRS string, read the way the GeoArrow field is.
 
     DuckDB ``ST_SetCRS`` writes any string into the native GEOMETRY type, so a
-    file can say ``WGS84`` or ``+proj=longlat +datum=WGS84 +no_defs``. Those
-    are lon/lat and need no transform. The string only ever decides "no
-    transform", it is never returned, so it never reaches SQL.
+    file can say ``WGS84``, ``NAD83``, ``EPSG:4326+5773`` or a PROJ string. The
+    Table API reads that string through pyproj, and so does this.
+
+    ``source`` is ``None`` when the CRS (a compound CRS by its horizontal part)
+    is OGC:CRS84 ignoring axis order, an ``"AUTH:CODE"`` when PROJ matches it
+    with confidence 100, and pyproj's own PROJJSON otherwise. The raw string is
+    never returned, so it never reaches SQL. ``parsed`` is False when pyproj
+    cannot read it. The caller has already refused an ``init=`` string.
     """
     from pyproj import CRS
     from pyproj.exceptions import CRSError
 
     try:
-        parsed = CRS.from_user_input(text)
+        crs = CRS.from_user_input(text)
     except (CRSError, TypeError, ValueError):
-        return False
-    return parsed.equals(CRS.from_user_input("OGC:CRS84"), ignore_axis_order=True)
+        return False, None
+    horizontal = crs.sub_crs_list[0] if crs.is_compound and crs.sub_crs_list else crs
+    if horizontal.equals(CRS.from_user_input("OGC:CRS84"), ignore_axis_order=True):
+        return True, None
+    authority = crs.to_authority(min_confidence=100)
+    if authority is not None:
+        candidate = f"{authority[0]}:{authority[1]}"
+        if _TRANSFORM_CRS_SHAPE.match(candidate):
+            return True, candidate
+    return True, _transform_source_from_dict(crs.to_json_dict())
 
 
 def transform_source_crs(crs) -> str | None:
@@ -1457,10 +1484,14 @@ def transform_source_crs(crs) -> str | None:
     - pyproj's canonical PROJJSON when there is no usable id and the body
       parses. An id PROJ does not know is dropped with a warning.
 
-    Anything else raises :class:`UnresolvableCRSError` with a ``--src-crs``
-    hint. A PROJ string or a bare name from a file is only asked whether it
-    is lon/lat WGS 84 (then ``None``), it is never returned or used as a
-    source, and pyproj's ``to_authority()`` is never asked to guess a near match. The result
+    - For a PROJ string or a bare name such as ``NAD83`` or ``EPSG:4326+5773``,
+      what the GeoArrow field reader gets from pyproj. ``None`` when it (a
+      compound CRS by its horizontal part) is lon/lat, the code PROJ matches
+      with confidence 100, else pyproj's PROJJSON. The raw string is never
+      returned, and one with a PROJ ``init=`` parameter is refused unread.
+
+    Anything else, including a string pyproj cannot read, raises
+    :class:`UnresolvableCRSError` with a ``--src-crs`` hint. The result
     is idempotent, ``transform_source_crs(transform_source_crs(x))`` gives the
     same answer, so a caller may hand an already-resolved string back in.
     """
@@ -1476,18 +1507,53 @@ def transform_source_crs(crs) -> str | None:
     raise _unresolvable(crs, "it is neither PROJJSON nor a CRS string")
 
 
+#: An ANSI/VT escape sequence (CSI or a two-byte escape).
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
+_LABEL_MAX_CHARS = 80
+
+
+def _printable_label(text: str, limit: int = _LABEL_MAX_CHARS) -> str:
+    """``text`` without escape sequences or unprintable characters, cut to ``limit``."""
+    text = _ANSI_ESCAPE.sub("", text)
+    text = "".join(ch if ch.isprintable() else " " for ch in text)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[:limit]}..."
+
+
 def transform_source_label(source: str | None) -> str:
-    """A short name for a :func:`transform_source_crs` result, for log lines."""
+    """A short, printable name for a :func:`transform_source_crs` result, for log lines.
+
+    The name inside a PROJJSON comes from the input file, so escape sequences
+    and control characters are dropped and the label is bounded.
+    """
     if not source:
         return "OGC:CRS84"
     if not source.startswith("{"):
-        return source
+        return _printable_label(source)
     try:
         body = json.loads(source)
     except ValueError:
-        return _shown_crs(source)
+        return _printable_label(source)
     name = (body.get("name") if isinstance(body, dict) else None) or "unnamed CRS"
-    return f"{name} (no authority code)"
+    suffix = " (no authority code)"
+    return f"{_printable_label(str(name), _LABEL_MAX_CHARS - len(suffix))}{suffix}"
+
+
+def lonlat_source_name(crs) -> str:
+    """The ``ST_Transform`` source to name for a lon/lat ``crs``, ``"EPSG:4326"`` when absent.
+
+    A CRS that names its own default code keeps it, and any other lon/lat CRS
+    (a body with no id, ``WGS84``) is OGC:CRS84, so a summary line says what
+    the file says.
+    """
+    if not crs or crs is CRS_ABSENT:
+        return "EPSG:4326"
+    identifier = _transform_identifier(_parse_crs_value(crs))
+    if identifier is not None:
+        candidate = f"{identifier[0]}:{identifier[1]}"
+        if candidate in ("EPSG:4326", "OGC:CRS84"):
+            return candidate
+    return "OGC:CRS84"
 
 
 def transform_geom_sql(geom_expr: str, source_crs, target_crs: str = DEFAULT_TARGET_CRS) -> str:
@@ -1642,6 +1708,12 @@ def geoarrow_crs_to_projjson(crs: object) -> dict | str | None:
     # unreadable value.
     if isinstance(crs, dict | str):
         return crs or None
+    # A geoarrow ``StringCrs`` hands its text to pyproj, which opens the file
+    # an ``init=`` parameter names. Return the text unparsed so the resolver
+    # refuses it like any other ``init=`` string.
+    raw = getattr(crs, "_crs", None)
+    if isinstance(raw, str) and names_proj_init_file(raw):
+        return raw
     if isinstance(crs, bytes | bytearray):
         try:
             decoded = crs.decode("utf-8")

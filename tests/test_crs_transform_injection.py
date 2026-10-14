@@ -52,8 +52,17 @@ INJECTION_CRS_VALUES = [
 FREEFORM_CRS_VALUES = [
     'GEOGCS["WGS 84",DATUM["WGS_1984"]]',
     "EPSG:12 34",  # colon-bearing, but not the quote-free authority-code shape
+    "not a coordinate reference system",
+]
+
+#: Free-form values pyproj reads as a CRS that is not lon/lat WGS 84. They
+#: resolve the way the GeoArrow field reader does, to a code PROJ is sure of
+#: or to pyproj's own PROJJSON, and the raw string never reaches SQL.
+PARSED_FREEFORM_CRS_VALUES = [
     "+proj=tmerc +lat_0=36",
     "NAD83",
+    "+proj=longlat +datum=NAD83",
+    "Tokyo",
 ]
 
 #: Free-form values that pyproj reads as lon/lat WGS 84. They need no transform,
@@ -111,8 +120,18 @@ class TestTransformSourceRejectsFreeform:
     def test_lon_lat_free_form_values_need_no_transform(self, value):
         assert transform_source_crs(value) is None
 
+    @pytest.mark.parametrize("value", PARSED_FREEFORM_CRS_VALUES)
+    def test_parsed_free_form_values_never_come_back_raw(self, value):
+        src = transform_source_crs(value)
+        assert src != value
+        assert src.startswith("{") or crs_authority_code(src) == src
+
     @pytest.mark.parametrize(
-        "value", INJECTION_CRS_VALUES + FREEFORM_CRS_VALUES + LONLAT_FREEFORM_CRS_VALUES
+        "value",
+        INJECTION_CRS_VALUES
+        + FREEFORM_CRS_VALUES
+        + PARSED_FREEFORM_CRS_VALUES
+        + LONLAT_FREEFORM_CRS_VALUES,
     )
     def test_free_form_values_name_no_authority_code(self, value):
         assert crs_authority_code(value) is None
