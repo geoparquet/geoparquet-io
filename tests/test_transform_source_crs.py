@@ -24,6 +24,7 @@ from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
     UnresolvableCRSError,
     crs_authority_code,
+    is_default_crs,
     reproject_to_source_sql,
     transform_geom_sql,
     transform_source_crs,
@@ -84,6 +85,12 @@ class TestLonLatInputNeedsNoTransform:
         ids=repr,
     )
     def test_absent_or_default_is_none(self, crs):
+        assert transform_source_crs(crs) is None
+
+    @pytest.mark.parametrize("crs", ["", {}], ids=repr)
+    def test_empty_value_is_absent_like_the_rest_of_the_module(self, crs):
+        """An empty CRS names nothing, so it is absent, as in ``is_default_crs``."""
+        assert is_default_crs(crs)
         assert transform_source_crs(crs) is None
 
     def test_coded_default_projjson_is_none(self):

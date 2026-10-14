@@ -1474,6 +1474,9 @@ def transform_source_crs(crs) -> str | None:
     ``crs`` is any CRS value gpio reads. A PROJJSON dict or string, an
     ``AUTH:CODE`` or URN string, a WKT string, ``None`` or :data:`CRS_ABSENT`.
 
+    An empty value (``""`` or ``{}``) names nothing and is treated as absent,
+    the same as :func:`is_default_crs` and :func:`note_default_crs_normalized`.
+
     Returns one of three things.
 
     - ``None`` when the coordinates are already lon/lat. The CRS is absent, the
