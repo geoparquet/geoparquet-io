@@ -909,6 +909,8 @@ def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, pro
             "success": True,
         }
 
-    except Exception as e:
+    except BaseException as e:
         _cleanup_temp_files(temp_files, output_file=None)
+        if not isinstance(e, Exception):  # Ctrl-C: clean up, then stop as asked
+            raise
         raise GeoParquetError(f"Failed to apply fixes: {str(e)}") from e

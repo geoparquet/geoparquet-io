@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import signal
 import struct
 import subprocess
@@ -47,6 +48,20 @@ def _write(path: Path) -> str:
         {
             "id": pa.array(range(20)),
             "geometry": pa.array([_wkb_point(i, -i) for i in range(20)], pa.binary()),
+        }
+    ).replace_schema_metadata({b"geo": json.dumps(_GEO).encode()})
+    pq.write_table(table, path)
+    return str(path)
+
+
+def _write_unordered(path: Path) -> str:
+    """Like :func:`_write`, but shuffled, so ``check spatial --fix`` has work to do."""
+    order = list(range(200))
+    random.Random(7).shuffle(order)
+    table = pa.table(
+        {
+            "id": pa.array(order),
+            "geometry": pa.array([_wkb_point(i, -i) for i in order], pa.binary()),
         }
     ).replace_schema_metadata({b"geo": json.dumps(_GEO).encode()})
     pq.write_table(table, path)
@@ -92,6 +107,47 @@ def test_is_interrupt_recognises_every_shape(exc):
 )
 def test_is_interrupt_ignores_other_errors(exc):
     assert not is_interrupt(exc)
+
+
+def _wrapped(inner: BaseException) -> Exception:
+    """``inner`` re-raised the way ``apply_all_fixes`` wraps it."""
+    try:
+        try:
+            raise inner
+        except BaseException as e:
+            raise ValueError(f"Failed to apply fixes: {e}") from e
+    except ValueError as outer:
+        return outer
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [RuntimeError(QUERY_INTERRUPTED), duckdb.InterruptException("INTERRUPT Error: Interrupted!")],
+    ids=["runtime", "duckdb-interrupt"],
+)
+def test_is_interrupt_sees_a_wrapped_interrupt(inner):
+    assert is_interrupt(_wrapped(inner))
+
+
+def test_is_interrupt_sees_an_interrupt_in_the_context_chain():
+    try:
+        try:
+            raise RuntimeError(QUERY_INTERRUPTED)
+        except RuntimeError:
+            raise ValueError("cleanup failed")  # noqa: B904, the implicit context is the point
+    except ValueError as outer:
+        assert is_interrupt(outer)
+
+
+def test_is_interrupt_ignores_a_wrapped_ordinary_error():
+    assert not is_interrupt(_wrapped(RuntimeError("disk full")))
+
+
+def test_is_interrupt_survives_a_cause_cycle():
+    first, second = RuntimeError("a"), RuntimeError("b")
+    first.__cause__ = second
+    second.__cause__ = first
+    assert not is_interrupt(first)
 
 
 # =============================================================================
@@ -161,6 +217,47 @@ def test_fix_summary_is_printed_once_on_interrupt(tmp_path, monkeypatch):
     assert result.exit_code == 1, result.output
     assert result.output.count("Fixed 1 file:") == 1, result.output
     assert files[0] in result.output
+
+
+@pytest.mark.parametrize(
+    "interrupt",
+    [lambda: RuntimeError(QUERY_INTERRUPTED), KeyboardInterrupt],
+    ids=["query-interrupted", "keyboard"],
+)
+@pytest.mark.parametrize(
+    ("command", "patched"),
+    [("all", "_apply_bbox_column_fix"), ("spatial", "fix_spatial_ordering")],
+)
+def test_multi_file_fix_stops_on_an_interrupted_fix_write(
+    tmp_path, monkeypatch, interrupt, command, patched
+):
+    """A Ctrl-C during one file's fix write stops the run, even when wrapped.
+
+    ``apply_all_fixes`` re-raises it as ``GeoParquetError(...) from e``, which
+    used to read as "Fix failed" so the next file was rewritten. The
+    interrupted file is put back and left with no ``.bak``.
+    """
+    from geoparquet_io.core import check_fixes
+
+    first = _write_unordered(tmp_path / "a.parquet")
+    second = _write_unordered(tmp_path / "b.parquet")
+    before = {path: Path(path).read_bytes() for path in (first, second)}
+    fixed = []
+
+    def interrupted_write(current_file, *args, **kwargs):
+        fixed.append(current_file)
+        raise interrupt()
+
+    monkeypatch.setattr(check_fixes, patched, interrupted_write)
+    result = CliRunner().invoke(
+        cli, ["check", command, str(tmp_path / "*.parquet"), "--all-files", "--fix"]
+    )
+    assert result.exit_code == 1, result.output
+    assert "Aborted!" in result.output
+    assert "Fix failed" not in result.output
+    assert len(fixed) == 1, fixed
+    assert {path: Path(path).read_bytes() for path in (first, second)} == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.parquet", "b.parquet"]
 
 
 def test_check_all_stops_when_spec_validation_is_interrupted(fixable_file, tmp_path, monkeypatch):

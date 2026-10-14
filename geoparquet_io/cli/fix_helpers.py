@@ -257,9 +257,10 @@ def handle_fix_common(
 
     # A fix that fails leaves no orphan .bak beside an unrewritten file: the
     # staged rewrite never landed, so the backup is put back and removed.
+    # Ctrl-C (a BaseException) is undone the same way, so it leaves no .bak.
     try:
         fix_func(parquet_file, output_path, verbose, profile)
-    except Exception as e:
+    except BaseException as e:
         handle_fix_error(e, no_backup, output_path, parquet_file, created_backup)
         raise
 
@@ -431,7 +432,7 @@ def apply_check_all_fixes(
             if not no_backup and fixing_in_place and backup_path and os.path.exists(backup_path):
                 click.echo(f"Backup: {backup_path}")
 
-    except Exception as e:
+    except BaseException as e:  # Ctrl-C too, so an interrupted fix leaves no .bak
         handle_fix_error(e, no_backup, output_path, file_path, backup_path)
         raise
 

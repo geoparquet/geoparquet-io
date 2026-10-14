@@ -189,7 +189,25 @@ def is_interrupt(exc: BaseException) -> bool:
     A guard that turns errors into verdicts must re-raise these. DuckDB
     reports a SIGINT during a query as ``RuntimeError("Query interrupted")``,
     which ``except Exception`` would otherwise swallow and carry on past.
+
+    The cause and context chain is searched too, since a caller that wraps
+    errors (``apply_all_fixes`` raises ``GeoParquetError(...) from e``) would
+    otherwise hide the interrupt. The walk is bounded and stops on a cycle.
     """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen and len(seen) < _MAX_CHAIN:
+        if _is_interrupt_itself(current):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
+_MAX_CHAIN = 32
+
+
+def _is_interrupt_itself(exc: BaseException) -> bool:
     if isinstance(exc, (KeyboardInterrupt, duckdb.InterruptException)):
         return True
     return isinstance(exc, (RuntimeError, duckdb.Error)) and str(exc) == _QUERY_INTERRUPTED
