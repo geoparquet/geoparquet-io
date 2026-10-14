@@ -110,8 +110,8 @@ def test_cli_inspect_stats_json_temporal_without_pytz(temporal_file):
     assert datetime.fromisoformat(tz["min"]) == TZ_MIN
     assert datetime.fromisoformat(tz["max"]) == TZ_MAX
 
-    assert stats["ts"]["min"] == "2024-01-01 12:00:00"
-    assert stats["ts"]["max"] == "2024-06-30 12:30:00"
+    assert stats["ts"]["min"] == "2024-01-01T12:00:00"
+    assert stats["ts"]["max"] == "2024-06-30T12:30:00"
     assert stats["d"]["min"] == "2024-01-01"
     assert stats["d"]["max"] == "2024-06-30"
 
