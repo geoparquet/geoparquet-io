@@ -32,10 +32,9 @@ if TYPE_CHECKING:
 
     import duckdb
 
-from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.crs_utils import source_crs_string
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
 from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
 from geoparquet_io.core.geometry_repair import repair_geometry_sql
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
@@ -100,41 +99,21 @@ def _utf8_stdout() -> Iterator[TextIO]:
 
 
 def _get_source_crs(input_path: str) -> str | None:
-    """
-    Get CRS from GeoParquet metadata.
+    """The primary geometry's CRS as an ``AUTH:CODE`` string, or ``None`` for lon/lat.
+
+    Read through :func:`crs_utils.source_crs_string`, the resolver every other
+    command uses, so a native-geo-only input (CRS only in the Parquet logical
+    type, no ``geo`` block) is reprojected too. Reading the block alone wrote
+    such a file's projected metres as RFC 7946 coordinates (#1248).
 
     Args:
-        input_path: Path to input GeoParquet file
+        input_path: RAW path to input GeoParquet file
 
     Returns:
-        CRS string (e.g., "EPSG:4326") or None if not found
+        CRS string (e.g., "EPSG:32631") or None if default, absent or unreadable
     """
-
     try:
-        metadata, _ = get_parquet_metadata(input_path, verbose=False)
-        geo_meta = parse_geo_metadata(metadata, verbose=False)
-
-        if not geo_meta:
-            return None
-
-        # Get primary geometry column's CRS
-        primary_col = geo_meta.get("primary_column", "geometry")
-        columns = geo_meta.get("columns", {})
-        col_meta = columns.get(primary_col, {})
-
-        crs = col_meta.get("crs")
-        if crs:
-            # Extract EPSG code from CRS object
-            if isinstance(crs, dict):
-                # Check for EPSG identifier
-                auth = crs.get("id", {})
-                if auth.get("authority") == "EPSG":
-                    return f"EPSG:{auth.get('code')}"
-                # Fall back to projjson parsing
-                return None
-            return str(crs)
-
-        return None
+        return source_crs_string(input_path)
     except Exception:
         return None
 

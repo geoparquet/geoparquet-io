@@ -5,6 +5,10 @@ Add geometry metrics (area and perimeter) to GeoParquet files.
 
 Calculates geodesic area (m²) and perimeter (m) using DuckDB's spheroid
 functions, following the Vecorel geometry-metrics extension specification.
+
+The spheroid functions read lon/lat degrees. Input in any other CRS is
+transformed to OGC:CRS84 first: handed projected metres they return NaN, which
+the command used to write without a word (#1193).
 """
 
 from __future__ import annotations
@@ -16,6 +20,11 @@ from geoparquet_io.core.common import (
     get_parquet_metadata,
 )
 from geoparquet_io.core.constants import VECOREL_METRICS_SCHEMA, build_collection_metadata
+from geoparquet_io.core.crs_utils import (
+    crs_transform_sql_expr,
+    extract_crs_from_parquet,
+    transform_geom_sql,
+)
 from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import (
@@ -31,6 +40,14 @@ from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 AREA_COLUMN = "metrics:area"
 PERIMETER_COLUMN = "metrics:perimeter"
+
+
+def _metric_exprs(geom_sql: str) -> tuple[str, str]:
+    """``(area, perimeter)`` SQL over a lon/lat geometry expression."""
+    return (
+        f"CAST(ST_Area_Spheroid({geom_sql}) AS FLOAT)",
+        f"CAST(ST_Perimeter_Spheroid({geom_sql}) AS FLOAT)",
+    )
 
 
 def _build_vecorel_metadata(
@@ -60,7 +77,9 @@ def add_geometry_metrics(
     Add geometry metrics (area and perimeter) to a GeoParquet file.
 
     Calculates geodesic area (m²) and perimeter (m) for each geometry
-    using spheroid-based calculations (assumes WGS84/EPSG:4326 input).
+    using spheroid-based calculations. The primary geometry's CRS is read from
+    the input and a non-default one is transformed to OGC:CRS84 first; an
+    explicit ``crs: null`` (unknown) warns and is measured as lon/lat.
 
     Uses add_computed_column for each metric — two passes over the data.
 
@@ -134,7 +153,7 @@ def _add_metrics_streaming(
     if should_stream_output(output_path):
         verbose = False
 
-    def make_query(source: str, con) -> str:
+    def make_query(source: str, con, source_crs: str | None = None) -> str:
         sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
         col_names = [col[0] for col in sample]
 
@@ -146,10 +165,12 @@ def _add_metrics_streaming(
         if not geom_col:
             geom_col = "geometry"
 
+        # `source_crs` is the input's CRS as an AUTH:CODE string, read by
+        # execute_transform from the file or the stream's geo metadata.
+        area, perimeter = _metric_exprs(transform_geom_sql(quote_identifier(geom_col), source_crs))
         return (
-            f"SELECT *, "
-            f"CAST(ST_Area_Spheroid({quote_identifier(geom_col)}) AS FLOAT) AS {quote_identifier(AREA_COLUMN)}, "
-            f"CAST(ST_Perimeter_Spheroid({quote_identifier(geom_col)}) AS FLOAT) AS {quote_identifier(PERIMETER_COLUMN)} "
+            f"SELECT *, {area} AS {quote_identifier(AREA_COLUMN)}, "
+            f"{perimeter} AS {quote_identifier(PERIMETER_COLUMN)} "
             f"FROM {source}"
         )
 
@@ -196,8 +217,11 @@ def _add_metrics_file_based(
 
     geom_col = find_primary_geometry_column(input_parquet, verbose)
 
-    area_expr = f"CAST(ST_Area_Spheroid({quote_identifier(geom_col)}) AS FLOAT)"
-    perimeter_expr = f"CAST(ST_Perimeter_Spheroid({quote_identifier(geom_col)}) AS FLOAT)"
+    # RAW path: extract_crs_from_parquet escapes its own argument (#718).
+    source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
+    area_expr, perimeter_expr = _metric_exprs(
+        crs_transform_sql_expr(quote_identifier(geom_col), source_crs)
+    )
 
     if dry_run:
         from geoparquet_io.core.logging_config import info

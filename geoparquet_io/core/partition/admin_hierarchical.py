@@ -766,7 +766,7 @@ def partition_by_admin_hierarchical(
         # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input before the
         # join so ST_Intersects neither errors on a CRS mismatch nor silently
         # matches nothing (#525).
-        source_crs = source_crs_string(actual_input, verbose)
+        source_crs = source_crs_string(actual_input, verbose, input_geom_col)
 
         # Get admin dataset info
         admin_geom_col = dataset.get_geometry_column()

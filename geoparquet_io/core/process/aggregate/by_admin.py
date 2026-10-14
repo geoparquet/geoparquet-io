@@ -295,7 +295,7 @@ def aggregate_by_admin(
         )
         # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input so ST_Intersects
         # does not fail on a CRS mismatch and the join point lands correctly (#525).
-        source_crs = extract_crs_from_parquet(input_parquet, verbose)
+        source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
         input_pt_expr, exclude_cols = bucket_point_expr(
             con, read_rel, geom_col, source_crs, bucket_point, bbox_column
         )

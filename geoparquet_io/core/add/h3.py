@@ -236,7 +236,7 @@ def add_h3_column(
 
     # H3 keying expects lon/lat degrees; reproject non-CRS84 input first (#525).
     geom_ref = transform_geom_sql(
-        quote_identifier(geom_col), source_crs_string(input_parquet, verbose)
+        quote_identifier(geom_col), source_crs_string(input_parquet, verbose, geom_col)
     )
 
     # Define the H3 SQL expression (using string format for portability)

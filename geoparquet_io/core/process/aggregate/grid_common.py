@@ -907,7 +907,7 @@ def aggregate_grid_file(
 
     input_url = resolve_file_url(input_parquet, verbose)
     geom_col = find_primary_geometry_column(input_parquet, verbose) or "geometry"
-    source_crs = extract_crs_from_parquet(input_parquet, verbose)
+    source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
 
     con = open_bounded_connection(
         load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose

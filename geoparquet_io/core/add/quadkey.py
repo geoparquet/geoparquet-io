@@ -173,7 +173,7 @@ def _streaming_source_crs(
     - True stdin: detect from the ``geo`` metadata carried on the Arrow stream.
     """
     if not is_stdin(input_path):
-        return source_crs_string(input_path, verbose)
+        return source_crs_string(input_path, verbose, geom_col)
     geo_meta = _parse_geo_metadata_from_schema(metadata)
     return crs_string_from_geo_meta(geo_meta, geom_col)
 
@@ -586,7 +586,7 @@ def _add_quadkey_file_based(
     # Quadkeys require lon/lat degrees. Reproject a known non-CRS84 CRS (#525);
     # otherwise keep the guard (rejects projected input we can't identify, and
     # passes through default/unknown which is assumed WGS84).
-    source_crs = source_crs_string(input_parquet, verbose)
+    source_crs = source_crs_string(input_parquet, verbose, geom_col)
     needs_transform = source_crs is not None
     if not needs_transform:
         _validate_crs_for_quadkey(input_parquet, geom_col, verbose)

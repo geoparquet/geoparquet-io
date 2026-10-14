@@ -877,7 +877,7 @@ def add_admin_divisions_multi(
 
     # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input before the join
     # (otherwise ST_Intersects errors on the CRS mismatch or matches nothing, #525).
-    source_crs = source_crs_string(input_parquet, verbose)
+    source_crs = source_crs_string(input_parquet, verbose, input_geom_col)
 
     # Get metadata before processing (skip in dry-run)
     metadata = None

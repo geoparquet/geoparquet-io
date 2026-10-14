@@ -319,8 +319,8 @@ def reproject_table(
         con.close()
 
 
-def _detect_source_crs(input_path: str, verbose: bool) -> str:
-    """Detect source CRS from GeoParquet metadata.
+def _detect_source_crs(input_path: str, verbose: bool, geom_col: str | None = None) -> str:
+    """Detect the source CRS of ``geom_col`` (the primary when ``None``).
 
     Args:
         input_path: RAW (unescaped) path/URL to the input file —
@@ -330,7 +330,7 @@ def _detect_source_crs(input_path: str, verbose: bool) -> str:
     Returns:
         CRS string like "EPSG:4326" or PROJJSON string for ST_Transform
     """
-    crs_info = extract_crs_from_parquet(input_path, verbose=verbose)
+    crs_info = extract_crs_from_parquet(input_path, verbose=verbose, geometry_column=geom_col)
 
     resolved = _resolve_crs_to_string(crs_info)
     if resolved:
@@ -559,7 +559,7 @@ def reproject_impl(
         log(f"Geometry column: {geom_col}")
 
         # Detect source CRS from metadata
-        detected_crs = _detect_source_crs(read_source, verbose)
+        detected_crs = _detect_source_crs(read_source, verbose, geom_col)
 
         # Use override if provided, otherwise use detected
         if source_crs is not None:
@@ -807,7 +807,7 @@ def _reproject_streaming(
             geom_col = find_primary_geometry_column(working_file, verbose=False)
 
             # Detect source CRS
-            detected_crs = _detect_source_crs(working_file, verbose=False)
+            detected_crs = _detect_source_crs(working_file, verbose=False, geom_col=geom_col)
             effective_source_crs = source_crs if source_crs else detected_crs
 
             # Check for existing bbox column to exclude (will be regenerated)

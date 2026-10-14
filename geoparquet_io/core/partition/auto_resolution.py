@@ -492,7 +492,7 @@ def _probe_extent_resolution(
         # probe keys the same coordinates the add/ modules will (#530). Without
         # this the probe feeds raw projected metres to the lon/lat cell functions
         # and picks a resolution from garbage cell counts.
-        source_crs = source_crs_string(input_parquet, verbose)
+        source_crs = source_crs_string(input_parquet, verbose, geom_col)
         geom_sql = transform_geom_sql(_geom_sql(con, url, geom_col), source_crs)
 
         sample_size = min(

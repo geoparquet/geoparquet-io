@@ -757,15 +757,19 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     return None
 
 
-def _crs_from_geo_block(parquet_file) -> tuple[dict | str | None, str | None]:
-    """``(crs, primary column)`` as the file's ``geo`` block states them.
+def _crs_from_geo_block(
+    parquet_file, geometry_column: str | None = None
+) -> tuple[dict | str | None, str | None]:
+    """``(crs, column)`` as the file's ``geo`` block states them.
 
-    The CRS is ``None`` for a missing block, an undescribed column, the default
-    CRS and an explicit ``crs: null`` alike -- all of them mean "this source does
-    not name a CRS to write". The null case warns on its way through, because an
-    unknown CRS is not an absent one. The column comes back alongside so the
-    caller can hold the logical type of *that* column against it, not whichever
-    geometry column happens to come first in the schema.
+    The column is ``geometry_column`` when the block describes it, else the
+    block's primary. The CRS is ``None`` for a missing block, an undescribed
+    column, the default CRS and an explicit ``crs: null`` alike -- all of them
+    mean "this source does not name a CRS to write". The null case warns on its
+    way through, because an unknown CRS is not an absent one. The column comes
+    back alongside so the caller can hold the logical type of *that* column
+    against it, not whichever geometry column happens to come first in the
+    schema.
 
     A write-path reader, so a malformed carried block goes through
     :func:`sanitize_geo_metadata` rather than being indexed as-is (#887).
@@ -777,55 +781,68 @@ def _crs_from_geo_block(parquet_file) -> tuple[dict | str | None, str | None]:
     geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file))
     if not geo_meta:
         return None, None
-    primary_col = _primary_column_of_file(geo_meta, parquet_file)
     columns = geo_meta.get("columns", {})
-    if primary_col not in columns:
-        return None, primary_col
-    if crs_is_explicitly_null(columns[primary_col]):
+    if geometry_column is not None and geometry_column in columns:
+        col = geometry_column
+    else:
+        col = _primary_column_of_file(geo_meta, parquet_file)
+    if col not in columns:
+        return None, col
+    if crs_is_explicitly_null(columns[col]):
         warn_null_crs_once(str(parquet_file))
-    crs = columns[primary_col].get("crs")
-    return (crs if crs and not is_default_crs(crs) else None), primary_col
+    crs = columns[col].get("crs")
+    return (crs if crs and not is_default_crs(crs) else None), col
 
 
-def _crs_from_native_geo_type(
-    parquet_file, column: str | None = None, prefer: str | None = None
-) -> dict | str | None:
-    """The CRS inside a Parquet GEOMETRY/GEOGRAPHY logical type, or ``None``.
+def _native_primary_column(root_columns: list[dict], requested: str | None) -> str | None:
+    """The root column whose native logical type answers for the primary geometry.
 
-    With ``column`` it reads that one column -- the second opinion on a file
-    whose ``geo`` block has already named its primary. Without it, the first
-    geometry column that names a non-default CRS: the only place a
-    *native-geo-only* file records its CRS, where no block says which column is
-    primary. ``prefer`` names the geometry column the caller is writing: when
-    the file has a native geometry column of that name, that column answers
-    (its default CRS included), because in a multi-geometry file the first
-    non-default CRS in schema order can be a SECONDARY's.
+    ``requested`` (a ``geo`` block's primary, or the caller's column) wins when
+    the file has it. Otherwise gpio's own primary detection: a standard geometry
+    name (``geometry``, ``geom``, ...), else the first native geometry column.
+    Never "the first column with a non-default CRS": in a multi-geometry file
+    that is a secondary's whenever one comes first in schema order (#1248).
+    """
+    names = [col["name"] for col in root_columns]
+    if requested is not None and requested in names:
+        return requested
+    by_name = detect_geometry_column_from_names(names)
+    if by_name is not None:
+        return by_name
+    native = [col["name"] for col in root_columns if _is_native_geo_column(col)]
+    return native[0] if native else None
+
+
+def _is_native_geo_column(col: dict) -> bool:
+    return (col.get("logical_type") or "").startswith(("GeometryType(", "GeographyType("))
+
+
+def _crs_from_native_geo_type(parquet_file, column: str | None = None) -> dict | str | None:
+    """The CRS inside the primary's Parquet GEOMETRY/GEOGRAPHY logical type, or ``None``.
+
+    ``column`` names the column to read -- the one a ``geo`` block named, as
+    the second opinion on it, or the caller's. Without one (or when the file has
+    no such column) :func:`_native_primary_column` picks the primary. This is
+    the only place a *native-geo-only* file records its CRS. ``None`` means the
+    column has no native type, or a default CRS.
     """
     from geoparquet_io.core.duckdb_metadata import (
         get_schema_info,
         parse_geometry_logical_type,
         resolve_crs_reference,
     )
+    from geoparquet_io.core.parquet_schema import root_schema_columns
 
-    geo_columns = [
-        col
-        for col in get_schema_info(parquet_file)
-        if (col.get("logical_type") or "").startswith(("GeometryType(", "GeographyType("))
-    ]
-    if column is None and prefer is not None:
-        if any(col.get("name") == prefer for col in geo_columns):
-            column = prefer
-    for col in geo_columns:
-        if column is not None and col.get("name") != column:
-            continue
-        logical_type = col.get("logical_type") or ""
-        parsed = parse_geometry_logical_type(logical_type)
-        if not (parsed and "crs" in parsed):
-            continue
-        crs = resolve_crs_reference(parquet_file, parsed["crs"])
-        if crs and not is_default_crs(crs):
-            return crs
-    return None
+    root_columns = root_schema_columns(get_schema_info(parquet_file))
+    target = _native_primary_column(root_columns, column)
+    entry = next((col for col in root_columns if col["name"] == target), None)
+    if entry is None or not _is_native_geo_column(entry):
+        return None
+    parsed = parse_geometry_logical_type(entry.get("logical_type") or "")
+    if not (parsed and "crs" in parsed):
+        return None
+    crs = resolve_crs_reference(parquet_file, parsed["crs"])
+    return crs if crs and not is_default_crs(crs) else None
 
 
 def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
@@ -870,7 +887,15 @@ def reset_crs_disagreement_warnings() -> None:
 
 def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None):
     """
-    Extract CRS (as PROJJSON dict) from a Parquet file.
+    The CRS (as PROJJSON dict) of a Parquet file's primary geometry column.
+
+    This is gpio's one answer to "what CRS is the geometry I am about to work on
+    in". ``geometry_column`` names that column when the caller knows it;
+    otherwise the ``geo`` block's ``primary_column``, else gpio's primary
+    detection over the schema (a standard geometry name, else the first native
+    geometry column). It never answers with whichever column happens to name a
+    CRS first in schema order: that is a secondary's in a file where one comes
+    first, and every command used to read it (#1232, #1248).
 
     ``parquet_file`` must be a **RAW** path/URL: every helper it reaches
     (``get_geo_metadata``, ``get_schema_info``, ``resolve_crs_reference``)
@@ -901,20 +926,16 @@ def extract_crs_from_parquet(parquet_file, verbose=False, geometry_column=None):
     footer either way, and ``gpio check spec`` reads both halves of every file
     regardless.
     """
-    geo_block_crs, primary_col = _crs_from_geo_block(parquet_file)
-    # Compare like with like: the block's answer is about its primary column,
-    # so the logical type it is held against has to be that column's. A valid
-    # file with a second geometry column in another CRS ahead of the primary in
+    geo_block_crs, block_col = _crs_from_geo_block(parquet_file, geometry_column)
+    # Compare like with like: the block's answer is about one column, so the
+    # logical type it is held against has to be that column's. A valid file
+    # with a second geometry column in another CRS ahead of the primary in
     # schema order is otherwise accused of contradicting itself, and a primary
     # that really does disagree is masked by a non-primary that happens to agree.
-    # With no block to name the primary, the caller's geometry column is the
-    # one to read (``geometry_column``): the first non-default CRS in schema
-    # order can belong to a secondary column.
-    native_crs = _crs_from_native_geo_type(
-        parquet_file,
-        column=primary_col if geo_block_crs is not None else None,
-        prefer=None if geo_block_crs is not None else geometry_column,
-    )
+    # With no block, the caller's column or gpio's own primary detection names
+    # the column: the first non-default CRS in schema order can belong to a
+    # secondary (#1232, #1248).
+    native_crs = _crs_from_native_geo_type(parquet_file, column=block_col or geometry_column)
 
     if geo_block_crs is not None:
         if _crs_sources_disagree(geo_block_crs, native_crs):
@@ -1265,12 +1286,18 @@ def transform_geom_sql(geom_expr: str, source_crs, target_crs: str = DEFAULT_TAR
     return f"ST_Transform({geom_expr}, '{src_esc}', '{tgt_esc}')"
 
 
-def source_crs_string(parquet_file, verbose: bool = False) -> str | None:
-    """Detect ``parquet_file``'s CRS as an ``"AUTH:CODE"`` transform string.
+def source_crs_string(
+    parquet_file, verbose: bool = False, geometry_column: str | None = None
+) -> str | None:
+    """Detect ``parquet_file``'s primary CRS as an ``"AUTH:CODE"`` transform string.
 
-    Returns ``None`` for CRS84/default/CRS-less input (no transform needed).
+    ``geometry_column`` is the column the caller is about to transform, when it
+    knows it (see :func:`extract_crs_from_parquet`). Returns ``None`` for
+    CRS84/default/CRS-less input (no transform needed).
     """
-    return crs_string_for_transform(extract_crs_from_parquet(parquet_file, verbose))
+    return crs_string_for_transform(
+        extract_crs_from_parquet(parquet_file, verbose, geometry_column=geometry_column)
+    )
 
 
 def reproject_to_source_sql(geom_expr: str, source_crs, base_crs: str = DEFAULT_TARGET_CRS) -> str:
