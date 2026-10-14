@@ -89,7 +89,9 @@ def test_convert_geojson_accepts_the_string(name, files, tmp_path):
 
 
 def _by_id(table, column: str) -> list:
-    return sorted(zip(table.column("id").to_pylist(), table.column(column).to_pylist(), strict=True))
+    return sorted(
+        zip(table.column("id").to_pylist(), table.column(column).to_pylist(), strict=True)
+    )
 
 
 @pytest.mark.parametrize("name", FREE_FORM)
