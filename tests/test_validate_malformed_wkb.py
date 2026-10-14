@@ -220,3 +220,75 @@ def test_a_check_that_invalidates_the_connection_does_not_poison_the_rest(tmp_pa
     assert coordinates.status == CheckStatus.PASSED, coordinates.message
     assert failed(checks) == ["geometry_types_match_data_geometry"]
     assert len(opened) == 2
+
+
+def _dictionary_file_with_one_bad_value(tmp_path) -> str:
+    """250 dictionary-encoded points (10 distinct) with garbage at row 7.
+
+    DuckDB 1.5.6 evaluates a bare ``ST_GeomFromWKB`` in a CASE branch over the
+    whole dictionary once a file has about 100 rows, so a guard that only
+    protects the WHEN still raises.
+    """
+    values = [wkb_point(i % 10, i % 10) for i in range(250)]
+    values[7] = GARBAGE
+    return write_wkb_file(tmp_path / "dict.parquet", values, ["Point"], use_dictionary=True)
+
+
+def test_dictionary_column_with_a_bad_value_is_counted_on_a_full_scan(tmp_path):
+    path = _dictionary_file_with_one_bad_value(tmp_path)
+    checks = verdicts(path, sample_size=0)
+
+    assert checks["encoding_matches_data_geometry"].message == (
+        '1 of 250 geometries do not match "WKB" encoding, first at row 7 (counting from 0)'
+    )
+    assert failed(checks) == ["encoding_matches_data_geometry"]
+    assert checks["geometry_types_match_data_geometry"].message == (
+        'all geometry types match declared "geometry_types" (249 checked)'
+    )
+    assert not any("Invalid Input Error" in c.message for c in checks.values())
+
+
+def test_geoarrow_struct_declared_wkb_fails_the_encoding_check(tmp_path):
+    """A coordinate struct is not WKB, whatever the ``geo`` block declares."""
+    coords = pa.StructArray.from_arrays(
+        [pa.array([0.0, 1.0, 2.0]), pa.array([0.0, 1.0, 2.0])], names=["x", "y"]
+    )
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+    }
+    table = pa.table({"geometry": coords}).replace_schema_metadata(
+        {b"geo": json.dumps(geo).encode()}
+    )
+    path = tmp_path / "struct_as_wkb.parquet"
+    pq.write_table(table, str(path))
+
+    encoding = verdicts(str(path))["encoding_matches_data_geometry"]
+    assert encoding.status == CheckStatus.FAILED
+    assert encoding.message == (
+        'column "geometry" is declared "WKB" but holds a GeoArrow coordinate struct '
+        "(STRUCT(x DOUBLE, y DOUBLE)), not WKB bytes or a GEOMETRY type"
+    )
+
+
+def test_a_failed_reopen_does_not_hide_the_statement_error(tmp_path, monkeypatch):
+    """The statement's own error is what the check reports, even if the reopen fails."""
+    path = write_wkb_file(tmp_path / "f.parquet", [wkb_point(1, 2)], ["Point"])
+    opens = []
+    real_open = validate._open_validation_connection
+
+    def open_once_then_fail(parquet_file):
+        opens.append(parquet_file)
+        if len(opens) > 1:
+            raise RuntimeError("could not reopen")
+        return _PoisonableConnection(real_open(parquet_file))
+
+    monkeypatch.setattr(validate, "_open_validation_connection", open_once_then_fail)
+    con = validate._ReopeningConnection(path)
+    try:
+        with pytest.raises(duckdb.InternalException, match="Buffer overflow"):
+            con.execute("SELECT 1 /*poison*/")
+    finally:
+        con.close()
+    assert len(opens) == 2

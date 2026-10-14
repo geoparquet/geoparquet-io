@@ -134,7 +134,12 @@ class TestResolveGeometryRead:
         assert read.kind == "wkb"
         assert read.readable
         # A zero-length or unparsable value maps to NULL instead of failing the decode.
-        assert read.expr == f'(CASE WHEN {read.parseable_sql} THEN ST_GeomFromWKB("geometry") END)'
+        # The THEN branch reads a flat vector too. A bare ST_GeomFromWKB there is
+        # evaluated over a whole dictionary and raises on its bad entry.
+        assert read.expr == (
+            f"(CASE WHEN {read.parseable_sql} "
+            'THEN ST_GeomFromWKB(list_extract(["geometry"], 1)) END)'
+        )
         assert 'octet_length("geometry") > 0' in read.parseable_sql
         # TRY() on a flat vector, so one bad row does not null its dictionary neighbours.
         assert 'TRY(ST_GeomFromWKB(list_extract(["geometry"], 1)))' in read.parseable_sql
@@ -322,3 +327,68 @@ def test_check_all_runs_spec_after_spatial_order_raises(null_geometry_file, monk
     assert "spatial exploded" in result.output
     assert "Spec Validation:" in result.output
     assert result.exit_code == 1
+
+
+# =============================================================================
+# A dictionary-encoded column with one bad value, at a size DuckDB vectorizes
+# =============================================================================
+
+
+@pytest.fixture
+def dictionary_file_with_one_bad_value(tmp_path) -> str:
+    """250 dictionary-encoded points (10 distinct) with garbage at row 7."""
+    geoms = [_wkb_point(i % 10, i % 10) for i in range(250)]
+    geoms[7] = b"\x00\x01\x02"
+    table = pa.table({"id": pa.array(range(250)), "geometry": pa.array(geoms, pa.binary())})
+    table = table.replace_schema_metadata({b"geo": json.dumps(_GEO_V11).encode()})
+    path = tmp_path / "dict_bad.parquet"
+    pq.write_table(table, path, use_dictionary=True)
+    return str(path)
+
+
+class TestDictionaryColumnWithBadValue:
+    def test_spatial_order_reads_the_other_rows(self, dictionary_file_with_one_bad_value):
+        result = check_spatial_order(
+            dictionary_file_with_one_bad_value, 10, 1000, False, return_results=True
+        )
+        assert result.get("error") is None
+        assert result["ratio"] is not None
+
+    def test_check_spatial_gives_a_verdict(self, dictionary_file_with_one_bad_value):
+        result = _invoke("check", "spatial", dictionary_file_with_one_bad_value)
+        _assert_no_traceback(result)
+        assert "Invalid Input Error" not in result.output
+        assert "could not run" not in result.output
+
+
+def test_spatial_order_lets_an_interrupt_through(null_geometry_file, monkeypatch):
+    """An interrupt is a duckdb.Error subclass, and it must not become a verdict."""
+    from geoparquet_io.core import check_spatial_order as spatial_mod
+
+    def interrupted(*_args, **_kwargs):
+        raise duckdb.InterruptException("INTERRUPT Error: Interrupted!")
+
+    monkeypatch.setattr(spatial_mod, "_sample_distances", interrupted)
+    with pytest.raises(duckdb.InterruptException):
+        check_spatial_order(null_geometry_file, 10, 1000, False, return_results=True)
+
+
+@pytest.mark.parametrize("subcommand", ["spatial", "all"])
+def test_unreadable_geometry_reason_is_printed_once(missing_column_file, subcommand):
+    result = _invoke("check", subcommand, missing_column_file)
+    _assert_no_traceback(result)
+    assert result.exit_code == 1
+    assert result.output.count('geometry column "nope" not found') == 1, result.output
+
+
+def test_check_spatial_counts_the_unreadable_file_as_failed(missing_column_file, tmp_path):
+    """Two files, so the multi-file summary shows how the error file was counted."""
+    import shutil
+
+    second = tmp_path / "second.parquet"
+    shutil.copy(missing_column_file, second)
+    result = _invoke("check", "spatial", str(tmp_path / "*.parquet"), "--all-files")
+    _assert_no_traceback(result)
+    assert result.exit_code == 1
+    assert "2 failed" in result.output, result.output
+    assert result.output.count('geometry column "nope" not found') == 2, result.output

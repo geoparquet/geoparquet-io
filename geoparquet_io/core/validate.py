@@ -58,7 +58,7 @@ from geoparquet_io.core.geometry_detection import (
     count_geometry_presence,
 )
 from geoparquet_io.core.json_output import dumps_json
-from geoparquet_io.core.logging_config import configure_verbose
+from geoparquet_io.core.logging_config import configure_verbose, debug
 from geoparquet_io.core.parquet_footer import read_footer_kv
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
@@ -1243,6 +1243,11 @@ def _check_encoding_matches_data(
         # A non-NULL count is not a check: a GEOMETRY column decodes lazily, so
         # a count passes bytes it never read (#1064, #1082).
         read = _geometry_read(con, raw_url, geom_col)
+        mismatch = _declared_wkb_mismatch(read, encoding)
+        if mismatch:
+            return ValidationCheck(
+                name=name, status=CheckStatus.FAILED, message=mismatch, category="data_validation"
+            )
         presence = count_geometry_presence(con, raw_url, read, limit_clause)
     except Exception as e:
         return ValidationCheck(
@@ -1252,6 +1257,21 @@ def _check_encoding_matches_data(
             category="data_validation",
         )
     return _wkb_encoding_verdict(name, geom_col, encoding, presence)
+
+
+# How a column that declares WKB may be stored: WKB bytes, or a Parquet
+# GEOMETRY type, which a GeoParquet 2.0 file declares as WKB.
+_WKB_STORAGE_KINDS = frozenset({"wkb", "native"})
+
+
+def _declared_wkb_mismatch(read: GeometryRead, encoding: Any) -> str | None:
+    """Why a column declared WKB does not hold WKB, or None when it does."""
+    if read.kind in _WKB_STORAGE_KINDS:
+        return None
+    return (
+        f'column "{read.column}" is declared "{encoding}" but holds a GeoArrow coordinate '
+        f"struct ({read.duckdb_type}), not WKB bytes or a GEOMETRY type"
+    )
 
 
 def _wkb_encoding_verdict(
@@ -3664,8 +3684,15 @@ class _ReopeningConnection:
             return self._con.execute(*args)
         except duckdb.Error:
             if not self._usable():
-                self._reopen()
+                self._try_reopen()
             raise
+
+    def _try_reopen(self) -> None:
+        """Reopen, but never let a failed reopen replace the statement's error."""
+        try:
+            self._reopen()
+        except Exception as reopen_error:
+            debug(f"Could not reopen the validation connection, {reopen_error}")
 
     def _usable(self) -> bool:
         import duckdb

@@ -205,6 +205,10 @@ class MultiFileCheckRunner:
             click.style(f"  ✗ {stage} could not run on {Path(file_path).name}, {reason}", fg="red")
         )
 
+    def errored(self, file_path: str) -> bool:
+        """Whether a check could not run on ``file_path``."""
+        return any(path == file_path for path, _ in self.check_errors)
+
     def raise_if_any_check_errored(self) -> None:
         """Exit non-zero when a check could not run on some file."""
         if self.check_errors:
@@ -404,20 +408,30 @@ def _spatial_stage(runner: MultiFileCheckRunner, file_path: str, call) -> dict:
     (from core) or raises. Either way it is reported, counted, and handed on
     as a failed, unfixable result, so the spec validation still runs.
     """
-    result = runner.run_stage(file_path, call, _SPATIAL_STAGE)
+    result: dict | None = runner.run_stage(file_path, call, _SPATIAL_STAGE)
     if result is None:
         reason = runner.check_errors[-1][1]
         return {
             "passed": False,
             "ratio": None,
-            "issues": [f"❌ {reason}"],
+            "issues": [],
             "recommendations": [],
             "fix_available": False,
             "error": reason,
         }
     if isinstance(result, dict) and result.get("error"):
         runner.note_check_error(file_path, _SPATIAL_STAGE, result["error"])
+        return _without_issue_lines(result)
     return result
+
+
+def _without_issue_lines(result: dict) -> dict:
+    """A result whose error was already printed by ``note_check_error``.
+
+    The reason is dropped from ``issues`` so ``record_result`` does not print
+    it a second time, and ``failed`` keeps the file counted as failed.
+    """
+    return {**result, "issues": [], "failed": True}
 
 
 def _echo_spec_result(spec_result, spec_details: bool) -> None:
@@ -647,7 +661,13 @@ def check_all(
                 combined_issues.append(f"Spec validation: {spec_result.failed_count} checks failed")
             runner.record_result(
                 file_path,
-                {"passed": combined_passed, "issues": combined_issues, **structure_results},
+                {
+                    "passed": combined_passed,
+                    "issues": combined_issues,
+                    **structure_results,
+                    # A check that could not run is a failure, already printed.
+                    "failed": bool(structure_results.get("failed")) or runner.errored(file_path),
+                },
             )
 
             # If --fix flag is set, apply fixes
@@ -796,7 +816,7 @@ def check_spatial(
             if result.get("error"):
                 # Could not read the geometry, so there is no verdict and no fix.
                 runner.note_check_error(file_path, _SPATIAL_STAGE, result["error"])
-                runner.record_result(file_path, result)
+                runner.record_result(file_path, _without_issue_lines(result))
                 continue
             ratio = result["ratio"]
             passed = result.get("passed", ratio < 0.5 if ratio is not None else True)

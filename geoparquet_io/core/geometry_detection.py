@@ -359,8 +359,11 @@ class GeometryRead:
         """
         if self.kind == "wkb":
             # CASE, not a WHERE conjunct, so no evaluation order can hand a bad
-            # value to ST_GeomFromWKB.
-            return f"(CASE WHEN {self.parseable_sql} THEN ST_GeomFromWKB({self.quoted}) END)"
+            # value to ST_GeomFromWKB. The THEN branch reads a flat vector as
+            # well. On a dictionary vector DuckDB evaluates a bare call over the
+            # whole dictionary, ignoring the CASE, and raises on its bad entry.
+            flat = f"list_extract([{self.quoted}], 1)"
+            return f"(CASE WHEN {self.parseable_sql} THEN ST_GeomFromWKB({flat}) END)"
         if self.kind == "geoarrow":
             return self._geoarrow_point_expr()
         return self.quoted

@@ -396,6 +396,9 @@ def check_spatial_order(
         averages = _sample_distances(
             con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
         )
+    except duckdb.InterruptException:
+        # A subclass of duckdb.Error, and a user stopping the run, not a verdict.
+        raise
     except duckdb.Error as e:
         averages = f"could not read geometry column {geometry_column!r} ({e})"
     finally:
