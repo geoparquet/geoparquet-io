@@ -426,9 +426,11 @@ def convert(
                mirroring repair_geometry). False raises an actionable error instead.
         max_angle_deg: Maximum angular step per stroked arc segment in degrees
                (default: 4.0, GDAL's OGR_ARC_STEPSIZE default).
-        encoding: Source text encoding for sources that cannot say, e.g. a
-               shapefile DBF without ``.cpg`` or a Latin-1 CSV (``ISO-8859-1``,
-               ``UTF-8``, ...). Not for Parquet.
+        encoding: Source text encoding, e.g. ``CP932`` for a Shift_JIS
+               shapefile DBF without ``.cpg`` or ``ISO-8859-1`` for a Latin-1
+               CSV. A shapefile's ``.cpg`` or DBF language driver id is used
+               when this is None. Text that is not UTF-8 and has no encoding
+               named raises ``GeoParquetError``. Not for Parquet.
         force_2d: Drop Z and M coordinates (``ST_Force2D``) so a 3D source
                becomes 2D geometry (default: False).
 

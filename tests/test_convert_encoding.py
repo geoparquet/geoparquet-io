@@ -27,9 +27,9 @@ from geoparquet_io.core.convert import (
     convert_to_geoparquet,
     csv_encoding,
     read_spatial_to_arrow,
-    source_open_options,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.source_text import plan_source_text
 
 DATA = Path(__file__).parent / "data"
 LATIN1_NAME = "Lääne maakond"
@@ -87,10 +87,10 @@ class TestSourceEncoding:
             _build_st_read_expr("a.shp", open_options=["ENCODING='x'; DROP TABLE t"])
 
     def test_source_open_options_validates_encoding_name(self):
-        assert source_open_options(None) is None
-        assert source_open_options("ISO-8859-1") == ["ENCODING=ISO-8859-1"]
+        assert plan_source_text("a.gpkg", None).open_options is None
+        assert plan_source_text("a.gpkg", "ISO-8859-1").open_options == ["ENCODING=ISO-8859-1"]
         with pytest.raises(InvalidParameterError):
-            source_open_options("latin 1; drop")
+            plan_source_text("a.gpkg", "latin 1; drop")
 
     def test_latin1_dbf_without_encoding_fails_or_is_recoded(self, latin1_shapefile, tmp_path):
         """Whether the bare read fails depends on the GDAL build behind DuckDB.

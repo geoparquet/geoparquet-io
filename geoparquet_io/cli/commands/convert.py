@@ -179,9 +179,9 @@ def convert(ctx):
 @click.option(
     "--encoding",
     default=None,
-    help="Source text encoding for sources that cannot say, e.g. a shapefile DBF without "
-    ".cpg or a Latin-1 CSV (ISO-8859-1, UTF-8, ...). Passed to GDAL as open option ENCODING, "
-    "or to the CSV reader. Not for Parquet.",
+    help="Source text encoding, e.g. CP932 for a Shift_JIS shapefile DBF without .cpg or "
+    "ISO-8859-1 for a Latin-1 CSV. A shapefile's .cpg or DBF language driver id is used "
+    "when this is not given. Not for Parquet.",
 )
 @click.option(
     "--force-2d",

@@ -613,19 +613,31 @@ by the second attempt or, if that fails too, left as it was.
 
 ### Source Text Encoding
 
-Some sources cannot say how their text is encoded. A shapefile whose DBF has no
-`.cpg` sidecar, or a CSV saved from a Windows spreadsheet, reaches DuckDB byte
-for byte: the first accented value ("Lääne maakond") is then invalid UTF-8 and
-the conversion fails with no way to name what the file actually is. `--encoding`
-names it. For GDAL formats it is passed as the `ENCODING` open option; for
-CSV/TSV it goes to DuckDB's CSV reader. Parquet carries UTF-8 already, so the
-option is refused there.
+Every string gpio writes is valid UTF-8, or the conversion stops. A shapefile
+attribute table (DBF) is often in a Windows code page instead, such as Shift_JIS
+(CP932) for Japanese data, GBK (CP936) for Chinese, CP1251 for Cyrillic or
+CP1252 for Western European text.
+
+For a shapefile, gpio finds the encoding the way GDAL does. It takes
+`--encoding` first, then the `.cpg` sidecar, then the language driver id in the
+DBF header. The GDAL that DuckDB bundles can only recode ISO-8859-1 by itself,
+so for any other code page gpio reads the raw bytes and decodes them with
+Python's codec of that name. Values and field names both come out as the
+original text. A character cut in half at a DBF field's width becomes U+FFFD,
+with a warning.
+
+When nothing names the encoding and a string is not UTF-8, the conversion
+fails. The error names the column and asks for `--encoding`. Nothing is
+written, so a file no reader can open is never reported as a success.
 
 === "CLI"
 
     <!-- doctest: skip="needs a shapefile whose DBF is not UTF-8" -->
     ```bash
-    # Shapefile with a Windows-ANSI attribute table and no .cpg
+    # Japanese shapefile with no .cpg sidecar
+    gpio convert tokyo.shp tokyo.parquet --encoding CP932
+
+    # Western European shapefile with no .cpg sidecar
     gpio convert ehak.shp ehak.parquet --encoding ISO-8859-1
 
     # Latin-1 CSV with a WKT column
@@ -640,16 +652,25 @@ option is refused there.
 
     <!-- doctest: skip="needs a shapefile whose DBF is not UTF-8" -->
     ```python
+    gpio.convert("tokyo.shp", encoding="CP932").write("tokyo.parquet")
     gpio.convert("ehak.shp", encoding="ISO-8859-1").write("ehak.parquet")
     gpio.convert("points.csv", encoding="ISO-8859-1").write("points.parquet")
     ```
 
-Use the encoding names GDAL knows (`ISO-8859-1`, `CP1252`, `UTF-8`, ...). The
-CSV reader decodes UTF-8, UTF-16 and Latin-1 on its own; the common names are
-translated for it (`ISO-8859-1` and `latin1` both reach it as Latin-1). Every
-other encoding, CP1252 included, comes from DuckDB's `encodings` extension,
-which gpio loads on demand; offline, without a cached copy, the error names the
-extension.
+A shapefile with a `.cpg` or a language driver id needs no option. Names follow
+Python's codec registry, so `CP932`, `Shift_JIS`, `GBK`, `CP936`, `CP1251`,
+`CP1252` and `latin1` all work. `Shift_JIS` and `GB2312` are read as their
+Windows supersets CP932 and GBK, which is what files labeled that way hold.
+gpio does not fetch the `.cpg` of a remote shapefile, so pass `--encoding` for
+one that is not UTF-8. For other GDAL formats the name is passed to GDAL as its
+`ENCODING` open option.
+
+The CSV reader decodes UTF-8, UTF-16 and Latin-1 on its own, and the common
+names are translated for it (`ISO-8859-1` and `latin1` both reach it as
+Latin-1). Every other encoding, CP1252 included, comes from DuckDB's
+`encodings` extension, which gpio loads on demand. Offline, without a cached
+copy, the error names the extension. Parquet carries UTF-8 already, so the
+option is refused there.
 
 ### Skip Hilbert Ordering
 

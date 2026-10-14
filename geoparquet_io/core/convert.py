@@ -67,6 +67,15 @@ from geoparquet_io.core.remote import (
     validate_profile_for_urls,
 )
 from geoparquet_io.core.sizing import format_size
+from geoparquet_io.core.source_text import (
+    SourceText,
+    check_arrow_text,
+    decoded_names,
+    encoding_name,
+    plan_source_text,
+    text_error,
+    text_safe_expr,
+)
 from geoparquet_io.core.write_funnels import read_preserved_kv_metadata, write_parquet_with_metadata
 
 
@@ -109,14 +118,6 @@ def _validate_open_option(option: str) -> str:
     return option
 
 
-def _encoding_name(encoding: str) -> str:
-    """Strip a character encoding name and refuse anything that is not one."""
-    encoding = encoding.strip()
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", encoding):
-        raise InvalidParameterError("encoding", f"{encoding!r} is not a character encoding name")
-    return encoding
-
-
 def validate_source_encoding(encoding: str | None, *, is_parquet: bool) -> None:
     """Check a requested source text encoding before any work starts.
 
@@ -128,24 +129,11 @@ def validate_source_encoding(encoding: str | None, *, is_parquet: bool) -> None:
     """
     if not encoding:
         return
-    _encoding_name(encoding)
+    encoding_name(encoding)
     if is_parquet:
         raise InvalidParameterError(
             "encoding", "only applies to sources GDAL or the CSV reader decode, not Parquet"
         )
-
-
-def source_open_options(encoding: str | None) -> list[str] | None:
-    """GDAL open options for a source text encoding, or None when none is requested.
-
-    Shapefile DBFs without a ``.cpg`` (and other drivers that cannot tell) are
-    read by GDAL byte for byte, so a Windows-1252 or Latin-1 attribute table
-    reaches DuckDB as invalid UTF-8 and the conversion fails on the first
-    accented value. GDAL's ``ENCODING`` open option recodes at the driver.
-    """
-    if not encoding:
-        return None
-    return [f"ENCODING={_encoding_name(encoding)}"]
 
 
 #: DuckDB's CSV reader spells its encodings its own way; keyed by the codec
@@ -198,7 +186,7 @@ def csv_encoding(encoding: str | None) -> str | None:
     """
     if not encoding:
         return None
-    encoding = _encoding_name(encoding)
+    encoding = encoding_name(encoding)
     try:
         canonical = codecs.lookup(encoding).name
     except LookupError:
@@ -521,9 +509,10 @@ def _detect_geometry_column(
     ``input_file`` is RAW: ``detect_parquet_geometry_column`` escapes its own
     argument, and ``_build_st_read_expr`` escapes at the SQL boundary.
 
-    ``columns_out``, when a list, receives every column name a non-parquet
+    ``columns_out``, when a list, receives every ``(name, type)`` a non-parquet
     source binds to: the same ``LIMIT 0`` bind answers the free bbox name
-    (#1079), and for GeoJSON a second bind would be a second full GDAL parse.
+    (#1079) and which columns hold text to decode or check (#1242), and for
+    GeoJSON a second bind would be a second full GDAL parse.
     """
 
     if verbose:
@@ -538,9 +527,10 @@ def _detect_geometry_column(
     table_expr = _build_st_read_expr(
         input_file, layer, open_options=open_options, column_aliases=column_aliases
     )
-    names = [col[0] for col in con.execute(f"SELECT * FROM {table_expr} LIMIT 0").description]
+    description = con.execute(f"SELECT * FROM {table_expr} LIMIT 0").description
+    names = [col[0] for col in description]
     if columns_out is not None:
-        columns_out[:] = names
+        columns_out[:] = [(col[0], str(col[1])) for col in description]
 
     for name in names:
         if name.lower() in STANDARD_GEOMETRY_NAMES:
@@ -1627,7 +1617,7 @@ def _calculate_csv_bounds(con, geom_info, verbose):
 
 
 def _build_plain_select_query(
-    input_url, is_parquet=False, is_csv=False, delimiter=None, encoding=None
+    input_url, is_parquet=False, is_csv=False, delimiter=None, encoding=None, con=None
 ):
     """Build a SELECT * query for non-geometry file conversion.
 
@@ -1641,6 +1631,8 @@ def _build_plain_select_query(
         delimiter: CSV delimiter (only used if is_csv=True)
         encoding: Source text encoding (``--encoding``); the attribute table
             still has to decode when there is no geometry to convert.
+        con: The connection the query will run on. When given, a GDAL
+            source's text is decoded or checked there (#1242).
 
     Returns:
         SQL SELECT query string
@@ -1651,8 +1643,14 @@ def _build_plain_select_query(
         csv_read = _build_csv_read_expr(input_url, delimiter, encoding=encoding)
         return f"SELECT * FROM {csv_read}"
     # Spatial formats (GeoJSON, Shapefile, GeoPackage, etc.) - use ST_Read
-    st_read = _build_st_read_expr(input_url, open_options=source_open_options(encoding))
-    return f"SELECT * FROM {st_read}"
+    return f"SELECT * FROM {_plain_st_read_expr(input_url, encoding, con=con)}"
+
+
+def _plain_st_read_expr(input_file, encoding, layer=None, con=None):
+    """``ST_Read`` of a source with no geometry, its text decoded or checked on ``con``."""
+    text = plan_source_text(input_file, encoding)
+    expr = _build_st_read_expr(input_file, layer, open_options=text.open_options)
+    return expr if con is None else text_safe_expr(con, expr, text)
 
 
 #: Warned when Hilbert ordering is skipped for want of an envelope (#649). Both
@@ -2091,6 +2089,38 @@ def _bounds_with_curve_fallback(
         return bounds, table_expr
 
 
+def _text_safe_source(con, input_file, layer, table_expr, text, column_aliases, columns):
+    """The source read with its text decoded or checked, or ``table_expr`` as it was.
+
+    A None ``table_expr`` means the bare ``ST_Read``; it stays None when there
+    is nothing to wrap, so the query builders keep building their own.
+    """
+    base = table_expr or _build_st_read_expr(
+        input_file, layer, open_options=text.open_options, column_aliases=column_aliases
+    )
+    safe = text_safe_expr(con, base, text, columns)
+    return table_expr if safe is base else safe
+
+
+def _log_read_plan(secondary_columns, skip_bbox, preserve_existing_bbox, skip_hilbert):
+    """Say, in verbose mode, what the spatial conversion's read pass will do."""
+    if secondary_columns:
+        debug(f"Preserving secondary geometry columns: {secondary_columns}")
+    if skip_bbox:
+        msg = "Reading input (skipping bbox for native geo types)..."
+        if not skip_hilbert:
+            msg = "Pass 1: Reading input and applying Hilbert ordering (skipping bbox)..."
+    elif preserve_existing_bbox:
+        msg = "Reading input (preserving existing bbox)..."
+        if not skip_hilbert:
+            msg = "Pass 1: Reading input and applying Hilbert ordering (preserving bbox)..."
+    else:
+        msg = "Reading input and adding bbox column..."
+        if not skip_hilbert:
+            msg = "Pass 1: Reading input, adding bbox, and applying Hilbert ordering..."
+    debug(msg)
+
+
 def _convert_spatial_path(
     con,
     input_file,
@@ -2135,8 +2165,10 @@ def _convert_spatial_path(
     """
 
     # ``encoding`` was validated against the input type by the caller, before
-    # any work started; here it only has to become GDAL open options.
-    open_options = source_open_options(encoding)
+    # any work started; here it becomes GDAL open options, plus a codec when
+    # the source's code page is one GDAL cannot recode (#1242).
+    text = SourceText() if is_parquet else plan_source_text(input_file, encoding)
+    open_options = text.open_options
 
     # Use multi-geometry detection for parquet files
     column_aliases = None
@@ -2251,21 +2283,7 @@ def _convert_spatial_path(
         skip_hilbert = bounds is None
 
     if verbose:
-        if secondary_columns:
-            debug(f"Preserving secondary geometry columns: {secondary_columns}")
-        if skip_bbox:
-            msg = "Reading input (skipping bbox for native geo types)..."
-            if not skip_hilbert:
-                msg = "Pass 1: Reading input and applying Hilbert ordering (skipping bbox)..."
-        elif preserve_existing_bbox:
-            msg = "Reading input (preserving existing bbox)..."
-            if not skip_hilbert:
-                msg = "Pass 1: Reading input and applying Hilbert ordering (preserving bbox)..."
-        else:
-            msg = "Reading input and adding bbox column..."
-            if not skip_hilbert:
-                msg = "Pass 1: Reading input, adding bbox, and applying Hilbert ordering..."
-        debug(msg)
+        _log_read_plan(secondary_columns, skip_bbox, preserve_existing_bbox, skip_hilbert)
 
     # When computing a bbox, its name must not collide with an input column
     # already named "bbox" that check_bbox_structure rightly rejected (a string
@@ -2274,6 +2292,11 @@ def _convert_spatial_path(
     # every source column, so the source's names are the ones that can collide:
     # a non-parquet source already bound them during detection (the linearized
     # view is a different source, so it is bound again).
+    if not is_parquet:
+        table_expr = _text_safe_source(
+            con, input_file, layer, table_expr, text, column_aliases, source_columns
+        )
+        source_columns = decoded_names([name for name, _ in source_columns], text)
     bbox_name = "bbox"
     if not skip_bbox and not preserve_existing_bbox:
         if is_parquet or linearized:
@@ -2527,9 +2550,7 @@ def read_spatial_to_arrow(
                 table_expr = _build_csv_read_expr(input_url, delimiter, encoding=encoding)
             else:
                 # Spatial formats (GeoJSON, Shapefile, GeoPackage, etc.)
-                table_expr = _build_st_read_expr(
-                    input_file, layer, open_options=source_open_options(encoding)
-                )
+                table_expr = _plain_st_read_expr(input_file, encoding, layer, con=con)
             arrow_table = con.execute(f"SELECT * FROM {table_expr}").arrow().read_all()
             return arrow_table, None, None
 
@@ -2564,6 +2585,9 @@ def read_spatial_to_arrow(
             from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
 
             raise GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e))) from e
+        refused = text_error(e)
+        if refused is not None:
+            raise refused from e
         raise GeoParquetError(f"Reading failed: {str(e)}") from e
 
     finally:
@@ -2691,15 +2715,17 @@ def _read_spatial_to_arrow(
     the source text encoding (GDAL open option ``ENCODING``); ``force_2d``
     drops Z/M from the geometry.
     """
-    open_options = source_open_options(encoding)
+    text = SourceText() if is_parquet else plan_source_text(input_file, encoding)
+    open_options = text.open_options
     column_aliases = None
+    columns = []
     if is_parquet:
         # Already detected by the caller for a Parquet source (see
         # read_spatial_to_arrow); detecting again costs a second footer read.
         geom_column = parquet_geom_column
     else:
         geom_column, column_aliases = _detect_spatial_geometry(
-            con, input_file, verbose, layer, open_options
+            con, input_file, verbose, layer, open_options, columns_out=columns
         )
     if geom_column is None:
         warn("No geometry column found in input file. Reading as plain table.")
@@ -2728,8 +2754,13 @@ def _read_spatial_to_arrow(
                 open_options=open_options,
                 force_2d=force_2d,
             )
-        table_expr = _build_st_read_expr(
-            input_file, layer, open_options=open_options, column_aliases=column_aliases
+        table_expr = text_safe_expr(
+            con,
+            _build_st_read_expr(
+                input_file, layer, open_options=open_options, column_aliases=column_aliases
+            ),
+            text,
+            columns,
         )
 
     # Convert geometry to WKB for geoarrow compatibility
@@ -2841,6 +2872,7 @@ class _LinearizedRead:
         wkb_type = self.schema.field(idx).type
         for batch in self._reader:
             columns = list(batch.columns)
+            check_arrow_text(batch)
             columns[idx] = pa.array(
                 [self._linearize(value) for value in batch.column(idx).to_pylist()],
                 type=wkb_type,
@@ -3317,6 +3349,7 @@ def convert_to_geoparquet(
                     is_csv=is_csv,
                     delimiter=delimiter,
                     encoding=encoding,
+                    con=con,
                 )
                 output_version = "parquet-geo-only"
                 output_crs = None
@@ -3443,6 +3476,9 @@ def convert_to_geoparquet(
             from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
 
             raise GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e))) from e
+        refused = text_error(e)
+        if refused is not None:
+            raise refused from e
         raise GeoParquetError(f"Conversion failed: {str(e)}") from e
 
     finally:

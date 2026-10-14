@@ -1037,6 +1037,36 @@ def _detect_crs_from_filegdb(gdb_path, con, verbose=False):
     return None
 
 
+#: The CRS DuckDB spatial attaches to ``ST_Read``'s geometry column type.
+_GEOMETRY_TYPE_CRS = re.compile(r"GEOMETRY\('(.+)'\)", re.DOTALL)
+
+
+def _crs_from_read_type(input_file, con):
+    """The CRS in the type of ``ST_Read``'s geometry column, or None.
+
+    ``ST_Read_Meta`` returns the field names with the layer and refuses the
+    whole layer when one is not UTF-8, as in a Shift_JIS shapefile (#1242).
+    ``ST_Read`` read as ISO-8859-1 binds any bytes, and its geometry column
+    type carries the CRS as an authority code or as PROJJSON.
+    """
+    try:
+        description = con.execute(
+            f"SELECT * FROM ST_Read({sql_path(input_file)}, "
+            "open_options=['ENCODING=ISO-8859-1']) LIMIT 0"
+        ).description
+    except Exception:
+        return None
+    for column in description:
+        match = _GEOMETRY_TYPE_CRS.fullmatch(str(column[1]))
+        if match is None:
+            continue
+        value = match.group(1).replace("''", "'")
+        if value.startswith("{"):
+            return json.loads(value)
+        return parse_crs_string_to_projjson(value)
+    return None
+
+
 def detect_crs_from_spatial_file(input_file, con, verbose=False):
     """Detect CRS from a spatial file (GeoJSON, GPKG, Shapefile, FileGDB)."""
     try:
@@ -1067,6 +1097,9 @@ def detect_crs_from_spatial_file(input_file, con, verbose=False):
     except Exception as e:
         if verbose:
             warn(f"Could not detect CRS from spatial file: {e}")
+        crs = _crs_from_read_type(input_file, con)
+        if crs is not None:
+            return crs
 
     if input_file.rstrip("/\\").lower().endswith(".gdb"):
         if verbose:
