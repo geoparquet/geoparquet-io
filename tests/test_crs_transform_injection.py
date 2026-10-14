@@ -7,9 +7,10 @@ misreading them as the OGC:CRS84 default). Before that, only quote-free
 ``'{source_crs}'`` interpolations in the ST_Transform sinks were safe by
 accident. Two layers now enforce what used to be incidental:
 
-1. :func:`crs_string_for_transform` -- the choke point every "give me a CRS
-   string for ST_Transform" helper funnels through -- only ever returns the
-   strict ``<authority>:<code>`` shape. A free-form value stays available for
+1. :func:`transform_source_crs` -- the one resolver every ST_Transform source
+   funnels through (#1264) -- only ever returns the strict
+   ``<authority>:<code>`` shape or PROJJSON that pyproj wrote itself, and
+   raises for anything else. A free-form value stays available for
    validation, but never becomes a transform argument.
 2. The ST_Transform sinks (``core/reproject.py``, ``core/geojson_stream.py``)
    escape whatever they interpolate via ``_escape_sql_string``, because the
@@ -30,7 +31,11 @@ import pyarrow.parquet as pq
 import pytest
 from pyproj import CRS as PyprojCRS
 
-from geoparquet_io.core.crs_utils import crs_string_for_transform
+from geoparquet_io.core.crs_utils import (
+    UnresolvableCRSError,
+    crs_authority_code,
+    transform_source_crs,
+)
 from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
 from geoparquet_io.core.duckdb_utils import _escape_sql_string
 from geoparquet_io.core.geojson_stream import _build_feature_query
@@ -81,35 +86,40 @@ def _write_geo_type_crs_file(tmp_path, name: str, parquet_crs: str, metadata_crs
 # =============================================================================
 
 
-class TestCrsStringForTransformRejectsFreeform:
+class TestTransformSourceRejectsFreeform:
     @pytest.mark.parametrize("value", INJECTION_CRS_VALUES)
-    def test_the_verified_probe_values_return_none(self, value):
-        assert crs_string_for_transform(value) is None
+    def test_the_verified_probe_values_raise(self, value):
+        with pytest.raises(UnresolvableCRSError):
+            transform_source_crs(value)
 
     @pytest.mark.parametrize("value", FREEFORM_CRS_VALUES)
-    def test_free_form_values_return_none(self, value):
-        assert crs_string_for_transform(value) is None
+    def test_free_form_values_raise(self, value):
+        with pytest.raises(UnresolvableCRSError):
+            transform_source_crs(value)
 
-    def test_a_projjson_dict_with_an_injected_code_returns_none(self):
+    @pytest.mark.parametrize("value", INJECTION_CRS_VALUES + FREEFORM_CRS_VALUES)
+    def test_free_form_values_name_no_authority_code(self, value):
+        assert crs_authority_code(value) is None
+
+    def test_a_projjson_dict_with_an_injected_code_raises(self):
         crs = {"id": {"authority": "EPSG", "code": "'||(SELECT '4326')||'"}}
-        assert crs_string_for_transform(crs) is None
+        assert crs_authority_code(crs) is None
+        with pytest.raises(UnresolvableCRSError):
+            transform_source_crs(crs)
 
-    def test_a_projjson_dict_with_an_injected_authority_returns_none(self):
+    def test_a_projjson_dict_with_an_injected_authority_raises(self):
         crs = {"id": {"authority": "EPSG'||x||'", "code": 3857}}
-        assert crs_string_for_transform(crs) is None
-
-    def test_never_returns_a_string_containing_a_quote(self):
-        for value in INJECTION_CRS_VALUES:
-            result = crs_string_for_transform(value)
-            assert result is None or "'" not in result
+        assert crs_authority_code(crs) is None
+        with pytest.raises(UnresolvableCRSError):
+            transform_source_crs(crs)
 
     def test_legitimate_authority_codes_still_pass(self):
-        assert crs_string_for_transform("EPSG:3857") == "EPSG:3857"
-        assert crs_string_for_transform("EPSG:28992") == "EPSG:28992"
+        assert transform_source_crs("EPSG:3857") == "EPSG:3857"
+        assert transform_source_crs("EPSG:28992") == "EPSG:28992"
 
     def test_a_legitimate_projjson_dict_still_passes(self):
         crs = {"id": {"authority": "EPSG", "code": 5070}}
-        assert crs_string_for_transform(crs) == "EPSG:5070"
+        assert transform_source_crs(crs) == "EPSG:5070"
 
 
 # =============================================================================

@@ -406,37 +406,40 @@ def _write_file_output(
 def _detect_transform_source_crs(
     input_path: str, metadata: dict | None, is_stream: bool
 ) -> str | None:
-    """Detect the input's CRS as an ``ST_Transform`` source string, or ``None``.
+    """Detect the input's CRS as an ``ST_Transform`` source, or ``None``.
 
     Streamed input carries its CRS in the Arrow ``geo`` schema metadata; file
-    input is read directly. Best-effort: detection runs for every caller (incl.
-    ones whose query fn ignores CRS), so a failure must never break the transform.
-    ``None`` means CRS84/CRS-less input (no reprojection needed).
+    input is read directly. ``None`` means lon/lat or CRS-less input (no
+    reprojection needed). A CRS that cannot be resolved raises
+    :class:`crs_utils.UnresolvableCRSError` rather than being keyed as lon/lat
+    (#1258), so this runs only for a query fn that transforms.
     """
-
-    try:
-        if is_stream:
-            return crs_string_from_geo_meta(parse_geo_metadata_from_schema(metadata), None)
-        return source_crs_string(input_path)
-    except Exception:
-        return None
+    if is_stream:
+        return crs_string_from_geo_meta(parse_geo_metadata_from_schema(metadata), None)
+    return source_crs_string(input_path)
 
 
-def _call_transform_query_fn(transform_query_fn, source, con, source_crs):
-    """Call the query builder, passing ``source_crs`` only if it accepts it.
+def _wants_source_crs(transform_query_fn) -> bool:
+    """True when the query builder takes a third ``source_crs`` parameter.
 
-    Keeps the ``(source, con)`` contract for existing callers (sort, bbox, …)
-    while letting CRS-aware builders opt in with a third ``source_crs`` parameter.
+    Keeps the ``(source, con)`` contract for existing callers (sort, bbox, ...)
+    while letting CRS-aware builders opt in.
     """
     import inspect
 
     try:
         params = inspect.signature(transform_query_fn).parameters
     except (TypeError, ValueError):
+        return False
+    return len(params) >= 3
+
+
+def _build_transform_query(transform_query_fn, source, con, input_path, metadata, is_stream):
+    """Call the query builder, resolving the input CRS only when it takes one."""
+    if not _wants_source_crs(transform_query_fn):
         return transform_query_fn(source, con)
-    if len(params) >= 3:
-        return transform_query_fn(source, con, source_crs)
-    return transform_query_fn(source, con)
+    source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
+    return transform_query_fn(source, con, source_crs)
 
 
 def execute_transform(
@@ -495,8 +498,9 @@ def execute_transform(
         # Detect the input's CRS once so a transform-aware query fn can reproject
         # non-CRS84 input (e.g. lon/lat grid keying, #525). Streamed input is an
         # Arrow IPC stream, so its CRS comes from the schema metadata, not a file.
-        source_crs = _detect_transform_source_crs(input_path, metadata, is_stream)
-        query = _call_transform_query_fn(transform_query_fn, source, con, source_crs)
+        query = _build_transform_query(
+            transform_query_fn, source, con, input_path, metadata, is_stream
+        )
 
         if dry_run:
             warn("\n=== DRY RUN MODE - SQL that would be executed ===\n")

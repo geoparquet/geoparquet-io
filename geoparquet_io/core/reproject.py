@@ -21,10 +21,12 @@ from geoparquet_io.core.crs_utils import (
     apply_target_crs_to_geo_meta,
     crs_is_explicitly_null,
     extract_crs_from_parquet,
+    extract_crs_from_table,
     geoparquet_crs_is_null,
     is_geographic_crs,
     parse_crs_string_to_projjson,
-    resolve_crs_to_string,
+    transform_source_crs,
+    transform_source_label,
 )
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import (
@@ -100,26 +102,17 @@ def _detect_geometry_column_from_table(table: pa.Table) -> str:
     return carried_geometry_column(geo_meta, table.schema.names) or "geometry"
 
 
-def _resolve_crs_to_string(crs_info) -> str | None:
-    """Resolve CRS info (PROJJSON dict or string) to a CRS string for ST_Transform.
-
-    Thin wrapper over :func:`crs_utils.resolve_crs_to_string` (single source of
-    truth) kept for the module-local callers below.
-    """
-    return resolve_crs_to_string(crs_info)
-
-
 def _detect_crs_from_table(table: pa.Table, geom_col: str) -> str:
-    """Detect CRS from table metadata.
+    """Detect the ``ST_Transform`` source CRS of ``geom_col`` in ``table``.
 
-    Args:
-        table: PyArrow Table with geo metadata
-        geom_col: Geometry column name
+    Reads the ``geo`` block, then the GeoArrow field a native-geo-only table
+    carries its CRS on (#1262), and resolves it through
+    :func:`transform_source_crs`, which raises for a CRS it cannot use.
 
     Returns:
-        CRS string like "EPSG:4326" or PROJJSON string for ST_Transform
+        ``"AUTH:CODE"``, canonical PROJJSON, or ``"EPSG:4326"`` when absent
     """
-    resolved = _resolve_crs_to_string(_table_geo_column_meta(table, geom_col).get("crs"))
+    resolved = transform_source_crs(extract_crs_from_table(table, geom_col))
     # Default to WGS84 per GeoParquet spec
     return resolved or "EPSG:4326"
 
@@ -332,7 +325,7 @@ def _detect_source_crs(input_path: str, verbose: bool, geom_col: str | None = No
     """
     crs_info = extract_crs_from_parquet(input_path, verbose=verbose, geometry_column=geom_col)
 
-    resolved = _resolve_crs_to_string(crs_info)
+    resolved = transform_source_crs(crs_info)
     if resolved:
         return resolved
 
@@ -558,17 +551,14 @@ def reproject_impl(
         geom_col = find_primary_geometry_column(read_source, verbose=verbose)
         log(f"Geometry column: {geom_col}")
 
-        # Detect source CRS from metadata
-        detected_crs = _detect_source_crs(read_source, verbose, geom_col)
-
-        # Use override if provided, otherwise use detected
+        # An explicit --src-crs wins without reading the file's CRS, so it also
+        # works around one that cannot be resolved (#1258).
         if source_crs is not None:
-            info(f"Detected CRS: {detected_crs}")
-            info(f"Overriding with source CRS: {source_crs}")
+            info(f"Using source CRS: {source_crs}")
             effective_source_crs = source_crs
         else:
-            effective_source_crs = detected_crs
-            log(f"Source CRS: {effective_source_crs}")
+            effective_source_crs = _detect_source_crs(read_source, verbose, geom_col)
+            log(f"Source CRS: {transform_source_label(effective_source_crs)}")
 
         log(f"Target CRS: {target_crs}")
 
@@ -744,7 +734,10 @@ def reproject_impl(
                     )
 
         if verbose:
-            success(f"Reprojected {count:,} features from {effective_source_crs} to {target_crs}")
+            success(
+                f"Reprojected {count:,} features from "
+                f"{transform_source_label(effective_source_crs)} to {target_crs}"
+            )
 
         return ReprojectResult(
             output_path=out_path,
@@ -807,8 +800,9 @@ def _reproject_streaming(
             geom_col = find_primary_geometry_column(working_file, verbose=False)
 
             # Detect source CRS
-            detected_crs = _detect_source_crs(working_file, verbose=False, geom_col=geom_col)
-            effective_source_crs = source_crs if source_crs else detected_crs
+            effective_source_crs = source_crs or _detect_source_crs(
+                working_file, verbose=False, geom_col=geom_col
+            )
 
             # Check for existing bbox column to exclude (will be regenerated)
             bbox_col = _get_bbox_column_name(working_file, verbose=False)
@@ -897,7 +891,10 @@ def _reproject_streaming(
             )
 
             if not should_stream_output(output_path):
-                success(f"Reprojected from {effective_source_crs} to {target_crs}: {output_path}")
+                success(
+                    f"Reprojected from {transform_source_label(effective_source_crs)} "
+                    f"to {target_crs}: {output_path}"
+                )
 
         finally:
             con.close()

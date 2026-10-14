@@ -289,7 +289,7 @@ def horizontal_crs(crs):
     - A PROJJSON CompoundCRS with one horizontal component becomes that
       component (its ``$schema`` is kept). The vertical component described
       nothing any more, and a compound CRS has no id of its own, so
-      ``crs_string_for_transform`` would have returned None for the 2D file.
+      ``crs_authority_code`` would have returned None for the 2D file.
     - A single three-axis CRS (a 3D geographic one such as EPSG:4979) is
       demoted with pyproj to its 2D counterpart (EPSG:4326).
 
@@ -653,34 +653,6 @@ def _wrap_query_with_crs(
 WGS84_TRANSFORM_TARGET = "OGC:CRS84"
 
 
-def resolve_crs_to_string(crs_info) -> str | None:
-    """Resolve CRS info (PROJJSON dict or string) to a CRS string for ST_Transform.
-
-    Tries the authority identifier first, then pyproj resolution, then the raw
-    PROJJSON. Returns None if ``crs_info`` is falsy or unresolvable.
-    """
-    if not crs_info:
-        return None
-
-    identifier = _transform_identifier(crs_info)
-    if identifier:
-        authority, code = identifier
-        return f"{authority}:{code}"
-
-    if isinstance(crs_info, dict):
-        try:
-            from pyproj import CRS
-
-            authority = CRS.from_json_dict(crs_info).to_authority()
-            if authority:
-                return f"{authority[0]}:{authority[1]}"
-        except Exception:
-            pass
-        return json.dumps(crs_info)
-
-    return None
-
-
 def crs_transform_sql_expr(
     geom_sql: str,
     source_crs,
@@ -688,48 +660,34 @@ def crs_transform_sql_expr(
 ) -> str:
     """Return a SQL expression yielding ``geom_sql`` in ``target_crs``.
 
-    Wraps ``geom_sql`` in ``ST_Transform(..., '<src>', '<target>')`` only when
-    the source CRS is known and differs from the target; otherwise returns
-    ``geom_sql`` unchanged. This is the single source of truth for making the
-    CRS-blind spatial operations (grid keying, admin joins) CRS-aware.
-
-    The rules mirror the GeoParquet/DuckDB contract:
-
-    - A missing/``None`` or default (OGC:CRS84 / EPSG:4326) source is treated as
-      already being the target — no transform. A CRS-less geometry (e.g. from an
-      in-memory Arrow table via ``ST_GeomFromWKB``) is therefore accepted as-is,
-      and ``ST_Intersects`` accepts a CRS-less geometry against a CRS-bearing one.
-    - An unresolvable source CRS is left untransformed rather than guessed.
-
-    Relies on the session-level ``geometry_always_xy = true`` so the transformed
-    coordinates come out as lon/lat (x/y) for the ``*_lonlat_to_cell`` keying.
+    The older name of :func:`transform_geom_sql`, kept for the grid keying and
+    metrics call sites. Both resolve the source through
+    :func:`transform_source_crs`, so an absent or lon/lat source is left alone,
+    a CRS with or without an authority code is transformed, and one that cannot
+    be resolved raises :class:`UnresolvableCRSError` instead of being read as
+    lon/lat (#1258).
 
     Args:
         geom_sql: A SQL geometry expression (e.g. a quoted column name or
             ``ST_Centroid("geometry")``).
-        source_crs: The source CRS as a PROJJSON dict, an ``AUTH:CODE`` string,
-            or ``None``.
+        source_crs: The source CRS as a PROJJSON dict or string, an
+            ``AUTH:CODE`` or WKT string, or ``None``.
         target_crs: The target CRS string (default OGC:CRS84).
     """
-    if not source_crs or is_default_crs(source_crs):
-        return geom_sql
-
-    src = resolve_crs_to_string(source_crs)
-    if not src:
-        return geom_sql
-
-    src_literal = _escape_sql_string(src)
-    target_literal = _escape_sql_string(target_crs)
-    return f"ST_Transform({geom_sql}, '{src_literal}', '{target_literal}')"
+    return transform_geom_sql(geom_sql, source_crs, target_crs)
 
 
 def extract_crs_from_table(table, geometry_column: str | None = None):
-    """Return the CRS of ``geometry_column`` from a pyarrow table's geo metadata.
+    """Return the CRS of ``geometry_column`` in a pyarrow table.
 
-    Returns the CRS value (PROJJSON dict or string) when present and non-default,
-    else ``None``. ``geometry_column`` defaults to the geo metadata's declared
-    primary column. Used by the table-centric (Python API) operations to detect
-    a projected input before grid keying.
+    Reads the ``geo`` block first, then the geometry field's GeoArrow CRS, the
+    only carrier a table read from a native-geo-only Parquet file has (#1262).
+    Returns the CRS value (PROJJSON dict or string) when present and
+    non-default, else ``None``. An explicit ``crs: null`` in the block is an
+    answer (unknown), so the field is not consulted for it. ``geometry_column``
+    defaults to the block's declared primary column, then to the table's own
+    geometry column names. Used by the table-centric (Python API) operations to
+    detect a projected input before grid keying or reprojecting.
 
     A write-path reader: the CRS it returns decides how the output is keyed, so
     a malformed carried block goes through :func:`sanitize_geo_metadata` and is
@@ -737,11 +695,11 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     """
 
     metadata = table.schema.metadata
-    if not metadata or b"geo" not in metadata:
-        return None
-    geo_meta = sanitize_geo_metadata(decode_carried_geo(metadata[b"geo"]))
+    geo_meta = None
+    if metadata and b"geo" in metadata:
+        geo_meta = sanitize_geo_metadata(decode_carried_geo(metadata[b"geo"]))
     if not isinstance(geo_meta, dict):
-        return None
+        geo_meta = {}
     columns = geo_meta.get("columns", {})
     col = geometry_column or geo_meta.get("primary_column")
     if not isinstance(col, str):
@@ -751,7 +709,10 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
         col = detect_geometry_column_from_names(table.schema.names)
     if col is None:
         return None
-    crs = columns.get(col, {}).get("crs")
+    col_meta = columns.get(col, {})
+    if crs_is_explicitly_null(col_meta):
+        return None
+    crs = col_meta.get("crs") or _crs_from_geoarrow_field(table, col)
     if crs and not is_default_crs(crs):
         return crs
     return None
@@ -878,8 +839,8 @@ def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
     reaching for it would pull the 2800-line validator onto a read path that runs
     for every rewrite.
     """
-    left = crs_string_for_transform(geo_block_crs)
-    right = crs_string_for_transform(native_crs)
+    left = crs_authority_code(geo_block_crs)
+    right = crs_authority_code(native_crs)
     return bool(left and right and left != right)
 
 
@@ -1288,32 +1249,60 @@ def parse_crs_string_to_projjson(crs_string, con=None):
 #: With ``SET geometry_always_xy = true`` this is interchangeable with EPSG:4326.
 DEFAULT_TARGET_CRS = "OGC:CRS84"
 
-#: The only shape :func:`crs_string_for_transform` may ever return.
+#: The only shape an authority code bound for SQL may take.
 #:
 #: The same strict quote-free ``<authority>:<code>`` shape the logical-type
 #: parser enforced before #870 (``_AUTHORITY_CODE_CRS`` in
 #: ``core/duckdb_metadata.py``). #866/#870 made the parser carry *arbitrary*
-#: free-form ``crs`` strings through so validation can fail closed on them --
-#: but a value headed for ``ST_Transform`` is headed for SQL, so this choke
-#: point restores the old invariant for transforms: authority code or nothing.
-#: The sinks still SQL-escape on top of this (defense in depth, and the
-#: reproject path legitimately passes PROJJSON strings that bypass this
-#: helper).
+#: free-form ``crs`` strings through so validation can fail closed on them, but
+#: a value headed for ``ST_Transform`` is headed for SQL. So only a code of this
+#: shape, or PROJJSON that pyproj wrote itself, ever leaves
+#: :func:`transform_source_crs`, and the sinks escape it once on top.
 _TRANSFORM_CRS_SHAPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]*:[A-Za-z0-9_.\-]+$")
 
+#: The largest CRS definition handed to pyproj. Real PROJJSON is a few kilobytes.
+MAX_PROJJSON_CHARS = 262_144
 
-def crs_string_for_transform(crs) -> str | None:
-    """Return an ``"AUTH:CODE"`` CRS string for ``ST_Transform``, or ``None``.
+_REPROJECT_HINT = (
+    "Reproject the input with an explicit source CRS first, for example "
+    "'gpio convert reproject <input> <output> --src-crs <CRS> --dst-crs EPSG:4326'."
+)
 
-    ``None`` means no transform is needed or possible: the CRS is absent, is the
-    default (OGC:CRS84 / EPSG:4326), or is not identifiable as an authority code.
-    ``crs`` may be PROJJSON (as returned by :func:`extract_crs_from_parquet`) or
-    an ``"AUTH:CODE"`` string.
 
-    The result is guaranteed to match :data:`_TRANSFORM_CRS_SHAPE`: a file's
-    free-form ``crs`` (carried through for validation since #866) or a hostile
-    PROJJSON ``id`` must never come out of here, because callers interpolate
-    the result into SQL.
+class UnresolvableCRSError(GeoParquetError):
+    """A CRS that cannot be turned into an ``ST_Transform`` source.
+
+    Raised only on paths that transform. Reading such coordinates as lon/lat
+    instead would write wrong output without a word (#1258).
+    """
+
+
+def _shown_crs(crs) -> str:
+    """A bounded, printable rendering of a CRS value for an error message."""
+    if isinstance(crs, str):
+        shown = crs
+    elif isinstance(crs, dict):
+        shown = json.dumps(crs, default=str)
+    else:
+        shown = repr(crs)
+    return shown if len(shown) <= 200 else f"{shown[:200]}..."
+
+
+def _unresolvable(crs, reason: str) -> UnresolvableCRSError:
+    return UnresolvableCRSError(
+        f"Cannot use the input CRS {_shown_crs(crs)!r} as a transform source, "
+        f"{reason}. {_REPROJECT_HINT}"
+    )
+
+
+def crs_authority_code(crs) -> str | None:
+    """Return the ``"AUTH:CODE"`` that ``crs`` names, or ``None``.
+
+    For comparing two CRS declarations by their authority code (#1014), not
+    for transforming. ``None`` means the CRS is absent, the default
+    (OGC:CRS84 / EPSG:4326) or names no code of the strict
+    :data:`_TRANSFORM_CRS_SHAPE`. A transform reads its source through
+    :func:`transform_source_crs`, which also handles a CRS with no code.
     """
     if not crs or is_default_crs(crs):
         return None
@@ -1327,35 +1316,177 @@ def crs_string_for_transform(crs) -> str | None:
     return candidate
 
 
+@lru_cache(maxsize=64)
+def _canonical_projjson(key: str) -> tuple[bool, str | None]:
+    """``(parsed, projjson)`` for a JSON-encoded CRS body.
+
+    ``projjson`` is pyproj's own rendering, or ``None`` when the body is
+    pyproj-equal to OGC:CRS84 ignoring axis order (no transform needed).
+    ``parsed`` is False when pyproj cannot read the body at all.
+    """
+    from pyproj import CRS
+    from pyproj.exceptions import CRSError
+
+    try:
+        parsed = CRS.from_json(key)
+    except (CRSError, TypeError, ValueError):
+        return False, None
+    if parsed.equals(CRS.from_user_input("OGC:CRS84"), ignore_axis_order=True):
+        return True, None
+    return True, parsed.to_json()
+
+
+def _resolvable_authority_code(crs: dict) -> str | None:
+    """``crs``'s own id as ``"AUTH:CODE"`` when PROJ knows it, else ``None``.
+
+    An id that is present but unusable is named in a warning, because the body
+    is used instead and the user should know which one won.
+    """
+    if "id" not in crs:
+        return None
+    identifier = _extract_crs_identifier({"id": crs["id"]})
+    shown = _shown_crs(crs["id"])
+    if identifier is not None:
+        authority, code = identifier
+        candidate = f"{authority}:{code}"
+        if not _TRANSFORM_CRS_SHAPE.match(candidate):
+            candidate = None
+        elif _projjson_from_authority(str(authority), str(code)) is not None:
+            return candidate
+        shown = candidate or shown
+    warn(
+        f"Ignoring CRS id {shown} because PROJ does not know it, reading the CRS definition instead"
+    )
+    return None
+
+
+def _transform_source_from_dict(crs: dict) -> str | None:
+    if is_default_crs(crs):
+        return None
+    target = crs
+    if "id" not in crs:
+        component = horizontal_component(crs)
+        if component is not None:
+            target = component
+            if is_default_crs(component):
+                return None
+    code = _resolvable_authority_code(target)
+    if code is not None:
+        return code
+    body = {key: value for key, value in target.items() if key != "id"}
+    if not body:
+        raise _unresolvable(crs, "it has no usable authority code and no CRS definition")
+    try:
+        key = json.dumps(body, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise _unresolvable(crs, "its definition is not JSON") from exc
+    if len(key) > MAX_PROJJSON_CHARS:
+        raise _unresolvable(crs, f"its definition is too large ({len(key):,} characters)")
+    parsed, projjson = _canonical_projjson(key)
+    if not parsed:
+        raise _unresolvable(crs, "PROJ cannot read its definition")
+    return projjson
+
+
+def _transform_source_from_string(text: str) -> str | None:
+    stripped = text.strip()
+    if _is_crs84_equivalent(stripped):
+        return None
+    if stripped.startswith("{"):
+        raise _unresolvable(text, "it is not valid PROJJSON")
+    identifier = _extract_crs_identifier(stripped)
+    if identifier is not None:
+        authority, code = identifier
+        candidate = f"{authority}:{code}"
+        if _TRANSFORM_CRS_SHAPE.match(candidate):
+            if _projjson_from_authority(str(authority), str(code)) is None:
+                raise _unresolvable(text, "PROJ does not know that authority code")
+            return candidate
+    body = projjson_from_wkt(stripped)
+    if body is None:
+        raise _unresolvable(text, "it is not an authority code, PROJJSON or WKT")
+    return _transform_source_from_dict(body)
+
+
+def transform_source_crs(crs) -> str | None:
+    """The one resolver from a CRS gpio read to an ``ST_Transform`` source (#1264).
+
+    ``crs`` is any CRS value gpio reads. A PROJJSON dict or string, an
+    ``AUTH:CODE`` or URN string, a WKT string, ``None`` or :data:`CRS_ABSENT`.
+
+    Returns one of three things.
+
+    - ``None`` when the coordinates are already lon/lat. The CRS is absent, the
+      default (OGC:CRS84 / EPSG:4326 by id or spelling), or a body pyproj finds
+      equal to OGC:CRS84 ignoring axis order.
+    - ``"AUTH:CODE"`` when the id (a CompoundCRS's horizontal component's id
+      when it has none) matches :data:`_TRANSFORM_CRS_SHAPE` and PROJ knows it.
+    - pyproj's canonical PROJJSON when there is no usable id and the body
+      parses. An id PROJ does not know is dropped with a warning.
+
+    Anything else raises :class:`UnresolvableCRSError` with a ``--src-crs``
+    hint. A PROJ string or a bare name from a file never reaches pyproj, and
+    pyproj's ``to_authority()`` is never asked to guess a near match. The result
+    is idempotent, ``transform_source_crs(transform_source_crs(x))`` gives the
+    same answer, so a caller may hand an already-resolved string back in.
+    """
+    if not crs:
+        return None
+    if isinstance(crs, str) and len(crs) > MAX_PROJJSON_CHARS:
+        raise _unresolvable(crs, f"it is too large ({len(crs):,} characters)")
+    crs = _parse_crs_value(crs)
+    if isinstance(crs, dict):
+        return _transform_source_from_dict(crs)
+    if isinstance(crs, str):
+        return _transform_source_from_string(crs)
+    raise _unresolvable(crs, "it is neither PROJJSON nor a CRS string")
+
+
+def transform_source_label(source: str | None) -> str:
+    """A short name for a :func:`transform_source_crs` result, for log lines."""
+    if not source:
+        return "OGC:CRS84"
+    if not source.startswith("{"):
+        return source
+    try:
+        body = json.loads(source)
+    except ValueError:
+        return _shown_crs(source)
+    name = (body.get("name") if isinstance(body, dict) else None) or "unnamed CRS"
+    return f"{name} (no authority code)"
+
+
 def transform_geom_sql(geom_expr: str, source_crs, target_crs: str = DEFAULT_TARGET_CRS) -> str:
     """Wrap ``geom_expr`` in ``ST_Transform`` to ``target_crs`` when needed.
 
-    Returns ``geom_expr`` unchanged when the source CRS is absent, the default,
-    or unidentifiable — so CRS-less / already-lon-lat input is untouched and the
-    common (CRS84) path pays nothing. The caller's DuckDB session should have
+    The source is resolved by :func:`transform_source_crs`. ``geom_expr`` comes
+    back unchanged for an absent or lon/lat source, so the common (CRS84) path
+    pays nothing, and an unresolvable source raises
+    :class:`UnresolvableCRSError`. The caller's DuckDB session should have
     ``geometry_always_xy = true`` so transformed coordinates come out as lon/lat.
 
     This is the shared "normalize geometry to the operation's expected CRS"
     utility used by the admin spatial joins and the lon/lat grid keying (#525).
     """
-    src = crs_string_for_transform(source_crs)
+    src = transform_source_crs(source_crs)
     if src is None:
         return geom_expr
-    src_esc = src.replace("'", "''")
-    tgt_esc = target_crs.replace("'", "''")
-    return f"ST_Transform({geom_expr}, '{src_esc}', '{tgt_esc}')"
+    return (
+        f"ST_Transform({geom_expr}, '{_escape_sql_string(src)}', "
+        f"'{_escape_sql_string(target_crs)}')"
+    )
 
 
 def source_crs_string(
     parquet_file, verbose: bool = False, geometry_column: str | None = None
 ) -> str | None:
-    """Detect ``parquet_file``'s primary CRS as an ``"AUTH:CODE"`` transform string.
+    """Detect ``parquet_file``'s primary CRS as an ``ST_Transform`` source.
 
     ``geometry_column`` is the column the caller is about to transform, when it
-    knows it (see :func:`extract_crs_from_parquet`). Returns ``None`` for
-    CRS84/default/CRS-less input (no transform needed).
+    knows it (see :func:`extract_crs_from_parquet`). Returns what
+    :func:`transform_source_crs` returns, ``None`` for lon/lat input.
     """
-    return crs_string_for_transform(
+    return transform_source_crs(
         extract_crs_from_parquet(parquet_file, verbose, geometry_column=geometry_column)
     )
 
@@ -1371,14 +1502,12 @@ def reproject_to_source_sql(geom_expr: str, source_crs, base_crs: str = DEFAULT_
 
     Returns ``geom_expr`` unchanged when ``source_crs`` is absent/default.
     """
-    if not source_crs or is_default_crs(source_crs):
+    src = transform_source_crs(source_crs)
+    if src is None:
         return geom_expr
-    src = resolve_crs_to_string(source_crs)
-    if not src:
-        return geom_expr
-    src_lit = _escape_sql_string(src)
-    base_lit = _escape_sql_string(base_crs)
-    return f"ST_Transform({geom_expr}, '{base_lit}', '{src_lit}')"
+    return (
+        f"ST_Transform({geom_expr}, '{_escape_sql_string(base_crs)}', '{_escape_sql_string(src)}')"
+    )
 
 
 def parse_geo_metadata_from_schema(metadata: dict | None) -> dict | None:
@@ -1401,12 +1530,13 @@ def parse_geo_metadata_from_schema(metadata: dict | None) -> dict | None:
 
 
 def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None:
-    """Return an ``"AUTH:CODE"`` transform string for a geometry column's CRS.
+    """Return the ``ST_Transform`` source for a geometry column's CRS.
 
     ``geo_meta`` is parsed GeoParquet ``geo`` metadata (as carried on a PyArrow
-    schema for the table-centric Python API). Returns ``None`` when no transform
-    is needed — the CRS is absent, the default (OGC:CRS84 / EPSG:4326), explicitly
-    null (unknown), or not identifiable as an authority code.
+    schema for the table-centric Python API). Resolved by
+    :func:`transform_source_crs`, so ``None`` means no transform is needed (the
+    CRS is absent, the default or explicitly null) and a CRS with no authority
+    code comes back as canonical PROJJSON rather than ``None`` (#1258).
 
     A write-path reader: the string it returns is spliced into an
     ``ST_Transform`` call, so the block is sanitized first (#887). Sanitizing
@@ -1423,7 +1553,7 @@ def crs_string_from_geo_meta(geo_meta: dict | None, geom_col: str) -> str | None
     if col_meta is None:
         col_meta = columns.get(geo_meta.get("primary_column", "geometry"), {})
     crs = col_meta.get("crs") if isinstance(col_meta, dict) else None
-    return crs_string_for_transform(crs)
+    return transform_source_crs(crs)
 
 
 #: GeoArrow geometry extension names (registered by ``geoarrow.pyarrow``).
@@ -1574,16 +1704,16 @@ def _crs_from_geoarrow_field(table, geom_col: str):
 
 
 def crs_string_from_table(table, geom_col: str) -> str | None:
-    """Detect an Arrow table's geometry CRS as an ``"AUTH:CODE"`` transform string.
+    """Detect an Arrow table's geometry CRS as an ``ST_Transform`` source.
 
     Checks both CRS carriers used by the table-centric Python API:
     1. The schema-level GeoParquet ``geo`` metadata.
     2. The geometry field's GeoArrow ``ARROW:extension:metadata`` (parquet-geo-only).
 
-    Returns ``None`` for CRS84/default/CRS-less input (no transform needed).
+    Returns what :func:`transform_source_crs` returns, ``None`` for lon/lat input.
     """
     geo_meta = parse_geo_metadata_from_schema(table.schema.metadata)
     crs = crs_string_from_geo_meta(geo_meta, geom_col)
     if crs:
         return crs
-    return crs_string_for_transform(_crs_from_geoarrow_field(table, geom_col))
+    return transform_source_crs(_crs_from_geoarrow_field(table, geom_col))

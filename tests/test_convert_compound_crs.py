@@ -2,7 +2,7 @@
 
 The Estonian Topographic Database shapefiles declare "EST97 + EVRF2007 height"
 (EPSG:3301 + EPSG:5621). After ``--force-2d`` the output still carried the
-CompoundCRS, which has no authority id of its own, so ``crs_string_for_transform``
+CompoundCRS, which has no authority id of its own, so the transform helper
 returned None and ``gpio pmtiles create`` handed metre coordinates to Tippecanoe
 as lon/lat: every tile collapsed at the pole, silently.
 """
@@ -93,10 +93,10 @@ def test_horizontal_crs_passes_through_anything_not_reducible(crs):
 
 
 def test_transform_helpers_identify_a_compound_crs_by_its_horizontal_component():
-    from geoparquet_io.core.crs_utils import crs_string_for_transform, resolve_crs_to_string
+    from geoparquet_io.core.crs_utils import crs_authority_code, transform_source_crs
 
-    assert crs_string_for_transform(COMPOUND_CRS) == "EPSG:3301"
-    assert resolve_crs_to_string(COMPOUND_CRS) == "EPSG:3301"
+    assert crs_authority_code(COMPOUND_CRS) == "EPSG:3301"
+    assert transform_source_crs(COMPOUND_CRS) == "EPSG:3301"
 
 
 WGS84_PLUS_EGM2008 = {

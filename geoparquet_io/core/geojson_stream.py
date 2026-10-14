@@ -32,7 +32,11 @@ if TYPE_CHECKING:
 
     import duckdb
 
-from geoparquet_io.core.crs_utils import source_crs_string
+from geoparquet_io.core.crs_utils import (
+    crs_string_from_table,
+    source_crs_string,
+    transform_source_label,
+)
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
@@ -99,23 +103,22 @@ def _utf8_stdout() -> Iterator[TextIO]:
 
 
 def _get_source_crs(input_path: str) -> str | None:
-    """The primary geometry's CRS as an ``AUTH:CODE`` string, or ``None`` for lon/lat.
+    """The primary geometry's ``ST_Transform`` source, or ``None`` for lon/lat.
 
     Read through :func:`crs_utils.source_crs_string`, the resolver every other
     command uses, so a native-geo-only input (CRS only in the Parquet logical
-    type, no ``geo`` block) is reprojected too. Reading the block alone wrote
-    such a file's projected metres as RFC 7946 coordinates (#1248).
+    type, no ``geo`` block) is reprojected too (#1248), and so is a CRS with no
+    authority code (#1258). A CRS that cannot be resolved raises
+    :class:`crs_utils.UnresolvableCRSError` rather than being written as
+    RFC 7946 lon/lat.
 
     Args:
         input_path: RAW path to input GeoParquet file
 
     Returns:
-        CRS string (e.g., "EPSG:32631") or None if default, absent or unreadable
+        ``"AUTH:CODE"``, canonical PROJJSON, or ``None`` for lon/lat input
     """
-    try:
-        return source_crs_string(input_path)
-    except Exception:
-        return None
+    return source_crs_string(input_path)
 
 
 def _needs_reprojection(source_crs: str | None) -> bool:
@@ -542,10 +545,11 @@ def convert_to_geojson_stream(
     input_url = resolve_file_url(input_path, verbose)
 
     # Check if reprojection is needed
-    source_crs = _get_source_crs(input_path)
-    needs_reproject = not keep_crs and _needs_reprojection(source_crs)
+    # --keep-crs writes the input coordinates, so the CRS is never resolved.
+    source_crs = None if keep_crs else _get_source_crs(input_path)
+    needs_reproject = _needs_reprojection(source_crs)
     if needs_reproject:
-        info(f"Reprojecting from {source_crs} to WGS84 (RFC 7946)")
+        info(f"Reprojecting from {transform_source_label(source_crs)} to WGS84 (RFC 7946)")
         debug(f"Source CRS: {source_crs}, reprojecting to {WGS84_CRS}")
 
     # Create DuckDB connection
@@ -625,13 +629,12 @@ def _convert_from_stream(
         Number of features written
 
     Note:
-        CRS detection from Arrow IPC stream is limited. For pipeline use,
-        ensure source data is already in WGS84 or use gpio convert reproject first.
+        The stream's CRS is read from its ``geo`` block, then from the geometry
+        field's GeoArrow CRS, through the same resolver a file input uses (#1261).
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
     from geoparquet_io.core.streaming import (
         find_geometry_column_from_table,
-        get_crs_from_arrow_table,
         read_arrow_stream,
     )
 
@@ -655,11 +658,11 @@ def _convert_from_stream(
 
     debug(f"Using geometry column: {geometry_column}")
 
-    # Check CRS from Arrow table metadata (if available)
-    source_crs = get_crs_from_arrow_table(table, geometry_column)
-    needs_reproject = not keep_crs and _needs_reprojection(source_crs)
-    if needs_reproject and source_crs:
-        info(f"Reprojecting from {source_crs} to WGS84 (RFC 7946)")
+    # --keep-crs writes the input coordinates, so the CRS is never resolved.
+    source_crs = None if keep_crs else crs_string_from_table(table, geometry_column)
+    needs_reproject = _needs_reprojection(source_crs)
+    if needs_reproject:
+        info(f"Reprojecting from {transform_source_label(source_crs)} to WGS84 (RFC 7946)")
 
     # Get property columns
     excluded = {geometry_column.lower(), "bbox"}
