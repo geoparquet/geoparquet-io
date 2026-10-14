@@ -5,10 +5,12 @@ Provides functions to extract metadata, preview data, calculate statistics,
 and format output for terminal, JSON, and Markdown.
 """
 
+import datetime
 import os
 import struct
 from typing import Any
 
+import duckdb
 import pyarrow as pa
 from rich.console import Console
 from rich.table import Table
@@ -30,7 +32,12 @@ from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
     get_row_count,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    fetch_row,
+    get_duckdb_connection,
+    quote_identifier,
+    sql_path,
+)
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.json_output import dumps_json, to_jsonable
 from geoparquet_io.core.logging_config import debug
@@ -763,11 +770,52 @@ def _native_geoarrow_columns_to_wkt(
     return table
 
 
+_UNKNOWN_STATS: dict[str, Any] = {"nulls": None, "min": None, "max": None, "unique": None}
+
+
+def _column_stats_query(col_name: str, is_geometry: bool, source: str) -> str:
+    """Build the stats query for one column (geometry columns only count nulls)."""
+    quoted = quote_identifier(col_name)
+    if is_geometry:
+        return f"SELECT COUNT(*) FILTER (WHERE {quoted} IS NULL) AS null_count FROM {source}"
+    return f"""
+        SELECT
+            COUNT(*) FILTER (WHERE {quoted} IS NULL) AS null_count,
+            MIN({quoted}) AS min_val,
+            MAX({quoted}) AS max_val,
+            APPROX_COUNT_DISTINCT({quoted}) AS unique_count
+        FROM {source}
+    """
+
+
+def compute_column_stats(con, col_name: str, is_geometry: bool, source: str) -> dict[str, Any]:
+    """Stats for one column of ``source`` (a SQL-ready relation or path literal).
+
+    A failed query reports every figure as unknown (None). An interrupt propagates.
+    """
+    try:
+        row = fetch_row(con, _column_stats_query(col_name, is_geometry, source))
+    except duckdb.InterruptException:
+        raise
+    except duckdb.Error as e:
+        debug(f"Could not compute statistics for column '{col_name}': {e}")
+        return dict(_UNKNOWN_STATS)
+    if row is None:
+        return dict(_UNKNOWN_STATS)
+    if is_geometry:
+        return {**_UNKNOWN_STATS, "nulls": row[0]}
+    return {"nulls": row[0], "min": row[1], "max": row[2], "unique": row[3]}
+
+
 def get_column_statistics(
     parquet_file: str, columns_info: list[dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
     """
     Calculate column statistics using DuckDB.
+
+    Rows are fetched through Arrow, so TIMESTAMP WITH TIME ZONE min and max come
+    back as tz-aware datetimes without DuckDB needing ``pytz``. A figure that
+    could not be computed is None, never a made-up zero.
 
     Args:
         parquet_file: Path to the parquet file
@@ -777,67 +825,13 @@ def get_column_statistics(
         dict: Statistics per column
     """
     raw_url = resolve_file_url(parquet_file, verbose=False)
+    source = sql_path(raw_url)
     con = get_duckdb_connection(load_httpfs=needs_httpfs(parquet_file))
-
     try:
-        stats = {}
-
-        for col in columns_info:
-            col_name = col["name"]
-            is_geometry = col["is_geometry"]
-
-            # Build stats query based on column type
-            if is_geometry:
-                # For geometry columns, only count nulls
-                query = f"""
-                    SELECT
-                        COUNT(*) FILTER (WHERE {quote_identifier(col_name)} IS NULL) as null_count
-                    FROM {sql_path(raw_url)}
-                """
-                result = con.execute(query).fetchone()
-                stats[col_name] = {
-                    "nulls": result[0] if result else 0,
-                    "min": None,
-                    "max": None,
-                    "unique": None,
-                }
-            else:
-                # For non-geometry columns, get full stats
-                query = f"""
-                    SELECT
-                        COUNT(*) FILTER (WHERE {quote_identifier(col_name)} IS NULL) as null_count,
-                        MIN({quote_identifier(col_name)}) as min_val,
-                        MAX({quote_identifier(col_name)}) as max_val,
-                        APPROX_COUNT_DISTINCT({quote_identifier(col_name)}) as unique_count
-                    FROM {sql_path(raw_url)}
-                """
-                try:
-                    result = con.execute(query).fetchone()
-                    if result:
-                        stats[col_name] = {
-                            "nulls": result[0],
-                            "min": result[1],
-                            "max": result[2],
-                            "unique": result[3],
-                        }
-                    else:
-                        stats[col_name] = {
-                            "nulls": 0,
-                            "min": None,
-                            "max": None,
-                            "unique": None,
-                        }
-                except Exception:
-                    # If stats fail for this column, provide basic info
-                    stats[col_name] = {
-                        "nulls": 0,
-                        "min": None,
-                        "max": None,
-                        "unique": None,
-                    }
-
-        return stats
-
+        return {
+            col["name"]: compute_column_stats(con, col["name"], col["is_geometry"], source)
+            for col in columns_info
+        }
     finally:
         con.close()
 
@@ -974,9 +968,21 @@ def _create_preview_table(
 
 
 def _truncate_stat_value(value: Any) -> str:
-    """Truncate stat value for display."""
-    value_str = str(value) if value is not None else "-"
+    """Truncate stat value for display.
+
+    Dates, times and timestamps are shown whole, so a TIMESTAMPTZ keeps its offset.
+    """
+    if value is None:
+        return "-"
+    value_str = str(value)
+    if isinstance(value, (datetime.date, datetime.time)):
+        return value_str
     return value_str[:17] + "..." if len(value_str) > 20 else value_str
+
+
+def _format_null_count(nulls: int | None) -> str:
+    """Null count for display, or "-" when it is unknown."""
+    return f"{nulls:,}" if nulls is not None else "-"
 
 
 def _create_stats_table(
@@ -996,7 +1002,7 @@ def _create_stats_table(
         unique = col_stats.get("unique")
         stats_table.add_row(
             col["name"],
-            f"{col_stats.get('nulls', 0):,}",
+            _format_null_count(col_stats.get("nulls")),
             _truncate_stat_value(col_stats.get("min")),
             _truncate_stat_value(col_stats.get("max")),
             f"~{unique:,}" if unique is not None else "-",
@@ -1708,23 +1714,13 @@ def format_markdown_output(
             col_name = col["name"]
             col_stats = stats.get(col_name, {})
 
-            nulls = col_stats.get("nulls", 0)
-            min_val = col_stats.get("min")
-            max_val = col_stats.get("max")
+            nulls_str = _format_null_count(col_stats.get("nulls"))
+            min_str = _truncate_stat_value(col_stats.get("min"))
+            max_str = _truncate_stat_value(col_stats.get("max"))
             unique = col_stats.get("unique")
-
-            # Format values
-            min_str = str(min_val) if min_val is not None else "-"
-            max_str = str(max_val) if max_val is not None else "-"
             unique_str = f"~{unique:,}" if unique is not None else "-"
 
-            # Truncate long values
-            if len(min_str) > 20:
-                min_str = min_str[:17] + "..."
-            if len(max_str) > 20:
-                max_str = max_str[:17] + "..."
-
-            lines.append(f"| {col_name} | {nulls:,} | {min_str} | {max_str} | {unique_str} |")
+            lines.append(f"| {col_name} | {nulls_str} | {min_str} | {max_str} | {unique_str} |")
 
         lines.append("")
 

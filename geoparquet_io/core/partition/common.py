@@ -7,7 +7,12 @@ from contextlib import contextmanager
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_row_count
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    fetch_rows,
+    get_duckdb_connection,
+    quote_identifier,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.logging_config import debug, error, info, progress, warn
@@ -632,8 +637,8 @@ def preview_partition(
         ORDER BY record_count DESC
     """
 
-    result = con.execute(query)
-    all_partitions = result.fetchall()
+    # Through Arrow: a TIMESTAMPTZ partition column would otherwise need pytz.
+    all_partitions = fetch_rows(con, query)
 
     con.close()
 

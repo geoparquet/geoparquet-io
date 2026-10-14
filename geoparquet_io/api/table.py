@@ -2821,26 +2821,22 @@ class Table:
             >>> print(stats['population']['max'])
             10000000
         """
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+        import duckdb
+
+        from geoparquet_io.core.duckdb_utils import fetch_row, get_duckdb_connection
+        from geoparquet_io.core.inspect_utils import compute_column_stats
+        from geoparquet_io.core.logging_config import debug
 
         con = None
         try:
             con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
             con.register("input_table", self._table)
 
+            regular_cols = [f.name for f in self._table.schema if f.name != self._geometry_column]
             stats = {}
 
-            # Separate geometry and non-geometry columns
-            geometry_cols = []
-            regular_cols = []
-            for field in self._table.schema:
-                col_name = field.name
-                if col_name == self._geometry_column:
-                    geometry_cols.append(col_name)
-                else:
-                    regular_cols.append(col_name)
-
-            # Build a single batched query for all non-geometry columns
+            # One batched query for all non-geometry columns. Rows come through
+            # Arrow, so TIMESTAMPTZ min and max need no pytz.
             if regular_cols:
                 select_parts = []
                 for col_name in regular_cols:
@@ -2853,90 +2849,30 @@ class Table:
                             f"APPROX_COUNT_DISTINCT({quoted_col})",
                         ]
                     )
-
                 query = f"SELECT {', '.join(select_parts)} FROM input_table"
                 try:
-                    result = con.execute(query).fetchone()
-                    if result:
-                        for i, col_name in enumerate(regular_cols):
-                            base_idx = i * 4
-                            stats[col_name] = {
-                                "nulls": result[base_idx],
-                                "min": result[base_idx + 1],
-                                "max": result[base_idx + 2],
-                                "unique": result[base_idx + 3],
-                            }
+                    row = fetch_row(con, query)
+                except duckdb.InterruptException:
+                    raise
+                except duckdb.Error as e:
+                    debug(f"Batched stats query failed, falling back to per-column queries: {e}")
+                    row = None
+                for i, col_name in enumerate(regular_cols):
+                    if row is None:
+                        stats[col_name] = compute_column_stats(con, col_name, False, "input_table")
                     else:
-                        for col_name in regular_cols:
-                            stats[col_name] = {
-                                "nulls": 0,
-                                "min": None,
-                                "max": None,
-                                "unique": None,
-                            }
-                except Exception:
-                    # If batched query fails, fall back to per-column queries
-                    import logging
+                        nulls, min_val, max_val, unique = row[i * 4 : i * 4 + 4]
+                        stats[col_name] = {
+                            "nulls": nulls,
+                            "min": min_val,
+                            "max": max_val,
+                            "unique": unique,
+                        }
 
-                    logger = logging.getLogger(__name__)
-                    logger.debug(
-                        "Batched stats query failed, falling back to per-column queries",
-                        exc_info=True,
-                    )
-                    for col_name in regular_cols:
-                        quoted_col = quote_identifier(col_name)
-                        try:
-                            query = f"""
-                                SELECT
-                                    COUNT(*) FILTER (WHERE {quoted_col} IS NULL),
-                                    MIN({quoted_col}),
-                                    MAX({quoted_col}),
-                                    APPROX_COUNT_DISTINCT({quoted_col})
-                                FROM input_table
-                            """
-                            result = con.execute(query).fetchone()
-                            if result:
-                                stats[col_name] = {
-                                    "nulls": result[0],
-                                    "min": result[1],
-                                    "max": result[2],
-                                    "unique": result[3],
-                                }
-                            else:
-                                stats[col_name] = {
-                                    "nulls": 0,
-                                    "min": None,
-                                    "max": None,
-                                    "unique": None,
-                                }
-                        except Exception:
-                            # If stats fail for this column, provide basic info
-                            logger.debug(
-                                "Stats query failed for column '%s'",
-                                col_name,
-                                exc_info=True,
-                            )
-                            stats[col_name] = {
-                                "nulls": 0,
-                                "min": None,
-                                "max": None,
-                                "unique": None,
-                            }
-
-            # Handle geometry columns separately (only null count)
-            for col_name in geometry_cols:
-                quoted_col = quote_identifier(col_name)
-                query = f"""
-                    SELECT COUNT(*) FILTER (WHERE {quoted_col} IS NULL)
-                    FROM input_table
-                """
-                result = con.execute(query).fetchone()
-                stats[col_name] = {
-                    "nulls": result[0] if result else 0,
-                    "min": None,
-                    "max": None,
-                    "unique": None,
-                }
+            if self._geometry_column in self._table.schema.names:
+                stats[self._geometry_column] = compute_column_stats(
+                    con, self._geometry_column, True, "input_table"
+                )
 
             return stats
 

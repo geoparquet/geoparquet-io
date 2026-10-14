@@ -1265,6 +1265,30 @@ class _DuckDBFieldWrapper:
         self.name = col_info.get("name", "")
 
 
+def fetch_row(con, query: str, params=None) -> tuple | None:
+    """Run ``query`` and return its first row as a tuple, or None when it is empty.
+
+    Use this instead of ``fetchone()`` whenever the row can carry a user column's
+    value. DuckDB's own Python row conversion of a TIMESTAMP WITH TIME ZONE needs
+    ``pytz``, which gpio does not depend on. The Arrow path returns tz-aware
+    datetimes built on ``zoneinfo`` and needs nothing extra.
+    """
+    table = con.execute(query, params).arrow().read_all()
+    if table.num_rows == 0:
+        return None
+    # Column-wise, so duplicate output names (two bare MIN(...)) do not collapse.
+    return tuple(column[0].as_py() for column in table.columns)
+
+
+def fetch_rows(con, query: str, params=None) -> list[tuple]:
+    """Run ``query`` and return every row as a tuple, fetched through Arrow.
+
+    The ``fetchall()`` counterpart of :func:`fetch_row`, for the same reason.
+    """
+    table = con.execute(query, params).arrow().read_all()
+    return list(zip(*(column.to_pylist() for column in table.columns), strict=True))
+
+
 def _get_query_columns(con, query: str) -> list[str]:
     """
     Get column names from a SQL query without executing it fully.

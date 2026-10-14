@@ -8,7 +8,7 @@ import re
 import string
 from dataclasses import dataclass
 
-from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_rows, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.logging_config import warn
 
@@ -659,10 +659,12 @@ def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> t
             f"column '{column}' has type {col_type}; a breakdown needs a column of "
             "strings, numbers, booleans or dates",
         )
-    rows = con.execute(
+    # Through Arrow: a TIMESTAMPTZ breakdown column would otherwise need pytz.
+    rows = fetch_rows(
+        con,
         f"SELECT {qcol} AS v, COUNT(*) AS n FROM ({source_sql}) "
-        f"GROUP BY 1 ORDER BY n DESC, v LIMIT {limit + 1}"
-    ).fetchall()
+        f"GROUP BY 1 ORDER BY n DESC, v LIMIT {limit + 1}",
+    )
     top = [r[0] for r in rows[:limit]]
     has_other = len(rows) > limit
     return top, has_other
