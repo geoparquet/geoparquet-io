@@ -18,7 +18,11 @@ The conversions:
 * ``Decimal`` becomes its exact decimal string, so no precision is lost to a
   float; a non-finite one becomes ``null``.
 * ``bytes``-like values become lowercase hex.
-* numpy scalars and arrays become their Python equivalents.
+* numpy scalars and arrays become their Python equivalents. A ``datetime64``
+  becomes an ISO 8601 string at its own precision (nanoseconds included), and
+  a scalar with no plain Python type (``longdouble``, ``clongdouble``) becomes
+  a ``float`` or its string.
+* pandas ``NaT`` and ``NA`` become ``null``.
 * NaN and infinite floats become ``null``.
 * sets and tuples become lists, and mapping keys become strings.
 * Anything else falls back to ``str(value)``, so a report never dies on a
@@ -30,6 +34,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import sys
 from decimal import Decimal
 from typing import Any
 
@@ -51,20 +56,50 @@ def _float_or_none(value: float) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _is_pandas_missing(value: Any) -> bool:
+    """True for pandas ``NaT`` or ``NA``, without importing pandas ourselves.
+
+    A pandas value can only reach us if pandas is already imported, so an
+    absent module means the value is not one of them.
+    """
+    pd = sys.modules.get("pandas")
+    if pd is None:
+        return False
+    return value is pd.NaT or value is pd.NA
+
+
+def _numpy_scalar_to_python(value: Any) -> Any:
+    """A numpy scalar as a value ``to_jsonable`` can finish converting."""
+    import numpy as np
+
+    if isinstance(value, np.datetime64):
+        return None if np.isnat(value) else str(np.datetime_as_string(value))
+    converted = value.tolist() if hasattr(value, "tolist") else value.item()
+    if not type(converted).__module__.startswith("numpy"):
+        return converted
+    # longdouble/clongdouble hand back themselves, so recursing never ends.
+    return float(value) if isinstance(value, np.floating) else str(value)
+
+
 def _numpy_to_python(value: Any) -> tuple[bool, Any]:
     """``(True, python_value)`` for a numpy scalar or array, else ``(False, None)``."""
     module = type(value).__module__
     if not module.startswith("numpy"):
         return False, None
-    if hasattr(value, "tolist"):
-        return True, value.tolist()
-    return True, value.item()
+    import numpy as np
+
+    if isinstance(value, np.ndarray):
+        # Walk the elements so each scalar gets the scalar rules above.
+        return True, value[()] if value.ndim == 0 else list(value)
+    return True, _numpy_scalar_to_python(value)
 
 
 def _scalar_to_jsonable(value: Any) -> Any:
     """Convert one non-container value."""
     if isinstance(value, float):
         return _float_or_none(value)
+    if _is_pandas_missing(value):
+        return None
     if isinstance(value, (dt.datetime, dt.date, dt.time)):
         return value.isoformat()
     if isinstance(value, dt.timedelta):

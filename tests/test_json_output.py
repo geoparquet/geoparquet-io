@@ -168,7 +168,11 @@ class TestInspectStatsJson:
 
 
 def test_check_spec_json_is_strict(typed_parquet):
-    """`gpio check spec --json` goes through the same encoder."""
+    """`gpio check spec --json` still parses strictly after moving to the shared encoder.
+
+    A regression guard for the switch, not a #1226 reproduction. The check
+    report carries no raw column values, so it parsed on main too.
+    """
     result = CliRunner().invoke(cli, ["check", "spec", typed_parquet, "--json"])
 
     assert result.exit_code in (0, 1), result.output
@@ -176,7 +180,12 @@ def test_check_spec_json_is_strict(typed_parquet):
 
 
 def test_meta_json_outputs_are_strict(typed_parquet):
-    """Every `gpio inspect meta --json` mode parses strictly."""
+    """Every `gpio inspect meta --json` mode still parses strictly after the switch.
+
+    A regression guard, not a #1226 reproduction. The footer statistics these
+    modes print are already strings (an infinite max reads ``"None"``), so no
+    NaN or date reaches the encoder and every mode parsed on main too.
+    """
     for flags in ([], ["--parquet"], ["--parquet-geo"], ["--geo"], ["--geo-stats"]):
         result = CliRunner().invoke(cli, ["inspect", "meta", typed_parquet, "--json", *flags])
         assert result.exit_code == 0, (flags, result.output)
@@ -223,3 +232,99 @@ def test_row_group_geo_stats_json_without_stats_is_valid(tmp_path, capsys):
         "row_group_geo_stats": [],
         "message": "No geo stats found",
     }
+
+
+class TestNumpyAndPandasEdgeCases:
+    """Scalars whose ``tolist()`` does not land on a plain Python type."""
+
+    def test_longdouble_does_not_recurse(self):
+        assert to_jsonable(np.longdouble(1.5)) == 1.5
+        assert to_jsonable(np.longdouble("inf")) is None
+
+    def test_clongdouble_does_not_recurse(self):
+        assert to_jsonable(np.clongdouble(1 + 2j)) == str(np.clongdouble(1 + 2j))
+
+    def test_longdouble_array_does_not_recurse(self):
+        assert to_jsonable(np.array([1.5, np.nan], dtype=np.longdouble)) == [1.5, None]
+
+    def test_pandas_nat_and_na_are_null(self):
+        pd = pytest.importorskip("pandas")
+
+        assert to_jsonable(pd.NaT) is None
+        assert to_jsonable(pd.NA) is None
+        assert to_jsonable({"a": [pd.NaT, pd.NA]}) == {"a": [None, None]}
+
+    def test_pandas_timestamp_stays_iso(self):
+        pd = pytest.importorskip("pandas")
+
+        assert to_jsonable(pd.Timestamp("2024-01-02 03:04:05")) == "2024-01-02T03:04:05"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (np.datetime64("2024-01-02T03:04:05.123456789", "ns"), "2024-01-02T03:04:05.123456789"),
+            (np.datetime64("2024-01-02T03:04:05", "s"), "2024-01-02T03:04:05"),
+            (np.datetime64("2024-01-02", "D"), "2024-01-02"),
+            (np.datetime64("NaT", "ns"), None),
+        ],
+    )
+    def test_datetime64_is_iso_8601(self, value, expected):
+        assert to_jsonable(value) == expected
+
+    def test_zero_dimensional_array_becomes_its_scalar(self):
+        assert to_jsonable(np.array(1.5)) == 1.5
+        assert to_jsonable(np.array(np.datetime64("2024-01-02", "D"))) == "2024-01-02"
+
+    def test_datetime64_ns_array_is_iso_8601(self):
+        values = np.array(["2024-01-02T03:04:05.000000001"], dtype="datetime64[ns]")
+        assert to_jsonable(values) == ["2024-01-02T03:04:05.000000001"]
+
+
+@pytest.fixture(scope="module")
+def nested_parquet(tmp_path_factory):
+    """A GeoParquet 2.0 file with struct, list, timestamp, tstz and BLOB columns."""
+    path = tmp_path_factory.mktemp("json_preview") / "nested.parquet"
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    try:
+        con.execute(
+            f"""
+            COPY (
+                SELECT
+                    ST_Point(i, i) AS geom,
+                    {{'a': i, 'b': 'x'}} AS s,
+                    [i, i + 1] AS l,
+                    TIMESTAMP '2024-01-02 03:04:05' AS ts,
+                    TIMESTAMPTZ '2024-01-02 03:04:05+00' AS tstz,
+                    '\\xAA\\xBB'::BLOB AS blob_col
+                FROM range(3) t(i)
+            ) TO {sql_path(str(path))} (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')
+            """
+        )
+    finally:
+        con.close()
+    return str(path)
+
+
+class TestPreviewJsonFormat:
+    """`inspect head/tail --json` cells are real JSON values, not Python reprs."""
+
+    @pytest.mark.parametrize(("command", "row", "index"), [("head", 0, 0), ("tail", 0, 2)])
+    def test_nested_and_typed_cells(self, nested_parquet, command, row, index):
+        result = CliRunner().invoke(cli, ["inspect", command, nested_parquet, "1", "--json"])
+
+        assert result.exit_code == 0, result.output
+        cell = _strict_loads(result.output)["preview"][row]
+        assert cell["s"] == {"a": index, "b": "x"}
+        assert cell["l"] == [index, index + 1]
+        assert cell["ts"] == "2024-01-02T03:04:05"
+        assert cell["blob_col"] == "aabb"
+
+    def test_tstz_preview_is_the_same_instant(self, nested_parquet):
+        result = CliRunner().invoke(cli, ["inspect", "head", nested_parquet, "1", "--json"])
+
+        assert result.exit_code == 0, result.output
+        text = _strict_loads(result.output)["preview"][0]["tstz"]
+        assert "T" in text
+        parsed = dt.datetime.fromisoformat(text)
+        assert parsed.tzinfo is not None
+        assert parsed == dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
