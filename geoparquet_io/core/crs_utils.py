@@ -1061,9 +1061,14 @@ def _crs_from_read_type(input_file, con):
         if match is None:
             continue
         value = match.group(1).replace("''", "'")
-        if value.startswith("{"):
+        if not value.startswith("{"):
+            return parse_crs_string_to_projjson(value)
+        try:
             return json.loads(value)
-        return parse_crs_string_to_projjson(value)
+        except ValueError:
+            # Runs inside the caller's handler, so a raise here would skip the
+            # FileGDB fallback and abort the conversion.
+            return None
     return None
 
 

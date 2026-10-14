@@ -361,3 +361,30 @@ class TestEncodingResolution:
         """Only the shapefile driver is known to honour ENCODING; elsewhere GDAL decides."""
         plan = plan_source_text("a.geojson", "CP932")
         assert plan == SourceText(["ENCODING=CP932"])
+
+
+class TestCrsFromReadTypeFallback:
+    """The ``ST_Read`` type fallback never aborts CRS detection (#1242)."""
+
+    @staticmethod
+    def _con_with_type(type_string):
+        class _Result:
+            description = [("id", "INTEGER"), ("geom", type_string)]
+
+        class _Con:
+            def execute(self, _sql):
+                return _Result()
+
+        return _Con()
+
+    def test_malformed_projjson_in_the_type_returns_none(self):
+        from geoparquet_io.core.crs_utils import _crs_from_read_type
+
+        con = self._con_with_type("GEOMETRY('{not json')")
+        assert _crs_from_read_type("in.shp", con) is None
+
+    def test_well_formed_projjson_in_the_type_is_returned(self):
+        from geoparquet_io.core.crs_utils import _crs_from_read_type
+
+        con = self._con_with_type('GEOMETRY(\'{"id": {"authority": "EPSG", "code": 3857}}\')')
+        assert _crs_from_read_type("in.shp", con) == {"id": {"authority": "EPSG", "code": 3857}}
