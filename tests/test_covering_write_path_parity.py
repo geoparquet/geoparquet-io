@@ -115,12 +115,14 @@ class TestTableWriteKeepsADeclaredCovering:
 
     @pytest.mark.parametrize("strategy", STRATEGIES)
     def test_a_table_with_no_block_at_all_still_declares_its_bbox(self, strategy, tmp_path):
-        """``convert`` of a CSV builds the table from a query, so it carries no block.
+        """A table with a bbox struct and no ``geo`` block still declares the covering.
 
-        ``add_bbox`` then has nothing to record its computed column into and the
-        table's schema is the only evidence left -- which the shared gate reads,
-        and three of the four strategies asked it. ``write_from_table`` hard-coded
-        "no bbox column" instead and wrote the struct undeclared.
+        ``convert`` of a CSV used to hand back exactly that. It now describes its
+        geometry (#1222), so the block is stripped here to keep the case covered,
+        as any bare Arrow table wrapped in ``Table`` still reaches it. The
+        table's schema is then the only evidence left -- which the shared gate
+        reads, and three of the four strategies asked it. ``write_from_table``
+        hard-coded "no bbox column" instead and wrote the struct undeclared.
         """
         import geoparquet_io as gpio
 
@@ -128,7 +130,8 @@ class TestTableWriteKeepsADeclaredCovering:
         csv.write_text("name,lat,lon\na,1.0,2.0\nb,3.0,4.0\n")
         out = tmp_path / f"csv_{strategy}.parquet"
 
-        table = gpio.convert(str(csv), lat_column="lat", lon_column="lon").add_bbox()
+        with_bbox = gpio.convert(str(csv), lat_column="lat", lon_column="lon").add_bbox()
+        table = gpio.Table(with_bbox.table.replace_schema_metadata(None), "geometry")
         assert table._table.schema.metadata is None, "the fixture must carry no block of its own"
         table.write(str(out), write_strategy=strategy)
 

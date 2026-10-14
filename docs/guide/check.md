@@ -338,6 +338,11 @@ Validates file structure and metadata against the GeoParquet specification:
 - Supports GeoParquet 1.0, 1.1, 2.0, and Parquet native geo types
 - Auto-detects version unless `--geoparquet-version` is specified
 - Optional data validation against metadata claims
+- `--json` prints strict JSON that `jq` and JavaScript parse as is. Dates and
+  times become ISO 8601 strings, decimals become exact strings, binary becomes
+  hex, and a NaN or infinite value becomes `null`. `gpio inspect stats`, `head`,
+  `tail` and `meta` use the same encoder for their `--json` output
+  ([#1226](https://github.com/geoparquet/geoparquet-io/issues/1226)).
 
 **Metadata checks include:**
 

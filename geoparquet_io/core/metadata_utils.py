@@ -24,6 +24,7 @@ from geoparquet_io.core.duckdb_metadata import (
 )
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.geo_metadata import is_covering_path
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.sizing import format_size
 
@@ -213,7 +214,7 @@ def _format_parquet_metadata_json(
             "details": bloom_filter_info,
         }
 
-    print(json.dumps(metadata_dict, indent=2))
+    print(dumps_json(metadata_dict, indent=2))
 
 
 def _format_bbox_corner(x: float, y: float) -> str:
@@ -611,7 +612,7 @@ def format_parquet_geo_metadata(
             "row_groups_examined": num_row_groups,
             "total_row_groups": num_row_groups,
         }
-        print(json.dumps(output, indent=2))
+        print(dumps_json(output, indent=2))
     else:
         _format_parquet_geo_terminal(
             geo_columns_info, num_row_groups, num_rg_to_show, row_groups_limit
@@ -636,7 +637,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
     if not geo_meta:
         if json_output:
-            print(json.dumps(None, indent=2))
+            print(dumps_json(None, indent=2))
         else:
             console = Console()
             console.print()
@@ -648,7 +649,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
 
     if json_output:
         # Output the exact geo metadata as JSON
-        print(json.dumps(geo_meta, indent=2))
+        print(dumps_json(geo_meta, indent=2))
     else:
         # Human-readable output
         console = Console()
@@ -804,7 +805,7 @@ def format_all_metadata(
             "parquet_geo_metadata": "See --parquet-geo flag for full output",
             "geoparquet_metadata": geo_meta,
         }
-        print(json.dumps(output, indent=2))
+        print(dumps_json(output, indent=2))
     else:
         # Terminal output - show all three sections
         geo_meta = get_geo_metadata(parquet_file)
@@ -849,7 +850,7 @@ def format_row_group_geo_stats(
 
     if not rg_stats:
         if json_output:
-            print(json.dumps({"row_group_geo_stats": [], "message": "No geo stats found"}))
+            print(dumps_json({"row_group_geo_stats": [], "message": "No geo stats found"}))
         else:
             console = Console()
             console.print()
@@ -872,7 +873,7 @@ def format_row_group_geo_stats(
     stats_with_rows = stats_with_rows[:effective_limit]
 
     if json_output:
-        print(json.dumps({"row_group_geo_stats": stats_with_rows}, indent=2))
+        print(dumps_json({"row_group_geo_stats": stats_with_rows}, indent=2))
     else:
         _format_geo_stats_terminal(stats_with_rows, total_row_groups)
 

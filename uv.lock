@@ -1535,7 +1535,7 @@ requires-dist = [
     { name = "contourrs", marker = "python_full_version >= '3.12' and extra == 'raster'", specifier = ">=0.8.0" },
     { name = "deptry", marker = "extra == 'dev'", specifier = ">=0.25.0" },
     { name = "diff-cover", marker = "extra == 'dev'", specifier = ">=9.0" },
-    { name = "duckdb", specifier = ">=1.5.5,<1.6" },
+    { name = "duckdb", specifier = ">=1.5.6,<1.6" },
     { name = "fiona", marker = "extra == 'benchmark'", specifier = ">=1.9.0" },
     { name = "fsspec", specifier = ">=2023.9.0" },
     { name = "geoarrow-pyarrow", specifier = ">=0.1.0" },

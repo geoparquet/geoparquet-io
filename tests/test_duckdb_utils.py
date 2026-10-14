@@ -307,9 +307,9 @@ class TestDuckDBVersionFloor:
         it -- only the version floor prevents it.
         """
         version = tuple(int(part) for part in duckdb.__version__.split(".")[:3])
-        assert version >= (1, 5, 5), (
-            f"DuckDB {duckdb.__version__} segfaults in geometry repair (#737); "
-            f"pyproject requires >= 1.5.5"
+        assert version >= (1, 5, 6), (
+            f"DuckDB {duckdb.__version__} segfaults in geometry repair (#737) "
+            f"or in ST_Read_Meta (#1102), pyproject requires >= 1.5.6"
         )
 
     # A behavioural probe would be better than the version string above, which is

@@ -1128,3 +1128,37 @@ def _normalize_arrow_large_types(table):
 
     new_schema = pa.schema(new_fields, metadata=table.schema.metadata)
     return table.cast(new_schema)
+
+
+def describe_wkb_geometry(table, geometry_column: str, crs: dict | str | None = None):
+    """Attach a ``geo`` block naming ``geometry_column`` to a table that has none.
+
+    A table built in memory from a query (``gpio.convert()``'s read) holds bare
+    WKB with no schema metadata, so nothing downstream can tell the column is
+    geometry or what CRS it is in: DuckDB reads it back as ``BLOB``, and the
+    CRS-aware cell indexes take projected metres for degrees (#1222). This gives
+    it the same self-description a table read from a GeoParquet file carries.
+
+    The block is a description, not an output decision: the write funnels
+    rebuild ``geo`` (types, bbox, version) from the data at write time. It
+    declares GeoParquet 1.1, which is what auto mode writes for a WKB table, and
+    an empty ``geometry_types`` (the spec's "not known"). ``crs`` is the source's
+    CRS as PROJJSON. ``None`` means the default (OGC:CRS84) and leaves the key
+    out, as the spec spells it.
+
+    A table that already has a ``geo`` key is returned unchanged.
+    """
+    metadata = dict(table.schema.metadata or {})
+    if b"geo" in metadata or geometry_column not in table.column_names:
+        return table
+
+    column: dict = {"encoding": "WKB", "geometry_types": []}
+    if crs is not None:
+        column["crs"] = crs
+    geo = {
+        "version": GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]["metadata_version"],
+        "primary_column": geometry_column,
+        "columns": {geometry_column: column},
+    }
+    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
+    return table.replace_schema_metadata(metadata)

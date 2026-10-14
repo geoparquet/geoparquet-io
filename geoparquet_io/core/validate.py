@@ -5,7 +5,6 @@ Validates GeoParquet files against versions 1.0, 1.1, 2.0, and Parquet native
 geospatial types according to their respective specifications.
 """
 
-import json
 import math
 import re
 import reprlib
@@ -51,6 +50,7 @@ from geoparquet_io.core.geo_metadata import (
     covering_lacks_bbox,
     is_covering_path,
 )
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.parquet_footer import read_footer_kv
 from geoparquet_io.core.parquet_schema import (
@@ -4296,4 +4296,4 @@ def format_json_output(result: ValidationResult) -> str:
             for c in result.checks
         ],
     }
-    return json.dumps(output, indent=2)
+    return dumps_json(output, indent=2)

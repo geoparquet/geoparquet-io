@@ -10,6 +10,7 @@ from pathlib import Path
 
 import duckdb
 
+from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
 from geoparquet_io.core.bbox_structure import check_bbox_structure, resolve_bbox_name
 from geoparquet_io.core.common import should_skip_bbox
 from geoparquet_io.core.crs_utils import (
@@ -1994,7 +1995,7 @@ def _convert_tabular_path(
     # the optimizer, causing repeated re-evaluation when downstream metadata
     # queries (ST_GeometryType, ST_XMin, etc.) wrap the query. Materializing
     # parses CSV once and eliminates the unsafe TRY() re-evaluation.
-    # pyproject now floors DuckDB at 1.5.5, which does not have that bug, so
+    # pyproject now floors DuckDB at 1.5.6, which does not have that bug, so
     # this full materialization is pure overhead on every supported version.
     # Left in place deliberately: removing it needs its own benchmarking.
     if materialize:
@@ -2561,6 +2562,10 @@ def read_spatial_to_arrow(
                 arrow_table, geometry_column, repair=repair_geometry
             )
 
+        # The query hands back bare WKB with no schema metadata. Say which column
+        # is the geometry and what CRS it is in, so every Table method that passes
+        # the Arrow table down to core sees what a read() table shows (#1222).
+        arrow_table = describe_wkb_geometry(arrow_table, geometry_column, detected_crs)
         return arrow_table, detected_crs, geometry_column
 
     except duckdb.IOException as e:

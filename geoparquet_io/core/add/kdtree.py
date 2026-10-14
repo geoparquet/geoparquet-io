@@ -175,6 +175,23 @@ def _find_optimal_iterations(total_rows, target_rows, verbose=False):
     return best_iterations
 
 
+def _centroid_sql(con, input_path, geom_col) -> str:
+    """``ST_Centroid`` of ``geom_col`` in ``input_path``, whatever type DuckDB reads it as.
+
+    A GeoParquet column reads back as native ``GEOMETRY``, but a WKB column
+    written without a ``geo`` key (an in-memory table spilled to a scratch file
+    by ``add_kdtree_table``) reads back as ``BLOB``, and ``ST_Centroid(BLOB)``
+    does not bind (#1222). ``input_path`` is RAW, escaped here by ``sql_path``.
+    """
+    quoted = quote_identifier(geom_col)
+    (column_type,) = con.execute(
+        f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {sql_path(input_path)})"
+    ).fetchone()
+    if column_type.upper().startswith("GEOMETRY"):
+        return f"ST_Centroid({quoted})"
+    return f"ST_Centroid(ST_GeomFromWKB({quoted}))"
+
+
 def _build_sampling_query(
     input_path, geom_col, kdtree_column_name, iterations, sample_size, con, verbose=False
 ):
@@ -192,14 +209,15 @@ def _build_sampling_query(
     2. Build a series of CTEs that iteratively compute partition IDs
     3. Each CTE checks boundaries and appends '0' or '1' to partition ID
     """
+    centroid = _centroid_sql(con, input_path, geom_col)
     # Phase 1: Compute boundaries from sample
     # We need to capture the actual boundary value used at each split
     boundaries_query = f"""
         WITH RECURSIVE kdtree_sample(iteration, x, y, partition_id, split_value) AS (
             SELECT
                 0 AS iteration,
-                ST_X(ST_Centroid({quote_identifier(geom_col)})) AS x,
-                ST_Y(ST_Centroid({quote_identifier(geom_col)})) AS y,
+                ST_X({centroid}) AS x,
+                ST_Y({centroid}) AS y,
                 '0' AS partition_id,
                 NULL::DOUBLE AS split_value
             FROM {sql_path(input_path)} USING SAMPLE {sample_size} ROWS
@@ -262,8 +280,8 @@ def _build_sampling_query(
     cte_parts.append(f"""
         data_with_coords AS (
             SELECT *,
-                ST_X(ST_Centroid({quote_identifier(geom_col)})) AS _kdtree_x,
-                ST_Y(ST_Centroid({quote_identifier(geom_col)})) AS _kdtree_y,
+                ST_X({centroid}) AS _kdtree_x,
+                ST_Y({centroid}) AS _kdtree_y,
                 '0' AS _kdtree_partition
             FROM {sql_path(input_path)}
         )
@@ -557,12 +575,13 @@ def add_kdtree_column(
             debug(f"Computing KD-tree partitions (exact mode: {iterations} iterations)...")
             debug("  This will process the full dataset recursively...")
         # https://duckdb.org/2024/09/09/spatial-extension.html
+        centroid = _centroid_sql(con, input_path, geom_col)
         query = f"""
             WITH RECURSIVE kdtree(iteration, x, y, partition_id, row_id) AS (
                 SELECT
                     0 AS iteration,
-                    ST_X(ST_Centroid({quote_identifier(geom_col)})) AS x,
-                    ST_Y(ST_Centroid({quote_identifier(geom_col)})) AS y,
+                    ST_X({centroid}) AS x,
+                    ST_Y({centroid}) AS y,
                     '0' AS partition_id,
                     ROW_NUMBER() OVER () AS row_id
                 FROM {sql_path(input_path)}

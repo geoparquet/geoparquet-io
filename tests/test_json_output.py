@@ -1,0 +1,183 @@
+"""Every ``--json`` report gpio prints must be valid JSON for any column type (#1226).
+
+``gpio inspect stats --json`` died with ``Object of type date is not JSON
+serializable`` on a DATE, TIMESTAMP or TIME column, because the min/max a
+DuckDB query hands back are Python ``date``/``datetime``/``time`` objects and
+the report was serialized with a bare ``json.dumps``. A DECIMAL or BLOB column
+failed the same way, and a NaN or infinite DOUBLE was printed as the bare
+``NaN``/``Infinity`` tokens, which no strict JSON parser accepts. The reports
+now share one encoder, ``core.json_output``.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import math
+from decimal import Decimal
+
+import numpy as np
+import pytest
+from click.testing import CliRunner
+
+import geoparquet_io as gpio
+from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.json_output import dumps_json, to_jsonable
+
+
+def _strict_loads(text: str):
+    """Parse JSON the way a strict consumer (jq, JavaScript) would: no NaN/Infinity."""
+
+    def _reject(token):
+        raise ValueError(f"non-standard JSON token {token}")
+
+    return json.loads(text, parse_constant=_reject)
+
+
+@pytest.fixture(scope="module")
+def typed_parquet(tmp_path_factory):
+    """A GeoParquet 2.0 file with one column of every awkward type."""
+    path = tmp_path_factory.mktemp("json_output") / "typed.parquet"
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    try:
+        con.execute(
+            f"""
+            COPY (
+                SELECT
+                    ST_Point(i, i) AS geom,
+                    DATE '2024-01-02' + i::INTEGER AS d,
+                    TIMESTAMP '2024-01-02 03:04:05' + to_seconds(i) AS ts,
+                    TIME '01:02:03' AS t,
+                    TIMESTAMPTZ '2024-01-02 03:04:05+00' AS tstz,
+                    (i + 0.25)::DECIMAL(10, 2) AS dec,
+                    CASE WHEN i = 1 THEN 'NaN'::DOUBLE ELSE i::DOUBLE END AS f_nan,
+                    CASE WHEN i = 1 THEN 'inf'::DOUBLE ELSE i::DOUBLE END AS f_inf,
+                    '\\xAA\\xBB'::BLOB AS blob_col,
+                    INTERVAL 3 DAY AS iv
+                FROM range(3) t(i)
+            ) TO {sql_path(str(path))} (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')
+            """
+        )
+    finally:
+        con.close()
+    return str(path)
+
+
+class TestToJsonable:
+    """The shared conversion, one type at a time."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (dt.date(2024, 1, 2), "2024-01-02"),
+            (dt.datetime(2024, 1, 2, 3, 4, 5), "2024-01-02T03:04:05"),
+            (
+                dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
+                "2024-01-02T03:04:05+00:00",
+            ),
+            (dt.time(1, 2, 3), "01:02:03"),
+            (Decimal("12.50"), "12.50"),
+            (b"\xaa\xbb", "aabb"),
+            (bytearray(b"\x01"), "01"),
+            (memoryview(b"\x02"), "02"),
+            (float("nan"), None),
+            (float("inf"), None),
+            (float("-inf"), None),
+            (Decimal("NaN"), None),
+            (np.int64(7), 7),
+            (np.float32(1.5), 1.5),
+            (np.float64("nan"), None),
+            (np.bool_(True), True),
+            (1.5, 1.5),
+            ("x", "x"),
+            (None, None),
+        ],
+    )
+    def test_scalar(self, value, expected):
+        assert to_jsonable(value) == expected
+
+    def test_timedelta_is_iso_8601_duration(self):
+        assert to_jsonable(dt.timedelta(days=3, seconds=4)) == "P3DT4S"
+        assert to_jsonable(dt.timedelta(0)) == "P0D"
+
+    def test_nested_containers_are_walked(self):
+        value = {"a": [dt.date(2024, 1, 2), (float("nan"), {"b": Decimal("1")})], 3: {1, 2}}
+        assert to_jsonable(value) == {"a": ["2024-01-02", [None, {"b": "1"}]], "3": [1, 2]}
+
+    def test_numpy_array_becomes_a_list(self):
+        assert to_jsonable(np.array([1.0, np.nan])) == [1.0, None]
+
+    def test_dumps_is_strict_and_passes_options_through(self):
+        text = dumps_json({"x": float("nan"), "d": dt.date(2024, 1, 2)}, indent=2)
+        assert _strict_loads(text) == {"x": None, "d": "2024-01-02"}
+        assert "\n  " in text
+
+
+class TestInspectStatsJson:
+    """`gpio inspect stats --json` on every awkward column type (#1226)."""
+
+    def test_cli_emits_strict_json(self, typed_parquet):
+        result = CliRunner().invoke(cli, ["inspect", "stats", typed_parquet, "--json"])
+
+        assert result.exit_code == 0, result.output
+        stats = _strict_loads(result.output)["statistics"]
+        assert stats["d"]["min"] == "2024-01-02"
+        assert stats["d"]["max"] == "2024-01-04"
+        assert stats["ts"]["min"] == "2024-01-02T03:04:05"
+        assert stats["t"]["min"] == "01:02:03"
+        assert stats["dec"]["min"] == "0.25"
+        assert stats["dec"]["max"] == "2.25"
+        # DuckDB orders NaN above every number, so it is the max; JSON has no NaN.
+        assert stats["f_nan"]["max"] is None
+        assert stats["f_inf"]["max"] is None
+        assert stats["blob_col"]["min"] == "aabb"
+        assert stats["iv"]["min"] == "P3D"
+
+    def test_head_json_preview_is_strict(self, typed_parquet):
+        result = CliRunner().invoke(cli, ["inspect", "head", typed_parquet, "3", "--json"])
+
+        assert result.exit_code == 0, result.output
+        preview = _strict_loads(result.output)["preview"]
+        assert preview[1]["f_nan"] is None
+        assert preview[1]["f_inf"] is None
+        assert preview[0]["d"] == "2024-01-02"
+
+    def test_python_api_stats_serialize_through_the_shared_encoder(self, typed_parquet):
+        """`Table.stats()` keeps native Python values; the shared encoder makes them JSON."""
+        stats = gpio.read(typed_parquet).stats()
+
+        assert stats["d"]["min"] == dt.date(2024, 1, 2)
+        assert isinstance(stats["ts"]["min"], dt.datetime)
+        assert isinstance(stats["t"]["min"], dt.time)
+        assert isinstance(stats["dec"]["min"], Decimal)
+        assert math.isnan(stats["f_nan"]["max"])
+
+        decoded = _strict_loads(dumps_json(stats))
+        assert decoded["d"]["min"] == "2024-01-02"
+        assert decoded["ts"]["min"] == "2024-01-02T03:04:05"
+        assert decoded["t"]["min"] == "01:02:03"
+        assert decoded["dec"]["min"] == "0.25"
+        assert decoded["f_nan"]["max"] is None
+
+    def test_core_formatter_matches_cli(self, typed_parquet):
+        from geoparquet_io.core.inspect import format_stats_output, inspect_stats
+
+        text = format_stats_output(inspect_stats(typed_parquet), json_output=True)
+        assert _strict_loads(text)["statistics"]["d"]["min"] == "2024-01-02"
+
+
+def test_check_spec_json_is_strict(typed_parquet):
+    """`gpio check spec --json` goes through the same encoder."""
+    result = CliRunner().invoke(cli, ["check", "spec", typed_parquet, "--json"])
+
+    assert result.exit_code in (0, 1), result.output
+    assert _strict_loads(result.output)["file_path"] == typed_parquet
+
+
+def test_meta_json_outputs_are_strict(typed_parquet):
+    """Every `gpio inspect meta --json` mode parses strictly."""
+    for flags in ([], ["--parquet"], ["--parquet-geo"], ["--geo"], ["--geo-stats"]):
+        result = CliRunner().invoke(cli, ["inspect", "meta", typed_parquet, "--json", *flags])
+        assert result.exit_code == 0, (flags, result.output)
+        _strict_loads(result.output)

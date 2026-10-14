@@ -5,7 +5,6 @@ Provides functions to extract metadata, preview data, calculate statistics,
 and format output for terminal, JSON, and Markdown.
 """
 
-import json
 import os
 import struct
 from typing import Any
@@ -33,6 +32,7 @@ from geoparquet_io.core.duckdb_metadata import (
 )
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.json_output import dumps_json, to_jsonable
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.metadata_utils import (
     extract_bbox_from_row_group_stats,
@@ -625,12 +625,9 @@ def format_value_for_json(value: Any, is_geometry: bool) -> Any:
             return format_geometry_display(value)
         return str(value)
 
-    # Handle various types
-    if isinstance(value, (int, float, str, bool)):
-        return value
-
-    # Convert other types to string
-    return str(value)
+    # Dates, decimals, bytes, nested values and non-finite floats all get the
+    # one conversion every --json report shares (#1226).
+    return to_jsonable(value)
 
 
 def get_preview_data(
@@ -1190,7 +1187,7 @@ def format_json_output(
     else:
         output["compression_stats"] = None
 
-    return json.dumps(output, indent=2)
+    return dumps_json(output, indent=2)
 
 
 def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[str, Any]:
@@ -1466,7 +1463,7 @@ def format_partition_json_output(
         "files": partition_summary["per_file_info"],
     }
 
-    return json.dumps(output, indent=2)
+    return dumps_json(output, indent=2)
 
 
 def format_partition_markdown_output(

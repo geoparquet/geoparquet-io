@@ -70,6 +70,19 @@ Auto-detected by file extension:
 
 Any format supported by DuckDB's spatial extension (50+ formats) can be read.
 
+A `.json` file has to be GeoJSON. A bare array of records, or records wrapped
+in an object such as `{"data": [...]}`, is not a vector dataset GDAL can open,
+so `gpio convert` stops with `Failed to read input file` and `gpio.convert()`
+raises a `GeoParquetError`. DuckDB 1.5.5 crashed on such files instead, which
+is why gpio requires DuckDB 1.5.6 or later
+([#1102](https://github.com/geoparquet/geoparquet-io/issues/1102)).
+
+The table `gpio.convert()` returns describes its geometry column and CRS the
+same way a table from `gpio.read()` does, so every `add_*` method works on it
+directly. A projected input such as EPSG:6933 now gets the same H3, S2, A5,
+quadkey and KD-tree cells whether it is converted or read back from GeoParquet
+([#1222](https://github.com/geoparquet/geoparquet-io/issues/1222)).
+
 ### Output Formats (from GeoParquet)
 
 Auto-detected from output file extension:
