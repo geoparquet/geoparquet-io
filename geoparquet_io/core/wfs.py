@@ -3050,9 +3050,17 @@ def _get_tiling_bbox(
     (it is already in the request CRS). Otherwise falls back to the layer's
     advertised WGS84 bbox from capabilities, reprojected into ``crs``, since
     each tile is sent labelled with ``crs``. Returns None if no bbox is
-    available or the layer bbox cannot be reprojected.
+    available, a bbox crosses the antimeridian (xmin > xmax, which a midpoint
+    split cannot tile), or the layer bbox cannot be reprojected.
+
+    Like every bbox gpio holds, the result is in x,y order (east-first, see
+    ``_first_axis_is_north``). ``_build_bbox_param`` swaps it, once, when the
+    request goes out.
     """
     if user_bbox and use_server_bbox:
+        if user_bbox[0] > user_bbox[2]:
+            warn("The --bbox crosses the antimeridian (xmin > xmax), so auto-tiling is off.")
+            return None
         return user_bbox
     if not layer_info.bbox:
         return None
@@ -3071,9 +3079,16 @@ def _get_tiling_bbox(
                 f"The layer bbox lies outside the area {crs} is defined for, so auto-tiling is off."
             )
             return None
-        transformer = Transformer.from_crs("EPSG:4326", target, always_xy=True)
-        xmin, ymin, xmax, ymax = transformer.transform_bounds(*lon_lat)
-        return (xmin, ymin, xmax, ymax)
+        # Authority order out, then x,y by the same rule _build_bbox_param
+        # swaps back with. always_xy is not that rule: PROJ leaves a
+        # Southing, Westing CRS (EPSG:5513, Krovak) as is, so the bbox would
+        # be swapped twice.
+        transformer = Transformer.from_crs("OGC:CRS84", target, always_xy=False)
+        a0_min, a1_min, a0_max, a1_max = transformer.transform_bounds(*lon_lat)
+        axes = _bbox_axes(crs)
+        if axes and axes.north_first:
+            return (a1_min, a0_min, a1_max, a0_max)
+        return (a0_min, a1_min, a0_max, a1_max)
     except Exception as e:
         warn(f"Could not reproject the layer bbox into {crs}, so auto-tiling is off: {e}")
         return None

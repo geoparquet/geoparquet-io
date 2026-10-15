@@ -4270,6 +4270,67 @@ class TestBboxAxisRuleByCrs:
         assert "antimeridian" in caplog.text
         assert "outside" not in caplog.text
 
+    @pytest.mark.parametrize(
+        "crs",
+        [
+            # Krovak with Southing, Westing axes, which always_xy leaves alone
+            "EPSG:2065",
+            "EPSG:5224",
+            "EPSG:5513",
+            "EPSG:5515",
+            "EPSG:8044",
+            "EPSG:8045",
+            "EPSG:8352",
+            # Krovak East North, the one in real use
+            "EPSG:5514",
+            # North first, and east first, for contrast
+            "EPSG:4258",
+            "EPSG:3035",
+            "EPSG:32633",
+        ],
+    )
+    def test_the_tiling_bbox_goes_out_in_the_authority_order(self, crs):
+        """Fourth review of #1278: a tile bbox is swapped exactly once, at send time."""
+        from pyproj import CRS, Transformer
+
+        from geoparquet_io.core.wfs import _build_bbox_param, _get_tiling_bbox
+
+        area = CRS.from_user_input(crs).area_of_use
+        lon, lat = (area.west + area.east) / 2, (area.south + area.north) / 2
+        layer = WFSLayerInfo(
+            typename="t:l",
+            title="",
+            crs_list=[],
+            default_crs=None,
+            bbox=(lon - 0.1, lat - 0.1, lon + 0.1, lat + 0.1),
+            geometry_column="geom",
+            available_formats=[],
+        )
+        tile = _get_tiling_bbox(None, True, layer, crs)
+        sent = [float(v) for v in _build_bbox_param(tile, crs, "1.1.0").split(",")[:4]]
+
+        to_authority = Transformer.from_crs("OGC:CRS84", crs, always_xy=False)
+        a0, a1 = to_authority.transform(lon, lat)
+        assert sent[0] <= a0 <= sent[2]
+        assert sent[1] <= a1 <= sent[3]
+
+    def test_a_user_bbox_across_the_antimeridian_is_not_tiled(self, caplog):
+        """Fourth review of #1278: treat it like a layer bbox that crosses it."""
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        layer = WFSLayerInfo(
+            typename="t:l",
+            title="",
+            crs_list=[],
+            default_crs=None,
+            bbox=(-180.0, -90.0, 180.0, 90.0),
+            geometry_column="geom",
+            available_formats=[],
+        )
+        with caplog.at_level(logging.WARNING):
+            assert _get_tiling_bbox((170.0, 50.0, -130.0, 72.0), True, layer, "EPSG:4326") is None
+        assert "antimeridian" in caplog.text
+
 
 # =============================================================================
 # Integration Tests for WFS 2.0 (Issue #312)
