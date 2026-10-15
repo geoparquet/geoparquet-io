@@ -289,3 +289,26 @@ def test_assembled_geo_block_keeps_geo_prefixed_sidecars():
         b"geography_note": b"kept",
         b"geo": b'{"version": "1.1.0"}',
     }
+
+
+def test_disk_rewrite_lets_an_explicit_geo_extra_win(tmp_path):
+    """The caller's extras merge last, over the generated ``geo``, as before the fix."""
+    out = tmp_path / "out.parquet"
+    explicit = json.dumps({**STALE_GEO, "version": "1.1.0", "note": "explicit"})
+
+    WriteStrategyFactory.get_strategy(WriteStrategy.DISK_REWRITE).write_from_table(
+        table=_carried_table(),
+        output_path=str(out),
+        geometry_column="geometry",
+        geoparquet_version="1.1",
+        compression="ZSTD",
+        compression_level=None,
+        row_group_size_mb=None,
+        row_group_rows=None,
+        verbose=False,
+        extra_kv_metadata={"geo": explicit},
+    )
+
+    footer = _footer(out)
+    assert json.loads(footer[b"geo"])["note"] == "explicit"
+    assert b"pandas" not in footer

@@ -562,14 +562,16 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
         # The facade's rule, as on every other Arrow-side write: no serialized
         # descriptor of the input's schema, and under parquet-geo-only (no
-        # `geo_meta`) no `geo` key either. A built block replaces the carried one.
+        # `geo_meta`) no `geo` key either. A built block replaces the carried one
+        # before the merge, so the caller's extras still have the last word.
+        metadata = dict(schema.metadata or {})
+        if geo_meta is not None:
+            metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
         new_meta = output_schema_metadata(
-            schema.metadata,
+            metadata,
             None if geo_meta is not None else "parquet-geo-only",
             extra_kv_metadata,
         )
-        if geo_meta is not None:
-            new_meta[b"geo"] = json.dumps(geo_meta).encode("utf-8")
         new_schema = schema.with_metadata(new_meta)
 
         if verbose:
