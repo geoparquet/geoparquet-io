@@ -468,6 +468,11 @@ declaration unchanged. `gpio check spec` warns about files that carry
     gpio.read('geography.parquet').sort_hilbert().write('output.parquet')
     ```
 
+The same holds for a native Parquet GEOGRAPHY column with no `geo` key, and
+for the commands that write through an Arrow table (`process simplify`, the
+Python API's `.write()`). A 2.0 output keeps the column a GEOGRAPHY, and its
+`geo` block says the same edges, so `gpio check spec` has nothing to warn about.
+
 When a GeoParquet 2.0 input declares an ellipsoidal edges algorithm
 (`vincenty`, `karney`, `andoyer`, `thomas`) and the output is 1.x, the
 algorithm is mapped to `"spherical"` — the only non-planar value 1.x supports

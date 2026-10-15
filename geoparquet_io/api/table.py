@@ -1508,8 +1508,26 @@ class Table:
                 self._table.schema.metadata, self._geometry_column, self._table.column_names
             )
 
+            # DuckDB refuses a GeoArrow column with non-planar edges, and the
+            # strategies rebuild the geo block without them. So the edges are
+            # read off the table, cleared for the write, and restored on the
+            # written file, as the CLI write paths do (#1253).
+            from geoparquet_io.core.arrow_geo_metadata import (
+                nonplanar_edges_from_schema,
+                with_planar_edge_types,
+            )
+            from geoparquet_io.core.write_funnels import (
+                _apply_nonplanar_edges,
+                table_nonplanar_edges,
+            )
+
+            edges_by_col = table_nonplanar_edges(self._table, self._geometry_column, None)
+            write_table = with_planar_edge_types(
+                self._table, nonplanar_edges_from_schema(self._table.schema)
+            )
+
             strategy.write_from_table(
-                table=self._table,
+                table=write_table,
                 output_path=str(local_path),
                 geometry_column=self._geometry_column,
                 geoparquet_version=geoparquet_version,
@@ -1521,6 +1539,14 @@ class Table:
                 input_crs=input_crs,
                 custom_metadata={"covering": carried_covering} if carried_covering else None,
                 extra_kv_metadata=preserved_kv or None,
+            )
+            _apply_nonplanar_edges(
+                edges_by_col,
+                str(local_path),
+                compression=compression,
+                compression_level=compression_level,
+                row_group_rows=row_group_rows,
+                verbose=verbose,
             )
 
             # Upload to remote if needed

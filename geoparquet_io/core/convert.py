@@ -2359,6 +2359,22 @@ def _convert_spatial_path(
     return query, geom_info, bbox_covering_column, order_by
 
 
+def _carry_input_kv_metadata(arrow_table, input_file: str, verbose: bool):
+    """Put a Parquet source's non-geo KV keys on the table its query built (#1268).
+
+    The DuckDB query hands back no schema metadata, so without this
+    ``gpio.convert(path).write(out)`` kept only the regenerated ``geo`` key.
+    Which keys survive is :func:`extract_preserved_kv_metadata`'s rule, the one
+    every other write path uses (#690). A key the table already has wins.
+    """
+    preserved = read_preserved_kv_metadata(input_file, verbose=verbose)
+    if not preserved:
+        return arrow_table
+    metadata = {k.encode("utf-8"): v.encode("utf-8") for k, v in preserved.items()}
+    metadata.update(arrow_table.schema.metadata or {})
+    return arrow_table.replace_schema_metadata(metadata)
+
+
 @uses_aws_profile
 def read_spatial_to_arrow(
     input_file,
@@ -2596,6 +2612,8 @@ def read_spatial_to_arrow(
         arrow_table = describe_wkb_geometry(
             arrow_table, geometry_column, detected_crs, edges=input_edges
         )
+        if is_parquet:
+            arrow_table = _carry_input_kv_metadata(arrow_table, input_file, verbose)
         return arrow_table, detected_crs, geometry_column
 
     except duckdb.IOException as e:

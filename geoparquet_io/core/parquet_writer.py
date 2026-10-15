@@ -61,14 +61,15 @@ the column it read carried, which is how ``gpio sort quadkey`` stamped
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import build_kv_metadata_clause
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY
+from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY, sanitized_carried_geo
+from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
 from geoparquet_io.core.logging_config import debug, info
 from geoparquet_io.core.streaming import extract_version_from_metadata
 
@@ -617,6 +618,56 @@ def geoparquet_copy_options(duckdb_version: str, kv_pairs: Mapping[str, str] | N
     return options
 
 
+def _leaf_paths(name: str, arrow_type) -> Iterator[str]:
+    """The Parquet leaf paths an Arrow column is written as, in schema order.
+
+    pyarrow names a dictionary-encoding request by leaf path, so ``bbox`` alone
+    would not reach ``bbox.xmin``. Lists and maps use the compliant nested
+    names pyarrow writes by default.
+    """
+    import pyarrow as pa
+
+    while isinstance(arrow_type, pa.BaseExtensionType):
+        arrow_type = arrow_type.storage_type
+    if pa.types.is_dictionary(arrow_type):
+        arrow_type = arrow_type.value_type
+    if pa.types.is_struct(arrow_type):
+        for i in range(arrow_type.num_fields):
+            child = arrow_type.field(i)
+            yield from _leaf_paths(f"{name}.{child.name}", child.type)
+    elif pa.types.is_map(arrow_type):
+        yield from _leaf_paths(f"{name}.key_value.key", arrow_type.key_type)
+        yield from _leaf_paths(f"{name}.key_value.value", arrow_type.item_type)
+    elif (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        yield from _leaf_paths(f"{name}.list.element", arrow_type.value_type)
+    else:
+        yield name
+
+
+def dictionary_columns(schema: pa.Schema, geometry_columns: Collection[str] = ()) -> list[str]:
+    """The leaf columns a pyarrow write may dictionary-encode: all but the geometry.
+
+    A WKB value is unique per row, so a dictionary over it is a second copy of
+    the column plus an index, and the overviews spec (4.5) forbids one (#1122).
+    The geometry columns are the ones named here, the ones the schema's ``geo``
+    block describes, and every GeoArrow extension field. Pass the result as
+    ``use_dictionary`` so every Arrow writer makes the same choice.
+    """
+    geometry = set(geometry_columns)
+    geometry.update((sanitized_carried_geo(schema.metadata).get("columns") or {}).keys())
+    geometry.update(field.name for field in schema if is_geoarrow_extension_field(field))
+    return [
+        path
+        for field in schema
+        if field.name not in geometry
+        for path in _leaf_paths(field.name, field.type)
+    ]
+
+
 @dataclass
 class ParquetWriteSettings:
     """
@@ -634,8 +685,18 @@ class ParquetWriteSettings:
     DEFAULT_COMPRESSION_LEVEL = 15
     DEFAULT_PARQUET_VERSION = "2.6"
 
-    def get_pyarrow_kwargs(self, calculated_row_group_size: int | None = None) -> dict:
-        """Get kwargs dict for PyArrow write_table()."""
+    def get_pyarrow_kwargs(
+        self,
+        calculated_row_group_size: int | None = None,
+        schema: pa.Schema | None = None,
+        geometry_columns: Collection[str] = (),
+    ) -> dict:
+        """Get kwargs dict for PyArrow write_table().
+
+        With ``schema``, dictionary encoding is limited to the non-geometry
+        columns (:func:`dictionary_columns`). Without it, pyarrow's default
+        applies to every column.
+        """
         pa_compression = self.compression if self.compression != "UNCOMPRESSED" else None
         pa_compression_level = (
             self.compression_level if self.compression in ["GZIP", "ZSTD", "BROTLI"] else None
@@ -651,7 +712,9 @@ class ParquetWriteSettings:
             "row_group_size": row_group_size,
             "compression": pa_compression,
             "write_statistics": True,
-            "use_dictionary": True,
+            "use_dictionary": (
+                True if schema is None else dictionary_columns(schema, geometry_columns)
+            ),
             "version": self.DEFAULT_PARQUET_VERSION,
         }
 

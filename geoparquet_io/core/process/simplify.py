@@ -20,6 +20,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.arrow_geo_metadata import nonplanar_edges_from_schema
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
@@ -31,6 +32,7 @@ from geoparquet_io.core.geoarrow_encoding import is_wkb_extension_field
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
 from geoparquet_io.core.parquet_writer import (
+    dictionary_columns,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
 )
@@ -291,6 +293,27 @@ def _with_stripped_geo(table: pa.Table, geometry_column: str) -> pa.Table:
     return table.replace_schema_metadata(metadata)
 
 
+def _with_carried_edges(table: pa.Table, geometry_column: str, edges: str | None) -> pa.Table:
+    """Keep the edges a native GEOGRAPHY input declared in its type (#1269).
+
+    Unwrapping the column to plain WKB drops its edge type, so the edges move
+    to the carried ``geo`` block, where a 1.x input already keeps them. The
+    write funnel then restores them on the output.
+    """
+    if not edges:
+        return table
+    metadata = dict(table.schema.metadata or {})
+    geo = sanitized_carried_geo(metadata) or {
+        "version": "1.1.0",
+        "primary_column": geometry_column,
+        "columns": {},
+    }
+    columns = geo.setdefault("columns", {})
+    columns.setdefault(geometry_column, {"encoding": "WKB"}).setdefault("edges", edges)
+    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
+    return table.replace_schema_metadata(metadata)
+
+
 def simplify_table(
     table: pa.Table,
     tolerance: float,
@@ -321,6 +344,7 @@ def simplify_table(
     if tolerance < 0:
         raise InvalidParameterError("tolerance", "must be >= 0")
     geom_col = _geometry_column_of(table, geometry_column)
+    native_edges = nonplanar_edges_from_schema(table.schema).get(geom_col)
     table = _with_wkb_storage(table, geom_col)
     column = table.column(geom_col)
     forward = inverse = None
@@ -381,7 +405,7 @@ def simplify_table(
         result = result.filter(pa.array(keep))
         row_bounds = row_bounds[np.array(keep)]
         info(f"dropped {sum(empty_flags)} empty geometries")
-    result = _with_stripped_geo(result, geom_col)
+    result = _with_carried_edges(_with_stripped_geo(result, geom_col), geom_col, native_edges)
     return _refresh_bbox_covering(result, geom_col, bounds=row_bounds)
 
 
@@ -572,7 +596,11 @@ def _simplify_file_streaming(
             # written at open would shadow it on read. DuckDB-written GeoParquet
             # carries no ARROW:schema either, so readers already live without it.
             with pq.ParquetWriter(
-                write_target, writer_schema, store_schema=False, **writer_kwargs
+                write_target,
+                writer_schema,
+                store_schema=False,
+                use_dictionary=dictionary_columns(schema, [geom_col]),
+                **writer_kwargs,
             ) as writer:
                 for batch in batches:
                     table = pa.Table.from_batches([batch])

@@ -283,6 +283,70 @@ def _is_spherical_edge_type(arrow_type) -> bool:
     return getattr(edge_type, "name", "").upper() == "SPHERICAL"
 
 
+def _field_edges(field) -> str | None:
+    """The edges a GeoArrow field declares, in either carrier shape, lower-case."""
+    edge_type = getattr(field.type, "edge_type", None)
+    name = getattr(edge_type, "name", None)
+    if name:
+        return name.lower()
+    raw = (field.metadata or {}).get(b"ARROW:extension:metadata")
+    try:
+        parsed = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    edges = parsed.get("edges") if isinstance(parsed, dict) else None
+    return edges.lower() if isinstance(edges, str) else None
+
+
+def nonplanar_edges_from_schema(schema) -> dict[str, str]:
+    """Map each GeoArrow field with non-planar edges to its edges value.
+
+    A table read from a native GEOGRAPHY file says its edges in the field type
+    (or, when ``geoarrow.pyarrow`` is not imported, in the field's extension
+    metadata), not in a ``geo`` block. The write paths that rebuild the block
+    need this to carry the edges over (#1269, #1253).
+    """
+    edges_by_col: dict[str, str] = {}
+    for field in schema:
+        if not is_geoarrow_extension_field(field):
+            continue
+        edges = _field_edges(field)
+        if edges and edges != "planar":
+            edges_by_col[field.name] = edges
+    return edges_by_col
+
+
+def with_planar_edge_types(table, columns):
+    """The table with each named GeoArrow column's edge type set to planar.
+
+    DuckDB refuses to register a GeoArrow column with non-planar edges ("Can't
+    import non-planar edges"), so a write that goes through DuckDB clears the
+    edge type first and restores it on the written file (#1253). The CRS and the
+    bytes are kept as they are.
+    """
+    for name in columns:
+        index = table.schema.get_field_index(name)
+        field = table.schema.field(index)
+        if hasattr(field.type, "with_edge_type"):
+            import geoarrow.pyarrow as ga
+
+            new_type = field.type.with_edge_type(ga.EdgeType.PLANAR)
+            column = _rebuild_array_with_type(table.column(index), new_type)
+            table = table.set_column(index, field.with_type(new_type), column)
+            continue
+        metadata = dict(field.metadata or {})
+        try:
+            ext = json.loads(metadata.get(b"ARROW:extension:metadata") or b"{}")
+        except ValueError:
+            continue
+        if not isinstance(ext, dict):
+            continue
+        ext.pop("edges", None)
+        metadata[b"ARROW:extension:metadata"] = json.dumps(ext).encode("utf-8")
+        table = table.set_column(index, field.with_metadata(metadata), table.column(index))
+    return table
+
+
 # What a secondary geometry column's carried entry says about the column ITSELF,
 # as opposed to about the rows a particular write happens to put in it. Only these
 # travel into a derived `geometry_info`; `bbox` and `covering` are the derived
@@ -1049,7 +1113,11 @@ def _write_table_with_settings(
         row_group_rows=row_group_rows,
         row_group_size_mb=row_group_size_mb,
     )
-    write_kwargs = settings.get_pyarrow_kwargs(calculated_row_group_size=rows_per_group)
+    write_kwargs = settings.get_pyarrow_kwargs(
+        calculated_row_group_size=rows_per_group,
+        schema=table.schema,
+        geometry_columns=[geometry_column],
+    )
 
     if verbose:
         compression_desc = (

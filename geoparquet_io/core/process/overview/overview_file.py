@@ -52,6 +52,7 @@ from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     apply_output_kv_metadata,
+    dictionary_columns,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
 )
@@ -379,7 +380,9 @@ def write_overview_file(
                 compression=compression,
                 compression_level=compression_level,
                 # OVERVIEWS_SPEC 4.5: no dictionary encoding on the geometry.
-                use_dictionary=[n for n in schema.names if n != geometry_column],
+                use_dictionary=dictionary_columns(
+                    schema, [geometry_column] if geometry_column else ()
+                ),
             ) as writer:
                 _write_levels(writer, files, data_schema, schema, rows_per_group)
             written = pq.read_metadata(tmp_path).num_row_groups
