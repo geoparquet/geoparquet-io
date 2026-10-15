@@ -209,6 +209,7 @@ from geoparquet_io.core import (  # noqa: E402
     geo_metadata,
     http_retry,
     overture,
+    wfs,
 )
 from geoparquet_io.core.write_strategies import WriteStrategyFactory  # noqa: E402
 
@@ -223,6 +224,8 @@ PACKAGE_CACHES = (
     geo_metadata._emit_malformed_geo_warning,
     geo_metadata._note_undeclarable_bbox_column,
     WriteStrategyFactory.get_strategy,
+    wfs._bbox_axes,
+    wfs._request_pyproj_crs,
 )
 
 
