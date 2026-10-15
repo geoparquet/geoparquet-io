@@ -25,13 +25,40 @@ The `add` commands enhance GeoParquet files with spatial indices, geometry metri
     scratch file first, so those commands preserve the version and the CRS now
     too.
 
-    Two shapes are not fully covered yet, both pinned by failing-on-purpose
-    tests: a native `GEOGRAPHY` column comes back as a planar `GEOMETRY` while
-    the metadata still declares spherical edges
+    A native `GEOGRAPHY` column stays `GEOGRAPHY` with its spherical edges
     ([#999](https://github.com/geoparquet/geoparquet-io/issues/999)), and a
-    *secondary* geometry column keeps its own Parquet type but is left out of
-    `geo.columns` and loses its CRS
+    *secondary* geometry column is described in `geo.columns` with its own CRS
     ([#1000](https://github.com/geoparquet/geoparquet-io/issues/1000)).
+
+!!! warning "Spherical edges and planar math"
+    The values these commands compute treat edges as straight lines on the
+    plane. That covers `bbox`, the cell keys (`h3`, `s2`, `a5`, `quadkey`) and
+    `kdtree`, and also `simplify`, `reproject` and the `aggregate` commands. On
+    a column with spherical edges they still run, and the values they add are
+    the planar ones. The Python API keeps the column's edges and logs one
+    warning for each such call.
+    Geodesic versions are tracked in
+    [#1286](https://github.com/geoparquet/geoparquet-io/issues/1286) and
+    [#1289](https://github.com/geoparquet/geoparquet-io/issues/1289).
+    Operations that only pass the geometry through, such as `sort` or
+    `extract`, keep the edges and do not warn.
+
+    === "CLI"
+
+        <!-- doctest: skip="needs world_geography.parquet, a GEOGRAPHY file the harness does not seed" -->
+        ```bash
+        gpio add bbox world_geography.parquet world_bbox.parquet
+        ```
+
+    === "Python"
+
+        <!-- doctest: skip="needs world_geography.parquet, a GEOGRAPHY file the harness does not seed" -->
+        ```python
+        import geoparquet_io as gpio
+
+        # Logs one warning, and the bbox values are planar
+        gpio.read("world_geography.parquet").add_bbox()
+        ```
 
 !!! note "Coordinate Reference Systems"
     The grid-index commands (`h3`, `s2`, `a5`, `quadkey`) and `admin-divisions` are
