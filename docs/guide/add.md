@@ -45,14 +45,12 @@ The `add` commands enhance GeoParquet files with spatial indices, geometry metri
 
     === "CLI"
 
-        <!-- doctest: skip="needs world_geography.parquet, a GEOGRAPHY file the harness does not seed" -->
         ```bash
         gpio add bbox world_geography.parquet world_bbox.parquet
         ```
 
     === "Python"
 
-        <!-- doctest: skip="needs world_geography.parquet, a GEOGRAPHY file the harness does not seed" -->
         ```python
         import geoparquet_io as gpio
 
