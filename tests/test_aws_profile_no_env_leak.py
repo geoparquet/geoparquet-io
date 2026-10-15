@@ -131,3 +131,24 @@ def test_connection_secret_uses_ambient_profile(monkeypatch):
     con.close()
 
     assert seen == ["prod"]
+
+
+@pytest.mark.parametrize(("profile", "expected"), [("prod", ["prod"]), (None, [])])
+def test_connection_secret_follows_scoped_profile_without_use_s3_auth(
+    monkeypatch, profile, expected
+):
+    """A scoped profile alone builds the secret. No profile and no use_s3_auth builds none."""
+    seen: list = []
+
+    def _fake_sql(scoped_profile):
+        seen.append(scoped_profile)
+        return "SELECT 1"
+
+    monkeypatch.setattr(duckdb_utils, "_install_and_load_extension", lambda con, name: None)
+    monkeypatch.setattr(duckdb_utils, "_credential_chain_secret_sql", _fake_sql)
+
+    with s3_config_scope({"profile": profile}):
+        con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
+    con.close()
+
+    assert seen == expected

@@ -1316,11 +1316,12 @@ def get_duckdb_connection(
     if load_httpfs:
         _install_and_load_extension(con, "httpfs")
 
-        # Only configure AWS credentials if explicitly requested (for private buckets)
-        # Public buckets work without any secret - DuckDB handles them automatically
-        if use_s3_auth:
+        # Only configure AWS credentials when asked for: use_s3_auth (private
+        # buckets) or a scoped AWS profile, which only the credential chain can
+        # honor. Public buckets work without any secret.
+        ambient_profile = (_active_s3_config.get() or {}).get("profile")
+        if use_s3_auth or ambient_profile:
             _install_and_load_extension(con, "aws")
-            ambient_profile = (_active_s3_config.get() or {}).get("profile")
             con.execute(_credential_chain_secret_sql(ambient_profile))
 
     # Apply S3 config: explicit kwargs override ambient config
