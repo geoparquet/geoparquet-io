@@ -51,25 +51,31 @@ def _wkb_of(*wkts: str) -> list[bytes]:
         con.close()
 
 
-def _geo_block(edges: str | None, extra: dict | None = None) -> bytes:
+def _geo_block(edges, extra: dict | None = None, column: str = "geometry") -> bytes:
     col: dict = {"encoding": "WKB", "geometry_types": ["Polygon"]}
     if edges:
         col["edges"] = edges
     col.update(extra or {})
     return json.dumps(
-        {"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": col}}
+        {"version": "1.1.0", "primary_column": column, "columns": {column: col}}
     ).encode()
 
 
-def _write_input(path, *wkts: str, edges: str | None = "spherical", extra: dict | None = None):
+def _write_input(
+    path,
+    *wkts: str,
+    edges: str | None = "spherical",
+    extra: dict | None = None,
+    column: str = "geometry",
+):
     """A GeoParquet 1.1 file whose geo block declares the given edges value."""
     table = pa.table(
         {
             "id": pa.array(range(len(wkts)), pa.int64()),
-            "geometry": pa.array(_wkb_of(*wkts), pa.binary()),
+            column: pa.array(_wkb_of(*wkts), pa.binary()),
         }
     )
-    table = table.replace_schema_metadata({b"geo": _geo_block(edges, extra)})
+    table = table.replace_schema_metadata({b"geo": _geo_block(edges, extra, column=column)})
     pq.write_table(table, str(path))
     return path
 
@@ -314,6 +320,53 @@ def test_api_convert_preserves_spherical_pole_ring(tmp_path, caplog):
     assert SKIP_MARKER in caplog.text
     assert "Repaired" not in caplog.text
     assert _storage_wkb(out) == _wkb_of(POLE_RING_WKT)
+
+
+@pytest.mark.parametrize("column", ["geometry", "geom"])
+def test_api_convert_table_describes_spherical_edges(column, tmp_path, caplog):
+    """The skipped repair is not enough: the Table must still say spherical.
+
+    ``gpio.convert()`` reads into a bare-WKB table and describes it with a fresh
+    geo block; without ``edges`` there every later step reads it as planar. The
+    ``geom`` variant catches a lookup under the renamed column only.
+    """
+    import geoparquet_io as gpio
+
+    src = _write_input(tmp_path / "in.parquet", POLE_RING_WKT, column=column)
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        table = gpio.convert(str(src)).to_arrow()
+    assert SKIP_MARKER in caplog.text
+    geo = json.loads(table.schema.metadata[b"geo"])
+    assert geo["columns"][geo["primary_column"]].get("edges") == "spherical"
+
+
+def test_api_convert_of_a_planar_parquet_describes_no_edges(tmp_path):
+    import geoparquet_io as gpio
+
+    src = _write_input(tmp_path / "in.parquet", BOWTIE_WKT, edges=None)
+    geo = json.loads(gpio.convert(str(src)).to_arrow().schema.metadata[b"geo"])
+    assert "edges" not in geo["columns"][geo["primary_column"]]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Table.write rebuilds the geo block without the table's edges (#1253); "
+        "PR #1280 restores them. Remove this marker when it lands."
+    ),
+)
+@pytest.mark.parametrize("column", ["geometry", "geom"])
+@pytest.mark.parametrize("version", [None, "2.0"])
+def test_api_convert_output_declares_spherical_edges(column, version, tmp_path):
+    import geoparquet_io as gpio
+    from tests.native_geo_probes import geo_block, spec_problems
+
+    src = _write_input(tmp_path / "in.parquet", POLE_RING_WKT, column=column)
+    out = tmp_path / "out.parquet"
+    gpio.convert(str(src)).write(str(out), geoparquet_version=version)
+    geo = geo_block(out)
+    assert geo["columns"][geo["primary_column"]].get("edges") == "spherical"
+    assert spec_problems(out) == []
 
 
 def test_api_extract_table_skips_repair_for_spherical_table(tmp_path, caplog):

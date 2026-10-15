@@ -2582,19 +2582,22 @@ def read_spatial_to_arrow(
         # can declare non-planar edges (geo block or GEOGRAPHY logical type),
         # which skips the planar repair (#1287) — the read renamed the column to
         # "geometry", so look the declaration up under the input's own name.
+        input_edges = None
+        if is_parquet:
+            edges_by_col = collect_nonplanar_edges(input_file)
+            input_edges = edges_by_col.get(parquet_geom_column or geometry_column)
         if arrow_table.num_rows > 0:
-            input_edges = None
-            if is_parquet:
-                edges_by_col = collect_nonplanar_edges(input_file)
-                input_edges = edges_by_col.get(parquet_geom_column or geometry_column)
             arrow_table, _ = repair_arrow_table_geometry(
                 arrow_table, geometry_column, repair=repair_geometry, nonplanar_edges=input_edges
             )
 
         # The query hands back bare WKB with no schema metadata. Say which column
-        # is the geometry and what CRS it is in, so every Table method that passes
-        # the Arrow table down to core sees what a read() table shows (#1222).
-        arrow_table = describe_wkb_geometry(arrow_table, geometry_column, detected_crs)
+        # is the geometry, what CRS it is in and which edges it declares, so every
+        # Table method that passes the Arrow table down to core sees what a
+        # read() table shows (#1222) and the write keeps spherical edges (#1287).
+        arrow_table = describe_wkb_geometry(
+            arrow_table, geometry_column, detected_crs, edges=input_edges
+        )
         return arrow_table, detected_crs, geometry_column
 
     except duckdb.IOException as e:

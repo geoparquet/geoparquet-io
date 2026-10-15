@@ -1130,7 +1130,9 @@ def _normalize_arrow_large_types(table):
     return table.cast(new_schema)
 
 
-def describe_wkb_geometry(table, geometry_column: str, crs: dict | str | None = None):
+def describe_wkb_geometry(
+    table, geometry_column: str, crs: dict | str | None = None, edges: str | None = None
+):
     """Attach a ``geo`` block naming ``geometry_column`` to a table that has none.
 
     A table built in memory from a query (``gpio.convert()``'s read) holds bare
@@ -1144,7 +1146,10 @@ def describe_wkb_geometry(table, geometry_column: str, crs: dict | str | None = 
     declares GeoParquet 1.1, which is what auto mode writes for a WKB table, and
     an empty ``geometry_types`` (the spec's "not known"). ``crs`` is the source's
     CRS as PROJJSON. ``None`` means the default (OGC:CRS84) and leaves the key
-    out, as the spec spells it.
+    out, as the spec spells it. ``edges`` is the source's declared edge
+    interpretation (e.g. ``"spherical"``); ``None`` or ``"planar"`` leaves the
+    key out (planar is the spec default). Dropping it would let the write read
+    great-circle edges as straight lines over the same bytes (#1287).
 
     A table that already has a ``geo`` key is returned unchanged.
     """
@@ -1155,6 +1160,8 @@ def describe_wkb_geometry(table, geometry_column: str, crs: dict | str | None = 
     column: dict = {"encoding": "WKB", "geometry_types": []}
     if crs is not None:
         column["crs"] = crs
+    if edges and edges != "planar":
+        column["edges"] = edges
     geo = {
         "version": GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]["metadata_version"],
         "primary_column": geometry_column,
