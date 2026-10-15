@@ -857,17 +857,27 @@ class TestBboxFilters:
         assert sql.count("-122.5 37.5") == 2
 
     def test_bbox_with_crs_suffix(self):
-        """WFS 1.1.0 bbox always uses EPSG:4326 regardless of output CRS.
-
-        Many WFS servers (especially GeoServer) only accept bbox in WGS84,
-        so we always send bbox with EPSG:4326 suffix regardless of output CRS.
-        """
+        """A URN 4326 request CRS is sent in the short form, which keeps XY order (#397)."""
         bbox = (-122.5, 37.5, -122.0, 38.0)
-        crs = "urn:ogc:def:crs:EPSG::4326"  # Output CRS (ignored for bbox)
-        result = _build_bbox_param(bbox, crs, "1.1.0")
-        # Bbox should always end with EPSG:4326, not the output CRS
-        assert result.endswith("EPSG:4326")
+        result = _build_bbox_param(bbox, "urn:ogc:def:crs:EPSG::4326", "1.1.0")
         assert result == "-122.5,37.5,-122.0,38.0,EPSG:4326"
+
+    @pytest.mark.parametrize(
+        "crs,suffix",
+        [
+            # The Moldova cadastre layer from #640: projected, YX authority axes.
+            ("urn:ogc:def:crs:EPSG::4026", "EPSG:4026"),
+            ("http://www.opengis.net/def/crs/EPSG/0/25830", "EPSG:25830"),
+            ("EPSG:3857", "EPSG:3857"),
+            # CRS84 is lon/lat by definition, the short EPSG:4326 form says the same.
+            ("urn:ogc:def:crs:OGC:1.3:CRS84", "EPSG:4326"),
+        ],
+    )
+    def test_bbox_is_labelled_with_the_request_crs(self, crs, suffix):
+        """#640: the bbox names the CRS its coordinates are in, never a hardcoded 4326."""
+        bbox = (185357.315, 133208.941, 213794.05, 174347.488)
+        result = _build_bbox_param(bbox, crs, "2.0.0")
+        assert result == f"185357.315,133208.941,213794.05,174347.488,{suffix}"
 
     def test_invalid_geometry_column_rejected(self):
         """Invalid geometry column names with SQL injection characters are rejected."""
@@ -1407,6 +1417,21 @@ class TestCRSNegotiation:
             ("http://www.opengis.net/def/crs/EPSG/0/4326", "EPSG:4326"),
             ("EPSG:3857", "EPSG:3857"),
             ("urn:ogc:def:crs:EPSG::3857", "EPSG:3857"),
+            ("epsg:25830", "EPSG:25830"),
+            # #1046: a versioned URN carries the EPSG database version, not the code
+            ("urn:x-ogc:def:crs:EPSG:6.11:31287", "EPSG:31287"),
+            ("urn:ogc:def:crs:EPSG:6.9:4326", "EPSG:4326"),
+            # #1046: the GML srs URL form
+            ("http://www.opengis.net/gml/srs/epsg.xml#31287", "EPSG:31287"),
+            # #1046: the legacy URN and the form OWSLib re-emits it as
+            ("urn:EPSG:geographicCRS:25830", "EPSG:25830"),
+            ("urn:EPSG:def:crs:::25830", "EPSG:25830"),
+            ("urn:ogc:def:crs:OGC:1.3:CRS84", "EPSG:4326"),
+            ("CRS:84", "EPSG:4326"),
+            # Not an EPSG code: left alone
+            ("ESRI:102100", "ESRI:102100"),
+            # Non-ASCII digits are not a code
+            ("EPSG:\u0664\u0663\u0662\u0666", "EPSG:\u0664\u0663\u0662\u0666"),
         ],
     )
     def test_crs_variant_normalization(self, crs_variant, expected_normalized):
@@ -2769,8 +2794,7 @@ class TestAxisOrder:
         [
             # WFS 1.0.0: no CRS suffix
             ((-122.5, 37.5, -122.0, 38.0), "EPSG:4326", "1.0.0", "auto", "-122.5,37.5,-122.0,38.0"),
-            # WFS 1.1.0+: Always EPSG:4326 with XY order (bbox is always WGS84)
-            # This ensures compatibility with servers that only accept WGS84 bbox
+            # WFS 1.1.0+: the short EPSG form of the request CRS, XY order
             (
                 (-122.5, 37.5, -122.0, 38.0),
                 "EPSG:4326",
@@ -2778,7 +2802,7 @@ class TestAxisOrder:
                 "auto",
                 "-122.5,37.5,-122.0,38.0,EPSG:4326",
             ),
-            # Even with URN output CRS, bbox uses simple EPSG:4326
+            # A URN request CRS is sent in the short form (#397)
             (
                 (-122.5, 37.5, -122.0, 38.0),
                 "urn:ogc:def:crs:EPSG::4326",
@@ -2786,7 +2810,7 @@ class TestAxisOrder:
                 "auto",
                 "-122.5,37.5,-122.0,38.0,EPSG:4326",
             ),
-            # WFS 2.0.0 also uses EPSG:4326 for bbox
+            # WFS 2.0.0 behaves the same
             (
                 (4.82, 50.44, 4.92, 50.48),
                 "urn:ogc:def:crs:EPSG::4326",
@@ -2794,18 +2818,18 @@ class TestAxisOrder:
                 "auto",
                 "4.82,50.44,4.92,50.48,EPSG:4326",
             ),
-            # Projected output CRS still uses WGS84 bbox
+            # A projected request CRS labels the bbox with that CRS (#640)
             (
-                (-122.5, 37.5, -122.0, 38.0),
+                (-13636000.0, 4500000.0, -13580000.0, 4580000.0),
                 "EPSG:3857",
                 "1.1.0",
                 "auto",
-                "-122.5,37.5,-122.0,38.0,EPSG:4326",
+                "-13636000.0,4500000.0,-13580000.0,4580000.0,EPSG:3857",
             ),
         ],
     )
     def test_build_bbox_param_axis_order(self, bbox, crs, version, axis_order, expected):
-        """Bbox parameter string should always use WGS84 for server compatibility."""
+        """The bbox is labelled with the short form of the request CRS (XY order)."""
         from geoparquet_io.core.wfs import _build_bbox_param
 
         result = _build_bbox_param(bbox, crs, version, axis_order)
@@ -3788,47 +3812,167 @@ class TestResolveCRSForOutput:
         assert result.num_rows == 1
 
     @pytest.mark.usefixtures("offline_wfs_probes")
-    def test_wfs_to_table_strips_server_crs_marker_when_no_projjson(self):
-        """The internal server-CRS marker never leaks into the output schema.
-
-        Even when no geo metadata is written (projjson unavailable for the
-        resolved CRS), the ``_wfs_server_crs`` marker must be removed.
-        """
+    def _wfs_to_table_with_server_crs(self, server_crs: str, x: float, y: float):
         from unittest.mock import MagicMock, patch
 
-        from geoparquet_io.core.wfs import (
-            _SERVER_CRS_METADATA_KEY,
-            _with_server_crs,
-            wfs_to_table,
-        )
+        from geoparquet_io.core.wfs import _with_server_crs, wfs_to_table
 
-        table = _with_server_crs(self._point_table(4527586.01, 6386852.32), "EPSG:22174")
-
+        table = _with_server_crs(self._point_table(x, y), server_crs)
         with (
             patch("geoparquet_io.core.wfs.negotiate_wfs_version") as mock_version,
             patch("geoparquet_io.core.wfs.get_layer_info") as mock_layer_info,
             patch("geoparquet_io.core.wfs.fetch_all_features_duckdb", return_value=table),
-            patch("geoparquet_io.core.wfs.parse_crs_string_to_projjson", return_value=None),
         ):
             mock_version.return_value = ("2.0.0", MagicMock())
             mock_layer_info.return_value = MagicMock(
                 typename="mock:layer",
                 title="Mock Layer",
-                crs_list=["EPSG:22174"],
-                default_crs="EPSG:22174",
+                crs_list=[server_crs],
+                default_crs=server_crs,
                 available_formats=["application/json"],
                 sortable_attribute=None,
                 bbox=None,
             )
-            result = wfs_to_table(
+            return wfs_to_table(
                 service_url="https://mock.wfs.server/wfs",
                 typename="mock:layer",
-                output_crs="EPSG:22174",
+                auto_tile=False,
             )
 
-        metadata = result.schema.metadata or {}
-        assert _SERVER_CRS_METADATA_KEY not in metadata
-        assert b"geo" not in metadata
+    def test_wfs_to_table_strips_server_crs_marker(self):
+        """The internal server-CRS marker never leaks into the output schema."""
+        from geoparquet_io.core.wfs import _SERVER_CRS_METADATA_KEY
+
+        result = self._wfs_to_table_with_server_crs("EPSG:22174", 4527586.01, 6386852.32)
+
+        assert _SERVER_CRS_METADATA_KEY not in (result.schema.metadata or {})
+
+    @pytest.mark.parametrize(
+        "server_crs",
+        ["urn:EPSG:geographicCRS:25830", "urn:EPSG:def:crs:::25830"],
+    )
+    def test_wfs_to_table_resolves_legacy_urns(self, server_crs):
+        """#1046: both legacy URN forms are EPSG:25830, not a CRS84 default."""
+        import json
+
+        result = self._wfs_to_table_with_server_crs(server_crs, 440000.0, 4470000.0)
+
+        geo = json.loads(result.schema.metadata[b"geo"])
+        assert geo["columns"]["geometry"]["crs"]["id"] == {"authority": "EPSG", "code": 25830}
+
+    def test_wfs_to_table_resolves_a_non_epsg_crs_through_pyproj(self):
+        """A CRS that is not an EPSG code still resolves when pyproj knows it."""
+        import json
+
+        result = self._wfs_to_table_with_server_crs("ESRI:102100", 4527586.01, 6386852.32)
+
+        geo = json.loads(result.schema.metadata[b"geo"])
+        assert geo["columns"]["geometry"]["crs"]["id"] == {"authority": "ESRI", "code": 102100}
+
+    @pytest.mark.parametrize(
+        "server_crs",
+        [
+            "urn:EPSG:def:crs:::999999",
+            "urn:example:crs:local-grid",
+            pytest.param("x" * 5000, id="oversized"),
+        ],
+    )
+    def test_wfs_to_table_refuses_a_crs_it_cannot_resolve(self, server_crs):
+        """#1046: an unresolvable server CRS is refused, never written as CRS84."""
+        with pytest.raises(WFSError, match="could not resolve") as excinfo:
+            self._wfs_to_table_with_server_crs(server_crs, 4527586.01, 6386852.32)
+        assert len(str(excinfo.value)) < 600
+
+
+class TestOutputCrsProjjson:
+    """_output_crs_projjson: PROJJSON gpio can write, or a refusal."""
+
+    def test_an_epsg_urn_resolves_to_full_projjson(self):
+        from geoparquet_io.core.wfs import _output_crs_projjson
+
+        projjson = _output_crs_projjson("http://www.opengis.net/gml/srs/epsg.xml#31287")
+
+        assert projjson["id"] == {"authority": "EPSG", "code": 31287}
+        assert projjson["type"] == "ProjectedCRS"
+
+    def test_an_unknown_epsg_code_is_not_written_as_an_id_stub(self):
+        from geoparquet_io.core.wfs import _output_crs_projjson
+
+        with pytest.raises(WFSError, match="could not resolve"):
+            _output_crs_projjson("EPSG:999999")
+
+
+class TestBboxCrsContract:
+    """#640: --bbox is read in the request CRS, and tiling follows suit."""
+
+    LAYER_WGS84 = (-3.8, 40.3, -3.6, 40.5)
+
+    def _layer(self, bbox=LAYER_WGS84):
+        return WFSLayerInfo(
+            typename="t:l",
+            title="",
+            crs_list=[],
+            default_crs=None,
+            bbox=bbox,
+            geometry_column="geom",
+            available_formats=[],
+        )
+
+    def test_a_user_bbox_is_used_as_given(self):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        user = (440000.0, 4470000.0, 450000.0, 4480000.0)
+        assert _get_tiling_bbox(user, True, self._layer(), "EPSG:25830") == user
+
+    def test_the_layer_bbox_stays_wgs84_for_a_wgs84_request(self):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        tiles = _get_tiling_bbox(None, True, self._layer(), "urn:ogc:def:crs:EPSG::4326")
+        assert tiles == self.LAYER_WGS84
+
+    def test_the_layer_bbox_is_reprojected_into_a_projected_request_crs(self):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        xmin, ymin, xmax, ymax = _get_tiling_bbox(
+            None, True, self._layer(), "urn:ogc:def:crs:EPSG::25830"
+        )
+        # Madrid in ETRS89 / UTM 30N
+        assert 400_000 < xmin < xmax < 500_000
+        assert 4_400_000 < ymin < ymax < 4_500_000
+
+    def test_an_unprojectable_layer_bbox_disables_tiling(self, caplog):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        with caplog.at_level(logging.WARNING):
+            assert _get_tiling_bbox(None, True, self._layer(), "urn:example:local") is None
+        assert "tiling" in caplog.text
+
+    def test_no_bbox_anywhere_means_no_tiling(self):
+        from geoparquet_io.core.wfs import _get_tiling_bbox
+
+        assert _get_tiling_bbox(None, True, self._layer(bbox=None), "EPSG:25830") is None
+
+    def test_a_lon_lat_looking_bbox_on_a_projected_crs_warns(self, caplog):
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat((-3.8, 40.3, -3.6, 40.5), "urn:ogc:def:crs:EPSG::25830")
+        assert "EPSG:25830" in caplog.text
+        assert "--bbox" in caplog.text
+
+    @pytest.mark.parametrize(
+        "bbox,crs",
+        [
+            ((-3.8, 40.3, -3.6, 40.5), "urn:ogc:def:crs:EPSG::4326"),
+            ((440000.0, 4470000.0, 450000.0, 4480000.0), "EPSG:25830"),
+        ],
+    )
+    def test_a_bbox_that_fits_its_crs_is_quiet(self, caplog, bbox, crs):
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(bbox, crs)
+        assert caplog.text == ""
 
 
 # =============================================================================

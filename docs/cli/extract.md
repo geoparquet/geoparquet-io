@@ -195,7 +195,7 @@ gpio extract wfs https://geo.example.com/wfs layer_name output.parquet
 **Options:**
 
 - `--version` - WFS protocol version: `1.0.0` or `1.1.0` (default)
-- `--bbox` - Bounding box filter: `xmin,ymin,xmax,ymax` in WGS84
+- `--bbox` - Bounding box filter: `xmin,ymin,xmax,ymax` in the CRS gpio requests from the layer (`--output-crs` when offered, else EPSG:4326 when offered, else the layer's default CRS)
 - `--bbox-mode` - Filter mode: `auto` (default), `server`, or `local`
 - `--limit` - Maximum features to extract
 - `--output-crs` - Request specific CRS from server (e.g., `EPSG:4326`)

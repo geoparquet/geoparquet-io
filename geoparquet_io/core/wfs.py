@@ -46,7 +46,7 @@ __all__ = [
 ]
 
 from geoparquet_io.core.arrow_types import _cast_table_to_schema, _compute_unified_schema
-from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
+from geoparquet_io.core.crs_utils import _projjson_from_authority
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
@@ -472,33 +472,42 @@ def negotiate_wfs_version(service_url: str, preferred_version: str = "auto"):
     )
 
 
+# The EPSG code a CRS string names: the last ASCII digit run after "EPSG",
+# behind a ":", "/" or "#". That one rule reads every form WFS servers send:
+#   EPSG:4326                                      short form
+#   urn:ogc:def:crs:EPSG::4326                     OGC URN
+#   urn:x-ogc:def:crs:EPSG:6.11:31287              versioned URN (6.11 is the database version)
+#   urn:EPSG:geographicCRS:25830                   legacy URN
+#   urn:EPSG:def:crs:::25830                       OWSLib's rewrite of the legacy URN
+#   http://www.opengis.net/def/crs/EPSG/0/4326     OGC URL
+#   http://www.opengis.net/gml/srs/epsg.xml#31287  GML srs URL
+_EPSG_CODE: Final = re.compile(r"EPSG[^,]*?[:/#]([0-9]{1,9})\s*$", re.IGNORECASE)
+# A server CRS string longer than this is not a CRS name. It is never parsed.
+_MAX_CRS_STRING: Final = 1024
+
+
+def _epsg_code(crs: str) -> str | None:
+    """The EPSG code a CRS string names, in any form listed above, or None."""
+    if len(crs) > _MAX_CRS_STRING:
+        return None
+    match = _EPSG_CODE.search(crs)
+    return match.group(1) if match else None
+
+
 def _normalize_crs(crs: str) -> str:
     """
-    Normalize CRS string to consistent EPSG format.
+    Normalize a CRS string to the short ``EPSG:<code>`` form.
 
-    Handles variants like:
-    - EPSG:4326
-    - urn:ogc:def:crs:EPSG::4326
-    - http://www.opengis.net/def/crs/EPSG/0/4326
+    Reads every URN and URL form listed at ``_EPSG_CODE``. CRS84 becomes
+    EPSG:4326 (the short form is read lon/lat in practice, like CRS84).
+    Anything else is returned as-is.
 
     Returns:
         Normalized EPSG string (e.g., "EPSG:4326")
     """
-    import re
-
-    # Already in simple format
-    if re.match(r"^EPSG:\d+$", crs, re.IGNORECASE):
-        return crs.upper()
-
-    # URN format: urn:ogc:def:crs:EPSG::4326
-    urn_match = re.search(r"EPSG::?(\d+)", crs, re.IGNORECASE)
-    if urn_match:
-        return f"EPSG:{urn_match.group(1)}"
-
-    # HTTP format: http://www.opengis.net/def/crs/EPSG/0/4326
-    http_match = re.search(r"EPSG/\d+/(\d+)", crs, re.IGNORECASE)
-    if http_match:
-        return f"EPSG:{http_match.group(1)}"
+    code = _epsg_code(crs)
+    if code:
+        return f"EPSG:{code}"
 
     # CRS84 is equivalent to EPSG:4326 (axis order differs but we handle that)
     if "CRS84" in crs.upper() or "CRS:84" in crs.upper():
@@ -1281,32 +1290,49 @@ def _build_bbox_param(
     axis_order: str = "auto",
 ) -> str:
     """
-    Build WFS bbox parameter string with correct axis order.
+    Build the WFS bbox parameter string.
 
-    IMPORTANT: Bbox is always sent in WGS84 (EPSG:4326) regardless of output CRS,
-    because many WFS servers (especially GeoServer) only accept bbox in WGS84.
-    The bbox coordinates are expected to be in lon,lat (WGS84) order.
+    The bbox coordinates are in the request CRS (``crs``, the srsName gpio
+    asks for), in x,y order. The CRS suffix names that same CRS in its short
+    ``EPSG:<code>`` form. The short form keeps x,y axis order on servers that
+    read a URN in its authority axis order (#397). Labelling every bbox
+    EPSG:4326 made servers drop the filter on any other layer and return the
+    whole layer (#640).
 
-    WFS 1.0.0: xmin,ymin,xmax,ymax (always XY, no CRS suffix)
-    WFS 1.1.0+: xmin,ymin,xmax,ymax,EPSG:4326 (always WGS84)
+    WFS 1.0.0: xmin,ymin,xmax,ymax (no CRS suffix, the layer's SRS applies)
+    WFS 1.1.0+: xmin,ymin,xmax,ymax,EPSG:<code of the request CRS>
 
     Args:
-        bbox: Bounding box tuple (xmin, ymin, xmax, ymax) in WGS84 lon,lat order
-        crs: Output CRS (ignored for bbox - we always use WGS84)
+        bbox: Bounding box tuple (xmin, ymin, xmax, ymax) in the request CRS
+        crs: Request CRS (the srsName sent with the request)
         version: WFS version
-        axis_order: "auto" (detect from CRS), "xy" (force lon,lat), "latlon" (force lat,lon)
+        axis_order: Accepted for call-site compatibility. The short form is x,y.
 
     Returns:
-        Bbox parameter string in WGS84
+        Bbox parameter string
     """
     xmin, ymin, xmax, ymax = bbox
 
     if version == "1.0.0":
         return f"{xmin},{ymin},{xmax},{ymax}"
 
-    # Always use WGS84 for bbox - most WFS servers expect this regardless of output CRS
-    # Use simple EPSG:4326 format (not URN) to ensure XY axis order
-    return f"{xmin},{ymin},{xmax},{ymax},EPSG:4326"
+    return f"{xmin},{ymin},{xmax},{ymax},{_normalize_crs(crs)}"
+
+
+def _warn_if_bbox_looks_lon_lat(bbox: tuple[float, float, float, float], crs: str) -> None:
+    """Warn when a bbox for a projected request CRS looks like lon/lat degrees.
+
+    ``--bbox`` is read in the request CRS. Degrees on a projected layer select
+    a tiny area near the CRS origin, so the result is almost always empty.
+    """
+    if _is_geographic_crs(crs) or _estimate_crs_from_bbox(bbox) != "EPSG:4326":
+        return
+    short = _normalize_crs(crs)
+    warn(
+        f"--bbox {','.join(str(v) for v in bbox)} looks like lon/lat, but it is read "
+        f"in the layer CRS {short}. Pass the bbox in {short}, or request EPSG:4326 "
+        "with --output-crs if the layer offers it."
+    )
 
 
 def _validate_identifier(name: str) -> str:
@@ -2918,18 +2944,57 @@ def _get_tiling_bbox(
     user_bbox: tuple[float, float, float, float] | None,
     use_server_bbox: bool,
     layer_info: WFSLayerInfo,
+    crs: str = "EPSG:4326",
 ) -> tuple[float, float, float, float] | None:
-    """Get the bounding box to use for spatial tiling.
+    """Get the bounding box to use for spatial tiling, in the request CRS.
 
-    Returns the user's bbox if provided and server-side filtering is enabled,
-    otherwise falls back to the layer's advertised bbox from capabilities.
-    Returns None if no bbox is available.
+    Returns the user's bbox if provided and server-side filtering is enabled
+    (it is already in the request CRS). Otherwise falls back to the layer's
+    advertised WGS84 bbox from capabilities, reprojected into ``crs``, since
+    each tile is sent labelled with ``crs``. Returns None if no bbox is
+    available or the layer bbox cannot be reprojected.
     """
     if user_bbox and use_server_bbox:
         return user_bbox
-    if layer_info.bbox:
+    if not layer_info.bbox:
+        return None
+    if _crs_matches(crs, "EPSG:4326"):
         return layer_info.bbox
-    return None
+    try:
+        from pyproj import Transformer
+
+        transformer = Transformer.from_crs("EPSG:4326", _normalize_crs(crs), always_xy=True)
+        xmin, ymin, xmax, ymax = transformer.transform_bounds(*layer_info.bbox)
+        return (xmin, ymin, xmax, ymax)
+    except Exception as e:
+        warn(f"Could not reproject the layer bbox into {crs}, so auto-tiling is off: {e}")
+        return None
+
+
+def _output_crs_projjson(crs: str) -> dict:
+    """PROJJSON for the CRS the output is labelled with, or a refusal.
+
+    Tries the EPSG code the string names (any form ``_EPSG_CODE`` reads), then
+    pyproj on the string itself (``ESRI:102100``, a CRS84 URN). A bare id stub
+    is never written. When neither resolves, the extraction stops: writing no
+    ``crs`` key would label the coordinates OGC:CRS84 (#1046).
+    """
+    code = _epsg_code(crs)
+    cached = _projjson_from_authority("EPSG", code) if code else None
+    if cached is not None:
+        return json.loads(cached)
+    if len(crs) <= _MAX_CRS_STRING:
+        try:
+            from pyproj import CRS as _PyprojCRS
+
+            return _PyprojCRS.from_user_input(crs).to_json_dict()
+        except Exception as e:
+            debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
+    raise WFSError(
+        f"gpio could not resolve the layer CRS {crs[:200]!r}, so it cannot label the "
+        "coordinates. Writing the file without a CRS would mark them as lon/lat "
+        "(OGC:CRS84). Ask the service for an EPSG CRS it offers with --output-crs."
+    )
 
 
 def wfs_to_table(
@@ -2964,7 +3029,10 @@ def wfs_to_table(
         service_url: WFS service URL
         typename: Layer typename
         version: WFS version (1.0.0, 1.1.0, or 2.0.0)
-        bbox: Bounding box filter (xmin, ymin, xmax, ymax)
+        bbox: Bounding box filter (xmin, ymin, xmax, ymax) in the request CRS,
+            the one ``_negotiate_crs`` picks (output_crs when the layer offers
+            it, else EPSG:4326 when offered, else the layer default). It is
+            sent labelled with that CRS (#640).
         bbox_mode: Bbox strategy ("auto", "server", "local")
         output_crs: Guarantee output in this CRS. If the server returns a
             different CRS than requested, data is reprojected automatically from
@@ -3024,6 +3092,7 @@ def wfs_to_table(
     use_server_bbox = True
     if bbox:
         use_server_bbox = _determine_bbox_strategy(bbox_mode, layer_info)
+        _warn_if_bbox_looks_lon_lat(bbox, crs)
 
     # Get expected feature count for cap detection
     # Try WFS 2.0.0 first for count query since it often has higher/no limits
@@ -3059,7 +3128,7 @@ def wfs_to_table(
         if startindex_limit:
             effective = min(limit, expected_count) if limit else expected_count
             if effective > startindex_limit + page_size:
-                tiling_bbox = _get_tiling_bbox(bbox, use_server_bbox, layer_info)
+                tiling_bbox = _get_tiling_bbox(bbox, use_server_bbox, layer_info, crs)
                 if tiling_bbox:
                     use_tiling = True
                     tiling_total = effective
@@ -3114,7 +3183,7 @@ def wfs_to_table(
             and _looks_like_server_cap(table.num_rows)
             and not limit  # Don't retry if user specified a limit
         ):
-            tiling_bbox = _get_tiling_bbox(bbox, use_server_bbox, layer_info)
+            tiling_bbox = _get_tiling_bbox(bbox, use_server_bbox, layer_info, crs)
             if tiling_bbox:
                 warn(
                     f"Server capped response at {table.num_rows:,} features "
@@ -3184,20 +3253,19 @@ def wfs_to_table(
     existing_meta = dict(table.schema.metadata or {})
     existing_meta.pop(_SERVER_CRS_METADATA_KEY, None)
 
-    # Add CRS metadata to schema
-    projjson = parse_crs_string_to_projjson(_normalize_crs(crs))
-    if projjson:
-        geo_meta = {
-            "version": "1.0.0",
-            "primary_column": "geometry",
-            "columns": {
-                "geometry": {
-                    "encoding": "WKB",
-                    "crs": projjson,
-                }
-            },
-        }
-        existing_meta[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+    # Add CRS metadata to schema. A CRS that does not resolve is refused, never
+    # omitted: an absent crs key means OGC:CRS84 (#1046).
+    geo_meta = {
+        "version": "1.0.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "crs": _output_crs_projjson(crs),
+            }
+        },
+    }
+    existing_meta[b"geo"] = json.dumps(geo_meta).encode("utf-8")
 
     table = table.replace_schema_metadata(existing_meta)
 

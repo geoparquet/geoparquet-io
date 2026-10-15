@@ -883,7 +883,9 @@ def _deprecated_version_callback(ctx, param, value):
 )
 @click.option(
     "--bbox",
-    help="Bounding box: xmin,ymin,xmax,ymax in WGS84",
+    help="Bounding box: xmin,ymin,xmax,ymax in the CRS gpio requests from the layer "
+    "(--output-crs when the layer offers it, else EPSG:4326 when offered, "
+    "else the layer's default CRS)",
 )
 @click.option(
     "--bbox-mode",

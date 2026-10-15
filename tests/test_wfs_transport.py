@@ -870,3 +870,81 @@ def test_a_service_url_query_parameter_survives_every_request(monkeypatch, tmp_p
 
     assert http.requests
     assert all(request.params.get("apikey") == "secret" for request in http.requests)
+
+
+# ---------------------------------------------------------------------------
+# --bbox on a projected layer (#640) and server CRS strings (#1046)
+# ---------------------------------------------------------------------------
+
+
+def _projected_capabilities(srs: str) -> bytes:
+    """The mock document with one layer CRS, so negotiation cannot pick 4326."""
+    xml = MOCK_CAPABILITIES_XML.replace(
+        "<wfs:OtherSRS>urn:ogc:def:crs:EPSG::3857</wfs:OtherSRS>", ""
+    ).replace("urn:ogc:def:crs:EPSG::4326", srs)
+    return xml.encode("utf-8")
+
+
+def _projected_pages(declared: str):
+    """A GeoJSON page in ETRS89 / UTM 30N that declares ``declared`` as its CRS."""
+
+    def _serve(request):
+        document = _geojson(3, crs=declared)
+        for index, feature in enumerate(document["features"]):
+            feature["geometry"]["coordinates"] = [441000.0 + index * 10, 4471000.0]
+        return geojson_reply(document)(request)
+
+    return _serve
+
+
+def _stub_projected_layer(monkeypatch, srs: str):
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, _projected_capabilities(srs), SCHEMA)
+    http.respond(_is_hits, xml_reply(b'<wfs:FeatureCollection numberMatched="3"/>'))
+    http.respond(_is_startindex_probe, geojson_reply(_geojson(0)))
+    http.respond(_is_getfeature, _projected_pages(srs))
+    return http
+
+
+def test_a_bbox_on_a_projected_layer_is_labelled_with_the_layer_crs(monkeypatch, tmp_path):
+    """#640: the bbox names the layer CRS, so the server applies the filter."""
+    http = _stub_projected_layer(monkeypatch, "urn:ogc:def:crs:EPSG::25830")
+    out = tmp_path / "madrid.parquet"
+
+    convert_wfs_to_geoparquet(
+        SERVICE,
+        TYPENAME,
+        str(out),
+        version="1.1.0",
+        bbox=(440000.0, 4470000.0, 450000.0, 4480000.0),
+        bbox_mode="server",
+    )
+
+    pages = [r for r in http.requests if _is_getfeature(r)]
+    assert pages
+    assert {r.params["bbox"] for r in pages} == {"440000.0,4470000.0,450000.0,4480000.0,EPSG:25830"}
+    assert {r.params["srsName"] for r in pages} == {"urn:ogc:def:crs:EPSG::25830"}
+    assert spec_problems(out) == []
+    assert geo_block_crs_id(out) == {"authority": "EPSG", "code": 25830}
+
+
+def test_a_legacy_urn_layer_crs_is_written_as_its_epsg_code(monkeypatch, tmp_path):
+    """#1046: the legacy geographicCRS URN is EPSG:25830, not a CRS84 default."""
+    _stub_projected_layer(monkeypatch, "urn:EPSG:geographicCRS:25830")
+    out = tmp_path / "legacy.parquet"
+
+    convert_wfs_to_geoparquet(SERVICE, TYPENAME, str(out), version="1.1.0")
+
+    assert spec_problems(out) == []
+    assert geo_block_crs_id(out) == {"authority": "EPSG", "code": 25830}
+
+
+def test_an_unresolvable_layer_crs_is_refused_and_nothing_is_written(monkeypatch, tmp_path):
+    """#1046: a file that labels projected coordinates as lon/lat is worse than none."""
+    _stub_projected_layer(monkeypatch, "urn:EPSG:def:crs:::999999")
+    out = tmp_path / "refused.parquet"
+
+    with pytest.raises(WFSError, match="could not resolve"):
+        convert_wfs_to_geoparquet(SERVICE, TYPENAME, str(out), version="1.1.0")
+
+    assert not out.exists()

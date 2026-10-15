@@ -1466,7 +1466,14 @@ Web Feature Service (WFS) is an OGC standard for serving vector geospatial data 
 
 ### Bbox Filtering
 
-Spatial filtering can be applied server-side (pushed to WFS) or locally (after download):
+Spatial filtering can be applied server-side (pushed to WFS) or locally (after download).
+
+The bbox is read in the CRS gpio requests from the layer. That is `--output-crs`
+when the layer offers it, else EPSG:4326 when the layer offers it, else the
+layer's default CRS. Most layers offer EPSG:4326, so a lon/lat bbox works. For
+a layer that only offers a projected CRS, pass the bbox in that CRS. gpio sends
+it labelled with that CRS in x,y order, so the server applies the filter, and
+warns when the bbox looks like lon/lat on a projected layer.
 
 === "CLI"
     <!-- doctest: skip="illustrative endpoint" -->
