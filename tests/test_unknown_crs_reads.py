@@ -274,3 +274,95 @@ def test_duckdb_v2_srid0_rewrite_stays_unknown(version, tmp_path):
     geo = json.loads(pq.ParquetFile(out).metadata.metadata[b"geo"])
     col = geo["columns"]["geometry"]
     assert "crs" in col and col["crs"] is None, col
+
+
+# --------------------------------------------------------------------------- #
+# A secondary column with crs: null is typed srid:0 at 2.0 on every write path
+# --------------------------------------------------------------------------- #
+
+
+def _write_two_geoms(path) -> str:
+    """A 1.1 file whose primary is lon/lat and whose ``geom2`` CRS is unknown."""
+    lonlat = [(10.0 + i, 20.0 + i) for i in range(5)]
+    table = pa.table({"id": list(range(5)), "geometry": _wkb(lonlat), "geom2": _wkb(PROJECTED)})
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {"encoding": "WKB", "geometry_types": ["Point"]},
+            "geom2": {"encoding": "WKB", "geometry_types": ["Point"], "crs": None},
+        },
+    }
+    pq.write_table(table.replace_schema_metadata({"geo": json.dumps(geo)}), path)
+    return str(path)
+
+
+def _column_type_crs(path, name):
+    schema = pq.ParquetFile(path).schema
+    logical = schema.column(schema.names.index(name)).logical_type
+    return json.loads(logical.to_json()).get("crs") if logical.type != "NONE" else None
+
+
+def _assert_secondary_unknown(path):
+    geo = json.loads(pq.ParquetFile(path).metadata.metadata[b"geo"])
+    col = geo["columns"]["geom2"]
+    assert "crs" in col and col["crs"] is None, col
+    assert _column_type_crs(path, "geom2") == PARQUET_UNKNOWN_CRS
+    result = CliRunner().invoke(cli, ["check", "spec", str(path), "--json"])
+    failed = [c for c in json.loads(result.output)["checks"] if c["status"] == "failed"]
+    assert failed == [], failed
+
+
+@pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+def test_table_write_types_a_null_secondary_srid0(strategy, tmp_path):
+    out = tmp_path / "out.parquet"
+    gpio.read(_write_two_geoms(tmp_path / "in.parquet")).write(
+        str(out), geoparquet_version="2.0", write_strategy=strategy
+    )
+    _assert_secondary_unknown(out)
+
+
+@pytest.mark.parametrize("command", [["convert", "geoparquet"], ["sort", "hilbert"]])
+def test_cli_types_a_null_secondary_srid0(command, tmp_path):
+    out = tmp_path / "out.parquet"
+    src = _write_two_geoms(tmp_path / "in.parquet")
+    result = CliRunner().invoke(cli, [*command, src, str(out), "--geoparquet-version", "2.0"])
+    assert result.exit_code == 0, result.output
+    _assert_secondary_unknown(out)
+
+
+@pytest.mark.parametrize("source", sorted(UNKNOWN_INPUTS))
+def test_check_spec_skips_the_lonlat_range_for_an_unknown_crs(source, tmp_path):
+    """Projected metres under an unknown CRS are not out of the lon/lat range."""
+    path = UNKNOWN_INPUTS[source](tmp_path)
+    result = CliRunner().invoke(cli, ["check", "spec", path, "--json"])
+    checks = {c["name"]: c for c in json.loads(result.output)["checks"]}
+    range_checks = [c for n, c in checks.items() if n.startswith("coordinates_valid_for_crs")]
+    assert range_checks, sorted(checks)
+    assert all(c["status"] == "skipped" for c in range_checks), range_checks
+
+
+def test_check_spec_still_fails_projected_metres_under_the_default_crs(tmp_path):
+    path = _write_v11(tmp_path / "default.parquet", {"id": {"authority": "OGC", "code": "CRS84"}})
+    result = CliRunner().invoke(cli, ["check", "spec", path, "--json"])
+    checks = json.loads(result.output)["checks"]
+    statuses = {c["status"] for c in checks if c["name"].startswith("coordinates_valid_for_crs")}
+    assert statuses == {"failed"}
+
+
+@pytest.mark.parametrize("command", [["convert", "geoparquet"], ["sort", "hilbert"]])
+def test_cli_types_a_named_secondary_with_its_crs(command, tmp_path):
+    """The same paths lost a named secondary CRS too, so the type carries it."""
+    albers = {"id": {"authority": "EPSG", "code": 5070}}
+    src = tmp_path / "in.parquet"
+    _write_two_geoms(src)
+    table = pq.read_table(src)
+    geo = json.loads(table.schema.metadata[b"geo"])
+    geo["columns"]["geom2"]["crs"] = albers
+    pq.write_table(table.replace_schema_metadata({"geo": json.dumps(geo)}), src)
+    out = tmp_path / "out.parquet"
+    result = CliRunner().invoke(cli, [*command, str(src), str(out), "--geoparquet-version", "2.0"])
+    assert result.exit_code == 0, result.output
+    written = json.loads(pq.ParquetFile(out).metadata.metadata[b"geo"])["columns"]["geom2"]
+    assert written.get("crs") == albers, written
+    assert json.loads(_column_type_crs(out, "geom2")) == albers

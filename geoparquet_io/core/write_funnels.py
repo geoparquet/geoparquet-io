@@ -118,7 +118,11 @@ from geoparquet_io.core.write_strategies import (
     WriteStrategyFactory,
     needs_metadata_rewrite,
 )
-from geoparquet_io.core.write_strategies.base import merge_secondary_geometry_metadata
+from geoparquet_io.core.write_strategies.base import (
+    has_unknown_secondary,
+    merge_secondary_geometry_metadata,
+    wrap_query_with_secondary_crs,
+)
 
 
 def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
@@ -560,6 +564,7 @@ def _plain_copy_to(
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
     defer_v2_geo_repair: bool = False,
+    secondary_geo_columns: dict | None = None,
 ) -> dict | None:
     """
     Execute a plain DuckDB COPY TO without geo metadata manipulation.
@@ -601,6 +606,8 @@ def _plain_copy_to(
             instead of patching it here, because the caller is about to patch
             the same footer for non-planar edges and one ``patch_footer`` call
             can carry both (#1270).
+        secondary_geo_columns: The ``geo.columns`` entries the secondaries'
+            CRS comes from, so a 2.0 type carries each one's own CRS.
 
     Returns:
         The repair's pending ``geo`` block when ``defer_v2_geo_repair`` asked
@@ -624,6 +631,9 @@ def _plain_copy_to(
     # DuckDB 1.5+: Apply CRS via ST_SetCRS so it's written natively into the
     # Parquet schema during COPY TO — no post-processing file rewrite needed.
     final_query = _wrap_query_with_crs(query, geometry_column, input_crs, geoparquet_version)
+    final_query = wrap_query_with_secondary_crs(
+        con, final_query, secondary_geo_columns, geometry_column, geoparquet_version
+    )
 
     # Build options list
     options = [
@@ -1403,6 +1413,19 @@ def write_parquet_with_metadata(
         # DuckDB instead. Merged after the "says more than DuckDB" gate, so a
         # secondary's own `crs` cannot by itself make a block worth carrying.
         merge_secondary_geometry_metadata(carried_geo_block, geometry_info)
+    secondary_geo_columns = (carried_geo_block or {}).get("columns") or (
+        geometry_info or {}
+    ).get("metadata")
+    # DuckDB's own 2.0 block omits the `crs` of a `srid:0` column, which reads
+    # as OGC:CRS84. With no carried block to say `crs: null` for an unknown
+    # secondary, the rewrite writes it (#1277 review).
+    if (
+        not rewrite_needed
+        and carried_geo_block is None
+        and effective_version == "2.0"
+        and has_unknown_secondary(secondary_geo_columns, geometry_column)
+    ):
+        rewrite_needed = True
 
     # Preserve non-geo KV metadata from input (e.g., vecorel, fiboa).
     # Build a merged local dict rather than mutating the caller-supplied
@@ -1477,6 +1500,7 @@ def write_parquet_with_metadata(
                 # An edges patch is coming: one patch_footer call carries the
                 # M/ZM geo repair and the retype together (#1270).
                 defer_v2_geo_repair=bool(edges_to_restore),
+                secondary_geo_columns=secondary_geo_columns,
             )
         else:
             pending_v2_geo = None

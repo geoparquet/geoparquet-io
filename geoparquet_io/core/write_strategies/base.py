@@ -8,6 +8,7 @@ varying memory and performance characteristics.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -21,7 +22,11 @@ from geoparquet_io.core.crs_utils import (
     PARQUET_UNKNOWN_CRS,
     apply_output_crs,
     crs_is_explicitly_null,
+    is_default_crs,
+    is_empty_crs_value,
+    is_unknown_type_crs,
 )
+from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     decode_carried_geo,
@@ -99,20 +104,72 @@ def native_geometry_crs(
 
     column_metadata = (geo_meta or {}).get("columns") or {}
     return {
-        column: _type_crs_for(column_metadata.get(column))
+        column: type_crs_for(column_metadata.get(column))
         for column in resolve_geometry_columns(geometry_column, geometry_info, geo_meta)
     }
 
 
-def _type_crs_for(col_meta: dict | None) -> dict | str | None:
-    """The type CRS for one column's block entry: ``srid:0`` for an explicit null.
+def type_crs_for(col_meta: dict | None) -> dict | str | None:
+    """The type CRS for one column's block entry: ``srid:0`` for an unknown CRS.
 
-    The type's unset CRS means OGC:CRS84, so a column the block calls unknown
-    would read as lon/lat if its type carried nothing (#1276).
+    Unknown is an explicit null or an empty value (#1267). The type's unset CRS
+    means OGC:CRS84, so a column the block calls unknown would read as lon/lat
+    if its type carried nothing (#1276). Every write path types its geometry
+    columns through this, the primary and each secondary alike.
     """
-    if crs_is_explicitly_null(col_meta or {}):
+    if crs_is_explicitly_null(col_meta or {}) or is_empty_crs_value((col_meta or {}).get("crs")):
         return PARQUET_UNKNOWN_CRS
     return (col_meta or {}).get("crs")
+
+
+def secondary_type_crs(geo_columns: dict | None, primary: str | None) -> dict[str, dict | str]:
+    """The type CRS each secondary needs set: unknown or a named non-default CRS."""
+    wanted = {}
+    for name, col_meta in (geo_columns or {}).items():
+        if name == primary or not isinstance(col_meta, dict):
+            continue
+        crs = type_crs_for(col_meta)
+        if is_unknown_type_crs(crs) or (crs and not is_default_crs(crs)):
+            wanted[name] = crs
+    return wanted
+
+
+def has_unknown_secondary(geo_columns: dict | None, primary: str | None) -> bool:
+    """Whether a secondary's CRS is unknown, so it is typed ``srid:0``."""
+    return any(is_unknown_type_crs(c) for c in secondary_type_crs(geo_columns, primary).values())
+
+
+def wrap_query_with_secondary_crs(
+    con, query: str, geo_columns: dict | None, primary: str | None, geoparquet_version: str | None
+) -> str:
+    """Type each secondary GEOMETRY column with its own CRS in a 2.0 output.
+
+    DuckDB reads a secondary's CRS from no ``geo`` entry: a GeoParquet input
+    hands its secondaries over as bare GEOMETRY, which a 2.0 type then calls
+    OGC:CRS84. The primary gets its CRS from ``_wrap_query_with_crs``; this does
+    the same for the rest, ``srid:0`` for an unknown one (#1277 review). Only
+    columns the query already types GEOMETRY are touched, as ``ST_SetCRS``
+    takes nothing else.
+    """
+    if geoparquet_version not in ("2.0", "parquet-geo-only"):
+        return query
+    wanted = secondary_type_crs(geo_columns, primary)
+    if not wanted:
+        return query
+    native = {
+        row[0]
+        for row in con.execute(f"DESCRIBE ({query})").fetchall()
+        if str(row[1]).upper().startswith("GEOMETRY")
+    }
+    replacements = []
+    for name in sorted(set(wanted) & native):
+        crs = wanted[name]
+        literal = crs if isinstance(crs, str) else json.dumps(crs)
+        ident = quote_identifier(name)
+        replacements.append(f"ST_SetCRS({ident}, '{_escape_sql_string(literal)}') AS {ident}")
+    if not replacements:
+        return query
+    return f"SELECT * REPLACE ({', '.join(replacements)}) FROM ({query})"
 
 
 def merge_secondary_geometry_metadata(geo_meta: dict, geometry_info: dict | None) -> None:
