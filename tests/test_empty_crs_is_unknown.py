@@ -24,15 +24,20 @@ import shapely
 from click.testing import CliRunner
 from pyproj import CRS
 
+from geoparquet_io.cli.main import cli
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
+    UNKNOWN_BY_EMPTY,
+    UNKNOWN_BY_NULL,
     crs_string_from_geo_meta,
     crs_string_from_table,
+    entry_crs_is_unknown,
     extract_crs_from_parquet,
     extract_crs_from_table,
     is_default_crs,
     is_empty_crs_value,
     transform_source_crs,
+    unknown_crs_reason,
 )
 from geoparquet_io.core.geo_metadata import sanitize_geo_metadata
 
@@ -257,3 +262,46 @@ def test_native_type_empty_crs_stays_unset(tmp_path):
 def test_a_real_projected_crs_is_still_used(tmp_path):
     src = _write_projected(tmp_path / "utm.parquet", CRS.from_epsg(32633).to_json_dict())
     assert transform_source_crs(extract_crs_from_parquet(src)) == "EPSG:32633"
+
+
+# --------------------------------------------------------------------------- #
+# One rule for "is this entry's CRS unknown" (#1277 review)
+# --------------------------------------------------------------------------- #
+
+ALBERS = {"id": {"authority": "EPSG", "code": 5070}}
+
+
+@pytest.mark.parametrize(
+    ("col_meta", "type_crs", "expected"),
+    [
+        ({"crs": None}, None, True),
+        ({"crs": {}}, None, True),
+        ({"crs": ""}, None, True),
+        ({"crs": ALBERS}, None, False),
+        ({}, None, False),
+        # No crs key: the Parquet type decides, and srid:0 is unknown.
+        ({}, "srid:0", True),
+        # A crs key decides, even over a srid:0 type.
+        ({"crs": ALBERS}, "srid:0", False),
+        (None, None, False),
+        (None, "srid:0", True),
+    ],
+    ids=repr,
+)
+def test_entry_crs_is_unknown(col_meta, type_crs, expected):
+    assert entry_crs_is_unknown(col_meta, type_crs) is expected
+
+
+@pytest.mark.parametrize(
+    ("crs", "reason"),
+    [({}, UNKNOWN_BY_EMPTY), ("", UNKNOWN_BY_EMPTY), (None, UNKNOWN_BY_NULL)],
+    ids=repr,
+)
+def test_reproject_names_an_empty_crs_as_empty(crs, reason, tmp_path):
+    """Sanitizing reads ``{}`` as null, so the message must still say empty."""
+    src = _write_projected(tmp_path / "in.parquet", crs)
+    assert unknown_crs_reason(src) == reason
+    out = tmp_path / "out.parquet"
+    result = CliRunner().invoke(cli, ["convert", "reproject", src, str(out)])
+    assert result.exit_code != 0
+    assert f"Input has {reason} (CRS unknown)" in str(result.output) + str(result.exception)

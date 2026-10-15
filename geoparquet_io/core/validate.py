@@ -28,8 +28,8 @@ from geoparquet_io.core.crs_utils import (
     _is_ogc_crs84,
     _parse_crs_value,
     crs_from_column_meta,
+    entry_crs_is_unknown,
     get_crs_display_name,
-    is_empty_crs_value,
     is_geographic_crs,
     is_unknown_type_crs,
 )
@@ -3991,18 +3991,6 @@ def _check_coordinates_valid_for_crs(
 # =============================================================================
 
 
-def _entry_crs_is_unknown(col_meta: dict, schema_info: list, geom_col: str) -> bool:
-    """True when a geometry column's CRS is unknown.
-
-    A ``crs`` key decides when the entry has one: null or empty is unknown.
-    Without one, a ``srid:0`` Parquet type does, which is how DuckDB's V2
-    writer spells an unknown CRS.
-    """
-    if "crs" in col_meta:
-        return col_meta["crs"] is None or is_empty_crs_value(col_meta["crs"])
-    return is_unknown_type_crs(_get_crs_from_schema(schema_info, geom_col))
-
-
 def _get_crs_from_schema(schema_info: list, geom_col: str) -> Any:
     """Extract CRS from schema logical type for a geometry column."""
 
@@ -4617,7 +4605,7 @@ def _run_geoparquet_checks(
             # null or empty crs, or no crs key over a srid:0 type) is spelled
             # the way the Parquet type spells it, so the check skips it rather
             # than reading it as the lon/lat default.
-            unknown = _entry_crs_is_unknown(col_meta, schema_info, col_name)
+            unknown = entry_crs_is_unknown(col_meta, _get_crs_from_schema(schema_info, col_name))
             range_crs = PARQUET_UNKNOWN_CRS if unknown else crs
             checks.append(
                 _check_coordinates_valid_for_crs(

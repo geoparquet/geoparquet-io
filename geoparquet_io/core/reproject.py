@@ -18,11 +18,10 @@ from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import (
     apply_target_crs_to_geo_meta,
-    crs_is_explicitly_null,
+    entry_crs_is_unknown,
     extract_crs_from_parquet,
     extract_crs_from_table,
     geoparquet_crs_is_null,
-    is_empty_crs_value,
     is_geographic_crs,
     lonlat_source_name,
     parse_crs_string_to_projjson,
@@ -431,7 +430,7 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
     metadata = dict(parquet_file.schema_arrow.metadata or {})
     geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
     for col in geo_meta.get("columns", {}).values():
-        if crs_is_explicitly_null(col) or is_empty_crs_value(col.get("crs")):
+        if entry_crs_is_unknown(col):
             col.pop("crs", None)
     metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
     new_schema = parquet_file.schema_arrow.with_metadata(metadata)

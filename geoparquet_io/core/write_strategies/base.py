@@ -21,9 +21,8 @@ from typing import TYPE_CHECKING
 from geoparquet_io.core.crs_utils import (
     PARQUET_UNKNOWN_CRS,
     apply_output_crs,
-    crs_is_explicitly_null,
+    entry_crs_is_unknown,
     is_default_crs,
-    is_empty_crs_value,
     is_unknown_type_crs,
 )
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier
@@ -118,7 +117,7 @@ def type_crs_for(col_meta: dict | None) -> dict | str | None:
     if its type carried nothing (#1276). Every write path types its geometry
     columns through this, the primary and each secondary alike.
     """
-    if crs_is_explicitly_null(col_meta or {}) or is_empty_crs_value((col_meta or {}).get("crs")):
+    if entry_crs_is_unknown(col_meta):
         return PARQUET_UNKNOWN_CRS
     return (col_meta or {}).get("crs")
 

@@ -851,7 +851,7 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     if col is None:
         return None
     col_meta = columns.get(col, {})
-    if crs_is_explicitly_null(col_meta):
+    if entry_crs_is_unknown(col_meta):
         return None
     crs = col_meta.get("crs") or _crs_from_geoarrow_field(table, col)
     if is_empty_crs_value(crs):
@@ -981,13 +981,41 @@ def _crs_from_native_geo_type(
     return (crs if crs and not is_default_crs(crs) else None), False
 
 
-def _unknown_reason_of_entry(col_meta: dict) -> str | None:
-    """Why a ``geo`` column entry's ``crs`` is unknown, or ``None`` when it is not."""
-    if crs_is_explicitly_null(col_meta):
-        return UNKNOWN_BY_NULL
-    if is_empty_crs_value(col_meta.get("crs")):
-        return UNKNOWN_BY_EMPTY
-    return None
+def entry_crs_is_unknown(col_meta: dict | None, type_crs=None) -> bool:
+    """True when a geometry column's CRS is unknown. The one rule for it.
+
+    A ``crs`` key in the ``geo`` column entry decides when present. ``null``
+    and an empty value (``{}``, ``""``, #1267) are unknown, anything else is
+    not. With no ``crs`` key the Parquet type's CRS (``type_crs``) decides,
+    and ``srid:0`` there is unknown. A missing key over no type CRS is the
+    OGC:CRS84 default, so it is not unknown.
+    """
+    if isinstance(col_meta, dict) and "crs" in col_meta:
+        crs = col_meta["crs"]
+        return crs is None or is_empty_crs_value(crs)
+    return is_unknown_type_crs(type_crs)
+
+
+def _unknown_reason_of_entry(col_meta: dict, raw_entry: dict | None = None) -> str | None:
+    """Why a ``geo`` column entry's ``crs`` is unknown, or ``None`` when it is not.
+
+    ``raw_entry`` is the same entry before sanitizing. Sanitizing turns an
+    empty ``{}`` into ``null``, so the raw form is what tells the two apart
+    and lets the message name an empty value as empty (#1277 review).
+    """
+    if not entry_crs_is_unknown(col_meta):
+        return None
+    for entry in (raw_entry, col_meta):
+        if isinstance(entry, dict) and is_empty_crs_value(entry.get("crs")):
+            return UNKNOWN_BY_EMPTY
+    return UNKNOWN_BY_NULL
+
+
+def _raw_column_entry(raw_geo, col: str) -> dict | None:
+    """The unsanitized ``geo`` entry for ``col``, or ``None`` when it is malformed."""
+    columns = raw_geo.get("columns") if isinstance(raw_geo, dict) else None
+    entry = columns.get(col) if isinstance(columns, dict) else None
+    return entry if isinstance(entry, dict) else None
 
 
 def unknown_crs_reason(parquet_file, geometry_column: str | None = None) -> str | None:
@@ -1004,7 +1032,8 @@ def unknown_crs_reason(parquet_file, geometry_column: str | None = None) -> str 
     """
     from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file)) or {}
+    raw_geo = get_geo_metadata(parquet_file)
+    geo_meta = sanitize_geo_metadata(raw_geo) or {}
     columns = geo_meta.get("columns") or {}
     col = geometry_column if geometry_column in columns else None
     if col is None and columns:
@@ -1012,7 +1041,7 @@ def unknown_crs_reason(parquet_file, geometry_column: str | None = None) -> str 
     target = geometry_column
     if col in columns and not _block_omits_requested_column(parquet_file, col, geometry_column):
         if "crs" in columns[col]:
-            return _unknown_reason_of_entry(columns[col])
+            return _unknown_reason_of_entry(columns[col], _raw_column_entry(raw_geo, col))
         target = col
     if is_unknown_type_crs(_native_type_crs_value(parquet_file, target)):
         return UNKNOWN_BY_SRID0
@@ -1036,7 +1065,7 @@ def table_crs_is_unknown(table, geometry_column: str | None) -> bool:
     geo_meta = sanitize_geo_metadata(parse_geo_metadata_from_schema(table.schema.metadata))
     col_meta = ((geo_meta or {}).get("columns") or {}).get(geometry_column)
     if isinstance(col_meta, dict) and "crs" in col_meta:
-        return _unknown_reason_of_entry(col_meta) is not None
+        return entry_crs_is_unknown(col_meta)
     return _field_type_crs_is_unknown(table.schema.field(geometry_column))
 
 
