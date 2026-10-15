@@ -229,7 +229,11 @@ def test_table_reproject_with_source_crs_on_srid0_field(tmp_path):
 @pytest.mark.parametrize("source", ["pgo_srid0", "duckdb_v2_srid0"])
 @pytest.mark.parametrize(
     "command,suffix",
-    [(["add", "h3"], ".parquet"), (["add", "quadkey"], ".parquet"), (["convert", "geojson"], ".geojson")],
+    [
+        (["add", "h3"], ".parquet"),
+        (["add", "quadkey"], ".parquet"),
+        (["convert", "geojson"], ".geojson"),
+    ],
     ids=["h3", "quadkey", "geojson"],
 )
 def test_lonlat_commands_warn_on_srid0(command, suffix, source, tmp_path):

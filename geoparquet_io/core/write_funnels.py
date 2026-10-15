@@ -1413,9 +1413,9 @@ def write_parquet_with_metadata(
         # DuckDB instead. Merged after the "says more than DuckDB" gate, so a
         # secondary's own `crs` cannot by itself make a block worth carrying.
         merge_secondary_geometry_metadata(carried_geo_block, geometry_info)
-    secondary_geo_columns = (carried_geo_block or {}).get("columns") or (
-        geometry_info or {}
-    ).get("metadata")
+    secondary_geo_columns = (carried_geo_block or {}).get("columns") or (geometry_info or {}).get(
+        "metadata"
+    )
     # DuckDB's own 2.0 block omits the `crs` of a `srid:0` column, which reads
     # as OGC:CRS84. With no carried block to say `crs: null` for an unknown
     # secondary, the rewrite writes it (#1277 review).
