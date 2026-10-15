@@ -886,6 +886,13 @@ and `streaming` strategies and the Arrow-table writer copied the `pandas` key
 through. A named or non-range pandas index now reads back as a plain column, as
 it already did on the default strategy.
 
+The `pandas` key is always dropped, not only when the rows change. pyarrow uses
+it in `to_pandas()` to restore the index and nullable dtypes such as `Int64`, so
+even a plain `gpio.read(path).write(out)` loses them. An `Int64` column with
+nulls comes back as `float64`, and a named index comes back as a plain column.
+If you need a pandas round trip, write the file with geopandas `to_parquet`
+instead.
+
 DuckDB's memory limit is auto-detected and respects container cgroup limits. To
 set it explicitly, use the CLI `gpio extract --write-memory` flag; the Python
 API does not expose a memory-limit argument.

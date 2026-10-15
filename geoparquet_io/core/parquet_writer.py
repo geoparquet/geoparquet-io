@@ -560,8 +560,8 @@ def apply_output_kv_metadata(
     in-memory and streaming output (#1268).
 
     Applied at the top of each strategy's ``write_from_table``, before any
-    early return can skip it, and again by ``_write_table_with_settings`` just
-    before ``pq.write_table``, so the Arrow-table funnel and every helper that
+    early return can skip it, and again, with the same extras, by
+    ``_write_table_with_settings`` just before ``pq.write_table``, so the Arrow-table funnel and every helper that
     writes through it get the same answer.
     """
     metadata = output_schema_metadata(table.schema.metadata, geoparquet_version, extra_kv_metadata)

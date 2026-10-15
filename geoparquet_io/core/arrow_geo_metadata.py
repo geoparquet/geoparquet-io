@@ -48,8 +48,7 @@ from geoparquet_io.core.geoarrow_encoding import (
     is_wkb_extension_field,
 )
 from geoparquet_io.core.logging_config import debug, success
-from geoparquet_io.core.parquet_writer import (  # noqa: F401 (re-exported key set)
-    _CARRIED_SCHEMA_METADATA_KEYS,
+from geoparquet_io.core.parquet_writer import (
     _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
     ParquetWriteSettings,
     apply_output_kv_metadata,
@@ -629,7 +628,7 @@ def _assemble_and_apply_geo_metadata(
 
 # The carried-key set (`_CARRIED_SCHEMA_METADATA_KEYS` and its bytes form) is
 # the write facade's now (`parquet_writer`), which applies it to every
-# Arrow-side write. It is imported above and still answers at this address.
+# Arrow-side write. Import it from there.
 
 
 def _strip_geo_metadata_key(table, verbose: bool = False):
@@ -1015,6 +1014,7 @@ def _write_table_with_settings(
     geoparquet_version: str | None,
     geometry_column: str,
     verbose: bool = False,
+    extra_kv_metadata: dict[str, str] | None = None,
 ) -> None:
     """
     Write Arrow table to Parquet with proper settings.
@@ -1033,6 +1033,8 @@ def _write_table_with_settings(
         geoparquet_version: GeoParquet version
         geometry_column: Name of the geometry column
         verbose: Whether to print verbose output
+        extra_kv_metadata: The caller's file-level keys. Passed again here so
+            this last pass does not drop a caller key named like a carried one
     """
     # The facade's row-group decision, including the MB -> rows sizing. Calling
     # it again after write_geoparquet_table already resolved is harmless and
@@ -1060,7 +1062,7 @@ def _write_table_with_settings(
     # The facade has the last word on the file-level keys, here at the one
     # place every Arrow-table write reaches: the table funnel and the helpers
     # that call this directly never pass through a strategy (#1268).
-    table = apply_output_kv_metadata(table, geoparquet_version)
+    table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
     # Use pq.write_table for all versions - we've already applied all metadata
     # Using geoarrow's write_geoparquet_table would overwrite our carefully constructed metadata

@@ -312,3 +312,31 @@ def test_disk_rewrite_lets_an_explicit_geo_extra_win(tmp_path):
     footer = _footer(out)
     assert json.loads(footer[b"geo"])["note"] == "explicit"
     assert b"pandas" not in footer
+
+
+@pytest.mark.parametrize("strategy", list(WriteStrategy))
+def test_caller_extras_named_like_carried_keys_survive(strategy, tmp_path):
+    """The drop is for keys carried from the input, never for the caller's extras.
+
+    The in-memory path applied the facade twice and the second pass, with no
+    extras, dropped a ``pandas`` extra the first pass had merged in.
+    """
+    out = tmp_path / "out.parquet"
+    explicit_pandas = '{"note": "explicit"}'
+
+    WriteStrategyFactory.get_strategy(strategy).write_from_table(
+        table=_carried_table(),
+        output_path=str(out),
+        geometry_column="geometry",
+        geoparquet_version="1.1",
+        compression="ZSTD",
+        compression_level=None,
+        row_group_size_mb=None,
+        row_group_rows=None,
+        verbose=False,
+        extra_kv_metadata={"pandas": explicit_pandas, "provenance": PROVENANCE.decode()},
+    )
+
+    footer = _footer(out)
+    assert footer[b"pandas"] == explicit_pandas.encode()
+    assert footer[b"provenance"] == PROVENANCE

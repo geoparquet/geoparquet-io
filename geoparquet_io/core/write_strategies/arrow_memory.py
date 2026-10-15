@@ -120,6 +120,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
             geoparquet_version=geoparquet_version,
             geometry_column=geometry_column,
             verbose=verbose,
+            extra_kv_metadata=extra_kv_metadata,
         )
 
     def write_from_table(
@@ -179,6 +180,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
             geoparquet_version=geoparquet_version,
             geometry_column=geometry_column,
             verbose=verbose,
+            extra_kv_metadata=extra_kv_metadata,
         )
 
         if verbose:

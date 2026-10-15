@@ -29,7 +29,6 @@ import duckdb
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
-    _CARRIED_SCHEMA_METADATA_KEYS,
     _apply_geoparquet_metadata,
     _normalize_arrow_large_types,
     _write_table_with_settings,
@@ -102,6 +101,7 @@ from geoparquet_io.core.parquet_footer import (
 )
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import (
+    _CARRIED_SCHEMA_METADATA_KEYS,
     geoparquet_copy_options,
     note_duckdb_copy_rounding,
     resolve_input_crs,
