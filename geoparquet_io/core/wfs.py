@@ -1292,6 +1292,8 @@ class _BboxAxes:
     """The authority lists northing or latitude first (EPSG:4326, 4258, 3006)."""
     wgs84_lon_lat: bool
     """The CRS is WGS84 lon/lat up to axis order, so CRS84 names it in x,y."""
+    x_axis: str = "easting"
+    """The axis gpio holds first in x,y, "easting" or "westing" (Krovak)."""
 
 
 _NORTH_FIRST_AXIS_NAMES: Final = ("northing", "southing", "latitude")
@@ -1327,13 +1329,28 @@ def _bbox_axes(crs: str) -> _BboxAxes | None:
         return None
     from pyproj import CRS as _PyprojCRS
 
+    north_first = _first_axis_is_north(target.axis_info)
     return _BboxAxes(
-        north_first=_first_axis_is_north(target.axis_info),
+        north_first=north_first,
         wgs84_lon_lat=bool(
             target.is_geographic
             and target.equals(_PyprojCRS.from_user_input("OGC:CRS84"), ignore_axis_order=True)
         ),
+        x_axis=_x_axis_word(target.axis_info, north_first),
     )
+
+
+def _x_axis_word(axis_info, north_first: bool) -> str:
+    """The axis gpio holds first in x,y, by its name, then its direction.
+
+    gpio holds the east or west axis first, so for a north-first CRS that is
+    the authority's second axis. Krovak (EPSG:5513) holds westing first.
+    """
+    axis = axis_info[1] if north_first and len(axis_info) > 1 else axis_info[0]
+    name = axis.name.lower()
+    if "westing" in name or ("easting" not in name and axis.direction.lower() == "west"):
+        return "westing"
+    return "easting"
 
 
 def _build_bbox_param(
@@ -1412,28 +1429,51 @@ def _warn_if_axis_order_ignored(version: str, axis_order: str) -> None:
         )
 
 
-def _bbox_looks_lon_lat_on_projected(bbox: tuple[float, float, float, float], crs: str) -> bool:
-    """The bbox looks like lon/lat degrees but the request CRS is projected."""
-    return not _is_geographic_crs(crs) and _estimate_crs_from_bbox(bbox) == "EPSG:4326"
+def _boxes_overlap(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
+def _bbox_looks_lon_lat_on_projected(
+    bbox: tuple[float, float, float, float],
+    crs: str,
+    layer_bbox: tuple[float, float, float, float] | None = None,
+) -> bool:
+    """The bbox looks like lon/lat degrees but the request CRS is projected.
+
+    The numbers must fit lon -180..180 and lat -90..90. With a layer extent
+    known, a box that overlaps the extent in the CRS but not the extent in
+    lon/lat is real small coordinates (EPSG:3857 metres near 0,0), not degrees.
+    """
+    if _is_geographic_crs(crs) or _estimate_crs_from_bbox(bbox) != "EPSG:4326":
+        return False
+    native = _layer_extent_in_crs(crs, layer_bbox)
+    if native is None or layer_bbox is None:
+        return True
+    return _boxes_overlap(bbox, layer_bbox) or not _boxes_overlap(bbox, native)
 
 
 def _warn_if_bbox_looks_lon_lat(
     bbox: tuple[float, float, float, float],
     crs: str,
     layer_bbox: tuple[float, float, float, float] | None = None,
-) -> None:
+) -> bool:
     """Warn when a bbox for a projected request CRS looks like lon/lat degrees.
 
     ``--bbox`` is read in the request CRS. Degrees on a projected layer select
     a tiny area near the CRS origin, so the result is almost always empty.
     The warning names the CRS, shows the layer extent and prints the box
     reprojected into the CRS, ready to copy. gpio does not apply it.
+
+    Returns True when it warned, so the caller does not print the hint again.
     """
-    if not _bbox_looks_lon_lat_on_projected(bbox, crs):
-        return
+    if not _bbox_looks_lon_lat_on_projected(bbox, crs, layer_bbox):
+        return False
     lines = [f"--bbox {_format_bbox(bbox)} looks like lon/lat. {_bbox_crs_line(crs)}"]
     lines += _bbox_hint_lines(bbox, crs, layer_bbox)
     warn("\n".join(lines))
+    return True
 
 
 def _warn_no_features_in_bbox(
@@ -1441,16 +1481,22 @@ def _warn_no_features_in_bbox(
     bbox: tuple[float, float, float, float],
     crs: str,
     layer_bbox: tuple[float, float, float, float] | None,
+    hint_shown: bool = False,
 ) -> None:
-    """Warn that a bbox matched nothing, and say which CRS it was read in."""
+    """Warn that a bbox matched nothing, and say which CRS it was read in.
+
+    ``hint_shown`` is True when the lon/lat warning already gave the extent
+    and the hint in this run, so they are not printed a second time.
+    """
     lines = [
         f"No features found in bbox for layer '{typename}'. Writing empty file.",
         _bbox_crs_line(crs),
     ]
-    if _bbox_looks_lon_lat_on_projected(bbox, crs):
-        lines += _bbox_hint_lines(bbox, crs, layer_bbox)
-    else:
-        lines += _bbox_extent_lines(crs, layer_bbox)
+    if not hint_shown:
+        if _bbox_looks_lon_lat_on_projected(bbox, crs, layer_bbox):
+            lines += _bbox_hint_lines(bbox, crs, layer_bbox)
+        else:
+            lines += _bbox_extent_lines(crs, layer_bbox)
     warn("\n".join(lines))
 
 
@@ -1460,7 +1506,11 @@ def _bbox_crs_line(crs: str) -> str:
     target = _request_pyproj_crs(crs)
     if target is not None and target.name:
         label = f"{label} ({target.name})"
-    order = "lon,lat" if _is_geographic_crs(crs) else "easting first"
+    if _is_geographic_crs(crs):
+        order = "lon,lat"
+    else:
+        axes = _bbox_axes(crs)
+        order = f"{axes.x_axis if axes else 'easting'} first"
     return f"--bbox is read in the layer CRS {label}, x,y ({order})."
 
 
@@ -1485,13 +1535,20 @@ def _bbox_extent_lines(crs: str, layer_bbox: tuple[float, float, float, float] |
     if not layer_bbox or layer_bbox[0] > layer_bbox[2]:
         return []
     line = f"Layer extent is {_format_bbox(layer_bbox)} in lon/lat"
-    native = None
-    if not _is_geographic_crs(crs):
-        clipped = _clip_to_area_of_use_or_none(layer_bbox, crs)
-        native = _try_lon_lat_bbox_in_crs(clipped, crs) if clipped else None
+    native = _layer_extent_in_crs(crs, layer_bbox)
     if native is not None:
         line += f" and {_format_bbox(native, outward=True)} in {_normalize_crs(crs)}"
     return [line + "."]
+
+
+def _layer_extent_in_crs(
+    crs: str, layer_bbox: tuple[float, float, float, float] | None
+) -> tuple[float, float, float, float] | None:
+    """The lon/lat layer extent reprojected into a projected ``crs``, or None."""
+    if not layer_bbox or layer_bbox[0] > layer_bbox[2] or _is_geographic_crs(crs):
+        return None
+    clipped = _clip_to_area_of_use_or_none(layer_bbox, crs)
+    return _try_lon_lat_bbox_in_crs(clipped, crs) if clipped else None
 
 
 def _clip_to_area_of_use_or_none(
@@ -3351,9 +3408,10 @@ def wfs_to_table(
 
     # Determine bbox strategy
     use_server_bbox = True
+    bbox_hint_shown = False
     if bbox:
         use_server_bbox = _determine_bbox_strategy(bbox_mode, layer_info)
-        _warn_if_bbox_looks_lon_lat(bbox, crs, layer_info.bbox)
+        bbox_hint_shown = _warn_if_bbox_looks_lon_lat(bbox, crs, layer_info.bbox)
         _warn_if_axis_order_ignored(version, axis_order)
 
     # Get expected feature count for cap detection
@@ -3479,7 +3537,9 @@ def wfs_to_table(
     if table.num_rows == 0:
         if bbox:
             # Empty results with bbox filter is valid - just no features in that area
-            _warn_no_features_in_bbox(typename, bbox, crs, layer_info.bbox)
+            _warn_no_features_in_bbox(
+                typename, bbox, crs, layer_info.bbox, hint_shown=bbox_hint_shown
+            )
         else:
             # Empty results without bbox likely indicates a problem
             raise EmptyLayerError(typename)

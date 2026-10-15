@@ -4179,6 +4179,102 @@ class TestBboxCrsContract:
         assert "read in the layer CRS EPSG:4026 (MOLDREF99 / Moldova TM)" in caplog.text
         assert "26.63,45.44,30.13,48.47" in caplog.text
 
+    def _run_empty_moldova(self, monkeypatch, caplog, bbox):
+        from geoparquet_io.core import wfs
+
+        layer = WFSLayerInfo(
+            typename="cadastru_data:terenuri",
+            title="",
+            crs_list=["EPSG:4026"],
+            default_crs="EPSG:4026",
+            bbox=self.MOLDOVA_WGS84,
+            geometry_column="geom",
+            available_formats=[],
+        )
+        monkeypatch.setattr(wfs, "get_layer_info", lambda *a, **k: layer)
+        monkeypatch.setattr(wfs, "negotiate_wfs_version", lambda *a, **k: ("1.1.0", None))
+        monkeypatch.setattr(wfs, "_get_feature_count", lambda *a, **k: 0)
+        monkeypatch.setattr(wfs, "fetch_all_features_duckdb", lambda **k: pa.table({"a": []}))
+        with caplog.at_level(logging.WARNING):
+            with contextlib.suppress(Exception):
+                wfs.wfs_to_table("http://mock/wfs", "cadastru_data:terenuri", bbox=bbox)
+        return caplog.text
+
+    def test_an_empty_lon_lat_bbox_result_prints_the_hint_once(self, monkeypatch, caplog):
+        """Round 4 on #1278: the early warning already gave the hint."""
+        text = self._run_empty_moldova(monkeypatch, caplog, self.CHISINAU)
+
+        assert "No features found in bbox" in text
+        assert text.count("try --bbox") == 1
+        assert text.count("Layer extent is") == 1
+
+    def test_an_empty_projected_bbox_result_shows_the_extent_once(self, monkeypatch, caplog):
+        text = self._run_empty_moldova(
+            monkeypatch, caplog, (230403.0, 207012.0, 234224.0, 210368.0)
+        )
+
+        assert "No features found in bbox" in text
+        assert text.count("Layer extent is") == 1
+        assert "try --bbox" not in text
+
+    def test_the_no_features_warning_alone_still_gives_the_hint(self, caplog):
+        """Without the early warning, the 0-features warning carries the hint once."""
+        from geoparquet_io.core.wfs import _warn_no_features_in_bbox
+
+        with caplog.at_level(logging.WARNING):
+            _warn_no_features_in_bbox("t", self.CHISINAU, "EPSG:4026", self.MOLDOVA_WGS84)
+        assert caplog.text.count("try --bbox") == 1
+        assert caplog.text.count("Layer extent is") == 1
+
+    def test_the_hint_is_tracked_per_call(self, monkeypatch, caplog):
+        """A second run warns again, so nothing is kept between calls."""
+        self._run_empty_moldova(monkeypatch, caplog, self.CHISINAU)
+        caplog.clear()
+        text = self._run_empty_moldova(monkeypatch, caplog, self.CHISINAU)
+
+        assert text.count("try --bbox") == 1
+
+    @pytest.mark.parametrize(
+        "crs,order",
+        [
+            ("EPSG:5513", "westing first"),
+            ("EPSG:4026", "easting first"),
+            ("EPSG:3006", "easting first"),
+            ("EPSG:3031", "easting first"),
+            ("EPSG:2056", "easting first"),
+            ("EPSG:4326", "lon,lat"),
+        ],
+    )
+    def test_the_crs_line_names_the_first_axis_gpio_holds(self, crs, order):
+        """Round 4 on #1278: Krovak 5513 is held westing first, not easting first."""
+        from geoparquet_io.core.wfs import _bbox_crs_line
+
+        assert f"x,y ({order})" in _bbox_crs_line(crs)
+
+    def test_small_metres_inside_the_layer_extent_are_quiet(self, caplog):
+        """Round 4 on #1278: 3857 metres near 0,0 are not lon/lat degrees."""
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat((10.0, 10.0, 100.0, 80.0), "EPSG:3857", (-1, -1, 1, 1))
+        assert caplog.text == ""
+
+    def test_small_metres_without_a_layer_extent_still_warn(self, caplog):
+        """No extent, no way to tell, so the old range check decides."""
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat((10.0, 10.0, 100.0, 80.0), "EPSG:3857")
+        assert "looks like lon/lat" in caplog.text
+
+    def test_degrees_inside_the_lon_lat_extent_still_warn(self, caplog):
+        """Moldova degrees sit in the lon/lat extent and far from the 4026 extent."""
+        from geoparquet_io.core.wfs import _warn_if_bbox_looks_lon_lat
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_bbox_looks_lon_lat(self.CHISINAU, "EPSG:4026", self.MOLDOVA_WGS84)
+        assert "looks like lon/lat" in caplog.text
+
     @pytest.mark.parametrize(
         "bbox,crs",
         [
