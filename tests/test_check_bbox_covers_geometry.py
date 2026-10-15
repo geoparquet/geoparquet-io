@@ -985,6 +985,24 @@ class TestFixCarriesTheValueVerdict:
         assert after["needs_bbox_metadata"] is False
         assert after["bbox_values"]["undersized_rows"] == 1
         assert result.exit_code == 1
+        # Say what the fix did, and that the file still fails -- not "success".
+        assert "optimized successfully" not in result.output
+        assert "Added the bbox covering metadata, but the file still fails" in result.output
+        assert any(
+            line.startswith("✗") and "does not cover its geometry" in line
+            for line in result.output.splitlines()
+        )
+        assert "gpio add bbox" in result.output.split("still fails")[1]
+
+    def test_a_fix_that_leaves_the_file_passing_still_says_success(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "undeclared_ok.parquet", [SQUARE], [SQUARE_BBOX], covering=False
+        )
+        out = tmp_path / "fixed_ok.parquet"
+        result = CliRunner().invoke(check, ["bbox", path, "--fix", "--fix-output", str(out)])
+        assert result.exit_code == 0
+        assert "Bbox optimized successfully!" in result.output
+        assert "still fails" not in result.output
 
 
 class TestUnusableTypes:

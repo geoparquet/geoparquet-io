@@ -166,6 +166,8 @@ class MultiFileCheckRunner:
         self.strict = strict
         #: Each file's verdict -- after its fix, when one was applied.
         self.verdicts: dict[str, Verdict] = {}
+        #: The re-check of each fixed file, behind its post-fix verdict.
+        self.rechecks: dict[str, dict] = {}
         self.verbose = verbose
         self.max_issues_shown = max_issues_shown
         self.fix_output = fix_output
@@ -263,6 +265,35 @@ class MultiFileCheckRunner:
             self._echo_could_not_run(file_path, line)
         verdict = result_verdict(result)
         self.verdicts[file_path] = Verdict.FAILURE if self.errored(file_path) else verdict
+        self.rechecks[file_path] = result
+
+    def echo_fixed(
+        self, file_path: str, applied: tuple[str, str | None], success: str, action: str
+    ) -> None:
+        """What ``--fix`` wrote, judged by its re-check -- never "success" for a file that fails.
+
+        A fix can repair one thing and leave another: ``check bbox --fix`` adds
+        a missing covering but cannot recompute wrong values. Then it says what
+        it did, that the file still fails, each failure, and the repair to run.
+        """
+        output_path, backup_path = applied
+        still_fails = self.verdicts.get(file_path) is Verdict.FAILURE
+        if still_fails:
+            click.echo(
+                click.style(f"\n{WARNING_GLYPH} {action}, but the file still fails:", fg="yellow")
+            )
+            result = self.rechecks.get(file_path, {})
+            for level, issue in labelled_issues(result):
+                if level is Verdict.FAILURE:
+                    click.echo(click.style(f"  {FAILURE_GLYPH} {issue}", fg="red"))
+            recommendations = result.get("recommendations") or []
+            if recommendations:
+                click.echo(f"  {recommendations[0]}")
+        else:
+            click.echo(click.style(f"\n{PASS_GLYPH} {success}", fg="green"))
+        click.echo(f"{'Written to' if still_fails else 'Optimized file'}: {output_path}")
+        if backup_path:
+            click.echo(f"Backup: {backup_path}")
 
     def finish(self) -> None:
         """Summarize the run and exit with its code: the one place a check run ends."""
@@ -1113,19 +1144,13 @@ def check_spatial(
                         path, random_sample_size, limit_rows, False, quiet=True
                     ),
                 )
-                if applied is None:
-                    continue
-                output_path, backup_path = applied
-
-                if show_output:
-                    click.echo(
-                        click.style(
-                            f"\n{PASS_GLYPH} Spatial ordering applied successfully!", fg="green"
-                        )
+                if applied is not None and show_output:
+                    runner.echo_fixed(
+                        file_path,
+                        applied,
+                        "Spatial ordering applied successfully!",
+                        "Applied Hilbert spatial ordering",
                     )
-                    click.echo(f"Optimized file: {output_path}")
-                    if backup_path:
-                        click.echo(f"Backup: {backup_path}")
 
         # Print summary for multi-file checks, and exit with the run's code
         runner.finish()
@@ -1220,22 +1245,25 @@ def check_compression_cmd(
                     verbose=verbose,
                     recheck=quiet_recheck(check_compression, False),
                 )
-                if applied is None:
-                    continue
-                output_path, backup_path = applied
-
-                if show_output:
-                    click.echo(
-                        click.style(
-                            f"\n{PASS_GLYPH} Compression optimized successfully!", fg="green"
-                        )
+                if applied is not None and show_output:
+                    runner.echo_fixed(
+                        file_path,
+                        applied,
+                        "Compression optimized successfully!",
+                        "Re-compressed with ZSTD",
                     )
-                    click.echo(f"Optimized file: {output_path}")
-                    if backup_path:
-                        click.echo(f"Backup: {backup_path}")
 
         # Print summary for multi-file checks, and exit with the run's code
         runner.finish()
+
+
+def _bbox_fix_action(needs_column: bool, needs_metadata: bool) -> str:
+    """What ``check bbox --fix`` did to a 1.x file, for the line that reports it."""
+    if needs_column:
+        return "Added the bbox column and its covering metadata"
+    if needs_metadata:
+        return "Added the bbox covering metadata"
+    return "Rewrote the bbox column"
 
 
 @check.command(name="bbox", cls=GlobAwareCommand)
@@ -1376,19 +1404,13 @@ def check_bbox_cmd(
                     applied = runner.fix_file(
                         file_path, bbox_fix_func, verbose=verbose, recheck=bbox_recheck
                     )
-                    if applied is None:
-                        continue
-                    output_path, backup_path = applied
-
-                    if show_output:
-                        click.echo(
-                            click.style(
-                                f"\n{PASS_GLYPH} Bbox column removed successfully!", fg="green"
-                            )
+                    if applied is not None and show_output:
+                        runner.echo_fixed(
+                            file_path,
+                            applied,
+                            "Bbox column removed successfully!",
+                            "Removed the bbox column",
                         )
-                        click.echo(f"Optimized file: {output_path}")
-                        if backup_path:
-                            click.echo(f"Backup: {backup_path}")
                 else:
                     # V1.x: add bbox column/metadata (existing logic)
                     needs_column = result.get("needs_bbox_column", False)
@@ -1414,17 +1436,13 @@ def check_bbox_cmd(
                     applied = runner.fix_file(
                         file_path, bbox_fix_func, verbose=verbose, recheck=bbox_recheck
                     )
-                    if applied is None:
-                        continue
-                    output_path, backup_path = applied
-
-                    if show_output:
-                        click.echo(
-                            click.style(f"\n{PASS_GLYPH} Bbox optimized successfully!", fg="green")
+                    if applied is not None and show_output:
+                        runner.echo_fixed(
+                            file_path,
+                            applied,
+                            "Bbox optimized successfully!",
+                            _bbox_fix_action(needs_column, needs_metadata),
                         )
-                        click.echo(f"Optimized file: {output_path}")
-                        if backup_path:
-                            click.echo(f"Backup: {backup_path}")
 
         # Print summary for multi-file checks, and exit with the run's code
         runner.finish()
@@ -1528,19 +1546,13 @@ def check_row_group_cmd(
                     verbose=verbose,
                     recheck=quiet_recheck(check_row_groups, False, profile=profile),
                 )
-                if applied is None:
-                    continue
-                output_path, backup_path = applied
-
-                if show_output:
-                    click.echo(
-                        click.style(
-                            f"\n{PASS_GLYPH} Row groups optimized successfully!", fg="green"
-                        )
+                if applied is not None and show_output:
+                    runner.echo_fixed(
+                        file_path,
+                        applied,
+                        "Row groups optimized successfully!",
+                        "Rewrote the row groups",
                     )
-                    click.echo(f"Optimized file: {output_path}")
-                    if backup_path:
-                        click.echo(f"Backup: {backup_path}")
 
         # Print summary for multi-file checks, and exit with the run's code
         runner.finish()
