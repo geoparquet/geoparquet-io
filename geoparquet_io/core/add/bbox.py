@@ -25,6 +25,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
+    register_geometry_column,
 )
 from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition.reader import require_single_file
@@ -158,24 +159,16 @@ def add_bbox_table(
     # information (#1268), and re-ordered the columns while doing it.
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table.select([geom_col]))
-
-        # Check if geometry column is BLOB (needs conversion)
-        columns_info = con.execute("DESCRIBE __input_table").fetchall()
-        geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
-
-        quoted_geom_col = quote_identifier(geom_col)
+        read = register_geometry_column(con, "__input_table", table, geom_col)
         quoted_bbox_col = quote_identifier(bbox_column_name)
-
-        geom_expr = f"ST_GeomFromWKB({quoted_geom_col})" if geom_is_blob else quoted_geom_col
         bbox_query = f"""
             SELECT STRUCT_PACK(
-                xmin := ST_XMin({quoted_geom_col}),
-                ymin := ST_YMin({quoted_geom_col}),
-                xmax := ST_XMax({quoted_geom_col}),
-                ymax := ST_YMax({quoted_geom_col})
+                xmin := ST_XMin(__g),
+                ymin := ST_YMin(__g),
+                xmax := ST_XMax(__g),
+                ymax := ST_YMax(__g)
             ) AS {quoted_bbox_col}
-            FROM (SELECT {geom_expr} AS {quoted_geom_col} FROM __input_table)
+            FROM (SELECT {read.shape_expr} AS __g FROM __input_table)
         """
         bbox_column = con.execute(bbox_query).arrow().read_all().column(0)
 

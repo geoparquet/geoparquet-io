@@ -141,6 +141,81 @@ def repair_query_geometry(con, query: str, geometry_column: str, *, repair: bool
     return f"SELECT * REPLACE ({repaired_expr} AS {col}) FROM ({query})"
 
 
+# Offset-based layouts ``if_else`` can patch; a view column is patched as its
+# offset-based twin and cast back (pyarrow 25 has no ``if_else`` for views).
+_VIEW_TWINS = {"binary_view": "large_binary", "string_view": "large_string"}
+
+
+def _repaired_rows(con, read):
+    """The repaired WKB for each invalid row, NULL for every other row (one scan).
+
+    The AND-form CASE (repair in THEN, passthrough in ELSE) is the
+    segfault-safe shape, and projecting the parsed geometry in an inner layer
+    keeps the NULL filter and ST_IsValid in separate operators, exactly as
+    _layered_invalid_count_sql does (#642, #737).
+    """
+    return (
+        con.execute(
+            "SELECT CASE WHEN __g IS NOT NULL AND NOT ST_IsValid(__g) "
+            "THEN ST_AsWKB(ST_MakeValid(__g)) END AS __fixed "
+            f"FROM (SELECT {read.expr} AS __g FROM _gpio_repair_src)"
+        )
+        .arrow()
+        .read_all()
+        .column(0)
+    )
+
+
+def _if_else_chunk(chunk, fixed):
+    """``chunk`` with each row where ``fixed`` is non-NULL replaced by ``fixed``."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    extension = chunk.type if isinstance(chunk.type, pa.ExtensionType) else None
+    storage = chunk.storage if extension is not None else chunk
+    twin = _VIEW_TWINS.get(str(storage.type))
+    work = storage.cast(twin) if twin else storage
+    patched = pc.if_else(pc.is_valid(fixed), fixed.cast(work.type), work)
+    if twin:
+        patched = patched.cast(storage.type)
+    return pa.ExtensionArray.from_storage(extension, patched) if extension else patched
+
+
+def _patch_chunk(chunk, fixed) -> list:
+    """Patch one chunk; halve it if the patched bytes no longer fit its offsets."""
+    import pyarrow as pa
+
+    try:
+        return [_if_else_chunk(chunk, fixed.combine_chunks())]
+    except (pa.ArrowInvalid, pa.ArrowCapacityError):
+        if len(chunk) < 2:
+            raise
+        half = len(chunk) // 2
+        return _patch_chunk(chunk.slice(0, half), fixed.slice(0, half)) + _patch_chunk(
+            chunk.slice(half), fixed.slice(half)
+        )
+
+
+def _patch_repaired_rows(original, fixed):
+    """``original`` with the non-NULL rows of ``fixed`` patched in, chunk by chunk.
+
+    Only a chunk holding a repaired row is rebuilt; every other chunk is passed
+    through zero-copy. Combining the column into one array instead copied all
+    of it, and past 2 GiB overflowed its 32-bit offsets (#1285 review).
+    """
+    import pyarrow as pa
+
+    chunks, offset = [], 0
+    for chunk in original.chunks:
+        piece = fixed.slice(offset, len(chunk))
+        offset += len(chunk)
+        if piece.null_count == len(chunk):
+            chunks.append(chunk)
+        else:
+            chunks.extend(_patch_chunk(chunk, piece))
+    return pa.chunked_array(chunks, type=original.type)
+
+
 def repair_arrow_table_geometry(table, geometry_column: str = "geometry", *, repair: bool = True):
     """Count and (optionally) repair invalid geometry in a WKB-encoded Arrow table.
 
@@ -148,18 +223,23 @@ def repair_arrow_table_geometry(table, geometry_column: str = "geometry", *, rep
     PyArrow table whose geometry column is WKB binary. ``ST_IsValid`` and
     ``ST_MakeValid`` require a native ``GEOMETRY``, so the WKB is decoded via
     ``ST_GeomFromWKB`` for the check/repair and re-encoded with ``ST_AsWKB``.
+    A column DuckDB reads as a native ``GEOMETRY`` (a ``geoarrow.wkb``
+    extension column) is checked as it is.
 
     A single warning with the exact invalid count is emitted when any invalid
-    geometry is found (phrasing depends on ``repair``).
+    geometry is found (phrasing depends on ``repair``), and only once the
+    repaired column has been built.
 
     The count and the repair run as ONE DuckDB scan over just the geometry
-    column, returning only the repaired rows (NULL elsewhere); the repaired
-    column is patched into the caller's table client-side. The table is never
+    column, returning only the repaired rows (NULL elsewhere); they are patched
+    into the caller's column chunk by chunk, client-side. The table is never
     round-tripped through DuckDB, so its schema metadata, column order,
     attribute types and the valid rows' exact WKB bytes all survive untouched
     (#1268). The original table object is returned unchanged when there is
-    nothing to repair (empty, no geometry column, no invalid rows, or
-    ``repair=False``).
+    nothing to repair (empty, no geometry column, a column that is neither WKB
+    nor GEOMETRY, no invalid rows, or ``repair=False``). When DuckDB cannot
+    scan the column at all, a warning says the column was not checked and the
+    table is returned unchanged, so a bad geometry never breaks extraction.
 
     Args:
         table: PyArrow table with a WKB-encoded geometry column.
@@ -172,69 +252,37 @@ def repair_arrow_table_geometry(table, geometry_column: str = "geometry", *, rep
     if table.num_rows == 0 or geometry_column not in table.column_names:
         return table, 0
 
-    import pyarrow.compute as pc
+    import duckdb
 
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.geometry_detection import register_geometry_column
 
-    col = quote_identifier(geometry_column)
-    # Decode WKB defensively: TRY() yields NULL on malformed bytes so a bad row
-    # never crashes extraction — such rows pass through unchanged.
-    parsed = "TRY(ST_GeomFromWKB(__raw))"
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        # Register only the geometry column (zero-copy) under a fixed name, so
-        # the scan never touches the other columns.
-        con.register("_gpio_repair_src", table.select([geometry_column]))
+        read = register_geometry_column(con, "_gpio_repair_src", table, geometry_column)
+        if read.kind not in ("wkb", "native"):
+            return table, 0
         if not repair:
             # Count-only: the layered form — the single-WHERE form segfaults on
-            # tables containing NULL geometry rows (#642), see
-            # _layered_invalid_count_sql.
-            n = con.execute(
-                _layered_invalid_count_sql(f"(SELECT {col} AS __raw FROM _gpio_repair_src)", parsed)
-            ).fetchone()[0]
+            # tables containing NULL geometry rows (#642).
+            sql = _layered_invalid_count_sql("_gpio_repair_src", read.expr)
+            n = con.execute(sql).fetchone()[0]
             _warn_invalid(n, repaired=False)
             return table, n
-
-        # Count and repair in ONE scan (#1268): each row yields the repaired
-        # WKB when the geometry is invalid and NULL otherwise, so the result
-        # holds only the repaired rows — not a full copy of the table. The
-        # AND-form CASE (repair in THEN, passthrough in ELSE) is the
-        # segfault-safe shape, and projecting the parsed geometry in an inner
-        # layer keeps the NULL filter and ST_IsValid in separate operators,
-        # exactly as _layered_invalid_count_sql does (#642, #737).
-        fixed = (
-            con.execute(
-                f"SELECT CASE WHEN __g IS NOT NULL AND NOT ST_IsValid(__g) "
-                f"THEN ST_AsWKB(ST_MakeValid(__g)) END AS __fixed "
-                f"FROM (SELECT {parsed} AS __g "
-                f"FROM (SELECT {col} AS __raw FROM _gpio_repair_src))"
-            )
-            .arrow()
-            .read_all()
-            .column(0)
-        )
-        n = len(fixed) - fixed.null_count
-        _warn_invalid(n, repaired=True)
-        if n == 0:
-            return table, 0
-
-        # Patch the repaired rows into the original column client-side: valid
-        # rows keep their exact original bytes and encoding, and the rest of
-        # the table — including its schema metadata — is never rebuilt.
-        original = table.column(geometry_column)
-        fixed = fixed.combine_chunks()
-        if fixed.type != original.type:
-            fixed = fixed.cast(original.type)
-        patched = pc.if_else(pc.is_valid(fixed), fixed, original.combine_chunks())
-        idx = table.column_names.index(geometry_column)
-        repaired = table.set_column(idx, table.schema.field(idx), patched)
-        return repaired, n
-    except Exception:
-        # Defensive: never let geometry repair break an extraction pipeline.
+        fixed = _repaired_rows(con, read)
+    except duckdb.Error as exc:
+        warn(f"Could not check geometry column {geometry_column!r} for invalid geometry: {exc}")
         return table, 0
     finally:
-        try:
-            con.unregister("_gpio_repair_src")
-        except Exception:
-            pass
         con.close()
+
+    n = len(fixed) - fixed.null_count
+    if n == 0:
+        return table, 0
+    # Patch first, claim after: a failure here raises rather than reporting a
+    # repair that never reached the table.
+    idx = table.column_names.index(geometry_column)
+    patched = _patch_repaired_rows(table.column(idx), fixed)
+    repaired = table.set_column(idx, table.schema.field(idx), patched)
+    _warn_invalid(n, repaired=True)
+    return repaired, n
