@@ -35,6 +35,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
+from geoparquet_io.core.geometry_repair import warn_planar_math
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
@@ -162,6 +163,7 @@ def add_s2_table(
         con.execute("SET geometry_always_xy = true;")
 
         _load_geography_extension(con)
+        warn_planar_math("add_s2", table, geom_col)
         registered = register_arrow(con, "__input_table", table)
 
         source_ref = _create_geometry_view(con, table, geom_col)

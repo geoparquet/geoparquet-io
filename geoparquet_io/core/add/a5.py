@@ -23,6 +23,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
+from geoparquet_io.core.geometry_repair import warn_planar_math
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
@@ -74,6 +75,7 @@ def add_a5_table(
         # Load A5 extension
         load_community_extension(con, "a5")
 
+        warn_planar_math("add_a5", table, geom_col)
         registered = register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB (needs conversion)

@@ -30,6 +30,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
+from geoparquet_io.core.geometry_repair import warn_planar_math
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -256,6 +257,7 @@ def add_quadkey_table(
             "VARCHAR",
         )
 
+        warn_planar_math("add_quadkey", table, geom_col)
         registered = register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB (needs conversion)

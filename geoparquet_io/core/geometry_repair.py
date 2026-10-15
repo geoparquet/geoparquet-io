@@ -82,6 +82,24 @@ def nonplanar_edges_of_arrow_table(table, geometry_column: str) -> str | None:
     return None
 
 
+def warn_planar_math(op: str, table, geometry_column: str | None) -> None:
+    """One warning when ``op`` runs planar math on a column with non-planar edges.
+
+    The bbox, the cell keys, simplify, reproject and the aggregations all treat
+    edges as straight lines on the plane. On spherical data they still run, and
+    their answer is the planar one. Geodesic versions are follow-ups (#1286,
+    #1289). Only a log line: the result is not changed.
+    """
+    if not geometry_column:
+        return
+    edges = nonplanar_edges_of_arrow_table(table, geometry_column)
+    if edges:
+        warn(
+            f"{op} uses planar math on '{geometry_column}', which has {edges} edges. "
+            "The result is planar. Geodesic support is tracked in #1286 and #1289."
+        )
+
+
 def _warn_invalid(n: int, *, repaired: bool) -> None:
     """Emit a single warning describing invalid geometries found (no-op when n == 0)."""
     if n <= 0:

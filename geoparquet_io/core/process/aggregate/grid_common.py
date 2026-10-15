@@ -38,6 +38,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_repair import warn_planar_math
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.common import (
@@ -1039,6 +1040,7 @@ def aggregate_grid_table(
     try:
         load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
+        warn_planar_math("aggregate", table, geom_col)
         register_arrow(con, "__agg_input", table)
         source_crs = extract_crs_from_table(table, geom_col)
         pt_expr, exclude = bucket_point_expr(

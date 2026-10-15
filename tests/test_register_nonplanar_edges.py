@@ -362,3 +362,67 @@ def test_wkb_conversion_keeps_the_geometry_in_place():
     finally:
         con.close()
     assert names == ["id", "geometry", "after"]
+
+
+# --------------------------------------------------------------------------
+# A planar-only op on spherical data says so, once
+# --------------------------------------------------------------------------
+
+PLANAR_MATH = {
+    "add_bbox": lambda t: t.add_bbox(),
+    "add_quadkey": lambda t: t.add_quadkey(),
+    "add_h3": lambda t: t.add_h3(),
+    "add_a5": lambda t: t.add_a5(),
+    "add_s2": lambda t: t.add_s2(),
+    "add_kdtree": lambda t: t.add_kdtree(iterations=2),
+    "simplify": lambda t: t.simplify(0.01),
+    "reproject": lambda t: t.reproject("EPSG:3857"),
+    "aggregate_h3": lambda t: t.aggregate_h3(3),
+    "aggregate_a5": lambda t: t.aggregate_a5(3),
+}
+PLANAR_MARKER = "planar math"
+
+
+def _planar_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if PLANAR_MARKER in r.getMessage()]
+
+
+@pytest.mark.parametrize("op", sorted(PLANAR_MATH))
+def test_planar_only_op_on_spherical_data_warns_once(op, table, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        PLANAR_MATH[op](table)
+    messages = _planar_warnings(caplog)
+    assert len(messages) == 1, messages
+    assert "spherical" in messages[-1]
+    assert "#1286" in messages[-1] and "#1289" in messages[-1]
+
+
+@pytest.mark.parametrize("op", ["sort_hilbert", "extract_where", "sort_column"])
+def test_pass_through_op_does_not_warn(op, table, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        PASS_THROUGH[op](table)
+    assert _planar_warnings(caplog) == []
+
+
+def test_planar_data_does_not_warn(rows, tmp_path, caplog):
+    import logging
+
+    planar = gpio.read(
+        str(write_native_geo_only(tmp_path / "planar.parquet", rows, {"geometry": (2, ga.wkb())}))
+    )
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        planar.add_bbox()
+        planar.add_h3()
+    assert _planar_warnings(caplog) == []
+
+
+def test_the_warning_does_not_change_the_result(table):
+    """Only a log line: the bbox values are the planar ones they were before."""
+    bbox = table.add_bbox().table.column("bbox").to_pylist()[0]
+    assert bbox == pytest.approx(
+        {"xmin": -122.0, "ymin": 26.0, "xmax": -121.6, "ymax": 26.3}, abs=0.05
+    )

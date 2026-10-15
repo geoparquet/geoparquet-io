@@ -46,6 +46,7 @@ from geoparquet_io.core.geo_metadata import (
     strip_derived_stats,
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_repair import warn_planar_math
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.remote import (
     needs_httpfs,
@@ -256,6 +257,7 @@ def reproject_table(
     # Create connection and register table
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
+        warn_planar_math("reproject", table, geom_col)
         register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB type (needs conversion to GEOMETRY)

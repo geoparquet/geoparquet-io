@@ -27,6 +27,7 @@ from geoparquet_io.core.geometry_detection import (
     find_primary_geometry_column,
     register_geometry_column,
 )
+from geoparquet_io.core.geometry_repair import warn_planar_math
 from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import open_input, write_output
@@ -159,6 +160,7 @@ def add_bbox_table(
     # information (#1268), and re-ordered the columns while doing it.
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
+        warn_planar_math("add_bbox", table, geom_col)
         read = register_geometry_column(con, "__input_table", table, geom_col)
         quoted_bbox_col = quote_identifier(bbox_column_name)
         bbox_query = f"""

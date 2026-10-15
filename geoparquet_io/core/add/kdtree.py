@@ -18,6 +18,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_repair import warn_planar_math
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -403,6 +404,7 @@ def add_kdtree_table(
     try:
         # DuckDB reads a GEOGRAPHY column back as planar GEOMETRY, so the temp
         # copy is the planar view and the result gets the input's edges back (#1253).
+        warn_planar_math("add_kdtree", table, geom_col)
         view, registered = planar_view(table, "kdtree_input")
         pq.write_table(view, temp_path)
 
