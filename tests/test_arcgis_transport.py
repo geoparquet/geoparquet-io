@@ -696,7 +696,10 @@ def _assert_ladder_walked_the_layer(http, pages) -> None:
         (int(request.params["resultOffset"]), int(request.params["resultRecordCount"]))
         for request in http.matching(_is_query)
     ]
-    assert windows[0] == (0, 100)  # the ladder starts at the size that was asked for
+    # The ladder starts at the size that was asked for. The offset-0 window is
+    # always issued (the collect loop waits on it first), but whether it reaches
+    # the transport before its sibling is the scheduler's.
+    assert (0, 100) in windows
     # Each refused rung is restarted from offset 0; how many of its siblings
     # were issued before the cancel is the scheduler's.
     assert {offset for offset, size in windows if size == 100} <= {0, 100}
@@ -894,6 +897,49 @@ def test_a_persistent_http_502_on_a_parallel_window_descends_the_ladder(monkeypa
 
     pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
 
+    _assert_ladder_walked_the_layer(http, pages)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [html_reply(b"<html>request too large</html>"), error_reply(502)],
+    ids=["html_refusal", "http_502"],
+)
+def test_the_parallel_ladder_does_not_care_which_window_reached_the_server_first(
+    monkeypatch, refusal
+):
+    """The sibling window's request lands before the offset-0 one.
+
+    Both windows are submitted together, so the transport can record them in
+    either order. This scheduling failed the ubuntu/3.11 job on PR #1240 at
+    random; here it is forced: the offset-0 page is held until the sibling has
+    been recorded.
+    """
+    import geoparquet_io.core.arcgis as arcgis_module
+
+    http = FakeTransport.install(monkeypatch)
+    server = _serves_pages_up_to(10, 200, refusal)
+    sibling_recorded = threading.Event()
+
+    def _serve(request):
+        if (request.params["resultOffset"], request.params["resultRecordCount"]) == ("100", "100"):
+            sibling_recorded.set()
+        return server(request)
+
+    stub_service(http, total=200, page_replies=(_serve,))
+    real_fetch_page = arcgis_module.fetch_features_page
+
+    def _offset_zero_waits_for_the_sibling(service_url, offset, batch_size, *args, **kwargs):
+        if (offset, batch_size) == (0, 100):
+            assert sibling_recorded.wait(timeout=30), "the sibling window was never issued"
+        return real_fetch_page(service_url, offset, batch_size, *args, **kwargs)
+
+    monkeypatch.setattr(arcgis_module, "fetch_features_page", _offset_zero_waits_for_the_sibling)
+
+    pages = list(fetch_all_features(SERVICE, _layer_info(200), batch_size=100, max_workers=2))
+
+    first = http.matching(_is_query)[0]
+    assert (first.params["resultOffset"], first.params["resultRecordCount"]) == ("100", "100")
     _assert_ladder_walked_the_layer(http, pages)
 
 
