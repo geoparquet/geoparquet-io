@@ -88,9 +88,13 @@ class TestLonLatInputNeedsNoTransform:
         assert transform_source_crs(crs) is None
 
     @pytest.mark.parametrize("crs", ["", {}], ids=repr)
-    def test_empty_value_is_absent_like_the_rest_of_the_module(self, crs):
-        """An empty CRS names nothing, so it is absent, as in ``is_default_crs``."""
-        assert is_default_crs(crs)
+    def test_empty_value_is_unknown_not_default(self, crs):
+        """An empty CRS names nothing, so it is unknown, like ``null`` (#1267).
+
+        There is nothing to transform from, so the result is still ``None``, but
+        it is not the default and a warning says so.
+        """
+        assert not is_default_crs(crs)
         assert transform_source_crs(crs) is None
 
     def test_coded_default_projjson_is_none(self):

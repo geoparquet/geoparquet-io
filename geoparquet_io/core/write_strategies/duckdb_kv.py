@@ -141,7 +141,7 @@ def _table_query_with_native_geometry(
         ident = quote_identifier(name)
         expr = f"ST_GeomFromWKB({ident})"
         crs = (metadata.get(name) or {}).get("crs") if name != geometry_column else None
-        if isinstance(crs, dict) and not is_default_crs(crs):
+        if isinstance(crs, dict) and crs and not is_default_crs(crs):
             expr = f"ST_SetCRS({expr}, '{_escape_sql_string(json.dumps(crs))}')"
         replacements.append(f"{expr} AS {ident}")
     if not replacements:

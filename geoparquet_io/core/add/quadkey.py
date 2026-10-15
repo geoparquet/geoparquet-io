@@ -12,9 +12,11 @@ from geoparquet_io.core.crs_utils import (
     crs_string_from_geo_meta,
     crs_string_from_table,
     get_crs_display_name,
+    is_empty_crs_value,
     parse_geo_metadata_from_schema,
     source_crs_string,
     transform_geom_sql,
+    warn_empty_crs_once,
 )
 from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata
 from geoparquet_io.core.duckdb_utils import (
@@ -57,9 +59,10 @@ def _is_geographic_crs(crs_info: dict | str | None) -> bool | None:
     Check if CRS is geographic (lat/long) vs projected.
 
     Returns:
-        True if geographic, False if projected, None if unknown
+        True if geographic, False if projected, None if unknown (also for an
+        empty value such as ``""`` or ``{}``, #1267)
     """
-    if crs_info is None:
+    if crs_info is None or is_empty_crs_value(crs_info):
         return None
 
     if isinstance(crs_info, str):
@@ -121,6 +124,11 @@ def _validate_crs_from_geo_metadata(
         return
 
     crs_info = columns_meta[geom_col].get("crs")
+
+    # An empty value names no CRS: unknown, like null, and said so (#1267).
+    if is_empty_crs_value(crs_info):
+        warn_empty_crs_once(crs_info)
+        return
 
     # No CRS specified means default (WGS84)
     if crs_info is None:

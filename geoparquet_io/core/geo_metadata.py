@@ -328,6 +328,23 @@ _COLUMN_VALUE_CHECKS: dict[str, tuple] = {
 }
 
 
+def _empty_crs_as_null(entry: dict) -> dict:
+    """``entry`` with an empty ``crs`` (``""``, ``{}``, ``[]``, ``0``) read as null.
+
+    An empty value names no CRS, so it is unknown, the same as ``null``. Dropping
+    it, as a wrong-typed value is dropped, would make it *absent*, which the spec
+    reads as OGC:CRS84, and a projected file's metres would then be keyed as
+    degrees (#1267). ``null`` is also what a write path may safely carry, where
+    an empty value would make the output unreadable. Warns once, naming the value.
+    """
+    from geoparquet_io.core.crs_utils import is_empty_crs_value, warn_empty_crs_once
+
+    if "crs" not in entry or not is_empty_crs_value(entry["crs"]):
+        return entry
+    warn_empty_crs_once(entry["crs"])
+    return {**entry, "crs": None}
+
+
 def _sanitize_column_entry(name: str, entry: dict) -> tuple[dict, list[str]]:
     """Drop wrong-typed carried values from one column entry; never mutates.
 
@@ -335,12 +352,12 @@ def _sanitize_column_entry(name: str, entry: dict) -> tuple[dict, list[str]]:
     shallow copy, plus the problems to warn about.
     """
     problems: list[str] = []
-    cleaned = entry
+    cleaned = _empty_crs_as_null(entry)
     for key, (accepts, expected) in _COLUMN_VALUE_CHECKS.items():
-        if key in entry and not accepts(entry[key]):
+        if key in cleaned and not accepts(cleaned[key]):
             problems.append(
                 f"'{key}' on column '{name}' is "
-                f"{_article(_json_type_name(entry[key]))}, expected {expected}"
+                f"{_article(_json_type_name(cleaned[key]))}, expected {expected}"
             )
             if cleaned is entry:
                 cleaned = dict(entry)

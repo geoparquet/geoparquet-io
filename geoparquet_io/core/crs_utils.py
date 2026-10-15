@@ -64,6 +64,54 @@ def crs_from_column_meta(col_meta: dict | None) -> Any:
     return col_meta["crs"]
 
 
+def is_empty_crs_value(crs) -> bool:
+    """True for a ``crs`` that is present but names nothing (#1267).
+
+    ``""`` (or only whitespace), ``{}``, ``[]`` and ``0``. The GeoParquet spec
+    allows a PROJJSON object or ``null`` only, and an omitted key means
+    OGC:CRS84. An empty value is neither omitted nor a CRS, so gpio reads it the
+    way it reads ``null``: the CRS is unknown. ``None``, :data:`CRS_ABSENT` and
+    ``False`` are not empty values. They have their own meanings, or are just
+    wrong-typed.
+
+    This is for a ``geo`` block or GeoArrow ``crs``. On the Parquet GEOMETRY
+    logical type an unset CRS is the OGC:CRS84 default, so readers of that type
+    do not call this.
+    """
+    if isinstance(crs, str):
+        return not crs.strip()
+    if isinstance(crs, dict | list):
+        return not crs
+    if isinstance(crs, int | float) and not isinstance(crs, bool):
+        return crs == 0
+    return False
+
+
+def _shown_empty_crs(crs) -> str:
+    """An empty ``crs`` as the file spells it: ``""``, ``{}``, ``[]`` or ``0``."""
+    return json.dumps(crs)
+
+
+#: Shared guidance for an empty ``crs`` value.
+EMPTY_CRS_HINT = (
+    "An empty crs names no CRS, so it is read as unknown, the same as an explicit "
+    "null (not the OGC:CRS84 default). If the coordinates are not lon/lat WGS84, "
+    "reproject with an explicit source CRS, for example "
+    "`gpio convert reproject <input> <output> --src-crs <CRS> --dst-crs EPSG:4326`."
+)
+
+
+@lru_cache(maxsize=256)
+def _emit_empty_crs_warning(shown: str) -> None:
+    """Emit the empty-CRS warning once per distinct value (LRU-bounded)."""
+    warn(f"Input has an empty crs value ({shown}). {EMPTY_CRS_HINT}")
+
+
+def warn_empty_crs_once(crs) -> None:
+    """Warn at most once per process for each distinct empty ``crs`` value."""
+    _emit_empty_crs_warning(_shown_empty_crs(crs))
+
+
 #: Authority ids that name the GeoParquet default CRS.
 #:
 #: OGC:CRS84 and EPSG:4326 differ only in axis order, and GeoParquet fixes the
@@ -316,9 +364,12 @@ def is_default_crs(crs):
     """
     Check if CRS is the default (OGC:CRS84 or EPSG:4326).
 
-    Returns True if CRS is None, empty, or represents WGS84.
-    Used to skip CRS rewriting when output would be default anyway.
+    Returns True if CRS is None, absent, or represents WGS84. Used to skip CRS
+    rewriting when output would be default anyway. An empty value (``""``,
+    ``{}``, ``[]``, ``0``) is unknown, not the default (#1267), so it is False.
     """
+    if is_empty_crs_value(crs):
+        return False
     if not crs:
         return True
 
@@ -388,7 +439,8 @@ def apply_output_crs(col_meta: dict, input_crs) -> None:
     if input_crs and not is_default_crs(input_crs):
         col_meta["crs"] = input_crs
         return
-    if input_crs or is_default_crs(col_meta.get("crs")):
+    current = col_meta.get("crs")
+    if input_crs or is_default_crs(current) or is_empty_crs_value(current):
         col_meta.pop("crs", None)
         note_default_crs_normalized(declared)
 
@@ -473,8 +525,9 @@ def warn_null_crs_once(key: str) -> None:
 
 
 def reset_null_crs_warnings() -> None:
-    """Clear the warn-once dedup cache. Intended for tests."""
+    """Clear the null and empty warn-once dedup caches. Intended for tests."""
     _emit_null_crs_warning.cache_clear()
+    _emit_empty_crs_warning.cache_clear()
 
 
 def apply_target_crs_to_geo_meta(geo_meta: dict, geom_col: str, target_crs: str, con) -> None:
@@ -713,6 +766,9 @@ def extract_crs_from_table(table, geometry_column: str | None = None):
     if crs_is_explicitly_null(col_meta):
         return None
     crs = col_meta.get("crs") or _crs_from_geoarrow_field(table, col)
+    if is_empty_crs_value(crs):
+        warn_empty_crs_once(crs)
+        return None
     if crs and not is_default_crs(crs):
         return crs
     return None
@@ -1474,8 +1530,8 @@ def transform_source_crs(crs) -> str | None:
     ``crs`` is any CRS value gpio reads. A PROJJSON dict or string, an
     ``AUTH:CODE`` or URN string, a WKT string, ``None`` or :data:`CRS_ABSENT`.
 
-    An empty value (``""`` or ``{}``) names nothing and is treated as absent,
-    the same as :func:`is_default_crs` and :func:`note_default_crs_normalized`.
+    An empty value (``""``, ``{}``, ``[]``, ``0``) names nothing. It is unknown,
+    like ``null`` (#1267), so it warns once and needs no transform.
 
     Returns one of three things.
 
@@ -1498,6 +1554,9 @@ def transform_source_crs(crs) -> str | None:
     is idempotent, ``transform_source_crs(transform_source_crs(x))`` gives the
     same answer, so a caller may hand an already-resolved string back in.
     """
+    if is_empty_crs_value(crs):
+        warn_empty_crs_once(crs)
+        return None
     if not crs:
         return None
     if isinstance(crs, str) and len(crs) > MAX_PROJJSON_CHARS:

@@ -82,7 +82,8 @@ def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:
         return False, None
     crs = resolve_crs_reference(parquet_file, raw)
     if isinstance(crs, dict):
-        return (False, None) if is_default_crs(crs) else (True, crs)
+        # An empty native CRS is unset, which on this type is the default.
+        return (False, None) if not crs or is_default_crs(crs) else (True, crs)
     warn(
         f"Native geometry type declares a CRS this build cannot resolve to PROJJSON: {crs!r}. "
         "Writing an explicit null CRS (unknown) rather than claiming the OGC:CRS84 default. "

@@ -422,7 +422,7 @@ def table_geometry_info(table, primary_column: str, carried_geo: dict | None = N
             crs = _crs_as_projjson(getattr(field.type, "crs", None))
             # The spec states the default by OMITTING the key; `apply_output_crs`
             # is where that rule lives for the primary.
-            if isinstance(crs, dict) and not is_default_crs(crs):
+            if isinstance(crs, dict) and crs and not is_default_crs(crs):
                 col_meta["crs"] = crs
         # The schema carries the edge interpretation as well as the CRS: left
         # behind, a spherical secondary came out planar with no warning.
