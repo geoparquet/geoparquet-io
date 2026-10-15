@@ -24,7 +24,9 @@ from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
     apply_output_crs,
+    field_type_crs_is_unknown,
     is_default_crs,
+    is_empty_crs_value,
     parse_geo_metadata_from_schema,
 )
 from geoparquet_io.core.geo_metadata import (
@@ -278,6 +280,25 @@ def _crs_as_projjson(crs):
         return None
 
 
+def _secondary_crs_from_field(field) -> dict:
+    """The ``crs`` key a secondary's GeoArrow type gives its ``geo`` entry.
+
+    ``{"crs": None}`` for an unknown CRS, the ``srid:0`` type or an empty
+    value, which PROJ cannot parse and the default must not swallow (#1277
+    review). ``{}`` for the default, which the spec states by omitting the key
+    (``apply_output_crs`` is where that rule lives for the primary). Otherwise
+    the PROJJSON the type names.
+    """
+    if field_type_crs_is_unknown(field):
+        return {"crs": None}
+    crs = _crs_as_projjson(getattr(field.type, "crs", None))
+    if is_empty_crs_value(crs):
+        return {"crs": None}
+    if isinstance(crs, dict) and not is_default_crs(crs):
+        return {"crs": crs}
+    return {}
+
+
 def _is_spherical_edge_type(arrow_type) -> bool:
     """Whether a GeoArrow extension type declares spherical edges."""
     edge_type = getattr(arrow_type, "edge_type", None)
@@ -419,11 +440,7 @@ def table_geometry_info(table, primary_column: str, carried_geo: dict | None = N
         # measure the real list treat as a gap (#952).
         col_meta.setdefault("geometry_types", [])
         if "crs" not in col_meta:
-            crs = _crs_as_projjson(getattr(field.type, "crs", None))
-            # The spec states the default by OMITTING the key; `apply_output_crs`
-            # is where that rule lives for the primary.
-            if isinstance(crs, dict) and crs and not is_default_crs(crs):
-                col_meta["crs"] = crs
+            col_meta.update(_secondary_crs_from_field(field))
         # The schema carries the edge interpretation as well as the CRS: left
         # behind, a spherical secondary came out planar with no warning.
         if "edges" not in col_meta and _is_spherical_edge_type(field.type):

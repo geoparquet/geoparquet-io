@@ -1066,10 +1066,10 @@ def table_crs_is_unknown(table, geometry_column: str | None) -> bool:
     col_meta = ((geo_meta or {}).get("columns") or {}).get(geometry_column)
     if isinstance(col_meta, dict) and "crs" in col_meta:
         return entry_crs_is_unknown(col_meta)
-    return _field_type_crs_is_unknown(table.schema.field(geometry_column))
+    return field_type_crs_is_unknown(table.schema.field(geometry_column))
 
 
-def _field_type_crs_is_unknown(field) -> bool:
+def field_type_crs_is_unknown(field) -> bool:
     """Whether a GeoArrow field's crs is ``srid:0``, on the type or in raw metadata."""
     if is_unknown_type_crs(getattr(getattr(field.type, "crs", None), "_crs", None)):
         return True
@@ -2135,6 +2135,6 @@ def _table_unknown_by_field_only(table, geo_meta: dict | None, geom_col: str) ->
     entry = columns.get(geom_col) if isinstance(columns, dict) else None
     if isinstance(entry, dict) and "crs" in entry:
         return False
-    return geom_col in table.schema.names and _field_type_crs_is_unknown(
+    return geom_col in table.schema.names and field_type_crs_is_unknown(
         table.schema.field(geom_col)
     )

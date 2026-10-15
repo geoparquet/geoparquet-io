@@ -103,3 +103,25 @@ def test_table_write_parquet_geo_only_types_each_secondary(strategy, secondary, 
     out = tmp_path / "out.parquet"
     gpio.read(src).write(str(out), geoparquet_version="parquet-geo-only", write_strategy=strategy)
     _assert_typed(out, SECONDARY_CRS[secondary])
+
+
+@pytest.mark.parametrize("secondary", sorted(SECONDARY_CRS))
+@pytest.mark.parametrize("strategy", STRATEGIES)
+def test_parquet_geo_only_secondary_crs_survives_a_1x_write(strategy, secondary, tmp_path):
+    """Reading the type back into a 1.1 block keeps the secondary's CRS.
+
+    The type is the only carrier, so an unknown ``srid:0`` secondary must come
+    back as ``crs: null`` and never crash PROJ or drop to the OGC:CRS84 default.
+    """
+    src = _write_two_geoms(tmp_path / "in.parquet", SECONDARY_CRS[secondary])
+    native = str(tmp_path / "native.parquet")
+    gpio.read(src).write(native, geoparquet_version="parquet-geo-only")
+    out = tmp_path / "out.parquet"
+    gpio.read(native).write(str(out), geoparquet_version="1.1", write_strategy=strategy)
+    geo = json.loads(pq.read_schema(out).metadata[b"geo"])
+    entry = geo["columns"]["geom2"]
+    assert "crs" in entry, entry
+    if SECONDARY_CRS[secondary] is None:
+        assert entry["crs"] is None
+    else:
+        assert entry["crs"]["id"] == ALBERS["id"]
