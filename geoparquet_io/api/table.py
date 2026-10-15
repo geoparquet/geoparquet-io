@@ -1512,19 +1512,14 @@ class Table:
             # strategies rebuild the geo block without them. So the edges are
             # read off the table, cleared for the write, and restored on the
             # written file, as the CLI write paths do (#1253).
-            from geoparquet_io.core.arrow_geo_metadata import (
-                nonplanar_edges_from_schema,
-                with_planar_edge_types,
-            )
+            from geoparquet_io.core.arrow_geo_metadata import with_planar_edge_types
             from geoparquet_io.core.write_funnels import (
                 apply_nonplanar_edges,
                 table_nonplanar_edges,
             )
 
             edges_by_col = table_nonplanar_edges(self._table, self._geometry_column, None)
-            write_table = with_planar_edge_types(
-                self._table, nonplanar_edges_from_schema(self._table.schema)
-            )
+            write_table = with_planar_edge_types(self._table)
 
             strategy.write_from_table(
                 table=write_table,

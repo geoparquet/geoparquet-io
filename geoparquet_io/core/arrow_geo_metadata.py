@@ -321,14 +321,23 @@ def nonplanar_edges_from_schema(schema) -> dict[str, str]:
     return edges_by_col
 
 
-def with_planar_edge_types(table, columns):
+def with_planar_edge_types(table, columns=None):
     """The table with each named GeoArrow column's edge type set to planar.
 
     DuckDB refuses to register a GeoArrow column with non-planar edges ("Can't
     import non-planar edges"), so a write that goes through DuckDB clears the
     edge type first and restores it on the written file (#1253). The CRS and the
-    bytes are kept as they are.
+    bytes are kept as they are. ``columns=None`` clears every GeoArrow column
+    whose type says anything but planar, a value gpio does not know included,
+    because DuckDB refuses those too. Which edges come back is the restore
+    side's question (``write_funnels.table_nonplanar_edges``).
     """
+    if columns is None:
+        columns = [
+            field.name
+            for field in table.schema
+            if is_geoarrow_extension_field(field) and _field_edges(field) not in (None, "planar")
+        ]
     for name in columns:
         index = table.schema.get_field_index(name)
         field = table.schema.field(index)

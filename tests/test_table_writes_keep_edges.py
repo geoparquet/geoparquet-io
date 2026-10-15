@@ -351,6 +351,26 @@ class TestTableWrite:
         gpio.read(str(declared)).write(str(out), geoparquet_version=version)
         _assert_spherical(out, version)
 
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "disk-rewrite"])
+    def test_unknown_type_edges_still_write(self, rows, tmp_path, strategy):
+        """DuckDB refuses any non-planar edges, so a typo is cleared too, not kept."""
+        table = _metadata_carrier_table(rows)
+        field = table.schema.field("geometry")
+        metadata = {**field.metadata, EXT_META: b'{"edges": "sphere"}'}
+        table = table.set_column(2, field.with_metadata(metadata), table.column("geometry"))
+        out = tmp_path / "out.parquet"
+        gpio.Table(table, geometry_column="geometry").write(
+            str(out), geoparquet_version="1.1", write_strategy=strategy
+        )
+        assert _edges(out) is None
+
+    def test_planar_edge_types_default_to_every_nonplanar_column(self, rows):
+        table = _metadata_carrier_table(rows)
+        assert (
+            json.loads(with_planar_edge_types(table).schema.field("geometry").metadata[EXT_META])
+            == {}
+        )
+
     def test_metadata_carrier_table(self, rows, tmp_path):
         out = tmp_path / "out.parquet"
         gpio.Table(_metadata_carrier_table(rows), geometry_column="geometry").write(
