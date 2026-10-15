@@ -700,7 +700,8 @@ def _replacement_box(bboxes: Mapping[str, list] | None, column: str, group: int)
     boxes = (bboxes or {}).get(column)
     if boxes is None or group >= len(boxes):
         return None
-    return boxes[group]
+    box: tuple | None = boxes[group]
+    return box
 
 
 def _bbox_splice(

@@ -7,103 +7,105 @@ canonical lon/lat ranges, ``xmin > xmax`` for an antimeridian wrap -- and to
 the property that makes a bbox usable for pruning at all: every point a
 reader would treat as part of the geometry is inside it.
 
-The ground truth for SPHERICAL edges is the definition of a spherical edge:
-the great-circle arc between the vertices, sampled densely by slerp.
+The ground truth is independent of the module under test: each edge is
+densified with ``pyproj.Geod.npts`` -- a sphere for SPHERICAL edges, the WGS84
+ellipsoid for the ellipsoidal algorithms -- and every sample must fall inside
+the box. A bound that pads, guesses or skips a branch fails here, not only a
+bound that is computed "the same way" as the expectation.
 """
 
 from __future__ import annotations
 
 import math
 import random
+import struct
 
 import pytest
 import shapely
+from pyproj import Geod
 
 from geoparquet_io.core.geodesic_bbox import (
-    ELLIPSOIDAL_LAT_EPSILON_DEG,
+    LAT_MARGIN_DEG,
     geodesic_bbox_of_wkb,
-    lon_range_contains,
+    row_group_geography_bboxes,
 )
+
+SPHERE = Geod(a=6371008.8, f=0.0)
+WGS84 = Geod(ellps="WGS84")
+GLOBE = (-180.0, -90.0, 180.0, 90.0)
 
 
 def _wkb(wkt: str) -> bytes:
     return shapely.to_wkb(shapely.from_wkt(wkt))
 
 
-def bbox_of(wkt: str, edges: str = "spherical"):
-    return geodesic_bbox_of_wkb([_wkb(wkt)], edges=edges)
+def bbox_of(wkt: str, edges: str = "spherical", orientation: str | None = None):
+    return geodesic_bbox_of_wkb([_wkb(wkt)], edges=edges, orientation=orientation)
 
 
-def _lon_in(bbox, lon: float) -> bool:
-    xmin, _, xmax, _ = bbox
-    if xmin <= xmax:
-        return xmin - 1e-9 <= lon <= xmax + 1e-9
-    return lon >= xmin - 1e-9 or lon <= xmax + 1e-9
-
-
-def _contains(bbox, lon: float, lat: float) -> bool:
-    return _lon_in(bbox, lon) and bbox[1] - 1e-9 <= lat <= bbox[3] + 1e-9
-
-
-def _unit(lon: float, lat: float):
-    lon, lat = math.radians(lon), math.radians(lat)
-    return (
-        math.cos(lat) * math.cos(lon),
-        math.cos(lat) * math.sin(lon),
-        math.sin(lat),
-    )
-
-
-def _slerp_lonlat(a, b, steps: int = 200):
-    """Dense samples of the great-circle arc between two lon/lat points."""
-    va, vb = _unit(*a), _unit(*b)
-    dot = max(-1.0, min(1.0, sum(x * y for x, y in zip(va, vb, strict=True))))
-    omega = math.acos(dot)
-    if omega < 1e-12:
-        return [a]
-    out = []
-    for i in range(steps + 1):
-        t = i / steps
-        sa = math.sin((1 - t) * omega) / math.sin(omega)
-        sb = math.sin(t * omega) / math.sin(omega)
-        x, y, z = (sa * va[j] + sb * vb[j] for j in range(3))
-        out.append((math.degrees(math.atan2(y, x)), math.degrees(math.asin(max(-1, min(1, z))))))
+def _line(points) -> bytes:
+    out = struct.pack("<BII", 1, 2, len(points))
+    for x, y in points:
+        out += struct.pack("<dd", x, y)
     return out
 
 
+def _lon_in(bbox, lon: float, tol: float = 1e-9) -> bool:
+    xmin, _, xmax, _ = bbox
+    if not -180.0 <= lon <= 180.0:
+        lon = ((lon + 180.0) % 360.0) - 180.0
+    if xmin <= xmax:
+        if xmin - tol <= lon <= xmax + tol:
+            return True
+        # -180 and 180 are one meridian.
+        return abs(lon) == 180.0 and (xmin <= -180.0 + tol or xmax >= 180.0 - tol)
+    return lon >= xmin - tol or lon <= xmax + tol
+
+
+def _contains(bbox, lon: float, lat: float, tol: float = 1e-9) -> bool:
+    if not bbox[1] - tol <= lat <= bbox[3] + tol:
+        return False
+    # At a pole every longitude is the same point.
+    return abs(lat) > 90.0 - 1e-7 or _lon_in(bbox, lon, tol)
+
+
+def _edges(coords):
+    return list(zip(coords, coords[1:], strict=False))
+
+
+def _oracle_misses(bbox, edges, geod: Geod, npts: int = 1000):
+    """Densified points of each edge that escape ``bbox`` (independent of the module)."""
+    misses = []
+    for a, b in edges:
+        if (a[0], a[1]) == (b[0], b[1]):
+            samples = [a]
+        else:
+            samples = [a, b, *geod.npts(a[0], a[1], b[0], b[1], npts)]
+        for lon, lat in samples:
+            if bbox is None or not _contains(bbox, lon, lat):
+                misses.append((a, b, lon, lat))
+    return misses
+
+
 class TestAcceptance:
-    """The issue's acceptance cases, verbatim."""
+    """The issue's acceptance cases."""
 
     def test_a_high_latitude_edge_bulges_poleward(self):
         """LINESTRING(-30 60, 30 60): the great circle peaks at ~63.43 N."""
         bbox = bbox_of("LINESTRING (-30 60, 30 60)")
-        assert bbox[3] == pytest.approx(63.4349, abs=0.01)
-        assert bbox[1] == pytest.approx(60.0, abs=1e-9)
-        assert bbox[0] == pytest.approx(-30.0)
-        assert bbox[2] == pytest.approx(30.0)
+        true_max = math.degrees(math.atan(math.tan(math.radians(60)) / math.cos(math.radians(30))))
+        assert true_max <= bbox[3] <= true_max + 2 * LAT_MARGIN_DEG
+        assert bbox[1] == 60.0
+        assert (bbox[0], bbox[2]) == (-30.0, 30.0)
 
     def test_a_southern_edge_bulges_toward_the_south_pole(self):
         bbox = bbox_of("LINESTRING (-30 -60, 30 -60)")
         assert bbox[1] == pytest.approx(-63.4349, abs=0.01)
-        assert bbox[3] == pytest.approx(-60.0, abs=1e-9)
+        assert bbox[3] == -60.0
 
     def test_an_antimeridian_crossing_edge_wraps(self):
         bbox = bbox_of("LINESTRING (170 10, -170 15)")
-        xmin, _, xmax, _ = bbox
-        assert xmin > xmax, f"expected a wrapped box, got [{xmin}, {xmax}]"
-        assert xmin == pytest.approx(170.0)
-        assert xmax == pytest.approx(-170.0)
-
-    def test_a_ring_enclosing_the_north_pole_reaches_it(self):
-        bbox = bbox_of("POLYGON ((0 80, 90 80, 180 80, -90 80, 0 80))")
-        assert bbox[3] == 90.0
-        assert (bbox[0], bbox[2]) == (-180.0, 180.0)
-        assert bbox[1] == pytest.approx(80.0, abs=1e-6)
-
-    def test_a_ring_enclosing_the_south_pole_reaches_it(self):
-        bbox = bbox_of("POLYGON ((0 -80, -90 -80, 180 -80, 90 -80, 0 -80))")
-        assert bbox[1] == -90.0
-        assert (bbox[0], bbox[2]) == (-180.0, 180.0)
+        assert (bbox[0], bbox[2]) == (170.0, -170.0)
 
     def test_results_are_clamped_to_canonical_ranges(self):
         bbox = bbox_of("LINESTRING (-179 89, 179 89)")
@@ -111,60 +113,124 @@ class TestAcceptance:
         assert -180.0 <= bbox[0] <= 180.0 and -180.0 <= bbox[2] <= 180.0
 
 
+class TestUnreadableCoordinates:
+    """A non-finite or out-of-range coordinate bounds nothing -- never NaN, never a raise."""
+
+    @pytest.mark.parametrize(
+        "points",
+        [
+            [(0.0, 0.0), (float("nan"), 10.0), (20.0, 20.0)],
+            [(0.0, 0.0), (10.0, float("nan"))],
+            [(float("inf"), 0.0), (20.0, 10.0)],
+            [(0.0, float("-inf")), (20.0, 10.0)],
+            [(0.0, 100.0), (10.0, 0.0)],
+        ],
+        ids=["nan-lon", "nan-lat", "inf-lon", "inf-lat", "lat-100"],
+    )
+    @pytest.mark.parametrize("edges", ["spherical", "karney"])
+    def test_a_bad_vertex_yields_none(self, points, edges):
+        assert geodesic_bbox_of_wkb([_line(points)], edges=edges) is None
+
+    def test_a_half_nan_point_yields_none(self):
+        assert geodesic_bbox_of_wkb([struct.pack("<BIdd", 1, 1, float("nan"), 1.0)]) is None
+
+    def test_a_bad_value_poisons_its_neighbours(self):
+        """A bound that skipped the bad row would under-cover it."""
+        good = _wkb("POINT (1 2)")
+        assert geodesic_bbox_of_wkb([good, _line([(0, 0), (float("nan"), 1)])]) is None
+
+    def test_a_row_group_with_a_nan_vertex_gets_no_box(self, tmp_path):
+        path = _native_file(tmp_path, [_wkb("POINT (1 2)"), _line([(0, 0), (float("nan"), 1)])])
+        bounds = row_group_geography_bboxes(str(path), "geometry", "spherical")
+        assert bounds.per_group == [(1.0, 2.0, 1.0, 2.0), None]
+        assert bounds.file_bbox is None
+        assert bounds.unreadable_groups == 1
+
+
 class TestGeometryKinds:
     def test_points_have_no_bulge(self):
         assert bbox_of("POINT (10 20)") == (10.0, 20.0, 10.0, 20.0)
 
+    def test_points_get_no_ellipsoidal_pad(self):
+        assert bbox_of("POINT (0 2)", edges="karney") == (0.0, 2.0, 0.0, 2.0)
+
     def test_multipoint_is_the_vertex_box(self):
-        bbox = bbox_of("MULTIPOINT ((10 20), (30 -5))")
-        assert bbox == (10.0, -5.0, 30.0, 20.0)
+        assert bbox_of("MULTIPOINT ((10 20), (30 -5))") == (10.0, -5.0, 30.0, 20.0)
 
-    def test_a_z_geometry_parses(self):
-        bbox = bbox_of("LINESTRING Z (-30 60 5, 30 60 7)")
+    @pytest.mark.parametrize(
+        "wkt",
+        ["LINESTRING Z (-30 60 5, 30 60 7)", "LINESTRING M (-30 60 1, 30 60 2)"],
+    )
+    def test_z_and_m_geometries_parse(self, wkt):
+        assert bbox_of(wkt)[3] == pytest.approx(63.4349, abs=0.01)
+
+    def test_a_zm_point_parses(self):
+        assert bbox_of("POINT ZM (1 2 3 4)") == (1.0, 2.0, 1.0, 2.0)
+
+    def test_big_endian_wkb_parses(self):
+        geom = shapely.from_wkt("POLYGON ((-30 60, 30 60, 30 50, -30 50, -30 60))")
+        bbox = geodesic_bbox_of_wkb([shapely.to_wkb(geom, byte_order=0)])
         assert bbox[3] == pytest.approx(63.4349, abs=0.01)
-
-    def test_an_m_geometry_parses(self):
-        bbox = bbox_of("LINESTRING M (-30 60 1, 30 60 2)")
-        assert bbox[3] == pytest.approx(63.4349, abs=0.01)
-
-    def test_a_zm_geometry_parses(self):
-        bbox = bbox_of("POINT ZM (1 2 3 4)")
-        assert bbox == (1.0, 2.0, 1.0, 2.0)
 
     def test_a_collection_unions_its_parts(self):
-        bbox = bbox_of("GEOMETRYCOLLECTION (POINT (-10 0), LINESTRING (0 60, 20 60))")
-        assert bbox[0] == pytest.approx(-10.0)
+        bbox = bbox_of(
+            "GEOMETRYCOLLECTION (POINT (-10 0), MULTILINESTRING ((0 60, 20 60)), "
+            "GEOMETRYCOLLECTION (POLYGON ((0 0, 1 0, 1 1, 0 0))))"
+        )
+        assert bbox[0] == -10.0
+        assert bbox[1] == 0.0
         assert bbox[3] > 60.0
 
     def test_a_multipolygon_with_an_interior_ring(self):
         bbox = bbox_of("MULTIPOLYGON (((0 0, 10 0, 10 10, 0 10, 0 0), (2 2, 3 2, 3 3, 2 3, 2 2)))")
-        assert bbox[0] == pytest.approx(0.0)
-        assert bbox[2] == pytest.approx(10.0)
+        assert (bbox[0], bbox[2]) == (0.0, 10.0)
+        assert bbox[1] < 1e-9 and bbox[3] >= 10.0
 
-    def test_an_empty_geometry_bounds_nothing(self):
-        assert geodesic_bbox_of_wkb([_wkb("LINESTRING EMPTY")]) is None
+    @pytest.mark.parametrize(
+        "wkt", ["LINESTRING EMPTY", "POINT EMPTY", "POLYGON EMPTY", "GEOMETRYCOLLECTION EMPTY"]
+    )
+    def test_an_empty_geometry_bounds_nothing(self, wkt):
+        assert geodesic_bbox_of_wkb([_wkb(wkt)]) is None
 
     def test_nulls_are_skipped(self):
         assert geodesic_bbox_of_wkb([None, _wkb("POINT (1 2)")]) == (1.0, 2.0, 1.0, 2.0)
 
     def test_ewkb_with_an_srid_parses(self):
-        geom = shapely.from_wkt("LINESTRING (-30 60, 30 60)")
-        shapely.set_srid(geom, 4326)
-        ewkb = shapely.to_wkb(shapely.set_srid(geom, 4326), flavor="extended", include_srid=True)
-        bbox = geodesic_bbox_of_wkb([ewkb])
-        assert bbox[3] == pytest.approx(63.4349, abs=0.01)
+        geom = shapely.set_srid(shapely.from_wkt("LINESTRING (-30 60, 30 60)"), 4326)
+        ewkb = shapely.to_wkb(geom, flavor="extended", include_srid=True)
+        assert geodesic_bbox_of_wkb([ewkb])[3] == pytest.approx(63.4349, abs=0.01)
 
-    def test_unparsable_wkb_yields_none(self):
-        assert geodesic_bbox_of_wkb([b"\x01\x99\x00\x00\x00"]) is None
-        assert geodesic_bbox_of_wkb([b""]) is None
+    def test_ewkb_z_polygon_parses(self):
+        geom = shapely.set_srid(
+            shapely.from_wkt("POLYGON Z ((-30 60 1, 30 60 1, 0 50 1, -30 60 1))"), 4326
+        )
+        ewkb = shapely.to_wkb(geom, flavor="extended", include_srid=True)
+        assert geodesic_bbox_of_wkb([ewkb])[3] == pytest.approx(63.4349, abs=0.01)
 
-    def test_an_unknown_geometry_kind_yields_none(self):
-        # A well-formed header whose kind (99) no WKB spec defines.
-        crafted = bytes([1]) + (99).to_bytes(4, "little") + (0).to_bytes(4, "little")
-        assert geodesic_bbox_of_wkb([crafted]) is None
-
-    def test_a_dimension_code_past_zm_yields_none(self):
-        crafted = bytes([1]) + (4001).to_bytes(4, "little") + bytes(16)
+    @pytest.mark.parametrize(
+        "crafted",
+        [
+            b"\x01\x99\x00\x00\x00",
+            b"",
+            b"\x07junk",
+            bytes([1]) + (99).to_bytes(4, "little") + (0).to_bytes(4, "little"),
+            bytes([1]) + (4001).to_bytes(4, "little") + bytes(16),
+            _line([(0, 0), (10, 10)])[:-5],
+            struct.pack("<BII", 1, 2, 2**31) + bytes(32),
+            struct.pack("<BIII", 1, 3, 1, 4) + bytes(16),
+        ],
+        ids=[
+            "kind-99-short",
+            "empty",
+            "junk",
+            "kind-99",
+            "dim-4",
+            "truncated",
+            "huge-count",
+            "short-ring",
+        ],
+    )
+    def test_unparsable_wkb_yields_none(self, crafted):
         assert geodesic_bbox_of_wkb([crafted]) is None
 
     def test_wkb_nested_past_the_depth_limit_yields_none(self):
@@ -173,97 +239,292 @@ class TestGeometryKinds:
             collection = shapely.geometrycollections([collection])
         assert geodesic_bbox_of_wkb([shapely.to_wkb(collection)]) is None
 
-    def test_an_empty_point_bounds_nothing(self):
-        assert geodesic_bbox_of_wkb([_wkb("POINT EMPTY")]) is None
-
     def test_a_single_vertex_chain_is_a_point(self):
-        # A one-point linestring is not valid WKT, so craft the WKB: kind 2,
-        # one vertex at (5, 6).
-        import struct as _struct
+        assert geodesic_bbox_of_wkb([_line([(5.0, 6.0)])]) == (5.0, 6.0, 5.0, 6.0)
 
-        crafted = (
-            bytes([1])
-            + (2).to_bytes(4, "little")
-            + (1).to_bytes(4, "little")
-            + _struct.pack("<2d", 5.0, 6.0)
+    def test_an_unclosed_ring_is_bounded_with_its_closing_edge(self):
+        """A reader closes the ring; the closing edge's bulge must be inside the box."""
+        crafted = struct.pack("<BIII", 1, 3, 1, 3) + struct.pack(
+            "<6d", -30.0, 50.0, 0.0, 40.0, 30.0, 60.0
         )
-        assert geodesic_bbox_of_wkb([crafted]) == (5.0, 6.0, 5.0, 6.0)
+        bbox = geodesic_bbox_of_wkb([crafted])
+        assert not _oracle_misses(bbox, [((30.0, 60.0), (-30.0, 50.0))], SPHERE)
 
     def test_a_repeated_vertex_adds_nothing(self):
-        bbox = bbox_of("LINESTRING (0 0, 0 0, 10 10)")
-        assert bbox == pytest.approx((0.0, 0.0, 10.0, 10.0))
+        assert bbox_of("LINESTRING (0 0, 0 0, 10 10)")[0::2] == (0.0, 10.0)
 
-    def test_geometry_after_a_pole_ring_stays_inside_the_globe_box(self):
-        bbox = geodesic_bbox_of_wkb(
-            [
-                _wkb("POLYGON ((0 80, 90 80, 180 80, -90 80, 0 80))"),
-                _wkb("LINESTRING (10 -20, 20 -25)"),
-            ]
-        )
-        assert (bbox[0], bbox[2], bbox[3]) == (-180.0, 180.0, 90.0)
-        assert bbox[1] == pytest.approx(-25.0, abs=0.1)
+    def test_values_of_mixed_buffer_types(self):
+        values = [bytearray(_wkb("POINT (1 2)")), memoryview(_wkb("POINT (3 4)"))]
+        assert geodesic_bbox_of_wkb(values) == (1.0, 2.0, 3.0, 4.0)
 
-    def test_antipodal_endpoints_are_bounded_conservatively(self):
-        """The geodesic between antipodes is undefined; the bound is the globe."""
-        bbox = bbox_of("LINESTRING (0 0, 180 0)")
-        assert _contains(bbox, 90.0, 0.0) or (bbox[0], bbox[2]) == (-180.0, 180.0)
+    def test_a_non_bytes_value_yields_none(self):
+        assert geodesic_bbox_of_wkb([12345]) is None
+
+    def test_an_unknown_edges_name_is_a_caller_error(self):
+        with pytest.raises(ValueError, match="edges"):
+            geodesic_bbox_of_wkb([_wkb("POINT (1 2)")], edges="planar")
+
+
+class TestDegenerateEdges:
+    """Zero-length and pole edges are not antipodal; antipodal ones bound the globe."""
+
+    def test_seam_duplicates_are_not_the_globe(self):
+        bbox = bbox_of("LINESTRING (180 10, -180 10, -170 10)")
+        assert (bbox[0], bbox[2]) == (-180.0, -170.0)
+        assert bbox[1] == 10.0 and bbox[3] < 10.1
+
+    def test_coincident_points_at_a_pole_are_not_the_globe(self):
+        bbox = bbox_of("LINESTRING (10 90, -10 90, 0 80)")
+        assert bbox[1] == 80.0 and bbox[3] == 90.0
+
+    def test_exactly_antipodal_endpoints_bound_the_globe(self):
+        """Every great circle through antipodes is "the" geodesic."""
+        assert bbox_of("LINESTRING (0 0, 180 0)") == GLOBE
+        assert bbox_of("LINESTRING (10 20, -170 -20)") == GLOBE
 
     def test_a_pole_crossing_meridian_edge_includes_the_pole(self):
-        """Same longitude 180 apart: the shortest path runs over a pole."""
         bbox = bbox_of("LINESTRING (0 80, 180 80)")
-        assert bbox[3] == 90.0
+        assert bbox[3] == 90.0 and (bbox[0], bbox[2]) == (-180.0, 180.0)
+        assert bbox[1] == 80.0
+
+    def test_a_vertex_at_a_pole_covers_every_longitude(self):
+        assert bbox_of("POINT (5 90)") == (-180.0, 90.0, 180.0, 90.0)
+
+
+class TestPoleEnclosure:
+    """Which side of a ring is the interior decides whether a pole is in the box.
+
+    gpio's outputs usually carry no ``orientation``; the GeoParquet spec says
+    readers then typically take the smaller of the two regions a ring bounds.
+    A declared ``counterclockwise`` puts the interior on the left.
+    """
+
+    NORTH_EAST = "POLYGON ((0 80, 90 80, 180 80, -90 80, 0 80))"
+    NORTH_WEST = "POLYGON ((0 80, -90 80, 180 80, 90 80, 0 80))"
+    SOUTH_EAST = "POLYGON ((0 -70, 90 -70, 180 -70, -90 -70, 0 -70))"
+    SOUTH_WEST = "POLYGON ((0 -80, -90 -80, 180 -80, 90 -80, 0 -80))"
+
+    @pytest.mark.parametrize("ring", [NORTH_EAST, NORTH_WEST])
+    def test_an_unoriented_north_cap_is_the_cap(self, ring):
+        bbox = bbox_of(ring)
+        assert bbox[3] == 90.0 and (bbox[0], bbox[2]) == (-180.0, 180.0)
+        assert bbox[1] == 80.0
+
+    @pytest.mark.parametrize("ring, top", [(SOUTH_EAST, -70.0), (SOUTH_WEST, -80.0)])
+    def test_an_unoriented_south_cap_is_the_cap(self, ring, top):
+        bbox = bbox_of(ring)
+        assert bbox[1] == -90.0 and (bbox[0], bbox[2]) == (-180.0, 180.0)
+        assert bbox[3] == top
+
+    def test_a_ccw_ring_wound_eastward_encloses_the_north_pole(self):
+        bbox = bbox_of(self.NORTH_EAST, orientation="counterclockwise")
+        assert (bbox[1], bbox[3]) == (80.0, 90.0)
+
+    def test_a_ccw_ring_wound_westward_is_everything_south_of_it(self):
+        bbox = bbox_of(self.NORTH_WEST, orientation="counterclockwise")
+        assert bbox[1] == -90.0
+        assert 80.0 < bbox[3] < 90.0  # the edges' poleward bulge, not the pole
+
+    def test_the_pole_triangle_keeps_its_cap(self):
+        """POLYGON((0 80,-120 80,120 80,0 80)) is a cap around the north pole."""
+        assert bbox_of("POLYGON ((0 80, -120 80, 120 80, 0 80))")[3] == 90.0
+
+    def test_a_small_clockwise_square_is_the_square_when_unoriented(self):
+        bbox = bbox_of("POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))")
+        assert (bbox[0], bbox[2]) == (0.0, 1.0)
+        assert bbox[1] == 0.0 and bbox[3] < 1.01
+
+    def test_a_small_clockwise_square_is_its_complement_when_ccw(self):
+        """Interior on the left of a clockwise square is the rest of the globe."""
+        bbox = bbox_of("POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))", orientation="counterclockwise")
+        assert bbox == GLOBE
+
+    def test_a_hole_around_a_pole_does_not_add_the_other_pole(self):
+        bbox = bbox_of(
+            "POLYGON ((0 -60, 90 -60, 180 -60, -90 -60, 0 -60), "
+            "(0 -80, -90 -80, 180 -80, 90 -80, 0 -80))"
+        )
+        assert bbox[3] == -60.0
+        assert bbox[1] == -90.0
+
+    @pytest.mark.parametrize("orientation", [None, "counterclockwise"])
+    def test_antarctica_drawn_to_minus_ninety(self, orientation):
+        """The planar-drawn Antarctica rectangle, counterclockwise in lon/lat."""
+        ring = "POLYGON ((-180 -90, 180 -90, 180 -60, 90 -60, 0 -60, -90 -60, -180 -60, -180 -90))"
+        bbox = bbox_of(ring, orientation=orientation)
+        assert (bbox[1], bbox[3]) == (-90.0, -60.0)
+        assert (bbox[0], bbox[2]) == (-180.0, 180.0)
+
+    def test_antarctica_wound_clockwise_is_still_the_cap_when_unoriented(self):
+        ring = "POLYGON ((-180 -90, -180 -60, -90 -60, 0 -60, 90 -60, 180 -60, 180 -90, -180 -90))"
+        assert bbox_of(ring)[1::2] == (-90.0, -60.0)
+
+    @pytest.mark.parametrize(
+        "ring",
+        [
+            "POLYGON ((-180 90, -180 60, -90 60, 0 60, 90 60, 180 60, 180 90, -180 90))",
+            "POLYGON ((-180 90, 180 90, 180 60, 90 60, 0 60, -90 60, -180 60, -180 90))",
+        ],
+        ids=["clockwise", "counterclockwise"],
+    )
+    def test_an_arctic_cap_drawn_to_ninety_is_the_cap_when_unoriented(self, ring):
+        """The ring touches N, so only the fan anchored at N can read its area."""
+        assert bbox_of(ring)[1::2] == (60.0, 90.0)
+
+    def test_a_hemisphere_ring_covers_both_halves(self):
+        """The equator splits the globe exactly in half: neither side is smaller."""
+        assert bbox_of("POLYGON ((0 0, 90 0, 180 0, -90 0, 0 0))") == GLOBE
+
+
+class TestIndependentOracle:
+    """Every densified point of every edge is inside the box (pyproj, not this module)."""
+
+    @staticmethod
+    def _fuzz(edges: str, geod: Geod, seed: int, count: int, long_edges: bool):
+        rng = random.Random(seed)
+        failures = []
+        for _ in range(count):
+            a = (rng.uniform(-180, 180), rng.uniform(-89, 89))
+            if long_edges:
+                b = (a[0] + rng.choice([-1, 1]) * rng.uniform(150, 179.9), rng.uniform(-89, 89))
+            else:
+                b = (rng.uniform(-180, 180), rng.uniform(-89, 89))
+            bbox = geodesic_bbox_of_wkb([_line([a, b])], edges=edges)
+            failures += _oracle_misses(bbox, [(a, b)], geod, npts=400)
+        return failures
+
+    def test_spherical_random_edges(self):
+        assert not self._fuzz("spherical", SPHERE, 1272, 400, long_edges=False)
+
+    def test_spherical_long_edges(self):
+        assert not self._fuzz("spherical", SPHERE, 7, 300, long_edges=True)
+
+    @pytest.mark.parametrize("edges", ["karney", "vincenty", "thomas", "andoyer"])
+    def test_ellipsoidal_random_edges(self, edges):
+        assert not self._fuzz(edges, WGS84, 99, 300, long_edges=False)
+
+    def test_karney_long_edges(self):
+        assert not self._fuzz("karney", WGS84, 5, 300, long_edges=True)
+
+    @pytest.mark.parametrize(
+        "a, b",
+        [
+            ((0.0, 0.0), (179.5, 0.0)),
+            ((0.0, 0.0), (179.8, 0.0)),
+            ((0.0, -5.0), (178.0, 0.0)),
+            ((-47.58, -8.65), (143.50, 0.43)),
+            ((-89.9, 1.0), (89.9, 1.0)),
+        ],
+    )
+    def test_karney_near_antipodal_edges(self, a, b):
+        """The reviewers' cases: the old 0.2 degree pad missed each by degrees."""
+        bbox = geodesic_bbox_of_wkb([_line([a, b])], edges="karney")
+        assert not _oracle_misses(bbox, [(a, b)], WGS84)
+
+    def test_karney_moderate_edges_stay_tight(self):
+        """Conservative is not the globe: a 120 degree edge gets a real box."""
+        a, b = (-60.0, 30.0), (60.0, 35.0)
+        bbox = geodesic_bbox_of_wkb([_line([a, b])], edges="karney")
+        true_max = max(lat for _, lat in WGS84.npts(*a, *b, 5000))
+        assert true_max <= bbox[3] <= true_max + 1e-3
+        assert (bbox[0], bbox[2]) == (-60.0, 60.0)
+
+    def test_polygons_with_many_vertices(self):
+        rng = random.Random(3)
+        for _ in range(40):
+            lon0, lat0 = rng.uniform(-170, 170), rng.uniform(-70, 70)
+            radius = rng.uniform(1, 15)
+            coords = [
+                (lon0 + radius * math.cos(t), lat0 + radius * math.sin(t))
+                for t in [2 * math.pi * k / 17 for k in range(17)]
+            ]
+            coords.append(coords[0])
+            wkt = "POLYGON ((" + ", ".join(f"{x} {y}" for x, y in coords) + "))"
+            bbox = bbox_of(wkt)
+            assert not _oracle_misses(bbox, _edges(coords), SPHERE, npts=100), wkt
+
+
+def _native_file(tmp_path, values: list, row_group_size: int = 1):
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = tmp_path / "native.parquet"
+    array = pa.ExtensionArray.from_storage(ga.wkb(), pa.array(values, pa.binary()))
+    pq.write_table(pa.table({"geometry": array}), str(path), row_group_size=row_group_size)
+    return path
 
 
 class TestRowGroupReading:
     """`row_group_geography_bboxes` bounds one row group at a time."""
 
-    @staticmethod
-    def _native_file(tmp_path, values: list):
-        import geoarrow.pyarrow as ga
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        path = tmp_path / "native.parquet"
-        array = pa.ExtensionArray.from_storage(ga.wkb(), pa.array(values, pa.binary()))
-        pq.write_table(pa.table({"geometry": array}), str(path), row_group_size=1)
-        return path
-
     def test_each_row_group_gets_its_own_box(self, tmp_path):
-        from geoparquet_io.core.geodesic_bbox import row_group_geography_bboxes
-
-        path = self._native_file(tmp_path, [_wkb("POINT (1 2)"), _wkb("POINT (3 4)")])
-        per_group, whole = row_group_geography_bboxes(str(path), "geometry", "spherical")
-
-        assert per_group == [(1.0, 2.0, 1.0, 2.0), (3.0, 4.0, 3.0, 4.0)]
-        assert whole == (1.0, 2.0, 3.0, 4.0)
+        path = _native_file(tmp_path, [_wkb("POINT (1 2)"), _wkb("POINT (3 4)")])
+        bounds = row_group_geography_bboxes(str(path), "geometry", "spherical")
+        assert bounds.per_group == [(1.0, 2.0, 1.0, 2.0), (3.0, 4.0, 3.0, 4.0)]
+        assert bounds.file_bbox == (1.0, 2.0, 3.0, 4.0)
+        assert bounds.unreadable_groups == 0
 
     def test_a_corrupt_row_group_poisons_the_file_bound(self, tmp_path):
         """A whole-file bound that skipped rows would under-cover; refuse it."""
-        from geoparquet_io.core.geodesic_bbox import row_group_geography_bboxes
-
-        path = self._native_file(tmp_path, [_wkb("POINT (1 2)"), b"\x07junk"])
-        per_group, whole = row_group_geography_bboxes(str(path), "geometry", "spherical")
-
-        assert per_group == [(1.0, 2.0, 1.0, 2.0), None]
-        assert whole is None
+        path = _native_file(tmp_path, [_wkb("POINT (1 2)"), b"\x07junk"])
+        bounds = row_group_geography_bboxes(str(path), "geometry", "spherical")
+        assert bounds.per_group == [(1.0, 2.0, 1.0, 2.0), None]
+        assert bounds.file_bbox is None
+        assert bounds.unreadable_groups == 1
 
     def test_an_unboundable_column_is_left_out_of_the_file_level_answer(self, tmp_path):
         from geoparquet_io.core.geodesic_bbox import geography_statistics
 
-        path = self._native_file(tmp_path, [_wkb("POINT (1 2)"), b"\x07junk"])
-        per_group, file_level = geography_statistics(str(path), {"geometry": "spherical"})
-
-        assert per_group == {"geometry": [(1.0, 2.0, 1.0, 2.0), None]}
-        assert file_level == {}
+        path = _native_file(tmp_path, [_wkb("POINT (1 2)"), b"\x07junk"])
+        stats = geography_statistics(str(path), {"geometry": "spherical"})
+        assert stats["geometry"].per_group == [(1.0, 2.0, 1.0, 2.0), None]
+        assert stats["geometry"].file_bbox is None
 
     def test_an_all_null_row_group_is_left_out_of_the_union(self, tmp_path):
-        from geoparquet_io.core.geodesic_bbox import row_group_geography_bboxes
+        path = _native_file(tmp_path, [_wkb("POINT (1 2)"), None])
+        bounds = row_group_geography_bboxes(str(path), "geometry", "spherical")
+        assert bounds.per_group == [(1.0, 2.0, 1.0, 2.0), None]
+        assert bounds.file_bbox == (1.0, 2.0, 1.0, 2.0)
+        assert bounds.unreadable_groups == 0
 
-        path = self._native_file(tmp_path, [_wkb("POINT (1 2)"), None])
-        per_group, whole = row_group_geography_bboxes(str(path), "geometry", "spherical")
+    def test_a_large_row_group_is_read_in_slices(self, tmp_path, monkeypatch):
+        """Bounded memory: the row group is folded slice by slice, same answer."""
+        import geoparquet_io.core.geodesic_bbox as module
 
-        assert per_group == [(1.0, 2.0, 1.0, 2.0), None]
-        assert whole == (1.0, 2.0, 1.0, 2.0)
+        values = [_line([(i * 0.01 - 170, 60.0), (i * 0.01 - 169, 60.0)]) for i in range(3000)]
+        path = _native_file(tmp_path, values, row_group_size=3000)
+        whole = row_group_geography_bboxes(str(path), "geometry", "spherical").file_bbox
+        monkeypatch.setattr(module, "_SLICE_BYTES", 512)
+        monkeypatch.setattr(module, "_BATCH_ROWS", 100)
+        sliced = row_group_geography_bboxes(str(path), "geometry", "spherical").file_bbox
+        assert sliced == whole
+        assert whole[0] == -170.0 and whole[2] == pytest.approx(-169.0 + 29.99)
+
+
+class TestLongitudeFolding:
+    def test_many_disjoint_longitudes_keep_the_widest_gap(self, monkeypatch):
+        """The arc set is capped; the cap fills only the smallest gaps."""
+        import geoparquet_io.core.geodesic_bbox as module
+
+        monkeypatch.setattr(module, "_MAX_LON_ARCS", 8)
+        lons = [float(x) for x in range(-100, 101, 3)]
+        bbox = geodesic_bbox_of_wkb([_wkb(f"POINT ({lon} 0)") for lon in lons])
+        assert (bbox[0], bbox[2]) == (-100.0, 98.0)
+        assert all(_contains(bbox, lon, 0.0) for lon in lons)
+
+    def test_the_cap_never_fills_the_widest_gap(self, monkeypatch):
+        """Two clusters either side of the antimeridian: the 240 degree gap must survive."""
+        import geoparquet_io.core.geodesic_bbox as module
+
+        monkeypatch.setattr(module, "_MAX_LON_ARCS", 4)
+        lons = [float(x) for x in range(-170, -119, 5)] + [float(x) for x in range(120, 171, 5)]
+        bbox = geodesic_bbox_of_wkb([_wkb(f"POINT ({lon} 0)") for lon in lons])
+        assert (bbox[0], bbox[2]) == (120.0, -120.0)
+
+    def test_the_widest_gap_wraps_into_a_wrapped_box(self):
+        values = [_wkb("POINT (170 0)"), _wkb("POINT (-170 0)"), _wkb("POINT (175 1)")]
+        assert geodesic_bbox_of_wkb(values)[0::2] == (170.0, -170.0)
 
 
 class TestLonNormalization:
@@ -273,66 +534,3 @@ class TestLonNormalization:
 
     def test_a_positive_odd_multiple_of_180_stays_east(self):
         assert bbox_of("POINT (540 0)") == (180.0, 0.0, 180.0, 0.0)
-
-
-class TestLonRangeContains:
-    def test_a_full_range_contains_everything(self):
-        assert lon_range_contains((-180.0, 180.0), (170.0, -170.0))
-
-    def test_a_wrapped_outer_contains_a_wrapped_inner(self):
-        assert lon_range_contains((160.0, -160.0), (170.0, -170.0))
-
-    def test_a_wrapped_outer_rejects_the_far_side(self):
-        assert not lon_range_contains((160.0, -160.0), (-10.0, 10.0))
-
-    def test_a_plain_outer_rejects_a_wider_inner(self):
-        assert not lon_range_contains((0.0, 10.0), (0.0, 20.0))
-        assert lon_range_contains((0.0, 20.0), (5.0, 10.0))
-
-
-class TestEllipsoidalAlgorithms:
-    def test_the_spherical_bound_is_padded(self):
-        spherical = bbox_of("LINESTRING (-30 60, 30 60)")
-        vincenty = bbox_of("LINESTRING (-30 60, 30 60)", edges="vincenty")
-        assert vincenty[3] == pytest.approx(spherical[3] + ELLIPSOIDAL_LAT_EPSILON_DEG)
-        assert vincenty[1] == pytest.approx(spherical[1] - ELLIPSOIDAL_LAT_EPSILON_DEG)
-        assert (vincenty[0], vincenty[2]) == (spherical[0], spherical[2])
-
-    def test_the_pad_is_clamped_at_the_poles(self):
-        bbox = bbox_of("POLYGON ((0 80, 90 80, 180 80, -90 80, 0 80))", edges="karney")
-        assert bbox[3] == 90.0
-
-
-class TestPruningSafety:
-    """A bbox-pruning reader must never skip a row that intersects (#1272).
-
-    Containment of every point of every edge is what makes pruning safe: if a
-    query window intersects the geometry, it contains one of its points, and
-    every point is inside the bbox -- so the bbox intersects the window and
-    the row group is kept. The arc samples are the definition of SPHERICAL
-    edges, so they are the ground truth.
-    """
-
-    def test_every_point_of_every_edge_is_inside_the_box(self):
-        rng = random.Random(1272)
-        for _ in range(150):
-            coords = [
-                (rng.uniform(-180, 180), rng.uniform(-85, 85)) for _ in range(rng.randint(2, 5))
-            ]
-            wkt = "LINESTRING (" + ", ".join(f"{lon} {lat}" for lon, lat in coords) + ")"
-            bbox = bbox_of(wkt)
-            for a, b in zip(coords, coords[1:], strict=False):
-                for lon, lat in _slerp_lonlat(a, b):
-                    assert _contains(bbox, lon, lat), (
-                        f"({lon}, {lat}) of edge {a}->{b} escapes {bbox} for {wkt}"
-                    )
-
-    def test_high_latitude_edges_near_the_antimeridian(self):
-        rng = random.Random(999)
-        for _ in range(60):
-            lon1 = rng.uniform(150, 180)
-            lon2 = rng.uniform(-180, -150)
-            lat1, lat2 = rng.uniform(55, 85), rng.uniform(55, 85)
-            bbox = bbox_of(f"LINESTRING ({lon1} {lat1}, {lon2} {lat2})")
-            for lon, lat in _slerp_lonlat((lon1, lat1), (lon2, lat2)):
-                assert _contains(bbox, lon, lat)

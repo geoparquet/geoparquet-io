@@ -481,13 +481,27 @@ statistics and the `geo` block's per-column `bbox` — are computed over the
 **geodesic edges**, not just the vertices. A long east–west great-circle edge
 at high latitude bulges poleward (`LINESTRING (-30 60, 30 60)` peaks near
 63.4°N, not 60°), so a vertex-only box would let a reader prune row groups
-that really match. gpio writes the bulged box instead: for `spherical` edges
-it is the exact great-circle bound, including the poles when a ring encloses
-one; for the ellipsoidal algorithms it is the spherical bound padded by a
-small documented margin. Geometry that crosses the antimeridian gets
-`xmin > xmax`, the wrap form both Parquet's statistics and RFC 7946 §5.2
-define. When a column cannot be bounded (unreadable WKB), the box is dropped
-instead — a missing box is always legal; it only gives up pruning.
+that really match. gpio writes the bulged box instead:
+
+- `spherical` edges get the exact great-circle bound; the ellipsoidal
+  algorithms (`vincenty`, `thomas`, `andoyer`, `karney`) get the bound of the
+  geodesic on the column CRS's ellipsoid (WGS84 when it names none), from the
+  geodesic's own azimuths. Edges longer than 170° of arc on the ellipsoid,
+  and antipodal edges on the sphere, bound to the whole globe.
+- A polygon whose interior holds a pole reaches it. Without an `orientation`
+  in the `geo` block, a ring's interior is the smaller of the two regions it
+  bounds — the reading the GeoParquet spec says readers typically make; with
+  `orientation: "counterclockwise"` it is the left of the ring.
+- Geometry that crosses the antimeridian gets `xmin > xmax`, the wrap form
+  both Parquet's statistics and RFC 7946 §5.2 define.
+- A row group that cannot be bounded — unreadable WKB, or a NaN, infinite or
+  out-of-range coordinate — loses its box (and the file-level `bbox` goes
+  too), with a warning. A missing box is always legal; it only gives up
+  pruning.
+
+1.x outputs have no `GEOGRAPHY` type, but a `spherical` column's `geo` block
+`bbox` is the geodesic bound there too. A bbox covering column is per-row
+data and stays the vertex box of each row.
 
 ### Z and M Dimensions
 

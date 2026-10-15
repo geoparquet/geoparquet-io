@@ -62,6 +62,7 @@ from geoparquet_io.core.geometry_detection import (
 )
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import configure_verbose, debug
+from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.parquet_footer import read_footer_kv
 from geoparquet_io.core.parquet_schema import (
     root_schema_index,
@@ -1609,6 +1610,17 @@ def _bbox_xy(bbox: Any) -> tuple[float, float, float, float] | None:
     return float(bbox[0]), float(bbox[1]), float(bbox[half]), float(bbox[half + 1])
 
 
+def _sql_float(value: Any) -> str:
+    """A finite number as a SQL literal; NaN or infinity is refused, not spliced.
+
+    ``str(float("nan"))`` is ``nan``, which DuckDB parses as a column name.
+    """
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"bounding box value {value!r} is not a finite number")
+    return repr(number)
+
+
 def _x_within_sql(geom_expr: str, xmin, xmax) -> str:
     """SQL predicate: every X of the geometry lies within the bbox X range.
 
@@ -1618,10 +1630,11 @@ def _x_within_sql(geom_expr: str, xmin, xmax) -> str:
     undecidable from vertices alone; RFC 7946 tells producers to cut such
     geometries at the antimeridian.
     """
+    lo, hi = _sql_float(xmin), _sql_float(xmax)
     if xmin <= xmax:
-        return f"ST_XMin({geom_expr}) >= {xmin} AND ST_XMax({geom_expr}) <= {xmax}"
+        return f"ST_XMin({geom_expr}) >= {lo} AND ST_XMax({geom_expr}) <= {hi}"
     return (
-        f"list_bool_and([ST_X(p.geom) <= {xmax} OR ST_X(p.geom) >= {xmin} "
+        f"list_bool_and([ST_X(p.geom) <= {hi} OR ST_X(p.geom) >= {lo} "
         f"FOR p IN ST_Dump(ST_Points({geom_expr}))])"
     )
 
@@ -2318,16 +2331,26 @@ def _is_geography_column(schema_info: list, geom_col: str) -> bool:
 
 
 def _validate_geography_bounds(min_x, max_x, min_y, max_y) -> list[str]:
-    """Check coordinate bounds and return list of issues found."""
+    """Check coordinate bounds and return list of issues found.
+
+    Every value must be finite and inside its canonical range (X in
+    [-180, 180], Y in [-90, 90]); a missing value is not checked.
+    """
     issues = []
-    if min_x is not None and min_x < -180:
-        issues.append(f"min_x={min_x} < -180")
-    if max_x is not None and max_x > 180:
-        issues.append(f"max_x={max_x} > 180")
-    if min_y is not None and min_y < -90:
-        issues.append(f"min_y={min_y} < -90")
-    if max_y is not None and max_y > 90:
-        issues.append(f"max_y={max_y} > 90")
+    for label, value, limit in (
+        ("min_x", min_x, 180),
+        ("max_x", max_x, 180),
+        ("min_y", min_y, 90),
+        ("max_y", max_y, 90),
+    ):
+        if value is None:
+            continue
+        if not math.isfinite(value):
+            issues.append(f"{label}={value} is not finite")
+        elif value < -limit:
+            issues.append(f"{label}={value} < -{limit}")
+        elif value > limit:
+            issues.append(f"{label}={value} > {limit}")
     return issues
 
 
@@ -2413,18 +2436,16 @@ def _geography_bbox_issues(chunks: list[dict]) -> list[str]:
     """Canonical-range violations in GEOGRAPHY row-group boxes, as messages.
 
     ``xmin > xmax`` is legal (the antimeridian wrap, RFC 7946 5.2); Y never
-    wraps, and every value must stay in [-180, 180] x [-90, 90].
+    wraps, and every value must be finite and in [-180, 180] x [-90, 90].
     """
     issues = []
     for chunk in chunks:
         group = chunk.get("row_group_id")
-        for key in ("xmin", "xmax"):
-            if not -180.0 <= chunk[key] <= 180.0:
-                issues.append(f"row group {group}: {key}={chunk[key]} outside [-180, 180]")
-        for key in ("ymin", "ymax"):
-            if not -90.0 <= chunk[key] <= 90.0:
-                issues.append(f"row group {group}: {key}={chunk[key]} outside [-90, 90]")
-        if chunk["ymin"] > chunk["ymax"]:
+        found = _validate_geography_bounds(
+            chunk["xmin"], chunk["xmax"], chunk["ymin"], chunk["ymax"]
+        )
+        issues += [f"row group {group}: {issue}" for issue in found]
+        if not found and chunk["ymin"] > chunk["ymax"]:
             issues.append(
                 f"row group {group}: ymin={chunk['ymin']} > ymax={chunk['ymax']} "
                 "(only X may wrap the antimeridian)"
@@ -2504,50 +2525,208 @@ def _geography_edge_algorithm(schema_info: list | None, geom_col: str) -> str:
     return "spherical"
 
 
-def _sampled_geodesic_bbox(
-    parquet_file: str, geom_col: str, con, sample_size: int, algorithm: str
-) -> tuple | None:
-    """The geodesic bound of a sample of the column, or None."""
-    from geoparquet_io.core.geodesic_bbox import geodesic_bbox_of_wkb
+#: Points sampled along each edge by the geodesic-containment oracle.
+_ORACLE_POINTS_PER_EDGE = 32
+#: Edges the oracle densifies across the whole file when sampling (bounded time).
+_ORACLE_EDGE_BUDGET = 50_000
+_ORACLE_BATCH_ROWS = 4096
+#: Slack on the oracle's containment test, in degrees (pyproj's own error is ~1e-12).
+_ORACLE_TOLERANCE_DEG = 1e-7
 
-    raw_url = resolve_file_url(parquet_file, verbose=False)
-    limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
-    rows = con.execute(f"""
-        SELECT ST_AsWKB({quote_identifier(geom_col)})::BLOB
-        FROM read_parquet({sql_path(raw_url)})
-        WHERE {quote_identifier(geom_col)} IS NOT NULL
-          AND NOT ST_IsEmpty({quote_identifier(geom_col)})
-        {limit_clause}
-    """).fetchall()
-    return geodesic_bbox_of_wkb((row[0] for row in rows), edges=algorithm)
+
+def _geography_geod(schema_info: list | None, geom_col: str, algorithm: str):
+    """The ``pyproj.Geod`` whose geodesics a column's edges follow."""
+    from pyproj import Geod
+
+    from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
+    from geoparquet_io.core.geodesic_bbox import ellipsoid_for_crs
+
+    if algorithm == "spherical":
+        return Geod(a=6371008.8, f=0.0)
+    crs = None
+    for col in schema_info or []:
+        if col.get("name") == geom_col:
+            crs = (parse_geometry_logical_type(col.get("logical_type") or "") or {}).get("crs")
+    semi_major, flattening = ellipsoid_for_crs(crs)
+    return Geod(a=semi_major, f=flattening)
+
+
+def _geojson_parts(geometry: dict | None, out_points: list, out_edges: list) -> None:
+    """Collect a GeoJSON geometry's vertices and edges (independent of the writer)."""
+    if not isinstance(geometry, dict):
+        return
+    kind, coords = geometry.get("type"), geometry.get("coordinates")
+    if kind == "GeometryCollection":
+        for part in geometry.get("geometries") or []:
+            _geojson_parts(part, out_points, out_edges)
+        return
+    chains: list = {
+        "Point": lambda: [[coords]],
+        "MultiPoint": lambda: [[c] for c in coords],
+        "LineString": lambda: [coords],
+        "MultiLineString": lambda: coords,
+        "Polygon": lambda: coords,
+        "MultiPolygon": lambda: [ring for polygon in coords for ring in polygon],
+    }.get(kind, list)()
+    for chain in chains:
+        points = [(float(c[0]), float(c[1])) for c in chain if len(c) >= 2]
+        out_points.extend(points)
+        out_edges.extend(zip(points, points[1:], strict=False))
+
+
+def _densified(geod, points: list, edges: list):
+    """Every vertex plus points along each edge's geodesic, as (lon, lat) arrays."""
+    np = load_module("numpy")
+
+    lon = [p[0] for p in points]
+    lat = [p[1] for p in points]
+    moving = [(a, b) for a, b in edges if a != b]
+    if moving:
+        lon1 = np.array([a[0] for a, _ in moving])
+        lat1 = np.array([a[1] for a, _ in moving])
+        lon2 = np.array([b[0] for _, b in moving])
+        lat2 = np.array([b[1] for _, b in moving])
+        azimuth, _, distance = geod.inv(lon1, lat1, lon2, lat2)
+        steps = np.linspace(0.0, 1.0, _ORACLE_POINTS_PER_EDGE + 2)[1:-1]
+        far_lon, far_lat, _ = geod.fwd(
+            np.repeat(lon1, len(steps)),
+            np.repeat(lat1, len(steps)),
+            np.repeat(azimuth, len(steps)),
+            np.outer(distance, steps).ravel(),
+        )
+        lon = np.concatenate([np.asarray(lon, float), np.asarray(far_lon)])
+        lat = np.concatenate([np.asarray(lat, float), np.asarray(far_lat)])
+    return np.asarray(lon, float), np.asarray(lat, float)
+
+
+def _escapes_box(lon, lat, box: tuple) -> tuple[int, tuple | None]:
+    """How many (lon, lat) points fall outside ``box``, and the worst one."""
+    np = load_module("numpy")
+
+    xmin, ymin, xmax, ymax = box
+    tol = _ORACLE_TOLERANCE_DEG
+    lon = np.where((lon < -180.0) | (lon > 180.0), ((lon + 180.0) % 360.0) - 180.0, lon)
+    if xmin <= xmax:
+        in_lon = (lon >= xmin - tol) & (lon <= xmax + tol)
+        if xmin <= -180.0 + tol or xmax >= 180.0 - tol:
+            in_lon |= np.abs(lon) == 180.0  # one meridian, two names
+    else:
+        in_lon = (lon >= xmin - tol) | (lon <= xmax + tol)
+    in_lon |= np.abs(lat) > 90.0 - 1e-7  # every longitude is the pole
+    inside = in_lon & (lat >= ymin - tol) & (lat <= ymax + tol)
+    outside = np.flatnonzero(~inside)
+    if outside.size == 0:
+        return 0, None
+    excess = np.maximum(lat[outside] - ymax, ymin - lat[outside])
+    worst = outside[int(np.argmax(excess))]
+    return int(outside.size), (float(lon[worst]), float(lat[worst]))
+
+
+def _sampled_rows(reader, group: int, geom_col: str, sample_size: int):
+    """Arrow batches of WKB for evenly spaced rows of one row group (all when 0)."""
+    np = load_module("numpy")
+    import pyarrow as pa
+
+    rows = reader.metadata.row_group(group).num_rows
+    wanted = None
+    if 0 < sample_size < rows:
+        wanted = np.unique(np.linspace(0, rows - 1, sample_size).astype(np.int64))
+    seen = 0
+    for batch in reader.iter_batches(
+        batch_size=_ORACLE_BATCH_ROWS, row_groups=[group], columns=[geom_col], use_threads=False
+    ):
+        column = batch.column(0)
+        column = column.storage if isinstance(column, pa.ExtensionArray) else column
+        if wanted is not None:
+            local = wanted[(wanted >= seen) & (wanted < seen + len(column))] - seen
+            column = column.take(pa.array(local))
+        seen += batch.num_rows
+        if len(column):
+            yield column
+
+
+def _geojson_of(con, wkb):
+    """GeoJSON dicts for an Arrow array of WKB, by DuckDB (unreadable rows skipped)."""
+    import json
+
+    rows = con.execute(
+        "SELECT ST_AsGeoJSON(TRY(ST_GeomFromWKB(w))) FROM (SELECT UNNEST(?::BLOB[]) AS w)",
+        [[value for value in wkb.to_pylist() if value is not None]],
+    ).fetchall()
+    for (text,) in rows:
+        if text:
+            with contextlib.suppress(ValueError):
+                yield json.loads(text)
+
+
+def _geodesic_escapes(
+    parquet_file: str, geom_col: str, con, sample_size: int, geod, chunks: list[dict]
+) -> tuple[list[str], int]:
+    """Row groups whose box misses a densified point of its own sampled geometries.
+
+    The oracle is independent of gpio's writer: DuckDB reads the geometry,
+    ``pyproj.Geod`` walks each edge's geodesic, and every sampled point must be
+    inside its own row group's box (a pole a polygon encloses is not sampled;
+    only its boundary is). Returns ``(problems, geometries checked)``.
+    """
+    import pyarrow.parquet as pq
+
+    boxes = {
+        c["row_group_id"]: (c["xmin"], c["ymin"], c["xmax"], c["ymax"])
+        for c in chunks
+        if not _validate_geography_bounds(c["xmin"], c["xmax"], c["ymin"], c["ymax"])
+    }
+    budget = max(500, _ORACLE_EDGE_BUDGET // max(1, len(boxes))) if sample_size > 0 else None
+    problems: list[str] = []
+    checked = 0
+    with pq.ParquetFile(parquet_file) as reader:
+        for group, box in sorted(boxes.items()):
+            misses, example, edges_seen = 0, None, 0
+            for wkb in _sampled_rows(reader, group, geom_col, sample_size):
+                for geometry in _geojson_of(con, wkb):
+                    points: list = []
+                    edges: list = []
+                    _geojson_parts(geometry, points, edges)
+                    if not points:
+                        continue
+                    checked += 1
+                    edges_seen += len(edges)
+                    count, worst = _escapes_box(*_densified(geod, points, edges), box)
+                    misses += count
+                    example = example or worst
+                if budget is not None and edges_seen >= budget:
+                    break
+            if misses:
+                problems.append(
+                    f"row group {group}: {misses} sampled point(s) outside "
+                    f"{[round(v, 6) for v in box]}, e.g. {example}"
+                )
+    return problems, checked
 
 
 def _check_geography_stats_cover_edges(
     parquet_file: str, geom_col: str, schema_info: list | None, con, sample_size: int
 ) -> ValidationCheck:
-    """Warn when a GEOGRAPHY bounding box is vertex-only (#1272).
+    """Warn when a GEOGRAPHY bounding box does not cover its geodesic edges (#1272).
 
     A geodesic edge can leave the box of its vertices -- a long east-west edge
     at high latitude bulges poleward -- and a reader pruning row groups by a
-    vertex-only box can then skip rows that really match. The sampled
-    geometries' geodesic bound must fit inside the declared box; a box gpio
-    writes does, because it is computed the same way.
+    vertex-only box can then skip rows that really match. Each row group's
+    box is compared with its own sampled rows (a file-wide union can hide a
+    bad row group), and the comparison is an independent oracle: the sampled
+    edges densified along their geodesics by ``pyproj.Geod``, not the bound
+    gpio's writer computes.
     """
     name = f"geography_stats_cover_edges_{geom_col}"
     chunks, gate = _geography_stats_gate(parquet_file, geom_col, schema_info, name)
     if gate is not None:
         return gate
-    from geoparquet_io.core.duckdb_metadata import aggregate_native_geo_stats
-    from geoparquet_io.core.geodesic_bbox import lon_range_contains
-
     try:
-        bbox = aggregate_native_geo_stats(chunks).get("bbox")
-        sampled = _sampled_geodesic_bbox(
-            parquet_file,
-            geom_col,
-            con,
-            sample_size,
-            _geography_edge_algorithm(schema_info, geom_col),
+        geod = _geography_geod(
+            schema_info, geom_col, _geography_edge_algorithm(schema_info, geom_col)
+        )
+        problems, checked = _geodesic_escapes(
+            parquet_file, geom_col, con, sample_size, geod, chunks
         )
     except Exception as e:
         return ValidationCheck(
@@ -2556,34 +2735,28 @@ def _check_geography_stats_cover_edges(
             message=f"could not compare the bounding box with the geodesic extent: {e}",
             category="parquet_geo_types",
         )
-    if not bbox or sampled is None:
+    if checked == 0:
         return ValidationCheck(
             name=name,
             status=CheckStatus.SKIPPED,
             message="no geometries to compare the bounding box against",
             category="parquet_geo_types",
         )
-    tolerance = 1e-6
-    covered = (
-        sampled[1] >= bbox[1] - tolerance
-        and sampled[3] <= bbox[3] + tolerance
-        and lon_range_contains((bbox[0], bbox[2]), (sampled[0], sampled[2]), tolerance)
-    )
-    if covered:
+    if not problems:
         return ValidationCheck(
             name=name,
             status=CheckStatus.PASSED,
-            message="GEOGRAPHY bounding boxes contain the sampled geodesic extent",
+            message="GEOGRAPHY bounding boxes contain the sampled geodesic edges of every "
+            f"row group ({checked} geometries checked)",
             category="parquet_geo_types",
         )
     return ValidationCheck(
         name=name,
         status=CheckStatus.WARNING,
         message="GEOGRAPHY bounding box appears vertex-only: it does not contain "
-        "the geodesic edge bulge",
-        details=f"sampled geodesic extent {list(sampled)} leaves the declared "
-        f"{list(bbox[:4])}; a reader pruning row groups by this box can skip "
-        "matching rows. Rewrite with gpio to get a geodesic box.",
+        "the geodesic edges of its row group",
+        details="; ".join(problems) + ". A reader pruning row groups by this box can "
+        "skip matching rows. Rewrite with gpio to get a geodesic box.",
         category="parquet_geo_types",
     )
 
@@ -2784,6 +2957,14 @@ def _check_native_geo_stats_contains_data(
                 category="parquet_geo_types",
             )
 
+        if not all(_is_finite_number(geo_bbox[key]) for key in geo_bbox):
+            return ValidationCheck(
+                name=f"native_geo_stats_contains_data_{geom_col}",
+                status=CheckStatus.FAILED,
+                message="geospatial statistics bbox has non-finite values",
+                details=f"bbox {bbox[:4]}: NaN or infinity bounds nothing",
+                category="parquet_geo_types",
+            )
         xmin = geo_bbox["xmin"]
         ymin = geo_bbox["ymin"]
         xmax = geo_bbox["xmax"]
@@ -2811,8 +2992,8 @@ def _check_native_geo_stats_contains_data(
             SELECT COUNT(*) as total,
                    COUNT(CASE WHEN
                        {_x_within_sql(quote_identifier(geom_col), xmin, xmax)} AND
-                       ST_YMin({quote_identifier(geom_col)}) >= {ymin} AND
-                       ST_YMax({quote_identifier(geom_col)}) <= {ymax}
+                       ST_YMin({quote_identifier(geom_col)}) >= {_sql_float(ymin)} AND
+                       ST_YMax({quote_identifier(geom_col)}) <= {_sql_float(ymax)}
                    THEN 1 END) as within_bbox
             FROM (
                 SELECT {quote_identifier(geom_col)}

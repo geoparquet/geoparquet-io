@@ -11,6 +11,8 @@ statistics stay exactly what DuckDB wrote (control).
 from __future__ import annotations
 
 import json
+import logging
+import math
 from pathlib import Path
 
 # Keeps pyarrow materialising GEOGRAPHY columns as GeoArrow extension types.
@@ -195,24 +197,128 @@ def test_the_mzm_merged_patch_carries_the_geodesic_box(tmp_path):
     assert boxes[0][3] == pytest.approx(BULGED_YMAX, abs=0.01)
 
 
-def test_an_ellipsoidal_algorithm_gets_the_padded_box(tmp_path):
-    from geoparquet_io.core.geodesic_bbox import ELLIPSOIDAL_LAT_EPSILON_DEG
-
-    source = _spherical_input(tmp_path, ["LINESTRING (-30 60, 30 60)"], ["LineString"])
-    # Rewrite the declaration to an ellipsoidal algorithm.
+def _declare(source: Path, **column_meta) -> None:
+    """Rewrite ``source``'s geo block with extra per-column keys (version 2.0.0)."""
     table = pq.read_table(str(source))
     meta = dict(table.schema.metadata)
     geo = json.loads(meta[b"geo"])
     geo["version"] = "2.0.0"
-    geo["columns"]["geometry"]["edges"] = "karney"
+    geo["columns"]["geometry"].update(column_meta)
     meta[b"geo"] = json.dumps(geo).encode()
     pq.write_table(table.replace_schema_metadata(meta), str(source))
+
+
+def test_an_ellipsoidal_algorithm_gets_its_geodesic_box(tmp_path):
+    """The bound is the geodesic's own vertex, not a fixed pad (#1286 review)."""
+    from pyproj import Geod
+
+    source = _spherical_input(tmp_path, ["LINESTRING (-30 60, 30 60)"], ["LineString"])
+    _declare(source, edges="karney")
     out = tmp_path / "out.parquet"
     convert_to_geoparquet(str(source), str(out), skip_hilbert=True, geoparquet_version="2.0")
 
     assert native_geo_edges(out) == ("Geography", "EdgeType.KARNEY")
-    _, _, _, ymax = _row_group_boxes(out)[0]
-    assert ymax == pytest.approx(BULGED_YMAX + ELLIPSOIDAL_LAT_EPSILON_DEG, abs=0.01)
+    _, ymin, _, ymax = _row_group_boxes(out)[0]
+    true_max = max(lat for _, lat in Geod(ellps="WGS84").npts(-30, 60, 30, 60, 5000))
+    assert true_max <= ymax <= true_max + 1e-4
+    assert ymin == 60.0
+
+
+def test_a_near_antipodal_karney_edge_is_covered(tmp_path):
+    """(0 0)->(179.5 0) on WGS84 reaches 34 N; the old 0.2 degree pad wrote +-0.2."""
+    source = _spherical_input(tmp_path, ["LINESTRING (0 0, 179.5 0)"], ["LineString"])
+    _declare(source, edges="karney")
+    out = tmp_path / "out.parquet"
+    convert_to_geoparquet(str(source), str(out), skip_hilbert=True, geoparquet_version="2.0")
+
+    box = _row_group_boxes(out)[0]
+    assert box is None or (box[1] <= 0.0 and box[3] >= 34.2)
+
+
+def _duckdb_v2(path: Path, wkt: str) -> None:
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        con.execute(
+            f"COPY (SELECT ST_GeomFromText('{wkt}') AS geometry) "
+            f"TO {sql_path(str(path))} (FORMAT PARQUET, GEOPARQUET_VERSION 'V2')"
+        )
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize(
+    "orientation, expected",
+    [(None, (0.0, 0.0, 1.0)), ("counterclockwise", (-180.0, -90.0, 180.0))],
+)
+def test_the_declared_orientation_decides_the_interior(tmp_path, orientation, expected):
+    """A clockwise square is the square unoriented, and the rest of the globe if ccw."""
+    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.write_funnels import _apply_nonplanar_edges
+
+    path = tmp_path / "square.parquet"
+    _duckdb_v2(path, "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))")
+    if orientation:
+        geo = geo_block(path)
+        geo["columns"]["geometry"]["orientation"] = orientation
+        patch_footer_kv(str(path), {"geo": json.dumps(geo)})
+
+    _apply_nonplanar_edges({"geometry": "spherical"}, str(path))
+
+    xmin, ymin, xmax, _ = _row_group_boxes(path)[0]
+    assert (xmin, ymin, xmax) == pytest.approx(expected, abs=1e-6)
+
+
+def test_a_non_finite_vertex_drops_the_box_with_a_warning(tmp_path, caplog):
+    """NaN never reaches the statistics or the geo JSON; the drop is said out loud."""
+    import struct
+
+    def line(points):
+        return struct.pack("<BII", 1, 2, len(points)) + b"".join(
+            struct.pack("<dd", x, y) for x, y in points
+        )
+
+    table = pa.table(
+        {
+            "id": [0, 1],
+            "geometry": pa.array(
+                [line([(0, 0), (float("nan"), 10), (20, 20)]), line([(-30, 60), (30, 60)])],
+                pa.binary(),
+            ),
+        }
+    )
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {"encoding": "WKB", "geometry_types": ["LineString"], "edges": "spherical"}
+        },
+    }
+    source = tmp_path / "nan.parquet"
+    pq.write_table(table.replace_schema_metadata({"geo": json.dumps(geo)}), str(source))
+    out = tmp_path / "out.parquet"
+    with caplog.at_level(logging.WARNING):
+        convert_to_geoparquet(str(source), str(out), skip_hilbert=True, geoparquet_version="2.0")
+
+    raw = pq.read_metadata(str(out)).metadata[b"geo"].decode()
+    assert "NaN" not in raw and "Infinity" not in raw
+    json.loads(raw)  # strict JSON
+    for box in _row_group_boxes(out):
+        assert box is None or all(math.isfinite(v) for v in box)
+    assert "bbox" not in geo_block(out)["columns"]["geometry"]
+    assert any("bounding box" in r.getMessage() for r in caplog.records)
+
+
+def test_a_spherical_1x_output_gets_a_geodesic_geo_bbox(tmp_path):
+    """1.x has no GEOGRAPHY type, but its geo block bbox must still cover the edges."""
+    source = _spherical_input(tmp_path, ["LINESTRING (-30 60, 30 60)"], ["LineString"])
+    out = tmp_path / "out.parquet"
+    convert_to_geoparquet(str(source), str(out), skip_hilbert=True, geoparquet_version="1.1")
+
+    column = geo_block(out)["columns"]["geometry"]
+    assert column.get("edges") == "spherical"
+    assert column["bbox"][3] == pytest.approx(BULGED_YMAX, abs=0.01)
 
 
 def test_a_six_element_geo_bbox_keeps_its_z_bounds():
@@ -236,16 +342,30 @@ def test_a_six_element_geo_bbox_keeps_its_z_bounds():
 
 
 def test_an_unboundable_column_still_drops_the_box(tmp_path, monkeypatch, caplog):
-    """When nothing can bound the edges, #1254's drop is the fallback."""
+    """When nothing can bound the edges, #1254's drop is the fallback -- with a warning."""
     from geoparquet_io.core import write_funnels
 
     def boom(*args, **kwargs):
-        raise RuntimeError("cannot read the column back")
+        raise OSError("cannot read the column back")
 
     monkeypatch.setattr(write_funnels, "geography_statistics", boom)
     source = _spherical_input(tmp_path, ["LINESTRING (-30 60, 30 60)"], ["LineString"])
     out = tmp_path / "out.parquet"
-    convert_to_geoparquet(str(source), str(out), skip_hilbert=True, geoparquet_version="2.0")
+    with caplog.at_level(logging.WARNING):
+        convert_to_geoparquet(str(source), str(out), skip_hilbert=True, geoparquet_version="2.0")
 
     assert native_geo_edges(out) == ("Geography", "EdgeType.SPHERICAL")
     assert _row_group_boxes(out) == [None]
+    assert "bbox" not in geo_block(out)["columns"]["geometry"], "a planar block bbox stayed"
+    assert any("cannot read the column back" in r.getMessage() for r in caplog.records)
+
+
+def test_running_out_of_memory_is_not_swallowed(tmp_path, monkeypatch):
+    from geoparquet_io.core import write_funnels
+
+    def oom(*args, **kwargs):
+        raise MemoryError
+
+    monkeypatch.setattr(write_funnels, "geography_statistics", oom)
+    with pytest.raises(MemoryError):
+        write_funnels._geodesic_bounds("unused.parquet", {"geometry": "spherical"}, None)

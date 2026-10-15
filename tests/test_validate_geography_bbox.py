@@ -6,6 +6,11 @@ the canonical ranges the Parquet spec gives them (X in [-180, 180], Y in
 only the vertex extent -- it does not contain the geodesic edge bulge -- is
 worth a warning, because a reader pruning row groups by it can skip rows that
 really match.
+
+The second check is judged per row group, against an oracle independent of the
+writer: each sampled geometry's edges densified with ``pyproj.Geod``. A box
+that is wrong in one row group must not hide behind a file-wide union that
+happens to cover it (#1286 review).
 """
 
 from __future__ import annotations
@@ -141,17 +146,90 @@ class TestGates:
         )
 
 
-def test_a_sample_with_nothing_boundable_is_skipped(tmp_path, monkeypatch):
-    from geoparquet_io.core import validate as validate_module
-
+def test_a_sample_with_nothing_boundable_is_skipped(tmp_path):
     path = _geography_file(
-        tmp_path, "POINT (10 20)", geography_bbox={"geometry": [(9.0, 19.0, 11.0, 21.0)]}
+        tmp_path, "POINT EMPTY", geography_bbox={"geometry": [(9.0, 19.0, 11.0, 21.0)]}
     )
-    monkeypatch.setattr(validate_module, "_sampled_geodesic_bbox", lambda *a, **k: None)
-
     check = _check(path, "geography_stats_cover_edges_geometry")
     assert check.status == CheckStatus.SKIPPED
-    assert "no geometries to compare" in check.message
+
+
+def _two_row_groups(tmp_path, name: str, boxes) -> Path:
+    """Rows 0..2047 bulge to 63.43 N; the rest are short and near-equatorial."""
+    path = tmp_path / name
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        con.execute(
+            "COPY (SELECT i AS id, CASE WHEN i < 2048 "
+            "THEN ST_GeomFromText('LINESTRING (-30 60, 30 60)') "
+            "ELSE ST_GeomFromText('LINESTRING (-10 -10, 10 -5)') END AS geometry "
+            f"FROM range(4096) t(i)) TO {sql_path(str(path))} "
+            "(FORMAT PARQUET, ROW_GROUP_SIZE 2048, GEOPARQUET_VERSION 'V2')"
+        )
+    finally:
+        con.close()
+    patch_footer(str(path), geography={"geometry": "spherical"}, geography_bbox={"geometry": boxes})
+    return path
+
+
+class TestPerRowGroup:
+    def test_a_vertex_only_group_is_not_masked_by_the_union(self, tmp_path):
+        """Row group 1's box reaches 70 N, so the union covers row group 0's bulge."""
+        path = _two_row_groups(
+            tmp_path, "masked.parquet", [(-30.0, 60.0, 30.0, 60.0), (-10.0, -11.0, 10.0, 70.0)]
+        )
+        check = _check(path, "geography_stats_cover_edges_geometry")
+        assert check.status == CheckStatus.WARNING
+        assert "row group 0" in (check.details or "")
+        assert "row group 1" not in (check.details or "")
+
+    def test_a_complemented_longitude_range_warns(self, tmp_path):
+        """(30, ..., -30) wraps the far side of the globe: the data is outside it."""
+        path = _two_row_groups(
+            tmp_path, "wrongwrap.parquet", [(30.0, 60.0, -30.0, 63.5), (-10.0, -11.0, 10.0, 0.0)]
+        )
+        check = _check(path, "geography_stats_cover_edges_geometry")
+        assert check.status == CheckStatus.WARNING
+        assert "row group 0" in (check.details or "")
+
+    def test_correct_boxes_pass(self, tmp_path):
+        path = _two_row_groups(
+            tmp_path, "ok.parquet", [(-30.0, 60.0, 30.0, 63.44), (-10.0, -11.0, 10.0, 0.0)]
+        )
+        assert _check(path, "geography_stats_cover_edges_geometry").status == CheckStatus.PASSED
+
+    def test_the_oracle_does_not_ask_the_writer(self, tmp_path, monkeypatch):
+        """Sabotaging the writer's own bound must not change the verdict."""
+        import geoparquet_io.core.geodesic_bbox as writer
+
+        path = _two_row_groups(
+            tmp_path, "masked2.parquet", [(-30.0, 60.0, 30.0, 60.0), (-10.0, -11.0, 10.0, 70.0)]
+        )
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the validator consulted the writer's bound")
+
+        monkeypatch.setattr(writer, "geodesic_bbox_of_wkb", refuse)
+        monkeypatch.setattr(writer, "row_group_geography_bboxes", refuse)
+        assert _check(path, "geography_stats_cover_edges_geometry").status == CheckStatus.WARNING
+
+
+class TestNonFiniteStatistics:
+    def test_a_nan_box_fails_the_range_check_and_never_reaches_sql(self, tmp_path):
+        nan = float("nan")
+        path = _geography_file(
+            tmp_path,
+            "LINESTRING (0 0, 20 20)",
+            geography_bbox={"geometry": [(nan, 0.0, 0.0, 20.0)]},
+        )
+        result = validate_geoparquet(str(path))
+        by_name = {c.name: c for c in result.checks}
+        stats = by_name["geography_stats_bbox_geometry"]
+        assert stats.status == CheckStatus.FAILED
+        assert "finite" in (stats.details or "")
+        for check in result.checks:
+            text = f"{check.message} {check.details or ''}"
+            assert "Binder Error" not in text, check
 
 
 class TestVertexOnlyWarning:

@@ -74,7 +74,12 @@ from geoparquet_io.core.geo_metadata import (
     strip_derived_stats,
     strip_nonplanar_edges,
 )
-from geoparquet_io.core.geodesic_bbox import geography_statistics
+from geoparquet_io.core.geodesic_bbox import (
+    ELLIPSOIDAL_ALGORITHMS,
+    ColumnBounds,
+    ellipsoid_for_crs,
+    geography_statistics,
+)
 from geoparquet_io.core.geometry_detection import (
     _detect_geometry_from_query,
     native_geometry_types_from_query,
@@ -209,7 +214,13 @@ def _apply_nonplanar_edges(
     GeospatialStatistics and the block's ``bbox`` were vertex boxes on a plane,
     which a geodesic edge can leave, so each is replaced with a bound computed
     over the edges (``core/geodesic_bbox``) rather than dropped as #1254 did.
-    When nothing can bound a column, the drop remains the fallback.
+    When nothing can bound a column, the drop remains the fallback, and the
+    block's planar ``bbox`` goes with it. A column with non-planar edges that
+    is *not* retyped -- every 1.x output, or a 2.0 column that is not a
+    top-level GEOMETRY -- gets the geodesic block ``bbox`` only: it has no
+    GEOGRAPHY statistics to patch (and ``patch_footer`` only replaces a box
+    DuckDB wrote, it never adds one). A bbox covering column is per-row data,
+    not footer, and stays the vertex box it was written as.
 
     ``pending_geo`` is the ``geo`` block the V2 M/ZM repair deferred to this
     patch (#1270): the block the output needs but does not yet carry, taken in
@@ -225,9 +236,16 @@ def _apply_nonplanar_edges(
         name: _edges_for_output_version(edges, geo_version) for name, edges in edges_by_col.items()
     }
     geography = _geography_candidates(output_file, edges_by_col)
-    geography_bbox, file_bboxes = _geodesic_bounds(output_file, geography)
+    targets = {**_block_bbox_targets(geo_meta, edges_by_col, geography), **geography}
+    bounds = _geodesic_bounds(output_file, targets, geo_meta)
+    geography_bbox = {name: bounds[name].per_group for name in geography if name in bounds}
+    file_bboxes = {name: b.file_bbox for name, b in bounds.items() if b.file_bbox is not None}
     geo_updates = _geo_block_updates(
-        geo_meta, edges_by_col, file_bboxes, force=pending_geo is not None
+        geo_meta,
+        edges_by_col,
+        file_bboxes,
+        force=pending_geo is not None,
+        unbounded=set(targets) - set(file_bboxes),
     )
 
     try:
@@ -310,19 +328,74 @@ def _read_geo_key(output_file: str) -> dict | None:
     return json.loads(raw.decode("utf-8")) if raw else None
 
 
-def _geodesic_bounds(output_file: str, geography: dict[str, str]) -> tuple[dict, dict]:
-    """Geodesic row-group and file-level bounds for the columns being retyped.
+def _block_bbox_targets(
+    geo_meta: dict | None, edges_by_col: dict[str, str], geography: dict[str, str]
+) -> dict[str, str]:
+    """Columns not being retyped whose ``geo`` block ``bbox`` still needs geodesic bounds.
+
+    Any column the block describes with non-planar edges and a geographic CRS
+    (none means OGC:CRS84): its vertex ``bbox`` under-covers the edges as much
+    as a GEOGRAPHY column's statistics would.
+    """
+    columns = (geo_meta or {}).get("columns") or {}
+    targets = {}
+    for name, edges in edges_by_col.items():
+        col_meta = columns.get(name)
+        if name in geography or not isinstance(col_meta, dict):
+            continue
+        if edges != "spherical" and edges not in ELLIPSOIDAL_ALGORITHMS:
+            continue
+        if is_geographic_crs(col_meta.get("crs")):
+            targets[name] = edges
+    return targets
+
+
+def _geodesic_bounds(
+    output_file: str, targets: dict[str, str], geo_meta: dict | None
+) -> dict[str, ColumnBounds]:
+    """Geodesic row-group and file-level bounds for ``targets`` (``{column: edges}``).
 
     Best-effort: a column whose bounds cannot be computed falls back to #1254's
-    behavior -- its planar boxes are dropped -- rather than failing the write.
+    behavior -- its planar boxes are dropped -- rather than failing the write,
+    and says so. A read error degrades; running out of memory does not.
     """
-    if not geography:
-        return {}, {}
+    if not targets:
+        return {}
+    import pyarrow as pa
+    from pyproj.exceptions import CRSError, GeodError
+
+    columns = (geo_meta or {}).get("columns") or {}
+    orientations = {
+        name: (columns.get(name) or {}).get("orientation")
+        for name in targets
+        if isinstance(columns.get(name), dict)
+    }
+    ellipsoids = {
+        name: ellipsoid_for_crs(extract_crs_from_parquet(output_file, geometry_column=name))
+        for name, edges in targets.items()
+        if edges in ELLIPSOIDAL_ALGORITHMS
+    }
     try:
-        return geography_statistics(output_file, geography)
-    except Exception as e:  # noqa: BLE001 - any read failure degrades to "drop the box"
-        debug(f"Could not compute geodesic bounds for {output_file}: {e}")
-        return {}, {}
+        bounds = geography_statistics(
+            output_file, targets, orientations=orientations, ellipsoids=ellipsoids
+        )
+    except MemoryError:
+        raise
+    except (OSError, ValueError, ArithmeticError, pa.ArrowException, CRSError, GeodError) as e:
+        warn(
+            f"Could not compute geodesic bounding boxes for {', '.join(sorted(targets))} "
+            f"({e}); their bounding boxes are dropped, which only gives up row-group pruning."
+        )
+        return {}
+    for name, column_bounds in bounds.items():
+        if column_bounds.unreadable_groups:
+            warn(
+                f"Column '{name}': {column_bounds.unreadable_groups} row group(s) hold geometry "
+                "gpio cannot bound geodesically (unreadable WKB, or a non-finite or "
+                "out-of-range coordinate); their bounding boxes, and the file's, are dropped, "
+                "which only gives up row-group pruning."
+            )
+    return bounds
 
 
 def _bbox_with_geodesic_xy(existing: object, box: tuple) -> list[float]:
@@ -338,11 +411,14 @@ def _geo_block_updates(
     edges_by_col: dict[str, str],
     file_bboxes: dict[str, tuple],
     force: bool = False,
+    unbounded: Collection[str] = (),
 ) -> dict[str, str]:
     """``{"geo": <block>}`` with edges and geodesic bboxes set, or ``{}``.
 
     ``force`` writes the block even unchanged -- the #1270 deferred repair's
     block is not in the file yet, so "unchanged" still has to land.
+    ``unbounded`` names columns whose edges no geodesic box could be computed
+    for: their planar ``bbox`` is removed rather than left to under-cover.
     """
     changed = False
     columns = (geo_meta or {}).get("columns") or {}
@@ -358,6 +434,11 @@ def _geo_block_updates(
         bbox = _bbox_with_geodesic_xy(col_meta.get("bbox"), box)
         if col_meta.get("bbox") != bbox:
             col_meta["bbox"] = bbox
+            changed = True
+    for name in unbounded:
+        col_meta = columns.get(name)
+        if isinstance(col_meta, dict) and "bbox" in col_meta:
+            del col_meta["bbox"]
             changed = True
     if geo_meta is None or not (changed or force):
         return {}
