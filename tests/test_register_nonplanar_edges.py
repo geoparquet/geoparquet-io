@@ -27,7 +27,12 @@ import pyarrow as pa
 import pytest
 
 import geoparquet_io as gpio
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, register_arrow
+from geoparquet_io.core.duckdb_utils import (
+    geoarrow_field_edges,
+    get_duckdb_connection,
+    planar_view,
+    register_arrow,
+)
 from tests.native_geo_probes import conus_wkb, write_native_geo_only
 
 EXT_NAME = b"ARROW:extension:name"
@@ -118,6 +123,57 @@ def test_register_arrow_leaves_a_planar_table_alone(rows):
         con.close()
     assert registered.edges == {}
     assert registered.restore_edges(result) is result
+
+
+def test_planar_view_keeps_a_resolved_type_and_its_crs(rows):
+    sph = ga.wkb().with_crs("OGC:CRS84").with_edge_type(gt.EdgeType.SPHERICAL)
+    source = pa.table(
+        {"geometry": pa.ExtensionArray.from_storage(sph, pa.array([bytes(r[2]) for r in rows]))}
+    )
+    view, registered = planar_view(source)
+    field = view.schema.field("geometry")
+    assert field.type.edge_type == gt.EdgeType.PLANAR
+    assert field.type.crs is not None
+    assert (
+        view.column("geometry").chunk(0).storage.equals(source.column("geometry").chunk(0).storage)
+    )
+    assert registered.edges == {"geometry": "spherical"}
+
+
+def test_planar_view_limits_to_the_named_columns(table):
+    view, registered = planar_view(table.table, columns=["id"])
+    assert registered.fields == {}
+    assert view is table.table
+
+
+def _meta_field(raw):
+    return pa.field("g", pa.binary(), metadata={EXT_NAME: b"geoarrow.wkb", EXT_META: raw})
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        (pa.field("g", ga.wkb().with_edge_type(gt.EdgeType.SPHERICAL)), "spherical"),
+        (_meta_field(b'{"edges": "Spherical"}'), "spherical"),
+        (_meta_field(b'{"edges": "karney"}'), "karney"),
+        (_meta_field(b"{nope"), None),
+        (_meta_field(b"[1]"), None),
+        (pa.field("g", pa.binary()), None),
+    ],
+)
+def test_geoarrow_field_edges_reads_both_carriers(field, expected):
+    assert geoarrow_field_edges(field) == expected
+
+
+def test_geoarrow_field_edges_planar_is_not_non_planar():
+    assert geoarrow_field_edges(pa.field("g", ga.wkb())) in (None, "planar")
+
+
+def test_one_copy_of_the_edge_helpers():
+    """#1280's write-side names are the duckdb_utils helpers, not a second copy."""
+    from geoparquet_io.core import arrow_geo_metadata
+
+    assert arrow_geo_metadata._field_edges is geoarrow_field_edges
 
 
 # --------------------------------------------------------------------------

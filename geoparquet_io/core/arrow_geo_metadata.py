@@ -27,6 +27,7 @@ from geoparquet_io.core.crs_utils import (
     is_default_crs,
     parse_geo_metadata_from_schema,
 )
+from geoparquet_io.core.duckdb_utils import geoarrow_field_edges, planar_view
 from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
     GEOGRAPHY_EDGE_ALGORITHMS,
@@ -284,19 +285,8 @@ def _is_spherical_edge_type(arrow_type) -> bool:
     return getattr(edge_type, "name", "").upper() == "SPHERICAL"
 
 
-def _field_edges(field) -> str | None:
-    """The edges a GeoArrow field declares, in either carrier shape, lower-case."""
-    edge_type = getattr(field.type, "edge_type", None)
-    name = getattr(edge_type, "name", None)
-    if name:
-        return name.lower()
-    raw = (field.metadata or {}).get(b"ARROW:extension:metadata")
-    try:
-        parsed = json.loads(raw) if raw else None
-    except ValueError:
-        return None
-    edges = parsed.get("edges") if isinstance(parsed, dict) else None
-    return edges.lower() if isinstance(edges, str) else None
+# One reader of a field's edges, shared with the DuckDB registration step (#1253).
+_field_edges = geoarrow_field_edges
 
 
 def nonplanar_edges_from_schema(schema) -> dict[str, str]:
@@ -330,35 +320,10 @@ def with_planar_edge_types(table, columns=None):
     bytes are kept as they are. ``columns=None`` clears every GeoArrow column
     whose type says anything but planar, a value gpio does not know included,
     because DuckDB refuses those too. Which edges come back is the restore
-    side's question (``write_funnels.table_nonplanar_edges``).
+    side's question (``write_funnels.table_nonplanar_edges``). The relabel is
+    ``duckdb_utils.planar_view``, the same one ``register_arrow`` does.
     """
-    if columns is None:
-        columns = [
-            field.name
-            for field in table.schema
-            if is_geoarrow_extension_field(field) and _field_edges(field) not in (None, "planar")
-        ]
-    for name in columns:
-        index = table.schema.get_field_index(name)
-        field = table.schema.field(index)
-        if hasattr(field.type, "with_edge_type"):
-            import geoarrow.pyarrow as ga
-
-            new_type = field.type.with_edge_type(ga.EdgeType.PLANAR)
-            column = _rebuild_array_with_type(table.column(index), new_type)
-            table = table.set_column(index, field.with_type(new_type), column)
-            continue
-        metadata = dict(field.metadata or {})
-        try:
-            ext = json.loads(metadata.get(b"ARROW:extension:metadata") or b"{}")
-        except ValueError:
-            continue
-        if not isinstance(ext, dict):
-            continue
-        ext.pop("edges", None)
-        metadata[b"ARROW:extension:metadata"] = json.dumps(ext).encode("utf-8")
-        table = table.set_column(index, field.with_metadata(metadata), table.column(index))
-    return table
+    return planar_view(table, columns=columns)[0]
 
 
 # What a secondary geometry column's carried entry says about the column ITSELF,
