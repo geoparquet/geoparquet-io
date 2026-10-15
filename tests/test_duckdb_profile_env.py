@@ -109,7 +109,9 @@ def test_path_that_is_a_file_degrades_gracefully(tmp_path, monkeypatch, caplog):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="chmod is advisory on Windows")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.skipif(
+    getattr(os, "geteuid", lambda: -1)() == 0, reason="root ignores directory permissions"
+)
 def test_unwritable_directory_degrades_gracefully(tmp_path, monkeypatch, caplog):
     locked = tmp_path / "locked"
     locked.mkdir()
