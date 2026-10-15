@@ -50,6 +50,7 @@ from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     BBOX_COVERING_FIELD_ORDERS,
     GEOARROW_ENCODINGS,
+    GEOGRAPHY_EDGE_ALGORITHMS,
     covering_lacks_bbox,
     is_covering_path,
 )
@@ -137,7 +138,7 @@ _GEOARROW_ENCODING_TYPE = {
 ORIENTATION_COUNTERCLOCKWISE = "counterclockwise"
 VALID_ORIENTATIONS = [ORIENTATION_COUNTERCLOCKWISE]
 VALID_EDGES_GEOPARQUET = ["planar", "spherical"]
-VALID_EDGES_PARQUET_GEO = ["spherical", "vincenty", "thomas", "andoyer", "karney"]
+VALID_EDGES_PARQUET_GEO = list(GEOGRAPHY_EDGE_ALGORITHMS)
 VALID_GEOMETRY_TYPES = [
     "Point",
     "LineString",

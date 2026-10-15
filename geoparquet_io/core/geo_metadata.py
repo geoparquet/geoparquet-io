@@ -56,6 +56,11 @@ GEOPARQUET_VERSIONS = {
 
 DEFAULT_GEOPARQUET_VERSION = "1.1"
 
+#: The non-planar edge algorithms a Parquet GEOGRAPHY can name, in the order of
+#: parquet.thrift's ``EdgeInterpolationAlgorithm`` (the position is the enum
+#: value). GeoParquet's ``edges`` spells them the same, lowercase.
+GEOGRAPHY_EDGE_ALGORITHMS = ("spherical", "vincenty", "thomas", "andoyer", "karney")
+
 #: The spec's single-geometry-type GeoArrow encodings. GeoParquet 1.1 permits
 #: these alongside "WKB" ("Supported values: "WKB"; one of "point",
 #: "linestring", "polygon", "multipoint", "multilinestring", "multipolygon"");

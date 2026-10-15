@@ -55,6 +55,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.write_strategies import atomic_write
 
@@ -98,7 +99,7 @@ _META_PATH_IN_SCHEMA, _META_GEO_STATS = 3, 17
 _GEO_STATS_BBOX = 1
 #: parquet.thrift's EdgeInterpolationAlgorithm, by the name GeoParquet's
 #: ``edges`` and gpio use for each.
-EDGE_ALGORITHMS = {"spherical": 0, "vincenty": 1, "thomas": 2, "andoyer": 3, "karney": 4}
+EDGE_ALGORITHMS = {name: code for code, name in enumerate(GEOGRAPHY_EDGE_ALGORITHMS)}
 
 # pyarrow's second copy of the schema, base64'd into one of those entries.
 _ARROW_SCHEMA_KEY = b"ARROW:schema"
