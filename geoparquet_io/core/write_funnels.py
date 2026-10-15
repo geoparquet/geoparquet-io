@@ -188,7 +188,7 @@ def _collect_nonplanar_edges_from_metadata(original_metadata: dict | None) -> di
         return {}
 
 
-def _apply_nonplanar_edges(
+def apply_nonplanar_edges(
     edges_by_col: dict[str, str],
     output_file: str,
     compression: str = "ZSTD",
@@ -254,6 +254,9 @@ def _apply_nonplanar_edges(
         force=pending_geo is not None,
         unbounded=set(targets) - set(file_bboxes),
     )
+    # A 1.x output has no GEOGRAPHY type to carry the edges, so a GeoArrow
+    # column's embedded Arrow schema is stamped instead, or it says planar.
+    arrow_edges = edges_by_col if geo_version.startswith("1.") else None
 
     try:
         retyped = patch_footer(
@@ -261,6 +264,7 @@ def _apply_nonplanar_edges(
             geo_updates,
             geography=geography,
             geography_bbox=geography_bbox,
+            arrow_edges=arrow_edges,
             verbose=verbose,
         )
     except FooterPatchRaced:
@@ -1535,7 +1539,7 @@ def write_parquet_with_metadata(
         # invalidated (#601) were excluded at collection rather than
         # re-attached. The fast path's deferred V2 geo repair rides along, so
         # both edits cost one footer patch (#1270).
-        _apply_nonplanar_edges(
+        apply_nonplanar_edges(
             edges_to_restore,
             actual_output,
             compression=compression,
@@ -1585,7 +1589,7 @@ def _edges_to_restore(
     ``exclude_columns``: columns whose declaration the write itself invalidated
     (#601). The input still declares them, but they must not come back.
 
-    Collection only; :func:`_apply_nonplanar_edges` writes the answer back
+    Collection only; :func:`apply_nonplanar_edges` writes the answer back
     after the write, on any rewrite path.
     """
     edges_by_col = declared_nonplanar_edges(input_file, original_metadata)
@@ -1760,7 +1764,7 @@ def write_geoparquet_table(
         # The DuckDB-query funnel restores edges in `_preserve_edges_after_write`.
         # This is the same step for a table: the block's `edges` and, at 2.0,
         # the GEOGRAPHY logical type, so the two never disagree (#1269).
-        _apply_nonplanar_edges(
+        apply_nonplanar_edges(
             edges_by_col,
             actual_output,
             compression=validated_compression or "UNCOMPRESSED",

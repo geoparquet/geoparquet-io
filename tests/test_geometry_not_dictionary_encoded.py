@@ -173,3 +173,71 @@ class TestOtherArrowWriters:
         _rewrite_file_with_geo_metadata(str(out), geo)
         assert DICT not in _encodings(out, "geometry")
         assert DICT in _encodings(out, "name")
+
+
+def _dictionary(encodings: tuple[str, ...]) -> bool:
+    """DuckDB writes PLAIN_DICTIONARY where pyarrow writes RLE_DICTIONARY."""
+    return any("DICTIONARY" in e for e in encodings)
+
+
+class TestTableWriteStrategies:
+    """Every ``Table.write`` strategy makes the same choice as the funnel."""
+
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+    @pytest.mark.parametrize("version", ["1.1", "2.0", "parquet-geo-only"])
+    def test_geometry_has_no_dictionary(self, tmp_path, strategy, version):
+        import geoparquet_io as gpio
+
+        src = tmp_path / "in.parquet"
+        write_geoparquet_table(
+            _table(), str(src), geometry_column="geometry", geoparquet_version="1.1"
+        )
+        out = tmp_path / "out.parquet"
+        gpio.read(str(src)).write(str(out), geoparquet_version=version, write_strategy=strategy)
+        assert not _dictionary(_encodings(out, "geometry"))
+        assert _dictionary(_encodings(out, "name"))
+
+    @pytest.mark.parametrize("where", ["", " WHERE false"])
+    def test_streaming_from_query(self, tmp_path, monkeypatch, where):
+        from geoparquet_io.core.write_strategies import arrow_streaming
+
+        requested = []
+        real_writer = arrow_streaming.pq.ParquetWriter
+
+        def spy(*args, **kwargs):
+            requested.append(kwargs.get("use_dictionary"))
+            return real_writer(*args, **kwargs)
+
+        monkeypatch.setattr(arrow_streaming.pq, "ParquetWriter", spy)
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+        from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
+
+        src = tmp_path / "in.parquet"
+        write_geoparquet_table(
+            _table(), str(src), geometry_column="geometry", geoparquet_version="1.1"
+        )
+        out = tmp_path / "out.parquet"
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+        try:
+            WriteStrategyFactory.get_strategy(WriteStrategy.ARROW_STREAMING).write_from_query(
+                con=con,
+                query=f"SELECT * FROM read_parquet({sql_path(str(src))}){where}",
+                output_path=str(out),
+                geometry_column="geometry",
+                original_metadata=None,
+                geoparquet_version="1.1",
+                compression="ZSTD",
+                compression_level=15,
+                row_group_size_mb=None,
+                row_group_rows=None,
+                input_crs=None,
+                verbose=False,
+            )
+        finally:
+            con.close()
+        # An empty result writes no row group, so the request is what is checked.
+        assert requested == [["name", "bbox.xmin", "bbox.ymin", "bbox.xmax", "bbox.ymax"]]
+        if where:
+            return
+        assert not _dictionary(_encodings(out, "geometry"))
+        assert _dictionary(_encodings(out, "name"))

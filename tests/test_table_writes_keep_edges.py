@@ -287,3 +287,57 @@ class TestTableWrite:
             str(out), geoparquet_version="1.1"
         )
         _assert_spherical(out, "1.1")
+
+
+def _arrow_edges(path, column="geometry") -> str | None:
+    """The edges the embedded ``ARROW:schema`` gives a GeoArrow field, read raw."""
+    import base64
+
+    blob = (pq.read_metadata(str(path)).metadata or {}).get(b"ARROW:schema")
+    assert blob is not None
+    schema = pa.ipc.read_schema(pa.BufferReader(base64.b64decode(blob)))
+    field = schema.field(column)
+    metadata = dict(field.metadata or {})
+    if isinstance(field.type, pa.ExtensionType):
+        metadata[EXT_META] = field.type.__arrow_ext_serialize__()
+    return json.loads(metadata.get(EXT_META) or b"{}").get("edges")
+
+
+class TestArrowSchemaAgrees:
+    """A GeoArrow column's ``ARROW:schema`` names the edges the ``geo`` block does.
+
+    A 1.x output has no GEOGRAPHY type to retype, so the footer patch only fixed
+    ``geo`` and left the embedded Arrow schema saying planar. A GeoArrow-aware
+    reader then saw two answers for the same column.
+    """
+
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+    def test_table_write_1_1_geoarrow(self, native, tmp_path, strategy):
+        out = tmp_path / "out.parquet"
+        gpio.read(str(native)).write(
+            str(out), geoparquet_version="1.1-geoarrow", write_strategy=strategy
+        )
+        assert _edges(out) == "spherical"
+        assert _arrow_edges(out) == "spherical"
+        assert native_geo_edges(out)[1] == "EdgeType.SPHERICAL"
+        # pyarrow reads the patched blob back as the same spherical type.
+        assert pq.read_table(str(out)).num_rows > 0
+
+    def test_planar_column_is_untouched(self, rows, tmp_path):
+        out = tmp_path / "out.parquet"
+        gpio.Table(_plain_table(rows), geometry_column="geometry").write(
+            str(out), geoparquet_version="1.1-geoarrow", write_strategy="in-memory"
+        )
+        assert _edges(out) is None
+        assert _arrow_edges(out) in (None, "planar")
+
+
+def test_api_uses_the_public_edges_helper():
+    """``Table.write`` restores edges through a public name, not a private one."""
+    import inspect
+
+    from geoparquet_io.api import table as api_table
+    from geoparquet_io.core import write_funnels
+
+    assert callable(write_funnels.apply_nonplanar_edges)
+    assert "_apply_nonplanar_edges" not in inspect.getsource(api_table)

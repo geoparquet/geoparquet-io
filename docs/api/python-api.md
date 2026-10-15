@@ -830,8 +830,10 @@ fragments, your own keys), for a table from `gpio.read()` and from
 `pandas` and `ARROW:schema` blocks are dropped on purpose, and `geo` is rebuilt
 from the table. Non-planar edges are kept too. A native GEOGRAPHY table writes
 as a GEOGRAPHY at 2.0 and as `edges: spherical` in a 1.x `geo` block
-([#1253](https://github.com/geoparquet/geoparquet-io/issues/1253)). The WKB
-geometry column is never dictionary-encoded
+([#1253](https://github.com/geoparquet/geoparquet-io/issues/1253)). A
+`1.1-geoarrow` output also names the edges in its GeoArrow type, so an Arrow
+reader sees the same answer. The WKB geometry column is never
+dictionary-encoded, on every `write_strategy`
 ([#1122](https://github.com/geoparquet/geoparquet-io/issues/1122)).
 
 ```python

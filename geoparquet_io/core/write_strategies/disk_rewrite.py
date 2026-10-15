@@ -583,6 +583,14 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         }
         if compression_level is not None and pa_compression:
             writer_kwargs["compression_level"] = compression_level
+        from geoparquet_io.core.write_strategies.arrow_streaming import (
+            without_geometry_dictionary,
+        )
+
+        # parquet-geo-only has no block, so `native_crs` is what names its columns.
+        writer_kwargs = without_geometry_dictionary(
+            writer_kwargs, new_schema, set((geo_meta or {}).get("columns") or native_crs)
+        )
 
         num_source_groups = pf.metadata.num_row_groups
 

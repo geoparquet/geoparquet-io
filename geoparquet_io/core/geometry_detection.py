@@ -200,7 +200,7 @@ def native_geometry_types_from_query(con, query: str, verbose: bool = False) -> 
     witness prefers it.
 
     DuckDB has no ``GEOGRAPHY`` type, so this source can never report ``edges``;
-    those travel separately, through ``write_funnels._apply_nonplanar_edges``.
+    those travel separately, through ``write_funnels.apply_nonplanar_edges``.
 
     Best-effort: a ``DESCRIBE`` that fails answers ``{}`` rather than failing the
     write.

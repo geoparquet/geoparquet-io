@@ -221,7 +221,7 @@ def test_a_pending_block_whose_edges_already_match_is_still_written(tmp_path):
         },
     }
 
-    write_funnels._apply_nonplanar_edges(
+    write_funnels.apply_nonplanar_edges(
         {"geometry": "spherical"}, str(path), pending_geo=json.loads(json.dumps(pending))
     )
 

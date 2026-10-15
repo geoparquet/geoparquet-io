@@ -1517,7 +1517,7 @@ class Table:
                 with_planar_edge_types,
             )
             from geoparquet_io.core.write_funnels import (
-                _apply_nonplanar_edges,
+                apply_nonplanar_edges,
                 table_nonplanar_edges,
             )
 
@@ -1540,7 +1540,7 @@ class Table:
                 custom_metadata={"covering": carried_covering} if carried_covering else None,
                 extra_kv_metadata=preserved_kv or None,
             )
-            _apply_nonplanar_edges(
+            apply_nonplanar_edges(
                 edges_by_col,
                 str(local_path),
                 compression=compression,

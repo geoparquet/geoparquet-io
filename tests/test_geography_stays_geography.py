@@ -350,7 +350,7 @@ def test_a_pyarrow_geography_without_a_bbox_is_not_warned_about(native_geography
 
 
 # ---------------------------------------------------------------------------
-# The funnel hook itself: `_apply_nonplanar_edges`
+# The funnel hook itself: `apply_nonplanar_edges`
 # ---------------------------------------------------------------------------
 
 
@@ -376,7 +376,7 @@ def test_an_unpatchable_footer_falls_back_to_the_block_rewrite(duckdb_v2, monkey
         raise FooterPatchUnsupported("refused for the test")
 
     monkeypatch.setattr(write_funnels, "patch_footer", refuse)
-    write_funnels._apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2))
+    write_funnels.apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2))
 
     assert _edges_in_geo_block(duckdb_v2) == "spherical"
     assert logical_geo_types(duckdb_v2)["geometry"][0] == "Geometry"
@@ -397,7 +397,7 @@ def test_a_race_propagates_without_a_rewrite(duckdb_v2, monkeypatch):
         lambda *a, **k: pytest.fail("a raced patch must not fall back to a rewrite"),
     )
     with pytest.raises(FooterPatchRaced):
-        write_funnels._apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2))
+        write_funnels.apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2))
 
 
 def test_a_geo_key_less_output_is_carried_by_the_logical_type(duckdb_v2, caplog):
@@ -406,7 +406,7 @@ def test_a_geo_key_less_output_is_carried_by_the_logical_type(duckdb_v2, caplog)
     from geoparquet_io.core.parquet_footer import patch_footer_kv
 
     patch_footer_kv(str(duckdb_v2), {"geo": None})
-    write_funnels._apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2), verbose=True)
+    write_funnels.apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2), verbose=True)
 
     assert native_geo_edges(duckdb_v2) == SPHERICAL
     assert "Edge interpretation is lost" not in caplog.text
@@ -417,7 +417,7 @@ def test_an_output_with_no_carrier_at_all_says_the_edges_are_lost(tmp_path, capl
 
     path = tmp_path / "plain.parquet"
     pq.write_table(pa.table({"geometry": pa.array([b"\x01"], pa.binary())}), str(path))
-    write_funnels._apply_nonplanar_edges({"geometry": "spherical"}, str(path))
+    write_funnels.apply_nonplanar_edges({"geometry": "spherical"}, str(path))
 
     assert "Edge interpretation is lost" in caplog.text
 
@@ -426,7 +426,7 @@ def test_an_edges_value_parquet_cannot_name_stays_in_the_block_only(duckdb_v2):
     """A malformed input ``edges`` must not crash the write in the retype."""
     from geoparquet_io.core import write_funnels
 
-    write_funnels._apply_nonplanar_edges({"geometry": "geodesic"}, str(duckdb_v2))
+    write_funnels.apply_nonplanar_edges({"geometry": "geodesic"}, str(duckdb_v2))
 
     assert _edges_in_geo_block(duckdb_v2) == "geodesic"
     assert logical_geo_types(duckdb_v2)["geometry"][0] == "Geometry"

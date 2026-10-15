@@ -1018,6 +1018,7 @@ def patch_footer(
     *,
     geography: Mapping[str, str] | None = None,
     geography_bbox: Mapping[str, list] | None = None,
+    arrow_edges: Mapping[str, str] | None = None,
     output_file: str | None = None,
     verbose: bool = False,
 ) -> list[str]:
@@ -1058,6 +1059,10 @@ def patch_footer(
             ``None`` box, a missing row group or a missing column drops that
             planar bounding box instead, #1254's behavior; Z/M bounds the
             chunk already carries are kept either way.
+        arrow_edges: ``{column: edges}`` to set in the embedded ``ARROW:schema``
+            for GeoArrow fields that are not retyped, such as a 1.x output's
+            GeoArrow column, which has no GEOGRAPHY type to carry them. A
+            retyped column always gets its ``geography`` edges there.
         output_file: Where to write the result. Defaults to the input, replaced
             atomically once the new footer has been read back.
         verbose: Report the footer sizes.
@@ -1089,11 +1094,9 @@ def patch_footer(
     before = _read_metadata_or_refuse(parquet_file)
     footer, retyped = _patch_geography(original, geography or {}, geography_bbox)
     wanted = _normalized(updates or {})
-    wanted.update(
-        _arrow_schema_in_step(
-            before.metadata, wanted, {name: (geography or {})[name] for name in retyped}
-        )
-    )
+    stamped = dict(arrow_edges or {})
+    stamped.update({name: (geography or {})[name] for name in retyped})
+    wanted.update(_arrow_schema_in_step(before.metadata, wanted, stamped))
     footer = _patch_footer(footer, wanted)
     if footer == original and destination == parquet_file:
         # Nothing to write, and copying a file onto itself to say so would cost

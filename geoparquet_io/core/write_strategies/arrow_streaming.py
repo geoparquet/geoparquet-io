@@ -44,7 +44,7 @@ from geoparquet_io.core.geoarrow_encoding import (
     wkb_array_to_geoarrow,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
-from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
+from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, dictionary_columns
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
     _parse_existing_geo_metadata,
@@ -242,6 +242,13 @@ def _check_geometry_type(
 
     final_sql = _wrap_query_with_wkb_conversion(query, geometry_column, con) if needs_wkb else query
     return needs_wkb, final_sql
+
+
+def without_geometry_dictionary(
+    writer_kwargs: dict, schema: pa.Schema, geometry_columns: set[str]
+) -> dict:
+    """``writer_kwargs`` with dictionary encoding limited to the non-geometry columns (#1122)."""
+    return {**writer_kwargs, "use_dictionary": dictionary_columns(schema, geometry_columns)}
 
 
 class ArrowStreamingStrategy(BaseWriteStrategy):
@@ -539,6 +546,9 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             col_index = schema_with_meta.get_field_index(geometry_column)
             geoarrow_type = schema_with_meta.field(col_index).type
 
+        writer_kwargs = without_geometry_dictionary(
+            writer_kwargs, schema_with_meta, geometry_columns or {geometry_column}
+        )
         rows_written, batches_written = self._write_all_batches(
             output_path,
             schema_with_meta,
@@ -581,6 +591,9 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
             geometry_columns=geometry_columns,
+        )
+        writer_kwargs = without_geometry_dictionary(
+            writer_kwargs, schema_with_meta, geometry_columns or {geometry_column}
         )
         with pq.ParquetWriter(output_path, schema_with_meta, **writer_kwargs):
             pass
@@ -809,6 +822,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         native_crs = native_geometry_crs(
             effective_version, geo_meta, geometry_column, geometry_info
         )
+        geometry_columns = set(geo_meta["columns"])
         if not should_add_geo_metadata:
             geo_meta = None
 
@@ -827,6 +841,9 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         writer_kwargs = {"compression": validated_compression or "NONE"}
         if validated_level is not None and validated_compression:
             writer_kwargs["compression_level"] = validated_level
+        writer_kwargs = without_geometry_dictionary(
+            writer_kwargs, schema_with_meta, geometry_columns
+        )
 
         geoarrow_type = None
         if use_native_geometry:
