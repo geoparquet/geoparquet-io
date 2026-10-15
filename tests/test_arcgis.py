@@ -1715,6 +1715,22 @@ class TestNetworkIntegration:
         assert info.name is not None
         assert info.total_count >= 0
 
+    def test_a_real_max_record_count_survives_the_boundary_check(self):
+        """The #1053 check keeps a real server's positive page size as it is."""
+        from geoparquet_io.core.arcgis import get_layer_info
+        from geoparquet_io.core.http_retry import make_request_with_retry
+
+        service = (
+            "https://sampleserver6.arcgisonline.com/arcgis/rest/services/Wildfire/FeatureServer/0"
+        )
+        advertised = make_request_with_retry("GET", service, params={"f": "json"})["maxRecordCount"]
+
+        info = get_layer_info(service)
+
+        assert isinstance(advertised, int) and advertised > 0
+        assert info.max_record_count == advertised
+        assert isinstance(info.total_count, int) and info.total_count >= 0
+
     def test_fetch_feature_count(self):
         """Test fetching real feature count."""
         from geoparquet_io.core.arcgis import get_feature_count
