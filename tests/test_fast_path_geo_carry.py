@@ -473,8 +473,9 @@ class TestMultiFileInputsDeclineTheCarry:
 class TestTheCarriedBlockGoesThroughTheCrsRule:
     """``apply_output_crs`` is the single source of truth for null-vs-default CRS.
 
-    The carried block bypassed it, so a ``crs: null`` input came back out with
-    ``crs: null`` on the fast path while the rewrite path stripped it.
+    The carried block once bypassed it, so the two paths disagreed on a
+    ``crs: null`` input. Both now go through it, and it keeps ``null`` (unknown)
+    while dropping an explicit default (#1276).
     """
 
     @pytest.fixture
@@ -493,11 +494,14 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
         }
         return _write_v2_input(fields_v2_file, tmp_path / "crs84.parquet", geo)
 
-    def test_a_null_crs_is_not_written_through(self, v2_crs_null, tmp_path):
+    def test_a_null_crs_is_kept_unknown(self, v2_crs_null, tmp_path):
+        """An unknown CRS must not be written as an absent one, which means CRS84 (#1276)."""
         out = tmp_path / "crs_null_out.parquet"
         _sort(v2_crs_null, out)
 
-        assert "crs" not in _geo(out)["columns"]["geometry"]
+        column = _geo(out)["columns"]["geometry"]
+        assert "crs" in column
+        assert column["crs"] is None
 
     def test_a_null_crs_input_matches_the_rewrite_path(self, v2_crs_null, tmp_path):
         fast = _write_through(v2_crs_null, tmp_path / "crs_null_fast.parquet", False)
@@ -517,8 +521,8 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
 
         assert fast == rewritten
 
-    def test_a_stripped_default_crs_alone_does_not_justify_the_carry(self):
-        """The CRS rule runs before the gate, so the block is judged as it will be written."""
+    def test_a_null_crs_alone_justifies_the_carry(self):
+        """The CRS rule runs before the gate and keeps ``null``, so the block is carried (#1276)."""
         from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
 
         metadata = {
@@ -531,6 +535,35 @@ class TestTheCarriedBlockGoesThroughTheCrsRule:
                             "encoding": "WKB",
                             "geometry_types": ["Polygon"],
                             "crs": None,
+                        }
+                    },
+                }
+            )
+        }
+
+        carried = _geo_block_to_carry_on_fast_path(metadata, "geometry", "2.0")
+
+        assert carried is not None
+        assert carried["columns"]["geometry"]["crs"] is None
+
+    def test_a_stripped_default_crs_alone_does_not_justify_the_carry(self):
+        """An explicit default is dropped before the gate, which leaves nothing to carry."""
+        from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
+
+        metadata = {
+            "geo": json.dumps(
+                {
+                    "version": "2.0.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["Polygon"],
+                            "crs": {
+                                "type": "GeographicCRS",
+                                "name": "WGS 84 (CRS84)",
+                                "id": {"authority": "OGC", "code": "CRS84"},
+                            },
                         }
                     },
                 }
