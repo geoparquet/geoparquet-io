@@ -142,11 +142,11 @@ def has_unknown_secondary(geo_columns: dict | None, primary: str | None) -> bool
 def wrap_query_with_secondary_crs(
     con, query: str, geo_columns: dict | None, primary: str | None, geoparquet_version: str | None
 ) -> str:
-    """Type each secondary GEOMETRY column with its own CRS in a 2.0 output.
+    """Type each secondary GEOMETRY column with its own CRS in a 2.0 or parquet-geo-only output.
 
     DuckDB reads a secondary's CRS from no ``geo`` entry: a GeoParquet input
     hands its secondaries over as bare GEOMETRY, which a 2.0 type then calls
-    OGC:CRS84. The primary gets its CRS from ``_wrap_query_with_crs``; this does
+    OGC:CRS84. The primary gets its CRS from ``_wrap_query_with_crs``, and this does
     the same for the rest, ``srid:0`` for an unknown one (#1277 review). Only
     columns the query already types GEOMETRY are touched, as ``ST_SetCRS``
     takes nothing else.
