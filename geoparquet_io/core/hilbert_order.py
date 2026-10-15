@@ -108,6 +108,7 @@ def _resolve_output_version(
 # concatenate-then-take, and each output chunk stays far below the 2 GiB a
 # 32-bit offset addresses.
 _GATHER_BATCH_BYTES = 16 * 1024 * 1024
+_GATHER_THREADS = 4
 
 
 def _view_twin(typ: pa.DataType) -> pa.DataType | None:
@@ -199,8 +200,16 @@ def _gather_column(column: pa.ChunkedArray, indices) -> pa.ChunkedArray:
 
 
 def _take_rows(table: pa.Table, indices) -> pa.Table:
-    """``table`` reordered to ``indices`` (numpy int64, one per row), one column at a time."""
-    columns = [_gather_column(table.column(i), indices) for i in range(table.num_columns)]
+    """``table`` reordered to ``indices`` (numpy int64, one per row).
+
+    Columns are gathered on a few threads (pyarrow releases the GIL), which
+    keeps the reorder as fast as ``Table.take``; each holds at most a couple
+    of batches beyond the output, so the transient stays bounded.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=_GATHER_THREADS) as pool:
+        columns = list(pool.map(lambda col: _gather_column(col, indices), table.columns))
     return pa.Table.from_arrays(columns, schema=table.schema)
 
 
