@@ -617,13 +617,13 @@ _SRID_CRS = {
 
 def _coerce_srid(raw: object) -> int | None:
     """An integer SRID out of a JSON value, or None when it is not one."""
-    if raw is None or isinstance(raw, bool):
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
         return None
     if isinstance(raw, float) and not raw.is_integer():
         return None
     try:
-        return int(raw)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
+        return int(raw)
+    except ValueError:
         return None
 
 

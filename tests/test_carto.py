@@ -1533,6 +1533,7 @@ class TestTableCrs:
             ([{"srid": 3.5}], []),
             ([{"srid": "abc"}], []),
             ([{"srid": None}], []),
+            ([{"srid": {"code": 4326}}], []),
         ],
         ids=[
             "int",
@@ -1547,6 +1548,7 @@ class TestTableCrs:
             "fractional",
             "not-a-number",
             "srid-null",
+            "srid-not-a-scalar",
         ],
     )
     def test_probe_reads_the_srids(self, rows, expected):
