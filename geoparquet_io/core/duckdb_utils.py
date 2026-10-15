@@ -67,6 +67,11 @@ def uses_aws_profile(func: _F) -> _F:
     scope as it is, and so does a call with no S3 URL among its arguments: an
     AWS profile means nothing to a local, https, gs or az path, and scoping it
     there would only load the ``aws`` extension for nothing.
+
+    The profile counts as explicit, so it wins over env keys (see
+    :func:`_resolve_s3_settings`). The scope is a ContextVar, so a worker thread
+    started inside ``func`` does not see it. Copy the context
+    (``contextvars.copy_context().run``) if a worker opens an S3 connection.
     """
     signature = inspect.signature(func)
     if "profile" not in signature.parameters:
@@ -78,7 +83,7 @@ def uses_aws_profile(func: _F) -> _F:
         profile = arguments.get("profile")
         if not profile or not _any_s3_url(arguments.values()):
             return func(*args, **kwargs)
-        with s3_config_scope({"profile": profile}):
+        with s3_config_scope({"profile": profile, "profile_from_env": False}):
             return func(*args, **kwargs)
 
     return wrapper  # type: ignore[return-value]
@@ -97,8 +102,14 @@ def _any_s3_url(values: Iterable[Any]) -> bool:
 # without CHAIN as "the config-file provider only" (aws_secret.cpp), which drops
 # SSO and credential_process profiles that the SDK default chain plus
 # AWS_PROFILE used to resolve. Naming them keeps those working. env is left out
-# on purpose: a named profile wins over environment keys, as it does for obstore
-# (core/aws_credentials.py) and the AWS CLI.
+# on purpose: only an explicit profile (--aws-profile, profile=) gets here, and
+# the AWS CLI lets an explicit --profile win over env keys. An exported
+# AWS_PROFILE does not get here (see _resolve_s3_settings), so env keys still
+# beat it, as they do in the AWS SDK.
+#
+# Known limit: for an assume-role profile (role_arn plus source_profile),
+# duckdb-aws signs the STS AssumeRole call with the SDK default chain, not the
+# source_profile keys. No CHAIN value changes that today.
 _NAMED_PROFILE_CHAIN = "config;process;sso"
 
 
@@ -111,10 +122,15 @@ def _resolve_s3_settings(
     ``credential_chain`` secret are built from this dict, so they cannot
     disagree: DuckDB reads a secret's endpoint and region over ``SET``, so a
     secret built from anything else silently wins.
+
+    ``profile`` is only an explicit one. A profile that is just the exported
+    ``AWS_PROFILE`` is left to the SDK default chain, which reads it itself
+    after env keys, so the secret keeps the AWS SDK order and main's behavior.
     """
     ambient = _active_s3_config.get() or {}
+    explicit_profile = None if ambient.get("profile_from_env") else ambient.get("profile")
     return {
-        "profile": ambient.get("profile"),
+        "profile": explicit_profile,
         "endpoint": s3_endpoint if s3_endpoint is not None else ambient.get("s3_endpoint"),
         "region": s3_region if s3_region is not None else ambient.get("s3_region"),
         "use_ssl": s3_use_ssl if s3_use_ssl is not None else ambient.get("s3_use_ssl"),

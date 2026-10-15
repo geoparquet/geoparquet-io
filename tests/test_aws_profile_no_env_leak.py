@@ -99,7 +99,7 @@ def test_uses_aws_profile_without_profile_keeps_outer_scope():
     with s3_config_scope({"profile": "outer", "s3_region": "eu-west-1"}):
         assert probe("s3://b/k") == {"profile": "outer", "s3_region": "eu-west-1"}
         inner = probe("s3://b/k", profile="inner")
-        assert inner == {"profile": "inner", "s3_region": "eu-west-1"}
+        assert inner == {"profile": "inner", "profile_from_env": False, "s3_region": "eu-west-1"}
 
 
 def test_uses_aws_profile_rejects_function_without_profile_parameter():
@@ -473,3 +473,97 @@ def test_public_admin_datasets_read_anonymously(dataset_name):
     with s3_config_scope({"profile": "prod"}):
         with s3_config_scope(dataset.get_s3_config()):
             assert not get_active_s3_config().get("profile")
+
+
+@needs_aws_extension
+@needs_runtime_env_in_aws_sdk
+@pytest.mark.usefixtures("fake_aws_files")
+class TestExportedProfileFollowsSdkPrecedence:
+    """Env keys beat an exported ``AWS_PROFILE``. Only an explicit profile beats env keys.
+
+    That is the AWS CLI and SDK order. ``resolve_s3_config`` folds an exported
+    ``AWS_PROFILE`` into the scope, so the secret has to tell it apart from
+    ``--aws-profile`` or the ``profile=`` argument.
+    """
+
+    @staticmethod
+    def _signer(endpoint, seen, *, aws_profile=None):
+        from geoparquet_io.core.remote import resolve_s3_config
+
+        config = resolve_s3_config(s3_endpoint=f"http://{endpoint}", aws_profile=aws_profile)
+        with s3_config_scope(config):
+            con = duckdb_utils.get_duckdb_connection(
+                load_spatial=False, load_httpfs=True, use_s3_auth=True
+            )
+        try:
+            _read_s3(con)
+        finally:
+            con.close()
+        assert seen, "the read never reached the fake endpoint"
+        return seen[0]["authorization"]
+
+    @staticmethod
+    def _env_keys(monkeypatch):
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", _FAKE_ENV_KEY)
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fakesecret")
+
+    def test_env_keys_beat_an_exported_profile(self, fake_s3_endpoint, monkeypatch):
+        endpoint, seen = fake_s3_endpoint
+        self._env_keys(monkeypatch)
+        monkeypatch.setenv("AWS_PROFILE", "fakep")
+        assert f"Credential={_FAKE_ENV_KEY}/" in self._signer(endpoint, seen)
+
+    def test_explicit_profile_beats_env_keys(self, fake_s3_endpoint, monkeypatch):
+        endpoint, seen = fake_s3_endpoint
+        self._env_keys(monkeypatch)
+        auth = self._signer(endpoint, seen, aws_profile="fakep")
+        assert f"Credential={_FAKE_STATIC_KEY}/" in auth
+
+    def test_explicit_profile_beats_env_keys_and_an_exported_profile(
+        self, fake_s3_endpoint, monkeypatch
+    ):
+        endpoint, seen = fake_s3_endpoint
+        self._env_keys(monkeypatch)
+        monkeypatch.setenv("AWS_PROFILE", "missing")
+        auth = self._signer(endpoint, seen, aws_profile="fakep")
+        assert f"Credential={_FAKE_STATIC_KEY}/" in auth
+
+    def test_exported_profile_alone_still_signs(self, fake_s3_endpoint, monkeypatch):
+        endpoint, seen = fake_s3_endpoint
+        monkeypatch.setenv("AWS_PROFILE", "fakep")
+        assert f"Credential={_FAKE_STATIC_KEY}/" in self._signer(endpoint, seen)
+
+    def test_exported_profile_alone_builds_no_secret_like_main(self, monkeypatch):
+        """Without use_s3_auth an exported AWS_PROFILE is left to the SDK, as on main."""
+        from geoparquet_io.core.remote import resolve_s3_config
+
+        monkeypatch.setenv("AWS_PROFILE", "fakep")
+        with s3_config_scope(resolve_s3_config()):
+            con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
+        try:
+            assert con.execute("SELECT count(*) FROM duckdb_secrets()").fetchone()[0] == 0
+        finally:
+            con.close()
+
+
+def test_resolve_s3_config_marks_an_exported_profile(monkeypatch):
+    from geoparquet_io.core.remote import resolve_s3_config
+
+    monkeypatch.setenv("AWS_PROFILE", "outer")
+    assert resolve_s3_config()["profile_from_env"] is True
+    assert resolve_s3_config(aws_profile="p")["profile_from_env"] is False
+
+
+def test_decorator_profile_counts_as_explicit_inside_an_exported_profile_scope(monkeypatch):
+    """``profile=`` on a decorated call is explicit even inside a scope built from env."""
+    from geoparquet_io.core.remote import resolve_s3_config
+
+    monkeypatch.setenv("AWS_PROFILE", "outer")
+
+    @uses_aws_profile
+    def probe(path, profile=None):
+        return duckdb_utils._resolve_s3_settings(None, None, None)["profile"]
+
+    with s3_config_scope(resolve_s3_config()):
+        assert duckdb_utils._resolve_s3_settings(None, None, None)["profile"] is None
+        assert probe("s3://b/k.parquet", profile="inner") == "inner"

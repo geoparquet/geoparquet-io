@@ -131,6 +131,10 @@ def resolve_s3_config(
     1. Explicit params
     2. AWS env vars (AWS_ENDPOINT_URL, AWS_REGION/AWS_DEFAULT_REGION, AWS_PROFILE)
     3. Defaults (no endpoint, no region, SSL on, no profile)
+
+    ``profile_from_env`` is True when the profile is only the exported
+    ``AWS_PROFILE``. The AWS SDK lets env keys beat an exported ``AWS_PROFILE``
+    but not ``--profile``, so the DuckDB secret needs to know which one it got.
     """
     endpoint = s3_endpoint or os.environ.get("AWS_ENDPOINT_URL") or None
     region = s3_region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
@@ -153,6 +157,7 @@ def resolve_s3_config(
         "s3_region": region,
         "s3_use_ssl": use_ssl,
         "profile": profile,
+        "profile_from_env": bool(profile) and not aws_profile,
     }
 
 
