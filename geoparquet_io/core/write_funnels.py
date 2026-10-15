@@ -182,6 +182,7 @@ def _apply_nonplanar_edges(
     compression_level: int | None = None,
     row_group_rows: int | None = None,
     verbose: bool = False,
+    pending_geo: dict | None = None,
 ) -> None:
     """Restate non-planar edges in an output's geo block *and* its logical types.
 
@@ -202,16 +203,23 @@ def _apply_nonplanar_edges(
     the same WKB either way, so nothing below the footer is re-encoded. The
     block-only rewrite this replaced cost a full pass and lost the compression
     level; it stays as the fallback for a footer that cannot be read.
+
+    ``pending_geo`` is the ``geo`` block the V2 M/ZM repair deferred to this
+    patch (#1270): the block the output needs but does not yet carry, taken in
+    place of the file's own and written whether or not the edges change it, so
+    the repair and the retype cost one below-the-footer copy instead of two.
     """
-    if not edges_by_col:
+    if not edges_by_col and pending_geo is None:
         return
 
-    geo_meta = _read_geo_key(output_file)
+    geo_meta = pending_geo if pending_geo is not None else _read_geo_key(output_file)
     geo_version = str((geo_meta or {}).get("version") or "")
     edges_by_col = {
         name: _edges_for_output_version(edges, geo_version) for name, edges in edges_by_col.items()
     }
     geo_updates = _geo_block_with_edges(geo_meta, edges_by_col)
+    if pending_geo is not None and not geo_updates:
+        geo_updates = {"geo": json.dumps(geo_meta)}
     geography = _geography_candidates(output_file, edges_by_col)
 
     try:
@@ -306,7 +314,8 @@ def _ensure_v2_geo_metadata(
     row_group_rows: int | None = None,
     verbose: bool = False,
     primary_column: str | None = None,
-) -> None:
+    defer: bool = False,
+) -> dict | None:
     """Attach GeoParquet 2.0 geo metadata if the writer omitted it (#589).
 
     DuckDB 1.5.4's V2 writer skips the geo KV metadata for M/ZM geometries;
@@ -328,10 +337,19 @@ def _ensure_v2_geo_metadata(
     This lives here rather than beside the derivation because
     ``derive_geo_from_file`` sits below ``parquet_footer`` in the import
     layering; the funnel is the only caller either way.
+
+    With ``defer`` the derived block is returned instead of patched: an edges
+    patch is about to rewrite the same footer, and folding the key into that
+    one ``patch_footer`` call halves the post-write I/O (#1270). Returns the
+    pending block then, ``None`` otherwise.
     """
     geo_meta = derive_v2_geo_metadata(output_path, primary_column=primary_column)
     if geo_meta is None:
-        return
+        return None
+    if defer:
+        if verbose:
+            debug("Deferring the omitted geo metadata to the edges footer patch")
+        return geo_meta
 
     try:
         patch_footer_kv(output_path, {"geo": json.dumps(geo_meta)}, verbose=verbose)
@@ -351,6 +369,7 @@ def _ensure_v2_geo_metadata(
         debug(
             f"Wrote the geo metadata the writer omitted or mislabelled: {geo_meta['primary_column']!r} is primary"
         )
+    return None
 
 
 def _plain_copy_to(
@@ -367,7 +386,8 @@ def _plain_copy_to(
     carry_geo_metadata: dict | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
-) -> None:
+    defer_v2_geo_repair: bool = False,
+) -> dict | None:
     """
     Execute a plain DuckDB COPY TO without geo metadata manipulation.
 
@@ -404,6 +424,14 @@ def _plain_copy_to(
             None means a default with headroom under the machine's memory
             ceiling -- never DuckDB's own 80%, which the allocations DuckDB
             makes outside its limit carry past a cgroup cap (#1153).
+        defer_v2_geo_repair: Hand the V2 geo repair's block back to the caller
+            instead of patching it here, because the caller is about to patch
+            the same footer for non-planar edges and one ``patch_footer`` call
+            can carry both (#1270).
+
+    Returns:
+        The repair's pending ``geo`` block when ``defer_v2_geo_repair`` asked
+        for it and the output needs one; ``None`` otherwise.
     """
     compression_map = {
         "zstd": "ZSTD",
@@ -465,14 +493,16 @@ def _plain_copy_to(
     # silently degrades to parquet-geo-only, so repair it from the file's own
     # native geospatial statistics (#589). When it does write the block, it
     # names the first geometry column primary, which the same repair corrects.
+    pending_v2_geo = None
     if duckdb_version == "V2":
-        _ensure_v2_geo_metadata(
+        pending_v2_geo = _ensure_v2_geo_metadata(
             output_path,
             compression=duckdb_compression,
             compression_level=compression_level,
             row_group_rows=row_group_rows,
             verbose=verbose,
             primary_column=geometry_column,
+            defer=defer_v2_geo_repair,
         )
 
     if verbose:
@@ -483,6 +513,7 @@ def _plain_copy_to(
         # `Could not move file: Access is denied` (#1023, #1032).
         with pq.ParquetFile(output_path) as pf:
             success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
+    return pending_v2_geo
 
 
 def _custom_covering_survives(covering, original_metadata, geometry_column, output_columns) -> bool:
@@ -1217,6 +1248,14 @@ def write_parquet_with_metadata(
     if extra_kv_metadata and verbose:
         debug(f"Carrying extra KV metadata: {list(extra_kv_metadata.keys())}")
 
+    # Which columns' non-planar edges this write must restore afterwards (#588).
+    # Asked before the write so the fast path can fold the V2 M/ZM geo repair
+    # into the edges footer patch when both are coming (#1270); the answer only
+    # reads the input, which the write does not change.
+    edges_to_restore = _edges_to_restore(
+        input_file, original_metadata, exclude_columns=drop_nonplanar_edges_columns
+    )
+
     if show_sql:
         info("\n-- Query:")
         progress(query)
@@ -1239,7 +1278,7 @@ def write_parquet_with_metadata(
             # that is certain, rather than let the footer be the first to tell
             # the user (#986).
             note_duckdb_copy_rounding(row_group_rows)
-            _plain_copy_to(
+            pending_v2_geo = _plain_copy_to(
                 con=con,
                 query=query,
                 output_path=actual_output,
@@ -1253,8 +1292,12 @@ def write_parquet_with_metadata(
                 carry_geo_metadata=carried_geo_block,
                 extra_kv_metadata=extra_kv_metadata,
                 memory_limit=memory_limit,
+                # An edges patch is coming: one patch_footer call carries the
+                # M/ZM geo repair and the retype together (#1270).
+                defer_v2_geo_repair=bool(edges_to_restore),
             )
         else:
+            pending_v2_geo = None
             # Metadata rewrite needed - use strategy pattern
 
             # 1.1-geoarrow produces native GeoArrow encoding from WKB/text inputs,
@@ -1334,16 +1377,17 @@ def write_parquet_with_metadata(
         # regenerates geo metadata without `edges`, silently demoting geography
         # data to planar. Runs on the local temp file, so remote outputs are
         # patched before upload. Columns whose declaration this write
-        # invalidated (#601) are excluded rather than re-attached.
-        _preserve_edges_after_write(
-            input_file,
-            original_metadata,
+        # invalidated (#601) were excluded at collection rather than
+        # re-attached. The fast path's deferred V2 geo repair rides along, so
+        # both edits cost one footer patch (#1270).
+        _apply_nonplanar_edges(
+            edges_to_restore,
             actual_output,
             compression=compression,
             compression_level=compression_level,
             row_group_rows=row_group_rows,
             verbose=verbose,
-            exclude_columns=drop_nonplanar_edges_columns,
+            pending_geo=pending_v2_geo,
         )
 
         # Auto-fix vecorel schema compliance when collection metadata is present
@@ -1360,37 +1404,28 @@ def write_parquet_with_metadata(
             )
 
 
-def _preserve_edges_after_write(
+def _edges_to_restore(
     input_file: str | None,
     original_metadata: dict | None,
-    output_path: str,
-    compression: str = "ZSTD",
-    compression_level: int | None = None,
-    row_group_rows: int | None = None,
-    verbose: bool = False,
     exclude_columns: Collection[str] | None = None,
-) -> None:
-    """Restore non-planar edges dropped by the writer, on any rewrite path.
+) -> dict[str, str]:
+    """The non-planar edges the writer will drop and the write must restore.
 
     Prefers the input file (sees native GEOGRAPHY logical types as well as geo
     metadata); falls back to the input's KV metadata dict when only that is
     available (e.g. an Arrow stream read from stdin). ``exclude_columns`` names
     columns whose declaration the write itself invalidated (#601): the input
     still declares them, but they must not come back.
+
+    Collection only; :func:`_apply_nonplanar_edges` writes the answer back
+    after the write, on any rewrite path.
     """
     edges_by_col = collect_nonplanar_edges(input_file) if input_file else {}
     if not edges_by_col:
         edges_by_col = _collect_nonplanar_edges_from_metadata(original_metadata)
     if exclude_columns:
         edges_by_col = {k: v for k, v in edges_by_col.items() if k not in exclude_columns}
-    _apply_nonplanar_edges(
-        edges_by_col,
-        output_path,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_rows=row_group_rows,
-        verbose=verbose,
-    )
+    return edges_by_col
 
 
 def _auto_fix_vecorel_if_needed(
