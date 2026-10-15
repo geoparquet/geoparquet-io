@@ -7,7 +7,11 @@ import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_usable_columns
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
+    quote_identifier,
+    uses_aws_profile,
+)
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, is_partition_path
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
@@ -17,7 +21,6 @@ from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
     needs_httpfs,
-    setup_aws_profile_if_needed,
     show_remote_read_message,
     validate_profile_for_urls,
 )
@@ -102,6 +105,7 @@ def _sortable_columns(input_parquet: str, read_expr: str, allow_schema_diff: boo
         con.close()
 
 
+@uses_aws_profile
 def sort_by_column(
     input_parquet: str,
     output_parquet: str | None = None,
@@ -185,9 +189,6 @@ def sort_by_column(
 
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_parquet, output_parquet)
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
 
     # Show remote read message
     show_remote_read_message(input_parquet, verbose)

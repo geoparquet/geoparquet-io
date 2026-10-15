@@ -33,6 +33,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import (
     GeometryError,
@@ -64,7 +65,6 @@ from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
     needs_httpfs,
-    setup_aws_profile_if_needed,
     show_remote_read_message,
     validate_profile_for_urls,
 )
@@ -2355,6 +2355,7 @@ def _convert_spatial_path(
     return query, geom_info, bbox_covering_column, order_by
 
 
+@uses_aws_profile
 def read_spatial_to_arrow(
     input_file,
     *,
@@ -2428,9 +2429,6 @@ def read_spatial_to_arrow(
 
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_file)
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_file)
 
     # Show progress for remote files
     show_remote_read_message(input_file, verbose=False)
@@ -3128,6 +3126,7 @@ def _report_conversion_results(output_file: str, start_time: float, is_geo: bool
         )
 
 
+@uses_aws_profile
 def convert_to_geoparquet(
     input_file,
     output_file,
@@ -3219,7 +3218,6 @@ def convert_to_geoparquet(
     start_time = time.time()
 
     validate_profile_for_urls(profile, input_file, output_file)
-    setup_aws_profile_if_needed(profile, input_file, output_file)
     show_remote_read_message(input_file, verbose=False)
     input_url = resolve_file_url(input_file, verbose)
     validate_output_path(output_file, verbose)

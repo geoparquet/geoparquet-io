@@ -192,8 +192,7 @@ def _isolate_package_logging(pytestconfig):
 #
 # Four more pieces of module-level state have a reset of their own but no
 # ``cache_clear``, so the walk cannot see them; ``_reset_module_state`` names
-# them. Not reset: the ``AWS_PROFILE`` that ``remote.setup_aws_profile_if_needed``
-# writes into ``os.environ`` -- a developer's real environment may carry one.
+# them.
 #
 # Scope: autouse fixtures in this file apply to ``tests/`` only. The
 # ``docs/guide`` example lane runs each fenced example in a subprocess, so an

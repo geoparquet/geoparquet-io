@@ -35,6 +35,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
@@ -48,7 +49,6 @@ from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.remote import (
     needs_httpfs,
     remote_write_context,
-    setup_aws_profile_if_needed,
     upload_if_remote,
     validate_profile_for_urls,
 )
@@ -472,6 +472,7 @@ def _resolve_null_crs_input(
     return raw_path, None
 
 
+@uses_aws_profile
 def reproject_impl(
     input_parquet: str,
     output_parquet: str | None = None,
@@ -527,9 +528,6 @@ def reproject_impl(
 
     # Validate profile usage
     validate_profile_for_urls(profile, input_parquet, output_parquet)
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
 
     # Resolve an explicit null CRS before DuckDB reads the file: raise a friendly
     # error without --assume-crs84, or sanitize to a temp copy with it. Pass the

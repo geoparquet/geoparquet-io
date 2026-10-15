@@ -6,6 +6,8 @@ with appropriate extensions loaded for GeoParquet operations.
 """
 
 import datetime
+import functools
+import inspect
 import itertools
 import os
 import re
@@ -13,9 +15,10 @@ import shutil
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Any, TypeVar
 
 import duckdb
 
@@ -49,6 +52,49 @@ def s3_config_scope(s3_config: dict):
         yield
     finally:
         _active_s3_config.reset(token)
+
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def uses_aws_profile(func: _F) -> _F:
+    """Run ``func`` with its ``profile`` argument as the ambient AWS profile.
+
+    The profile goes into :func:`s3_config_scope`, which DuckDB's
+    ``credential_chain`` secret and the obstore store read explicitly. Nothing is
+    written to ``os.environ``, so a call with ``profile="prod"`` cannot change
+    the credentials of a later call (#1055). A ``None`` profile leaves any outer
+    scope as it is.
+    """
+    signature = inspect.signature(func)
+    if "profile" not in signature.parameters:
+        raise TypeError(f"{func.__qualname__} has no 'profile' parameter")
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        profile = signature.bind_partial(*args, **kwargs).arguments.get("profile")
+        if not profile:
+            return func(*args, **kwargs)
+        with s3_config_scope({"profile": profile}):
+            return func(*args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
+
+
+def _credential_chain_secret_sql(profile: str | None) -> str:
+    """The ``CREATE SECRET`` statement for the AWS credential chain.
+
+    A named profile is passed as the secret's ``PROFILE`` so DuckDB never has to
+    find it in ``AWS_PROFILE``.
+    """
+    profile_clause = f",\n    PROFILE '{_escape_sql_string(profile)}'" if profile else ""
+    return (
+        "CREATE OR REPLACE SECRET (\n"
+        "    TYPE s3,\n"
+        "    PROVIDER credential_chain,\n"
+        f"    VALIDATION 'none'{profile_clause}\n"
+        ");"
+    )
 
 
 def get_active_s3_config() -> dict:
@@ -1274,13 +1320,8 @@ def get_duckdb_connection(
         # Public buckets work without any secret - DuckDB handles them automatically
         if use_s3_auth:
             _install_and_load_extension(con, "aws")
-            con.execute("""
-                CREATE OR REPLACE SECRET (
-                    TYPE s3,
-                    PROVIDER credential_chain,
-                    VALIDATION 'none'
-                );
-            """)
+            ambient_profile = (_active_s3_config.get() or {}).get("profile")
+            con.execute(_credential_chain_secret_sql(ambient_profile))
 
     # Apply S3 config: explicit kwargs override ambient config
     ambient = _active_s3_config.get() or {}

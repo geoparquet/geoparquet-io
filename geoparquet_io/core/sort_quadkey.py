@@ -13,7 +13,12 @@ from geoparquet_io.core.add.quadkey import add_quadkey_column, add_quadkey_table
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME, DEFAULT_QUADKEY_RESOLUTION
 from geoparquet_io.core.duckdb_metadata import get_column_names, get_usable_columns
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
+    quote_identifier,
+    sql_path,
+    uses_aws_profile,
+)
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.file_utils import (
     handle_output_overwrite,
@@ -29,7 +34,6 @@ from geoparquet_io.core.partition.reader import (
 )
 from geoparquet_io.core.remote import (
     needs_httpfs,
-    setup_aws_profile_if_needed,
     validate_profile_for_urls,
 )
 from geoparquet_io.core.sort_by_column import _sortable_columns
@@ -95,6 +99,7 @@ def sort_by_quadkey_table(
         con.close()
 
 
+@uses_aws_profile
 def sort_by_quadkey(
     input_parquet: str,
     output_parquet: str | None = None,
@@ -176,9 +181,6 @@ def sort_by_quadkey(
 
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_parquet, output_parquet)
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
 
     # A directory has to become the glob over its files before anything reads
     # it (#817). `input_parquet` itself stays raw: it is what messages quote and

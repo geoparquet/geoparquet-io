@@ -21,6 +21,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
@@ -40,7 +41,6 @@ from geoparquet_io.core.remote import (
     _sanitize_url_for_logging,
     is_remote_url,
     needs_httpfs,
-    setup_aws_profile_if_needed,
     validate_profile_for_urls,
 )
 from geoparquet_io.core.stream_io import open_input, write_output
@@ -541,6 +541,7 @@ def _quadkey_from_clause(path: str, allow_schema_diff: bool, hive_input: bool | 
     return f"read_parquet({sql_path(path)}, {', '.join(options)})"
 
 
+@uses_aws_profile
 def _add_quadkey_file_based(
     input_parquet: str,
     output_parquet: str | None,
@@ -572,9 +573,6 @@ def _add_quadkey_file_based(
 
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_parquet, output_parquet)
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
 
     # RAW path: shown to the user in the dry-run header below, and escaped at
     # the SQL boundary by sql_path (#802).

@@ -336,11 +336,7 @@ def read_partition(
         s3_config_scope,
     )
     from geoparquet_io.core.partition.reader import build_read_parquet_expr
-    from geoparquet_io.core.remote import (
-        needs_httpfs,
-        resolve_s3_config,
-        setup_aws_profile_if_needed,
-    )
+    from geoparquet_io.core.remote import needs_httpfs, resolve_s3_config
     from geoparquet_io.core.streaming import find_geometry_column_from_table
 
     s3_config = resolve_s3_config(
@@ -349,9 +345,6 @@ def read_partition(
         s3_no_ssl=not s3_use_ssl,
         aws_profile=aws_profile,
     )
-    if s3_config["profile"]:
-        setup_aws_profile_if_needed(s3_config["profile"], str(path))
-
     path_str = str(path)
     expr = build_read_parquet_expr(
         path_str,

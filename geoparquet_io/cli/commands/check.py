@@ -1586,14 +1586,11 @@ def check_stac_cmd(ctx, stac_file, verbose, strict):
       gpio check stac output.json
     """
     with _activate_s3(ctx):
-        from geoparquet_io.core.remote import setup_aws_profile_if_needed, validate_profile_for_urls
+        from geoparquet_io.core.remote import validate_profile_for_urls
         from geoparquet_io.core.stac_check import check_stac
 
         # Validate profile is only used with S3
         validate_profile_for_urls(None, stac_file)
-
-        # Setup AWS profile if needed
-        setup_aws_profile_if_needed(None, stac_file)
 
         exit_for_verdict(check_stac(stac_file, verbose), strict=strict)
 
@@ -1668,10 +1665,7 @@ def check_spec(
       # Skip data validation for faster check
       gpio check spec data.parquet --skip-data-validation
     """
-    from geoparquet_io.core.remote import (
-        setup_aws_profile_if_needed,
-        validate_profile_for_urls,
-    )
+    from geoparquet_io.core.remote import validate_profile_for_urls
     from geoparquet_io.core.validate import (
         format_json_output as format_json,
     )
@@ -1687,7 +1681,6 @@ def check_spec(
     with _activate_s3(ctx):
         # Validate profile is only used with S3
         validate_profile_for_urls(None, parquet_file)
-        setup_aws_profile_if_needed(None, parquet_file)
         refuse_no_parquet_match(parquet_file)
 
         result = validate_geoparquet(

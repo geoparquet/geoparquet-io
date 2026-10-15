@@ -19,6 +19,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
@@ -43,7 +44,6 @@ from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
     needs_httpfs,
-    setup_aws_profile_if_needed,
 )
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
@@ -196,6 +196,7 @@ def _rewrite_through_staging(
             con.close()
 
 
+@uses_aws_profile
 def fix_compression(
     parquet_file, output_file, verbose=False, profile=None, geoparquet_version=None
 ):
@@ -213,9 +214,6 @@ def fix_compression(
     """
     if verbose:
         debug("Applying ZSTD compression...")
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, parquet_file, output_file)
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
@@ -266,6 +264,7 @@ def _supply_or_strip_bbox_member(parquet_file, geo_meta, verbose):
     return strip_bboxless_covering(geo_meta, verbose), None
 
 
+@uses_aws_profile
 def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None):
     """Repair a ``covering`` that carries no ``bbox`` member.
 
@@ -355,7 +354,6 @@ def fix_bboxless_covering(parquet_file, output_file, verbose=False, profile=None
         except FooterPatchUnsupported as exc:
             warn(f"{exc}. Falling back to a rewrite, which re-encodes the data.")
 
-    setup_aws_profile_if_needed(profile, parquet_file, output_file)
     raw_url = resolve_file_url(parquet_file, verbose)
     # `original_metadata` rather than the repaired block: the funnels own what
     # reaches the `geo` key, and they re-derive the identical answer from the
@@ -430,6 +428,7 @@ def fix_bbox_metadata(parquet_file, output_file, verbose=False, profile=None):
     return {"fix_applied": "Added bbox covering metadata", "success": True}
 
 
+@uses_aws_profile
 def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False, profile=None):
     """Remove bbox column from a file.
 
@@ -448,9 +447,6 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
     """
     # Always inform user when removing bbox column
     info(f"Removing bbox column '{bbox_column_name}' (not needed for native geo types)")
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, parquet_file, output_file)
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
@@ -580,6 +576,7 @@ def _staging_path_beside(output_file):
     return temp_path
 
 
+@uses_aws_profile
 def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geoparquet_version=None):
     """Rewrite with optimal row group size.
 
@@ -595,9 +592,6 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
     """
     if verbose:
         debug("Optimizing row groups...")
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, parquet_file, output_file)
 
     raw_url = resolve_file_url(parquet_file, verbose)
 

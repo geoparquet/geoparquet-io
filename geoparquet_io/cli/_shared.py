@@ -20,7 +20,6 @@ Only helpers used by more than one command group belong here. A helper used by a
 single group travels with that group into ``cli/commands/<group>.py``.
 """
 
-import os
 from contextlib import contextmanager
 
 import click
@@ -49,7 +48,8 @@ def init_group_context(ctx: click.Context) -> None:
 def _activate_s3(ctx, aws_profile=None, s3_endpoint=None, s3_region=None, s3_no_ssl=False):
     """Resolve and activate S3 config from ctx + per-command overrides.
 
-    Properly saves/restores AWS_PROFILE env var to avoid credential leaks.
+    The profile travels in the ambient S3 config, never in ``os.environ``, so
+    DuckDB and obstore read it explicitly and nothing leaks past the scope (#1055).
 
     ``ctx.obj`` is primed here rather than relied upon. The root ``gpio`` group
     fills it, so every real CLI path already arrives with a dict -- but a group
@@ -69,17 +69,8 @@ def _activate_s3(ctx, aws_profile=None, s3_endpoint=None, s3_region=None, s3_no_
         s3_no_ssl=s3_no_ssl or ctx.obj.get("s3_no_ssl", False),
         aws_profile=aws_profile or ctx.obj.get("aws_profile"),
     )
-    previous_profile = os.environ.get("AWS_PROFILE")
-    try:
-        if config["profile"]:
-            os.environ["AWS_PROFILE"] = config["profile"]
-        with s3_config_scope(config):
-            yield config
-    finally:
-        if previous_profile is None:
-            os.environ.pop("AWS_PROFILE", None)
-        else:
-            os.environ["AWS_PROFILE"] = previous_profile
+    with s3_config_scope(config):
+        yield config
 
 
 def prepare_output(

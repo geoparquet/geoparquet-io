@@ -26,6 +26,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
@@ -39,7 +40,6 @@ from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import (
     is_remote_url,
     needs_httpfs,
-    setup_aws_profile_if_needed,
     validate_profile_for_urls,
 )
 from geoparquet_io.core.sizing import format_size
@@ -148,6 +148,7 @@ def _get_srs_parameter(input_path: str, verbose: bool = False) -> str | None:
     return json.dumps(crs)
 
 
+@uses_aws_profile
 def write_gdal_format(
     input_path: str,
     output_path: str,
@@ -205,7 +206,6 @@ def write_gdal_format(
         )
 
     validate_profile_for_urls(profile, input_path)
-    setup_aws_profile_if_needed(profile, input_path)
 
     # Check if output exists
     from pathlib import Path
@@ -323,6 +323,7 @@ def write_gdal_format(
         con.close()
 
 
+@uses_aws_profile
 def write_csv(
     input_path: str,
     output_path: str,
@@ -368,7 +369,6 @@ def write_csv(
         raise GeoParquetError(ERROR_FILE_EXISTS.format(format="CSV", path=output_path))
 
     validate_profile_for_urls(profile, input_path)
-    setup_aws_profile_if_needed(profile, input_path)
     validate_output_path(output_path, verbose)
 
     progress(f"Converting to CSV: {output_path}")
@@ -444,6 +444,7 @@ def write_csv(
         con.close()
 
 
+@uses_aws_profile
 def write_geojson(
     input_path: str,
     output_path: str,
@@ -502,7 +503,6 @@ def write_geojson(
         raise GeoParquetError(ERROR_FILE_EXISTS.format(format="GeoJSON", path=output_path))
 
     validate_profile_for_urls(profile, input_path)
-    setup_aws_profile_if_needed(profile, input_path)
 
     # "-" is an Arrow IPC stream on stdin, not a path: there is nothing to
     # resolve or probe, and the stream can only be consumed once. Skip the

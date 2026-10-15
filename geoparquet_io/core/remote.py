@@ -119,34 +119,6 @@ def needs_httpfs(path):
     return any(path.startswith(scheme) for scheme in httpfs_schemes)
 
 
-def setup_aws_profile_if_needed(profile, *paths):
-    """
-    Set AWS_PROFILE environment variable if profile specified and S3 URLs detected.
-
-    This allows both DuckDB (via credential_chain) and obstore to use the specified
-    AWS profile for authentication. The profile is resolved using standard AWS SDK
-    mechanisms (reads from ~/.aws/credentials, ~/.aws/config, etc.).
-
-    Note: This is a convenience wrapper. Setting AWS_PROFILE env var directly
-    has the same effect.
-
-    Args:
-        profile: AWS profile name or None
-        *paths: Variable number of file paths to check for S3 URLs
-
-    Example:
-        setup_aws_profile_if_needed(profile, input_file, output_file)
-        # Equivalent to: os.environ['AWS_PROFILE'] = profile
-    """
-    if not profile:
-        return
-
-    # Check if any path is S3
-    has_s3 = any(p and is_s3_url(p) for p in paths)
-    if has_s3:
-        os.environ["AWS_PROFILE"] = profile
-
-
 def resolve_s3_config(
     s3_endpoint: str | None = None,
     s3_region: str | None = None,

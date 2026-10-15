@@ -529,13 +529,10 @@ def add_bbox_metadata_cmd(ctx, parquet_file, bbox_name, verbose):
     If you need to add both the bbox column and metadata, use 'add bbox' instead.
     """
     with _activate_s3(ctx):
-        from geoparquet_io.core.remote import setup_aws_profile_if_needed, validate_profile_for_urls
+        from geoparquet_io.core.remote import validate_profile_for_urls
 
         # Validate profile is only used with S3
         validate_profile_for_urls(None, parquet_file)
-
-        # Setup AWS profile if needed
-        setup_aws_profile_if_needed(None, parquet_file)
 
         add_bbox_metadata_impl(parquet_file, verbose, bbox_column=bbox_name)
 

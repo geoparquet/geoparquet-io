@@ -12,6 +12,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -29,7 +30,6 @@ from geoparquet_io.core.partition.staging import (
 from geoparquet_io.core.remote import (
     needs_httpfs,
     remote_write_context,
-    setup_aws_profile_if_needed,
     show_remote_read_message,
     upload_if_remote,
 )
@@ -760,6 +760,7 @@ def _determine_output_path(
     return output_filename
 
 
+@uses_aws_profile
 def partition_by_column(
     input_parquet: str,
     output_folder: str,
@@ -823,9 +824,6 @@ def partition_by_column(
     # Stop before touching the output: nothing to partition means nothing to
     # write, and --skip-analysis/--force must not get past this either (#823).
     raise_if_no_rows(input_parquet)
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_parquet, output_folder)
 
     # Show remote read message
     show_remote_read_message(input_parquet, verbose)

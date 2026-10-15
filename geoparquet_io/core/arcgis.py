@@ -30,7 +30,7 @@ from geoparquet_io.core.crs_utils import (
     parse_crs_string_to_projjson,
     projjson_from_wkt,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path, uses_aws_profile
 from geoparquet_io.core.exceptions import (
     BatchTooLargeError,
     GeoParquetError,
@@ -47,7 +47,6 @@ from geoparquet_io.core.http_retry import (
     make_request_with_retry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
-from geoparquet_io.core.remote import setup_aws_profile_if_needed
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 # ArcGIS Online token endpoint
@@ -1814,6 +1813,7 @@ def arcgis_to_table(
                 debug(f"Could not remove temp file {temp_parquet}")
 
 
+@uses_aws_profile
 def convert_arcgis_to_geoparquet(
     service_url: str,
     output_file: str,
@@ -1888,9 +1888,6 @@ def convert_arcgis_to_geoparquet(
             serialize.
     """
     configure_verbose(verbose)
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, output_file)
 
     # Check if output file exists and overwrite is False
     if not overwrite and Path(output_file).exists():

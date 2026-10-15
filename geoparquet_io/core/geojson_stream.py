@@ -41,12 +41,17 @@ from geoparquet_io.core.crs_utils import (
     transform_source_label,
     warn_null_crs_once,
 )
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    _escape_sql_string,
+    quote_identifier,
+    sql_path,
+    uses_aws_profile,
+)
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
 from geoparquet_io.core.geometry_repair import repair_geometry_sql
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
-from geoparquet_io.core.remote import needs_httpfs, setup_aws_profile_if_needed
+from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.stream_io import _create_view_with_geometry
 from geoparquet_io.core.streaming import is_stdin
 
@@ -479,6 +484,7 @@ def _find_geometry_column(
     )
 
 
+@uses_aws_profile
 def convert_to_geojson_stream(
     input_path: str,
     output_path: str | None = None,
@@ -541,9 +547,6 @@ def convert_to_geojson_stream(
             keep_crs=keep_crs,
             repair_geometry=repair_geometry,
         )
-
-    # Setup AWS profile if needed
-    setup_aws_profile_if_needed(profile, input_path)
 
     # Get safe URL for input
     input_url = resolve_file_url(input_path, verbose)

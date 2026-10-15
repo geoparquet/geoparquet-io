@@ -6,7 +6,7 @@ including summary, preview (head/tail), statistics, and metadata operations.
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_compression_stats, get_usable_columns
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, uses_aws_profile
 from geoparquet_io.core.geo_metadata import parse_geo_metadata
 from geoparquet_io.core.inspect_utils import (
     extract_file_info,
@@ -31,7 +31,6 @@ from geoparquet_io.core.metadata_utils import (
 from geoparquet_io.core.partition.reader import get_partition_info
 from geoparquet_io.core.remote import (
     needs_httpfs,
-    setup_aws_profile_if_needed,
     validate_profile_for_urls,
 )
 
@@ -70,6 +69,7 @@ def _build_columns_info(usable_columns: list[dict], primary_geom_col: str | None
     ]
 
 
+@uses_aws_profile
 def inspect_summary(
     parquet_file: str,
     check_all_files: bool = False,
@@ -87,7 +87,6 @@ def inspect_summary(
     """
 
     validate_profile_for_urls(profile, parquet_file)
-    setup_aws_profile_if_needed(profile, parquet_file)
 
     partition_info = get_partition_info(parquet_file, verbose=False)
 
@@ -190,6 +189,7 @@ def format_summary_output(
         return None
 
 
+@uses_aws_profile
 def inspect_preview(
     parquet_file: str,
     count: int = 10,
@@ -209,7 +209,6 @@ def inspect_preview(
     """
 
     validate_profile_for_urls(profile, parquet_file)
-    setup_aws_profile_if_needed(profile, parquet_file)
 
     partition_info = get_partition_info(parquet_file, verbose=False)
     file_to_inspect = parquet_file
@@ -295,6 +294,7 @@ def format_preview_output(
         return None
 
 
+@uses_aws_profile
 def inspect_stats(
     parquet_file: str,
     profile: str | None = None,
@@ -310,7 +310,6 @@ def inspect_stats(
     """
 
     validate_profile_for_urls(profile, parquet_file)
-    setup_aws_profile_if_needed(profile, parquet_file)
 
     partition_info = get_partition_info(parquet_file, verbose=False)
     file_to_inspect = parquet_file

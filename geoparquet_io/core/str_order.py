@@ -11,7 +11,12 @@ import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
+    quote_identifier,
+    sql_path,
+    uses_aws_profile,
+)
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import parse_geo_metadata
@@ -41,7 +46,6 @@ from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
     needs_httpfs,
-    setup_aws_profile_if_needed,
     show_remote_read_message,
     validate_profile_for_urls,
 )
@@ -387,6 +391,7 @@ def _str_order_streaming(
                 success(f"Wrote data without STR ordering to: {output_path}")
 
 
+@uses_aws_profile
 def _str_order_file_based(
     input_parquet: str,
     output_parquet: str | None,
@@ -409,7 +414,6 @@ def _str_order_file_based(
         input_parquet, add_bbox_flag, verbose
     )
     validate_profile_for_urls(profile, input_parquet, output_parquet)
-    setup_aws_profile_if_needed(profile, input_parquet, output_parquet)
     show_remote_read_message(working_parquet, verbose)
 
     source = sql_path(resolve_file_url(working_parquet, verbose))

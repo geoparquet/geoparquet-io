@@ -17,13 +17,14 @@ from geoparquet_io.core.duckdb_utils import (
     load_community_extension,
     quote_identifier,
     sql_path,
+    uses_aws_profile,
     validate_where_clause,
     where_sql_fragment,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
 from geoparquet_io.core.logging_config import debug, info, warn
-from geoparquet_io.core.remote import needs_httpfs, setup_aws_profile_if_needed
+from geoparquet_io.core.remote import needs_httpfs
 
 # Tuning for the extent-aware probe (issue #524). Sampling a multiple of the
 # target partition count keeps cells near the target resolution well-populated,
@@ -62,6 +63,7 @@ def _count_query(url: str, where: str | None) -> str:
     )
 
 
+@uses_aws_profile
 def _get_total_row_count(
     input_parquet: str,
     verbose: bool = False,
@@ -88,10 +90,6 @@ def _get_total_row_count(
     con = None
     try:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-
-        # Setup S3 authentication if profile specified
-        if profile:
-            setup_aws_profile_if_needed(profile, input_parquet)
 
         result = con.execute(_count_query(input_url, where)).fetchone()
         return result[0] if result else 0
@@ -452,6 +450,7 @@ def _select_closest_resolution(
     return best_res
 
 
+@uses_aws_profile
 def _probe_extent_resolution(
     input_parquet: str,
     spatial_index_type: str,
@@ -479,8 +478,6 @@ def _probe_extent_resolution(
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
         # Ensure ST_Transform (CRS-aware probing) emits lon/lat order.
         con.execute("SET geometry_always_xy = true;")
-        if profile:
-            setup_aws_profile_if_needed(profile, input_parquet)
         index_extension = _INDEX_EXTENSIONS[spatial_index_type]
         if index_extension:
             load_community_extension(con, index_extension)

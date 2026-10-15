@@ -607,7 +607,7 @@ def aws_profile_option(func):
     """Add hidden --aws-profile option (now a global option)."""
     return click.option(
         "--aws-profile",
-        help="AWS profile name for S3 operations (sets AWS_PROFILE env var)",
+        help="AWS profile name for S3 operations",
         hidden=True,
     )(func)
 

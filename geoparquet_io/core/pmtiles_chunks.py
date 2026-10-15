@@ -50,6 +50,7 @@ from geoparquet_io.core.duckdb_utils import (
     quote_identifier,
     spill_directory,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
@@ -68,7 +69,7 @@ from geoparquet_io.core.pmtiles import (
     create_pmtiles_from_geoparquet,
     resolve_scratch_directory,
 )
-from geoparquet_io.core.remote import is_remote_url, needs_httpfs, setup_aws_profile_if_needed
+from geoparquet_io.core.remote import is_remote_url, needs_httpfs
 from geoparquet_io.core.tile_join import (
     TileJoinNotFoundError,
     _build_tile_join_command,
@@ -311,6 +312,7 @@ def _tile_chunks(
     return parts
 
 
+@uses_aws_profile
 def create_pmtiles_chunked(
     input_path: str,
     output_path: str,
@@ -356,7 +358,6 @@ def create_pmtiles_chunked(
     scratch = resolve_scratch_directory(tiling.get("temporary_directory"))
     tiling = {**tiling, "temporary_directory": scratch}
 
-    setup_aws_profile_if_needed(profile, input_path)
     metadata, _ = get_parquet_metadata(input_path, verbose)
     if is_levelled_overview(metadata):
         raise InvalidParameterError(
