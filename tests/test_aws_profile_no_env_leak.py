@@ -9,6 +9,7 @@ config (:func:`~geoparquet_io.core.duckdb_utils.s3_config_scope`), which DuckDB'
 
 import http.server
 import os
+import sys
 import threading
 
 import duckdb
@@ -195,6 +196,16 @@ needs_aws_extension = pytest.mark.skipif(
     not _aws_extension_available(), reason="DuckDB aws extension is not installable here"
 )
 
+# These tests point the AWS SDK at fake files and keys with monkeypatch.setenv.
+# On Windows the aws extension has its own C runtime, which keeps the env it saw
+# when the DLL loaded (at collection, in _aws_extension_available), so a
+# variable set later in the same process never reaches the SDK. A real user sets
+# the env before gpio starts, so this only affects the test, not the feature.
+needs_runtime_env_in_aws_sdk = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the aws extension does not see env vars set after it loads on Windows",
+)
+
 
 @pytest.fixture
 def fake_aws_files(tmp_path, monkeypatch):
@@ -319,6 +330,18 @@ class TestProfileSecretKeepsResolvedSettings:
 
         assert seen, "the read never reached the custom endpoint"
         assert seen[0]["path"].startswith("/fakebucket/x.parquet")
+
+    @needs_runtime_env_in_aws_sdk
+    def test_profile_signs_the_custom_endpoint_read(self, fake_s3_endpoint):
+        endpoint, seen = fake_s3_endpoint
+        scope = {"profile": "fakep", "s3_endpoint": endpoint, "s3_use_ssl": False}
+        with s3_config_scope(scope):
+            con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
+        try:
+            _read_s3(con)
+        finally:
+            con.close()
+        assert seen
         assert f"Credential={_FAKE_STATIC_KEY}/" in seen[0]["authorization"]
 
     def test_explicit_region_beats_the_profile_region(self):
@@ -342,6 +365,7 @@ class TestProfileSecretKeepsResolvedSettings:
         finally:
             con.close()
 
+    @needs_runtime_env_in_aws_sdk
     def test_profile_region_is_used_when_nothing_else_is_set(self):
         with s3_config_scope({"profile": "fakep"}):
             con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
@@ -362,6 +386,7 @@ class TestProfileSecretKeepsResolvedSettings:
         finally:
             con.close()
 
+    @needs_runtime_env_in_aws_sdk
     def test_explicit_env_keys_still_sign_requests(self, fake_s3_endpoint, monkeypatch):
         endpoint, seen = fake_s3_endpoint
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", _FAKE_ENV_KEY)
