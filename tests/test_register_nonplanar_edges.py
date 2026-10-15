@@ -173,7 +173,60 @@ def test_one_copy_of_the_edge_helpers():
     """#1280's write-side names are the duckdb_utils helpers, not a second copy."""
     from geoparquet_io.core import arrow_geo_metadata
 
+    from geoparquet_io.core import duckdb_utils
+
     assert arrow_geo_metadata._field_edges is geoarrow_field_edges
+    assert not hasattr(duckdb_utils, "_nonplanar_edges")
+
+
+def _with_geo_block(table, edges):
+    """``table`` with a carried ``geo`` block that states ``edges`` for its geometry."""
+    geo = {"version": "2.0.0", "primary_column": "geometry", "columns": {}}
+    geo["columns"]["geometry"] = {"encoding": "WKB", "geometry_types": [], "edges": edges}
+    return table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
+
+
+@pytest.mark.parametrize(
+    ("type_edges", "block_edges", "declared"),
+    [
+        # The block wins for what the table declares, but DuckDB reads the type.
+        ("spherical", "planar", {}),
+        # A typo counts for nothing on the restore side, and DuckDB still refuses it.
+        ("sphericall", None, {}),
+        ("spherical", None, {"geometry": "spherical"}),
+    ],
+)
+def test_register_follows_the_type_not_the_geo_block(rows, type_edges, block_edges, declared):
+    """``geoarrow_field_edges`` is the type's answer, on purpose.
+
+    DuckDB never reads a ``geo`` block: it refuses a column whose GeoArrow
+    type is non-planar whatever the block says. So the register path relabels
+    on the type, and the geo-block-wins rule stays with
+    ``write_funnels.table_nonplanar_edges``, which decides what a write restores.
+    """
+    from geoparquet_io.core.write_funnels import table_nonplanar_edges
+
+    base = _metadata_only_spherical(rows)
+    field = base.schema.field("geometry").with_metadata(
+        {EXT_NAME: b"geoarrow.wkb", EXT_META: json.dumps({"edges": type_edges}).encode()}
+    )
+    arrow = base.set_column(1, field, base.column("geometry"))
+    if block_edges is not None:
+        arrow = _with_geo_block(arrow, block_edges)
+
+    assert geoarrow_field_edges(arrow.schema.field("geometry")) == type_edges
+    assert table_nonplanar_edges(arrow, "geometry", None) == declared
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    try:
+        with pytest.raises(Exception, match="non-planar"):
+            con.register("raw", arrow)
+            con.execute("SELECT count(geometry) FROM raw").fetchone()
+        registered = register_arrow(con, "t", arrow)
+        count = con.execute("SELECT count(ST_Area(geometry)) FROM t").fetchone()[0]
+    finally:
+        con.close()
+    assert count == arrow.num_rows
+    assert registered.edges == {"geometry": type_edges}
 
 
 # --------------------------------------------------------------------------
