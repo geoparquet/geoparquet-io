@@ -17,17 +17,20 @@ from geoparquet_io.core.bbox_structure import bbox_shaped_struct_columns, check_
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import validate_compression_settings
 from geoparquet_io.core.crs_utils import (
-    NULL_CRS_NO_FLAG_ERROR,
     apply_target_crs_to_geo_meta,
     crs_is_explicitly_null,
     extract_crs_from_parquet,
     extract_crs_from_table,
     geoparquet_crs_is_null,
+    is_empty_crs_value,
     is_geographic_crs,
     lonlat_source_name,
     parse_crs_string_to_projjson,
+    table_crs_is_unknown,
     transform_source_crs,
     transform_source_label,
+    unknown_crs_error,
+    unknown_crs_reason,
 )
 from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
 from geoparquet_io.core.duckdb_utils import (
@@ -201,10 +204,12 @@ def _retarget_carried_geo(metadata: dict, geom_col: str, target_crs: str, con) -
     return True
 
 
-#: Raised by the Arrow/Python-API path on an explicit ``crs: null`` input.
+#: Raised by the Arrow/Python-API path on an unknown input CRS (``crs: null``,
+#: an empty value, or a ``srid:0`` field).
 NULL_CRS_TABLE_ERROR = (
-    "Input table has an explicit null CRS (unknown). Pass assume_crs84=True to "
-    "treat the coordinates as OGC:CRS84 (lon/lat WGS84), or set source_crs."
+    "Input table's CRS is unknown (an explicit null CRS, an empty one, or srid:0). "
+    "Set source_crs to name the CRS of the coordinates, or pass assume_crs84=True "
+    "to treat them as OGC:CRS84 (lon/lat WGS84)."
 )
 
 
@@ -232,20 +237,21 @@ def reproject_table(
         New table with reprojected geometry
 
     Raises:
-        ValueError: If the input has an explicit ``crs: null`` (unknown CRS) and
-            neither ``source_crs`` nor ``assume_crs84`` is set. This mirrors the
-            CLI contract so the Python API never silently treats unknown data as
-            the default.
+        ValueError: If the input's CRS is unknown (``crs: null``, an empty
+            value, or a ``srid:0`` field) and neither ``source_crs`` nor
+            ``assume_crs84`` is set. This mirrors the CLI contract so the Python
+            API never silently treats unknown data as the default.
     """
     # Detect geometry column
     geom_col = geometry_column or _detect_geometry_column_from_table(table)
 
-    # Resolve source CRS. An explicit crs:null is *unknown*, not the default — so
-    # mirror the CLI contract: require source_crs or assume_crs84, else raise,
-    # rather than silently transforming unknown coordinates as if lon/lat WGS84.
+    # Resolve source CRS. An unknown CRS is not the default, so mirror the CLI
+    # contract: require source_crs or assume_crs84, else raise, rather than
+    # silently transforming unknown coordinates as if lon/lat WGS84. One rule
+    # with the file path, so a srid:0 field counts too (#1277 review).
     if source_crs:
         effective_source_crs = source_crs
-    elif crs_is_explicitly_null(_table_geo_column_meta(table, geom_col)):
+    elif table_crs_is_unknown(table, geom_col):
         if not assume_crs84:
             raise ValueError(NULL_CRS_TABLE_ERROR)
         effective_source_crs = "OGC:CRS84"
@@ -425,7 +431,7 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
     metadata = dict(parquet_file.schema_arrow.metadata or {})
     geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
     for col in geo_meta.get("columns", {}).values():
-        if crs_is_explicitly_null(col):
+        if crs_is_explicitly_null(col) or is_empty_crs_value(col.get("crs")):
             col.pop("crs", None)
     metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
     new_schema = parquet_file.schema_arrow.with_metadata(metadata)
@@ -453,23 +459,31 @@ def _sanitize_null_crs_file(raw_path: str, verbose: bool = False) -> tuple[str, 
 
 
 def _resolve_null_crs_input(
-    raw_path: str, assume_crs84: bool, verbose: bool
-) -> tuple[str, str | None]:
-    """Resolve an explicit null CRS before DuckDB reads the file.
+    raw_path: str, assume_crs84: bool, verbose: bool, source_crs: str | None = None
+) -> tuple[str, str | None, str | None]:
+    """Resolve an unknown input CRS before DuckDB reads the file.
 
-    Without ``assume_crs84`` an explicit ``crs: null`` raises a friendly error
-    (DuckDB can't read it); with it, the file is sanitized to a temp copy.
+    Unknown is ``crs: null``, an empty ``crs`` or a ``srid:0`` type, decided by
+    :func:`unknown_crs_reason`. Reprojecting needs a source CRS, so without
+    ``source_crs`` or ``assume_crs84`` it raises, naming both flags. With either,
+    a null or empty ``geo`` crs is stripped into a temp copy (DuckDB's reader
+    rejects ``crs: null``), and the caller transforms from ``source_crs``, or
+    from OGC:CRS84 under ``assume_crs84`` (#1277 review).
 
     ``raw_path`` must be the *unescaped* path/URL.
 
     Returns:
-        ``(path_to_read, temp_path_or_None)`` — both are raw (unescaped) paths.
+        ``(path_to_read, temp_path_or_None, forced_source_or_None)``. The paths
+        are raw (unescaped). The third is ``"OGC:CRS84"`` when ``assume_crs84``
+        decides the source of an unknown input, else ``None``.
     """
-    if assume_crs84:
-        return _sanitize_null_crs_file(raw_path, verbose=verbose)
-    if geoparquet_crs_is_null(raw_path):
-        raise ValueError(NULL_CRS_NO_FLAG_ERROR)
-    return raw_path, None
+    reason = unknown_crs_reason(raw_path)
+    if reason is None:
+        return raw_path, None, None
+    if source_crs is None and not assume_crs84:
+        raise ValueError(unknown_crs_error(reason))
+    read_path, temp_path = _sanitize_null_crs_file(raw_path, verbose=verbose)
+    return read_path, temp_path, (None if source_crs is not None else "OGC:CRS84")
 
 
 @uses_aws_profile
@@ -529,11 +543,11 @@ def reproject_impl(
     # Validate profile usage
     validate_profile_for_urls(profile, input_parquet, output_parquet)
 
-    # Resolve an explicit null CRS before DuckDB reads the file: raise a friendly
-    # error without --assume-crs84, or sanitize to a temp copy with it. Pass the
-    # raw path (not the SQL-escaped URL) to the PyArrow/metadata helpers.
-    read_source, temp_sanitized = _resolve_null_crs_input(
-        input_parquet, assume_crs84, verbose=verbose
+    # Resolve an unknown CRS before DuckDB reads the file: raise a friendly
+    # error without --src-crs or --assume-crs84, or sanitize to a temp copy with
+    # one. Pass the raw path (not the SQL-escaped URL) to the metadata helpers.
+    read_source, temp_sanitized, forced_source = _resolve_null_crs_input(
+        input_parquet, assume_crs84, verbose=verbose, source_crs=source_crs
     )
 
     # Safe URL for SQL interpolation, computed from the (possibly sanitized) path.
@@ -556,7 +570,9 @@ def reproject_impl(
             info(f"Using source CRS: {source_crs}")
             effective_source_crs = source_crs
         else:
-            effective_source_crs = _detect_source_crs(read_source, verbose, geom_col)
+            effective_source_crs = forced_source or _detect_source_crs(
+                read_source, verbose, geom_col
+            )
             log(f"Source CRS: {transform_source_label(effective_source_crs)}")
 
         log(f"Target CRS: {target_crs}")
@@ -782,10 +798,10 @@ def _reproject_streaming(
         else:
             working_file = input_path
 
-        # Resolve an explicit null CRS (raise without the flag, sanitize with it),
-        # passing the raw path — not the SQL-escaped URL — to PyArrow helpers.
-        working_file, temp_sanitized = _resolve_null_crs_input(
-            working_file, assume_crs84, verbose=verbose
+        # Resolve an unknown CRS (raise without a flag, sanitize with one),
+        # passing the raw path, not the SQL-escaped URL, to the PyArrow helpers.
+        working_file, temp_sanitized, forced_source = _resolve_null_crs_input(
+            working_file, assume_crs84, verbose=verbose, source_crs=source_crs
         )
 
         # Get safe URL for SQL interpolation
@@ -799,8 +815,10 @@ def _reproject_streaming(
             geom_col = find_primary_geometry_column(working_file, verbose=False)
 
             # Detect source CRS
-            effective_source_crs = source_crs or _detect_source_crs(
-                working_file, verbose=False, geom_col=geom_col
+            effective_source_crs = (
+                source_crs
+                or forced_source
+                or _detect_source_crs(working_file, verbose=False, geom_col=geom_col)
             )
 
             # Check for existing bbox column to exclude (will be regenerated)
