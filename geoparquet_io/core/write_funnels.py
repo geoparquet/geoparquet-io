@@ -1161,6 +1161,30 @@ def _query_geometry_is_already_native(con, query: str, geometry_column: str | No
     )
 
 
+def _secondary_geo_columns(carried_geo_block: dict | None, geometry_info: dict | None):
+    """The ``geo.columns`` entries the write's secondary CRS comes from."""
+    return (carried_geo_block or {}).get("columns") or (geometry_info or {}).get("metadata")
+
+
+def _unknown_secondary_needs_rewrite(
+    carried_geo_block: dict | None,
+    secondary_geo_columns: dict | None,
+    geometry_column: str | None,
+    effective_version: str,
+) -> bool:
+    """Whether an unknown secondary CRS sends a 2.0 fast-path write to the rewrite.
+
+    DuckDB's own 2.0 block omits the ``crs`` of a ``srid:0`` column, which reads
+    as OGC:CRS84. With no carried block to say ``crs: null`` for an unknown
+    secondary, the rewrite writes it (#1277 review).
+    """
+    return (
+        carried_geo_block is None
+        and effective_version == "2.0"
+        and has_unknown_secondary(secondary_geo_columns, geometry_column)
+    )
+
+
 def write_parquet_with_metadata(
     con,
     query,
@@ -1413,19 +1437,10 @@ def write_parquet_with_metadata(
         # DuckDB instead. Merged after the "says more than DuckDB" gate, so a
         # secondary's own `crs` cannot by itself make a block worth carrying.
         merge_secondary_geometry_metadata(carried_geo_block, geometry_info)
-    secondary_geo_columns = (carried_geo_block or {}).get("columns") or (geometry_info or {}).get(
-        "metadata"
+    secondary_geo_columns = _secondary_geo_columns(carried_geo_block, geometry_info)
+    rewrite_needed = rewrite_needed or _unknown_secondary_needs_rewrite(
+        carried_geo_block, secondary_geo_columns, geometry_column, effective_version
     )
-    # DuckDB's own 2.0 block omits the `crs` of a `srid:0` column, which reads
-    # as OGC:CRS84. With no carried block to say `crs: null` for an unknown
-    # secondary, the rewrite writes it (#1277 review).
-    if (
-        not rewrite_needed
-        and carried_geo_block is None
-        and effective_version == "2.0"
-        and has_unknown_secondary(secondary_geo_columns, geometry_column)
-    ):
-        rewrite_needed = True
 
     # Preserve non-geo KV metadata from input (e.g., vecorel, fiboa).
     # Build a merged local dict rather than mutating the caller-supplied
