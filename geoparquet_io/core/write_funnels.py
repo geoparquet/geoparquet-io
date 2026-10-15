@@ -35,7 +35,14 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _write_table_with_settings,
 )
 from geoparquet_io.core.compression import validate_compression_settings
-from geoparquet_io.core.crs_utils import _wrap_query_with_crs, apply_output_crs
+from geoparquet_io.core.crs_utils import (
+    _wrap_query_with_crs,
+    apply_output_crs,
+    extract_crs_from_parquet,
+    get_crs_display_name,
+    is_geographic_crs,
+    parse_crs_string_to_projjson,
+)
 from geoparquet_io.core.derive_geo_from_file import (
     _rewrite_file_with_geo_metadata,
     derive_secondary_geometry_info,
@@ -87,6 +94,7 @@ from geoparquet_io.core.parquet_footer import (
     patch_footer,
     patch_footer_kv,
 )
+from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import (
     geoparquet_copy_options,
     note_duckdb_copy_rounding,
@@ -204,7 +212,7 @@ def _apply_nonplanar_edges(
         name: _edges_for_output_version(edges, geo_version) for name, edges in edges_by_col.items()
     }
     geo_updates = _geo_block_with_edges(geo_meta, edges_by_col)
-    geography = {name: e for name, e in edges_by_col.items() if e in EDGE_ALGORITHMS}
+    geography = _geography_candidates(output_file, edges_by_col)
 
     try:
         retyped = patch_footer(output_file, geo_updates, geography=geography, verbose=verbose)
@@ -235,6 +243,41 @@ def _apply_nonplanar_edges(
             f"Kept non-planar edges for {', '.join(sorted(edges_by_col))}"
             + (f"; retyped GEOGRAPHY: {', '.join(retyped)}" if retyped else "")
         )
+
+
+def _geography_candidates(output_file: str, edges_by_col: dict[str, str]) -> dict[str, str]:
+    """The columns that may be retyped GEOGRAPHY: a Parquet edge algorithm and a geographic CRS.
+
+    Parquet's GEOGRAPHY requires a geographic CRS, so a column whose CRS is
+    projected keeps its planar GEOMETRY type, as it did before #999, and says
+    why; a ``geo`` block still carries what the input declared, which
+    ``check spec`` warns about on its own (#601). No CRS is OGC:CRS84.
+    """
+    geography: dict[str, str] = {}
+    candidates = {name: e for name, e in edges_by_col.items() if e in EDGE_ALGORITHMS}
+    if not candidates:
+        return geography
+    # Only a top-level GEOMETRY can be retyped; a 1.x output's WKB has no type.
+    planar = {
+        col["name"]
+        for col in root_schema_columns(get_schema_info(output_file))
+        if "GeometryType" in (col.get("logical_type") or "")
+    }
+    for name, edges in candidates.items():
+        if name not in planar:
+            continue
+        crs = extract_crs_from_parquet(output_file, geometry_column=name)
+        if isinstance(crs, str):
+            crs = parse_crs_string_to_projjson(crs) or crs
+        if is_geographic_crs(crs):
+            geography[name] = edges
+        else:
+            warn(
+                f"Kept column '{name}' a planar GEOMETRY in the Parquet schema: "
+                f"GEOGRAPHY requires a geographic CRS, and {get_crs_display_name(crs)} "
+                f"is not one, so the type cannot carry edges: {edges}."
+            )
+    return geography
 
 
 def _read_geo_key(output_file: str) -> dict | None:

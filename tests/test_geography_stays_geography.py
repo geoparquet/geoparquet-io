@@ -261,6 +261,76 @@ def test_the_crs_survives_the_family_change(rows, tmp_path):
     assert set(spec_problems(out)) <= set(spec_problems(source))
 
 
+@pytest.fixture(scope="module")
+def projected_spherical_wkb(tmp_path_factory) -> Path:
+    """A 1.1 WKB file in EPSG:3857 whose ``geo`` block declares spherical edges."""
+    import shapely
+    from pyproj import CRS
+
+    points = shapely.points([(1e6, 4e6), (2e6, 5e6)])
+    table = pa.table(
+        {
+            "id": [0, 1],
+            "geometry": pa.array(list(shapely.to_wkb(points)), pa.binary()),
+        }
+    )
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "edges": "spherical",
+                "crs": CRS.from_epsg(3857).to_json_dict(),
+            }
+        },
+    }
+    path = tmp_path_factory.mktemp("projected") / "in.parquet"
+    pq.write_table(table.replace_schema_metadata({"geo": json.dumps(geo)}), str(path))
+    return path
+
+
+@pytest.mark.parametrize(
+    "path_name", ["convert-geoparquet", "sort-hilbert"], ids=["convert", "sort-hilbert"]
+)
+def test_a_projected_crs_is_not_retyped_geography(
+    path_name, projected_spherical_wkb, tmp_path, caplog
+):
+    """GEOGRAPHY requires a geographic CRS: a projected one stays a GEOMETRY.
+
+    The input's ``edges`` claim is incoherent on a plane (``check spec`` warns
+    about it either way), but retyping the column made it a spec-invalid
+    GEOGRAPHY that ``check spec`` fails. The column keeps its planar type, the
+    block keeps what the input declared, and the user is told why.
+    """
+    out = _run_path(
+        path_name, projected_spherical_wkb, tmp_path / "out.parquet", "--geoparquet-version", "2.0"
+    )
+
+    assert logical_geo_types(out)["geometry"][0] == "Geometry"
+    assert _edges_in_geo_block(out) == "spherical"
+    assert spec_problems(out) == []
+    assert "requires a geographic CRS" in caplog.text
+
+
+def test_a_projected_1_1_output_has_no_type_to_keep_planar(
+    projected_spherical_wkb, tmp_path, caplog
+):
+    """1.x writes plain WKB: there is no GEOGRAPHY to refuse, so nothing to say."""
+    out = _run_path(
+        "sort-hilbert",
+        projected_spherical_wkb,
+        tmp_path / "out.parquet",
+        "--geoparquet-version",
+        "1.1",
+    )
+
+    assert logical_geo_types(out) == {}
+    assert _edges_in_geo_block(out) == "spherical"
+    assert "requires a geographic CRS" not in caplog.text
+
+
 def test_duckdb_still_reads_the_output(native_geography, tmp_path):
     out = _run_path("add-bbox", native_geography, tmp_path / "out.parquet")
 
