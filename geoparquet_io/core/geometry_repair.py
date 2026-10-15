@@ -152,12 +152,14 @@ def repair_arrow_table_geometry(table, geometry_column: str = "geometry", *, rep
     A single warning with the exact invalid count is emitted when any invalid
     geometry is found (phrasing depends on ``repair``).
 
-    Rebuilding through DuckDB drops Arrow *schema* metadata, so the original
-    table-level schema metadata (e.g. the GeoParquet ``geo`` block or a CRS
-    marker) is re-applied to the repaired table — the geometry encoding is
-    unchanged (WKB in, WKB out), so the metadata stays valid. The original
-    table object is returned unchanged when there is nothing to repair (empty,
-    no geometry column, no invalid rows, or ``repair=False``).
+    The count and the repair run as ONE DuckDB scan over just the geometry
+    column, returning only the repaired rows (NULL elsewhere); the repaired
+    column is patched into the caller's table client-side. The table is never
+    round-tripped through DuckDB, so its schema metadata, column order,
+    attribute types and the valid rows' exact WKB bytes all survive untouched
+    (#1268). The original table object is returned unchanged when there is
+    nothing to repair (empty, no geometry column, no invalid rows, or
+    ``repair=False``).
 
     Args:
         table: PyArrow table with a WKB-encoded geometry column.
@@ -170,40 +172,62 @@ def repair_arrow_table_geometry(table, geometry_column: str = "geometry", *, rep
     if table.num_rows == 0 or geometry_column not in table.column_names:
         return table, 0
 
+    import pyarrow.compute as pc
+
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
     col = quote_identifier(geometry_column)
     # Decode WKB defensively: TRY() yields NULL on malformed bytes so a bad row
     # never crashes extraction — such rows pass through unchanged.
-    parsed = f"TRY(ST_GeomFromWKB({col}))"
+    parsed = "TRY(ST_GeomFromWKB(__raw))"
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("_gpio_repair_src", table)
-        # Layered count: the single-WHERE form segfaults on tables containing
-        # NULL geometry rows (issue #642) — see _layered_invalid_count_sql.
-        n = con.execute(_layered_invalid_count_sql("_gpio_repair_src", parsed)).fetchone()[0]
-        _warn_invalid(n, repaired=repair)
-        if not repair or n == 0:
+        # Register only the geometry column (zero-copy) under a fixed name, so
+        # the scan never touches the other columns.
+        con.register("_gpio_repair_src", table.select([geometry_column]))
+        if not repair:
+            # Count-only: the layered form — the single-WHERE form segfaults on
+            # tables containing NULL geometry rows (#642), see
+            # _layered_invalid_count_sql.
+            n = con.execute(
+                _layered_invalid_count_sql(f"(SELECT {col} AS __raw FROM _gpio_repair_src)", parsed)
+            ).fetchone()[0]
+            _warn_invalid(n, repaired=False)
             return table, n
-        # AND-form (repair in THEN, passthrough in ELSE). The equivalent
-        # OR-form (`col IS NULL OR parsed IS NULL OR ST_IsValid(parsed)` with
-        # ST_MakeValid in the ELSE branch) segfaults DuckDB <= 1.5.1's spatial
-        # extension on some real WKB inputs — a conditional-execution bug where
-        # the raw-blob `IS NULL` term mis-aligns the selection vector fed to
-        # ST_MakeValid. This form is logically identical and crash-free.
-        repair_expr = (
-            f"CASE WHEN {parsed} IS NOT NULL AND NOT ST_IsValid({parsed}) "
-            f"THEN ST_AsWKB(ST_MakeValid({parsed})) ELSE {col} END"
-        )
-        repaired = (
-            con.execute(f"SELECT * REPLACE ({repair_expr} AS {col}) FROM _gpio_repair_src")
+
+        # Count and repair in ONE scan (#1268): each row yields the repaired
+        # WKB when the geometry is invalid and NULL otherwise, so the result
+        # holds only the repaired rows — not a full copy of the table. The
+        # AND-form CASE (repair in THEN, passthrough in ELSE) is the
+        # segfault-safe shape, and projecting the parsed geometry in an inner
+        # layer keeps the NULL filter and ST_IsValid in separate operators,
+        # exactly as _layered_invalid_count_sql does (#642, #737).
+        fixed = (
+            con.execute(
+                f"SELECT CASE WHEN __g IS NOT NULL AND NOT ST_IsValid(__g) "
+                f"THEN ST_AsWKB(ST_MakeValid(__g)) END AS __fixed "
+                f"FROM (SELECT {parsed} AS __g "
+                f"FROM (SELECT {col} AS __raw FROM _gpio_repair_src))"
+            )
             .arrow()
             .read_all()
+            .column(0)
         )
-        # The DuckDB roundtrip drops Arrow schema metadata; restore it so any
-        # GeoParquet/CRS metadata the caller already attached survives.
-        if table.schema.metadata:
-            repaired = repaired.replace_schema_metadata(dict(table.schema.metadata))
+        n = len(fixed) - fixed.null_count
+        _warn_invalid(n, repaired=True)
+        if n == 0:
+            return table, 0
+
+        # Patch the repaired rows into the original column client-side: valid
+        # rows keep their exact original bytes and encoding, and the rest of
+        # the table — including its schema metadata — is never rebuilt.
+        original = table.column(geometry_column)
+        fixed = fixed.combine_chunks()
+        if fixed.type != original.type:
+            fixed = fixed.cast(original.type)
+        patched = pc.if_else(pc.is_valid(fixed), fixed, original.combine_chunks())
+        idx = table.column_names.index(geometry_column)
+        repaired = table.set_column(idx, table.schema.field(idx), patched)
         return repaired, n
     except Exception:
         # Defensive: never let geometry repair break an extraction pipeline.

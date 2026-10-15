@@ -112,6 +112,14 @@ def hilbert_order_table(
     Empty or NULL geometries are placed at the end of the result since they
     have no spatial extent and cannot be assigned a Hilbert curve index.
 
+    DuckDB sees only the geometry column and a row index, and hands back the
+    sorted *indices*; the result is then built with ``Table.take``. Round-
+    tripping the whole table through DuckDB instead — sort the full rows,
+    ``read_all()`` the sorted copy — held three copies of the data at once
+    and peaked at ~11x the input file's size (#1268). ``take`` also keeps
+    what a round-trip destroyed: column order, the geometry column's exact
+    bytes and encoding, and every attribute's Arrow type.
+
     Args:
         table: Input PyArrow Table
         geometry_column: Geometry column name (auto-detected if None)
@@ -123,28 +131,34 @@ def hilbert_order_table(
     geom_col = geometry_column or find_geometry_column_from_table(table)
     if not geom_col:
         geom_col = "geometry"
-    quoted_geom = quote_identifier(geom_col)
 
-    # Register table and execute query
+    # Register only (row index, geometry): registration is zero-copy, and the
+    # queries below never touch the other columns.
+    import numpy as np
+
+    idx_col = "__gpio_row_idx"
+    while idx_col == geom_col or idx_col in table.column_names:
+        idx_col += "_"
+    sort_input = pa.table(
+        {
+            idx_col: pa.array(np.arange(table.num_rows, dtype=np.int64)),
+            geom_col: table.column(geom_col),
+        }
+    )
+    quoted_geom = quote_identifier(geom_col)
+    quoted_idx = quote_identifier(idx_col)
+
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table)
+        con.register("__input_table", sort_input)
 
         # Check if geometry column is BLOB (needs conversion)
         columns_info = con.execute("DESCRIBE __input_table").fetchall()
         geom_is_blob = any(col[0] == geom_col and "BLOB" in col[1].upper() for col in columns_info)
 
-        if geom_is_blob and geom_col in table.column_names:
-            # Quote column names to handle special characters (colons, spaces, etc.)
-            other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-            col_defs = other_cols + [f"ST_GeomFromWKB({quoted_geom}) AS {quoted_geom}"]
-            view_query = (
-                f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
-            )
-            con.execute(view_query)
-            source_ref = "__input_view"
-        else:
-            source_ref = "__input_table"
+        geom_expr = f"ST_GeomFromWKB({quoted_geom})" if geom_is_blob else quoted_geom
+        # One projection of the parsed geometry, shared by every query below.
+        source_ref = f"(SELECT {quoted_idx}, {geom_expr} AS {quoted_geom} FROM __input_table)"
 
         # Count empty/null geometries to handle them separately
         # ST_IsEmpty returns TRUE for empty geometries, NULL for NULL geometries
@@ -178,43 +192,25 @@ def hilbert_order_table(
 
         xmin, ymin, xmax, ymax = bounds_result
 
-        # Get non-geometry columns
-        other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-        select_cols = ", ".join(other_cols) if other_cols else ""
-
-        # Build column selection with WKB conversion
-        if select_cols:
-            wkb_select = f"{select_cols}, ST_AsWKB({quoted_geom}) AS {quoted_geom}"
-        else:
-            wkb_select = f"ST_AsWKB({quoted_geom}) AS {quoted_geom}"
-
-        # Build Hilbert ordering query that handles empty geometries:
-        # 1. Non-empty geometries are ordered by Hilbert curve
-        # 2. Empty/null geometries are appended at the end
-        query = f"""
-            WITH non_empty AS (
-                SELECT {wkb_select}
-                FROM {source_ref}
-                WHERE {quoted_geom} IS NOT NULL AND NOT ST_IsEmpty({quoted_geom})
-                ORDER BY ST_Hilbert({quoted_geom},
-                    ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
-            ),
-            empty_or_null AS (
-                SELECT {wkb_select}
-                FROM {source_ref}
+        # Sorted row indices: non-empty geometries in Hilbert order, then
+        # empty/null rows in their original order. DuckDB sorts (hilbert key,
+        # index) pairs — 16 bytes a row — never the rows themselves.
+        ordered = con.execute(f"""
+            SELECT {quoted_idx} FROM {source_ref}
+            WHERE {quoted_geom} IS NOT NULL AND NOT ST_IsEmpty({quoted_geom})
+            ORDER BY ST_Hilbert({quoted_geom},
+                ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
+        """).fetchnumpy()[idx_col]
+        indices = pa.array(ordered, type=pa.int64())
+        if empty_count > 0:
+            trailing = con.execute(f"""
+                SELECT {quoted_idx} FROM {source_ref}
                 WHERE {quoted_geom} IS NULL OR ST_IsEmpty({quoted_geom})
-            )
-            SELECT * FROM non_empty
-            UNION ALL
-            SELECT * FROM empty_or_null
-        """
-        result = con.execute(query).arrow().read_all()
+            """).fetchnumpy()[idx_col]
+            indices = pa.concat_arrays([indices, pa.array(trailing, type=pa.int64())])
 
-        # Preserve metadata
-        if table.schema.metadata:
-            result = result.replace_schema_metadata(table.schema.metadata)
-
-        return result
+        # take() preserves the schema, so the caller's metadata travels as-is.
+        return table.take(indices)
     finally:
         con.close()
 

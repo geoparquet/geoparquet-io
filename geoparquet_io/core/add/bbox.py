@@ -151,10 +151,14 @@ def add_bbox_table(
 
     table, bbox_column_name = _prepare_table_bbox_column(table, bbox_column_name)
 
-    # Register table and execute query
+    # Register only the geometry column: registration is zero-copy, and DuckDB
+    # computes nothing but the bbox struct — 32 bytes a row. Round-tripping the
+    # whole table (every attribute plus an ST_AsWKB re-encode of the geometry)
+    # materialized a second full copy of the data for four doubles of new
+    # information (#1268), and re-ordered the columns while doing it.
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table)
+        con.register("__input_table", table.select([geom_col]))
 
         # Check if geometry column is BLOB (needs conversion)
         columns_info = con.execute("DESCRIBE __input_table").fetchall()
@@ -163,47 +167,21 @@ def add_bbox_table(
         quoted_geom_col = quote_identifier(geom_col)
         quoted_bbox_col = quote_identifier(bbox_column_name)
 
-        if geom_is_blob and geom_col in table.column_names:
-            # Create view with geometry conversion
-            # Quote column names to handle special characters (colons, spaces,
-            # embedded quotes, etc.)
-            other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-            col_defs = other_cols + [f"ST_GeomFromWKB({quoted_geom_col}) AS {quoted_geom_col}"]
-            view_query = (
-                f"CREATE VIEW __input_view AS SELECT {', '.join(col_defs)} FROM __input_table"
-            )
-            con.execute(view_query)
-            source_ref = "__input_view"
-        else:
-            source_ref = "__input_table"
+        geom_expr = f"ST_GeomFromWKB({quoted_geom_col})" if geom_is_blob else quoted_geom_col
+        bbox_query = f"""
+            SELECT STRUCT_PACK(
+                xmin := ST_XMin({quoted_geom_col}),
+                ymin := ST_YMin({quoted_geom_col}),
+                xmax := ST_XMax({quoted_geom_col}),
+                ymax := ST_YMax({quoted_geom_col})
+            ) AS {quoted_bbox_col}
+            FROM (SELECT {geom_expr} AS {quoted_geom_col} FROM __input_table)
+        """
+        bbox_column = con.execute(bbox_query).arrow().read_all().column(0)
 
-        # Build query to add bbox column
-        bbox_expr = f"""STRUCT_PACK(
-            xmin := ST_XMin({quoted_geom_col}),
-            ymin := ST_YMin({quoted_geom_col}),
-            xmax := ST_XMax({quoted_geom_col}),
-            ymax := ST_YMax({quoted_geom_col})
-        )"""
-
-        # Get non-geometry columns
-        other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
-        select_cols = ", ".join(other_cols) if other_cols else ""
-
-        # Build SELECT with geometry converted back to WKB
-        if select_cols:
-            query = f"""
-                SELECT {select_cols},
-                       ST_AsWKB({quoted_geom_col}) AS {quoted_geom_col},
-                       {bbox_expr} AS {quoted_bbox_col}
-                FROM {source_ref}
-            """
-        else:
-            query = f"""
-                SELECT ST_AsWKB({quoted_geom_col}) AS {quoted_geom_col},
-                       {bbox_expr} AS {quoted_bbox_col}
-                FROM {source_ref}
-            """
-        result = con.execute(query).arrow().read_all()
+        # Append the computed column; everything else keeps its exact bytes,
+        # Arrow types and column order.
+        result = table.append_column(bbox_column_name, bbox_column)
 
         # Preserve metadata, recording the column just computed as the
         # geometry's covering bbox (see _declare_computed_bbox).
