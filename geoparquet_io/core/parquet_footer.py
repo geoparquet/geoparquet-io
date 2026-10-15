@@ -742,7 +742,7 @@ def _apply_splices(footer: bytes, splices: list[_Splice]) -> bytes:
     offset order. Applying them one at a time instead copied the whole footer
     once per row group: 20,000 row groups took 19 seconds rather than 4.
     """
-    parts = []
+    parts: list[bytes] = []
     position = 0
     for start, end, value in sorted(splices):
         parts += (footer[position:start], value)
