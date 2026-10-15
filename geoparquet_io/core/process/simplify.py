@@ -28,7 +28,7 @@ from geoparquet_io.core.exceptions import (
 )
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geoarrow_encoding import is_wkb_extension_field
-from geoparquet_io.core.geometry_repair import warn_planar_math
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.optional_deps import load_module, require_coarsen
 from geoparquet_io.core.parquet_writer import (
@@ -791,6 +791,8 @@ def simplify_file(
                 input_parquet, output_parquet, tolerance, drop_columns=_drop_columns, **kwargs
             )
             return
+        # The in-memory branches run simplify_table, which warns itself.
+        warn_planar_math_for_file("simplify", input_parquet, geom_col)
         _simplify_file_streaming(
             pf,
             output_parquet,

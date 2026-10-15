@@ -46,7 +46,7 @@ from geoparquet_io.core.geo_metadata import (
     strip_derived_stats,
 )
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
-from geoparquet_io.core.geometry_repair import warn_planar_math
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.remote import (
     needs_httpfs,
@@ -551,6 +551,7 @@ def reproject_impl(
     try:
         # Detect geometry column
         geom_col = find_primary_geometry_column(read_source, verbose=verbose)
+        warn_planar_math_for_file("reproject", read_source, geom_col)
         log(f"Geometry column: {geom_col}")
 
         # An explicit --src-crs wins without reading the file's CRS, so it also
@@ -800,6 +801,7 @@ def _reproject_streaming(
         try:
             # Detect geometry column
             geom_col = find_primary_geometry_column(working_file, verbose=False)
+            warn_planar_math_for_file("reproject", working_file, geom_col)
 
             # Detect source CRS
             effective_source_crs = source_crs or _detect_source_crs(

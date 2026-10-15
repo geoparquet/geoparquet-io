@@ -92,8 +92,35 @@ def warn_planar_math(op: str, table, geometry_column: str | None) -> None:
     """
     if not geometry_column:
         return
-    edges = nonplanar_edges_of_arrow_table(table, geometry_column)
-    if edges:
+    _warn_planar_edges(op, geometry_column, nonplanar_edges_of_arrow_table(table, geometry_column))
+
+
+def warn_planar_math_for_file(op: str, input_path: str, geometry_column: str | None = None) -> None:
+    """The file-path twin of :func:`warn_planar_math`, for the CLI.
+
+    Reads the edges the input file declares (the native GEOGRAPHY type or the
+    ``geo`` block) for ``geometry_column``, or for the primary geometry column
+    when none is given. A stdin stream has no file to read, so it is skipped.
+    Detection never breaks the command: a failure is a debug line.
+    """
+    from geoparquet_io.core.streaming import is_stdin
+
+    if not input_path or is_stdin(input_path):
+        return
+    try:
+        from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+        from geoparquet_io.core.write_funnels import collect_nonplanar_edges
+
+        column = geometry_column or find_primary_geometry_column(input_path)
+        edges = collect_nonplanar_edges(input_path).get(column) if column else None
+    except Exception as e:  # noqa: BLE001 - detection must never break a pipeline
+        debug(f"Could not read the edges of {input_path}: {e}")
+        return
+    _warn_planar_edges(op, column, edges)
+
+
+def _warn_planar_edges(op: str, geometry_column: str, edges: str | None) -> None:
+    if edges in GEOGRAPHY_EDGE_ALGORITHMS:
         warn(
             f"{op} uses planar math on '{geometry_column}', which has {edges} edges. "
             "The result is planar. Geodesic support is tracked in #1286 and #1289."

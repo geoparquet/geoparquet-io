@@ -18,7 +18,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geometry_detection import find_primary_geometry_column
-from geoparquet_io.core.geometry_repair import warn_planar_math
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -497,6 +497,8 @@ def add_kdtree_column(
     configure_verbose(verbose)
 
     require_iterations_or_auto(iterations, auto_target_rows)
+
+    warn_planar_math_for_file("add_kdtree", input_parquet)
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)

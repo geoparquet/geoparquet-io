@@ -424,3 +424,83 @@ def test_the_warning_does_not_change_the_result(table):
     assert bbox == pytest.approx(
         {"xmin": -122.0, "ymin": 26.0, "xmax": -121.6, "ymax": 26.3}, abs=0.05
     )
+
+
+# --------------------------------------------------------------------------
+# The CLI file paths say so too, once per run
+# --------------------------------------------------------------------------
+
+PLANAR_MATH_CLI = {
+    "add_bbox": ["add", "bbox"],
+    "add_quadkey": ["add", "quadkey"],
+    "add_h3": ["add", "h3"],
+    "add_s2": ["add", "s2"],
+    "add_a5": ["add", "a5"],
+    "add_kdtree": ["add", "kdtree", "--partitions", "4"],
+    "simplify": ["process", "simplify", "--tolerance", "0.01"],
+    "reproject": ["convert", "reproject", "--dst-crs", "EPSG:3857"],
+    "aggregate": ["process", "aggregate", "h3", "--resolution", "3"],
+}
+
+
+def _run_cli(args, src, out):
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    split = next((i for i, a in enumerate(args) if a.startswith("--")), len(args))
+    command, options = args[:split], args[split:]
+    return CliRunner().invoke(cli, [*command, str(src), str(out), *options])
+
+
+@pytest.mark.parametrize("op", sorted(PLANAR_MATH_CLI))
+def test_planar_only_cli_on_spherical_file_warns_once(op, native_geography, tmp_path):
+    result = _run_cli(PLANAR_MATH_CLI[op], native_geography, tmp_path / "out.parquet")
+    assert result.exit_code == 0, result.output
+    messages = [line for line in result.output.splitlines() if PLANAR_MARKER in line]
+    assert len(messages) == 1, result.output
+    assert f"{op} uses planar math" in messages[0]
+    assert "spherical" in messages[0]
+
+
+@pytest.mark.parametrize("op", ["add_bbox", "simplify", "aggregate"])
+def test_planar_only_cli_on_a_geo_block_spherical_file_warns(op, rows, tmp_path):
+    """A 1.1 WKB file whose geo block declares spherical edges counts too.
+
+    Plain WKB lets simplify take its streaming branch, which never runs
+    simplify_table, so the file check is the only one there.
+    """
+    import pyarrow.parquet as pq
+
+    src = tmp_path / "wkb_spherical.parquet"
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": [], "edges": "spherical"}},
+    }
+    tbl = pa.table(
+        {"id": [r[0] for r in rows], "geometry": pa.array([r[2] for r in rows], pa.binary())}
+    )
+    pq.write_table(tbl.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), src)
+    result = _run_cli(PLANAR_MATH_CLI[op], src, tmp_path / "out.parquet")
+    assert result.exit_code == 0, result.output
+    assert sum(PLANAR_MARKER in line for line in result.output.splitlines()) == 1
+
+
+def test_planar_only_cli_on_planar_file_does_not_warn(rows, tmp_path):
+    planar = write_native_geo_only(tmp_path / "planar.parquet", rows, {"geometry": (2, ga.wkb())})
+    for op in ("add_bbox", "simplify"):
+        result = _run_cli(PLANAR_MATH_CLI[op], planar, tmp_path / f"{op}.parquet")
+        assert result.exit_code == 0, result.output
+        assert PLANAR_MARKER not in result.output
+
+
+def test_simplify_file_in_memory_warns_once(native_geography, tmp_path, caplog):
+    """The in-memory file path runs simplify_table, so the file check must not add a second."""
+    import logging
+
+    from geoparquet_io.core.process.simplify import simplify_file
+
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        simplify_file(str(native_geography), str(tmp_path / "out.parquet"), tolerance=0.01)
+    assert len(_planar_warnings(caplog)) == 1

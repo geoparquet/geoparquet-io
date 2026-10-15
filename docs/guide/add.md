@@ -35,8 +35,8 @@ The `add` commands enhance GeoParquet files with spatial indices, geometry metri
     plane. That covers `bbox`, the cell keys (`h3`, `s2`, `a5`, `quadkey`) and
     `kdtree`, and also `simplify`, `reproject` and the `aggregate` commands. On
     a column with spherical edges they still run, and the values they add are
-    the planar ones. The Python API keeps the column's edges and logs one
-    warning for each such call.
+    the planar ones. The output keeps the column's edges, and each command or
+    Python call logs one warning. A CLI input read from stdin is not checked.
     Geodesic versions are tracked in
     [#1286](https://github.com/geoparquet/geoparquet-io/issues/1286) and
     [#1289](https://github.com/geoparquet/geoparquet-io/issues/1289).

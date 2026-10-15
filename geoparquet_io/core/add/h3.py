@@ -23,7 +23,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import warn_planar_math
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
@@ -207,6 +207,8 @@ def add_h3_column(
     # Validate resolution
     if not 0 <= h3_resolution <= 15:
         raise InvalidParameterError("resolution", f"must be between 0 and 15, got {h3_resolution}")
+
+    warn_planar_math_for_file("add_h3", input_parquet)
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)

@@ -27,7 +27,7 @@ from geoparquet_io.core.geometry_detection import (
     find_primary_geometry_column,
     register_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import warn_planar_math
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, progress, success, warn
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import open_input, write_output
@@ -408,6 +408,8 @@ def add_bbox_column(
         compression, compression_level, row_group_size_mb, row_group_rows, geoparquet_version
     )
     compression = compression or "ZSTD"
+
+    warn_planar_math_for_file("add_bbox", input_parquet)
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)

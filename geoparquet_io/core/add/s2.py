@@ -35,7 +35,7 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import warn_planar_math
+from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.stream_io import execute_transform
@@ -263,6 +263,8 @@ def add_s2_column(
     # Fail before reading the input (or draining stdin) when the community
     # extension that computes S2 cells is unavailable for this DuckDB (#737).
     require_community_extension("geography", feature=_S2_FEATURE)
+
+    warn_planar_math_for_file("add_s2", input_parquet)
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
