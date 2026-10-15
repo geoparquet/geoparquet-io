@@ -262,13 +262,13 @@ class TestValidatorWarnsOnSphericalPlusProjected:
         assert result.is_valid, [c.message for c in result.checks if c.status == CheckStatus.FAILED]
 
     def test_cli_check_spec_does_not_fail_the_file(self, spherical_crs84, tmp_path):
-        """Exit 2 is `check spec`'s warnings-only code; a failure would be exit 1."""
+        """A warning exits 0 (1 only under --strict); a failure would be exit 1 (#1241)."""
         out = tmp_path / "out.parquet"
         reproject(str(spherical_crs84), str(out), target_crs="EPSG:3857")
         _set_edges(out, "spherical")
 
         result = CliRunner().invoke(cli, ["check", "spec", str(out)])
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == 0, result.output
         assert "0 failed" in result.output
         assert "projected CRS" in result.output
 

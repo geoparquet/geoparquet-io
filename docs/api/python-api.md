@@ -2024,6 +2024,7 @@ from geoparquet_io import CheckResult
 
 # Methods
 result.passed()          # Returns True if all checks passed
+result.verdict()         # "pass", "warning" or "failure" - what `gpio check` exits on
 result.failures()        # List of failure messages
 result.warnings()        # List of warning messages
 result.recommendations() # List of recommendations

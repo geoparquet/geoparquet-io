@@ -540,10 +540,11 @@ def test_journey_10_sorting_improves_spatial_pushdown(tmp_path):
 def test_oracle_rejects_a_damaged_journey_output(tmp_path):
     """The oracle must FAIL on a damaged intermediate, not just on a non-zero exit.
 
-    `gpio check all` exits 0 on the file below (it reports "✗ 3 failed, 25
-    passed" and still returns 0), so this guards the assertion that actually
-    does the work in :func:`assert_check_all`. Without it every journey could
-    pass against corrupt output.
+    `gpio check all` used to exit 0 on the file below (it reported "✗ 3 failed,
+    25 passed" and still returned 0). It exits 1 now (#1241), but the exit code
+    is not what :func:`assert_check_all` relies on, so this still guards the
+    assertion that does the work. Without it every journey could pass against
+    corrupt output.
     """
     good = tmp_path / "good.parquet"
     damaged = tmp_path / "damaged.parquet"
@@ -554,6 +555,6 @@ def test_oracle_rejects_a_damaged_journey_output(tmp_path):
     del payload[len(payload) // 2 : len(payload) // 2 + 1500]
     damaged.write_bytes(bytes(payload))
 
-    assert run_gpio(["check", "all", damaged], 1, expect_success=False).returncode == 0
+    assert run_gpio(["check", "all", damaged], 1, expect_success=False).returncode == 1
     with pytest.raises(AssertionError):
         assert_check_all(damaged, 1)

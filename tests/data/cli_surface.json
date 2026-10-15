@@ -2941,6 +2941,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -3069,6 +3085,22 @@
        "required": true,
        "secondary_opts": [],
        "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
       },
       {
        "default": "False",
@@ -3211,6 +3243,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -3275,6 +3323,22 @@
        "required": true,
        "secondary_opts": [],
        "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
       },
       {
        "default": "False",
@@ -3426,6 +3490,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "choice[web,case_sensitive=False]"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
       },
       {
        "default": "False",
@@ -3600,6 +3680,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -3703,6 +3799,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "verbose",
        "nargs": 1,
        "opts": [
@@ -3736,6 +3848,22 @@
        "required": true,
        "secondary_opts": [],
        "type": "text"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "strict",
+       "nargs": 1,
+       "opts": [
+        "--strict"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
       },
       {
        "default": "False",

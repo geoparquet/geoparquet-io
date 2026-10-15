@@ -11,6 +11,7 @@ Evaluates five factors that affect spatial query performance:
 
 from geoparquet_io.core.check_parquet_structure import _NO_COMPRESSION_INFO, check_compression
 from geoparquet_io.core.check_spatial_order import check_spatial_order
+from geoparquet_io.core.check_verdict import PASS_GLYPH, WARNING_GLYPH
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.logging_config import error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
@@ -248,10 +249,11 @@ def _print_results(checks, score, total_checks, level, issues, recommendations):
     progress("\nChecklist:")
     for name, check in checks.items():
         label = name.replace("_", " ").title()
+        # Every factor is advice, so a miss is a warning, not a failure (#1241).
         if check["passed"]:
-            success(f"  [pass] {label}: {check['detail']}")
+            success(f"  {PASS_GLYPH} {label}: {check['detail']}")
         else:
-            warn(f"  [fail] {label}: {check['detail']}")
+            warn(f"  {WARNING_GLYPH} {label}: {check['detail']}")
 
     if recommendations:
         progress("\nRecommendations:")

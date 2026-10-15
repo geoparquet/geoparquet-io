@@ -263,7 +263,7 @@ def _determine_bbox_status(
             f"⚠️  Found bbox column '{bbox_column_name}' but no bbox covering metadata (recommended for better performance)",
         )
     else:
-        return "poor", "❌ No valid bbox column found"
+        return "poor", "⚠️  No valid bbox column found"
 
 
 class BboxInfo(TypedDict, total=False):

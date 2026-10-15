@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pystac.validation
 
+from geoparquet_io.core.check_verdict import Verdict
 from geoparquet_io.core.exceptions import ValidationError
 from geoparquet_io.core.logging_config import debug, error, progress, success, warn
 
@@ -227,6 +228,13 @@ def check_stac(stac_path: str, verbose: bool = False):
     Args:
         stac_path: Path to STAC JSON file
         verbose: Print verbose output
+
+    Returns:
+        The run's :class:`~geoparquet_io.core.check_verdict.Verdict` when it
+        did not fail: ``WARNING`` when anything was reported, else ``PASS``.
+
+    Raises:
+        ValidationError: when the file fails validation.
     """
     if verbose:
         debug(f"Validating STAC file: {stac_path}\n")
@@ -234,5 +242,17 @@ def check_stac(stac_path: str, verbose: bool = False):
     results = validate_stac_file(stac_path, verbose)
     _print_validation_results(results, verbose)
 
-    if _should_raise_error(results):
+    if stac_verdict(results) is Verdict.FAILURE:
         raise ValidationError("STAC validation failed")
+    return stac_verdict(results)
+
+
+def stac_verdict(results: dict) -> Verdict:
+    """The verdict of :func:`validate_stac_file`'s results.
+
+    A real error fails; what is left -- advice, or a validator that could not
+    run because jsonschema is missing -- is a warning.
+    """
+    if _should_raise_error(results):
+        return Verdict.FAILURE
+    return Verdict.WARNING if results["warnings"] or results["errors"] else Verdict.PASS

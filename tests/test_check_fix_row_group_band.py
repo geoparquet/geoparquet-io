@@ -299,7 +299,7 @@ class TestTheIssuesOwnReproductionThroughTheCli:
         assert "No fix needed" not in fix.output, fix.output
 
         after = runner.invoke(cli, ["check", "optimization", spatially_oversized_file])
-        assert "[pass]" in _row_group_factor(after.output), after.output
+        assert "✓ Row Group Size" in _row_group_factor(after.output), after.output
         assert_band_output_is_sound(spatially_oversized_file, version="1.1")
 
     def test_check_all_fix_leaves_a_file_that_passes_check_optimization(
@@ -319,7 +319,7 @@ class TestTheIssuesOwnReproductionThroughTheCli:
         assert fix.exit_code == 0, fix.output
 
         after = runner.invoke(cli, ["check", "optimization", spatially_oversized_file])
-        assert "[pass]" in _row_group_factor(after.output), after.output
+        assert "✓ Row Group Size" in _row_group_factor(after.output), after.output
         # `check all` names the version from its own checks, so a 1.0 input is
         # repaired as 1.0 rather than upgraded behind the user.
         assert_band_output_is_sound(spatially_oversized_file, version="1.0")

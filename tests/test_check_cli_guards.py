@@ -82,7 +82,12 @@ def non_geo_parquet(tmp_path):
 
 
 class TestEmptyInputGuard:
-    """Every check subcommand bails out before touching a runner."""
+    """Every check subcommand fails an empty input before touching a runner.
+
+    This used to exit 0 with a red line on stdout. An input that matched nothing
+    is an error now, with or without ``--fix`` (#1091): a script checking or
+    fixing a mistyped path must not be told it succeeded.
+    """
 
     @pytest.mark.parametrize("subcommand,extra", EMPTY_INPUT_SUBCOMMANDS)
     def test_no_parquet_files_found(self, subcommand, extra, empty_partition_dir):
@@ -90,18 +95,19 @@ class TestEmptyInputGuard:
         with mock.patch.object(cli_check, "MultiFileCheckRunner") as fake_runner:
             result = runner.invoke(cli, ["check", subcommand, empty_partition_dir, *extra])
 
-        assert result.exit_code == 0, result.output
-        assert "No parquet files found" in result.output
-        # The guard returns *before* any per-file work is set up.
+        assert result.exit_code == 1, result.output
+        assert "No parquet files found" in result.stderr
+        # The guard fails *before* any per-file work is set up.
         fake_runner.assert_not_called()
 
-    def test_partition_notice_is_shown_alongside_the_guard(self, empty_partition_dir):
-        """The notice from ``get_files_to_check`` is printed before the guard."""
+    def test_the_error_names_the_input(self, empty_partition_dir):
+        """The message says which input matched nothing, and nothing goes to stdout."""
         runner = CliRunner()
         result = runner.invoke(cli, ["check", "all", empty_partition_dir])
 
-        assert result.exit_code == 0, result.output
-        assert "No parquet files found in partition" in result.output
+        assert result.exit_code == 1, result.output
+        assert f"No parquet files found in {empty_partition_dir}" in result.stderr
+        assert result.stdout == ""
 
 
 class TestPmtilesGuards:
@@ -200,7 +206,7 @@ class TestMultiFileFixOutputValidation:
 
 
 class TestNonGeoParquetSkip:
-    """``check all --pmtiles`` skips files that carry no geo metadata."""
+    """``check all --pmtiles`` fails files that carry no geo metadata, and skips them."""
 
     def test_non_geoparquet_file_is_skipped(self, non_geo_parquet):
         runner = CliRunner()
@@ -211,12 +217,23 @@ class TestNonGeoParquetSkip:
         ):
             result = runner.invoke(cli, ["check", "all", non_geo_parquet, "--pmtiles", "--fix"])
 
-        assert result.exit_code == 0, result.output
-        assert f"Skipping {non_geo_parquet}: not a GeoParquet file" in result.output
-        # The skip happens before the structure check, so neither the checks nor
+        # Not GeoParquet is a failure (#1241), not a skip that exits 0.
+        assert result.exit_code == 1, result.output
+        assert "Not a GeoParquet file" in result.output
+        # It is judged before the structure check, so neither the checks nor
         # the PMTiles generation ran on a file that would crash them.
         impl.assert_not_called()
         create.assert_not_called()
+
+    def test_a_file_that_cannot_be_read_is_left_to_the_check(self, tmp_path):
+        """The not-GeoParquet test does not answer for a file it cannot read."""
+        broken = tmp_path / "broken.parquet"
+        broken.write_bytes(b"not parquet at all")
+
+        result = CliRunner().invoke(cli, ["check", "compression", str(broken)])
+
+        assert result.exit_code != 0
+        assert "Not a GeoParquet file" not in result.output
 
 
 class TestVerboseMultiFileBanner:

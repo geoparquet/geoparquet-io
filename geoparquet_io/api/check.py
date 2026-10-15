@@ -70,6 +70,24 @@ class CheckResult:
         # Handle single check results
         return self._results.get("passed", False)
 
+    def verdict(self) -> str:
+        """
+        How bad the result is: ``"pass"``, ``"warning"`` or ``"failure"``.
+
+        The same classification ``gpio check`` uses for its exit code: a
+        failure exits 1, a warning exits 0 (1 with ``--strict``). Unlike
+        :meth:`passed`, which is False for either, this tells advice apart
+        from a defect.
+
+        Returns:
+            The verdict's label
+        """
+        from geoparquet_io.core.check_verdict import result_verdict, results_verdict
+
+        if self._check_type == "all":
+            return results_verdict(self._results).label
+        return result_verdict(self._results).label
+
     def warnings(self) -> list[str]:
         """
         Get list of warning messages.

@@ -23,7 +23,9 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from click.testing import CliRunner
 
+from geoparquet_io.cli.main import cli
 from geoparquet_io.core.geo_metadata import (
     _note_undeclarable_bbox_column,
     bbox_column_to_declare,
@@ -448,8 +450,13 @@ class TestCheckBbox:
         result = check_metadata_and_bbox(
             str(declared_illegal_v1_1), return_results=True, quiet=True
         )
-        output = run_cli("check", "bbox", declared_illegal_v1_1)
+        invoked = CliRunner().invoke(cli, ["check", "bbox", str(declared_illegal_v1_1)])
+        output = invoked.output
         structure = check_bbox_structure(str(declared_illegal_v1_1))
+
+        # A covering the file declares and the spec rejects is a failure (#1241).
+        assert invoked.exit_code == 1, output
+        assert result["severity"] == "failure"
 
         assert structure["status"] == "suboptimal", structure
         assert "declares a 'covering'" in structure["message"]

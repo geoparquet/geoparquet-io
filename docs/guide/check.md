@@ -38,10 +38,74 @@ Runs all validation checks:
 - GeoParquet v2.0 upgrade recommendation (for v1.1 files)
 - Spec validation
 
-Every check runs even when an earlier one cannot. A check that cannot run
-prints a line naming the check and the reason, the remaining checks still run,
-and `gpio check all` then exits with status 1. A check that could not read the
-data is never reported as a pass (#624).
+## Exit Codes
+
+Every `check` subcommand — `all`, `bbox`, `compression`, `optimization`,
+`row-group`, `spatial`, `spec` and `stac` — follows one contract, so any of them
+can gate a CI build:
+
+| Outcome | Exit code | With `--strict` |
+|---------|-----------|-----------------|
+| Every check passed | `0` | `0` |
+| Warnings only (advice) | `0` | `1` |
+| A check failed | `1` | `1` |
+| A check could not run | `1` | `1` |
+| The input matched no files | `1` | `1` |
+
+A **failure** is a defect: a spec violation, a file that is not GeoParquet at
+all (no `geo` metadata and no native Parquet geo types), or metadata a reader
+would mis-read or cannot open — a `covering` the spec rejects, or one with no
+`bbox` member. A **warning** is advice: a non-ZSTD codec, a row-group size
+outside the recommended band, data that is not spatially sorted, a missing bbox
+column on a 1.x file, an optimization score below 5/5, or "GeoParquet 2.0 is
+available". `check all` exits 1 if any of its checks failed, including spec
+validation. Over a directory or glob, the run exits 1 if any file failed.
+
+A check that cannot run counts as a failure. It prints a line naming the check
+and the reason, the remaining checks still run, and the run then exits 1 with or
+without `--strict`. A check that could not read the data is never reported as a
+pass, even after `--fix` (#624).
+
+Pass `--strict` to make warnings exit 1 as well; it prints a line on stderr
+saying that is why.
+
+On stdout, `✓` marks a pass, `⚠` a warning and `✗` a failure, in every
+subcommand.
+
+=== "CLI"
+
+    ```bash
+    # Fails the build only on a defect
+    gpio check all myfile.parquet
+
+    # Fails the build on any finding, advice included
+    gpio check compression myfile.parquet --strict || echo "not ZSTD"
+    ```
+
+=== "Python"
+
+    <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
+    ```python
+    # "pass", "warning" or "failure" - the same classification as the exit code
+    verdict = table.check().verdict()
+    if verdict == "failure":
+        raise SystemExit(1)
+    ```
+
+`--fix` keeps the contract: a file is judged by what the fix wrote, so a
+failure that `--fix` repairs exits 0, while a fix that fails, or that `--fix`
+declines because it cannot repair the problem, exits 1.
+
+An input that resolves to no parquet files — a glob that matches nothing, or an
+empty directory — exits 1 with `No parquet files found` on stderr, with or
+without `--fix`, so a mistyped path cannot pass for a successful run.
+
+!!! note "Changed after 1.6"
+    Six of the eight subcommands used to print a failure and exit 0, a glob that
+    matched nothing exited 0, and `check spec` exited `2` for warnings only.
+    Failures now exit 1, warnings exit 0 (1 with `--strict`), and `check spec`
+    no longer uses exit code `2` ([#1241](https://github.com/geoparquet/geoparquet-io/issues/1241),
+    [#1091](https://github.com/geoparquet/geoparquet-io/issues/1091)).
 
 ## Individual Checks
 
@@ -132,7 +196,7 @@ A bbox column is optional in GeoParquet 2.0, but it must be declared, and the
 declaration must be true:
 
 - A bbox column that no `covering` entry points at costs file size and cannot be
-  used by any reader, so `check bbox` fails the file and suggests
+  used by any reader, so `check bbox` warns about it and suggests
   `gpio add bbox-metadata` (or `--fix` to drop the column). `--fix` only ever
   removes an *undeclared* column — a covering the file legitimately declares is
   never deleted.
@@ -449,19 +513,16 @@ Validates file structure and metadata against the GeoParquet specification:
   not the first one's — so a correctly written multi-row-group file passes
   (#721).
 
-**Exit codes:**
+**Exit codes:** `0` when no check failed, `1` when one did; warnings exit `0`,
+or `1` with `--strict` (see [Exit Codes](#exit-codes)). `check spec` used to
+exit `2` for warnings only; it no longer does.
 
-- `0` - All checks passed
-- `1` - One or more checks failed
-- `2` - Warnings only (all required checks passed)
-
-!!! note "Coordinate/CRS mismatch heuristic is now a warning"
+!!! note "Coordinate/CRS mismatch heuristic is a warning"
     The heuristic that flags geographic-looking coordinates (values within
     ±180/±90) under a projected CRS reports a **WARNING** instead of a failure,
-    so `gpio check spec` exits with code `2` instead of `1` for affected files.
-    Update CI pipelines that gate only on exit code `1`. The deterministic
-    CRS-consistency check for GeoParquet 2.0 native geo statistics still fails
-    on a real mismatch.
+    so `gpio check spec` exits `0` for affected files (`1` with `--strict`).
+    The deterministic CRS-consistency check for GeoParquet 2.0 native geo
+    statistics still fails on a real mismatch.
 
 ### STAC Validation
 

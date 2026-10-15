@@ -3370,8 +3370,13 @@ class Table:
         )
 
         # Convert ValidationResult to dict for CheckResult
+        from geoparquet_io.core.check_verdict import SEVERITY_KEY, validation_verdict
+
         results = {
             "passed": validation_result.is_valid,
+            SEVERITY_KEY: validation_verdict(
+                failed=validation_result.failed_count, warnings=validation_result.warning_count
+            ).label,
             "file_path": validation_result.file_path,
             "detected_version": validation_result.detected_version,
             "target_version": validation_result.target_version,
