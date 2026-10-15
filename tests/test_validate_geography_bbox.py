@@ -244,7 +244,7 @@ class TestVertexOnlyWarning:
 
     def test_a_geodesic_box_passes(self, tmp_path):
         """A box gpio's own write computes contains the bulge and is clean."""
-        from geoparquet_io.core.write_funnels import _apply_nonplanar_edges
+        from geoparquet_io.core.write_funnels import apply_nonplanar_edges
 
         path = tmp_path / "gpio.parquet"
         con = get_duckdb_connection(load_spatial=True)
@@ -255,13 +255,13 @@ class TestVertexOnlyWarning:
             )
         finally:
             con.close()
-        _apply_nonplanar_edges({"geometry": "spherical"}, str(path))
+        apply_nonplanar_edges({"geometry": "spherical"}, str(path))
 
         check = _check(path, "geography_stats_cover_edges_geometry")
         assert check.status == CheckStatus.PASSED
 
     def test_a_wrapping_geodesic_box_passes(self, tmp_path):
-        from geoparquet_io.core.write_funnels import _apply_nonplanar_edges
+        from geoparquet_io.core.write_funnels import apply_nonplanar_edges
 
         path = tmp_path / "wrap.parquet"
         con = get_duckdb_connection(load_spatial=True)
@@ -272,7 +272,7 @@ class TestVertexOnlyWarning:
             )
         finally:
             con.close()
-        _apply_nonplanar_edges({"geometry": "spherical"}, str(path))
+        apply_nonplanar_edges({"geometry": "spherical"}, str(path))
 
         check = _check(path, "geography_stats_cover_edges_geometry")
         assert check.status == CheckStatus.PASSED
@@ -320,7 +320,7 @@ def test_gpio_outputs_pass_both_checks(tmp_path):
 
 
 def test_a_karney_output_passes_against_the_ellipsoidal_oracle(tmp_path):
-    from geoparquet_io.core.write_funnels import _apply_nonplanar_edges
+    from geoparquet_io.core.write_funnels import apply_nonplanar_edges
 
     path = tmp_path / "karney.parquet"
     con = get_duckdb_connection(load_spatial=True)
@@ -331,7 +331,7 @@ def test_a_karney_output_passes_against_the_ellipsoidal_oracle(tmp_path):
         )
     finally:
         con.close()
-    _apply_nonplanar_edges({"geometry": "karney"}, str(path))
+    apply_nonplanar_edges({"geometry": "karney"}, str(path))
 
     assert _check(path, "geography_stats_cover_edges_geometry").status == CheckStatus.PASSED
 

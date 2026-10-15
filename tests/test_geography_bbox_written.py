@@ -105,13 +105,13 @@ def test_an_antimeridian_crossing_geometry_wraps_the_box(tmp_path):
 def test_a_pole_enclosing_ring_reaches_the_pole(tmp_path):
     """The funnel's own patch bounds a pole ring to the pole.
 
-    Driven at `_apply_nonplanar_edges`, the unit every write path ends in: a
+    Driven at `apply_nonplanar_edges`, the unit every write path ends in: a
     ring that winds every longitude is *degenerate on the plane*, so gpio's
     planar geometry repair rewrites it before any end-to-end write reaches
     this code (pre-existing, independent of #1272).
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
-    from geoparquet_io.core.write_funnels import _apply_nonplanar_edges
+    from geoparquet_io.core.write_funnels import apply_nonplanar_edges
 
     path = tmp_path / "ring.parquet"
     con = get_duckdb_connection(load_spatial=True)
@@ -123,7 +123,7 @@ def test_a_pole_enclosing_ring_reaches_the_pole(tmp_path):
     finally:
         con.close()
 
-    _apply_nonplanar_edges({"geometry": "spherical"}, str(path))
+    apply_nonplanar_edges({"geometry": "spherical"}, str(path))
 
     assert native_geo_edges(path) == ("Geography", "EdgeType.SPHERICAL")
     xmin, _, xmax, ymax = _row_group_boxes(path)[0]
@@ -255,7 +255,7 @@ def _duckdb_v2(path: Path, wkt: str) -> None:
 def test_the_declared_orientation_decides_the_interior(tmp_path, orientation, expected):
     """A clockwise square is the square unoriented, and the rest of the globe if ccw."""
     from geoparquet_io.core.parquet_footer import patch_footer_kv
-    from geoparquet_io.core.write_funnels import _apply_nonplanar_edges
+    from geoparquet_io.core.write_funnels import apply_nonplanar_edges
 
     path = tmp_path / "square.parquet"
     _duckdb_v2(path, "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))")
@@ -264,7 +264,7 @@ def test_the_declared_orientation_decides_the_interior(tmp_path, orientation, ex
         geo["columns"]["geometry"]["orientation"] = orientation
         patch_footer_kv(str(path), {"geo": json.dumps(geo)})
 
-    _apply_nonplanar_edges({"geometry": "spherical"}, str(path))
+    apply_nonplanar_edges({"geometry": "spherical"}, str(path))
 
     xmin, ymin, xmax, _ = _row_group_boxes(path)[0]
     assert (xmin, ymin, xmax) == pytest.approx(expected, abs=1e-6)
