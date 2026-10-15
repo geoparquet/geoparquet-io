@@ -108,8 +108,14 @@ def _resolve_output_version(
 # 32-bit offset addresses.
 _GATHER_BATCH_BYTES = 16 * 1024 * 1024
 
-# View layouts pyarrow 25 cannot ``take``: gathered as their offset-based twin.
-_VIEW_TWINS = {pa.binary_view(): pa.large_binary(), pa.string_view(): pa.large_string()}
+
+def _view_twin(typ: pa.DataType) -> pa.DataType | None:
+    """The offset-based twin of a view layout pyarrow 25 cannot ``take``, else None."""
+    if pa.types.is_binary_view(typ):
+        return pa.large_binary()
+    if pa.types.is_string_view(typ):
+        return pa.large_string()
+    return None
 
 
 def _row_index_name(geom_col: str) -> str:
@@ -171,7 +177,7 @@ def _gather_column(column: pa.ChunkedArray, indices) -> pa.ChunkedArray:
     """
     import numpy as np
 
-    twin = _VIEW_TWINS.get(column.type)
+    twin = _view_twin(column.type)
     if twin is not None:
         gathered = _gather_column(column.cast(twin), indices)
         return pa.chunked_array([c.cast(column.type) for c in gathered.chunks], type=column.type)

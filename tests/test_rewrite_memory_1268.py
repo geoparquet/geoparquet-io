@@ -585,3 +585,23 @@ def test_bbox_of_unreadable_wkb_is_null(con):
     boxes = add_bbox_table(table, geometry_column="geometry").column("bbox").to_pylist()
     assert boxes[0] == {"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}
     assert boxes[1] == {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
+
+
+def test_hilbert_multi_chunk_geoarrow_wkb_column(con):
+    """An extension-typed geometry split over chunks is gathered with its type intact."""
+    ga = pytest.importorskip("geoarrow.pyarrow")
+    from geoparquet_io.core.hilbert_order import hilbert_order_table
+
+    wkbs = [_wkb(con, f"POINT({(x * 37) % 101} {(x * 11) % 53})") for x in range(40)]
+    whole = pa.table(
+        {"geometry": ga.wkb().wrap_array(pa.array(wkbs, pa.binary())), "id": range(40)}
+    )
+    table = pa.Table.from_batches(whole.to_batches(max_chunksize=7))
+    result = hilbert_order_table(table, geometry_column="geometry")
+    assert result.schema == table.schema
+    for rid, geom in zip(
+        result.column("id").to_pylist(),
+        result.column("geometry").combine_chunks().storage.to_pylist(),
+        strict=True,
+    ):
+        assert geom == wkbs[rid]
