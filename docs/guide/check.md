@@ -614,6 +614,29 @@ Validates file structure and metadata against the GeoParquet specification:
   reprojects from it. If the coordinates really are lon/lat WGS84, drop the
   null instead. `gpio convert reproject in.parquet out.parquet --assume-crs84`
   writes the default (see [convert](../cli/convert.md)).
+
+  === "CLI"
+
+      ```bash
+      # You know the real CRS, so reproject from it
+      gpio convert reproject input.parquet out.parquet --src-crs EPSG:5070
+
+      # The coordinates really are lon/lat WGS84
+      gpio convert reproject input.parquet out_crs84.parquet --assume-crs84
+      ```
+
+  === "Python"
+
+      <!-- doctest: prelude="import geoparquet_io as gpio" -->
+      ```python
+      table = gpio.read("input.parquet")
+
+      # You know the real CRS, so reproject from it
+      table.reproject(target_crs="EPSG:4326", source_crs="EPSG:5070").write("out.parquet")
+
+      # The coordinates really are lon/lat WGS84
+      table.reproject(target_crs="EPSG:4326", assume_crs84=True).write("out_crs84.parquet")
+      ```
 - **Every CRS form the Parquet geo type may use** — the `GEOMETRY`/`GEOGRAPHY`
   logical type can name its CRS as inline PROJJSON, `srid:<id>`,
   `projjson:<key>` or the compact `<authority>:<code>` (e.g. `EPSG:32633`), and
