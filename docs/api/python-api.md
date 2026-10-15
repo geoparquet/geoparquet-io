@@ -1419,16 +1419,21 @@ ops.add_stac_metadata('items.parquet', 'collection.json')
 
 #### `check()` / `check_spatial()` / `check_compression()` / `check_bbox()` / `check_row_groups()`
 
-Run best-practice checks on the table.
+Run best-practice checks on the table. `check()` runs the structure checks
+(row groups, bbox and covering, compression, bloom filters); `gpio check all`
+also runs spatial order and spec validation, so for its exit code combine
+`check()`, `check_spatial()` and `validate()`.
 
 ```python
-# Run all checks
+# Run the structure checks
 result = table.check()
-if result.passed():
-    print("All checks passed!")
-else:
+if result.verdict() == "failure":
     for failure in result.failures():
         print(f"Failed: {failure}")
+
+# What `gpio check all` exits 1 on (`!= "pass"` for `--strict`)
+gate = [table.check(), table.check_spatial(), table.validate()]
+check_all_fails = any(r.verdict() == "failure" for r in gate)
 
 # Individual checks
 spatial_result = table.check_spatial()
@@ -2025,8 +2030,9 @@ from geoparquet_io import CheckResult
 # Methods
 result.passed()          # Returns True if all checks passed
 result.verdict()         # "pass", "warning" or "failure" - what `gpio check` exits on
-result.failures()        # List of failure messages
-result.warnings()        # List of warning messages
+                         # (exit 1 on "failure"; `verdict() != "pass"` is --strict)
+result.failures()        # Issues whose severity is "failure"
+result.warnings()        # Issues whose severity is "warning" (advice)
 result.recommendations() # List of recommendations
 result.to_dict()         # Full results as dictionary
 

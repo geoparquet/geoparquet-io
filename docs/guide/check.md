@@ -57,9 +57,18 @@ all (no `geo` metadata and no native Parquet geo types), or metadata a reader
 would mis-read or cannot open — a `covering` the spec rejects, or one with no
 `bbox` member. A **warning** is advice: a non-ZSTD codec, a row-group size
 outside the recommended band, data that is not spatially sorted, a missing bbox
-column on a 1.x file, an optimization score below 5/5, or "GeoParquet 2.0 is
-available". `check all` exits 1 if any of its checks failed, including spec
-validation. Over a directory or glob, the run exits 1 if any file failed.
+column on a 1.x file, low spatial-filter pushdown readiness in `check spatial`,
+an optimization score below 5/5, or "GeoParquet 2.0 is available". `check all`
+exits 1 if any of its checks failed, including spec validation. Each issue is
+printed at its own check's level, so `check all` on a file that fails the spec
+and uses SNAPPY prints the spec failure as `✗ ERROR` and the codec as
+`⚠ WARNING`.
+
+Over a directory or glob, the run exits 1 if any of the files it checked
+failed. Without `--all-files` (or `--sample-files N`) a check reads only the
+first file, so its verdict covers that file alone, and the run says so on
+stderr: pass `--all-files` to gate on every file. `--fix` never samples — it
+checks and repairs every matched file.
 
 A check that cannot run counts as a failure. It prints a line naming the check
 and the reason, the remaining checks still run, and the run then exits 1 with or
@@ -70,7 +79,7 @@ Pass `--strict` to make warnings exit 1 as well; it prints a line on stderr
 saying that is why.
 
 On stdout, `✓` marks a pass, `⚠` a warning and `✗` a failure, in every
-subcommand.
+subcommand; `ℹ️` marks information that does not count either way.
 
 === "CLI"
 
@@ -86,21 +95,34 @@ subcommand.
 
     <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
     ```python
-    # "pass", "warning" or "failure" - the same classification as the exit code
-    verdict = table.check().verdict()
-    if verdict == "failure":
-        raise SystemExit(1)
+    # table.check() runs the structure checks only; `gpio check all` adds
+    # spatial order and spec validation, so a CI gate combines all three.
+    results = [table.check(), table.check_spatial(), table.validate()]
+    verdicts = {r.verdict() for r in results}  # "pass", "warning" or "failure"
+
+    failed = "failure" in verdicts  # what `gpio check all` exits 1 on
+    strict_failed = verdicts != {"pass"}  # the --strict equivalent
+    for result in results:
+        print(*result.failures(), *result.warnings(), sep="\n")
     ```
+
+    `failures()` and `warnings()` bucket each issue by the same severity
+    `verdict()` reads.
 
 `--fix` keeps the contract: a file is judged by what the fix wrote, so a
 failure that `--fix` repairs exits 0, while a fix that fails, or that `--fix`
-declines because it cannot repair the problem, exits 1.
+declines because it cannot repair the problem, exits 1 (and says
+`✗ No automatic fix available`). With `--fix-output`, a file that needed no
+repair is copied there, so a pipeline always gets the file it named; a failing
+file that `--fix` cannot repair is not.
 
 An input that resolves to no parquet files — a glob that matches nothing, or an
 empty directory — exits 1 with `No parquet files found` on stderr, with or
-without `--fix`, so a mistyped path cannot pass for a successful run.
+without `--fix`, so a mistyped path cannot pass for a successful run. That holds
+for every subcommand that reads parquet files, `check spec` included; `check
+stac` takes one JSON file, and a missing one is an error (exit 1) too.
 
-!!! note "Changed after 1.6"
+!!! note "Changed after 1.6.0"
     Six of the eight subcommands used to print a failure and exit 0, a glob that
     matched nothing exited 0, and `check spec` exited `2` for warnings only.
     Failures now exit 1, warnings exit 0 (1 with `--strict`), and `check spec`
@@ -224,7 +246,8 @@ wrote that shape over a bbox-less input up to gpio 1.6. They no longer do, but
 the files are published, so both halves of `check` now say so:
 
 - `check spec` **fails** such a file at 1.1+ (`covering_has_bbox_<column>`). It
-  is a failure, not a warning, because the file does not open.
+  is a failure, not a warning, because the file does not open. `check bbox` and
+  `check all` fail it too, at any version.
 - `check all --fix` drops the covering, before any other repair, and says it
   did. The repair patches the footer only — compression codec and level,
   encodings, bloom filters, row-group boundaries and row order are all kept —
@@ -359,6 +382,12 @@ Shows:
 - **Row group count** and bbox coverage
 - **Estimated skip rate** - percentage of row groups that can be skipped for representative spatial queries
 - **Avg bbox area ratio** - how tight the row group bounding boxes are
+
+It counts toward the verdict where it is advice: low pushdown efficiency on a
+file with several row groups, or a 1.x file with no bbox column, is a `⚠`
+warning (exit 1 with `--strict`). A file with native geo types needs no bbox
+column for pushdown, and a single row group has nothing to skip; both are shown
+as `ℹ️` information.
 
 !!! note "Requires bbox data"
     Pushdown readiness requires GeoParquet 2.0 native geo stats or a bbox column. For v1.1 files, add a bbox column with `gpio add bbox`.

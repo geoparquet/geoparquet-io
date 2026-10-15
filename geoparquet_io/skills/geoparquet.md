@@ -79,6 +79,10 @@ gpio check all <file> --fix --fix-output <fixed_file>
 ```
 <!-- END GENERATED: check-commands -->
 
+Every `check` subcommand exits `1` when a check fails or could not run, and `0`
+when it only warns; add `--strict` to exit `1` on warnings too (a CI gate). A
+glob or directory is judged by its first file unless you pass `--all-files`.
+
 ### Format Conversion
 
 ```bash
@@ -270,7 +274,7 @@ Run checks and fix issues:
 gpio check all <output.parquet>
 
 # If issues found, fix them
-gpio check all <output.parquet> --fix --output <optimized.parquet>
+gpio check all <output.parquet> --fix --fix-output <optimized.parquet>
 ```
 
 ### Step 5: Make Recommendations
