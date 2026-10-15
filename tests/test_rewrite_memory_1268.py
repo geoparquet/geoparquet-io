@@ -99,6 +99,21 @@ class TestHilbertOrderTableFidelity:
         assert result.num_rows == 3
         assert sorted(result.column("geometry").to_pylist()) == sorted(wkbs)
 
+    def test_row_index_name_moves_aside_on_collision(self, con):
+        """A user column named like the internal row index never collides with it."""
+        from geoparquet_io.core.hilbert_order import hilbert_order_table
+
+        wkbs = [_wkb(con, f"POINT({x} 0)") for x in (9, 1, 5)]
+        table = pa.table(
+            {
+                "__gpio_row_idx": pa.array([7, 8, 9], type=pa.int64()),
+                "geometry": pa.array(wkbs, type=pa.binary()),
+            }
+        )
+        result = hilbert_order_table(table, geometry_column="geometry")
+        assert result.column_names == table.column_names
+        assert sorted(result.column("__gpio_row_idx").to_pylist()) == [7, 8, 9]
+
 
 class TestAddBboxTableFidelity:
     def test_appends_bbox_without_touching_other_columns(self, points_table):
@@ -156,6 +171,15 @@ class TestRepairSingleScan:
         # Encoding and column order survive.
         assert repaired.schema.field("geometry").type == pa.binary()
         assert repaired.column_names == table.column_names
+
+    def test_non_binary_geometry_column_is_passthrough(self):
+        """A column DuckDB cannot parse as WKB never breaks the pipeline."""
+        from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
+
+        table = pa.table({"geometry": pa.array([1, 2, 3], type=pa.int64())})
+        result, n = repair_arrow_table_geometry(table, "geometry", repair=True)
+        assert result is table
+        assert n == 0
 
 
 @pytest.mark.slow
