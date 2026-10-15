@@ -376,6 +376,86 @@ class TestPoleEnclosure:
         assert bbox_of("POLYGON ((0 0, 90 0, 180 0, -90 0, 0 0))") == GLOBE
 
 
+def _cap(lat: float, count: int, east: bool) -> str:
+    lons = [-180.0 + 360.0 * i / count for i in range(count)]
+    lons = lons if east else lons[::-1]
+    ring = [*lons, lons[0]]
+    return "POLYGON ((" + ", ".join(f"{lon!r} {lat!r}" for lon in ring) + "))"
+
+
+def _tiny_ring(rng: random.Random, sign: float) -> str:
+    """A small square near a pole that stays clear of it."""
+    lat = sign * rng.uniform(89.9, 89.995)
+    half = rng.uniform(1e-5, 2e-3)
+    lon = rng.uniform(-170.0, 170.0)
+    corners = [(lon - half, lat - half), (lon + half, lat - half), (lon + half, lat + half)]
+    corners.append((lon - half, lat + half))
+    if rng.random() < 0.5:
+        corners.reverse()
+    ring = [*corners, corners[0]]
+    return "POLYGON ((" + ", ".join(f"{x!r} {y!r}" for x, y in ring) + "))"
+
+
+_CAP_LATS = [89.9, 89.99, 89.993, 89.995, 89.998, 89.999, 89.9995, 89.99999]
+
+
+class TestNearPoleConditioning:
+    """A fan anchored at a ring's antipodal pole loses its area to rounding.
+
+    A cap a few metres across around one pole made the fan anchored at the
+    other pole read just below -4 pi, so the cap looked like the larger half
+    and the box swapped the pole it holds for the opposite one.
+    """
+
+    @pytest.mark.parametrize("count", [4, 8, 32, 128])
+    @pytest.mark.parametrize("east", [True, False], ids=["east", "west"])
+    @pytest.mark.parametrize("lat", _CAP_LATS)
+    def test_an_unoriented_north_cap_holds_only_the_north_pole(self, lat, east, count):
+        bbox = bbox_of(_cap(lat, count, east))
+        assert bbox[3] == 90.0
+        assert bbox[1] > 89.0
+
+    @pytest.mark.parametrize("count", [4, 8, 32, 128])
+    @pytest.mark.parametrize("east", [True, False], ids=["east", "west"])
+    @pytest.mark.parametrize("lat", _CAP_LATS)
+    def test_an_unoriented_south_cap_holds_only_the_south_pole(self, lat, east, count):
+        bbox = bbox_of(_cap(-lat, count, east))
+        assert bbox[1] == -90.0
+        assert bbox[3] < -89.0
+
+    @pytest.mark.parametrize("count", [4, 8, 32, 128])
+    # A metre-wide cap's area is under the fan's error bound, so a declared
+    # orientation cannot tell it from the whole sphere and both poles go in.
+    @pytest.mark.parametrize("lat", _CAP_LATS[:-1])
+    def test_ccw_caps_hold_the_pole_on_their_left(self, lat, count):
+        ccw = "counterclockwise"
+        # Eastward at a northern latitude has the pole on the left.
+        assert bbox_of(_cap(lat, count, True), orientation=ccw)[1::2] == (
+            pytest.approx(lat, abs=1e-3),
+            90.0,
+        )
+        north_west = bbox_of(_cap(lat, count, False), orientation=ccw)
+        assert north_west[1] == -90.0
+        # Westward at a southern latitude has the pole on the left.
+        assert bbox_of(_cap(-lat, count, False), orientation=ccw)[1::2] == (
+            -90.0,
+            pytest.approx(-lat, abs=1e-3),
+        )
+        south_east = bbox_of(_cap(-lat, count, True), orientation=ccw)
+        assert south_east[3] == 90.0
+
+    @pytest.mark.parametrize("sign", [1.0, -1.0], ids=["north", "south"])
+    def test_a_tiny_ring_near_a_pole_never_gets_the_opposite_pole(self, sign):
+        rng = random.Random(1286)
+        for _ in range(300):
+            wkt = _tiny_ring(rng, sign)
+            bbox = bbox_of(wkt)
+            if sign > 0:
+                assert bbox[1] > 89.0, wkt
+            else:
+                assert bbox[3] < -89.0, wkt
+
+
 class TestIndependentOracle:
     """Every densified point of every edge is inside the box (pyproj, not this module)."""
 

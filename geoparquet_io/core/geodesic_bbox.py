@@ -619,9 +619,11 @@ def _pole_flags(
 
     Anchored at S, the signed triangles (S, a, b) of a ring sum to the area of
     the region left of it, less 4 pi when N is inside that region; anchored at
-    N, likewise for S. A fan is only trusted for a ring that stays clear of
-    its anchor's antipode (a ring touching a pole has that pole in the box
-    already).
+    N, likewise for S. A fan loses its area to rounding for a ring near its
+    anchor's antipode (a ring at 89.998 N read just below -4 pi from S), so
+    each ring takes its area from the fan with the smaller error bound -- the
+    one anchored at the pole nearer it -- and both poles' sides follow from
+    that area and the two sums, whose 4 pi offsets survive the rounding.
     """
     exterior = role[edges.chain] == _EXTERIOR
     if not exterior.any():
@@ -639,29 +641,26 @@ def _pole_flags(
         np.bincount(chain, weights=2.0 * np.arctan2(num, den), minlength=size)[rings]
         for num, den in terms
     )
-    n_in_left, s_in_left = from_s < 0.0, from_n < 0.0
-    # Rings whose answer the rounding could flip get a real error bound.
-    if ctx.orientation == COUNTERCLOCKWISE:
-        close = (np.abs(from_s) < 1e-4) | (np.abs(from_n) < 1e-4)
-    else:
-        area = np.where(touch_n, np.mod(from_n, _FOUR_PI), np.mod(from_s, _FOUR_PI))
-        close = np.abs(area - 2.0 * math.pi) < 1e-4
-    err_s = np.zeros(len(rings))
-    err_n = np.zeros(len(rings))
-    if close.any():
-        err_s, err_n = _fan_errors(np, chain, size, terms, rings)
+    err_s, err_n = _fan_errors(np, chain, size, terms, rings)
+    # Read the area from the better-conditioned fan (the one anchored at the
+    # pole nearer the ring), and each pole's side relative to that area, so a
+    # rounding slip across 0 / 4 pi moves the area and both sides together.
+    use_n = err_n < err_s
+    err = np.where(use_n, err_n, err_s)
+    area = np.mod(np.where(use_n, from_n, from_s), _FOUR_PI)
+    n_in_left = area - from_s > 2.0 * math.pi
+    s_in_left = area - from_n > 2.0 * math.pi
 
     if ctx.orientation == COUNTERCLOCKWISE:
-        # A sum within its error of zero cannot say which side the pole is on.
-        north = touch_n | n_in_left | (np.abs(from_s) <= err_s)
-        south = touch_s | s_in_left | (np.abs(from_n) <= err_n)
+        # An area within its error of 0 or 4 pi cannot say whether the left
+        # side is nothing or everything.
+        unsure = np.minimum(area, _FOUR_PI - area) <= err
+        north = touch_n | n_in_left | unsure
+        south = touch_s | s_in_left | unsure
         return bool(north.any()), bool(south.any())
-    # The smaller side. A sum near zero is a tiny region whichever way the
-    # rounding goes -- the area and the membership flip together -- so only
-    # the half-sphere tie is ambiguous, and it covers both sides.
-    slack = np.where(touch_n, err_n, err_s) + (
-        _ELLIPSOIDAL_HALF_TOLERANCE if ctx.algorithm != SPHERICAL else 1e-12
-    )
+    # The smaller side. Only the half-sphere tie is ambiguous, and it covers
+    # both sides.
+    slack = err + (_ELLIPSOIDAL_HALF_TOLERANCE if ctx.algorithm != SPHERICAL else 1e-12)
     left = area <= 2.0 * math.pi + slack
     right = area >= 2.0 * math.pi - slack
     north = touch_n | (left & n_in_left) | (right & ~n_in_left)
