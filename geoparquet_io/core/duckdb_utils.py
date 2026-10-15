@@ -2106,6 +2106,12 @@ class RegisteredArrow:
         every registered non-planar column that ``result`` still holds as WKB
         bytes; ``columns`` limits it to those names. A column that came back as
         anything but binary (text, a struct) is left alone.
+
+        It matches by name only. The caller must know that each restored name
+        still holds the input column's geometry. A query that puts other data
+        under a registered name (``SELECT pt AS geometry``) would get the input
+        field, edges and all. Nothing in the result tells the two apart (same
+        storage, often the same CRS), so pass ``columns`` or skip the restore.
         """
         import pyarrow as pa
 
