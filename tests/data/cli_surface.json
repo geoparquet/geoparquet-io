@@ -2980,6 +2980,22 @@
        "is_flag": true,
        "metavar": null,
        "multiple": false,
+       "name": "all_rows",
+       "nargs": 1,
+       "opts": [
+        "--all-rows"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
        "name": "check_all_files",
        "nargs": 1,
        "opts": [
@@ -3085,6 +3101,22 @@
        "required": true,
        "secondary_opts": [],
        "type": "text"
+      },
+      {
+       "default": "5000",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "sample_rows",
+       "nargs": 1,
+       "opts": [
+        "--sample-rows"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "integer range[min=0,max=None,min_open=False,max_open=False,clamp=False]"
       },
       {
        "default": "False",
