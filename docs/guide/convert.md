@@ -77,6 +77,14 @@ raises a `GeoParquetError`. DuckDB 1.5.5 crashed on such files instead, which
 is why gpio requires DuckDB 1.5.6 or later
 ([#1102](https://github.com/geoparquet/geoparquet-io/issues/1102)).
 
+GeoJSON dates and times keep their UTC offset. A property such as
+`2026-01-01T00:00:00+01:00` becomes the instant `2025-12-31 23:00:00` UTC in a
+TIMESTAMP WITH TIME ZONE column, and DATE, TIME and offset-free TIMESTAMP
+columns keep their types. The GDAL that DuckDB spatial 1.5 bundles dropped the
+offset when a whole column shared one, so gpio reads GeoJSON date columns as
+text and lets DuckDB parse them
+([#1152](https://github.com/geoparquet/geoparquet-io/issues/1152)).
+
 The table `gpio.convert()` returns describes its geometry column and CRS the
 same way a table from `gpio.read()` does, so every `add_*` method works on it
 directly. A projected input such as EPSG:6933 now gets the same H3, S2, A5,

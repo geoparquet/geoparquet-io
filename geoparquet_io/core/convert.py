@@ -49,6 +49,7 @@ from geoparquet_io.core.geo_metadata import (
     build_bbox_covering,
     sanitize_geo_metadata,
 )
+from geoparquet_io.core.geojson_datetimes import DatetimeRead, plan_datetime_read
 from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     detect_parquet_geometry_column,
@@ -760,6 +761,23 @@ def _is_geojson_file(input_file):
     path = input_file.split("?")[0]
     ext = os.path.splitext(path)[1].lower()
     return ext in [".geojson", ".json"]
+
+
+def _plan_dates(input_file, open_options, columns) -> DatetimeRead:
+    """Read a GeoJSON source's dates as text for DuckDB to parse (#1152).
+
+    ``columns`` is the detection bind, so planning costs no extra read.
+    """
+    return plan_datetime_read(_is_geojson_file(input_file), open_options, columns)
+
+
+def _dated_st_read_expr(input_file, layer, dates: DatetimeRead, column_aliases=None) -> str:
+    """``ST_Read`` with ``dates``' open options, its text dates cast back."""
+    return dates.wrap(
+        _build_st_read_expr(
+            input_file, layer, open_options=dates.open_options, column_aliases=column_aliases
+        )
+    )
 
 
 # Default max line size for CSV reading: 50MB
@@ -2174,6 +2192,7 @@ def _convert_spatial_path(
     # Use multi-geometry detection for parquet files
     column_aliases = None
     source_columns = None
+    dates = DatetimeRead(open_options)
     if is_parquet:
         geom_info = (
             parquet_geometry
@@ -2187,6 +2206,7 @@ def _convert_spatial_path(
         geom_column, column_aliases = _detect_spatial_geometry(
             con, input_file, verbose, layer, open_options, columns_out=source_columns
         )
+        dates = _plan_dates(input_file, open_options, source_columns)
         secondary_columns = []
         geom_info = {
             "primary": geom_column,
@@ -2217,10 +2237,8 @@ def _convert_spatial_path(
                 con, input_file, layer, geom_column, max_angle_deg, open_options=open_options
             )
             linearized = True
-        elif open_options or column_aliases:
-            table_expr = _build_st_read_expr(
-                input_file, layer, open_options=open_options, column_aliases=column_aliases
-            )
+        elif open_options or column_aliases or dates.casts:
+            table_expr = _dated_st_read_expr(input_file, layer, dates, column_aliases)
 
     if force_2d:
         if is_parquet:
@@ -2759,13 +2777,9 @@ def _read_spatial_to_arrow(
                 open_options=open_options,
                 force_2d=force_2d,
             )
+        dates = _plan_dates(input_file, open_options, columns)
         table_expr = text_safe_expr(
-            con,
-            _build_st_read_expr(
-                input_file, layer, open_options=open_options, column_aliases=column_aliases
-            ),
-            text,
-            columns,
+            con, _dated_st_read_expr(input_file, layer, dates, column_aliases), text, columns
         )
 
     # Convert geometry to WKB for geoarrow compatibility
