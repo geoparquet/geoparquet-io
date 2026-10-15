@@ -272,6 +272,35 @@ CANONICAL_PLACES_FILE = TEST_DATA_DIR / "canonical" / "places.parquet"
 COUNTRY_PARTITION_DIR = TEST_DATA_DIR / "country_partition"
 
 
+#: A pid no real process holds in the tests below. Windows pids are multiples
+#: of 4 and Linux caps them at 2**22, so this odd value above both is never live.
+DEAD_SPILL_PID = 999_999_999
+
+
+@pytest.fixture
+def dead_pid(monkeypatch):
+    """A pid whose spill directories the sweep must treat as orphaned.
+
+    Spawning a child and keeping its pid after it exits is not enough on
+    Windows: the OS hands freed pids out again almost at once, and with xdist
+    workers spawning processes the "dead" pid can belong to a new process by
+    the time the sweep runs. The sweep then reads it as alive, which is the
+    conservative answer the production code wants, and the test flakes.
+
+    So the owner check is pinned for this one fake pid only. Every other pid,
+    ``os.getpid()`` included, still goes through the real psutil check.
+    """
+    from geoparquet_io.core import duckdb_utils
+
+    real_check = duckdb_utils._process_is_alive
+
+    def process_is_alive(pid: int) -> bool:
+        return pid != DEAD_SPILL_PID and real_check(pid)
+
+    monkeypatch.setattr(duckdb_utils, "_process_is_alive", process_is_alive)
+    return DEAD_SPILL_PID
+
+
 @pytest.fixture
 def test_data_dir():
     """Return the path to the test data directory."""
