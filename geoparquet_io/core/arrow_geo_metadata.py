@@ -29,6 +29,7 @@ from geoparquet_io.core.crs_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
+    GEOGRAPHY_EDGE_ALGORITHMS,
     GEOPARQUET_VERSIONS,
     _bbox_claimed_by_another_column,
     _get_geometry_type_name,
@@ -305,13 +306,17 @@ def nonplanar_edges_from_schema(schema) -> dict[str, str]:
     (or, when ``geoarrow.pyarrow`` is not imported, in the field's extension
     metadata), not in a ``geo`` block. The write paths that rebuild the block
     need this to carry the edges over (#1269, #1253).
+
+    The type carrier only. Only a GeoParquet edge algorithm
+    (``GEOGRAPHY_EDGE_ALGORITHMS``) counts (#1288). What a table declares once
+    its ``geo`` block is weighed too is ``write_funnels.table_nonplanar_edges``.
     """
     edges_by_col: dict[str, str] = {}
     for field in schema:
         if not is_geoarrow_extension_field(field):
             continue
         edges = _field_edges(field)
-        if edges and edges != "planar":
+        if edges in GEOGRAPHY_EDGE_ALGORITHMS:
             edges_by_col[field.name] = edges
     return edges_by_col
 

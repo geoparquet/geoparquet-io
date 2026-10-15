@@ -64,6 +64,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import is_partition_path
 from geoparquet_io.core.geo_metadata import (
+    GEOGRAPHY_EDGE_ALGORITHMS,
     GEOPARQUET_VERSIONS,
     SELF_EVIDENT_BBOX_COLUMN,
     carried_geometry_column,
@@ -163,11 +164,11 @@ def _edges_for_output_version(edges: str, geo_version: str) -> str:
     return "spherical"
 
 
-def _collect_nonplanar_edges_from_metadata(original_metadata: dict | None) -> dict[str, str]:
-    """Map geometry column -> non-planar edges declared in an input KV metadata dict.
+def _block_edges(original_metadata: dict | None) -> dict[str, object]:
+    """Map geometry column -> the ``edges`` value its ``geo`` block states, as written.
 
-    Fallback for write paths that carry the input's KV metadata but not its
-    path (the native GEOGRAPHY logical-type half needs the file itself).
+    A column whose block has no ``edges`` key is left out: it says nothing.
+    An unreadable block reads as empty.
     """
     if not original_metadata:
         return {}
@@ -178,14 +179,26 @@ def _collect_nonplanar_edges_from_metadata(original_metadata: dict | None) -> di
         if isinstance(geo_data, bytes):
             geo_data = geo_data.decode("utf-8")
         geo_meta = json.loads(geo_data) if isinstance(geo_data, str) else geo_data
-        edges_by_col: dict[str, str] = {}
-        for name, col_meta in (geo_meta.get("columns") or {}).items():
-            edges = col_meta.get("edges") if isinstance(col_meta, dict) else None
-            if edges and edges != "planar":
-                edges_by_col[name] = edges
-        return edges_by_col
+        return {
+            name: col_meta["edges"]
+            for name, col_meta in (geo_meta.get("columns") or {}).items()
+            if isinstance(col_meta, dict) and "edges" in col_meta
+        }
     except Exception:
         return {}
+
+
+def _collect_nonplanar_edges_from_metadata(original_metadata: dict | None) -> dict[str, str]:
+    """Map geometry column -> non-planar edges declared in an input KV metadata dict.
+
+    Fallback for write paths that carry the input's KV metadata but not its
+    path (the native GEOGRAPHY logical-type half needs the file itself).
+    """
+    return {
+        name: edges
+        for name, edges in _block_edges(original_metadata).items()
+        if edges and edges != "planar"
+    }
 
 
 def apply_nonplanar_edges(
@@ -1601,13 +1614,23 @@ def _edges_to_restore(
 def table_nonplanar_edges(table, geometry_column: str, edges: str | None) -> dict[str, str]:
     """Map geometry column -> non-planar edges an in-memory table declares.
 
-    The caller's ``edges`` wins for the primary, then a GeoArrow field's own
-    edge type, then the carried ``geo`` block. An explicit ``"planar"`` is a
-    choice too, so it drops the primary. The table is the only witness the
-    Arrow funnel has, since it never sees the input file.
+    The one reader of a table's edges (the repair gate's
+    ``geometry_repair.nonplanar_edges_of_arrow_table`` is a view of it). The
+    caller's ``edges`` wins for the primary, then the carried ``geo`` block,
+    then a GeoArrow field's own edge type. A block that states ``edges`` wins
+    over the type when they disagree, ``"planar"`` included. A block without
+    ``edges`` says nothing, so the type decides. Only a GeoParquet edge
+    algorithm (``GEOGRAPHY_EDGE_ALGORITHMS``) counts as a declaration, so a
+    typo falls through to the type (#1288). An explicit ``"planar"`` from the
+    caller is a choice too, so it drops the primary. The table is the only
+    witness the Arrow funnel has, since it never sees the input file.
     """
-    edges_by_col = _collect_nonplanar_edges_from_metadata(table.schema.metadata)
-    edges_by_col.update(nonplanar_edges_from_schema(table.schema))
+    edges_by_col = nonplanar_edges_from_schema(table.schema)
+    for name, declared in _block_edges(table.schema.metadata).items():
+        if declared == "planar":
+            edges_by_col.pop(name, None)
+        elif declared in GEOGRAPHY_EDGE_ALGORITHMS:
+            edges_by_col[name] = declared
     if edges == "planar":
         edges_by_col.pop(geometry_column, None)
     elif edges:

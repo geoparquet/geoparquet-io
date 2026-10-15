@@ -473,6 +473,10 @@ for the commands that write through an Arrow table (`process simplify`, the
 Python API's `.write()`). A 2.0 output keeps the column a GEOGRAPHY, and its
 `geo` block says the same edges, so `gpio check spec` has nothing to warn about.
 
+When a table's `geo` block states `edges` and its GeoArrow type says
+something else, the `geo` block wins. Only a GeoParquet edge algorithm counts,
+so an `edges` value gpio does not know is read as no declaration at all.
+
 When a GeoParquet 2.0 input declares an ellipsoidal edges algorithm
 (`vincenty`, `karney`, `andoyer`, `thomas`) and the output is 1.x, the
 algorithm is mapped to `"spherical"` — the only non-planar value 1.x supports
@@ -648,10 +652,8 @@ the sphere (via the S2 `geography` extension) is a planned follow-up.
     gpio.convert("spherical.parquet").write("output.parquet")
     ```
 
-    The geometry bytes pass through unchanged. `Table.write` does not yet
-    restate the edges in the written file's metadata
-    ([#1253](https://github.com/geoparquet/geoparquet-io/issues/1253)); the CLI
-    command above does.
+    The geometry bytes pass through unchanged, and `Table.write` restates the
+    edges in the written file's metadata, as the CLI command above does.
 
 ### Curved Geometries
 

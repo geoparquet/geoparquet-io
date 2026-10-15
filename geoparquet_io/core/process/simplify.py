@@ -20,7 +20,6 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.arrow_geo_metadata import nonplanar_edges_from_schema
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
@@ -36,7 +35,7 @@ from geoparquet_io.core.parquet_writer import (
     resolve_row_group_rows,
     without_geometry_dictionary,
 )
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.write_funnels import table_nonplanar_edges, write_geoparquet_table
 
 #: Above this row count, coverage mode's whole-column materialization gets a
 #: memory warning (plain mode processes chunk by chunk).
@@ -294,11 +293,12 @@ def _with_stripped_geo(table: pa.Table, geometry_column: str) -> pa.Table:
 
 
 def _with_carried_edges(table: pa.Table, geometry_column: str, edges: str | None) -> pa.Table:
-    """Keep the edges a native GEOGRAPHY input declared in its type (#1269).
+    """Keep the edges the input declared, in its type or its block (#1269).
 
     Unwrapping the column to plain WKB drops its edge type, so the edges move
     to the carried ``geo`` block, where a 1.x input already keeps them. The
-    write funnel then restores them on the output.
+    write funnel then restores them on the output. ``edges`` is the answer of
+    ``table_nonplanar_edges``, which already let a stated block win (#1288).
     """
     if not edges:
         return table
@@ -309,7 +309,6 @@ def _with_carried_edges(table: pa.Table, geometry_column: str, edges: str | None
         "columns": {},
     }
     columns = geo.setdefault("columns", {})
-    # The type is what the column is, so it replaces a carried value.
     columns.setdefault(geometry_column, {"encoding": "WKB"})["edges"] = edges
     metadata[b"geo"] = json.dumps(geo).encode("utf-8")
     return table.replace_schema_metadata(metadata)
@@ -345,7 +344,7 @@ def simplify_table(
     if tolerance < 0:
         raise InvalidParameterError("tolerance", "must be >= 0")
     geom_col = _geometry_column_of(table, geometry_column)
-    native_edges = nonplanar_edges_from_schema(table.schema).get(geom_col)
+    declared_edges = table_nonplanar_edges(table, geom_col, None).get(geom_col)
     table = _with_wkb_storage(table, geom_col)
     column = table.column(geom_col)
     forward = inverse = None
@@ -406,7 +405,7 @@ def simplify_table(
         result = result.filter(pa.array(keep))
         row_bounds = row_bounds[np.array(keep)]
         info(f"dropped {sum(empty_flags)} empty geometries")
-    result = _with_carried_edges(_with_stripped_geo(result, geom_col), geom_col, native_edges)
+    result = _with_carried_edges(_with_stripped_geo(result, geom_col), geom_col, declared_edges)
     return _refresh_bbox_covering(result, geom_col, bounds=row_bounds)
 
 

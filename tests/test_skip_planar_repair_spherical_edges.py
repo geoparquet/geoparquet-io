@@ -353,13 +353,6 @@ def test_api_convert_of_a_planar_parquet_describes_no_edges(tmp_path):
     assert "edges" not in geo["columns"][geo["primary_column"]]
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Table.write rebuilds the geo block without the table's edges (#1253); "
-        "PR #1280 restores them. Remove this marker when it lands."
-    ),
-)
 @pytest.mark.parametrize("column", ["geometry", "geom"])
 @pytest.mark.parametrize("version", [None, "2.0"])
 def test_api_convert_output_declares_spherical_edges(column, version, tmp_path):

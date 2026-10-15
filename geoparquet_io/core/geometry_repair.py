@@ -64,29 +64,19 @@ def _should_skip_nonplanar(geometry_column: str, nonplanar_edges, repair: bool) 
     return True
 
 
-def _geoarrow_nonplanar_edges(arrow_type) -> str | None:
-    """The non-planar edge algorithm a GeoArrow extension type declares, if any."""
-    name = str(getattr(getattr(arrow_type, "edge_type", None), "name", "")).lower()
-    return name if name in GEOGRAPHY_EDGE_ALGORITHMS else None
-
-
 def nonplanar_edges_of_arrow_table(table, geometry_column: str) -> str | None:
     """The non-planar edges an Arrow table declares for one column, if any.
 
-    Reads both carriers an in-memory table can have: a ``geo`` block in the
-    schema metadata (via the owner of that question, ``write_funnels``) and a
-    GeoArrow non-planar edge type (spherical or an ellipsoidal algorithm) on
-    the column's Arrow type. Returns the edges value, or ``None`` for planar.
+    One column of ``write_funnels.table_nonplanar_edges``, the single reader of
+    a table's edges, so the repair gate and the write agree. It reads both
+    carriers (the ``geo`` block, which wins, and a GeoArrow non-planar edge
+    type) and counts only a GeoParquet edge algorithm. Returns the edges
+    value, or ``None`` for planar.
     """
-    from geoparquet_io.core.write_funnels import _collect_nonplanar_edges_from_metadata
+    from geoparquet_io.core.write_funnels import table_nonplanar_edges
 
     try:
-        metadata = dict(table.schema.metadata) if table.schema.metadata else None
-        edges = _collect_nonplanar_edges_from_metadata(metadata).get(geometry_column)
-        if edges:
-            return edges
-        if geometry_column in table.column_names:
-            return _geoarrow_nonplanar_edges(table.schema.field(geometry_column).type)
+        return table_nonplanar_edges(table, geometry_column, None).get(geometry_column)
     except Exception as e:  # noqa: BLE001 - detection must never break a pipeline
         debug(f"Could not read edges metadata from Arrow table: {e}")
     return None

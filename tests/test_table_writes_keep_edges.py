@@ -109,6 +109,20 @@ def _metadata_carrier_table(rows) -> pa.Table:
     return table.set_column(2, field, table.column("geometry"))
 
 
+def _typed_table(rows, type_edges, block_edges) -> pa.Table:
+    """A table whose GeoArrow type and ``geo`` block each declare their own edges."""
+    table = _plain_table(rows)
+    if type_edges is not None:
+        ext = ga.wkb().with_edge_type(type_edges)
+        column = pa.ExtensionArray.from_storage(ext, table.column("geometry").combine_chunks())
+        table = table.set_column(2, pa.field("geometry", ext), column)
+    col_meta = {"encoding": "WKB"}
+    if block_edges is not None:
+        col_meta["edges"] = block_edges
+    geo = {"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": col_meta}}
+    return table.replace_schema_metadata({"geo": json.dumps(geo)})
+
+
 class TestSchemaEdges:
     def test_extension_type_and_metadata_carrier(self, rows):
         native_type = ga.wkb().with_edge_type(gt.EdgeType.SPHERICAL)
@@ -134,6 +148,11 @@ class TestSchemaEdges:
                     metadata={EXT_NAME: b"geoarrow.wkb", EXT_META: b'{"edges": 1}'},
                 ),
                 pa.field("bare", pa.binary(), metadata={EXT_NAME: b"geoarrow.wkb"}),
+                pa.field(
+                    "typo",
+                    pa.binary(),
+                    metadata={EXT_NAME: b"geoarrow.wkb", EXT_META: b'{"edges": "sphere"}'},
+                ),
             ]
         )
         assert nonplanar_edges_from_schema(schema) == {"a": "spherical", "b": "vincenty"}
@@ -143,6 +162,44 @@ class TestSchemaEdges:
         table = _plain_table(rows).replace_schema_metadata({"geo": json.dumps(geo)})
         assert table_nonplanar_edges(table, "geometry", "karney") == {"geometry": "karney"}
         assert table_nonplanar_edges(table, "geometry", "planar") == {}
+
+    @pytest.mark.parametrize(
+        ("block_edges", "type_edges", "expected"),
+        [
+            # The geo block wins when it and the GeoArrow type disagree (#1288).
+            ("spherical", gt.EdgeType.PLANAR, "spherical"),
+            ("planar", gt.EdgeType.SPHERICAL, None),
+            ("vincenty", gt.EdgeType.SPHERICAL, "vincenty"),
+            # A block without edges says nothing, so the type decides.
+            (None, gt.EdgeType.SPHERICAL, "spherical"),
+            # Only a GeoParquet edge algorithm counts. A typo is no declaration.
+            ("bogus", gt.EdgeType.SPHERICAL, "spherical"),
+            ("bogus", gt.EdgeType.PLANAR, None),
+            ("bogus", None, None),
+            ("Spherical", None, None),
+        ],
+    )
+    def test_geo_block_wins_and_only_known_algorithms_count(
+        self, rows, block_edges, type_edges, expected
+    ):
+        from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
+
+        table = _typed_table(rows, type_edges, block_edges)
+        want = {"geometry": expected} if expected else {}
+        assert table_nonplanar_edges(table, "geometry", None) == want
+        # One rule: the repair gate reads the same answer as the write funnel.
+        assert nonplanar_edges_of_arrow_table(table, "geometry") == expected
+
+    def test_one_copy_of_the_edges_detection(self):
+        """The repair gate has no edges reader of its own (#1280, #1288)."""
+        import inspect
+
+        from geoparquet_io.core import geometry_repair
+
+        assert not hasattr(geometry_repair, "_geoarrow_nonplanar_edges")
+        source = inspect.getsource(geometry_repair.nonplanar_edges_of_arrow_table)
+        assert "table_nonplanar_edges" in source
+        assert "_collect_nonplanar_edges_from_metadata" not in source
 
     def test_planar_edge_types_keep_bytes_and_crs(self, rows):
         crs_type = ga.wkb().with_crs("OGC:CRS84").with_edge_type(gt.EdgeType.SPHERICAL)
@@ -257,12 +314,25 @@ class TestSimplify:
         assert result.exit_code == 0, result.output
         _assert_spherical(out, "2.0")
 
-    def test_native_edges_replace_conflicting_carried_edges(self, rows):
-        """The type is what the column is. A stale carried block does not win."""
-        geo = {"version": "1.1.0", "primary_column": "geometry"}
-        geo["columns"] = {"geometry": {"encoding": "WKB", "edges": "planar"}}
-        table = _plain_table(rows).replace_schema_metadata({"geo": json.dumps(geo)})
-        out = _with_carried_edges(table, "geometry", "spherical")
+    @pytest.mark.parametrize(
+        ("block_edges", "type_edges", "expected"),
+        [
+            ("planar", gt.EdgeType.SPHERICAL, "planar"),
+            ("spherical", gt.EdgeType.PLANAR, "spherical"),
+            (None, gt.EdgeType.SPHERICAL, "spherical"),
+        ],
+    )
+    def test_declared_block_wins_over_the_type(self, rows, block_edges, type_edges, expected):
+        """Simplify reads the edges by the same rule as the write funnel (#1288)."""
+        from geoparquet_io.core.process.simplify import simplify_table
+
+        table = _typed_table(rows, type_edges, block_edges)
+        out = simplify_table(table, 0.01, geometry_column="geometry")
+        carried = json.loads(out.schema.metadata[b"geo"])["columns"]["geometry"]
+        assert carried.get("edges", "planar") == expected
+
+    def test_carried_edges_are_set_on_the_block(self, rows):
+        out = _with_carried_edges(_plain_table(rows), "geometry", "spherical")
         assert json.loads(out.schema.metadata[b"geo"])["columns"]["geometry"]["edges"] == (
             "spherical"
         )
