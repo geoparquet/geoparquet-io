@@ -486,6 +486,56 @@ class TestFoldedIntoCheckMetadataAndBbox:
         assert any("larger than" in issue for issue in result["issues"])
 
 
+class TestExitCodes:
+    """The verdict has to be usable as a gate, not only readable.
+
+    Asserting on stdout alone is how a check that printed ``❌`` and exited 0
+    shipped, so the exit code is pinned for all three outcomes.
+    """
+
+    def _exit_code(self, path, *args):
+        return CliRunner().invoke(check, ["bbox", str(path), *args]).exit_code
+
+    def test_clean_file_exits_zero(self, honest_file):
+        assert self._exit_code(honest_file) == 0
+
+    def test_oversized_file_exits_zero(self, tmp_path):
+        """A warning by design: results stay correct, so it must not fail a build."""
+        path = _write_geoparquet(
+            tmp_path / "exit_wide.parquet", [SQUARE], [(-5.0, -5.0, 15.0, 15.0)]
+        )
+        assert self._exit_code(path) == 0
+
+    def test_undersized_file_exits_one(self, tmp_path):
+        path = _write_geoparquet(tmp_path / "exit_short.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
+        assert self._exit_code(path) == 1
+
+    def test_null_bbox_exits_one(self, tmp_path):
+        path = _write_geoparquet(
+            tmp_path / "exit_null.parquet", [SQUARE, SQUARE], [SQUARE_BBOX, None]
+        )
+        assert self._exit_code(path) == 1
+
+    def test_skipping_the_comparison_exits_zero(self, tmp_path):
+        """``--sample-rows 0`` asked no question, so it cannot answer "failed"."""
+        path = _write_geoparquet(tmp_path / "exit_skip.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
+        assert self._exit_code(path, "--sample-rows", "0") == 0
+
+    def test_file_with_no_bbox_column_keeps_its_old_exit_code(self, buildings_test_file):
+        """Pre-existing verdicts are not turned into gates by this change."""
+        assert self._exit_code(buildings_test_file) == 0
+
+    def test_partition_exits_one_and_names_the_bad_file(self, tmp_path):
+        """A multi-file run gates on any file, and says which."""
+        part = tmp_path / "part"
+        part.mkdir()
+        _write_geoparquet(part / "good.parquet", [SQUARE], [SQUARE_BBOX])
+        _write_geoparquet(part / "bad.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
+        result = CliRunner().invoke(check, ["bbox", str(part), "--all-files"])
+        assert result.exit_code == 1
+        assert "bad.parquet" in result.output
+
+
 class TestCheckBboxCli:
     """``gpio check bbox`` reports the comparison by default."""
 
@@ -563,6 +613,7 @@ class TestCheckBboxCli:
     def test_fix_declines_a_wrong_bbox_with_a_hint(self, tmp_path):
         path = _write_geoparquet(tmp_path / "cli_fix.parquet", [SQUARE], [(0.0, 0.0, 9.0, 9.0)])
         result = CliRunner().invoke(check, ["bbox", path, "--fix"])
+        # --fix cannot repair it, so the file is still broken when the run ends.
         assert result.exit_code == 1
         assert "No automatic fix available" in result.output
         assert "gpio add bbox" in result.output

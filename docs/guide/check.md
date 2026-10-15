@@ -261,6 +261,10 @@ the same finding:
 A row with no geometry — NULL or empty — is counted and skipped. There is no
 envelope to compare it against, and that is not a defect.
 
+An undersized or NULL bbox is a failure, so `gpio check bbox` exits 1 on it like
+any other check failure; an oversized one is a warning, which exits 0 unless
+`--strict` is set. See [exit codes](#exit-codes) for the shared contract.
+
 The report names the worst offending rows by their position in the file, which
 is the part you can act on:
 
