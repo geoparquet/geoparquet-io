@@ -20,10 +20,11 @@ This module provides three injection styles:
 """
 
 from geoparquet_io.core.duckdb_utils import quote_identifier
+from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
 from geoparquet_io.core.logging_config import debug, warn
 
 
-def _should_skip_nonplanar(geometry_column: str, nonplanar_edges: str | None, repair: bool) -> bool:
+def _should_skip_nonplanar(geometry_column: str, nonplanar_edges, repair: bool) -> bool:
     """Whether the planar repair must be skipped for a non-planar column (#1287).
 
     Planar validity is the wrong test for a column that declares non-planar
@@ -31,27 +32,42 @@ def _should_skip_nonplanar(geometry_column: str, nonplanar_edges: str | None, re
     area) on the plane, and ``ST_MakeValid`` collapses it into line fragments.
     The invalid *count* is just as planar a statement, so a skipped column gets
     neither the repair nor the "Repaired/Left unrepaired N" report. The skip
-    applies even when repair was requested explicitly — planar repair is
-    actively destructive on spherical data — and the warning says so; with
+    applies even when repair was requested explicitly -- planar repair is
+    actively destructive on spherical data -- and the warning says so; with
     repair opted out the pass-through is what was asked for, so only a debug
     line is emitted.
+
+    Only a GeoParquet edge algorithm (``GEOGRAPHY_EDGE_ALGORITHMS``) skips. Any
+    other value -- ``"Planar"``, a typo, a number -- is not a declaration gpio
+    can honor, so the column keeps the planar repair it would get anyway.
     """
     if not nonplanar_edges or nonplanar_edges == "planar":
         return False
+    if not isinstance(nonplanar_edges, str) or nonplanar_edges not in GEOGRAPHY_EDGE_ALGORITHMS:
+        debug(
+            f"Column '{geometry_column}' declares unrecognized edges {nonplanar_edges!r}; "
+            "treating it as planar for geometry repair"
+        )
+        return False
     if repair:
         warn(
-            f"Skipping planar geometry repair: column '{geometry_column}' declares "
-            f"{nonplanar_edges} edges, so planar validity is the wrong test and "
-            f"ST_MakeValid would corrupt shapes that are valid on the sphere (#1287). "
-            f"This applies even when --repair-geometry is requested explicitly; "
-            f"repair on the sphere is not supported yet."
+            f"Skipping planar geometry repair for column '{geometry_column}': it declares "
+            f"{nonplanar_edges!r} edges, and planar ST_MakeValid would corrupt shapes that "
+            "are valid on the sphere (#1287). Explicit repair requests are skipped too; "
+            "repair on the sphere is not supported yet."
         )
     else:
         debug(
             f"Planar validity count skipped for column '{geometry_column}': "
-            f"it declares {nonplanar_edges} edges (#1287)"
+            f"it declares {nonplanar_edges!r} edges (#1287)"
         )
     return True
+
+
+def _geoarrow_nonplanar_edges(arrow_type) -> str | None:
+    """The non-planar edge algorithm a GeoArrow extension type declares, if any."""
+    name = str(getattr(getattr(arrow_type, "edge_type", None), "name", "")).lower()
+    return name if name in GEOGRAPHY_EDGE_ALGORITHMS else None
 
 
 def nonplanar_edges_of_arrow_table(table, geometry_column: str) -> str | None:
@@ -59,10 +75,9 @@ def nonplanar_edges_of_arrow_table(table, geometry_column: str) -> str | None:
 
     Reads both carriers an in-memory table can have: a ``geo`` block in the
     schema metadata (via the owner of that question, ``write_funnels``) and a
-    GeoArrow spherical edge type on the column's Arrow type (via
-    ``arrow_geo_metadata``). Returns the edges value, or ``None`` for planar.
+    GeoArrow non-planar edge type (spherical or an ellipsoidal algorithm) on
+    the column's Arrow type. Returns the edges value, or ``None`` for planar.
     """
-    from geoparquet_io.core.arrow_geo_metadata import _is_spherical_edge_type
     from geoparquet_io.core.write_funnels import _collect_nonplanar_edges_from_metadata
 
     try:
@@ -70,10 +85,8 @@ def nonplanar_edges_of_arrow_table(table, geometry_column: str) -> str | None:
         edges = _collect_nonplanar_edges_from_metadata(metadata).get(geometry_column)
         if edges:
             return edges
-        if geometry_column in table.column_names and _is_spherical_edge_type(
-            table.schema.field(geometry_column).type
-        ):
-            return "spherical"
+        if geometry_column in table.column_names:
+            return _geoarrow_nonplanar_edges(table.schema.field(geometry_column).type)
     except Exception as e:  # noqa: BLE001 - detection must never break a pipeline
         debug(f"Could not read edges metadata from Arrow table: {e}")
     return None

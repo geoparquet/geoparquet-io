@@ -271,16 +271,21 @@ def test_api_convert_of_a_planar_geojson_still_repairs(tmp_path, caplog):
     assert SKIP_MARKER not in caplog.text
 
 
-def test_streaming_edges_fallback_reads_the_kv_metadata_dict(tmp_path):
+def test_declared_edges_fall_back_to_the_kv_metadata_dict():
     """A stream input has no re-readable path; the KV dict is the witness then."""
-    from geoparquet_io.core.extract import _nonplanar_edges_of_input
+    from geoparquet_io.core.write_funnels import declared_nonplanar_edges
 
     metadata = {b"geo": _geo_block("spherical")}
-    assert (
-        _nonplanar_edges_of_input(str(tmp_path / "missing.parquet"), metadata, "geometry")
-        == "spherical"
-    )
-    assert _nonplanar_edges_of_input(str(tmp_path / "missing.parquet"), None, "geometry") is None
+    assert declared_nonplanar_edges(None, metadata) == {"geometry": "spherical"}
+    assert declared_nonplanar_edges(None, None) == {}
+
+
+def test_declared_edges_prefer_the_file(tmp_path):
+    from geoparquet_io.core.write_funnels import declared_nonplanar_edges
+
+    src = _write_input(tmp_path / "in.parquet", POLE_RING_WKT, edges="vincenty")
+    metadata = {b"geo": _geo_block("spherical")}
+    assert declared_nonplanar_edges(str(src), metadata) == {"geometry": "vincenty"}
 
 
 # ---------------------------------------------------------------------------
@@ -439,3 +444,162 @@ def test_extract_skip_keeps_orientation_declaration(tmp_path, caplog):
     geo = json.loads(pq.read_table(str(out)).schema.metadata[b"geo"])
     assert geo["columns"]["geometry"].get("orientation") == "counterclockwise"
     assert geo["columns"]["geometry"].get("edges") == "spherical"
+
+
+# ---------------------------------------------------------------------------
+# The gate trusts only a known non-planar algorithm
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bogus", ["Planar", "bogus", 7, {"a": 1}, "\x1b[31mspherical\x1b[0m"])
+def test_unknown_edges_value_keeps_planar_repair(bogus, caplog):
+    """Only a GeoParquet edge algorithm skips the repair; anything else is planar."""
+    con = get_duckdb_connection(load_spatial=True)
+    table = _wkb_query_table(con, BOWTIE_WKT)
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        result, n = repair_arrow_table_geometry(
+            table, "geometry", repair=True, nonplanar_edges=bogus
+        )
+    assert n == 1
+    assert result is not table
+    assert SKIP_MARKER not in caplog.text
+
+
+def test_unknown_edges_value_in_geo_block_keeps_planar_repair(tmp_path, caplog):
+    src = _write_input(tmp_path / "in.parquet", BOWTIE_WKT, edges="bogus")
+    out = tmp_path / "out.parquet"
+    text = _run_cli(caplog, "extract", "geoparquet", src, out)
+    assert "Repaired 1 invalid geometry" in text
+    assert SKIP_MARKER not in text
+
+
+@pytest.mark.parametrize("algorithm", ["vincenty", "karney"])
+def test_ellipsoidal_edges_value_skips(algorithm, caplog):
+    con = get_duckdb_connection(load_spatial=True)
+    table = _wkb_query_table(con, POLE_RING_WKT)
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        _, n = repair_arrow_table_geometry(
+            table, "geometry", repair=True, nonplanar_edges=algorithm
+        )
+    assert n == 0
+    assert f"'{algorithm}' edges" in caplog.text
+
+
+def test_skip_warning_is_one_concise_line_naming_no_cli_flag(caplog):
+    con = get_duckdb_connection(load_spatial=True)
+    table = _wkb_query_table(con, POLE_RING_WKT)
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        repair_arrow_table_geometry(table, "geometry", repair=True, nonplanar_edges="spherical")
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "--" not in message.replace("(#1287)", "")
+    assert "column 'geometry'" in message
+    assert "'spherical' edges" in message
+
+
+@pytest.mark.parametrize("edge_type", ["KARNEY", "VINCENTY", "THOMAS", "ANDOYER"])
+def test_geoarrow_ellipsoidal_edge_type_is_detected(edge_type):
+    import geoarrow.pyarrow as ga
+    import geoarrow.types as gt
+
+    from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
+
+    wkb_type = ga.wkb().with_edge_type(getattr(gt.EdgeType, edge_type))
+    table = pa.table(
+        {"geometry": pa.ExtensionArray.from_storage(wkb_type, pa.array(_wkb_of(POLE_RING_WKT)))}
+    )
+    assert nonplanar_edges_of_arrow_table(table, "geometry") == edge_type.lower()
+
+
+def test_geoarrow_planar_edge_type_is_planar():
+    import geoarrow.pyarrow as ga
+
+    from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
+
+    table = pa.table(
+        {"geometry": pa.ExtensionArray.from_storage(ga.wkb(), pa.array(_wkb_of(BOWTIE_WKT)))}
+    )
+    assert nonplanar_edges_of_arrow_table(table, "geometry") is None
+
+
+# ---------------------------------------------------------------------------
+# A failed edges read is said out loud, not silently planar
+# ---------------------------------------------------------------------------
+
+
+def test_unreadable_edges_metadata_warns(tmp_path, monkeypatch, caplog):
+    from geoparquet_io.core import write_funnels
+
+    def boom(_path):
+        raise RuntimeError("footer unreadable")
+
+    monkeypatch.setattr(write_funnels, "get_schema_info", boom)
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        assert write_funnels.collect_nonplanar_edges(str(tmp_path / "x.parquet")) == {}
+    assert "edges" in caplog.text
+    assert "footer unreadable" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Each call site hands its declaration to the gate
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_extract_to_stdout_preserves_spherical_ring(tmp_path, monkeypatch, caplog):
+    """``gpio extract geoparquet in.parquet -``: the streaming path is gated too."""
+    import io
+    from unittest import mock
+
+    import pyarrow.ipc as ipc
+
+    from geoparquet_io.core.extract import extract
+
+    src = _write_input(tmp_path / "in.parquet", POLE_RING_WKT)
+    buffer = io.BytesIO()
+    mock_stdout = mock.MagicMock()
+    mock_stdout.isatty.return_value = False
+    mock_stdout.buffer = buffer
+    monkeypatch.setattr("sys.stdout", mock_stdout)
+
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+        extract(str(src), "-")
+
+    buffer.seek(0)
+    column = ipc.open_stream(buffer).read_all().column("geometry").combine_chunks()
+    storage = getattr(column, "storage", column)
+    assert storage.to_pylist() == _wkb_of(POLE_RING_WKT)
+    assert SKIP_MARKER in caplog.text
+    assert "Repaired" not in caplog.text
+
+
+def test_bigquery_native_geography_skips_planar_repair(caplog):
+    """A native GEOGRAPHY export declares spherical edges; the repair must not run."""
+    from unittest.mock import MagicMock, patch
+
+    from geoparquet_io.core.extract_bigquery import extract_bigquery
+
+    fetched = pa.table(
+        {
+            "id": pa.array([0], pa.int64()),
+            "geom": pa.array(_wkb_of(POLE_RING_WKT), pa.binary()),
+        }
+    )
+    with (
+        patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as mock_conn,
+        patch(
+            "geoparquet_io.core.extract_bigquery._schema_rows",
+            return_value=[("id", "BIGINT"), ("geom", "GEOMETRY")],
+        ),
+        patch(
+            "geoparquet_io.core.extract_bigquery._read_with_view_fallback",
+            return_value=fetched,
+        ),
+        caplog.at_level(logging.WARNING, logger="geoparquet_io"),
+    ):
+        mock_conn.return_value.__enter__.return_value = MagicMock()
+        result = extract_bigquery(table_id="project-name.dataset.table", output_parquet=None)
+
+    assert result.column("geom").to_pylist() == _wkb_of(POLE_RING_WKT)
+    assert SKIP_MARKER in caplog.text
+    assert "Repaired" not in caplog.text

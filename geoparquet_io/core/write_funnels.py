@@ -136,7 +136,12 @@ def collect_nonplanar_edges(input_file: str) -> dict[str, str]:
             if edges and edges != "planar":
                 edges_by_col.setdefault(name, edges)
     except Exception as e:
-        debug(f"Could not collect edges metadata from {input_file}: {e}")
+        # Fail loudly: an empty answer reads as "planar", which re-enables the
+        # planar geometry repair and drops the edges from the output (#1287).
+        warn(
+            f"Could not read the edges metadata of {input_file}; treating its geometry "
+            f"as planar: {e}"
+        )
         return {}
     return edges_by_col
 
@@ -1542,6 +1547,21 @@ def write_parquet_with_metadata(
             )
 
 
+def declared_nonplanar_edges(
+    input_file: str | None, original_metadata: dict | None
+) -> dict[str, str]:
+    """Map geometry column -> non-planar edges an input declares, from either carrier.
+
+    Prefers the input file, which sees native GEOGRAPHY logical types as well as
+    the ``geo`` block; falls back to the input's KV metadata dict when the file
+    says nothing or there is no re-readable file (an Arrow stream read from
+    stdin passes ``input_file=None``). One answer serves both the planar-repair
+    gate (#1287) and the edges a write restores (#588).
+    """
+    edges_by_col = collect_nonplanar_edges(input_file) if input_file else {}
+    return edges_by_col or _collect_nonplanar_edges_from_metadata(original_metadata)
+
+
 def _edges_to_restore(
     input_file: str | None,
     original_metadata: dict | None,
@@ -1549,18 +1569,14 @@ def _edges_to_restore(
 ) -> dict[str, str]:
     """The non-planar edges the writer will drop and the write must restore.
 
-    Prefers the input file (sees native GEOGRAPHY logical types as well as geo
-    metadata); falls back to the input's KV metadata dict when only that is
-    available (e.g. an Arrow stream read from stdin). ``exclude_columns`` names
-    columns whose declaration the write itself invalidated (#601): the input
-    still declares them, but they must not come back.
+    The input's declaration (:func:`declared_nonplanar_edges`), less
+    ``exclude_columns``: columns whose declaration the write itself invalidated
+    (#601). The input still declares them, but they must not come back.
 
     Collection only; :func:`_apply_nonplanar_edges` writes the answer back
     after the write, on any rewrite path.
     """
-    edges_by_col = collect_nonplanar_edges(input_file) if input_file else {}
-    if not edges_by_col:
-        edges_by_col = _collect_nonplanar_edges_from_metadata(original_metadata)
+    edges_by_col = declared_nonplanar_edges(input_file, original_metadata)
     if exclude_columns:
         edges_by_col = {k: v for k, v in edges_by_col.items() if k not in exclude_columns}
     return edges_by_col

@@ -34,7 +34,7 @@ The `convert` command transforms between GeoParquet and other vector formats wit
     so the number you ask for is the number that lands.
 
     A request of **2,048 rows or fewer** is the exception: gpio passes it
-    through untouched, because pyarrow honours it exactly while DuckDB's
+    through untouched, because pyarrow honors it exactly while DuckDB's
     `COPY` rounds it up to 2,048 regardless — so what lands depends on which
     writer runs, and gpio cannot snap it without overriding the one writer that
     could have obeyed. `convert` writes through DuckDB, so
@@ -416,7 +416,7 @@ detected. The returned `Table` carries the name actually used, so read it off
 | Source | `geometry_column='geom'` gives |
 |--------|-------------------------------|
 | CSV, or Parquet with WKT / lat-lon columns | `geom` — the geometry is *built* here, so it can take the name. A column the source carries through that already has that name keeps it, and the built one moves aside to `geom_1` with a warning. |
-| GeoPackage, Shapefile, GeoJSON, FlatGeobuf, FileGDB, GeoParquet | `geometry` — the read aliases `ST_AsWKB(...) AS geometry`, so the request cannot be honoured and the actual name is reported instead. This is also why `gpio.convert()` on a `the_geom` GeoParquet hands back `geometry`, where the CLI above keeps the name. |
+| GeoPackage, Shapefile, GeoJSON, FlatGeobuf, FileGDB, GeoParquet | `geometry` — the read aliases `ST_AsWKB(...) AS geometry`, so the request cannot be honored and the actual name is reported instead. This is also why `gpio.convert()` on a `the_geom` GeoParquet hands back `geometry`, where the CLI above keeps the name. |
 
 === "Python"
 
@@ -429,7 +429,7 @@ detected. The returned `Table` carries the name actually used, so read it off
                          geometry_column='geom')
     table.geometry_column   # 'geom'
 
-    # Not honoured: a GeoPackage's geometry is read, and reports back 'geometry'
+    # Not honored: a GeoPackage's geometry is read, and reports back 'geometry'
     table = gpio.convert('data.gpkg', geometry_column='geom')
     table.geometry_column   # 'geometry'
     ```
@@ -606,8 +606,9 @@ envelope).
 #### Spherical (non-planar) edges are never planar-repaired
 
 Planar validity is the wrong test for a column that declares non-planar edges —
-`edges: spherical` in the input's `geo` metadata, a GeoArrow spherical edge
-type, or a native Parquet `GEOGRAPHY` logical type (the normal shape of
+`edges: spherical` (or an ellipsoidal algorithm such as `vincenty` or `karney`)
+in the input's `geo` metadata, a GeoArrow non-planar edge type, or a native
+Parquet `GEOGRAPHY` logical type (the normal shape of
 BigQuery GEOGRAPHY exports and S2-based pipelines). A pole-enclosing ring like
 `POLYGON ((0 80, 90 80, 180 80, -90 80, 0 80))` is valid on the sphere but
 collinear (zero area) on the plane, and `ST_MakeValid` would collapse it into
@@ -616,8 +617,9 @@ line fragments.
 For such columns gpio **skips** the planar repair and its invalid count
 entirely and warns — even when repair is requested explicitly, because planar
 repair is actively destructive on spherical data. The geometry passes through
-unchanged. Repair on the sphere (via the S2 `geography` extension) is a planned
-follow-up.
+unchanged. An `edges` value that is not a GeoParquet edge algorithm is not a
+declaration gpio can honor, so that column keeps the planar repair. Repair on
+the sphere (via the S2 `geography` extension) is a planned follow-up.
 
 === "CLI"
 
@@ -625,7 +627,7 @@ follow-up.
     ```bash
     # Input declares edges: spherical — geometry passes through unchanged
     gpio convert geoparquet spherical.parquet output.parquet
-    # Skipping planar geometry repair: column 'geometry' declares spherical edges, ...
+    # Skipping planar geometry repair for column 'geometry': it declares 'spherical' edges, ...
     ```
 
 === "Python"
@@ -636,9 +638,15 @@ follow-up.
 
     <!-- doctest: skip="needs an input declaring spherical edges" -->
     ```python
-    # Same skip through the Python API — the warning is logged
+    # Same skip through the Python API — the warning is logged, and the
+    # returned table's geo metadata keeps edges: spherical
     gpio.convert("spherical.parquet").write("output.parquet")
     ```
+
+    The geometry bytes pass through unchanged. `Table.write` does not yet
+    restate the edges in the written file's metadata
+    ([#1253](https://github.com/geoparquet/geoparquet-io/issues/1253)); the CLI
+    command above does.
 
 ### Curved Geometries
 

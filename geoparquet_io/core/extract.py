@@ -80,8 +80,7 @@ from geoparquet_io.core.streaming import (
     should_stream_output,
 )
 from geoparquet_io.core.write_funnels import (
-    _collect_nonplanar_edges_from_metadata,
-    collect_nonplanar_edges,
+    declared_nonplanar_edges,
     write_parquet_with_metadata,
 )
 
@@ -877,21 +876,6 @@ def _repair_geometry_in_query(
     return repaired_query, repaired_query != query
 
 
-def _nonplanar_edges_of_input(input_path: str, metadata: dict | None, geom_col: str) -> str | None:
-    """The non-planar edges the input declares for ``geom_col``, if any.
-
-    Both carriers a file input has: the input file itself (geo block plus the
-    native GEOGRAPHY logical type, via ``collect_nonplanar_edges``) and, for
-    inputs whose path cannot be re-read (a stdin stream), the already-read KV
-    metadata dict.
-    """
-    return (
-        collect_nonplanar_edges(input_path).get(geom_col)
-        or _collect_nonplanar_edges_from_metadata(metadata).get(geom_col)
-        or None
-    )
-
-
 def _carry_metadata_to_columns(metadata: dict, columns: list[str]) -> dict | None:
     """Return the input's KV metadata rewritten to describe only ``columns``.
 
@@ -1023,7 +1007,10 @@ def _extract_streaming(
             query,
             geom_col,
             repair_geometry,
-            nonplanar_edges=_nonplanar_edges_of_input(input_path, metadata, geom_col),
+            # A stdin stream has no file to re-read; its KV dict is the witness.
+            nonplanar_edges=declared_nonplanar_edges(
+                None if is_stream else input_path, metadata
+            ).get(geom_col),
         )
 
         if verbose:
@@ -1261,7 +1248,7 @@ def _execute_extraction(
                 query,
                 geometry_col,
                 repair_geometry,
-                nonplanar_edges=_nonplanar_edges_of_input(input_parquet, metadata, geometry_col),
+                nonplanar_edges=declared_nonplanar_edges(input_parquet, metadata).get(geometry_col),
             )
 
         stale_columns = _stale_stat_columns(
