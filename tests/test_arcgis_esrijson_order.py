@@ -180,6 +180,16 @@ def test_prepare_puts_geometry_type_first_and_features_last(order, expected, sho
     assert list(_prepare_esrijson_for_gdal(page)) == expected
 
 
+def test_prepare_does_not_invent_a_features_member():
+    """A page with no `features` member keeps its members and gains none."""
+    page = {"fields": [], "geometryType": "esriGeometryPoint", "exceededTransferLimit": True}
+
+    prepared = _prepare_esrijson_for_gdal(page)
+
+    assert list(prepared) == ["geometryType", "fields", "exceededTransferLimit"]
+    assert prepared == page
+
+
 # ---------------------------------------------------------------------------
 # Conversion of other page shapes and member sets
 # ---------------------------------------------------------------------------
