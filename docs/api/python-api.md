@@ -874,6 +874,18 @@ table.write('output.parquet', write_strategy='streaming')
 |-----------|------|-------------|
 | `write_strategy` | str | Write strategy: `duckdb-kv` (default), `streaming`, `disk-rewrite`, or `in-memory` |
 
+Every strategy writes the same file-level keys. The `geo` block is built fresh
+for the output, and other keys such as fiboa, STAC or your own provenance key are
+kept. The input's `pandas`, `ARROW:schema` and `geo:overviews` keys are never
+copied, because they describe the input's rows and not the written ones. A stale
+`pandas` block made pandas give sorted rows the input's index labels, or shift a
+naive timestamp by a time zone the column no longer has. The CLI and the
+`duckdb-kv` and `disk-rewrite` strategies already worked this way. Before
+[#1268](https://github.com/geoparquet/geoparquet-io/issues/1268) the `in-memory`
+and `streaming` strategies and the Arrow-table writer copied the `pandas` key
+through. A named or non-range pandas index now reads back as a plain column, as
+it already did on the default strategy.
+
 DuckDB's memory limit is auto-detected and respects container cgroup limits. To
 set it explicitly, use the CLI `gpio extract --write-memory` flag; the Python
 API does not expose a memory-limit argument.

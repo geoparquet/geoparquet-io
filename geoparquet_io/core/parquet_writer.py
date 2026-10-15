@@ -21,9 +21,11 @@ write path is entitled to answer for itself:
    for one -- :func:`resolve_output_geoparquet_version`.
 3. **Which CRS the output declares** when the caller did not name one --
    :func:`resolve_input_crs`.
-4. **Whether a ``geo`` key appears in the output's file-level metadata at all**
-   -- :func:`apply_output_kv_metadata`, and for a DuckDB ``COPY`` that carries
-   its own ``geo`` block, :func:`geoparquet_copy_options`.
+4. **Which file-level keys the output carries** -- whether a ``geo`` key
+   appears at all, and that the input's ``pandas``, ``ARROW:schema`` and
+   ``geo:overviews`` never do -- :func:`output_schema_metadata` and
+   :func:`apply_output_kv_metadata`, and for a DuckDB ``COPY`` that carries its
+   own ``geo`` block, :func:`geoparquet_copy_options`.
 
 The third exists because it is the *same question as the second*, asked of the
 same witness. Both are "what did the input declare", and a rewrite that answers
@@ -66,6 +68,7 @@ from typing import TYPE_CHECKING
 from geoparquet_io.core.crs_utils import extract_crs_from_parquet
 from geoparquet_io.core.duckdb_utils import build_kv_metadata_clause
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY
 from geoparquet_io.core.logging_config import debug, info
 from geoparquet_io.core.streaming import extract_version_from_metadata
 
@@ -468,20 +471,82 @@ def resolve_input_crs(
         return None
 
 
+# Schema-metadata keys that describe the *input's* schema rather than the
+# output's, so they must never ride along into a write.
+#
+# `geo` would declare the input's GeoParquet version over output the writer has
+# just given a different shape; `ARROW:schema` and `pandas` are serialized
+# descriptors that pyarrow writes through verbatim rather than regenerating,
+# leaving the output naming the input's columns and CRS. A stale `pandas` block
+# also relabels rows: after a sort it hands back the input's index labels in the
+# input's order, and a stale `datetimetz` entry shifts a naive timestamp by the
+# zone's offset (#710, #1268).
+#
+# One definition, used by every place that needs it -- the facade below, the
+# parquet-geo-only path in arrow_geo_metadata (which sees `bytes` keys, straight
+# off a pyarrow schema) and write_parquet_with_metadata's preserved-keys loop
+# (which sees them decoded). They were separate literals; a key added to one and
+# not the other is a silent metadata leak, so the bytes form is derived rather
+# than written out again. It lives here because the facade applies it to every
+# Arrow-side write.
+#
+# `geo:overviews` describes the file's own row-group layout (OVERVIEWS_SPEC
+# 3.1 calls it authoritative), so a rewrite that regroups or filters rows must
+# not carry it: an honest plain file with a `level` column beats a footer that
+# lies about where each level ends. The writer of a levelled file mints a fresh
+# one; nothing else may forward it.
+_CARRIED_SCHEMA_METADATA_KEYS = frozenset({"geo", "ARROW:schema", "pandas", OVERVIEWS_KEY})
+_CARRIED_SCHEMA_METADATA_KEYS_BYTES = frozenset(
+    key.encode("utf-8") for key in _CARRIED_SCHEMA_METADATA_KEYS
+)
+
+
+def _as_bytes(value: str | bytes) -> bytes:
+    return value.encode("utf-8") if isinstance(value, str) else value
+
+
+def output_schema_metadata(
+    metadata: Mapping[str | bytes, str | bytes] | Mapping[bytes, bytes] | None,
+    geoparquet_version: str | None,
+    extra_kv_metadata: Mapping[str, str] | Mapping[str | bytes, str | bytes] | None = None,
+) -> dict[bytes, bytes]:
+    """The file-level KV metadata an output gets from its table's metadata.
+
+    * The input's ``pandas``, ``ARROW:schema`` and ``geo:overviews`` are
+      dropped: they describe the input's rows, not the output's (#710, #1268).
+      pyarrow regenerates ``ARROW:schema`` from what is left.
+    * ``geo`` is kept, because by the time a write gets here the table carries
+      the block that write built. ``parquet-geo-only`` drops it too, as it
+      means "carry no GeoParquet metadata".
+    * Every other key (fiboa, vecorel, STAC, provenance) survives (#690), and
+      ``extra_kv_metadata`` is merged in last, so the caller's value wins.
+
+    Keys and values come back as ``bytes``, ready for
+    ``replace_schema_metadata`` or ``with_metadata``.
+    """
+    dropped = _CARRIED_SCHEMA_METADATA_KEYS_BYTES
+    if geoparquet_version != "parquet-geo-only":
+        dropped = dropped - {b"geo"}
+
+    result = {
+        _as_bytes(key): _as_bytes(value)
+        for key, value in (metadata or {}).items()
+        if _as_bytes(key) not in dropped
+    }
+    for key, value in (extra_kv_metadata or {}).items():
+        result[_as_bytes(key)] = _as_bytes(value)
+    return result
+
+
 def apply_output_kv_metadata(
     table: pa.Table,
     geoparquet_version: str | None,
     extra_kv_metadata: dict[str, str] | None = None,
 ) -> pa.Table:
-    """Decide the output's file-level KV metadata. The fourth decision.
+    """Give ``table`` its output's file-level KV metadata. The fourth decision.
 
-    Two rules, and the version decides both:
-
-    * ``parquet-geo-only`` means "carry no GeoParquet metadata", so the ``geo``
-      key is dropped. Every other key is not GeoParquet metadata and survives.
-    * ``extra_kv_metadata`` -- the input's preserved sidecar payloads (fiboa,
-      vecorel, STAC), plus anything the caller minted -- is merged in, caller
-      last.
+    The rules are :func:`output_schema_metadata`'s; this is the table form. It
+    is zero-copy: only the schema metadata is replaced.
 
     The three Arrow strategies each carried their own copy of the merge half and
     none of them had the drop half: ``write_from_table`` guards its metadata
@@ -490,22 +555,16 @@ def apply_output_kv_metadata(
     ``geo`` key naming a ``primary_column`` the output does not have, and
     declaring a GeoParquet version for a file explicitly asked to declare none
     (#773). The same hole let a parquet-geo-only write *with* geometry keep the
-    input's carried block on the streaming path.
+    input's carried block on the streaming path. Copying the rest of the
+    metadata verbatim also carried the input's ``pandas`` block into every
+    in-memory and streaming output (#1268).
 
-    Applied once, at the top of each strategy's ``write_from_table``, before any
-    early return can skip it.
+    Applied at the top of each strategy's ``write_from_table``, before any
+    early return can skip it, and again by ``_write_table_with_settings`` just
+    before ``pq.write_table``, so the Arrow-table funnel and every helper that
+    writes through it get the same answer.
     """
-    metadata = dict(table.schema.metadata or {})
-
-    if geoparquet_version == "parquet-geo-only":
-        metadata.pop(b"geo", None)
-        metadata.pop("geo", None)
-
-    for key, value in (extra_kv_metadata or {}).items():
-        bkey = key.encode("utf-8") if isinstance(key, str) else key
-        bval = value.encode("utf-8") if isinstance(value, str) else value
-        metadata[bkey] = bval
-
+    metadata = output_schema_metadata(table.schema.metadata, geoparquet_version, extra_kv_metadata)
     return table.replace_schema_metadata(metadata)
 
 

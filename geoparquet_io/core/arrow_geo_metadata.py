@@ -30,7 +30,6 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
-    OVERVIEWS_KEY,
     _bbox_claimed_by_another_column,
     _get_geometry_type_name,
     _self_evident_bbox_column,
@@ -49,9 +48,13 @@ from geoparquet_io.core.geoarrow_encoding import (
     is_wkb_extension_field,
 )
 from geoparquet_io.core.logging_config import debug, success
-from geoparquet_io.core.parquet_writer import (
+from geoparquet_io.core.parquet_writer import (  # noqa: F401 (re-exported key set)
+    _CARRIED_SCHEMA_METADATA_KEYS,
+    _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
     ParquetWriteSettings,
+    apply_output_kv_metadata,
     estimate_row_size,
+    output_schema_metadata,
     resolve_row_group_rows_for_table,
 )
 from geoparquet_io.core.write_strategies.base import (
@@ -611,17 +614,10 @@ def _assemble_and_apply_geo_metadata(
     Returns:
         pa.Table: Table with geo metadata applied
     """
-    # Apply metadata to table
-    existing_metadata = dict(table.schema.metadata) if table.schema.metadata else {}
-    new_metadata = {}
-
-    # Copy non-geo metadata from existing
-    for k, v in existing_metadata.items():
-        key_str = k.decode("utf-8") if isinstance(k, bytes) else k
-        if not key_str.startswith("geo"):
-            new_metadata[k] = v
-
-    # Add geo metadata
+    # Keep the table's other keys under the facade's rule: the input's `pandas`,
+    # `ARROW:schema` and `geo:overviews` go, while a sidecar whose name only
+    # starts with "geo" stays. The `geo` key itself is replaced just below.
+    new_metadata = output_schema_metadata(table.schema.metadata, metadata_version)
     new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
     table = table.replace_schema_metadata(new_metadata)
 
@@ -631,28 +627,9 @@ def _assemble_and_apply_geo_metadata(
     return table
 
 
-# Schema-metadata keys that describe the *input's* schema rather than the
-# output's, so they must never ride along into a write.
-#
-# `geo` would declare the input's GeoParquet version over output the writer has
-# just given a different shape; `ARROW:schema` and `pandas` are serialized
-# descriptors that pyarrow writes through verbatim rather than regenerating,
-# leaving the output naming the input's columns and CRS.
-#
-# One definition, used by both places that need it -- the parquet-geo-only path
-# below (which sees `bytes` keys, straight off a pyarrow schema) and
-# write_parquet_with_metadata's preserved-keys loop (which sees them decoded).
-# They were separate literals; a key added to one and not the other is a silent
-# metadata leak, so the bytes form is derived rather than written out again.
-# `geo:overviews` describes the file's own row-group layout (OVERVIEWS_SPEC
-# 3.1 calls it authoritative), so a rewrite that regroups or filters rows must
-# not carry it: an honest plain file with a `level` column beats a footer that
-# lies about where each level ends. The writer of a levelled file mints a fresh
-# one; nothing else may forward it.
-_CARRIED_SCHEMA_METADATA_KEYS = frozenset({"geo", "ARROW:schema", "pandas", OVERVIEWS_KEY})
-_CARRIED_SCHEMA_METADATA_KEYS_BYTES = frozenset(
-    key.encode("utf-8") for key in _CARRIED_SCHEMA_METADATA_KEYS
-)
+# The carried-key set (`_CARRIED_SCHEMA_METADATA_KEYS` and its bytes form) is
+# the write facade's now (`parquet_writer`), which applies it to every
+# Arrow-side write. It is imported above and still answers at this address.
 
 
 def _strip_geo_metadata_key(table, verbose: bool = False):
@@ -1079,6 +1056,11 @@ def _write_table_with_settings(
         debug(f"Writing with {compression_desc} compression")
         if rows_per_group:
             debug(f"Row group size: {rows_per_group:,} rows")
+
+    # The facade has the last word on the file-level keys, here at the one
+    # place every Arrow-table write reaches: the table funnel and the helpers
+    # that call this directly never pass through a strategy (#1268).
+    table = apply_output_kv_metadata(table, geoparquet_version)
 
     # Use pq.write_table for all versions - we've already applied all metadata
     # Using geoarrow's write_geoparquet_table would overwrite our carefully constructed metadata

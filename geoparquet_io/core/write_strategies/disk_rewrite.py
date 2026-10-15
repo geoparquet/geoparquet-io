@@ -20,7 +20,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
-    _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
     _detect_version_from_table,
     _parse_geo_metadata_quietly,
     table_geometry_info,
@@ -42,7 +41,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
-from geoparquet_io.core.parquet_writer import apply_output_kv_metadata
+from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, output_schema_metadata
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
@@ -561,23 +560,16 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
         schema = _native_geometry_schema(pf.schema_arrow, native_crs)
 
-        new_meta = dict(schema.metadata or {})
+        # The facade's rule, as on every other Arrow-side write: no serialized
+        # descriptor of the input's schema, and under parquet-geo-only (no
+        # `geo_meta`) no `geo` key either. A built block replaces the carried one.
+        new_meta = output_schema_metadata(
+            schema.metadata,
+            None if geo_meta is not None else "parquet-geo-only",
+            extra_kv_metadata,
+        )
         if geo_meta is not None:
             new_meta[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-        else:
-            # parquet-geo-only: no `geo` key, and no serialized descriptor of the
-            # input's schema either -- the same exclusion set the other write
-            # paths use (`_strip_geo_metadata_key`).
-            new_meta = {
-                key: value
-                for key, value in new_meta.items()
-                if key not in _CARRIED_SCHEMA_METADATA_KEYS_BYTES
-            }
-        if extra_kv_metadata:
-            for key, value in extra_kv_metadata.items():
-                bkey = key.encode("utf-8") if isinstance(key, str) else key
-                bval = value.encode("utf-8") if isinstance(value, str) else value
-                new_meta[bkey] = bval
         new_schema = schema.with_metadata(new_meta)
 
         if verbose:
