@@ -301,3 +301,64 @@ def test_add_bbox_then_write_keeps_the_geography(table, tmp_path):
     out = tmp_path / "out.parquet"
     table.add_bbox().write(str(out))
     assert native_geo_edges(out) == ("Geography", "EdgeType.SPHERICAL")
+
+
+def _leaf_logical_type(path, column="geometry") -> str:
+    """The Parquet logical type of ``column``, found by leaf path.
+
+    ``ParquetSchema.column(i)`` counts leaves, so a struct before the geometry
+    (a bbox) shifts it. Reading by the Arrow field index lands on a bbox child.
+    """
+    import pyarrow.parquet as pq
+
+    schema = pq.ParquetFile(path).schema
+    leaf = next(schema.column(i) for i in range(len(schema)) if schema.column(i).path == column)
+    return str(leaf.logical_type)
+
+
+@pytest.mark.parametrize("strategy", ["duckdb-kv", "disk-rewrite", "in-memory", "streaming"])
+@pytest.mark.parametrize("with_bbox", [False, True], ids=["no-bbox", "bbox"])
+@pytest.mark.parametrize("edges", ["planar", "spherical"])
+def test_every_strategy_writes_the_native_type_and_keeps_column_order(
+    rows, tmp_path, strategy, with_bbox, edges
+):
+    """Every write strategy gives the same file: the native logical type with
+    the right edges, and the columns in the table's order.
+
+    disk-rewrite used to move the geometry after every other column, so a bbox
+    added after the geometry came out ahead of it.
+    """
+    import pyarrow.parquet as pq
+
+    geo_type = ga.wkb() if edges == "planar" else ga.wkb().with_edge_type(gt.EdgeType.SPHERICAL)
+    source = write_native_geo_only(tmp_path / "in.parquet", rows, {"geometry": (2, geo_type)})
+    table = gpio.read(str(source))
+    if with_bbox:
+        table = table.add_bbox()
+    out = tmp_path / "out.parquet"
+    table.write(str(out), write_strategy=strategy)
+
+    logical = _leaf_logical_type(out)
+    if edges == "planar":
+        assert logical.startswith("Geometry(")
+    else:
+        assert logical.startswith("Geography(") and "algorithm=spherical" in logical
+    pf = pq.ParquetFile(out)
+    assert pf.schema_arrow.names == table.table.column_names
+    geo = json.loads(pf.schema_arrow.metadata[b"geo"])
+    assert geo["version"] == "2.0.0"
+    assert geo["columns"]["geometry"].get("edges") == (None if edges == "planar" else edges)
+
+
+def test_wkb_conversion_keeps_the_geometry_in_place():
+    """The root cause of the disk-rewrite reorder: the wrapper put the geometry last."""
+    from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
+
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    try:
+        query = "SELECT 1 AS id, ST_Point(0, 0) AS geometry, 2 AS after"
+        wrapped = _wrap_query_with_wkb_conversion(query, "geometry", con)
+        names = [d[0] for d in con.execute(wrapped).description]
+    finally:
+        con.close()
+    assert names == ["id", "geometry", "after"]

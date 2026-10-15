@@ -1878,12 +1878,15 @@ def _wrap_query_with_wkb_conversion(query: str, geometry_column: str, con=None) 
     if con:
         try:
             columns = _get_query_columns(con, query)
-            other_cols = [
-                quote_identifier(c) for c in columns if c.lower() != geometry_column.lower()
+            # In the query's own order: appending the geometry moved a column
+            # after it (a bbox) ahead of it in the written file.
+            is_geom = [c.lower() == geometry_column.lower() for c in columns]
+            select = [
+                f"ST_AsWKB({quoted_geom}) AS {quoted_geom}" if geom else quote_identifier(c)
+                for c, geom in zip(columns, is_geom, strict=True)
             ]
-            if other_cols:
-                cols_str = ", ".join(other_cols)
-                return f"SELECT {cols_str}, ST_AsWKB({quoted_geom}) AS {quoted_geom} FROM ({query})"
+            if any(is_geom) and not all(is_geom):
+                return f"SELECT {', '.join(select)} FROM ({query})"
         except Exception:
             pass
 
