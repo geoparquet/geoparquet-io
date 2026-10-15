@@ -1473,7 +1473,9 @@ when the layer offers it, else EPSG:4326 when the layer offers it, else the
 layer's default CRS. Most layers offer EPSG:4326, so a lon/lat bbox works. For
 a layer that only offers a projected CRS, pass the bbox in that CRS. gpio sends
 it labelled with that CRS in x,y order, so the server applies the filter, and
-warns when the bbox looks like lon/lat on a projected layer.
+warns when the bbox looks like lon/lat on a projected layer. A lon/lat bbox is
+labelled `urn:ogc:def:crs:OGC:1.3:CRS84`, which GeoServer, MapServer, QGIS
+Server and deegree all read as lon,lat.
 
 === "CLI"
     <!-- doctest: skip="illustrative endpoint" -->

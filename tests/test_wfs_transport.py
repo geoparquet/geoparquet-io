@@ -434,7 +434,7 @@ def test_a_bbox_reaches_the_hits_probe(monkeypatch):
     _get_feature_count(SERVICE, TYPENAME, "1.1.0", bbox=(-1, -2, 3, 4), crs="EPSG:4326")
 
     assert http.last.params["bbox"].startswith("-1")
-    assert http.last.params["bbox"].endswith("EPSG:4326")
+    assert http.last.params["bbox"].endswith(",urn:ogc:def:crs:OGC:1.3:CRS84")
 
 
 def test_a_countless_answer_is_not_a_failure(monkeypatch, caplog):
@@ -948,3 +948,45 @@ def test_an_unresolvable_layer_crs_is_refused_and_nothing_is_written(monkeypatch
         convert_wfs_to_geoparquet(SERVICE, TYPENAME, str(out), version="1.1.0")
 
     assert not out.exists()
+
+
+def _hits_matching_the_bbox(request):
+    """396 features in the layer, 3 inside any bbox: what a real server counts."""
+    matched = 3 if "bbox" in request.params else 396
+    body = f'<wfs:FeatureCollection numberMatched="{matched}"/>'.encode()
+    return xml_reply(body)(request)
+
+
+def test_a_server_bbox_is_counted_with_the_bbox_so_a_small_result_is_not_a_cap(
+    monkeypatch, tmp_path
+):
+    """#640: the count gpio compares a page with is the filtered count.
+
+    Measured against the whole layer's count, a bbox that matches 3 features
+    looked like a server cap of 3, and gpio paged the rest one feature at a
+    time with sortBy, which MapServer rejects (seen live on wfs.nrw.de).
+    """
+    http = FakeTransport.install(monkeypatch)
+    wfs_capabilities(monkeypatch, _projected_capabilities("urn:ogc:def:crs:EPSG::25830"), SCHEMA)
+    http.respond(_is_hits, _hits_matching_the_bbox)
+    http.respond(_is_startindex_probe, geojson_reply(_geojson(0)))
+    http.respond(_is_getfeature, _projected_pages("urn:ogc:def:crs:EPSG::25830"))
+    out = tmp_path / "filtered.parquet"
+
+    convert_wfs_to_geoparquet(
+        SERVICE,
+        TYPENAME,
+        str(out),
+        version="1.1.0",
+        bbox=(440000.0, 4470000.0, 450000.0, 4480000.0),
+        limit=200,
+        skip_hilbert=True,
+    )
+
+    hits = [r for r in http.requests if _is_hits(r)]
+    pages = [r for r in http.requests if _is_getfeature(r)]
+    assert hits
+    assert all(r.params.get("bbox") for r in hits)
+    assert len(pages) == 1
+    assert "sortBy" not in pages[0].params
+    assert pq.read_metadata(out).num_rows == 3

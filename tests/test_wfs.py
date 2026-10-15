@@ -820,10 +820,15 @@ class TestBboxFilters:
                 (-122.5, 37.5, -122.0, 38.0),
                 "EPSG:4326",
                 "1.1.0",
-                "-122.5,37.5,-122.0,38.0,EPSG:4326",
+                "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84",
             ),
             # Integer coordinates
-            ((-180, -90, 180, 90), "EPSG:4326", "1.1.0", "-180,-90,180,90,EPSG:4326"),
+            (
+                (-180, -90, 180, 90),
+                "EPSG:4326",
+                "1.1.0",
+                "-180,-90,180,90,urn:ogc:def:crs:OGC:1.3:CRS84",
+            ),
         ],
     )
     def test_server_side_bbox_parameter(self, bbox, crs, version, expected_param):
@@ -857,10 +862,16 @@ class TestBboxFilters:
         assert sql.count("-122.5 37.5") == 2
 
     def test_bbox_with_crs_suffix(self):
-        """A URN 4326 request CRS is sent in the short form, which keeps XY order (#397)."""
+        """A 4326 request sends lon,lat labelled CRS84 (#397, #640).
+
+        GeoServer reads a URN 4326 bbox as lat,lon (#397), and MapServer reads
+        the short EPSG:4326 form as lat,lon in WFS 1.1.0 (seen live on
+        demo.mapserver.org, PDOK, wfs.nrw.de, USGS mrdata, geo.weather.gc.ca).
+        CRS84 is lon,lat on all of them.
+        """
         bbox = (-122.5, 37.5, -122.0, 38.0)
         result = _build_bbox_param(bbox, "urn:ogc:def:crs:EPSG::4326", "1.1.0")
-        assert result == "-122.5,37.5,-122.0,38.0,EPSG:4326"
+        assert result == "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84"
 
     @pytest.mark.parametrize(
         "crs,suffix",
@@ -869,8 +880,9 @@ class TestBboxFilters:
             ("urn:ogc:def:crs:EPSG::4026", "EPSG:4026"),
             ("http://www.opengis.net/def/crs/EPSG/0/25830", "EPSG:25830"),
             ("EPSG:3857", "EPSG:3857"),
-            # CRS84 is lon/lat by definition, the short EPSG:4326 form says the same.
-            ("urn:ogc:def:crs:OGC:1.3:CRS84", "EPSG:4326"),
+            # A lon/lat request is labelled CRS84, which every server reads as x,y.
+            ("urn:ogc:def:crs:OGC:1.3:CRS84", "urn:ogc:def:crs:OGC:1.3:CRS84"),
+            ("EPSG:4326", "urn:ogc:def:crs:OGC:1.3:CRS84"),
         ],
     )
     def test_bbox_is_labelled_with_the_request_crs(self, crs, suffix):
@@ -2794,21 +2806,21 @@ class TestAxisOrder:
         [
             # WFS 1.0.0: no CRS suffix
             ((-122.5, 37.5, -122.0, 38.0), "EPSG:4326", "1.0.0", "auto", "-122.5,37.5,-122.0,38.0"),
-            # WFS 1.1.0+: the short EPSG form of the request CRS, XY order
+            # WFS 1.1.0+: a lon/lat request is labelled CRS84, XY order
             (
                 (-122.5, 37.5, -122.0, 38.0),
                 "EPSG:4326",
                 "1.1.0",
                 "auto",
-                "-122.5,37.5,-122.0,38.0,EPSG:4326",
+                "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84",
             ),
-            # A URN request CRS is sent in the short form (#397)
+            # A URN 4326 request CRS is labelled CRS84 too (#397)
             (
                 (-122.5, 37.5, -122.0, 38.0),
                 "urn:ogc:def:crs:EPSG::4326",
                 "1.1.0",
                 "auto",
-                "-122.5,37.5,-122.0,38.0,EPSG:4326",
+                "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84",
             ),
             # WFS 2.0.0 behaves the same
             (
@@ -2816,7 +2828,7 @@ class TestAxisOrder:
                 "urn:ogc:def:crs:EPSG::4326",
                 "2.0.0",
                 "auto",
-                "4.82,50.44,4.92,50.48,EPSG:4326",
+                "4.82,50.44,4.92,50.48,urn:ogc:def:crs:OGC:1.3:CRS84",
             ),
             # A projected request CRS labels the bbox with that CRS (#640)
             (

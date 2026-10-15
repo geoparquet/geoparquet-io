@@ -22,7 +22,7 @@ import time
 import xml.etree.ElementTree as ET  # nosec B405 - the one parse here (_is_empty_gml_collection) refuses any body declaring a DTD, so no entity expansion is possible; stdlib ET never resolves external entities regardless
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import duckdb
@@ -1283,6 +1283,10 @@ def _needs_axis_swap(crs: str, version: str, axis_order: str = "auto") -> bool:
     return False
 
 
+# The lon/lat CRS label every WFS server reads in x,y order (see _build_bbox_param).
+_CRS84_URN: Final = "urn:ogc:def:crs:OGC:1.3:CRS84"
+
+
 def _build_bbox_param(
     bbox: tuple[float, float, float, float],
     crs: str,
@@ -1299,8 +1303,15 @@ def _build_bbox_param(
     EPSG:4326 made servers drop the filter on any other layer and return the
     whole layer (#640).
 
+    A lon/lat (EPSG:4326) request is labelled ``urn:ogc:def:crs:OGC:1.3:CRS84``
+    instead. MapServer and QGIS Server read even the short ``EPSG:4326`` form
+    as lat,lon in WFS 1.1.0, so a lon,lat bbox selected a swapped area or
+    nothing (seen live on demo.mapserver.org, PDOK, wfs.nrw.de, USGS mrdata
+    and geo.weather.gc.ca). CRS84 is lon,lat by definition, and GeoServer,
+    MapServer, QGIS Server and deegree all read it that way.
+
     WFS 1.0.0: xmin,ymin,xmax,ymax (no CRS suffix, the layer's SRS applies)
-    WFS 1.1.0+: xmin,ymin,xmax,ymax,EPSG:<code of the request CRS>
+    WFS 1.1.0+: xmin,ymin,xmax,ymax,<CRS84 URN or EPSG:<code of the request CRS>>
 
     Args:
         bbox: Bounding box tuple (xmin, ymin, xmax, ymax) in the request CRS
@@ -1316,7 +1327,10 @@ def _build_bbox_param(
     if version == "1.0.0":
         return f"{xmin},{ymin},{xmax},{ymax}"
 
-    return f"{xmin},{ymin},{xmax},{ymax},{_normalize_crs(crs)}"
+    label = _normalize_crs(crs)
+    if label == "EPSG:4326":
+        label = _CRS84_URN
+    return f"{xmin},{ymin},{xmax},{ymax},{label}"
 
 
 def _warn_if_bbox_looks_lon_lat(bbox: tuple[float, float, float, float], crs: str) -> None:
@@ -2801,7 +2815,9 @@ def fetch_all_features_duckdb(
             extract_fid,
             output_format=output_format,
         )
-        expected = max_features or total_count
+        # total_count is already capped at max_features. A --limit above what
+        # the layer holds is not a shortfall to page for.
+        expected = total_count or max_features
         if expected and table.num_rows < expected and version != "1.0.0":
             # Server returned fewer than expected — likely has a maxFeatures cap.
             # Fall through to adaptive pagination to fetch the rest.
@@ -3099,6 +3115,12 @@ def wfs_to_table(
     # Get expected feature count for cap detection
     # Try WFS 2.0.0 first for count query since it often has higher/no limits
     expected_count = None
+    # A server-side bbox is counted with that bbox. Against the whole layer's
+    # count, a small filtered page looked like a server cap, and gpio paged
+    # the rest one feature at a time (#640, seen live on MapServer).
+    count_filter: dict[str, Any] = (
+        {"bbox": bbox, "crs": crs, "axis_order": axis_order} if bbox and use_server_bbox else {}
+    )
     if auto_tile and version != "1.0.0":
         # Try WFS 2.0.0 count first (higher limits), fall back to requested
         # version. The 2.0.0 attempt is speculative — a 1.1.0-only server
@@ -3106,10 +3128,12 @@ def wfs_to_table(
         # quiet; the fallback below is the probe whose failure actually costs
         # us auto-tiling, and it warns.
         expected_count = _get_feature_count(
-            service_url, layer_info.typename, "2.0.0", warn_on_failure=False
+            service_url, layer_info.typename, "2.0.0", warn_on_failure=False, **count_filter
         )
         if not expected_count:
-            expected_count = _get_feature_count(service_url, layer_info.typename, version)
+            expected_count = _get_feature_count(
+                service_url, layer_info.typename, version, **count_filter
+            )
         if expected_count:
             debug(f"Server reports {expected_count:,} features")
 
