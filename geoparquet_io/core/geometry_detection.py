@@ -16,6 +16,7 @@ from geoparquet_io.core.duckdb_utils import _geoarrow_coord_exprs, quote_identif
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import carried_column_name
 from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.remote import needs_httpfs
 
 # Standard geometry column names for fallback detection
@@ -496,7 +497,7 @@ def register_geometry_column(
 
     Returns how SQL reads the registered column.
     """
-    import numpy as np
+    np = load_module("numpy")
     import pyarrow as pa
 
     geometry = table.column(column)

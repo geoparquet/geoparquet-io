@@ -20,6 +20,7 @@ from geoparquet_io.core.geometry_detection import (
     register_geometry_column,
 )
 from geoparquet_io.core.logging_config import debug, info, success, warn
+from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     resolve_output_geoparquet_version,
@@ -128,7 +129,7 @@ def _row_index_name(geom_col: str) -> str:
 
 def _row_bytes(column: pa.ChunkedArray):
     """Approximate bytes each row of ``column`` adds to an output: exact for binary/string."""
-    import numpy as np
+    np = load_module("numpy")
     import pyarrow.compute as pc
 
     sizes = []
@@ -148,7 +149,7 @@ def _row_bytes(column: pa.ChunkedArray):
 
 def _gather_batch(chunks, starts, batch):
     """``batch`` (global row positions) gathered from ``chunks``, chunk by chunk."""
-    import numpy as np
+    np = load_module("numpy")
 
     owner = np.searchsorted(starts, batch, side="right") - 1
     order = np.argsort(owner, kind="stable")
@@ -175,7 +176,7 @@ def _gather_column(column: pa.ChunkedArray, indices) -> pa.ChunkedArray:
     (ArrowInvalid) and otherwise holds a second copy of the column. Gathering
     each output batch straight from the chunks it touches avoids both.
     """
-    import numpy as np
+    np = load_module("numpy")
 
     twin = _view_twin(column.type)
     if twin is not None:
