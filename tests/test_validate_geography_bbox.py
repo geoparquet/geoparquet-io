@@ -141,6 +141,19 @@ class TestGates:
         )
 
 
+def test_a_sample_with_nothing_boundable_is_skipped(tmp_path, monkeypatch):
+    from geoparquet_io.core import validate as validate_module
+
+    path = _geography_file(
+        tmp_path, "POINT (10 20)", geography_bbox={"geometry": [(9.0, 19.0, 11.0, 21.0)]}
+    )
+    monkeypatch.setattr(validate_module, "_sampled_geodesic_bbox", lambda *a, **k: None)
+
+    check = _check(path, "geography_stats_cover_edges_geometry")
+    assert check.status == CheckStatus.SKIPPED
+    assert "no geometries to compare" in check.message
+
+
 class TestVertexOnlyWarning:
     def test_a_vertex_only_box_warns(self, tmp_path):
         """The vertex box of the bulged line misses ~3.4 degrees of edge."""

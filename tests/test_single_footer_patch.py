@@ -94,7 +94,9 @@ def test_the_mzm_repair_and_the_edges_retype_share_one_footer_patch(
 def test_the_single_patch_carries_both_edits(xym_geography, tmp_path):
     """The merged patch must lose neither half: the geo block nor the GEOGRAPHY."""
     out = tmp_path / "out.parquet"
-    convert_to_geoparquet(str(xym_geography), str(out), skip_hilbert=True, geoparquet_version="2.0")
+    convert_to_geoparquet(
+        str(xym_geography), str(out), skip_hilbert=True, geoparquet_version="2.0", verbose=True
+    )
 
     block = geo_block(out)
     assert block is not None, "the M/ZM repair's geo block never reached the footer"

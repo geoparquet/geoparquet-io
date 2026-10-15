@@ -158,6 +158,51 @@ class TestGeometryKinds:
         assert geodesic_bbox_of_wkb([b"\x01\x99\x00\x00\x00"]) is None
         assert geodesic_bbox_of_wkb([b""]) is None
 
+    def test_an_unknown_geometry_kind_yields_none(self):
+        # A well-formed header whose kind (99) no WKB spec defines.
+        crafted = bytes([1]) + (99).to_bytes(4, "little") + (0).to_bytes(4, "little")
+        assert geodesic_bbox_of_wkb([crafted]) is None
+
+    def test_a_dimension_code_past_zm_yields_none(self):
+        crafted = bytes([1]) + (4001).to_bytes(4, "little") + bytes(16)
+        assert geodesic_bbox_of_wkb([crafted]) is None
+
+    def test_wkb_nested_past_the_depth_limit_yields_none(self):
+        collection = shapely.from_wkt("GEOMETRYCOLLECTION (POINT (1 2))")
+        for _ in range(40):
+            collection = shapely.geometrycollections([collection])
+        assert geodesic_bbox_of_wkb([shapely.to_wkb(collection)]) is None
+
+    def test_an_empty_point_bounds_nothing(self):
+        assert geodesic_bbox_of_wkb([_wkb("POINT EMPTY")]) is None
+
+    def test_a_single_vertex_chain_is_a_point(self):
+        # A one-point linestring is not valid WKT, so craft the WKB: kind 2,
+        # one vertex at (5, 6).
+        import struct as _struct
+
+        crafted = (
+            bytes([1])
+            + (2).to_bytes(4, "little")
+            + (1).to_bytes(4, "little")
+            + _struct.pack("<2d", 5.0, 6.0)
+        )
+        assert geodesic_bbox_of_wkb([crafted]) == (5.0, 6.0, 5.0, 6.0)
+
+    def test_a_repeated_vertex_adds_nothing(self):
+        bbox = bbox_of("LINESTRING (0 0, 0 0, 10 10)")
+        assert bbox == pytest.approx((0.0, 0.0, 10.0, 10.0))
+
+    def test_geometry_after_a_pole_ring_stays_inside_the_globe_box(self):
+        bbox = geodesic_bbox_of_wkb(
+            [
+                _wkb("POLYGON ((0 80, 90 80, 180 80, -90 80, 0 80))"),
+                _wkb("LINESTRING (10 -20, 20 -25)"),
+            ]
+        )
+        assert (bbox[0], bbox[2], bbox[3]) == (-180.0, 180.0, 90.0)
+        assert bbox[1] == pytest.approx(-25.0, abs=0.1)
+
     def test_antipodal_endpoints_are_bounded_conservatively(self):
         """The geodesic between antipodes is undefined; the bound is the globe."""
         bbox = bbox_of("LINESTRING (0 0, 180 0)")
@@ -167,6 +212,58 @@ class TestGeometryKinds:
         """Same longitude 180 apart: the shortest path runs over a pole."""
         bbox = bbox_of("LINESTRING (0 80, 180 80)")
         assert bbox[3] == 90.0
+
+
+class TestRowGroupReading:
+    """`row_group_geography_bboxes` bounds one row group at a time."""
+
+    @staticmethod
+    def _native_file(tmp_path, values: list):
+        import geoarrow.pyarrow as ga
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        path = tmp_path / "native.parquet"
+        array = pa.ExtensionArray.from_storage(ga.wkb(), pa.array(values, pa.binary()))
+        pq.write_table(pa.table({"geometry": array}), str(path), row_group_size=1)
+        return path
+
+    def test_each_row_group_gets_its_own_box(self, tmp_path):
+        from geoparquet_io.core.geodesic_bbox import row_group_geography_bboxes
+
+        path = self._native_file(tmp_path, [_wkb("POINT (1 2)"), _wkb("POINT (3 4)")])
+        per_group, whole = row_group_geography_bboxes(str(path), "geometry", "spherical")
+
+        assert per_group == [(1.0, 2.0, 1.0, 2.0), (3.0, 4.0, 3.0, 4.0)]
+        assert whole == (1.0, 2.0, 3.0, 4.0)
+
+    def test_a_corrupt_row_group_poisons_the_file_bound(self, tmp_path):
+        """A whole-file bound that skipped rows would under-cover; refuse it."""
+        from geoparquet_io.core.geodesic_bbox import row_group_geography_bboxes
+
+        path = self._native_file(tmp_path, [_wkb("POINT (1 2)"), b"\x07junk"])
+        per_group, whole = row_group_geography_bboxes(str(path), "geometry", "spherical")
+
+        assert per_group == [(1.0, 2.0, 1.0, 2.0), None]
+        assert whole is None
+
+    def test_an_unboundable_column_is_left_out_of_the_file_level_answer(self, tmp_path):
+        from geoparquet_io.core.geodesic_bbox import geography_statistics
+
+        path = self._native_file(tmp_path, [_wkb("POINT (1 2)"), b"\x07junk"])
+        per_group, file_level = geography_statistics(str(path), {"geometry": "spherical"})
+
+        assert per_group == {"geometry": [(1.0, 2.0, 1.0, 2.0), None]}
+        assert file_level == {}
+
+    def test_an_all_null_row_group_is_left_out_of_the_union(self, tmp_path):
+        from geoparquet_io.core.geodesic_bbox import row_group_geography_bboxes
+
+        path = self._native_file(tmp_path, [_wkb("POINT (1 2)"), None])
+        per_group, whole = row_group_geography_bboxes(str(path), "geometry", "spherical")
+
+        assert per_group == [(1.0, 2.0, 1.0, 2.0), None]
+        assert whole == (1.0, 2.0, 1.0, 2.0)
 
 
 class TestLonNormalization:
