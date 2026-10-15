@@ -44,6 +44,7 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     quote_identifier,
+    register_arrow,
     sql_path,
     uses_aws_profile,
 )
@@ -694,7 +695,7 @@ def _convert_from_stream(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
 
     try:
-        con.register("input_stream", table)
+        register_arrow(con, "input_stream", table)
 
         # Create view with proper geometry type
         source_ref = _create_view_with_geometry(con, "input_stream", geometry_column)

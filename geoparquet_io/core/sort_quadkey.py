@@ -16,6 +16,7 @@ from geoparquet_io.core.duckdb_metadata import get_column_names, get_usable_colu
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
+    register_arrow,
     sql_path,
     uses_aws_profile,
 )
@@ -77,7 +78,7 @@ def sort_by_quadkey_table(
     # Sort by quadkey
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", working_table)
+        registered = register_arrow(con, "__input_table", working_table)
 
         if remove_quadkey_column:
             select_cols = [
@@ -94,6 +95,7 @@ def sort_by_quadkey_table(
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
 
+        result = registered.restore_edges(result)
         return result
     finally:
         con.close()

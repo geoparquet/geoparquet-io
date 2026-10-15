@@ -35,6 +35,7 @@ from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
     quote_identifier,
+    register_arrow,
     sql_path,
     validate_compression_level,
 )
@@ -564,7 +565,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            con.register("input_table", table)
+            register_arrow(con, "input_table", table)
 
             # Convert WKB bytes to GEOMETRY for proper spatial processing.
             query = _table_query_with_native_geometry(
@@ -620,7 +621,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         try:
-            con.register("input_table", table)
+            register_arrow(con, "input_table", table)
 
             options = [
                 "FORMAT PARQUET",

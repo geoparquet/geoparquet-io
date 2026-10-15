@@ -26,6 +26,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
+    register_arrow,
     require_community_extension,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -161,7 +162,7 @@ def add_s2_table(
         con.execute("SET geometry_always_xy = true;")
 
         _load_geography_extension(con)
-        con.register("__input_table", table)
+        registered = register_arrow(con, "__input_table", table)
 
         source_ref = _create_geometry_view(con, table, geom_col)
         geom_ref = transform_geom_sql(quote_identifier(geom_col), source_crs)
@@ -174,6 +175,7 @@ def add_s2_table(
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
 
+        result = registered.restore_edges(result)
         return result
     finally:
         con.close()

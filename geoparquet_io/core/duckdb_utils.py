@@ -9,6 +9,7 @@ import datetime
 import functools
 import inspect
 import itertools
+import json
 import os
 import re
 import shutil
@@ -1970,3 +1971,165 @@ def _wrap_query_with_blob_conversion(
         SELECT * REPLACE ({replacements})
         FROM __arrow_source
     """
+
+
+# ---------------------------------------------------------------------------
+# Registering an Arrow table: the one step that hands DuckDB in-memory geometry
+# ---------------------------------------------------------------------------
+
+_EXT_NAME = b"ARROW:extension:name"
+_EXT_META = b"ARROW:extension:metadata"
+
+
+def _geoarrow_extension(field) -> tuple[str | None, dict]:
+    """A field's GeoArrow extension name and parsed metadata, in either carrier.
+
+    pyarrow resolves the type when ``geoarrow.pyarrow`` is imported and leaves
+    it as storage plus field metadata when it is not; DuckDB reads both.
+    """
+    ext_type = field.type
+    name = getattr(ext_type, "extension_name", None)
+    if name is not None:
+        raw = ext_type.__arrow_ext_serialize__()
+    else:
+        metadata = field.metadata or {}
+        name = metadata.get(_EXT_NAME, b"").decode("utf-8") or None
+        raw = metadata.get(_EXT_META)
+    if not name or not name.startswith("geoarrow."):
+        return None, {}
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except ValueError:
+        parsed = {}
+    return name, parsed if isinstance(parsed, dict) else {}
+
+
+def _nonplanar_edges(parsed: dict) -> str | None:
+    edges = parsed.get("edges")
+    if isinstance(edges, str) and edges != "planar":
+        return edges
+    return None
+
+
+def _storage(column):
+    """A column's storage chunks, whether or not its extension type is resolved."""
+    import pyarrow as pa
+
+    if isinstance(column.type, pa.ExtensionType):
+        return pa.chunked_array(
+            [chunk.storage for chunk in column.chunks], column.type.storage_type
+        )
+    return column
+
+
+def _planar_view(table) -> tuple:
+    """``table`` with every non-planar GeoArrow column relabelled planar.
+
+    Zero-copy: the column keeps its storage buffers and its CRS; only the
+    ``edges`` key leaves the extension metadata. Returns the view and the
+    input fields it relabelled, keyed by name.
+    """
+    import pyarrow as pa
+
+    originals: dict = {}
+    for index, field in enumerate(table.schema):
+        name, parsed = _geoarrow_extension(field)
+        if name is None or _nonplanar_edges(parsed) is None:
+            continue
+        originals[field.name] = field
+        planar_meta = {k: v for k, v in parsed.items() if k != "edges"}
+        column = _storage(table.column(index))
+        metadata = dict(field.metadata or {})
+        metadata[_EXT_NAME] = name.encode("utf-8")
+        metadata[_EXT_META] = json.dumps(planar_meta).encode("utf-8")
+        planar_field = pa.field(field.name, column.type, field.nullable, metadata)
+        table = table.set_column(index, planar_field, column)
+    return table, originals
+
+
+class RegisteredArrow:
+    """What :func:`register_arrow` registered, and how to give the edges back.
+
+    DuckDB has no GEOGRAPHY type: a registered column is a planar GEOMETRY
+    there. An operation that passes a geometry column through unchanged calls
+    :meth:`restore_edges` on its result. One that computes new geometry in
+    planar math (an aggregation's cells, a reprojection, a planar repair or
+    simplification) must not: the edges would then describe shapes that were
+    never built on the sphere.
+    """
+
+    def __init__(self, name: str, fields: dict) -> None:
+        self.name = name
+        self.fields = fields
+
+    @property
+    def edges(self) -> dict[str, str]:
+        """``{column: edges}`` for every column that was registered as planar."""
+        return {
+            col: _nonplanar_edges(_geoarrow_extension(field)[1]) or "planar"
+            for col, field in self.fields.items()
+        }
+
+    def restore_edges(self, result, columns: Iterable[str] | None = None):
+        """``result`` with each pass-through geometry column given its input field back.
+
+        Restores the input's exact field (type, CRS, edges, field metadata) on
+        every registered non-planar column that ``result`` still holds as WKB
+        bytes; ``columns`` limits it to those names. A column that came back as
+        anything but binary (text, a struct) is left alone.
+        """
+        import pyarrow as pa
+
+        names = self.fields if columns is None else [c for c in columns if c in self.fields]
+        for col in names:
+            if col not in result.column_names:
+                continue
+            original = self.fields[col]
+            index = result.schema.get_field_index(col)
+            storage = _storage(result.column(index))
+            if not (pa.types.is_binary(storage.type) or pa.types.is_large_binary(storage.type)):
+                continue
+            target = original.type
+            is_ext = isinstance(target, pa.ExtensionType)
+            storage = storage.cast(target.storage_type if is_ext else target)
+            if is_ext:
+                storage = pa.chunked_array(
+                    [pa.ExtensionArray.from_storage(target, c) for c in storage.chunks], target
+                )
+            result = result.set_column(index, original, storage)
+        return result
+
+
+def register_arrow(con, name: str, table) -> RegisteredArrow:
+    """Register the Arrow ``table`` on ``con`` as ``name``, non-planar edges and all.
+
+    The one way gpio hands an in-memory table to DuckDB (#1253). DuckDB 1.5
+    refuses a ``geoarrow.wkb`` column whose ``edges`` is anything but
+    ``"planar"`` ("Can't import non-planar edges") and has no setting to accept
+    one. So each such column is registered as a planar view of the same
+    buffers, and the returned :class:`RegisteredArrow` keeps the input fields
+    for :meth:`RegisteredArrow.restore_edges`. The caller's table is unchanged.
+
+    Every non-planar string is relabelled, not only a GeoParquet edge
+    algorithm, because DuckDB rejects them all. Which values gpio honours is
+    the restore side's question (``geo_metadata.GEOGRAPHY_EDGE_ALGORITHMS``).
+    """
+    view, registered = planar_view(table, name)
+    if registered.fields:
+        debug(
+            f"Registering {', '.join(sorted(registered.fields))} on DuckDB as planar "
+            "GEOMETRY: DuckDB cannot import non-planar edges (#1253)"
+        )
+    con.register(name, view)
+    return registered
+
+
+def planar_view(table, name: str = "table") -> tuple:
+    """``(view, RegisteredArrow)``: the planar view DuckDB can read, and the way back.
+
+    For the paths that hand DuckDB a table some other way than ``register``
+    (a temp Parquet file read back with ``read_parquet``): DuckDB reads a
+    GEOGRAPHY column as planar GEOMETRY, so the result needs the same restore.
+    """
+    view, fields = _planar_view(table)
+    return view, RegisteredArrow(name, fields)

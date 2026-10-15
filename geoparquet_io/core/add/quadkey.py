@@ -20,6 +20,7 @@ from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadat
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
+    register_arrow,
     sql_path,
     uses_aws_profile,
 )
@@ -255,7 +256,7 @@ def add_quadkey_table(
             "VARCHAR",
         )
 
-        con.register("__input_table", table)
+        registered = register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB (needs conversion)
         columns_info = con.execute("DESCRIBE __input_table").fetchall()
@@ -312,6 +313,7 @@ def add_quadkey_table(
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
 
+        result = registered.restore_edges(result)
         return result
 
 

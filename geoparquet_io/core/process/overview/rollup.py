@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import gc
 
-from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import quote_identifier, register_arrow, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.memory_limits import open_bounded_connection
@@ -216,7 +216,7 @@ def rollup_table(
     con = open_bounded_connection(load_spatial=True, load_httpfs=True, memory_limit=memory_limit)
     try:
         con.execute("SET geometry_always_xy = true")
-        con.register("__overview_input", table)
+        register_arrow(con, "__overview_input", table)
         # detect_aggregate_info installs/loads the grid extension while probing
         # the base level, so no extra ensure_grid_extension call is needed.
         info = detect_aggregate_info(con, "__overview_input", cell_column, scheme)

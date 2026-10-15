@@ -10,6 +10,7 @@ from geoparquet_io.core.duckdb_metadata import get_usable_columns
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
+    register_arrow,
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
@@ -67,7 +68,7 @@ def sort_by_column_table(
     # Register table and execute query
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table)
+        registered = register_arrow(con, "__input_table", table)
 
         # Build ORDER BY clause
         direction = " DESC" if descending else ""
@@ -80,6 +81,7 @@ def sort_by_column_table(
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
 
+        result = registered.restore_edges(result)
         return result
     finally:
         con.close()

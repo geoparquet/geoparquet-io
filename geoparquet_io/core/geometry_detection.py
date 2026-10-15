@@ -12,7 +12,12 @@ from dataclasses import dataclass
 
 import duckdb
 
-from geoparquet_io.core.duckdb_utils import _geoarrow_coord_exprs, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    _geoarrow_coord_exprs,
+    quote_identifier,
+    register_arrow,
+    sql_path,
+)
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import carried_column_name
 from geoparquet_io.core.logging_config import debug
@@ -507,7 +512,7 @@ def register_geometry_column(
     if row_index is not None:
         columns[row_index] = pa.array(np.arange(table.num_rows, dtype=np.int64))
     columns[column] = geometry
-    con.register(name, pa.table(columns))
+    register_arrow(con, name, pa.table(columns))
     described = con.execute(f"DESCRIBE {quote_identifier(name)}").fetchall()
     return GeometryRead.for_type(column, _find_described_type(described, column), flat=True)
 

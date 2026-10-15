@@ -27,7 +27,12 @@ from geoparquet_io.core.crs_utils import (
     parse_geo_metadata_from_schema,
     source_crs_string,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
+    quote_identifier,
+    register_arrow,
+    sql_path,
+)
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     backfill_derived_stats,
@@ -148,7 +153,7 @@ def _open_stdin_input(
 
     try:
         # Register the Arrow table for SQL queries
-        con.register("input_stream", table)
+        register_arrow(con, "input_stream", table)
 
         # Find geometry column and create view with proper geometry type
         geom_col = find_geometry_column_from_table(table)

@@ -34,6 +34,7 @@ from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     get_duckdb_connection,
     quote_identifier,
+    register_arrow,
     sql_path,
     uses_aws_profile,
 )
@@ -255,7 +256,7 @@ def reproject_table(
     # Create connection and register table
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table)
+        register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB type (needs conversion to GEOMETRY)
         geom_is_blob = False

@@ -14,6 +14,7 @@ from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     quote_identifier,
+    register_arrow,
     sql_path,
     uses_aws_profile,
 )
@@ -207,7 +208,7 @@ def str_order_table(
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table)
+        registered = register_arrow(con, "__input_table", table)
         source = _geometry_source(con, "__input_table", geom_col)
 
         row_count = _count_spatial_rows(con, source, geom_col)
@@ -236,6 +237,7 @@ def str_order_table(
         result = con.execute(query).arrow().read_all()
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
+        result = registered.restore_edges(result)
         return result
     finally:
         con.close()

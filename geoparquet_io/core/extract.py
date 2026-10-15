@@ -35,6 +35,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     get_duckdb_connection_for_s3,
     quote_identifier,
+    register_arrow,
     sql_path,
     validate_where_clause,
 )
@@ -814,7 +815,7 @@ def extract_table(
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        con.register("__input_table", table)
+        registered = register_arrow(con, "__input_table", table)
         source_ref, needs_wkb = (
             _setup_geometry_view(con, table, geom_col) if geom_col else ("__input_table", False)
         )
@@ -851,7 +852,10 @@ def extract_table(
                 metadata = backfill_derived_stats(strip_derived_stats(metadata), result)
                 metadata = strip_orientation(metadata, geom_col)
             result = result.replace_schema_metadata(metadata)
-        return result
+        # The geometry passes through unless the planar repair rewrote it; a
+        # repaired column is planar GEOMETRY now and must not be relabelled (#1253).
+        passed_through = [c for c in registered.fields if not (geometry_repaired and c == geom_col)]
+        return registered.restore_edges(result, passed_through)
     finally:
         con.close()
 

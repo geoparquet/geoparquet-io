@@ -30,6 +30,7 @@ from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
     get_duckdb_connection,
     quote_identifier,
+    register_arrow,
     sql_path,
 )
 from geoparquet_io.core.geo_metadata import (
@@ -341,7 +342,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
         con = get_duckdb_connection(load_httpfs=False)
         try:
-            con.register("input_table", table)
+            register_arrow(con, "input_table", table)
 
             # Convert WKB bytes to GEOMETRY for proper spatial processing.
             # A geoarrow.wkb column already registers as GEOMETRY, and

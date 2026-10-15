@@ -190,12 +190,12 @@ def _calculate_bounds_from_table(
     if table.num_rows == 0:
         return None
 
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, register_arrow
 
     con = None
     try:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-        con.register("input_table", table)
+        register_arrow(con, "input_table", table)
 
         # Use ST_Extent to get the bounding box of all geometries
         query = f"""
@@ -2851,6 +2851,7 @@ class Table:
             fetch_row,
             get_duckdb_connection,
             is_interrupt,
+            register_arrow,
         )
         from geoparquet_io.core.inspect_utils import compute_column_stats
         from geoparquet_io.core.logging_config import debug
@@ -2858,7 +2859,7 @@ class Table:
         con = None
         try:
             con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-            con.register("input_table", self._table)
+            register_arrow(con, "input_table", self._table)
 
             regular_cols = [f.name for f in self._table.schema if f.name != self._geometry_column]
             stats = {}

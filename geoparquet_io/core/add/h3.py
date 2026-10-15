@@ -15,6 +15,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
+    register_arrow,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite
@@ -73,7 +74,7 @@ def add_h3_table(
         # Load H3 extension
         load_community_extension(con, "h3")
 
-        con.register("__input_table", table)
+        registered = register_arrow(con, "__input_table", table)
 
         # Check if geometry column is BLOB (needs conversion)
         columns_info = con.execute("DESCRIBE __input_table").fetchall()
@@ -126,6 +127,7 @@ def add_h3_table(
         if table.schema.metadata:
             result = result.replace_schema_metadata(table.schema.metadata)
 
+        result = registered.restore_edges(result)
         return result
     finally:
         con.close()

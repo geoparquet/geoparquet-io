@@ -30,6 +30,7 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     load_community_extension,
     quote_identifier,
+    register_arrow,
     sql_path,
     validate_where_clause,
     where_sql_fragment,
@@ -1038,7 +1039,7 @@ def aggregate_grid_table(
     try:
         load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
-        con.register("__agg_input", table)
+        register_arrow(con, "__agg_input", table)
         source_crs = extract_crs_from_table(table, geom_col)
         pt_expr, exclude = bucket_point_expr(
             con, "__agg_input", geom_col, source_crs, bucket_point, bbox_column
