@@ -1472,10 +1472,12 @@ The bbox is read in the CRS gpio requests from the layer. That is `--output-crs`
 when the layer offers it, else EPSG:4326 when the layer offers it, else the
 layer's default CRS. Most layers offer EPSG:4326, so a lon/lat bbox works. For
 a layer that only offers a projected CRS, pass the bbox in that CRS, x,y
-(easting first). gpio does not reproject it, and sends it labelled with that
-CRS so the server applies the filter. A lon/lat bbox is labelled
+(easting first, or westing first for Krovak). gpio does not reproject it, and
+sends it labelled with that CRS so the server applies the filter. Only when
+the request CRS is geographic WGS84 is the bbox labelled
 `urn:ogc:def:crs:OGC:1.3:CRS84`, which GeoServer, MapServer, QGIS Server and
-deegree all read as lon,lat.
+deegree all read as lon,lat. For a projected request CRS, gpio reads the bbox
+in that CRS without reprojecting it.
 
 When the bbox looks like lon/lat on a projected layer, or a bbox matches no
 features, gpio warns. The warning names the layer CRS, shows the layer extent
