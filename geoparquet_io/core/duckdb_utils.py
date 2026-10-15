@@ -25,7 +25,7 @@ import duckdb
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
-from geoparquet_io.core.remote import needs_httpfs
+from geoparquet_io.core.remote import is_s3_url, needs_httpfs
 
 # Per-bucket cache for S3 buckets that require authentication
 # Buckets not in this set are accessed without credentials (works for public buckets)
@@ -64,7 +64,9 @@ def uses_aws_profile(func: _F) -> _F:
     ``credential_chain`` secret and the obstore store read explicitly. Nothing is
     written to ``os.environ``, so a call with ``profile="prod"`` cannot change
     the credentials of a later call (#1055). A ``None`` profile leaves any outer
-    scope as it is.
+    scope as it is, and so does a call with no S3 URL among its arguments: an
+    AWS profile means nothing to a local, https, gs or az path, and scoping it
+    there would only load the ``aws`` extension for nothing.
     """
     signature = inspect.signature(func)
     if "profile" not in signature.parameters:
@@ -72,8 +74,9 @@ def uses_aws_profile(func: _F) -> _F:
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        profile = signature.bind_partial(*args, **kwargs).arguments.get("profile")
-        if not profile:
+        arguments = signature.bind_partial(*args, **kwargs).arguments
+        profile = arguments.get("profile")
+        if not profile or not _any_s3_url(arguments.values()):
             return func(*args, **kwargs)
         with s3_config_scope({"profile": profile}):
             return func(*args, **kwargs)
@@ -81,20 +84,100 @@ def uses_aws_profile(func: _F) -> _F:
     return wrapper  # type: ignore[return-value]
 
 
-def _credential_chain_secret_sql(profile: str | None) -> str:
+def _any_s3_url(values: Iterable[Any]) -> bool:
+    """Whether any value, or any item of a list/tuple value, is an S3 URL."""
+    for value in values:
+        items = value if isinstance(value, (list, tuple)) else (value,)
+        if any(is_s3_url(item) for item in items):
+            return True
+    return False
+
+
+# The providers a secret with a named PROFILE tries. duckdb-aws reads PROFILE
+# without CHAIN as "the config-file provider only" (aws_secret.cpp), which drops
+# SSO and credential_process profiles that the SDK default chain plus
+# AWS_PROFILE used to resolve. Naming them keeps those working. env is left out
+# on purpose: a named profile wins over environment keys, as it does for obstore
+# (core/aws_credentials.py) and the AWS CLI.
+_NAMED_PROFILE_CHAIN = "config;process;sso"
+
+
+def _resolve_s3_settings(
+    s3_endpoint: str | None, s3_region: str | None, s3_use_ssl: bool | None
+) -> dict:
+    """The S3 settings a connection gets: explicit kwargs over the ambient scope.
+
+    The one place they are resolved. Both the ``SET s3_*`` statements and the
+    ``credential_chain`` secret are built from this dict, so they cannot
+    disagree: DuckDB reads a secret's endpoint and region over ``SET``, so a
+    secret built from anything else silently wins.
+    """
+    ambient = _active_s3_config.get() or {}
+    return {
+        "profile": ambient.get("profile"),
+        "endpoint": s3_endpoint if s3_endpoint is not None else ambient.get("s3_endpoint"),
+        "region": s3_region if s3_region is not None else ambient.get("s3_region"),
+        "use_ssl": s3_use_ssl if s3_use_ssl is not None else ambient.get("s3_use_ssl"),
+    }
+
+
+def _s3_secret_sql(settings: Mapping[str, Any]) -> str:
     """The ``CREATE SECRET`` statement for the AWS credential chain.
 
-    A named profile is passed as the secret's ``PROFILE`` so DuckDB never has to
-    find it in ``AWS_PROFILE``.
+    ``settings`` is the dict from :func:`_resolve_s3_settings`. The secret
+    carries the same endpoint, URL style, SSL flag and region the ``SET``
+    statements apply, because a ``credential_chain`` secret otherwise defaults
+    its endpoint to ``s3.amazonaws.com`` and its region to the profile's, and
+    both beat ``SET``. A region left unset is still filled by DuckDB from
+    ``s3_region``, ``AWS_REGION`` or the profile, in that order.
     """
-    profile_clause = f",\n    PROFILE '{_escape_sql_string(profile)}'" if profile else ""
-    return (
-        "CREATE OR REPLACE SECRET (\n"
-        "    TYPE s3,\n"
-        "    PROVIDER credential_chain,\n"
-        f"    VALIDATION 'none'{profile_clause}\n"
-        ");"
-    )
+    params = ["TYPE s3", "PROVIDER credential_chain", "VALIDATION 'none'"]
+    profile = settings.get("profile")
+    if profile:
+        params.append(f"CHAIN '{_NAMED_PROFILE_CHAIN}'")
+        params.append(f"PROFILE '{_escape_sql_string(profile)}'")
+    endpoint = settings.get("endpoint")
+    if endpoint:
+        params.append(f"ENDPOINT '{_escape_sql_string(endpoint)}'")
+        params.append("URL_STYLE 'path'")
+        params.append(f"USE_SSL {'false' if settings.get('use_ssl') is False else 'true'}")
+    region = settings.get("region")
+    if region:
+        params.append(f"REGION '{_escape_sql_string(region)}'")
+    body = ",\n    ".join(params)
+    return f"CREATE OR REPLACE SECRET (\n    {body}\n);"
+
+
+def _create_s3_secret(con, settings: Mapping[str, Any], *, required: bool) -> None:
+    """Load ``aws`` and create the credential chain secret on ``con``.
+
+    ``required`` is the caller's ``use_s3_auth``: a private bucket read needs
+    the secret, so a missing ``aws`` extension is an error. A secret that only
+    an ambient profile asked for is best effort. The connection may never read
+    S3 at all (gs, az), and an offline machine must not fail on ``INSTALL aws``.
+    """
+    try:
+        _install_and_load_extension(con, "aws")
+    except Exception as e:
+        if required:
+            raise
+        debug(f"Skipping the AWS profile secret, the aws extension is unavailable: {e}")
+        return
+    con.execute(_s3_secret_sql(settings))
+
+
+def _apply_s3_settings(con, settings: Mapping[str, Any]) -> None:
+    """``SET`` the resolved endpoint and region for reads that use no secret."""
+    endpoint = settings.get("endpoint")
+    if endpoint:
+        con.execute(f"SET s3_endpoint='{_escape_sql_string(endpoint)}';")
+        con.execute("SET s3_url_style='path';")
+        ssl_value = "false" if settings.get("use_ssl") is False else "true"
+        con.execute(f"SET s3_use_ssl={ssl_value};")
+
+    region = settings.get("region")
+    if region:
+        con.execute(f"SET s3_region='{_escape_sql_string(region)}';")
 
 
 def get_active_s3_config() -> dict:
@@ -1312,6 +1395,10 @@ def get_duckdb_connection(
         # Replaces per-call always_xy := true in ST_Transform.
         con.execute("SET geometry_always_xy = true;")
 
+    # S3 config, resolved once (explicit kwargs over the ambient scope). The
+    # SET statements and the secret below are both built from it.
+    s3_settings = _resolve_s3_settings(s3_endpoint, s3_region, s3_use_ssl)
+
     # Load httpfs for cloud storage support
     if load_httpfs:
         _install_and_load_extension(con, "httpfs")
@@ -1319,27 +1406,10 @@ def get_duckdb_connection(
         # Only configure AWS credentials when asked for: use_s3_auth (private
         # buckets) or a scoped AWS profile, which only the credential chain can
         # honor. Public buckets work without any secret.
-        ambient_profile = (_active_s3_config.get() or {}).get("profile")
-        if use_s3_auth or ambient_profile:
-            _install_and_load_extension(con, "aws")
-            con.execute(_credential_chain_secret_sql(ambient_profile))
+        if use_s3_auth or s3_settings["profile"]:
+            _create_s3_secret(con, s3_settings, required=use_s3_auth)
 
-    # Apply S3 config: explicit kwargs override ambient config
-    ambient = _active_s3_config.get() or {}
-    eff_endpoint = s3_endpoint if s3_endpoint is not None else ambient.get("s3_endpoint")
-    eff_region = s3_region if s3_region is not None else ambient.get("s3_region")
-    eff_use_ssl = s3_use_ssl if s3_use_ssl is not None else ambient.get("s3_use_ssl")
-
-    if eff_endpoint:
-        safe_endpoint = _escape_sql_string(eff_endpoint)
-        con.execute(f"SET s3_endpoint='{safe_endpoint}';")
-        con.execute("SET s3_url_style='path';")
-        ssl_value = "true" if eff_use_ssl is not False else "false"
-        con.execute(f"SET s3_use_ssl={ssl_value};")
-
-    if eff_region:
-        safe_region = _escape_sql_string(eff_region)
-        con.execute(f"SET s3_region='{safe_region}';")
+    _apply_s3_settings(con, s3_settings)
 
     # GPIO_DUCKDB_PROFILE=<dir>: wrap the connection (after all setup, so the
     # setup statements above are not profiled) to write one JSON profile per
