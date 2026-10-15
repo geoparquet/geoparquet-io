@@ -42,7 +42,9 @@ Credentials come from the standard AWS credential chain, so anything the AWS CLI
 5. **`credential_process`**: an external command that prints credentials
 6. **IAM role**: EC2 instance, ECS task or EKS pod identity metadata
 
-Precedence follows the AWS CLI. Naming a profile with `--aws-profile` (or `profile=` in Python) makes that profile win over environment keys. An exported `AWS_PROFILE` does not, so when `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are also set, DuckDB reads sign with the environment keys. The region is read from the same chain: `--s3-region`, then `AWS_REGION`/`AWS_DEFAULT_REGION`, then the profile's `region`.
+For DuckDB reads, precedence follows the AWS CLI. Naming a profile with `--aws-profile` (or `profile=` in Python) makes that profile win over environment keys. An exported `AWS_PROFILE` does not, so when `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are also set, DuckDB reads sign with the environment keys. Uploads and copies go through obstore, where an exported `AWS_PROFILE` still wins over environment keys.
+
+The region comes from `--s3-region` (or `s3_region=` in Python) first, then `AWS_REGION` or `AWS_DEFAULT_REGION`. After that, a profile named with `--aws-profile` gives its own `region`. An exported `AWS_PROFILE` does not, and DuckDB reads use the `region` of the `default` profile instead. If the bucket is in another region, pass `--s3-region` (or `s3_region=`) or set `AWS_REGION`.
 
 Credentials from SSO, assume-role and `credential_process` are short-lived. gpio resolves them once at the start of a command, which is fine for a single upload or copy; a run that outlives the credential lifetime needs to be restarted.
 
