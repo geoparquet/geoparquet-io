@@ -106,6 +106,23 @@ def test_the_single_patch_carries_both_edits(xym_geography, tmp_path):
     assert spec_problems(out, status="warning") == []
 
 
+def test_a_verbose_write_says_the_repair_is_deferred(xym_geography, tmp_path, caplog):
+    """Under --verbose the deferral is named, and the merged patch still lands both edits."""
+    out = tmp_path / "out.parquet"
+    with caplog.at_level("DEBUG"):
+        convert_to_geoparquet(
+            str(xym_geography),
+            str(out),
+            skip_hilbert=True,
+            geoparquet_version="2.0",
+            verbose=True,
+        )
+
+    assert "Deferring the omitted geo metadata to the edges footer patch" in caplog.text
+    assert geo_block(out)["columns"]["geometry"].get("edges") == "spherical"
+    assert native_geo_edges(out) == ("Geography", "EdgeType.SPHERICAL")
+
+
 def test_an_edges_free_mzm_write_still_patches_once(tmp_path, monkeypatch):
     """Control: with no edges to restore, the repair alone still patches once."""
     source = tmp_path / "xym.parquet"
