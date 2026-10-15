@@ -78,7 +78,11 @@ from geoparquet_io.core.source_text import (
     text_error,
     text_safe_expr,
 )
-from geoparquet_io.core.write_funnels import read_preserved_kv_metadata, write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import (
+    collect_nonplanar_edges,
+    read_preserved_kv_metadata,
+    write_parquet_with_metadata,
+)
 
 
 def _validate_layer_name(layer: str) -> str:
@@ -2574,10 +2578,17 @@ def read_spatial_to_arrow(
             return arrow_table, None, None
 
         # Repair invalid geometry (issue #506). The geometry column is WKB-encoded
-        # at this point; the helper preserves schema metadata.
+        # at this point; the helper preserves schema metadata. A Parquet input
+        # can declare non-planar edges (geo block or GEOGRAPHY logical type),
+        # which skips the planar repair (#1287) — the read renamed the column to
+        # "geometry", so look the declaration up under the input's own name.
         if arrow_table.num_rows > 0:
+            input_edges = None
+            if is_parquet:
+                edges_by_col = collect_nonplanar_edges(input_file)
+                input_edges = edges_by_col.get(parquet_geom_column or geometry_column)
             arrow_table, _ = repair_arrow_table_geometry(
-                arrow_table, geometry_column, repair=repair_geometry
+                arrow_table, geometry_column, repair=repair_geometry, nonplanar_edges=input_edges
             )
 
         # The query hands back bare WKB with no schema metadata. Say which column
@@ -3382,7 +3393,15 @@ def convert_to_geoparquet(
             # computed upstream stays correct.
             if has_geometry:
                 geom_col = geometry_info["primary"]
-                query = repair_query_geometry(con, query, geom_col, repair=repair_geometry)
+                # Only a Parquet input can declare non-planar edges (geo block
+                # or native GEOGRAPHY logical type); that declaration skips the
+                # planar repair, which would corrupt spherical shapes (#1287).
+                input_edges = (
+                    collect_nonplanar_edges(input_file).get(geom_col) if is_parquet else None
+                )
+                query = repair_query_geometry(
+                    con, query, geom_col, repair=repair_geometry, nonplanar_edges=input_edges
+                )
                 # Sort last. The repair count above is a full pass over the
                 # rows, and DuckDB keeps an ORDER BY inside a COUNT subquery:
                 # counting the ordered query sorted the whole input once more,

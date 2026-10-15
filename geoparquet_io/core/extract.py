@@ -60,7 +60,10 @@ from geoparquet_io.core.geometry_detection import (
     STANDARD_GEOMETRY_NAMES,
     find_primary_geometry_column,
 )
-from geoparquet_io.core.geometry_repair import repair_query_geometry
+from geoparquet_io.core.geometry_repair import (
+    nonplanar_edges_of_arrow_table,
+    repair_query_geometry,
+)
 from geoparquet_io.core.logging_config import debug, info, progress, success, warn
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.reader import build_read_parquet_expr, require_parquet_files
@@ -76,7 +79,11 @@ from geoparquet_io.core.streaming import (
     is_stdin,
     should_stream_output,
 )
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import (
+    _collect_nonplanar_edges_from_metadata,
+    collect_nonplanar_edges,
+    write_parquet_with_metadata,
+)
 
 
 def get_parquet_row_count(parquet_file: str) -> int:
@@ -826,7 +833,11 @@ def extract_table(
         geometry_repaired = False
         if keeps_geometry:
             query, geometry_repaired = _repair_geometry_in_query(
-                con, query, geom_col, repair_geometry
+                con,
+                query,
+                geom_col,
+                repair_geometry,
+                nonplanar_edges=nonplanar_edges_of_arrow_table(table, geom_col),
             )
 
         result = con.execute(query).arrow().read_all()
@@ -847,19 +858,38 @@ def extract_table(
 
 
 def _repair_geometry_in_query(
-    con, query: str, geometry_column: str, repair: bool
+    con, query: str, geometry_column: str, repair: bool, nonplanar_edges: str | None = None
 ) -> tuple[str, bool]:
     """Run the geometry repair pass, reporting whether it rewrote the query.
 
     :func:`repair_query_geometry` returns ``query`` unchanged when repair is off,
-    when the column is not repairable in place, and when it counted zero invalid
-    rows; it returns a rewritten query only when at least one row will actually
-    be repaired. That distinction is what decides whether the input's derived
-    stats survive into the output: a pass that changed nothing keeps them, so a
-    file with no invalid geometry is never rescanned for nothing.
+    when the column is not repairable in place, when the column declares
+    non-planar edges (planar validity is the wrong test there — #1287), and when
+    it counted zero invalid rows; it returns a rewritten query only when at
+    least one row will actually be repaired. That distinction is what decides
+    whether the input's derived stats and orientation survive into the output: a
+    pass that changed nothing keeps them, so a file with no invalid geometry is
+    never rescanned for nothing.
     """
-    repaired_query = repair_query_geometry(con, query, geometry_column, repair=repair)
+    repaired_query = repair_query_geometry(
+        con, query, geometry_column, repair=repair, nonplanar_edges=nonplanar_edges
+    )
     return repaired_query, repaired_query != query
+
+
+def _nonplanar_edges_of_input(input_path: str, metadata: dict | None, geom_col: str) -> str | None:
+    """The non-planar edges the input declares for ``geom_col``, if any.
+
+    Both carriers a file input has: the input file itself (geo block plus the
+    native GEOGRAPHY logical type, via ``collect_nonplanar_edges``) and, for
+    inputs whose path cannot be re-read (a stdin stream), the already-read KV
+    metadata dict.
+    """
+    return (
+        collect_nonplanar_edges(input_path).get(geom_col)
+        or _collect_nonplanar_edges_from_metadata(metadata).get(geom_col)
+        or None
+    )
 
 
 def _carry_metadata_to_columns(metadata: dict, columns: list[str]) -> dict | None:
@@ -988,7 +1018,13 @@ def _extract_streaming(
         query = _build_query_for_source(source, selected_columns, spatial_filter, where, limit)
 
         # Repair invalid geometry (issue #506) before streaming the write.
-        query, geometry_repaired = _repair_geometry_in_query(con, query, geom_col, repair_geometry)
+        query, geometry_repaired = _repair_geometry_in_query(
+            con,
+            query,
+            geom_col,
+            repair_geometry,
+            nonplanar_edges=_nonplanar_edges_of_input(input_path, metadata, geom_col),
+        )
 
         if verbose:
             debug(f"Streaming extraction query: {query}")
@@ -1221,7 +1257,11 @@ def _execute_extraction(
         geometry_repaired = False
         if geometry_col:
             query, geometry_repaired = _repair_geometry_in_query(
-                con, query, geometry_col, repair_geometry
+                con,
+                query,
+                geometry_col,
+                repair_geometry,
+                nonplanar_edges=_nonplanar_edges_of_input(input_parquet, metadata, geometry_col),
             )
 
         stale_columns = _stale_stat_columns(

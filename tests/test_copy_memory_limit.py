@@ -396,9 +396,9 @@ class TestConvertSortsOnce:
         src = test_data_dir / source
         seen = []
 
-        def spy(con, query, geometry_column, *, repair=True):
+        def spy(con, query, geometry_column, *, repair=True, **kwargs):
             seen.append(query)
-            return repair_query_geometry(con, query, geometry_column, repair=repair)
+            return repair_query_geometry(con, query, geometry_column, repair=repair, **kwargs)
 
         monkeypatch.setattr(convert_mod, "repair_query_geometry", spy)
         out = tmp_path / "out.parquet"

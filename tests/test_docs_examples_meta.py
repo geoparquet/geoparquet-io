@@ -56,7 +56,12 @@ DOCS_ROOT = GUIDE_DIR.parent
 # 251 -> 253: the `extract bigquery --sql` CLI/Python pair in extract.md. It
 # runs a GoogleSQL query job, which needs BigQuery credentials and a billing
 # project; there is no local stand-in for bigquery_query().
-MAX_SKIPPED_BLOCKS = 253
+# 253 -> 255: the spherical-edges repair-skip CLI/Python pair in convert.md
+# (#1287). It needs an input whose geo metadata declares `edges: spherical`;
+# no gpio command writes that declaration onto the seeded sample data, and
+# hand-building one inline would drown the two-line example it illustrates.
+# tests/test_skip_planar_repair_spherical_edges.py runs the real thing.
+MAX_SKIPPED_BLOCKS = 255
 MIN_EXECUTED_BLOCKS = 217
 
 #: Looks like a command rather than prose or sample output.

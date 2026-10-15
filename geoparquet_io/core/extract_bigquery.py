@@ -1531,9 +1531,14 @@ def _execute_bigquery_extraction(
         final_geom_col = geom_col if geom_col and geom_col in result.column_names else None
 
         # Repair invalid geometry (issue #506). The geometry column is already
-        # WKB-encoded by the SELECT; the helper preserves schema metadata.
+        # WKB-encoded by the SELECT; the helper preserves schema metadata. A
+        # native GEOGRAPHY export declares spherical edges (final_edges), which
+        # skips the planar repair — it would corrupt pole-enclosing and
+        # antimeridian-winding rings that are valid on the sphere (#1287).
         if final_geom_col and result.num_rows > 0:
-            result, _ = repair_arrow_table_geometry(result, final_geom_col, repair=repair_geometry)
+            result, _ = repair_arrow_table_geometry(
+                result, final_geom_col, repair=repair_geometry, nonplanar_edges=final_edges
+            )
 
         # Write output if path provided
         if output_parquet:

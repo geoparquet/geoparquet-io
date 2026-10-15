@@ -20,7 +20,63 @@ This module provides three injection styles:
 """
 
 from geoparquet_io.core.duckdb_utils import quote_identifier
-from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.logging_config import debug, warn
+
+
+def _should_skip_nonplanar(geometry_column: str, nonplanar_edges: str | None, repair: bool) -> bool:
+    """Whether the planar repair must be skipped for a non-planar column (#1287).
+
+    Planar validity is the wrong test for a column that declares non-planar
+    edges: a pole-enclosing ring is valid on the sphere but collinear (zero
+    area) on the plane, and ``ST_MakeValid`` collapses it into line fragments.
+    The invalid *count* is just as planar a statement, so a skipped column gets
+    neither the repair nor the "Repaired/Left unrepaired N" report. The skip
+    applies even when repair was requested explicitly — planar repair is
+    actively destructive on spherical data — and the warning says so; with
+    repair opted out the pass-through is what was asked for, so only a debug
+    line is emitted.
+    """
+    if not nonplanar_edges or nonplanar_edges == "planar":
+        return False
+    if repair:
+        warn(
+            f"Skipping planar geometry repair: column '{geometry_column}' declares "
+            f"{nonplanar_edges} edges, so planar validity is the wrong test and "
+            f"ST_MakeValid would corrupt shapes that are valid on the sphere (#1287). "
+            f"This applies even when --repair-geometry is requested explicitly; "
+            f"repair on the sphere is not supported yet."
+        )
+    else:
+        debug(
+            f"Planar validity count skipped for column '{geometry_column}': "
+            f"it declares {nonplanar_edges} edges (#1287)"
+        )
+    return True
+
+
+def nonplanar_edges_of_arrow_table(table, geometry_column: str) -> str | None:
+    """The non-planar edges an Arrow table declares for one column, if any.
+
+    Reads both carriers an in-memory table can have: a ``geo`` block in the
+    schema metadata (via the owner of that question, ``write_funnels``) and a
+    GeoArrow spherical edge type on the column's Arrow type (via
+    ``arrow_geo_metadata``). Returns the edges value, or ``None`` for planar.
+    """
+    from geoparquet_io.core.arrow_geo_metadata import _is_spherical_edge_type
+    from geoparquet_io.core.write_funnels import _collect_nonplanar_edges_from_metadata
+
+    try:
+        metadata = dict(table.schema.metadata) if table.schema.metadata else None
+        edges = _collect_nonplanar_edges_from_metadata(metadata).get(geometry_column)
+        if edges:
+            return edges
+        if geometry_column in table.column_names and _is_spherical_edge_type(
+            table.schema.field(geometry_column).type
+        ):
+            return "spherical"
+    except Exception as e:  # noqa: BLE001 - detection must never break a pipeline
+        debug(f"Could not read edges metadata from Arrow table: {e}")
+    return None
 
 
 def _warn_invalid(n: int, *, repaired: bool) -> None:
@@ -80,7 +136,14 @@ def _layered_invalid_count_sql(source_sql: str, parsed_expr: str) -> str:
     )
 
 
-def repair_query_geometry(con, query: str, geometry_column: str, *, repair: bool = True) -> str:
+def repair_query_geometry(
+    con,
+    query: str,
+    geometry_column: str,
+    *,
+    repair: bool = True,
+    nonplanar_edges: str | None = None,
+) -> str:
     """Count and optionally repair invalid geometry in an arbitrary query.
 
     Auto-detects whether the geometry column in ``query`` is a native
@@ -98,10 +161,15 @@ def repair_query_geometry(con, query: str, geometry_column: str, *, repair: bool
         query: SQL query exposing ``geometry_column``.
         geometry_column: Name of the geometry column.
         repair: Whether to repair (True) or only count and warn (False).
+        nonplanar_edges: The edges value the input declares for this column
+            (e.g. ``"spherical"``), or ``None``/``"planar"``. A non-planar value
+            skips the planar repair and count entirely, with a warning (#1287).
 
     Returns:
         The original query, or a query that repairs the geometry column in place.
     """
+    if _should_skip_nonplanar(geometry_column, nonplanar_edges, repair):
+        return query
     col = quote_identifier(geometry_column)
     try:
         desc = con.execute(f"DESCRIBE ({query})").fetchall()
@@ -216,7 +284,13 @@ def _patch_repaired_rows(original, fixed):
     return pa.chunked_array(chunks, type=original.type)
 
 
-def repair_arrow_table_geometry(table, geometry_column: str = "geometry", *, repair: bool = True):
+def repair_arrow_table_geometry(
+    table,
+    geometry_column: str = "geometry",
+    *,
+    repair: bool = True,
+    nonplanar_edges: str | None = None,
+):
     """Count and (optionally) repair invalid geometry in a WKB-encoded Arrow table.
 
     Used by extraction paths (WFS, ArcGIS, BigQuery, Carto) that assemble a
@@ -245,11 +319,20 @@ def repair_arrow_table_geometry(table, geometry_column: str = "geometry", *, rep
         table: PyArrow table with a WKB-encoded geometry column.
         geometry_column: Name of the WKB geometry column.
         repair: Whether to repair (True) or only count and warn (False).
+        nonplanar_edges: The edges value declared for this column (e.g.
+            ``"spherical"``), or ``None`` to detect it from the table's own
+            schema (``geo`` block metadata or a GeoArrow spherical edge type).
+            A non-planar value skips the planar repair and count entirely,
+            with a warning (#1287).
 
     Returns:
         Tuple ``(table, n_invalid)``.
     """
     if table.num_rows == 0 or geometry_column not in table.column_names:
+        return table, 0
+    if nonplanar_edges is None:
+        nonplanar_edges = nonplanar_edges_of_arrow_table(table, geometry_column)
+    if _should_skip_nonplanar(geometry_column, nonplanar_edges, repair):
         return table, 0
 
     import duckdb

@@ -603,6 +603,43 @@ Only invalid geometry is touched: valid geometry is byte-identical, NULL is
 preserved, and bounding boxes stay correct (`ST_MakeValid` never expands an
 envelope).
 
+#### Spherical (non-planar) edges are never planar-repaired
+
+Planar validity is the wrong test for a column that declares non-planar edges —
+`edges: spherical` in the input's `geo` metadata, a GeoArrow spherical edge
+type, or a native Parquet `GEOGRAPHY` logical type (the normal shape of
+BigQuery GEOGRAPHY exports and S2-based pipelines). A pole-enclosing ring like
+`POLYGON ((0 80, 90 80, 180 80, -90 80, 0 80))` is valid on the sphere but
+collinear (zero area) on the plane, and `ST_MakeValid` would collapse it into
+line fragments.
+
+For such columns gpio **skips** the planar repair and its invalid count
+entirely and warns — even when repair is requested explicitly, because planar
+repair is actively destructive on spherical data. The geometry passes through
+unchanged. Repair on the sphere (via the S2 `geography` extension) is a planned
+follow-up.
+
+=== "CLI"
+
+    <!-- doctest: skip="needs an input declaring spherical edges" -->
+    ```bash
+    # Input declares edges: spherical — geometry passes through unchanged
+    gpio convert geoparquet spherical.parquet output.parquet
+    # Skipping planar geometry repair: column 'geometry' declares spherical edges, ...
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+    ```
+
+    <!-- doctest: skip="needs an input declaring spherical edges" -->
+    ```python
+    # Same skip through the Python API — the warning is logged
+    gpio.convert("spherical.parquet").write("output.parquet")
+    ```
+
 ### Curved Geometries
 
 GeoParquet cannot represent curved geometry types (CircularString,

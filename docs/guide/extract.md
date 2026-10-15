@@ -192,7 +192,14 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
       fixed a row — `ST_MakeValid` can change a geometry's type, so a repaired
       self-intersecting `Polygon` comes back a `MultiPolygon` and the input's
       `geometry_types` would under-declare the output. A repair pass that found
-      nothing invalid changes no row and keeps the carried stats.
+      nothing invalid changes no row and keeps the carried stats. A column that
+      declares **non-planar edges** (`edges: spherical` in the `geo` metadata or
+      a native `GEOGRAPHY` logical type) is never planar-repaired at all: planar
+      validity is the wrong test there, and `ST_MakeValid` would collapse shapes
+      that are valid on the sphere (a pole-enclosing ring, say) into line
+      fragments. The repair and its invalid count are skipped with a warning —
+      even when repair is requested explicitly — and the carried stats and
+      `orientation` stay.
     - **`--exclude-cols`** — metadata that references a dropped column is
       pruned: excluding the `bbox` column drops the `covering` entry, and
       excluding the geometry column writes plain Parquet with no `geo` metadata
