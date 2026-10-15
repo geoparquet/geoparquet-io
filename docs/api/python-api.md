@@ -1448,8 +1448,10 @@ details = result.to_dict()
 `check_bbox()` also compares each row's bbox against its geometry's real
 envelope. A bbox smaller than its geometry fails the check — readers prune on
 the covering, so those rows go missing from spatial query results with no error
-anywhere — while one larger than its geometry is only a warning. The comparison
-reads 5,000 rows sampled across the file by default:
+anywhere — as do a NULL or NaN bbox and a geometry that is not valid WKB; one
+larger than its geometry is a warning (`verdict()` is `"warning"`). The
+comparison decodes a seeded sample of 5,000 rows drawn across the file by
+default, though it reads the geometry and bbox columns in full:
 
 ```python
 bbox_result = table.check_bbox(all_rows=True)       # compare every row
