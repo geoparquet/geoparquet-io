@@ -2982,7 +2982,9 @@ def _output_crs_projjson(crs: str) -> dict:
     code = _epsg_code(crs)
     cached = _projjson_from_authority("EPSG", code) if code else None
     if cached is not None:
-        return json.loads(cached)
+        projjson = json.loads(cached)
+        if isinstance(projjson, dict):
+            return projjson
     if len(crs) <= _MAX_CRS_STRING:
         try:
             from pyproj import CRS as _PyprojCRS

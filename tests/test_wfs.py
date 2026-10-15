@@ -3901,6 +3901,14 @@ class TestOutputCrsProjjson:
         with pytest.raises(WFSError, match="could not resolve"):
             _output_crs_projjson("EPSG:999999")
 
+    def test_a_cached_entry_that_is_not_an_object_falls_back_to_pyproj(self):
+        from geoparquet_io.core.wfs import _output_crs_projjson
+
+        with patch("geoparquet_io.core.wfs._projjson_from_authority", return_value="[]"):
+            projjson = _output_crs_projjson("EPSG:31287")
+
+        assert projjson["id"] == {"authority": "EPSG", "code": 31287}
+
 
 class TestBboxCrsContract:
     """#640: --bbox is read in the request CRS, and tiling follows suit."""
