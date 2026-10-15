@@ -1311,9 +1311,6 @@ With `--output-crs native`, the layer's advertised spatial reference is resolved
 | `native` | Fetches EsriJSON with the layer's advertised spatial reference |
 | `EPSG:<code>` | Fetches EsriJSON with `outSR` set to the requested code, which must resolve under EPSG or ESRI |
 
-!!! note "Changed after 1.6.0"
-    Some services, often Hosted FeatureServers, send the `features` array before `geometryType`, `spatialReference` and `fields`. Extraction with `--output-crs` used to stop on those pages with `Failed to read GeoJSON data`. They are now read like any other page, with both `native` and an explicit CRS.
-
 ### Geometry generalization
 
 Some layers have very large or vertex-dense polygons that are slow to download or that overwhelm a server. Use `--max-allowable-offset` to ask the server to simplify each geometry before it is sent (the ArcGIS `maxAllowableOffset` parameter, a Douglas-Peucker tolerance). This reduces the vertex count per feature, which is different from `--limit`, which only caps the number of features.
