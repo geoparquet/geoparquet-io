@@ -14,6 +14,7 @@ from typing import Any
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.geo_metadata import decode_carried_geo, sanitize_geo_metadata
+from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
 from geoparquet_io.core.geometry_detection import (
     detect_geometry_column_from_names,
     detect_parquet_geometry_column,
@@ -48,6 +49,22 @@ class _CrsAbsent:
 #: so any helper that must tell them apart takes this sentinel for the first
 #: case and ``None`` for the second. Extract with :func:`crs_from_column_meta`.
 CRS_ABSENT = _CrsAbsent()
+
+#: The Parquet GEOMETRY/GEOGRAPHY type CRS for an unknown CRS. The type's
+#: unset CRS means OGC:CRS84, so an unknown CRS (``geo`` ``crs: null``) is
+#: spelled ``srid:0`` there, as the GeoParquet 2.0 spec says (#1276).
+PARQUET_UNKNOWN_CRS = "srid:0"
+
+
+def is_unknown_type_crs(crs) -> bool:
+    """True for the Parquet type's spelling of an unknown CRS, ``srid:0``.
+
+    Also the marker a write path passes as its ``input_crs`` when the source's
+    CRS is unknown (:func:`parquet_writer.resolve_input_crs`), so the output
+    says "unknown" in the ``geo`` block (``crs: null``) and in the type
+    (``srid:0``) instead of saying nothing, which means OGC:CRS84 (#1276).
+    """
+    return isinstance(crs, str) and crs.strip().lower() == PARQUET_UNKNOWN_CRS
 
 
 def crs_from_column_meta(col_meta: dict | None) -> Any:
@@ -424,8 +441,11 @@ def apply_output_crs(col_meta: dict, input_crs) -> None:
     - ``input_crs`` default -> drop ``crs`` (output is the spec default), so a
       stale value carried from the source (e.g. EPSG:3857 after reprojecting to
       4326, or an explicit ``crs: null``) is not written through.
-    - ``input_crs`` is ``None`` (CRS unchanged) -> preserve a real ``crs`` but
-      still strip a stray default/null one the source or DuckDB may have attached.
+    - ``input_crs`` is ``None`` (CRS unchanged) -> preserve a real ``crs`` and
+      an explicit ``crs: null`` (unknown, #1276), write an empty value as null
+      (#1267), and strip a stray default one.
+    - ``input_crs`` is :data:`PARQUET_UNKNOWN_CRS` (the source's CRS is
+      unknown) -> write ``crs: null``.
 
     Dropping a ``crs`` the input *spelled out* as the default is invisible in the
     output, so :func:`note_default_crs_normalized` reports it once at
@@ -436,11 +456,22 @@ def apply_output_crs(col_meta: dict, input_crs) -> None:
     # Captured before the pop: the note describes what the input declared.
     declared = col_meta.get("crs")
 
+    if is_unknown_type_crs(input_crs):
+        # The source's CRS is unknown: say so, never fall back to the default.
+        col_meta["crs"] = None
+        return
     if input_crs and not is_default_crs(input_crs):
         col_meta["crs"] = input_crs
         return
+    if not input_crs and crs_is_explicitly_null(col_meta):
+        # Unknown stays unknown (#1276).
+        return
     current = col_meta.get("crs")
-    if input_crs or is_default_crs(current) or is_empty_crs_value(current):
+    if not input_crs and is_empty_crs_value(current):
+        # An empty value is unknown too (#1267), and null is how to write it.
+        col_meta["crs"] = None
+        return
+    if input_crs or is_default_crs(current):
         col_meta.pop("crs", None)
         note_default_crs_normalized(declared)
 
@@ -677,9 +708,24 @@ def _validate_projjson(crs: dict) -> bool:
 def _wrap_query_with_crs(
     query: str,
     geometry_column: str | None,
-    input_crs: dict | None,
+    input_crs: dict | str | None,
+    geoparquet_version: str | None = None,
 ) -> str:
-    """Wrap query with ST_SetCRS() so DuckDB writes CRS into the Parquet schema natively."""
+    """Wrap query with ST_SetCRS() so DuckDB writes CRS into the Parquet schema natively.
+
+    An unknown CRS (:data:`PARQUET_UNKNOWN_CRS`) is set as ``srid:0`` only for
+    a 2.0 or parquet-geo-only output, the versions whose Parquet type carries
+    the CRS. DuckDB's 1.x writer rejects it, and there the ``geo`` block's
+    ``crs: null`` says it alone (#1276).
+    """
+    if is_unknown_type_crs(input_crs):
+        if not geometry_column or geoparquet_version not in ("2.0", "parquet-geo-only"):
+            return query
+        col = quote_identifier(geometry_column)
+        return f"""
+        SELECT * REPLACE (ST_SetCRS({col}, '{PARQUET_UNKNOWN_CRS}') AS {col})
+        FROM ({query})
+    """
     if not input_crs or is_default_crs(input_crs):
         return query
 
@@ -852,20 +898,12 @@ def _is_native_geo_column(col: dict) -> bool:
     return (col.get("logical_type") or "").startswith(("GeometryType(", "GeographyType("))
 
 
-def _crs_from_native_geo_type(parquet_file, column: str | None = None) -> dict | str | None:
-    """The CRS inside the primary's Parquet GEOMETRY/GEOGRAPHY logical type, or ``None``.
+def _native_type_crs_value(parquet_file, column: str | None = None):
+    """The raw CRS the primary's Parquet GEOMETRY/GEOGRAPHY type names, or ``None``.
 
-    ``column`` names the column to read -- the one a ``geo`` block named, as
-    the second opinion on it, or the caller's. Without one (or when the file has
-    no such column) :func:`_native_primary_column` picks the primary. This is
-    the only place a *native-geo-only* file records its CRS. ``None`` means the
-    column has no native type, or a default CRS.
+    ``None`` when the column has no native type or its type names no CRS.
     """
-    from geoparquet_io.core.duckdb_metadata import (
-        get_schema_info,
-        parse_geometry_logical_type,
-        resolve_crs_reference,
-    )
+    from geoparquet_io.core.duckdb_metadata import get_schema_info, parse_geometry_logical_type
     from geoparquet_io.core.parquet_schema import root_schema_columns
 
     root_columns = root_schema_columns(get_schema_info(parquet_file))
@@ -874,10 +912,78 @@ def _crs_from_native_geo_type(parquet_file, column: str | None = None) -> dict |
     if entry is None or not _is_native_geo_column(entry):
         return None
     parsed = parse_geometry_logical_type(entry.get("logical_type") or "")
-    if not (parsed and "crs" in parsed):
+    return parsed.get("crs") if parsed else None
+
+
+def _crs_from_native_geo_type(parquet_file, column: str | None = None) -> dict | str | None:
+    """The CRS inside the primary's Parquet GEOMETRY/GEOGRAPHY logical type, or ``None``.
+
+    ``column`` names the column to read -- the one a ``geo`` block named, as
+    the second opinion on it, or the caller's. Without one (or when the file has
+    no such column) :func:`_native_primary_column` picks the primary. This is
+    the only place a *native-geo-only* file records its CRS. ``None`` means the
+    column has no native type, a default CRS, or ``srid:0``, which is the type's
+    spelling of an unknown CRS and never a CRS to carry (#1276).
+    """
+    from geoparquet_io.core.duckdb_metadata import resolve_crs_reference
+
+    raw = _native_type_crs_value(parquet_file, column)
+    if raw is None or is_unknown_type_crs(raw):
         return None
-    crs = resolve_crs_reference(parquet_file, parsed["crs"])
+    crs = resolve_crs_reference(parquet_file, raw)
     return crs if crs and not is_default_crs(crs) else None
+
+
+def source_crs_is_unknown(parquet_file, geometry_column: str | None = None) -> bool:
+    """True when a Parquet file says its primary geometry's CRS is unknown.
+
+    The ``geo`` block says so with ``crs: null`` or an empty value (#1267). A
+    file the block does not describe (a parquet-geo-only one) says so with a
+    ``srid:0`` type. A block that omits the key, or names a CRS, is not unknown,
+    whatever the type says. ``parquet_file`` is a RAW path (#718).
+    """
+    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
+
+    geo_meta = sanitize_geo_metadata(get_geo_metadata(parquet_file)) or {}
+    columns = geo_meta.get("columns") or {}
+    col = geometry_column if geometry_column in columns else None
+    if col is None and columns:
+        col = _primary_column_of_file(geo_meta, parquet_file)
+    if col in columns and not _block_omits_requested_column(parquet_file, col, geometry_column):
+        col_meta = columns[col]
+        return crs_is_explicitly_null(col_meta) or is_empty_crs_value(col_meta.get("crs"))
+    return is_unknown_type_crs(_native_type_crs_value(parquet_file, geometry_column))
+
+
+def table_crs_is_unknown(table, geometry_column: str | None) -> bool:
+    """:func:`source_crs_is_unknown` for an in-memory Arrow table.
+
+    The schema's ``geo`` block decides when it describes the column. Otherwise
+    the field's GeoArrow crs does, ``srid:0`` meaning unknown.
+    """
+    if not geometry_column or geometry_column not in table.schema.names:
+        return False
+    geo_meta = sanitize_geo_metadata(parse_geo_metadata_from_schema(table.schema.metadata))
+    col_meta = ((geo_meta or {}).get("columns") or {}).get(geometry_column)
+    if isinstance(col_meta, dict):
+        return crs_is_explicitly_null(col_meta) or is_empty_crs_value(col_meta.get("crs"))
+    return _field_type_crs_is_unknown(table.schema.field(geometry_column))
+
+
+def _field_type_crs_is_unknown(field) -> bool:
+    """Whether a GeoArrow field's crs is ``srid:0``, on the type or in raw metadata."""
+    if is_unknown_type_crs(getattr(getattr(field.type, "crs", None), "_crs", None)):
+        return True
+    raw = getattr(field.type, "extension_metadata", None) or (field.metadata or {}).get(
+        b"ARROW:extension:metadata"
+    )
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(parsed, dict) and is_unknown_type_crs(srid_crs_as_text(parsed).get("crs"))
 
 
 def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
@@ -1734,6 +1840,29 @@ _GEOARROW_EXTENSION_NAMES = frozenset(
 )
 
 
+def _is_srid_text(value: str) -> bool:
+    return value.strip().lower().startswith("srid:")
+
+
+def _srid_text_or_none(value: str) -> str | None:
+    """``None`` for an empty string or ``srid:0`` (unknown), else ``value``."""
+    if not value or is_unknown_type_crs(value):
+        return None
+    return value
+
+
+def _crs_from_extension_metadata(parsed: object):
+    """The ``crs`` in parsed ``ARROW:extension:metadata``, ``srid`` kept as ``srid:<N>``.
+
+    ``srid:0`` (unknown) is ``None``. An empty value is returned as it is, so
+    the caller can warn about it (#1267).
+    """
+    if not isinstance(parsed, dict):
+        return None
+    crs = srid_crs_as_text(parsed).get("crs")
+    return None if is_unknown_type_crs(crs) else crs
+
+
 def geoarrow_crs_to_projjson(crs: object) -> dict | str | None:
     """Return an Arrow extension type's ``.crs`` as PROJJSON, or ``None``.
 
@@ -1769,13 +1898,15 @@ def geoarrow_crs_to_projjson(crs: object) -> dict | str | None:
     # the caller's ``is not None`` check, so it is rejected like any other
     # unreadable value.
     if isinstance(crs, dict | str):
-        return crs or None
+        return _srid_text_or_none(crs) if isinstance(crs, str) else crs or None
     # A geoarrow ``StringCrs`` hands its text to pyproj, which opens the file
     # an ``init=`` parameter names. Return the text unparsed so the resolver
-    # refuses it like any other ``init=`` string.
+    # refuses it like any other ``init=`` string. pyproj cannot read the
+    # Parquet ``srid:<N>`` spelling either (the geoarrow compat shim gives a
+    # srid type that text), so it is returned for the resolver too.
     raw = getattr(crs, "_crs", None)
-    if isinstance(raw, str) and names_proj_init_file(raw):
-        return raw
+    if isinstance(raw, str) and (names_proj_init_file(raw) or _is_srid_text(raw)):
+        return _srid_text_or_none(raw)
     if isinstance(crs, bytes | bytearray):
         try:
             decoded = crs.decode("utf-8")
@@ -1825,8 +1956,7 @@ def _crs_from_extension_type(field_type):
             parsed = json.loads(ext_meta)
         except (json.JSONDecodeError, TypeError):
             return None
-        if isinstance(parsed, dict):
-            return parsed.get("crs")
+        return _crs_from_extension_metadata(parsed)
     return None
 
 
@@ -1868,7 +1998,7 @@ def _crs_from_geoarrow_field(table, geom_col: str):
         ext_dict = json.loads(ext)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
-    return ext_dict.get("crs") if isinstance(ext_dict, dict) else None
+    return _crs_from_extension_metadata(ext_dict)
 
 
 def crs_string_from_table(table, geom_col: str) -> str | None:

@@ -28,8 +28,8 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _parse_geo_metadata_quietly,
     table_geometry_info,
 )
+from geoparquet_io.core.crs_utils import PARQUET_UNKNOWN_CRS, crs_is_explicitly_null, is_default_crs
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
-from geoparquet_io.core.crs_utils import is_default_crs
 from geoparquet_io.core.duckdb_utils import (
     _escape_sql_string,
     _wrap_query_with_blob_conversion,
@@ -62,11 +62,12 @@ VALID_COMPRESSIONS = frozenset({"ZSTD", "SNAPPY", "GZIP", "LZ4", "UNCOMPRESSED",
 def _wrap_query_with_crs(
     query: str,
     geometry_column: str,
-    input_crs: dict | None,
+    input_crs: dict | str | None,
+    geoparquet_version: str | None = None,
 ) -> str:
-    """Wrap query with ST_SetCRS() — delegates to shared helper in common.py."""
+    """Wrap query with ST_SetCRS() — delegates to the shared helper in crs_utils."""
 
-    return _common_wrap_query_with_crs(query, geometry_column, input_crs)
+    return _common_wrap_query_with_crs(query, geometry_column, input_crs, geoparquet_version)
 
 
 def _plain_wkb_for_secondary_columns(
@@ -342,7 +343,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         # DuckDB 1.5+: Keep native GEOMETRY type — DuckDB writes native Parquet
         # geometry encoding directly. No WKB conversion needed.
         # Apply CRS via ST_SetCRS so DuckDB writes it into the schema natively.
-        final_query = _wrap_query_with_crs(query, geometry_column, input_crs)
+        final_query = _wrap_query_with_crs(query, geometry_column, input_crs, "parquet-geo-only")
 
         copy_options = _build_copy_options(
             compression,
@@ -417,7 +418,11 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 query, geometry_column, con, secondary_columns=sorted(secondary_columns)
             )
         else:
-            final_query = _wrap_query_with_crs(query, geometry_column, input_crs)
+            # The block just built is the answer for the type too: a column it
+            # calls unknown is typed `srid:0`, never left bare (#1276).
+            primary_meta = (geo_meta.get("columns") or {}).get(geometry_column)
+            type_crs = PARQUET_UNKNOWN_CRS if crs_is_explicitly_null(primary_meta) else input_crs
+            final_query = _wrap_query_with_crs(query, geometry_column, type_crs, geoparquet_version)
 
         copy_options = _build_copy_options(
             compression, row_group_rows, json.dumps(geo_meta), extra_kv_metadata, compression_level

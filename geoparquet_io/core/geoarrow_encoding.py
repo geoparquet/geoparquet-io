@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from geoparquet_io.core.crs_utils import is_default_crs
+from geoparquet_io.core.crs_utils import PARQUET_UNKNOWN_CRS, is_default_crs, is_unknown_type_crs
 from geoparquet_io.core.logging_config import debug
 
 if TYPE_CHECKING:
@@ -70,7 +70,7 @@ def is_geoarrow_extension_field(field: pa.Field) -> bool:
     return name is not None and name.startswith("geoarrow.")
 
 
-def native_wkb_type(crs: dict | None, edges: str | None = None):
+def native_wkb_type(crs: dict | str | None, edges: str | None = None):
     """The ``geoarrow.wkb`` type a 2.0 / parquet-geo-only geometry column is written as.
 
     PyArrow writes this extension type as a native Parquet GEOMETRY logical
@@ -88,7 +88,10 @@ def native_wkb_type(crs: dict | None, edges: str | None = None):
     import geoarrow.pyarrow as ga
 
     geoarrow_type = ga.wkb()
-    if crs and not is_default_crs(crs):
+    if is_unknown_type_crs(crs):
+        # An unknown CRS is `srid:0` in the type; bare would mean OGC:CRS84 (#1276).
+        geoarrow_type = geoarrow_type.with_crs(PARQUET_UNKNOWN_CRS)
+    elif crs and not is_default_crs(crs):
         geoarrow_type = geoarrow_type.with_crs(crs)
     # A column the block declares spherical is a GEOGRAPHY; typing it a planar
     # GEOMETRY beside `edges: spherical` makes the file disagree with itself.
@@ -213,7 +216,7 @@ def determine_geoarrow_target_type(
     if dimension_enum is not None:
         common = common.with_dimensions(dimension_enum)
 
-    if input_crs and not is_default_crs(input_crs):
+    if input_crs and not is_default_crs(input_crs) and not is_unknown_type_crs(input_crs):
         common = common.with_crs(input_crs)
 
     encoding = common.extension_name.replace("geoarrow.", "")

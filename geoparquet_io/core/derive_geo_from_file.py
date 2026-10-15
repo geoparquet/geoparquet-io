@@ -22,7 +22,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs
+from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs, is_unknown_type_crs
 from geoparquet_io.core.duckdb_metadata import (
     get_geo_metadata,
     get_schema_info,
@@ -80,6 +80,9 @@ def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:
     raw = parsed.get("crs")
     if raw is None:
         return False, None
+    if is_unknown_type_crs(raw):
+        # `srid:0` is how the type says "unknown", and null is how the block does.
+        return True, None
     crs = resolve_crs_reference(parquet_file, raw)
     if isinstance(crs, dict):
         # An empty native CRS is unset, which on this type is the default.

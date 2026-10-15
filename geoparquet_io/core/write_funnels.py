@@ -42,6 +42,7 @@ from geoparquet_io.core.crs_utils import (
     extract_crs_from_parquet,
     get_crs_display_name,
     is_geographic_crs,
+    is_unknown_type_crs,
     parse_crs_string_to_projjson,
 )
 from geoparquet_io.core.derive_geo_from_file import (
@@ -622,7 +623,7 @@ def _plain_copy_to(
 
     # DuckDB 1.5+: Apply CRS via ST_SetCRS so it's written natively into the
     # Parquet schema during COPY TO — no post-processing file rewrite needed.
-    final_query = _wrap_query_with_crs(query, geometry_column, input_crs)
+    final_query = _wrap_query_with_crs(query, geometry_column, input_crs, geoparquet_version)
 
     # Build options list
     options = [
@@ -998,9 +999,12 @@ def _fast_path_geo_decision(
     Both answers are ``(None, False)`` — "let DuckDB write its own block on the
     fast path" — when the version is not 2.0 (1.x already rewrites), when the
     input resolves to more than one file (see below), or when the carried block
-    says nothing DuckDB would not write itself.
+    says nothing DuckDB would not write itself. The one exception is an unknown
+    ``input_crs`` with no carried block to state it: DuckDB's block would omit
+    ``crs`` and so claim OGC:CRS84, so that write is sent to the rewrite
+    (``(None, True)``, #1276).
 
-    The second answer is ``True`` only when the block IS worth keeping and still
+    Otherwise the second answer is ``True`` only when the block IS worth keeping and still
     cannot be written verbatim, because a caller invalidated the derived stats and
     nothing here can recompute them. The fast path cannot merge: it replaces
     DuckDB's whole ``geo`` key with what this returns, so a block missing
@@ -1014,8 +1018,14 @@ def _fast_path_geo_decision(
     gate is: until that step has run, there is no telling whether the block has
     anything the fast path would lose.
     """
-    if effective_version != "2.0" or not geometry_column or not original_metadata:
+    if effective_version != "2.0" or not geometry_column:
         return None, False
+    # DuckDB's own 2.0 block omits `crs`, which reads as OGC:CRS84. An unknown
+    # CRS with no carried block to say so takes the rewrite, which writes
+    # `crs: null` (#1276).
+    no_block = (None, is_unknown_type_crs(input_crs))
+    if not original_metadata:
+        return no_block
 
     # A glob/directory input merges several files, but `original_metadata` was
     # read from the FIRST file's footer only. Carrying its bbox/geometry_types
@@ -1028,7 +1038,7 @@ def _fast_path_geo_decision(
                 "Not carrying the input's geo block: a multi-file input's merged "
                 "stats cannot come from the first file's footer"
             )
-        return None, False
+        return no_block
 
     # A write-path reader in the strongest sense: whatever comes back is written
     # to the output file verbatim, so the block goes through the shared shape
@@ -1036,10 +1046,10 @@ def _fast_path_geo_decision(
     # `'list' object has no attribute 'get'` on the next line (#947).
     geo_dict = sanitized_carried_geo(original_metadata)
     if not geo_dict:
-        return None, False
+        return no_block
     col_meta = (geo_dict.get("columns") or {}).get(geometry_column)
     if not isinstance(col_meta, dict):
-        return None, False
+        return no_block
     carried = copy.deepcopy(geo_dict)
     carried["version"] = "2.0.0"
     # Before the gate: a block whose only extra key was a default or null

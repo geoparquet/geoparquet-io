@@ -1490,6 +1490,17 @@ class Table:
                 from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
 
                 input_crs = parse_crs_string_to_projjson(input_crs)
+            elif input_crs is None:
+                # `self.crs` is None for an unknown CRS and for the default
+                # alike. Unknown has to be said on the way out (`crs: null`,
+                # a `srid:0` type), or it is written as OGC:CRS84 (#1276).
+                from geoparquet_io.core.crs_utils import (
+                    PARQUET_UNKNOWN_CRS,
+                    table_crs_is_unknown,
+                )
+
+                if table_crs_is_unknown(self._table, self._geometry_column):
+                    input_crs = PARQUET_UNKNOWN_CRS
 
             # Carry the table's non-geo file-level KV metadata (fiboa, vecorel,
             # STAC fragments) into the write. The Arrow strategies copied it

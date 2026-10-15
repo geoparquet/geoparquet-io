@@ -768,6 +768,12 @@ WGS84, use `assume_crs84=True` to treat them as OGC:CRS84 and write the default
 table = gpio.read('unknown_crs.parquet').reproject(assume_crs84=True)
 ```
 
+Without that, `Table.write()` keeps an unknown CRS unknown. A 1.0 or 1.1
+output keeps `crs: null`, a 2.0 output keeps it and types the column `srid:0`,
+and a parquet-geo-only output types the column `srid:0`. An empty `crs` value
+such as `{}` reads as unknown, with a warning, and is written the same way.
+`table.crs` is `None` for both the default and an unknown CRS.
+
 #### `extract(columns=None, exclude_columns=None, bbox=None, where=None, limit=None)`
 
 Filter columns and rows.

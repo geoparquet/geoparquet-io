@@ -601,7 +601,11 @@ Validates file structure and metadata against the GeoParquet specification:
   `v2_crs_consistency`, because the Parquet type's own default is OGC:CRS84.
   The spec's pairing for an unknown CRS is `"crs": null` in the geo metadata
   *and* the string `srid:0` in the Parquet logical type; written that way, the
-  file passes. If the coordinates really are lon/lat WGS84, drop the null
+  file passes. Every gpio write keeps an unknown CRS unknown. GeoParquet 1.0
+  and 1.1 outputs keep `"crs": null`, 2.0 outputs keep it and type the column
+  `srid:0`, and parquet-geo-only outputs type the column `srid:0`. An empty
+  `crs` value such as `{}` is read as unknown too, with a warning, and written
+  the same way. If the coordinates really are lon/lat WGS84, drop the null
   instead: `gpio convert reproject in.parquet out.parquet --assume-crs84`
   writes the default (see [convert](../cli/convert.md)).
 - **Every CRS form the Parquet geo type may use** — the `GEOMETRY`/`GEOGRAPHY`

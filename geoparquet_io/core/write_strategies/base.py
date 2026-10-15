@@ -17,7 +17,11 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from geoparquet_io.core.crs_utils import apply_output_crs
+from geoparquet_io.core.crs_utils import (
+    PARQUET_UNKNOWN_CRS,
+    apply_output_crs,
+    crs_is_explicitly_null,
+)
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     decode_carried_geo,
@@ -75,7 +79,8 @@ def native_geometry_crs(
 
     Each CRS is read back out of the metadata just built for the file, so the
     type and the block cannot disagree (``v2_crs_consistency``). A column the
-    block gives no ``crs`` is the spec default, and carries none in its type.
+    block gives no ``crs`` is the spec default, and carries none in its type. A
+    column whose ``crs`` is null (unknown) is typed ``srid:0`` (#1276).
 
     ``geo_meta`` is therefore the *output's* block, after ``apply_output_crs``
     has resolved a requested ``input_crs`` against what the source declared --
@@ -94,9 +99,20 @@ def native_geometry_crs(
 
     column_metadata = (geo_meta or {}).get("columns") or {}
     return {
-        column: (column_metadata.get(column) or {}).get("crs")
+        column: _type_crs_for(column_metadata.get(column))
         for column in resolve_geometry_columns(geometry_column, geometry_info, geo_meta)
     }
+
+
+def _type_crs_for(col_meta: dict | None) -> dict | str | None:
+    """The type CRS for one column's block entry: ``srid:0`` for an explicit null.
+
+    The type's unset CRS means OGC:CRS84, so a column the block calls unknown
+    would read as lon/lat if its type carried nothing (#1276).
+    """
+    if crs_is_explicitly_null(col_meta or {}):
+        return PARQUET_UNKNOWN_CRS
+    return (col_meta or {}).get("crs")
 
 
 def merge_secondary_geometry_metadata(geo_meta: dict, geometry_info: dict | None) -> None:

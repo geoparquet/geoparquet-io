@@ -65,7 +65,11 @@ from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+from geoparquet_io.core.crs_utils import (
+    PARQUET_UNKNOWN_CRS,
+    extract_crs_from_parquet,
+    source_crs_is_unknown,
+)
 from geoparquet_io.core.duckdb_utils import build_kv_metadata_clause
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY, sanitized_carried_geo
@@ -406,12 +410,12 @@ def resolve_output_geoparquet_version(
 
 
 def resolve_input_crs(
-    input_crs: dict | None,
+    input_crs: dict | str | None,
     *,
     input_file: str | None = None,
     geometry_column: str | None = None,
     verbose: bool = False,
-) -> dict | None:
+) -> dict | str | None:
     """Decide which CRS the output describes its geometry with. The third decision.
 
     An output with no geometry column describes no geometry, so the question has
@@ -445,9 +449,11 @@ def resolve_input_crs(
     anywhere.
 
     ``extract_crs_from_parquet`` returns ``None`` for the default CRS and for an
-    explicit ``crs: null``, both of which mean "do not state a CRS here" -- so a
-    miss leaves ``input_crs`` ``None`` and ``apply_output_crs`` keeps its
-    existing behaviour of preserving whatever the carried block said. A file
+    unknown one. The two are told apart here: an input whose CRS is unknown
+    (``crs: null``, an empty value, or a ``srid:0`` type with no block) answers
+    :data:`crs_utils.PARQUET_UNKNOWN_CRS`, so the output says "unknown" in the
+    ``geo`` block and in its type rather than nothing, which means OGC:CRS84
+    (#1276). Any other miss leaves ``input_crs`` ``None``. A file
     that cannot be inspected (remote without credentials, a path that is not
     Parquet) is a miss too, not an error: the write worked before this function
     existed and must keep working.
@@ -464,9 +470,11 @@ def resolve_input_crs(
         # The geometry column says which native column's CRS a block-less
         # (native-geo-only) input means: in schema order the first CRS can be
         # a secondary's.
-        return extract_crs_from_parquet(
-            input_file, verbose=verbose, geometry_column=geometry_column
-        )
+        crs = extract_crs_from_parquet(input_file, verbose=verbose, geometry_column=geometry_column)
+        if crs is None and source_crs_is_unknown(input_file, geometry_column):
+            # An unknown CRS is a fact about the output too (#1276).
+            return PARQUET_UNKNOWN_CRS
+        return crs
     except Exception as exc:  # pragma: no cover - defensive, see docstring
         debug(f"CRS auto-detect failed for {input_file}: {exc}; leaving the CRS unstated")
         return None
