@@ -1614,17 +1614,21 @@ a service advertises nothing at all, gpio asks for GeoJSON as it always has.
 
 ### Axis Order
 
-WFS 1.1.0+ with URN-format CRS (e.g., `urn:ogc:def:crs:EPSG::4326`) uses lat,lon axis order per OGC spec. gpio auto-detects this, but you can override:
+Pass `--bbox` as x,y (lon,lat for a geographic layer). By default gpio sends it
+that way, labelled CRS84 for lon/lat. Some servers, such as ArcGIS WFS, read
+every EPSG:4326 bbox as lat,lon whatever the label says, so the filter selects
+a swapped area. For those, `--axis-order latlon` sends the bbox as lat,lon with
+the `urn:ogc:def:crs:EPSG::4326` label. It has no effect on a projected bbox.
 
 <!-- doctest: skip="illustrative endpoint" -->
 ```bash
-# Force lon,lat (XY) axis order
+# Default, x,y order (same as --axis-order xy)
+gpio extract wfs https://geo.example.com/wfs cities output.parquet \
+    --bbox 4.82,50.44,4.92,50.48
+
+# Send a lon/lat bbox to the server as lat,lon
 gpio extract wfs https://geo.example.com/wfs cities output.parquet \
     --bbox 4.82,50.44,4.92,50.48 \
-    --axis-order xy
-
-# Force lat,lon axis order
-gpio extract wfs https://geo.example.com/wfs cities output.parquet \
     --axis-order latlon
 ```
 

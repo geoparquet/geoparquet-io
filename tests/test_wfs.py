@@ -2838,6 +2838,39 @@ class TestAxisOrder:
                 "auto",
                 "-13636000.0,4500000.0,-13580000.0,4580000.0,EPSG:3857",
             ),
+            # --axis-order latlon sends a geographic bbox lat,lon with the
+            # lat,lon URN. ArcGIS WFS reads every 4326 bbox lat,lon, whatever
+            # the label says.
+            (
+                (-122.5, 37.5, -122.0, 38.0),
+                "EPSG:4326",
+                "1.1.0",
+                "latlon",
+                "37.5,-122.5,38.0,-122.0,urn:ogc:def:crs:EPSG::4326",
+            ),
+            (
+                (-122.5, 37.5, -122.0, 38.0),
+                "EPSG:4326",
+                "1.0.0",
+                "latlon",
+                "37.5,-122.5,38.0,-122.0",
+            ),
+            # --axis-order xy keeps the CRS84 label
+            (
+                (-122.5, 37.5, -122.0, 38.0),
+                "urn:ogc:def:crs:EPSG::4326",
+                "1.1.0",
+                "xy",
+                "-122.5,37.5,-122.0,38.0,urn:ogc:def:crs:OGC:1.3:CRS84",
+            ),
+            # A projected bbox has no lat,lon order, so latlon leaves it alone
+            (
+                (100.0, 200.0, 300.0, 400.0),
+                "EPSG:3857",
+                "1.1.0",
+                "latlon",
+                "100.0,200.0,300.0,400.0,EPSG:3857",
+            ),
         ],
     )
     def test_build_bbox_param_axis_order(self, bbox, crs, version, axis_order, expected):

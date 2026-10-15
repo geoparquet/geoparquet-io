@@ -872,8 +872,9 @@ def _deprecated_version_callback(ctx, param, value):
     "--axis-order",
     type=click.Choice(["auto", "xy", "latlon"]),
     default="auto",
-    help="Bbox axis order. 'auto' (default) detects from CRS format. "
-    "'xy' forces lon,lat order. 'latlon' forces lat,lon order.",
+    help="Order the server reads --bbox in. 'auto' (default) and 'xy' send x,y "
+    "(lon,lat). 'latlon' sends a lon/lat bbox as lat,lon, for servers such as "
+    "ArcGIS WFS that read every EPSG:4326 bbox that way.",
 )
 @click.option(
     "--strict-crs",

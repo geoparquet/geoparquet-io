@@ -1317,20 +1317,27 @@ def _build_bbox_param(
         bbox: Bounding box tuple (xmin, ymin, xmax, ymax) in the request CRS
         crs: Request CRS (the srsName sent with the request)
         version: WFS version
-        axis_order: Accepted for call-site compatibility. The short form is x,y.
+        axis_order: "latlon" sends a geographic bbox as lat,lon, labelled
+            with the lat,lon URN. ArcGIS WFS reads every 4326 bbox lat,lon
+            whatever the label says (seen live on sampleserver6). "auto" and
+            "xy" send x,y.
 
     Returns:
         Bbox parameter string
     """
     xmin, ymin, xmax, ymax = bbox
+    label = _normalize_crs(crs)
+    if axis_order == "latlon" and _is_geographic_crs(crs):
+        coords = f"{ymin},{xmin},{ymax},{xmax}"
+        label = "urn:ogc:def:crs:EPSG::" + label.removeprefix("EPSG:")
+    else:
+        coords = f"{xmin},{ymin},{xmax},{ymax}"
+        if label == "EPSG:4326":
+            label = _CRS84_URN
 
     if version == "1.0.0":
-        return f"{xmin},{ymin},{xmax},{ymax}"
-
-    label = _normalize_crs(crs)
-    if label == "EPSG:4326":
-        label = _CRS84_URN
-    return f"{xmin},{ymin},{xmax},{ymax},{label}"
+        return coords
+    return f"{coords},{label}"
 
 
 def _warn_if_bbox_looks_lon_lat(bbox: tuple[float, float, float, float], crs: str) -> None:

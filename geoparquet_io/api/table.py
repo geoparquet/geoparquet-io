@@ -933,8 +933,9 @@ class Table:
             limit: Maximum features to fetch
             max_workers: Parallel requests for large datasets (default: 1)
             page_size: Features per page when using parallel mode (default: 100000)
-            axis_order: Bbox axis order ('auto', 'xy', 'latlon'). 'auto' detects from
-                CRS format - URN CRS with WFS 1.1.0+ uses lat,lon per OGC spec.
+            axis_order: Bbox axis order ('auto', 'xy', 'latlon'). 'auto' and 'xy'
+                send the bbox x,y. 'latlon' sends a geographic bbox lat,lon, for
+                servers such as ArcGIS WFS that read every 4326 bbox that way.
             strict_crs: If True, fail when the server returns a different CRS than
                 requested. If False (default), warn and use the server's actual
                 CRS. The CRS the server declares in its GeoJSON response is
